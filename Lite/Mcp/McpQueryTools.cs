@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Collectors;
@@ -10,7 +11,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpQueryTools
 {
-    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive cached queries from sys.dm_exec_query_stats, ranked by CPU over a window ending at as_of. Filters (database_name, parallel_only, min_dop) apply before the top-N cap: filter_applied names the floor in force, and an empty page under it is the window's real answer, not a miss. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start says where the answer begins. Row cap is top (not limit). <<GUIDE>> Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spilled pages (total_spills counts 8 KB pages written to tempdb, not spill events), and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means no stored text for the group). Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled; confirm current parallelism when Query Store is on: find the statement in get_query_store_top (filter by database_name, match on query_hash) and pass that row's database_name and plan_id to analyze_query_store_plan, which fetches the compiled plan from the monitored server's Query Store (Lite keeps no plans, so analyze_query_plan cannot answer). Reads the raw tier only, which on a store with a lowered retention_days or less history than the window can be shorter than hours_back: window_truncated is the store's retention floor, not a page cut, and effective_start / effective_hours_back say where the answer begins." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
+    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive cached queries from sys.dm_exec_query_stats, ranked by CPU over a window ending at as_of. Filters (database_name, parallel_only, min_dop) apply before the top-N cap: filter_applied names the floor in force, and an empty page under it is the window's real answer, not a miss. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start says where the answer begins. Row cap is top (not limit). <<GUIDE>> Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spilled pages (total_spills counts 8 KB pages written to tempdb, not spill events), and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means no stored text for the group). Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled; confirm current parallelism when Query Store is on: find the statement in get_query_store_top (filter by database_name, match on query_hash) and pass that row's database_name and plan_id to analyze_query_store_plan, which fetches the compiled plan from the monitored server's Query Store (Lite keeps no plans, so analyze_query_plan cannot answer). Reads the raw tier only, which on a store with a lowered retention_days or less history than the window can be shorter than hours_back: window_truncated is the store's retention floor, not a page cut, and effective_start / effective_hours_back say where the answer begins. With no database_name, rows from a database the server no longer lists rank after the listed ones and carry database_dropped: true." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
     public static async Task<string> GetTopQueriesByCpu(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -74,7 +75,19 @@ public sealed class McpQueryTools
             var serverClock = await McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId);
 
             var requestedStart = nowUtc.AddHours(-hours_back);
-            var rows = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, minMaxDop: minMaxDop, tags: tagScope);
+            /* #7725 (Darling's twin): the databases the server dropped rank AFTER the ones it still lists, and carry database_dropped. This read did
+               not narrow before, so a dropped database's rows ranked among the rest; now the listed databases rank first and what the limit leaves
+               is filled from the dropped ones, ranked the same way. A named database is read as asked. */
+            var droppedDatabases = string.IsNullOrEmpty(database_name)
+                ? await dataService.GetDroppedDatabasesAsync(resolved.ServerId, asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : nowUtc, windowStartUtc: requestedStart)
+                : null;
+            var rows = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, minMaxDop: minMaxDop, tags: tagScope, excludeDatabaseNames: droppedDatabases);
+            if (droppedDatabases is { Count: > 0 } && rows.Count < top)
+            {
+                var fill = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top - rows.Count, serverClock: serverClock, databaseNames: droppedDatabases, asOfUtc: windowEnd, minMaxDop: minMaxDop, tags: tagScope);
+                rows = [.. rows, .. fill];
+            }
+
             /* #7005: every empty answer below also says whether the store holds the window (the notice rides it by WithEmptyWindowNoticeAsync). */
             async Task<string> EmptyAnswerAsync()
             {
@@ -191,7 +204,8 @@ public sealed class McpQueryTools
                     : null
             });
 
-            return JsonSerializer.Serialize(new
+            var droppedWithoutRows = DroppedDatabaseMark.WithoutRows(DatabasesLeftOut.Distinct(droppedDatabases), rows.Select(r => (string?)r.DatabaseName));
+            var payload = JsonSerializer.SerializeToNode(new
             {
                 server = resolved.DisplayName,
                 hours_back,
@@ -213,8 +227,18 @@ public sealed class McpQueryTools
                     attributed_cpu_ratio = attribution.AttributedCpuRatio,
                     note = attribution.Note
                 },
+                /* #7725: disclosed, never silent (get_top_procedures_by_cpu's rule, Darling's twin): the dropped databases this read left out
+                   and that have no row in the reply. Null when every one of them got rows, or the read left none out. */
+                databases_left_out = DatabasesLeftOut.Named(droppedWithoutRows),
+                databases_left_out_note = DatabasesLeftOut.Note(droppedWithoutRows),
                 queries = result
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions)!.AsObject();
+            if (payload["queries"] is JsonArray queryRows)
+            {
+                DroppedDatabaseMark.Mark(queryRows, rows.Select(r => (string?)r.DatabaseName).ToList(), droppedDatabases);
+            }
+
+            return payload.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {
@@ -242,7 +266,7 @@ public sealed class McpQueryTools
         return McpHelpers.Status(status, message);
     }
 
-    [McpServerTool(Name = "get_top_procedures_by_cpu"), Description("Gets the most expensive stored procedures ranked by total CPU time over a window ending at as_of. Delta-based: requires ~30 minutes after adding a new server before data appears. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed (extremes_note flags a provably stale one); cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> Shows execution counts, CPU/elapsed times, and I/O metrics. Delta-based: requires ~30 minutes after adding a new server before data appears. Reads the raw tier only, which on a store with a lowered retention_days or less history than the window can be shorter than hours_back." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
+    [McpServerTool(Name = "get_top_procedures_by_cpu"), Description("Gets the most expensive stored procedures ranked by total CPU time over a window ending at as_of. Delta-based: requires ~30 minutes after adding a new server before data appears. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed (extremes_note flags a provably stale one); cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> Shows execution counts, CPU/elapsed times, and I/O metrics. Delta-based: requires ~30 minutes after adding a new server before data appears. Reads the raw tier only, which on a store with a lowered retention_days or less history than the window can be shorter than hours_back. With no database_name, rows from a database the server no longer lists rank after the listed ones and carry database_dropped: true." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
     public static async Task<string> GetTopProceduresByCpu(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -284,22 +308,34 @@ public sealed class McpQueryTools
                 ? await dataService.GetDroppedDatabasesAsync(resolved.ServerId, asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : nowUtc, windowStartUtc: requestedStart)
                 : null;
             var rows = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, excludeDatabaseNames: droppedDatabases, tags: tagScope);
+            /* #7725: the databases the server still lists rank first, as above. What the limit leaves is filled from the left-out databases,
+               ranked the same way and marked database_dropped (Darling twin does the same), so a dropped database rows never push out a
+               listed row and the grid is not empty while the work is on record. databases_left_out then names only the databases with no row. */
+            if (droppedDatabases is { Count: > 0 } && rows.Count < top)
+            {
+                var fill = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top - rows.Count, serverClock: serverClock, databaseNames: droppedDatabases, asOfUtc: windowEnd, tags: tagScope);
+                rows = [.. rows, .. fill];
+            }
+
             /* #5633 review (finding D): the narrowing is disclosed, never silent (Darling's twin does the same, in the same words). The names
                it left out ride the envelope of an empty page and of a page with rows, and an empty page's sentence claims only the databases
                the server still has, so "the collector recorded nothing" is never said over a window with rows in a dropped database. */
             var leftOut = DatabasesLeftOut.Distinct(droppedDatabases);
             if (rows.Count == 0 && tagScope.Active)
             {
-                return await OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.WithDatabasesLeftOut(McpHelpers.Status("empty", $"No procedure on {resolved.DisplayName} in the last {hours_back} hour(s) carries query tag '{tagScope.Requested}'. The tag filter was applied in SQL before the top-{top} ranking."), leftOut)!);
+                return await OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.WithDatabasesLeftOut(McpHelpers.Status("empty", $"No procedure on {resolved.DisplayName} in the last {hours_back} hour(s) carries query tag '{tagScope.Requested}'. The tag filter was applied in SQL before the top-{top} ranking."), leftOut)!, requestedStart);
             }
 
             if (rows.Count == 0)
             {
-                return await WithEmptyWindowNoticeAsync(McpHelpers.WithDatabasesLeftOut(
-                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "procedure_stats", awsRdsKind: AwsRdsKind.None)
+                /* #7724: the collector's no-run answers are unavailable, which WithEmptyWindowNoticeAsync leaves alone. For a server that is offline
+                   by the SUCCESS-run rule the offline lead goes in front of them (Darling's twin does the same). */
+                var emptyPage = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "procedure_stats", awsRdsKind: AwsRdsKind.None)
                     ?? EmptyProcedureStatsStatus(
                         await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "procedure_stats", hours_back, asOfUtc: windowEnd),
-                        hours_back, leftOut?.Count ?? 0), leftOut)!,
+                        hours_back, leftOut?.Count ?? 0);
+                emptyPage = await WithOfflineLeadAsync(dataService, resolved.ServerId, windowEnd, emptyPage);
+                return await WithEmptyWindowNoticeAsync(McpHelpers.WithDatabasesLeftOut(emptyPage, leftOut)!,
                     dataService, QueryWindowRelation.ProcedureStats, resolved.ServerId, requestedStart, nowUtc, "procedure_stats");
             }
 
@@ -352,6 +388,7 @@ public sealed class McpQueryTools
                 total_spills = r.TotalSpills
             });
 
+            var leftOutWithoutRows = DroppedDatabaseMark.WithoutRows(leftOut, rows.Select(r => (string?)r.DatabaseName));
             return WithTagFilter(new
             {
                 server = resolved.DisplayName,
@@ -373,10 +410,16 @@ public sealed class McpQueryTools
                     note = attribution.Note
                 },
                 /* #5633 review (finding D): null when the read left no database out. */
-                databases_left_out = DatabasesLeftOut.Named(leftOut),
-                databases_left_out_note = DatabasesLeftOut.Note(leftOut),
+                databases_left_out = DatabasesLeftOut.Named(leftOutWithoutRows),
+                databases_left_out_note = DatabasesLeftOut.Note(leftOutWithoutRows),
                 procedures = result
-            }, tagScope.Named);
+            }, tagScope.Named, node =>
+            {
+                if (node["procedures"] is JsonArray procedureRows)
+                {
+                    DroppedDatabaseMark.Mark(procedureRows, rows.Select(r => (string?)r.DatabaseName).ToList(), droppedDatabases);
+                }
+            });
         }
         catch (Exception ex)
         {
@@ -388,15 +431,21 @@ public sealed class McpQueryTools
     /// Serializes a payload and, only when a tag shaped the read, adds a <c>tag_filter</c> member naming it: the tag as the caller gave it,
     /// or <c>untagged</c> (the twin of Darling's #5984 payload member). A call without a tag is unchanged.
     /// </summary>
-    internal static string WithTagFilter(object payload, string? tagName)
+    internal static string WithTagFilter(object payload, string? tagName, Action<JsonObject>? shape = null)
     {
-        if (tagName is null)
+        if (tagName is null && shape is null)
         {
             return JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
         }
 
         var node = JsonSerializer.SerializeToNode(payload, McpHelpers.JsonOptions)!.AsObject();
-        node["tag_filter"] = tagName;
+        /* #7725: a caller shaping of the object (the dropped-database mark on the rows) before the tag member is added. */
+        shape?.Invoke(node);
+        if (tagName is not null)
+        {
+            node["tag_filter"] = tagName;
+        }
+
         return node.ToJsonString(McpHelpers.JsonOptions);
     }
 
@@ -827,7 +876,7 @@ public sealed class McpQueryTools
         /* #7167: the all-clear rungs below are true negatives only while the server is being collected. */
         await OfflineInsteadOfEmptyAsync(
             dataService, serverId, windowEnd,
-            await EmptyRegressionRungsAsync(dataService, serverId, serverName, hours_back, windowEnd, notice, databases, floor, baselineStart, replay));
+            await EmptyRegressionRungsAsync(dataService, serverId, serverName, hours_back, windowEnd, notice, databases, floor, baselineStart, replay), windowEnd.AddHours(-hours_back));
 
     private static async Task<string> EmptyRegressionRungsAsync(
         LocalDataService dataService, int serverId, string serverName, int hours_back, DateTime windowEnd, McpWindowNotice notice,
@@ -996,7 +1045,7 @@ public sealed class McpQueryTools
                 return WithWindowNotice(
                     await OfflineInsteadOfEmptyAsync(
                         dataService, resolved.ServerId, windowEnd,
-                        await EmptyHeatmapAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, notice, filtered: databases is not null)),
+                        await EmptyHeatmapAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, notice, filtered: databases is not null), requestedStart),
                     notice, requestedStart, windowEnd);
 
             var truncated = rows.Count > limit;
@@ -1727,7 +1776,7 @@ public sealed class McpQueryTools
     internal static async Task<string> WithWindowNoticeAsync(
         string answer, LocalDataService dataService, QueryWindowRelation relation, int serverId, DateTime requestedStart, DateTime windowEnd, string table)
     {
-        (answer, var status) = await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer, ReadStatus(answer));
+        (answer, var status) = await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer, ReadStatus(answer), requestedStart);
         if (status.IsOffline)
         {
             return answer;
@@ -1757,8 +1806,9 @@ public sealed class McpQueryTools
     /// (<see cref="LocalDataService.ServerDisplayNameLookup"/>), as Darling's does. The original answer's wording and hints are dropped with its
     /// word, and the window wrappers add none (<see cref="AnswerStatus.IsOffline"/>).
     /// </summary>
-    internal static async Task<string> OfflineInsteadOfEmptyAsync(LocalDataService dataService, int serverId, DateTime windowEnd, string answer) =>
-        (await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer, ReadStatus(answer))).Answer;
+    internal static async Task<string> OfflineInsteadOfEmptyAsync(
+        LocalDataService dataService, int serverId, DateTime windowEnd, string answer, DateTime? windowStart = null) =>
+        (await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer, ReadStatus(answer), windowStart)).Answer;
 
     /// <summary>
     /// <see cref="OfflineInsteadOfEmptyAsync(LocalDataService, int, DateTime, string)"/> over a status the caller has already read, so a
@@ -1766,19 +1816,65 @@ public sealed class McpQueryTools
     /// (read again only when the answer changed, which only an <c>empty</c> one does).
     /// </summary>
     private static async Task<(string Answer, AnswerStatus Status)> OfflineInsteadOfEmptyAsync(
-        LocalDataService dataService, int serverId, DateTime windowEnd, string answer, AnswerStatus status)
+        LocalDataService dataService, int serverId, DateTime windowEnd, string answer, AnswerStatus status, DateTime? windowStart = null)
     {
         if (!status.IsEmpty)
         {
             return (answer, status);
         }
 
-        var offline = await OfflineAnswerOrNullAsync(dataService, serverId, windowEnd);
+        var offline = await OfflineAnswerOrNullAsync(dataService, serverId, windowEnd, windowStart);
         return offline is null ? (answer, status) : (offline, ReadStatus(offline));
     }
 
     /// <summary>The offline answer for the server as of <paramref name="windowEnd"/>, or null when it is not offline (or the read failed).</summary>
-    private static async Task<string?> OfflineAnswerOrNullAsync(LocalDataService dataService, int serverId, DateTime windowEnd)
+    private static async Task<string?> OfflineAnswerOrNullAsync(LocalDataService dataService, int serverId, DateTime windowEnd, DateTime? windowStart = null)
+    {
+        var (lead, newest) = await OfflineLeadOrNullAsync(dataService, serverId, windowEnd);
+        if (lead is null)
+        {
+            return null;
+        }
+
+        /* #7724: the window holds a collection (the server went quiet partway through it), so say what was collected through, as Darling does,
+           after the offline lead. A caller that does not pass its window start keeps the offline sentence. */
+        var offlineOnly = McpHelpers.Status("unavailable", lead + " " + OfflineAnswerEnd);
+        return newest is { } last
+            ? McpHelpers.OfflineEmptyAnswer(lead, last, windowEnd, windowStart, offlineOnly)
+            : offlineOnly;
+    }
+
+    /// <summary>
+    /// #7724: <paramref name="answer"/>, when it is an <c>unavailable</c> envelope for a server that is offline as of <paramref name="windowEnd"/>,
+    /// with the offline sentence (<see cref="OfflineLeadOrNullAsync"/>, the one <see cref="OfflineAnswerOrNullAsync"/> opens with) in front of its
+    /// <c>message</c>, as Darling's <c>DarlingServerOfflineNote.WithLeadAsync</c> does. Any other answer, and any answer for a server that is not offline,
+    /// comes back unchanged.
+    /// </summary>
+    internal static async Task<string> WithOfflineLeadAsync(LocalDataService dataService, int serverId, DateTime windowEnd, string answer)
+    {
+        if (ReadStatus(answer) is not { Word: "unavailable" } || await OfflineLeadOrNullAsync(dataService, serverId, windowEnd) is not ({ } lead, _))
+        {
+            return answer;
+        }
+
+        try
+        {
+            if (System.Text.Json.Nodes.JsonNode.Parse(answer) is System.Text.Json.Nodes.JsonObject node
+                && node["message"] is System.Text.Json.Nodes.JsonValue message && message.TryGetValue<string>(out var text))
+            {
+                node["message"] = lead + " " + text;
+                return node.ToJsonString(McpHelpers.JsonOptions);
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+        }
+
+        return answer;
+    }
+
+    /// <summary>The sentence that opens an offline answer, and the newest SUCCESS collection it judged by (null when the log holds none), or a null lead when the server is not offline as of <paramref name="windowEnd"/> (or the read failed).</summary>
+    private static async Task<(string? Lead, DateTime? Newest)> OfflineLeadOrNullAsync(LocalDataService dataService, int serverId, DateTime windowEnd)
     {
         DateTime? last;
         try
@@ -1787,7 +1883,7 @@ public sealed class McpQueryTools
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return null;
+            return (null, null);
         }
 
         if (last is not { } newest)
@@ -1800,25 +1896,23 @@ public sealed class McpQueryTools
             if (ServerHealthClassifier.ClassifyFreshness(null, registered, RetentionService.OldestRetainedInstant(windowEnd), windowEnd)
                 != ServerFreshness.Offline)
             {
-                return null;
+                return (null, null);
             }
 
-            return McpHelpers.Status(
-                "unavailable",
-                $"{OfflineSubject(dataService, serverId)} is offline: the store holds no successful collection from it within its retained history, "
-                + "so nothing is arriving to read, whatever the collectors would otherwise report. " + OfflineAnswerEnd);
+            return ($"{OfflineSubject(dataService, serverId)} is offline: the store holds no successful collection from it within its retained history, "
+                + "so nothing is arriving to read, whatever the collectors would otherwise report.", null);
         }
 
         if (windowEnd <= newest
             || ServerHealthClassifier.ClassifyFreshness(newest, windowEnd) != ServerFreshness.Offline)
         {
-            return null;
+            return (null, newest);
         }
 
-        return McpHelpers.Status(
-            "unavailable",
-            $"{OfflineSubject(dataService, serverId)} is offline: the store has had no successful collection from it since {newest.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture)} UTC, "
-            + "so nothing is arriving to read, whatever the collectors would otherwise report. " + OfflineAnswerEnd);
+        var lead = $"{OfflineSubject(dataService, serverId)} is offline: the store has had no successful collection from it since {newest.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture)} UTC, "
+            + "so nothing is arriving to read, whatever the collectors would otherwise report.";
+
+        return (lead, newest);
     }
 
     private const string OfflineAnswerEnd = "An empty result here is missing data, not a finding.";
@@ -1836,7 +1930,8 @@ public sealed class McpQueryTools
 
         /// <summary>The answer <see cref="OfflineInsteadOfEmptyAsync(LocalDataService, int, DateTime, string)"/> builds.</summary>
         public bool IsOffline => Word == "unavailable" && Message is { } text
-            && text.Contains(" is offline: ", StringComparison.Ordinal) && text.EndsWith(OfflineAnswerEnd, StringComparison.Ordinal);
+            && ((text.Contains(" is offline: ", StringComparison.Ordinal) && text.EndsWith(OfflineAnswerEnd, StringComparison.Ordinal))
+                || (text.Contains(" is offline: ", StringComparison.Ordinal) && text.Contains(McpHelpers.CollectedThroughOpening, StringComparison.Ordinal)));
     }
 
     private static AnswerStatus ReadStatus(string answer)
@@ -1873,7 +1968,7 @@ public sealed class McpQueryTools
     internal static async Task<string> WithEmptyWindowNoticeAsync(
         string answer, LocalDataService dataService, QueryWindowRelation relation, int serverId, DateTime requestedStart, DateTime windowEnd, string table)
     {
-        (answer, var status) = await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer, ReadStatus(answer));
+        (answer, var status) = await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer, ReadStatus(answer), requestedStart);
         if (status.IsOffline)
         {
             return answer;

@@ -162,7 +162,10 @@ export function fanout(read, params, specs, intro = null) {
       if (hidesPanel(spec, res, shells[i], keys[i])) return;
       if (res.kind === "error") return mount(body, readErrorStrip(res.message));
       if (res.kind === "empty") {
-        const repeats = saidEmpty && emptyHeadline(spec, res) === res.message;
+        /* #7724: an offline server's read that holds collection says what was collected through, and each panel prints that sentence
+           (the red strip above already names the outage), so none of them points at another panel. */
+        const throughSentence = typeof res.data?.collected_through === "string";
+        const repeats = saidEmpty && !throughSentence && emptyHeadline(spec, res) === res.message;
         if (!saidEmpty && emptyHeadline(spec, res) === res.message) saidBy = spec.title;
         saidEmpty = saidEmpty || emptyHeadline(spec, res) === res.message;
         /* #7552: the pointer names the panel that says why. */

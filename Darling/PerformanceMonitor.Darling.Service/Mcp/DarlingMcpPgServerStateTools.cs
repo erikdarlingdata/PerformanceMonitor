@@ -79,7 +79,7 @@ public sealed class DarlingMcpPgServerStateTools
                         "empty",
                         $"No buffer pool contents recorded for {resolved.DisplayName} in the last "
                         + $"{hours_back} hour(s). This needs the pg_buffercache extension in the database "
-                        + "the collector connects to."), cancellationToken);
+                        + "the collector connects to."), cancellationToken, windowEnd.AddHours(-hours_back));
             }
 
             var newest = rows[0];
@@ -196,7 +196,7 @@ public sealed class DarlingMcpPgServerStateTools
                     postgres, resolved.ServerId, resolved.DisplayName, "pg_extension_availability", cancellationToken);
                 if (notCollected != null)
                 {
-                    return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, notCollected, cancellationToken);
+                    return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, notCollected, cancellationToken, windowStart);
                 }
 
                 var emptyNotice = await DarlingMcpWindowNotice.ReadAsync(
@@ -214,7 +214,7 @@ public sealed class DarlingMcpPgServerStateTools
                               + "that the collector enumerates it, because a name that matches nothing is "
                               + "indistinguishable here from a server with no inventory. Re-run without the "
                               + "filter to see which databases are reported."),
-                        emptyNotice.AsHints()), emptyNotice), cancellationToken);
+                        emptyNotice.AsHints()), emptyNotice), cancellationToken, windowStart);
             }
 
             /* The result is capped at `limit`, so a summary count taken over the returned rows describes
@@ -501,7 +501,7 @@ public sealed class DarlingMcpPgServerStateTools
                             coveredClaim: ", so this is the "
                                 + "healthy state on a server without sustained contention — and it is not proof "
                                 + "that nothing was ever locked."),
-                        emptyNotice.AsHints()), cancellationToken);
+                        emptyNotice.AsHints()), cancellationToken, emptyStart);
             }
 
             /* #4966: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote).
@@ -594,7 +594,7 @@ public sealed class DarlingMcpPgServerStateTools
                         /* #4966: the window keys ride on an empty answer under hints, from the coverage probe; not_collected (above) stays bare. */
                         (await DarlingMcpWindowNotice.ReadAsync(
                             () => DarlingMcpWindowNotice.Probe(postgres, WriteStatsTable, resolved.ServerName, requestedStart, windowEnd, cancellationToken),
-                            requestedStart, windowEnd, WriteStatsTable, emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken);
+                            requestedStart, windowEnd, WriteStatsTable, emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken, requestedStart);
             }
 
             /* #4966: ONE row whose every figure is a first-to-last difference, so the span it covers IS the row's own first sample
@@ -955,7 +955,7 @@ public sealed class DarlingMcpPgServerStateTools
                                 + $"{hours_back} hour(s)",
                             coveredClaim: ". That is a real finding rather than missing data - this "
                                 + "read compares consecutive snapshots, so an unchanged server produces no rows."),
-                        emptyNotice.AsHints()), cancellationToken);
+                        emptyNotice.AsHints()), cancellationToken, emptyStart);
             }
 
             var truncated = fetched.Count > limit;

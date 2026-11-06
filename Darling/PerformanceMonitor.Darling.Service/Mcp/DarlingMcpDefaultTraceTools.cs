@@ -120,7 +120,7 @@ public sealed class DarlingMcpDefaultTraceTools
                     "empty",
                     $"No significant default trace events found in the requested time range{DarlingMcpBlockingTools.ForChosenDatabases(databases)}.",
                     databases.Describe(),
-                    notice.AsHints()), cancellationToken);
+                    notice.AsHints()), cancellationToken, windowStart);
 
             var events = significant.Take(limit).Select(r =>
             {

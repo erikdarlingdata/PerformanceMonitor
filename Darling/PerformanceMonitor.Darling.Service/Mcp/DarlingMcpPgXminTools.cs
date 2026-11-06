@@ -132,7 +132,7 @@ public sealed class DarlingMcpPgXminTools
                             + "reclaim dead rows, so bloat growth has a different cause — look at whether "
                             + "autovacuum is being triggered at all (per-table thresholds and dead-tuple "
                             + "counts) rather than at whether it is being blocked."),
-                }, McpHelpers.JsonOptions), emptyNotice), cancellationToken);
+                }, McpHelpers.JsonOptions), emptyNotice), cancellationToken, now.AddHours(-hours_back));
             }
 
             var holders = rows.Select(r => new
