@@ -125,7 +125,7 @@ public sealed class DarlingMcpPgDeadlockTools
                         NoDeadlocksText(resolved.DisplayName, hours_back),
                         (await DarlingMcpWindowNotice.ReadEventAsync(
                             () => DarlingMcpWindowNotice.Probe(postgres, "pg_deadlocks", resolved.ServerName, windowStart, windowEnd, cancellationToken),
-                            null, windowStart, windowEnd, "pg_deadlocks", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken);
+                            null, windowStart, windowEnd, "pg_deadlocks", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken, windowStart);
             }
 
             /* #4966: the notice is always COVERAGE, whether or not the cap cut the page (the cap is reported by truncated). A sparse event

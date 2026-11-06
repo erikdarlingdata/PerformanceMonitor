@@ -61,7 +61,7 @@ public sealed partial class DarlingMcpFinOpsTools
             /* #7010: the window-floor notice of the two tables the view windows (the not_collected answer above stays bare). */
             var noRows = await ViewWindowNoticeAsync(postgres, resolved.ServerName, hoursBack, ["query_stats", "file_io_stats"], "query_stats and file_io_stats", true, ct);
             return await DarlingMcpWindowNotice.FinishEmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, DateTime.UtcNow, McpHelpers.Status("empty",
-                    $"No query statistics or file I/O were collected for this server in the last {hoursBack} hours, so there is no per-database usage to show.", noRows.AsHints()), noRows, ct);
+                    $"No query statistics or file I/O were collected for this server in the last {hoursBack} hours, so there is no per-database usage to show.", noRows.AsHints()), noRows, ct, cutoff);
         }
 
         var ordered = OrderDatabaseRows(rows);

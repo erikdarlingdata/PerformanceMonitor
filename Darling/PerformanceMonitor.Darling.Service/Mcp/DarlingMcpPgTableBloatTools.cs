@@ -507,7 +507,7 @@ public sealed class DarlingMcpPgTableBloatTools
                         + "collection ran. Every table on every collected database is under the collector's 1 MB "
                         + "floor, below which bloat is not an actionable amount of space",
                     coveredClaim: ". That is a genuine all-clear rather than missing data."),
-                hints), cancellationToken);
+                hints), cancellationToken, start);
         }
 
         return await DarlingServerOfflineNote.UnavailableAsync(

@@ -247,11 +247,11 @@ public sealed class DarlingMcpSessionTools
                         + (tagFilter.Active ? $" (query tag '{tagFilter.Requested}')" : "")
                         + ". The filters were applied in SQL over the whole window, so unfiltered snapshots may well exist — drop them to see what the window holds."
                         + MonitorLeftOutNote(includeMonitor),
-                        notice.AsHints()), cancellationToken);
+                        notice.AsHints()), cancellationToken, windowStart);
                 }
 
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_snapshots", cancellationToken)
-                    ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", "No active query snapshots found in the requested time range." + MonitorLeftOutNote(includeMonitor), notice.AsHints()), cancellationToken);
+                    ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", "No active query snapshots found in the requested time range." + MonitorLeftOutNote(includeMonitor), notice.AsHints()), cancellationToken, windowStart);
             }
 
             var truncated = rows.Count > limit;
@@ -386,9 +386,9 @@ public sealed class DarlingMcpSessionTools
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status(
                     "empty",
                     $"No active query snapshots on {resolved.DisplayName} in the last {hoursBack} hour(s) matched "
-                    + DescribeActiveQueryFilters(databases, blockingOnly, waitFilter) + "." + MonitorLeftOutNote(includeMonitor)), cancellationToken);
+                    + DescribeActiveQueryFilters(databases, blockingOnly, waitFilter) + "." + MonitorLeftOutNote(includeMonitor)), cancellationToken, now.AddHours(-hoursBack));
             return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_snapshots", cancellationToken)
-                ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", "No active query snapshots found in the requested time range." + MonitorLeftOutNote(includeMonitor)), cancellationToken);
+                ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", "No active query snapshots found in the requested time range." + MonitorLeftOutNote(includeMonitor)), cancellationToken, now.AddHours(-hoursBack));
         }
 
         var truncated = page.Snapshots.Count > limit;
@@ -512,10 +512,10 @@ public sealed class DarlingMcpSessionTools
                         $"No waiting tasks captured in the specified time range{DarlingMcpBlockingTools.ForChosenDatabases(databases)}. "
                         + "The filter was applied in SQL over the whole window, so waiting tasks of other databases may well exist; drop it to see what the window holds."
                         + MonitorLeftOutNote(includeMonitor),
-                        notice.AsHints()), cancellationToken);
+                        notice.AsHints()), cancellationToken, windowStart);
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "waiting_tasks", cancellationToken)
-                    ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", "No waiting tasks captured in the specified time range." + MonitorLeftOutNote(includeMonitor), notice.AsHints()), cancellationToken);
+                    ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", "No waiting tasks captured in the specified time range." + MonitorLeftOutNote(includeMonitor), notice.AsHints()), cancellationToken, windowStart);
 
             var truncated = rows.Count > limit;
             var page = truncated ? rows.Take(limit).ToList() : rows;

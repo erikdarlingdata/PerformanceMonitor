@@ -66,7 +66,7 @@ public sealed class DarlingMcpPgTrendTools
                         + "single collection (a trend needs at least two to difference)."
                         + DarlingMcpPgWaitSamplingTools.DescribeInstrumentForEmpty(
                             await DarlingPgWaitSamplingReader.GetWaitInstrumentAsync(postgres, resolved.ServerId, cancellationToken))
-                        + " get_pg_extensions reports whether the pg_wait_sampling extension is loaded."), cancellationToken);
+                        + " get_pg_extensions reports whether the pg_wait_sampling extension is loaded."), cancellationToken, start);
             }
 
             var points = await DarlingPgTrendReader.GetWaitTrendAsync(
@@ -81,7 +81,7 @@ public sealed class DarlingMcpPgTrendTools
                         $"No samples for wait event '{chosen}' on {resolved.DisplayName} in the last "
                         + $"{hours_back} hour(s). A trend needs at least TWO snapshots to difference, so a "
                         + "window holding one collection is legitimately empty here even when the event is "
-                        + "being sampled. get_pg_wait_sampling lists the events this server does record."), cancellationToken);
+                        + "being sampled. get_pg_wait_sampling lists the events this server does record."), cancellationToken, start);
             }
 
             var resets = points.Count(p => p.CounterReset);
@@ -200,7 +200,7 @@ public sealed class DarlingMcpPgTrendTools
                         ?? EmptyStatus(await EmptyHintsAsync(postgres, "get_pg_query_duration_trend", resolved.ServerName, start, windowEnd, logger, cancellationToken),
                             "empty",
                             $"No statement recorded execution time on {resolved.DisplayName} in the last "
-                            + $"{hours_back} hour(s), so there is nothing to follow."), cancellationToken);
+                            + $"{hours_back} hour(s), so there is nothing to follow."), cancellationToken, start);
                 }
 
                 parsedQueryId = top.Value;
@@ -222,7 +222,7 @@ public sealed class DarlingMcpPgTrendTools
                         $"No samples for queryid {parsedQueryId} on {resolved.DisplayName} in the last "
                         + $"{hours_back} hour(s). pg_stat_statements evicts statements under memory "
                         + "pressure, so a queryid that was there yesterday can be gone rather than idle - "
-                        + "get_pg_top_queries shows what the server currently tracks."), cancellationToken);
+                        + "get_pg_top_queries shows what the server currently tracks."), cancellationToken, start);
             }
 
             var ran = points.Where(p => p.Calls > 0).ToList();
@@ -356,7 +356,7 @@ public sealed class DarlingMcpPgTrendTools
                                   + $"recorded any I/O or buffer activity on {resolved.DisplayName} in the "
                                   + $"last {hours_back} hour(s). get_pg_io_stats lists the combinations "
                                   + "this server reports; omit both parameters to follow whichever pair is "
-                                  + "busiest."), cancellationToken);
+                                  + "busiest."), cancellationToken, start);
                 }
 
                 chosenBackend = dominant.Value.BackendType;
@@ -376,7 +376,7 @@ public sealed class DarlingMcpPgTrendTools
                         + $"{resolved.DisplayName} in the last {hours_back} hour(s). A trend needs at least "
                         + "TWO snapshots to difference, so a window holding one collection is legitimately "
                         + "empty here even while the combination is being collected. get_pg_io_stats lists "
-                        + "the combinations this server actually reports."), cancellationToken);
+                        + "the combinations this server actually reports."), cancellationToken, start);
             }
 
             /* Asked of the server's OWN configuration rather than inferred from the zeros, because the two
@@ -608,7 +608,7 @@ public sealed class DarlingMcpPgTrendTools
                         ?? EmptyStatus(await EmptyHintsAsync(postgres, "get_pg_database_trend", resolved.ServerName, start, windowEnd, logger, cancellationToken),
                             "empty",
                             $"No database recorded block accesses or temp files on {resolved.DisplayName} in "
-                            + $"the last {hours_back} hour(s), so there is nothing to follow."), cancellationToken);
+                            + $"the last {hours_back} hour(s), so there is nothing to follow."), cancellationToken, start);
                 }
             }
 
@@ -650,7 +650,7 @@ public sealed class DarlingMcpPgTrendTools
                                 ? "No snapshot at all landed in this window, though this server has been "
                                   + "collected before. get_collection_health says whether the sweep is "
                                   + "running."
-                                : "This server has never had pg_database_stats collected.")), cancellationToken);
+                                : "This server has never had pg_database_stats collected.")), cancellationToken, start);
             }
 
             var totalTempFiles = points.Sum(p => p.TempFiles);
