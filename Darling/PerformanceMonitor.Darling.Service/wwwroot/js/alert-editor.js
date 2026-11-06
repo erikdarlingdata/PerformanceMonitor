@@ -442,6 +442,9 @@ function buildAlertEditor(main, ctx) {
   });
 
   let checkTimer = null;
+  /* #7937: the number of the latest check. A validate or test reply from an earlier check is dropped, so a slow test of an
+     earlier definition cannot land over the "Checking…" strip of the one the author has since typed. */
+  let checkSeq = 0;
   function scheduleCheck() {
     clearTimeout(checkTimer);
     checkTimer = setTimeout(runCheck, CHECK_DEBOUNCE_MS);
@@ -468,9 +471,11 @@ function buildAlertEditor(main, ctx) {
       return;
     }
     const def = modelToDefinition(model);
+    const seq = ++checkSeq;
     mount(previewBox, loadingStrip("Checking…"));
 
     const vres = await api.validateAlertRule(def);
+    if (seq !== checkSeq) return;
     if (vres.kind === "error") {
       mount(previewBox, errorStrip(vres.message || "Could not validate this rule."));
       return;
@@ -481,6 +486,7 @@ function buildAlertEditor(main, ctx) {
     }
 
     const tres = await api.testAlertRule({ definition: def });
+    if (seq !== checkSeq) return;
     mount(previewBox, renderTestResult(tres, model.metric.unit, ctx.recordKey));
   }
 
