@@ -235,15 +235,22 @@ public sealed class PgStatementsDeallocLiveTests
             "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status, error_message) VALUES ($1, $2, $3, 'pg_statement_stats', $4, 'SUCCESS', $5)",
             CollectionIdGenerator.Next(), serverId, ServerName, DarlingMcpTestData.Naive(at), note);
 
-    private static async Task SeedStatsAsync(NpgsqlConnection connection, CancellationToken ct, int serverId, DateTime at) =>
-        await DarlingMcpTestData.ExecAsync(connection, ct, @"
+    /// <summary>Two snapshots of one statement, a minute apart, ending at <paramref name="at"/>. #7909: a series' first sample in
+    /// the window carries no interval, so the deltas ride on the second.</summary>
+    private static async Task SeedStatsAsync(NpgsqlConnection connection, CancellationToken ct, int serverId, DateTime at)
+    {
+        foreach (var (snap, deltaCalls, deltaMs, deltaRows) in new[] { (at.AddMinutes(-1), 0L, 0L, 0L), (at, 10L, 500L, 20L) })
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO pg_statement_stats
     (collection_id, collection_time, server_id, server_name, queryid, database_id, user_id, toplevel,
      calls, total_exec_time_ms, max_exec_time_ms, rows_returned,
      shared_blks_hit, shared_blks_read, temp_blks_read, temp_blks_written, wal_bytes,
      delta_calls, delta_total_exec_time_ms, delta_rows)
-VALUES ($1, $2, $3, $4, 42, 16384, 10, TRUE, 100, 5000, 91.5, 250, 10, 5, 0, 0, 0, 10, 500, 20)",
-            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), serverId, ServerName);
+VALUES ($1, $2, $3, $4, 42, 16384, 10, TRUE, 100, 5000, 91.5, 250, 10, 5, 0, 0, 0, $5, $6, $7)",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(snap), serverId, ServerName, deltaCalls, deltaMs, deltaRows);
+        }
+    }
 
     private static string Sql(int major, bool aurora)
         => PgStatementStatsCollector.Instance.BuildQuery(new CollectorContext

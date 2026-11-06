@@ -143,8 +143,11 @@ public sealed class DarlingPgTopQueriesLiveTests
                CAST(SUM(delta_calls) AS bigint) overflows at RUNTIME. A deterministic fault that needs no
                DDL against the shared store. */
             await DeleteStatsAsync(connection, ct);
+            /* Three samples: a series' first sample in the window carries no interval (#7909), so two counted
+               maxima are what overflow the cast. */
             await SeedStatsAsync(connection, ct, t0, OutOfRangeQueryId, deltaCalls: long.MaxValue, deltaTimeMs: 500, deltaRows: 1, walBytes: 0);
             await SeedStatsAsync(connection, ct, t1, OutOfRangeQueryId, deltaCalls: long.MaxValue, deltaTimeMs: 500, deltaRows: 1, walBytes: 0);
+            await SeedStatsAsync(connection, ct, t1.AddSeconds(60), OutOfRangeQueryId, deltaCalls: long.MaxValue, deltaTimeMs: 500, deltaRows: 1, walBytes: 0);
 
             /* Aurora FIRST, and this is the assertion that keeps the fix honest. The collector CAN run here,
                so a genuine fault must still read as a fault. A catch block that answered not_collected
@@ -190,6 +193,69 @@ public sealed class DarlingPgTopQueriesLiveTests
         }
     }
 
+    /// <summary>
+    /// #7909: every counter measures the same intervals. The stored <c>delta_*</c> columns carry the interval that
+    /// ENDED at each sample, so a series' first sample in the window carries an interval that began before the
+    /// window. The block and WAL figures are differenced inside the window and contribute 0 for that sample. Calls,
+    /// execution time and rows follow the same rule, so a per-call figure such as blocks per call is taken over the
+    /// same two intervals as its numerator.
+    /// </summary>
+    [Fact]
+    public async Task CallsTimeAndRows_CountTheSameIntervalsAsTheBlockFigures_SoAFirstSampleInTheWindowAddsNothing()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live get_pg_top_queries window test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            await SetEngineKindAsync(connection, ct, MonitoredEngineKind.Postgres);
+
+            /* Three samples a minute apart, all inside the window. The first carries a 100-call interval that ended at
+               it and began before the window; the two later ones carry 10 calls each. shared_blks_read is cumulative:
+               1,000 then 1,100 then 1,200, so the two in-window intervals read 100 blocks each. */
+            var t0 = MinutesAgo(30);
+            var t1 = t0.AddSeconds(60);
+            var t2 = t1.AddSeconds(60);
+            await SeedStatsAsync(connection, ct, t0, OutOfRangeQueryId, deltaCalls: 100, deltaTimeMs: 1_000, deltaRows: 10_000, walBytes: 1_000, sharedBlksRead: 1_000);
+            await SeedStatsAsync(connection, ct, t1, OutOfRangeQueryId, deltaCalls: 10, deltaTimeMs: 100, deltaRows: 1_000, walBytes: 2_000, sharedBlksRead: 1_100);
+            await SeedStatsAsync(connection, ct, t2, OutOfRangeQueryId, deltaCalls: 10, deltaTimeMs: 100, deltaRows: 1_000, walBytes: 3_000, sharedBlksRead: 1_200);
+
+            var root = JsonDocument.Parse(await DarlingMcpPgTopQueries(dataSource)).RootElement;
+            Assert.False(
+                root.TryGetProperty("status", out var status) && status.GetString() == "error",
+                $"the read threw instead of executing: {root}");
+            var row = Assert.Single(root.GetProperty("queries").EnumerateArray());
+
+            /* The two in-window intervals, on every counter. */
+            Assert.Equal(20, row.GetProperty("calls").GetInt64());
+            Assert.Equal(200, row.GetProperty("total_exec_time_ms").GetInt64());
+            Assert.Equal(2_000, row.GetProperty("rows_returned").GetInt64());
+            Assert.Equal(200, row.GetProperty("shared_blks_read").GetInt64());
+            Assert.Equal(2_000, row.GetProperty("wal_bytes").GetInt64());
+
+            /* So blocks per call is 10, taken over the same intervals as its numerator. */
+            Assert.Equal(10.0, (double)row.GetProperty("shared_blks_read").GetInt64() / row.GetProperty("calls").GetInt64(), 3);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static async Task<string> DarlingMcpPgTopQueries(NpgsqlDataSource dataSource) =>
         await DarlingMcpPgStatementTools.GetPgTopQueries(dataSource, ServerName, 4);
 
@@ -202,7 +268,7 @@ public sealed class DarlingPgTopQueriesLiveTests
 
     private static async Task SeedStatsAsync(
         NpgsqlConnection connection, CancellationToken ct, DateTime collectionTimeUtc,
-        long queryId, long deltaCalls, long deltaTimeMs, long deltaRows, long walBytes) =>
+        long queryId, long deltaCalls, long deltaTimeMs, long deltaRows, long walBytes, long sharedBlksRead = 5) =>
         await DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO pg_statement_stats
     (collection_id, collection_time, server_id, server_name, queryid, database_id, user_id, toplevel,
@@ -212,11 +278,11 @@ INSERT INTO pg_statement_stats
      delta_calls, delta_total_exec_time_ms, delta_rows)
 VALUES ($1, $2, $3, $4, $5, 16384, 10, TRUE,
         100, 5000, 91.5, 250,
-        10, 5, 3, 2,
+        10, $10, 3, 2,
         0, 0, $6, 2097152,
         $7, $8, $9)",
             CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectionTimeUtc), ServerId, ServerName,
-            queryId, walBytes, deltaCalls, deltaTimeMs, deltaRows);
+            queryId, walBytes, deltaCalls, deltaTimeMs, deltaRows, sharedBlksRead);
 
     private static async Task SeedTextAsync(
         NpgsqlConnection connection, CancellationToken ct, long queryId, string text) =>
