@@ -56,7 +56,7 @@ export function formToBody(values, zoneFallback) {
   const server = text("server_id");
   const windowText = text("window_minutes");
   return {
-    server_id: /^\d+$/.test(server) ? Number(server) : null,
+    server_id: /^-?\d+$/.test(server) ? Number(server) : null,
     metric_name: text("metric_name") || null,
     time_of_day: time || null,
     time_zone: time ? zone || zoneFallback || null : null,
