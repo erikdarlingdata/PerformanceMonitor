@@ -22,7 +22,7 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class DarlingEngineCapabilityReasonsTests
 {
-    private static NpgsqlDataSource Unreachable() => NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=x;Database=x;Timeout=1");
+    private static NpgsqlDataSource Unreachable() => NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=x;Database=x;Timeout=15");
 
     [Fact]
     public async Task NotCollectedStatusAsync_PropagatesACancellation()

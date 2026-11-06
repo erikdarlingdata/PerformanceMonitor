@@ -1130,14 +1130,15 @@ public partial class ViewerServerTab
                   + "redacted because the monitoring login lacks pg_monitor.";
 
         /* #7878, #7910: the reads return the rows that cleared too (includeCleared), and each grid shows only the current ones. */
-        var xminCurrent = xminTask.Result.Where(r => r.IsCurrent).ToList();
-        PgXminHorizonGrid.ItemsSource = xminCurrent.Select(PgDisplay.Xmin).ToList();
+        var (xminRows, xminCapturesInWindow) = xminTask.Result;
+        var xminCurrent = xminRows.Where(r => r.IsCurrent).ToList();
+        PgXminHorizonGrid.ItemsSource = xminCurrent.Select(r => PgDisplay.Xmin(r, xminCapturesInWindow)).ToList();
         ShowNote(PgXminNote, PanelNoteParts("pg_xmin_horizon", xminCurrent.Count,
             "Nothing held the xmin horizon back in this window.",
             "Nothing held the xmin horizon back in this window — no long-running transaction, replication "
             + "slot, standby feedback or prepared transaction pinned an old xmin. Zero rows is the healthy "
             + "answer here, not a missing read.",
-            ClearedRows.Xmin(xminTask.Result.Count - xminCurrent.Count)));
+            ClearedRows.Xmin(xminRows.Count - xminCurrent.Count)));
 
         var autovacuumCurrent = autovacuumTask.Result.Where(r => r.IsCurrent).ToList();
         PgAutovacuumGrid.ItemsSource = autovacuumCurrent.Select(PgDisplay.Autovacuum).ToList();

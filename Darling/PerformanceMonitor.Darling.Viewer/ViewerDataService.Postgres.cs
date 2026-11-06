@@ -239,10 +239,15 @@ public sealed partial class ViewerDataService
     // the MCP surface, so these add a window and nothing else.
     // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// <summary>Vacuum tab, panel 1 — what is holding the xmin horizon back, by cause. Includes rows that cleared since the newest run (#7878): the tab lists the current ones and counts the rest in its note. The same holds for the autovacuum, wraparound and slot reads below.</summary>
-    public Task<List<DarlingPgXminReader.PgXminRow>> GetPgXminHorizonAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
-        DarlingPgXminReader.GetPgXminHorizonAsync(_dataSource, serverId, startUtc, endUtc, includeCleared: true, cancellationToken: cancellationToken);
+    /// <summary>Vacuum tab, panel 1 — what is holding the xmin horizon back, by cause. Includes rows that cleared since the newest run (#7878): the tab lists the current ones and counts the rest in its note. The same holds for the autovacuum, wraparound and slot reads below.
+    /// <para>#8014: also the window's capture count, the denominator of the Held In column. It is read after the rows on the same task, not beside them, so the panel still takes one connection from the pool.</para></summary>
+    public async Task<(List<DarlingPgXminReader.PgXminRow> Rows, long CapturesInWindow)> GetPgXminHorizonAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    {
+        var rows = await DarlingPgXminReader.GetPgXminHorizonAsync(_dataSource, serverId, startUtc, endUtc, includeCleared: true, cancellationToken: cancellationToken);
+        var captures = await DarlingPgXminReader.GetXminCapturesInWindowAsync(_dataSource, serverId, startUtc, endUtc, cancellationToken);
+        return (rows, captures);
+    }
 
     /// <summary>Vacuum tab, panel 2 — per-table autovacuum backlog, ranked by ratio to the table's own threshold.</summary>
     public Task<List<DarlingPgAutovacuumReader.PgAutovacuumRow>> GetPgAutovacuumAsync(

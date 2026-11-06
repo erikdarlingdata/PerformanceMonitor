@@ -44,6 +44,9 @@ public sealed class KnownPatternWebRoutesLiveTests
 
     /// <summary>Has a <c>servers</c> row and no definition: removed, its history kept.</summary>
     private const int RegistryOnlyServerId = 7_633_403;
+
+    /// <summary>Defined, with a negative id as about half of all real server ids are (#7975: the id is a 32-bit hash of the storage name).</summary>
+    private const int NegativeServerId = -1_714_925_380;
     private const string ServerName = "LcKnownPatternSrv";
     private const string RolePassword = "known-pattern-live-pw";
     private static readonly CapturingTestLogger Log = new();
@@ -64,6 +67,7 @@ public sealed class KnownPatternWebRoutesLiveTests
             /* The write functions refuse a server id the registry (config_monitored_servers) does not hold. */
             await DarlingMcpTestData.ExecAsync(connection, ct, $"INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES ({ServerId}, 'kp-a', 'kp-a', TRUE) ON CONFLICT DO NOTHING");
             await DarlingMcpTestData.ExecAsync(connection, ct, $"INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES ({DefinedOnlyServerId}, 'kp-b', 'kp-b', TRUE) ON CONFLICT DO NOTHING");
+            await DarlingMcpTestData.ExecAsync(connection, ct, $"INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES ({NegativeServerId}, 'kp-neg', 'kp-neg', TRUE) ON CONFLICT DO NOTHING");
             await DarlingMcpTestData.RegisterServerAsync(connection, RegistryOnlyServerId, "kp-gone", ct);
             /* The three store functions are provisioning SQL, not a migration: create them as the store owner, before the viewer replay grants EXECUTE on them. */
             await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT (id) DO NOTHING");
@@ -223,6 +227,17 @@ public sealed class KnownPatternWebRoutesLiveTests
             Assert.Contains(expected, edited.Body.GetProperty("error").GetString(), StringComparison.Ordinal);
             Assert.DoesNotContain("(Parameter", edited.Body.GetProperty("error").GetString(), StringComparison.Ordinal);
             Assert.Equal("Keep me.", Assert.Single(await store.LoadAllAsync(ct)).Note);
+        });
+    }
+
+    [Fact]
+    public async Task AServerWithANegativeId_IsAccepted_AndStoredAsThatServer()
+    {
+        await WithRoutesAsync(new DarlingWebSeat("alice@example.com", true), async (client, store, ct) =>
+        {
+            var added = await SendAsync(client, HttpMethod.Post, "/api/known-patterns", $"{{\"server_id\":{NegativeServerId},\"note\":\"Negative id.\"}}");
+            Assert.True(added.Status == HttpStatusCode.Created, added.Body + " " + Log.Joined);
+            Assert.Equal(NegativeServerId, Assert.Single(await store.LoadAllAsync(ct)).ServerId);
         });
     }
 

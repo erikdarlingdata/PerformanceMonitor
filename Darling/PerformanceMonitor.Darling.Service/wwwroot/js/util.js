@@ -293,9 +293,13 @@ export function listOnlyNote(managedStore, lists, toChange, adminWritesOff) {
       ", use the Viewer app, or give the web an admin store login (set postgres.webConnectionString to an admin login).";
 }
 
-/** #7558: the sentence Admin says once, under its heading, when the managed store's web.allowAdminWrites switch is off. Every tab used to
-    open its list-only note with "Changes from this page are turned off" and the switch's name; now a tab says only what it lists. */
-export const ADMIN_WRITES_OFF_NOTE = "Changes from the web are turned off. To let a signed-in admin make them here, set web.allowAdminWrites to true in darling.json and restart the service.";
+/** #7558: the sentence Admin says once, under its heading, when the managed store's web.allowAdminWrites switch is off; each tab's own
+    list-only note then says only what it lists. #7950: it names the changes the switch turns off, and says that adding and editing servers
+    are not among them: those follow the edit seat through the web login's own grants, so the Servers tab still saves with the switch off. */
+export const ADMIN_WRITES_OFF_NOTE =
+  "Changes from the web to alert settings, notification routes, environment profiles, threshold overrides, people, report feedback, " +
+  "practice requests, pending notes, server actions and agent changes are turned off. Adding and editing servers follow the edit seat and " +
+  "still work. To let a signed-in admin make the other changes here, set web.allowAdminWrites to true in darling.json and restart the service.";
 
 /** #7558: listOnlyNote for an Admin tab. With the switch off the heading already said so (ADMIN_WRITES_OFF_NOTE), so the tab keeps only what
     it lists and where to change it. Any other cause is a fact about this store login and stays in the tab's own words. */
@@ -1802,15 +1806,20 @@ export function busyRetryAfter(res) {
   return res && res.kind === "error" && res.status === 429 ? Math.max(1, res.retryAfterSeconds || 5) : null;
 }
 
-/** The strip a page shows while it waits to send a read refused busy again. */
+/** The strip a page shows while it waits to send a read refused busy again. `busy-retry` marks it as a panel that has not drawn yet, so
+ *  a poll's in-place refresh (refresh-in-place.js) keeps the panel's current content until the second read answers (#7942). */
 export function busyRetryStrip(seconds) {
-  return noticeStrip("The service is running as many long reads as it allows. Retrying in " + seconds + (seconds === 1 ? " second…" : " seconds…"));
+  const strip = noticeStrip("The service is running as many long reads as it allows. Retrying in " + seconds + (seconds === 1 ? " second…" : " seconds…"));
+  strip.className += " busy-retry";
+  return strip;
 }
 
 /**
  * #6800: runs `read`, and when the service refuses it busy (429) calls `onBusy(seconds)`, waits the Retry-After the reply named and
  * runs it once more. The second answer is the caller's, whatever it is, so a second refusal shows as the error it is. An abort of
  * `signal` during the wait returns { kind: "aborted" } without the second read.
+ * #7942: the wait counts as a read of the page, on the scope current when it starts, so the poll loop neither stamps the page updated
+ * nor plans the next poll while the second read has not run. The hold ends as the second read starts and counts itself.
  */
 export async function retryOnceWhenBusy(read, onBusy, signal) {
   const first = await read();
@@ -1818,20 +1827,27 @@ export async function retryOnceWhenBusy(read, onBusy, signal) {
   if (seconds === null) return first;
   if (signal && signal.aborted) return { kind: "aborted" };
   if (onBusy) onBusy(seconds);
-  const waited = await new Promise((resolve) => {
-    let onAbort = null;
-    const timer = setTimeout(() => {
-      if (signal && onAbort) signal.removeEventListener("abort", onAbort);
-      resolve(true);
-    }, seconds * 1000);
-    if (signal) {
-      onAbort = () => {
-        clearTimeout(timer);
-        resolve(false);
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-    }
-  });
+  const scope = pageReads;
+  scope.n++;
+  let waited;
+  try {
+    waited = await new Promise((resolve) => {
+      let onAbort = null;
+      const timer = setTimeout(() => {
+        if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+        resolve(true);
+      }, seconds * 1000);
+      if (signal) {
+        onAbort = () => {
+          clearTimeout(timer);
+          resolve(false);
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+    });
+  } finally {
+    scope.n--;
+  }
   return waited ? read() : { kind: "aborted" };
 }
 
