@@ -836,7 +836,7 @@ public sealed class DarlingMcpBlockingTools
         }
     }
 
-    [McpServerTool(Name = "get_blocking_trend"), Description("Gets a time-series of blocked-process report counts per minute over time (reports, not blocked sessions: one wait can write several reports; when the window holds no reports for the chosen databases the count is the always-on DMV blocking snapshot's rows instead). Useful for identifying patterns (e.g., blocking spikes during batch jobs) or confirming whether blocking is a new, worsening, or resolved issue. The source key names the collector that answered, blocked-process-report or DMV snapshot; the DMV snapshot is used only when the blocked process reports have no rows for the chosen databases, so source can differ between filters.")]
+    [McpServerTool(Name = "get_blocking_trend"), Description("Gets a time-series of blocked-process report counts per minute over time (reports, not blocked sessions: one wait can write several reports; when the window holds no reports for the chosen databases the count is the always-on DMV blocking snapshot's rows instead). Useful for identifying patterns (e.g., blocking spikes during batch jobs) or confirming whether blocking is a new, worsening, or resolved issue. The source key names the collector that answered, blocked-process-report or DMV snapshot; the DMV snapshot is used only when the blocked process reports have no rows for the chosen databases, so source can differ between filters. The covered list gives the stretches of the window the blocked-process-report collector's successful runs read, as start and end times: a minute outside them has no row because nobody was looking (the service was stopped, the server unreachable, the collector off), not because there was no blocking, and a minute inside them with no row is a count of 0.")]
     public static Task<string> GetBlockingTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -907,6 +907,9 @@ public sealed class DarlingMcpBlockingTools
             var notice = await DarlingMcpWindowNotice.ReadAsync(
                 () => DarlingMcpWindowNotice.Probe(postgres, BlockingPageSources, resolved.ServerName, start, now, cancellationToken),
                 start, now, BlockingPageTables, logger: logger, cancellationToken: cancellationToken);
+            /* #7850: the time the blocked-process-report collector's runs read, so the page draws a 0 only inside it. */
+            var covered = await DarlingBlockingTrendReader.GetCoveredRangesAsync(
+                postgres, resolved.ServerId, start, now, "blocked_process_report", cancellationToken);
             return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
@@ -918,7 +921,8 @@ public sealed class DarlingMcpBlockingTools
                    reports, or the DMV snapshot when those have no rows for the chosen databases. One source per answer. */
                 database_name = databases.Describe(),
                 source = points[0].Source,
-                trend = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count })
+                trend = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count }),
+                covered = CoveredJson(covered)
             }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -927,7 +931,11 @@ public sealed class DarlingMcpBlockingTools
         }
     }
 
-    [McpServerTool(Name = "get_deadlock_trend"), Description("Gets a time-series of deadlock event counts per minute over time. Useful for identifying patterns or confirming whether deadlock issues are new, worsening, or resolved.")]
+    /// <summary>#7850: the reply's <c>covered</c> list, in the "o" round-trip text every other time in the trend replies uses.</summary>
+    private static IEnumerable<object> CoveredJson(List<DarlingBlockingTrendReader.CoveredRange> covered) =>
+        covered.Select(c => new { start = c.Start.ToString("o"), end = c.End.ToString("o") });
+
+    [McpServerTool(Name = "get_deadlock_trend"), Description("Gets a time-series of deadlock event counts per minute over time. Useful for identifying patterns or confirming whether deadlock issues are new, worsening, or resolved. The covered list gives the stretches of the window the deadlock collector's successful runs read, as start and end times: a minute outside them has no row because nobody was looking (the service was stopped, the server unreachable, the collector off), not because there was no deadlock, and a minute inside them with no row is a count of 0.")]
     public static async Task<string> GetDeadlockTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -980,6 +988,9 @@ public sealed class DarlingMcpBlockingTools
             var notice = await DarlingMcpWindowNotice.ReadAsync(
                 () => DarlingMcpWindowNotice.Probe(postgres, "deadlocks", resolved.ServerName, start, now, cancellationToken),
                 start, now, "deadlocks", logger: logger, cancellationToken: cancellationToken);
+            /* #7850: the time the deadlock collector's runs read, so the page draws a 0 only inside it. */
+            var covered = await DarlingBlockingTrendReader.GetCoveredRangesAsync(
+                postgres, resolved.ServerId, start, now, "deadlocks", cancellationToken);
             return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
@@ -987,7 +998,8 @@ public sealed class DarlingMcpBlockingTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
-                trend = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count })
+                trend = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count }),
+                covered = CoveredJson(covered)
             }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

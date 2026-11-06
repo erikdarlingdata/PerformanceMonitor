@@ -1651,8 +1651,11 @@ function vizLine(data, desc) {
      count of 0. Not when the answer's source (`sourceKey`) is the DMV snapshot, a sample taken on a schedule: a bucket it has no row for is time
      nobody observed, so those points reach the chart as they came. */
   const fill = desc.zeroFill && !(desc.sourceKey && getPath(data, desc.sourceKey) === SAMPLED_BLOCKING_SOURCE);
+  /* #7850: the reply's `covered` ranges are the time the collector's successful runs read; the fill is 0 only inside them. A reply without the field (an
+     older service) fills the whole window, as #7839 did. */
+  const covered = fill ? coveredRanges(getPath(data, "covered")) : null;
   const chart = zoomableLineChart({
-    points: fill ? zeroFilledPoints(points, desc.xKey, seriesCfg, getPath(data, "bucket_minutes"), win) : points,
+    points: fill ? zeroFilledPoints(points, desc.xKey, seriesCfg, getPath(data, "bucket_minutes"), win, covered) : points,
     xKey: desc.xKey,
     series,
     annotations,
@@ -1684,13 +1687,32 @@ function vizLine(data, desc) {
 }
 
 /**
+ * The `covered` field of a trend reply (#7850) as [startMs, endMs] pairs, or null when the reply has none (an older service: the fill keeps #7839's
+ * whole-window behaviour). An empty list is a window no run covered, so nothing is filled. A range with an unreadable time is dropped.
+ */
+export function coveredRanges(raw) {
+  if (!Array.isArray(raw)) return null;
+  const out = [];
+  for (const r of raw) {
+    const from = r ? parseUtc(r.start) : null;
+    const to = r ? parseUtc(r.end) : null;
+    if (from instanceof Date && to instanceof Date && Number.isFinite(from.getTime()) && Number.isFinite(to.getTime()) && to > from) out.push([from.getTime(), to.getTime()]);
+  }
+  return out;
+}
+
+/**
  * The points of an event-count trend with every bucket of the window present (`zeroFill`). get_blocking_trend and get_deadlock_trend
  * return only the buckets that have events, so a bucket they leave out is a count of 0 and not a gap in collection: two reports a
  * minute apart must not read as a line floating between 1 and 4. The bucket is the reply's own (`bucket_minutes`) when it states one,
  * else the smallest step between the points it returned, and never under a minute. The window is the chart's own (windowStart and
  * windowEnd in epoch ms); without one the fill spans the points. The points the read returned are kept as they are.
+ *
+ * `covered` (#7850) is the reply's `covered` ranges as [startMs, endMs] pairs (coveredRanges), the time the collector's successful runs read. A
+ * bucket is filled only when the whole bucket lies inside one range; a bucket outside them is time nobody observed and is left out, as it was before
+ * the fill. Null (no `covered` field, an older service) fills the whole window.
  */
-export function zeroFilledPoints(points, xKey, seriesCfg, bucketMinutes, win) {
+export function zeroFilledPoints(points, xKey, seriesCfg, bucketMinutes, win, covered = null) {
   const timeOf = (p) => {
     const d = p ? parseUtc(p[xKey]) : null;
     return d instanceof Date && Number.isFinite(d.getTime()) ? d.getTime() : null;
@@ -1716,6 +1738,7 @@ export function zeroFilledPoints(points, xKey, seriesCfg, bucketMinutes, win) {
   for (let t = first, n = 0; t <= end && n < 20000; t += stepMs, n++) {
     const p = have.get(t);
     if (p) out.push(p);
+    else if (covered && !covered.some(([from, to]) => t >= from && t + stepMs <= to)) continue;
     else {
       const zero = { [xKey]: new Date(t).toISOString() };
       for (const s of seriesCfg) zero[s.key] = 0;

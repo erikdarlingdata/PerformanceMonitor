@@ -287,6 +287,104 @@ internal static class DarlingBlockingTrendReader
         return items;
     }
 
+    /* ───────────────── the time a trend's runs covered (#7850) ───────────────── */
+
+    /// <summary>One stretch of time the collector's successful runs read, naive UTC, clipped to the window.</summary>
+    public sealed record CoveredRange(DateTime Start, DateTime End);
+
+    /// <summary>
+    /// The longest spacing between two successful runs that still counts as read time, in minutes (#7850).
+    /// <para>Both trends read a dedicated Extended Events RING BUFFER (<c>PerformanceMonitor_BlockedProcess</c>,
+    /// <c>PerformanceMonitor_Deadlock</c>), not a file target. The session keeps capturing on the monitored server while the
+    /// service is stopped, so an event in a stop is usually read at the next run, but the buffer is 4 MB and drops its oldest
+    /// events when it fills, a SQL Server restart or a re-created session empties it, and a run that finds no stored event reads
+    /// back only <c>CollectorContext.EventFallbackWindow</c> (10 minutes). The store keeps no record of what the buffer still
+    /// held, so a long stretch between two runs is not time anyone can call event-free. A SUCCESS run proves the session existed
+    /// and was read (a missing one logs SESSION_MISSING, not SUCCESS). The hour is the floor the quiet bar's observed time uses
+    /// for the same question (<c>ObservedQuietGaps.GapFloorMinutes</c>); a collector scheduled less often than that is never
+    /// covered, which leaves its trend unfilled, the pre-#7839 look, never a false 0.</para>
+    /// </summary>
+    public const int CoveredGapCapMinutes = 60;
+
+    /// <summary>
+    /// Each consecutive pair of one collector's SUCCESS runs no further apart than <see cref="CoveredGapCapMinutes"/>, for the
+    /// pairs whose later run falls in the window. The lookback of one cap before the window start brings in the run that began
+    /// the first pair. $1 server_id, $2/$3 window (naive UTC), $4 collector name, $5 the cap in minutes. Only the SUCCESS rows of
+    /// the one collector: a run that failed read nothing, and the other blocking collector (the DMV snapshot) is a sample, not
+    /// the report source this trend's zero fill depends on.
+    /// </summary>
+    public const string CoveredRunPairsSql = """
+        SELECT prev_time, run_time
+        FROM (
+            SELECT collection_time AS run_time,
+                   LAG(collection_time) OVER (ORDER BY collection_time) AS prev_time
+            FROM v_collection_log
+            WHERE server_id = $1
+            AND   collector_name = $4
+            AND   status = 'SUCCESS'
+            AND   collection_time >= $2 - ($5 * INTERVAL '1 minute')
+            AND   collection_time <= $3
+        ) runs
+        WHERE prev_time IS NOT NULL
+        AND   run_time >= $2
+        AND   run_time - prev_time <= $5 * INTERVAL '1 minute'
+        ORDER BY run_time
+        """;
+
+    /// <summary>
+    /// Merges the run pairs into ranges and clips them to the window. Pairs that touch or overlap become one range, so a collector
+    /// that ran without a break gives one. Input must be ordered by its end time, as <see cref="CoveredRunPairsSql"/> returns it.
+    /// </summary>
+    public static List<CoveredRange> MergeCovered(IEnumerable<(DateTime From, DateTime To)> pairs, DateTime startUtc, DateTime endUtc)
+    {
+        var merged = new List<CoveredRange>();
+        foreach (var (from, to) in pairs)
+        {
+            var s = from < startUtc ? startUtc : from;
+            var e = to > endUtc ? endUtc : to;
+            if (e <= s)
+            {
+                continue;
+            }
+
+            if (merged.Count > 0 && s <= merged[^1].End)
+            {
+                if (e > merged[^1].End)
+                {
+                    merged[^1] = merged[^1] with { End = e };
+                }
+            }
+            else
+            {
+                merged.Add(new CoveredRange(s, e));
+            }
+        }
+
+        return merged;
+    }
+
+    /// <summary>
+    /// The time <paramref name="collectorName"/>'s successful runs read inside the window (#7850), as merged ranges: empty when no
+    /// two runs within <see cref="CoveredGapCapMinutes"/> of each other fall in it.
+    /// </summary>
+    public static async Task<List<CoveredRange>> GetCoveredRangesAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, string collectorName, CancellationToken cancellationToken = default)
+    {
+        var pairs = new List<(DateTime, DateTime)>();
+        await using var command = postgres.CreateCommand(CoveredRunPairsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
+        DarlingMcpReadParameters.AddText(command, collectorName);
+        DarlingMcpReadParameters.AddInt(command, CoveredGapCapMinutes);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            pairs.Add((reader.GetDateTime(0), reader.GetDateTime(1)));
+        }
+
+        return MergeCovered(pairs, startUtc, endUtc);
+    }
+
     /* ───────────────── the denominator an empty trend needs ───────────────── */
 
     /// <summary>
