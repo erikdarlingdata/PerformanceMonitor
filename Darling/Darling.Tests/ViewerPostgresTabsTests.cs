@@ -876,6 +876,7 @@ public sealed class ViewerPostgresTabsTests
     private static readonly IReadOnlyDictionary<string, string> FoldedFields =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
+            ["PgStatementRow.DatabaseName"] = "DatabaseId (shown as Database) — the cell shows the name, or 'database <id>' for a row stored before the name was collected",
             ["PgXminRow.IsWinner"] = "IsWinnerText — rendered as a word rather than True/False",
             ["PgXminRow.SamplesAsWinner"] = "WinnerShare — '58 of 60 samples' says more than either half alone",
             ["PgXminRow.Samples"] = "WinnerShare — it is that fraction's denominator",

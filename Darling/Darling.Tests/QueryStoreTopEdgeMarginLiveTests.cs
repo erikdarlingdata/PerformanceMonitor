@@ -215,7 +215,8 @@ public sealed class QueryStoreTopEdgeMarginLiveTests
            Viewer grid places its window by the interval's start, so the two straddlers below carry an interval start of 12:00, the window
            start, with a first execution two hours (9999) and three and a half hours (9998) before it. These two rows are synthetic:
            Query Store records first_execution_time within the interval, so it never emits a first execution before the interval start.
-           They exist only to exercise the narrowed first-execution floor of the edge margin. An interval start of 10:00 is outside the
+           They exist only to exercise the narrowed first-execution floor of the edge margin. #7814: Darling's MCP top read places its window by the
+           same expression, so this one seed serves it and the Viewer grid alike. An interval start of 10:00 is outside the
            grid's window and the Viewer reads would never return it. */
         const string columns = """
             (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time,

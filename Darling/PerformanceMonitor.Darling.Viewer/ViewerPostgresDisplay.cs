@@ -780,8 +780,6 @@ internal static class PgDisplay
         public string QueryText { get; init; } = "";
         /// <summary>The number <see cref="QueryId"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
         public long? QueryIdSort { get; init; }
-        /// <summary>The number <see cref="DatabaseId"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
-        public long? DatabaseIdSort { get; init; }
         /// <summary>The number <see cref="Calls"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
         public long? CallsSort { get; init; }
         /// <summary>The number <see cref="TotalExecTimeMs"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
@@ -805,7 +803,8 @@ internal static class PgDisplay
     internal static StatementRow Statement(DarlingPgStatementReader.PgStatementRow row) => new()
     {
         QueryId = row.QueryId.ToString(CultureInfo.InvariantCulture),
-        DatabaseId = row.DatabaseId.ToString("N0", CultureInfo.CurrentCulture),
+        /* #7731: the name, else "database <id>" with no thousands separator on the id (an oid is an identifier, not a count). */
+        DatabaseId = row.DatabaseName ?? string.Create(CultureInfo.InvariantCulture, $"database {row.DatabaseId}"),
         Calls = Count(row.Calls),
         TotalExecTimeMs = Count(row.TotalExecTimeMs),
         AvgExecTimeMs = row.Calls <= 0
@@ -839,7 +838,6 @@ internal static class PgDisplay
             ? "[Performance Monitor's own statement] " + row.QueryText
             : row.QueryText ?? "(statement text not captured yet)",
         QueryIdSort = row.QueryId,
-        DatabaseIdSort = row.DatabaseId,
         CallsSort = Raw(row.Calls),
         TotalExecTimeMsSort = Raw(row.TotalExecTimeMs),
         AvgExecTimeMsSort = row.Calls <= 0 ? null : row.TotalExecTimeMs / (double)row.Calls,
