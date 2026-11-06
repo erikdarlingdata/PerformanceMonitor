@@ -273,6 +273,10 @@ internal enum LivenessProbeOutcome
 /// <summary>The verdict of one liveness probe: when it ran, what its login found, and whether the server counts as alive.</summary>
 internal sealed record LivenessVerdict(DateTime ProbedUtc, LivenessProbeOutcome Outcome, bool Alive);
 
+/// <summary>What one <see cref="LivenessProbeMemo"/> probe found: whether the server counts as alive, the probe's outcome, whether
+/// <see cref="LivenessProbeMemo.Clear"/> ran while it was in flight (so nothing was remembered), and the timed-out streak after it.</summary>
+internal readonly record struct LivenessProbeResult(bool Alive, LivenessProbeOutcome Outcome, bool Stale, int TimedOutInARow);
+
 /// <summary>
 /// One server's memory of its last liveness probe. A server under CPU or thread-pool pressure times out many
 /// collectors close together, the sequential body's and the detached runs', and each timeout is settled by
@@ -297,27 +301,43 @@ internal sealed class LivenessProbeMemo
     /// </summary>
     internal const int MaxTimedOutProbesInARow = 3;
 
+    private readonly object _gate = new();
     private LivenessVerdict? _last;
     private int _timedOutInARow;
     private int _generation;
 
+    /// <summary>A hook for a test, called under the lock between ProbeAsync's generation compare and its writes, so a
+    /// test can land a <see cref="Clear"/> on another thread in exactly that window (#7851). Null in production.</summary>
+    internal Action? BetweenCheckAndWriteForTests { get; set; }
+
     /// <summary>The last verdict, or null when none is held.</summary>
-    internal LivenessVerdict? Last => _last;
+    internal LivenessVerdict? Last => Volatile.Read(ref _last);
 
     /// <summary>Probes in a row whose own login timed out, with no completed run and no login between them.</summary>
-    internal int TimedOutProbesInARow => _timedOutInARow;
+    internal int TimedOutProbesInARow => Volatile.Read(ref _timedOutInARow);
 
-    /// <summary>Forgets the verdict and the streak: the runtime was dropped, and a reconnected server starts afresh.</summary>
+    /// <summary>Forgets the verdict and the streak: the runtime was dropped, and a reconnected server starts afresh.
+    /// Takes the lock <see cref="ProbeWithResultAsync"/> compares and writes under, so a probe either writes before this
+    /// runs (and the write is forgotten) or sees the new generation and writes nothing (#7851).</summary>
     internal void Clear()
     {
-        Interlocked.Increment(ref _generation);
-        _last = null;
-        _timedOutInARow = 0;
+        lock (_gate)
+        {
+            _generation++;
+            _last = null;
+            _timedOutInARow = 0;
+        }
     }
 
     /// <summary>A run on the server's connection completed, so the server answers: the timed-out streak ends. The held
     /// verdict stays, since it is about fresh logins, not about the open session.</summary>
-    internal void RunCompleted() => _timedOutInARow = 0;
+    internal void RunCompleted()
+    {
+        lock (_gate)
+        {
+            _timedOutInARow = 0;
+        }
+    }
 
     /// <summary>Whether a verdict stamped at <paramref name="verdict"/>.ProbedUtc still serves at <paramref name="nowUtc"/>.
     /// A clock that stepped back does not.</summary>
@@ -331,42 +351,63 @@ internal sealed class LivenessProbeMemo
     /// together with no verdict held may both probe; the later answer is the one kept. A probe that returns after
     /// <see cref="Clear"/> ran (a Dead verdict dropped the runtime while it was in flight) answers its own caller but writes
     /// neither the streak nor a verdict: it is about the connection that was let go, not the one that replaces it (#7851).
+    /// The probe runs outside the lock; the generation compare and both writes run under it, so a <see cref="Clear"/> cannot
+    /// land between them.
     /// </summary>
     internal async Task<bool> ProbeAsync(
         ServerRuntime runtime,
         Func<ServerRuntime, CancellationToken, Task<LivenessProbeOutcome>> probe,
         DateTime nowUtc,
+        CancellationToken cancellationToken) =>
+        (await ProbeWithResultAsync(runtime, probe, nowUtc, cancellationToken).ConfigureAwait(false)).Alive;
+
+    /// <summary><see cref="ProbeAsync"/> with the verdict's parts handed back, so the caller that logs the outcome reads
+    /// them from here and not from the memo, which another run may have cleared since (#7851).</summary>
+    internal async Task<LivenessProbeResult> ProbeWithResultAsync(
+        ServerRuntime runtime,
+        Func<ServerRuntime, CancellationToken, Task<LivenessProbeOutcome>> probe,
+        DateTime nowUtc,
         CancellationToken cancellationToken)
     {
-        if (_last is { } last && IsFresh(last, nowUtc))
+        int generation;
+        lock (_gate)
         {
-            return last.Alive;
+            if (_last is { } last && IsFresh(last, nowUtc))
+            {
+                return new LivenessProbeResult(last.Alive, last.Outcome, Stale: false, _timedOutInARow);
+            }
+
+            generation = _generation;
         }
 
-        var generation = Volatile.Read(ref _generation);
         var outcome = await probe(runtime, cancellationToken).ConfigureAwait(false);
-        var alive = false;
-        var current = generation == Volatile.Read(ref _generation);
-        switch (outcome)
+
+        lock (_gate)
         {
-            case LivenessProbeOutcome.LoggedIn:
-                if (current)
-                {
-                    _timedOutInARow = 0;
-                }
+            var stale = generation != _generation;
+            BetweenCheckAndWriteForTests?.Invoke();
+            var alive = false;
+            switch (outcome)
+            {
+                case LivenessProbeOutcome.LoggedIn:
+                    if (!stale)
+                    {
+                        _timedOutInARow = 0;
+                    }
 
-                alive = true;
-                break;
-            case LivenessProbeOutcome.TimedOut:
-                alive = !current || Interlocked.Increment(ref _timedOutInARow) <= MaxTimedOutProbesInARow;
-                break;
+                    alive = true;
+                    break;
+                case LivenessProbeOutcome.TimedOut:
+                    alive = stale || ++_timedOutInARow <= MaxTimedOutProbesInARow;
+                    break;
+            }
+
+            if (!stale)
+            {
+                _last = new LivenessVerdict(nowUtc, outcome, alive);
+            }
+
+            return new LivenessProbeResult(alive, outcome, stale, _timedOutInARow);
         }
-
-        if (current)
-        {
-            _last = new LivenessVerdict(nowUtc, outcome, alive);
-        }
-
-        return alive;
     }
 }
