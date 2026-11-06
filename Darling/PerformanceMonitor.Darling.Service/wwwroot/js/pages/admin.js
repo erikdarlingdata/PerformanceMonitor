@@ -1295,13 +1295,14 @@ async function buildRoutes(body, generation) {
   if (generation !== renderGeneration) return;
   const sourceRoutes = Array.isArray(res.data && res.data.routes) ? res.data.routes : [];
   const rows = routeRows(res.data).map((row, i) => ({ ...row, agent_use: routeUseText(sourceRoutes[i]) }));
-  const scopes = access.routes ? await readScopes() : { servers: [], tags: [] };
+  const scopes = access.routes ? await readScopes() : { servers: [], tags: [], complete: true };
   if (generation !== renderGeneration) return;
   const options = {
     canEdit: access.routes,
     routes: sourceRoutes,
     servers: scopes.servers,
     tags: scopes.tags,
+    scopesComplete: scopes.complete,
     repaint: () => (shownTab === "routes" && shownBody ? startBuilder("routes", shownBody, ++renderGeneration) : undefined),
   };
   /* A failed signing read leaves the strip out; the routes below are the page. */
@@ -1319,13 +1320,22 @@ async function buildRoutes(body, generation) {
   ]);
 }
 
-/** The servers and tags the scope pickers offer, from the fleet read: [{id, name}]. */
-async function readScopes() {
-  const res = await apiGetFleet();
-  const d = res && res.kind !== "error" ? res.data || {} : {};
+/** The servers and tags the scope pickers offer: [{id, name, disabled}] and [{id, name}]. #7949: the servers come from the Servers tab's read, which
+    lists every configured server with its enabled state, so a disabled server is still in a picker and its name says so. The fleet read lists
+    enabled servers only; it is the tags' source and the servers' fallback. `complete` is false when either read failed, so a tab can say that a
+    scope may be missing from the list. */
+export async function readScopes() {
+  const [fleet, list] = await Promise.all([apiGetFleet(), apiGet("/api/admin/servers")]);
+  const fleetRead = !!fleet && fleet.kind === "data";
+  const d = fleetRead ? fleet.data || {} : {};
+  const listed = list && list.kind === "data" && list.data && Array.isArray(list.data.servers) ? list.data.servers : null;
+  const rows = listed
+    ? listed.filter((s) => Number.isInteger(s.server_id)).map((s) => ({ id: s.server_id, name: s.display_name || s.server_name || "server " + s.server_id, disabled: s.status === "Disabled" }))
+    : (Array.isArray(d.cards) ? d.cards : []).filter((c) => Number.isInteger(c.server_id)).map((c) => ({ id: c.server_id, name: c.display_name || "server " + c.server_id, disabled: false }));
   return {
-    servers: (Array.isArray(d.cards) ? d.cards : []).filter((c) => Number.isInteger(c.server_id)).map((c) => ({ id: c.server_id, name: c.display_name || "server " + c.server_id })),
+    servers: rows.map((s) => ({ id: s.id, name: s.disabled ? s.name + " (disabled)" : s.name, disabled: s.disabled })),
     tags: (Array.isArray(d.tags) ? d.tags : []).filter((t) => Number.isInteger(t.id)).map((t) => ({ id: t.id, name: t.name || "tag " + t.id })),
+    complete: listed !== null && fleetRead,
   };
 }
 
