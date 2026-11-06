@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, ticksCarryUnit, noteStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, applyDataSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, captionStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceSpan, applySourceSubtitle, setQueryWaitFilter, waitIsLinked, fmtPlain } from "../../util.js";
+import { el, ticksCarryUnit, noteStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, applyDataSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, captionStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceSpan, applySourceSubtitle, setQueryWaitFilter, waitIsLinked, fmtPlain, fmtMs } from "../../util.js";
 import { renderPanel, panelEmptyStrip, emptyHeadline, setPanelSignal, getPanelSignal, VIZ } from "../../panels.js";
 import { estimatedPlotPx } from "../../trend-points.js";
 import { SNAPSHOT_LIST_CAP, snapshotTruncatedNote } from "../active-snapshots.js";
@@ -1295,7 +1295,8 @@ export function seriesTrendPanel(server, ctx, kind) {
         .filter((d) => d.rows.length >= (spec.minPoints || 1))
         .map((d) => ({ ...d, key: "s" + d.index, color: SERIES_COLORS[d.index % SERIES_COLORS.length] }));
       /* #7578: a unit prints once. These axes print it on every tick ("0.3 MB/s"), so the heading drops its "(MB/s)": the same rule as the caption over an axis (`ticksCarryUnit`). A chart with nothing drawn has no ticks and keeps the unit in its heading. */
-      const tick = (v, o) => fmtPlain(v, o) + " " + chart.unit;
+      /* #7670: a duration in ms reads in the unit its axis tops out in (80 s, not 80,000 ms), as every other ms axis on the web does (fmtMs). */
+      const tick = chart.unit === "ms" ? fmtMs : (v, o) => fmtPlain(v, o) + " " + chart.unit;
       const unitSuffix = " (" + chart.unit + ")";
       const heading = ticksCarryUnit([tick(1)]) && chart.title.endsWith(unitSuffix) ? chart.title.slice(0, -unitSuffix.length) : chart.title;
       return drawn.length

@@ -353,6 +353,7 @@ public sealed class WebChartAxisBehaviourTests
         var c = Run().GetProperty("unitCaptions");
         Assert.Empty(Strings(c.GetProperty("ticksWithUnit")));
         Assert.Empty(Strings(c.GetProperty("ticksWithRateUnit")));
+        Assert.Empty(Strings(c.GetProperty("stackedSecondsTicks")));
         Assert.Equal(new[] { "MB" }, Strings(c.GetProperty("bareTicks")));
         Assert.Equal(new[] { "n" }, Strings(c.GetProperty("secondAxisWithUnit")));
     }

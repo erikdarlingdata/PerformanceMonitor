@@ -140,7 +140,7 @@ public sealed class WebPlainTextTests
     public void CollectorMeasurementCounts_ReadAsWords()
     {
         var o = Run(["latest run: shred_gated=1 events_read=0 report_xml_empty=0"], out _);
-        Assert.Equal("latest run: shred gated: 1, events read: 0, report xml empty: 0", o[0]);
+        Assert.Equal("latest run: shred gated: 1 (no new events since the last run, so the XML was not read), events read: 0, report xml empty: 0", o[0]);
     }
 
     /* #6649: the left-out databases pointer, the baseline window sentence and the memory clerk note's four arms reached the page
@@ -403,9 +403,9 @@ public sealed class WebPlainTextTests
             "pg_wraparound_stats failed; last_error has the text",
         ], out _);
         Assert.Equal("use Collection Health to find where it stopped", o[0]);
-        Assert.Equal("latest run: shred gated: 1, events read: 0, report xml empty: 0", o[1]);
+        Assert.Equal("latest run: shred gated: 1 (no new events since the last run, so the XML was not read), events read: 0, report xml empty: 0", o[1]);
         Assert.Equal("latest run: events read: 4", o[2]);
-        Assert.Equal("latest noted run: shred gated: 1, events read: 0 (3 of 5 runs)", o[3]);
+        Assert.Equal("latest noted run: shred gated: 1 (no new events since the last run, so the XML was not read), events read: 0 (3 of 5 runs)", o[3]);
         Assert.Equal("the freeze-headroom collector failed; Last Error has the text", o[4]);
     }
 

@@ -60,7 +60,7 @@ internal static class PgConfigAuditText
         }
         else if (fact.Severity > 0 || notApplicable || s_contextKeys.Contains(fact.Key))
         {
-            text = Join(advice.Headline, advice.Remediation);
+            text = Join(advice.Headline, DropRestatedLead(advice.Headline, advice.Remediation));
         }
         else
         {
@@ -77,6 +77,26 @@ internal static class PgConfigAuditText
         PgTargetFactKeys.ConfigMemoryOvercommit => $"The configured worst case ({setting}) is {currentValue}.",
         _ => $"{setting} is {currentValue}.",
     };
+
+    /// <summary>A remediation that opens by restating the setting and its value ("max_wal_size is 1 GB.") says again what the
+    /// headline just said, once the two run together as one Why text (#7670). Drops that opening sentence, and only when it is
+    /// a bare restatement: it starts with the headline's own "name is", ends at the first full stop and has no comma or
+    /// semicolon (a sentence that goes on to say something, as "shared_buffers is 1 GB, already sized above the default.",
+    /// is kept).</summary>
+    internal static string DropRestatedLead(string headline, string remediation)
+    {
+        var at = headline.IndexOf(" is ", StringComparison.Ordinal);
+        if (at <= 0)
+            return remediation;
+        var lead = headline[..(at + 4)];
+        var body = remediation.TrimStart();
+        if (!body.StartsWith(lead, StringComparison.Ordinal))
+            return remediation;
+        var end = body.IndexOf(". ", StringComparison.Ordinal);
+        if (end < 0 || body.AsSpan(0, end).IndexOfAny(',', ';') >= 0)
+            return remediation;
+        return body[(end + 2)..];
+    }
 
     /// <summary>Two sentences with exactly one space between them, and a full stop on the first only when it has no
     /// sentence-ending mark already.</summary>

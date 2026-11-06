@@ -355,6 +355,8 @@ const captionsOf = (spec) => find(charts.renderLineChart({ xKey: "t", series: [{
 out.unitCaptions = {
   ticksWithUnit: captionsOf({ points: rows([100, 200, 300, 400]), formatValue: (v, o) => util.applyFormat("ms", v, o), unit: "ms" }),
   ticksWithRateUnit: captionsOf({ points: rows([0.1, 0.2, 0.3]), formatValue: (v) => v.toFixed(1) + " MB/s", unit: "MB/s" }),
+  /* #7670: a Custom View stacked wait chart in seconds: its ticks read "800 s", so no "s" caption sits above them. */
+  stackedSecondsTicks: captionsOf({ mode: "stacked", points: rows([100, 400, 800]), formatValue: (v, o) => compose.formatComposedValue(v, "s", o), unit: "s" }),
   bareTicks: captionsOf({ points: rows([100, 200, 300, 400]), formatValue: (v) => util.fmtInt(v), unit: "MB" }),
   secondAxisWithUnit: captionsOf({ points: rows([1, 2, 3], "a", [10, 20, 30]), formatValue: (v) => String(v), unit: "n", series2: { key: "b", label: "B", color: "#00f", formatValue: (v) => v + " ms", unit: "ms" } }),
 };
