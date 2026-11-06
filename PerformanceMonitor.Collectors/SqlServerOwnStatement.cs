@@ -29,8 +29,15 @@ namespace PerformanceMonitor.Collectors;
 ///
 /// <para><b>Exact texts.</b> Each entry is the text of a statement as <c>git show 661e6bf47^</c> sends it, with the values the build
 /// resolved at run time written out (the forced-plans row cap, the forcing-type column of each of its two shapes). A statement
-/// whose text carries a run-time list (an id list, a row cap that changes) is not a closed text and is not here. The list covers the
-/// statements that stayed listed on a store in the field: the two eligibility gates, the forced-plans read and its object-id update.</para>
+/// whose text carries a run-time list (an id list, a row cap that changes) is not a closed text and is not here.</para>
+///
+/// <para><b>Why only these five.</b> Every other statement the ten collectors #7463 changed (Query Store and its replica, forced plans,
+/// health, hints, plan correction, index object stats, database scoped configuration, database size, identity capacity) already began
+/// <c>SELECT /* PerformanceMonitorLite */</c> with the comment INSIDE the statement, so the text Query Store keeps contains the marker word and
+/// <see cref="IsOwnStatement"/> recognizes it without a list entry (a database with PARAMETERIZATION FORCED strips the comment and is the
+/// ruled exception above). Only the statements that began with <c>IF</c>, or with <c>SELECT</c> or <c>UPDATE</c> and no comment, needed an
+/// entry: the readable-secondary gate, the eligibility gate (the same text in the Query Store, forced-plans and hints collectors), the
+/// forced-plans read in its two shapes and its object-id update.</para>
 /// </summary>
 public static class SqlServerOwnStatement
 {
