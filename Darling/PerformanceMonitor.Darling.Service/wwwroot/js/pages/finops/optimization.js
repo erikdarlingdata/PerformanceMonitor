@@ -158,7 +158,7 @@ export const tab = {
           sectionView("Idle Databases", data.idle_databases, IDLE_COLUMNS, "No idle databases detected", idleNotice),
           sectionView("tempdb Pressure", data.tempdb_pressure, TEMPDB_COLUMNS, "No tempdb data available", windowNotice),
           sectionView("Wait Stats Summary", data.wait_categories, WAIT_COLUMNS, "No wait stats data available", windowNotice),
-          sectionView("Expensive Queries (Top " + LIMIT + " by CPU)", data.expensive_queries, [...QUERY_COLUMNS, planColumn(server)], "No expensive queries found", queryNotice, queryWindowShortened),
+          sectionView("Expensive Queries", data.expensive_queries, [...QUERY_COLUMNS, planColumn(server)], "No expensive queries found", queryNotice, queryWindowShortened),
           sectionView("Memory Grant Efficiency", data.memory_grant_efficiency, GRANT_COLUMNS, "No memory grant data available", windowNotice),
         ]);
       } catch (e) {

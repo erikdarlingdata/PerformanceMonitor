@@ -118,7 +118,9 @@ namespace PerformanceMonitor.Common
                         options.ServerSupportsCompression
                         && w.Src.IndexId > 0
                         && string.Equals(w.Src.DataCompressionDesc, CompressionNone, StringComparison.OrdinalIgnoreCase)
-                        && w.SizeGb >= options.MinSizeGb;
+                        && w.SizeGb >= options.MinSizeGb
+                        // #7706: an index with no rows has nothing to compress. A null count (not collected) is not zero.
+                        && w.Src.TotalRows != 0;
                 }
 
                 recommendations.AddRange(BuildRecommendations(perDatabaseAnalyzed, options));
@@ -1234,6 +1236,9 @@ namespace PerformanceMonitor.Common
                 notes.Add("Some compression candidates may not be compressible in practice. The collected data does not say which "
                     + "columns are sparse or hold legacy large-object types (text, ntext, image), so tables with those columns are "
                     + "not left out. Check a table for them before you compress it.");
+                notes.Add("Indexes with no rows"
+                    + (options.MinSizeGb > 0m ? " or under " + options.MinSizeGb.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) + " GB" : "")
+                    + " are not offered for compression, because they would save almost nothing.");
                 notes.Add("Compression savings are a rough range of 20% to 60% of the index size. They are not measured with "
                     + "sp_estimate_data_compression_savings, which samples the live server and cannot run on collected data.");
                 notes.Add("COMPRESSION REBUILD scripts use PARTITION = ALL for an index with more than one partition, because "

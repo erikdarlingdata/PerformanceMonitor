@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
@@ -15,6 +16,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -170,6 +172,10 @@ public sealed class DarlingMcpPvsTools
                 server = resolved.DisplayName,
                 database_name = databaseFilter.Describe(),
                 as_of = rows[0].CollectionTime.ToString("o"),
+                /* #7706: always present, null when every secondary copy here has a row (or there is none). Fails open like every AG note. */
+                secondary_replica_note = SecondaryWithoutRowNote(
+                    await PgSecondaryReplicaScope.ReadAsync(postgres, resolved.ServerId, DateTime.UtcNow, null, cancellationToken),
+                    rows.Select(r => r.DatabaseName), databaseFilter),
                 databases,
                 trend_hours_back = trend_hours_back > 0 ? trend_hours_back : (int?)null,
                 trend,
@@ -179,6 +185,26 @@ public sealed class DarlingMcpPvsTools
         {
             return McpHelpers.FormatError("get_pvs_stats", ex);
         }
+    }
+
+    /// <summary>
+    /// #7706: the sentence for a database this server holds only as an availability group secondary copy and that has no PVS row in
+    /// the snapshot (the DMV reports nothing for it here), so the grid does not look as if it were forgotten. Null when none. A name
+    /// is matched exactly, as <see cref="AgReplicaScope"/> does, and the chosen databases of a filter are the only ones counted.
+    /// </summary>
+    internal static string? SecondaryWithoutRowNote(IEnumerable<string> secondaryDatabases, IEnumerable<string> rowDatabases, DatabaseFilter filter)
+    {
+        var withRow = new HashSet<string>(rowDatabases, StringComparer.Ordinal);
+        var count = secondaryDatabases.Count(d => !withRow.Contains(d)
+            && (filter.IsAll || filter.Names.Contains(d, StringComparer.Ordinal))
+            && !filter.ExcludedNames.Contains(d, StringComparer.Ordinal));
+        return count switch
+        {
+            0 => null,
+            1 => "1 database has no row here: this server holds a secondary copy of it in an availability group. Check the primary replica for its persistent version store.",
+            _ => string.Create(System.Globalization.CultureInfo.InvariantCulture,
+                $"{count} databases have no row here: this server holds a secondary copy of them in an availability group. Check the primary replica for their persistent version store."),
+        };
     }
 
     /// <summary>Oldest active minus oldest aborted transaction id; null unless both are non-zero.</summary>

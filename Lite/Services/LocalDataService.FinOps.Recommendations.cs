@@ -823,7 +823,7 @@ HAVING SUM(delta_reads) > 1000";
             ioCmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             ioCmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
 
-            var lowLatencyDbs = new List<(string Name, decimal AvgReadMs, decimal AvgWriteMs)>();
+            var lowLatencyDbs = new List<(string Name, decimal AvgReadMs, decimal? AvgWriteMs)>();
             var storageMin = DateTime.MaxValue;
             var storageMax = DateTime.MinValue;
             long storageSamples = 0;
@@ -843,9 +843,10 @@ HAVING SUM(delta_reads) > 1000";
                 var totalStallWrite = ioReader.IsDBNull(4) ? 0L : ToInt64(ioReader.GetValue(4));
 
                 var avgReadMs = totalReads > 0 ? (decimal)totalStallRead / totalReads : 0m;
-                var avgWriteMs = totalWrites > 0 ? (decimal)totalStallWrite / totalWrites : 0m;
+                // #7706: no writes is not a 0 ms write latency. It stays null, passes the test, and prints as "no writes".
+                decimal? avgWriteMs = totalWrites > 0 ? (decimal)totalStallWrite / totalWrites : null;
 
-                if (avgReadMs < 5m && avgWriteMs < 3m)
+                if (avgReadMs < 5m && (avgWriteMs ?? 0m) < 3m)
                 {
                     lowLatencyDbs.Add((dbName, avgReadMs, avgWriteMs));
                     storageSamples += ioReader.IsDBNull(7) ? 0L : ToInt64(ioReader.GetValue(7));
@@ -863,7 +864,8 @@ HAVING SUM(delta_reads) > 1000";
             {
                 var storageWindow = RightSizingWindow.Describe(storageSamples, storageMax > storageMin ? storageMax - storageMin : TimeSpan.Zero);
                 var detail = string.Join("; ", lowLatencyDbs.Take(10)
-                    .Select(d => $"{d.Name} (read {d.AvgReadMs:N1}ms, write {d.AvgWriteMs:N1}ms)"));
+                    .Select(d => $"{d.Name} (read {d.AvgReadMs:N1}ms, {(d.AvgWriteMs is { } w ? $"write {w:N1}ms" : "no writes")})"));
+                var noWritesNote = lowLatencyDbs.Take(10).Any(d => d.AvgWriteMs is null) ? " A database with no writes was judged on reads only." : "";
                 recommendations.Add(new RecommendationRow
                 {
                     Category = "Storage",
@@ -872,7 +874,7 @@ HAVING SUM(delta_reads) > 1000";
                     Finding = $"{lowLatencyDbs.Count} {(lowLatencyDbs.Count == 1 ? "database" : "databases")} with low IO latency, so standard storage may suffice",
                     Detail = $"These databases have avg read latency under 5ms and write under 3ms across {storageWindow}: {detail}" +
                              (lowLatencyDbs.Count > 10 ? $" and {lowLatencyDbs.Count - 10} more" : "") +
-                             ". Premium/high-performance storage may not be needed."
+                             ". Premium/high-performance storage may not be needed." + noWritesNote
                 });
             }
         }
@@ -999,7 +1001,7 @@ AND   sqlserver_cpu_utilization IS NOT NULL";
     /// a clean bill.</summary>
     internal static string IdleDatabasesEmptyText(bool hasCoverage) => hasCoverage
         ? "No idle databases detected"
-        : "Idle databases cannot be judged yet: query stats do not cover each of the last 7 days";
+        : "Idle databases cannot be judged yet: query stats do not cover each of the last 7 days.";
 
     /// <summary>
     /// True when the server's query stats cover a full 7 days: BOTH the oldest sample is at or before now minus 7 days, AND each of

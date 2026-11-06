@@ -11,7 +11,9 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Linq;
 using System.Text.Json;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Storage.FinOps;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -103,5 +105,21 @@ public sealed class FinOpsWebDetails7706Tests
     public void TheIdleDatabasesStrip_EndsWithAPeriod()
     {
         Assert.EndsWith(".", DarlingFinOpsOptimizationReader.IdleDatabasesEmptyText(false), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ASecondaryCopyWithNoPvsRow_IsCounted_OnlyWhenItIsInTheChosenDatabases()
+    {
+        string[] secondary = ["AgDb", "OtherAg"];
+        string[] withRows = ["master", "tempdb"];
+
+        Assert.Equal(
+            "2 databases have no row here: this server holds a secondary copy of them in an availability group. Check the primary replica for their persistent version store.",
+            DarlingMcpPvsTools.SecondaryWithoutRowNote(secondary, withRows, DatabaseFilter.All));
+        Assert.StartsWith("1 database has no row here:", DarlingMcpPvsTools.SecondaryWithoutRowNote(secondary, withRows, DatabaseFilter.One("AgDb")), StringComparison.Ordinal);
+        // A secondary copy that does have a row is not named, and a filter that leaves the secondary out says nothing.
+        Assert.Null(DarlingMcpPvsTools.SecondaryWithoutRowNote(secondary, ["AgDb", "OtherAg"], DatabaseFilter.All));
+        Assert.Null(DarlingMcpPvsTools.SecondaryWithoutRowNote(secondary, withRows, DatabaseFilter.One("master")));
+        Assert.Null(DarlingMcpPvsTools.SecondaryWithoutRowNote(Array.Empty<string>(), withRows, DatabaseFilter.All));
     }
 }

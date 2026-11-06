@@ -268,8 +268,9 @@ LIMIT 1";
     /// Derives the analyzer options from the collected server facts, reproducing sp_IndexCleanup's runtime
     /// gates: <c>@can_compress</c> = EngineEdition IN (3,5,8) [Enterprise / Azure SQL DB / Managed Instance] OR
     /// (EngineEdition IN (2,4) [Standard / Express family] AND ProductVersion major &gt;= 13 [SQL 2016+]);
-    /// <c>@online</c> = EngineEdition IN (3,5,8). The size/read/write/row minimums and dedupe-only match the
-    /// proc's parameter DEFAULTS (all 0 / off) — no speculative settings knobs. Uptime days is computed from the
+    /// <c>@online</c> = EngineEdition IN (3,5,8). The read/write/row minimums and dedupe-only match the
+    /// proc's parameter DEFAULTS (all 0 / off) — no speculative settings knobs. The size minimum is 0.01 GB (#7706): a smaller index
+    /// is not offered for compression. Uptime days is computed from the
     /// server-LOCAL <c>sqlserver_start_time</c> vs the viewer's local now (both wall-clock, mirroring the proc's
     /// <c>DATEDIFF(DAY, sqlserver_start_time, SYSDATETIME())</c>); it drives the analyzer's &lt;14-day
     /// unused caveat and &lt;=7-day auto-dedupe. When no server_properties row is collected yet, edition is
@@ -315,7 +316,8 @@ LIMIT 1";
         return new IndexCleanupOptions
         {
             DedupeOnly = false,
-            MinSizeGb = 0m,
+            /* #7706: an index under 0.01 GB saves almost nothing when compressed, and the analyzer's note says so. */
+            MinSizeGb = 0.01m,
             MinReads = 0,
             MinWrites = 0,
             MinRows = 0,
