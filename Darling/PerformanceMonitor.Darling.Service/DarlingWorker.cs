@@ -1513,6 +1513,50 @@ LIMIT 1";
             runtime.Target.IsAzureSqlDb, runtime.ServerId.ToString(CultureInfo.InvariantCulture),
             runtime.Config.Host, runtime.Config.Database, _registryState?.Read()?.Servers);
 
+    /// <summary>
+    /// One fleet sweep as a tracked task: the #4925 separately-monitored lookups first, then the engine run they scope.
+    /// A target that is disconnected when the sweep fires has no runtime to ask, so its list is a store read, and that
+    /// read belongs inside the task with the sweep, never on the collection loop ahead of it: with the fleet sweep on,
+    /// many targets unreachable and a slow store, the loop would otherwise wait one round trip per target before it
+    /// could launch. A connected target's list comes from its runtime and <paramref name="registryServers"/>, the
+    /// registry snapshot the fire read, and the stored lookup carries the same snapshot, so one sweep never mixes two
+    /// registry snapshots however long its store reads take. A lookup that throws leaves its target unscoped (null) and
+    /// never fails the sweep. The task never faults, because it is tracked and completes unobserved: a stop returns
+    /// quietly, like the engine's own cancellation.
+    /// </summary>
+    internal static async Task RunFleetSweepAsync(
+        IReadOnlyList<(int ServerId, ServerRuntime? Runtime)> targets,
+        IReadOnlyList<MonitoredServer>? registryServers,
+        Func<int, CancellationToken, Task<IReadOnlyList<string>?>> storedLookup,
+        Func<IReadOnlyDictionary<int, IReadOnlyList<string>?>, CancellationToken, Task> runSweep,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        var separatelyMonitored = new Dictionary<int, IReadOnlyList<string>?>(targets.Count);
+        foreach (var (serverId, runtime) in targets)
+        {
+            try
+            {
+                separatelyMonitored[serverId] = runtime is null
+                    ? await storedLookup(serverId, cancellationToken)
+                    : AnalysisSeparatelyMonitoredDatabases(
+                        runtime.Target.IsAzureSqlDb, runtime.ServerId.ToString(CultureInfo.InvariantCulture),
+                        runtime.Config.Host, runtime.Config.Database, registryServers);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Fleet sweep could not list the separately monitored databases for server {ServerId}; reading it unscoped", serverId);
+                separatelyMonitored[serverId] = null;
+            }
+        }
+
+        await runSweep(separatelyMonitored, cancellationToken);
+    }
+
     private readonly MonitoredServerRegistryState _registryState;
 
     /* #5632 step 7: where the worker publishes its store owner data source for the force and unforce tools. Null in a test-built worker. */
