@@ -1152,19 +1152,26 @@ public static partial class PlanAnalyzer
         // A PROBE() alone is just a bitmap filter — not a real residual predicate.
         // Skip for 0-execution nodes — the operator never ran
         if (!cfg.IsRuleDisabled(11) && nonSargableReason == null && IsRowstoreScan(node) && !string.IsNullOrEmpty(node.Predicate) &&
-            !IsProbeOnly(node.Predicate) && !(node.HasActualStats && node.ActualExecutions == 0))
+            !IsProbeOnly(node.Predicate) && !(node.HasActualStats && node.ActualExecutions == 0) &&
+            ScanPredicateIsWorthReporting(node, stmt, out var scanImpact))
         {
             var displayPredicate = StripProbeExpressions(node.Predicate);
-            var details = BuildScanImpactDetails(node, stmt);
             var severity = PlanWarningSeverity.Warning;
 
+            /* #7891: an actual plan's share is the scan's elapsed time. The cost share is the optimizer's
+               estimate, and the plans worth reading are the ones where that estimate was wrong. An estimated
+               plan, or an actual plan that carries no statement time, has only the cost share. */
+            var sharePct = node.HasActualStats && HasStatementElapsed(stmt) ? scanImpact.ElapsedPct : scanImpact.CostPct;
+
             // Elevate to Critical if the scan dominates the plan
-            if (details.CostPct >= 90 || details.ElapsedPct >= 90)
+            if (sharePct >= 90)
                 severity = PlanWarningSeverity.Critical;
 
-            var message = "Scan with residual predicate — SQL Server is reading every row and filtering after the fact.";
-            if (!string.IsNullOrEmpty(details.Summary))
-                message += $" {details.Summary}";
+            var message = node.HasActualStats && node.ActualRowsRead > 0
+                ? $"Scan with residual predicate — SQL Server read {node.ActualRowsRead:N0} rows to return {node.ActualRows:N0}, filtering after the fact."
+                : "Scan with residual predicate — SQL Server is reading every row and filtering after the fact.";
+            if (!string.IsNullOrEmpty(scanImpact.Summary))
+                message += $" {scanImpact.Summary}";
 
             // If the statement is executing a dynamic cursor, that's usually
             // the reason an index didn't get used. Call it out so the user looks there
@@ -1177,7 +1184,7 @@ public static partial class PlanAnalyzer
                 message += " Check that you have appropriate indexes.";
 
             // I/O waits specifically confirm the scan is hitting disk — elevate
-            if (HasSignificantIoWaits(stmt.WaitStats) && details.CostPct >= 50
+            if (HasSignificantIoWaits(stmt.WaitStats) && sharePct >= 50
                 && severity != PlanWarningSeverity.Critical)
                 severity = PlanWarningSeverity.Critical;
 
@@ -1232,9 +1239,22 @@ public static partial class PlanAnalyzer
         if (!cfg.IsRuleDisabled(34) && isBareScanCandidate)
         {
             var colCount = node.OutputColumns!.Split(',').Length;
-            var isSignificant = node.HasActualStats
-                ? GetOperatorOwnElapsedMs(node) > 0
-                : node.CostPercent >= 20;
+
+            /* #7891: a scan under the rows floor is a few hundred pages at most, and a narrower index cannot
+               make it cheaper. An actual plan is judged on the rows it read and the scan's own share of the
+               statement's time, with any own time at all standing in when the plan carries no statement time.
+               An estimated plan is judged on the table's cardinality and the scan's share of the plan's cost. */
+            bool isSignificant;
+            if (node.HasActualStats)
+            {
+                var ownShare = OwnTimeSharePct(node, stmt);
+                isSignificant = Math.Max(node.ActualRowsRead, node.ActualRows) >= ScanRuleMinRows
+                    && (ownShare.HasValue ? ownShare.Value >= ScanRuleMinOwnTimeSharePct : GetOperatorOwnElapsedMs(node) > 0);
+            }
+            else
+            {
+                isSignificant = node.TableCardinality >= ScanRuleMinRows && node.CostPercent >= 20;
+            }
 
             if (isSignificant)
             {
@@ -2844,6 +2864,36 @@ public static partial class PlanAnalyzer
         return new ScanImpact(costPct, elapsedPct, parts.Count > 0 ? string.Join(" ", parts) : null);
     }
 
+    private static bool HasStatementElapsed(PlanStatement stmt) =>
+        stmt.QueryTimeStats != null && stmt.QueryTimeStats.ElapsedTimeMs > 0;
+
+    /* #7891: the operator's own elapsed time as a share of the statement's, or null when the plan carries
+       no statement time and there is no share to measure. */
+    private static double? OwnTimeSharePct(PlanNode node, PlanStatement stmt) =>
+        HasStatementElapsed(stmt)
+            ? (double)GetOperatorOwnElapsedMs(node) / stmt.QueryTimeStats!.ElapsedTimeMs * 100
+            : null;
+
+    /* #7891: rule 11's gate. An estimated plan is always reported. An actual plan must have read at least
+       ScanRuleMinRows rows, returned under ScanPredicateMaxSelectivity of what it read when the plan says
+       how many it read, and spent at least ScanRuleMinOwnTimeSharePct of the statement's time in the scan
+       when the plan carries statement time. The impact details come out either way, so the caller does not
+       build them twice. */
+    private static bool ScanPredicateIsWorthReporting(PlanNode node, PlanStatement stmt, out ScanImpact details)
+    {
+        details = BuildScanImpactDetails(node, stmt);
+        if (!node.HasActualStats)
+            return true;
+
+        if (Math.Max(node.ActualRowsRead, node.ActualRows) < ScanRuleMinRows)
+            return false;
+        if (node.ActualRowsRead > 0 && (double)node.ActualRows / node.ActualRowsRead >= ScanPredicateMaxSelectivity)
+            return false;
+
+        var ownShare = OwnTimeSharePct(node, stmt);
+        return ownShare is null || ownShare.Value >= ScanRuleMinOwnTimeSharePct;
+    }
+
     /// <summary>
     /// Checks whether a function call in a predicate is on the column side of the comparison.
     /// Predicate ScalarStrings look like: [db].[schema].[table].[col]>dateadd(day,(0),[@var])
@@ -3201,6 +3251,22 @@ public static partial class PlanAnalyzer
     // guesses below, and from this size up it stays clear of them (0.3% and 5.6% at this size,
     // falling as the table grows).
     private const double CeGuessMinTableRows = 100_000;
+
+    /* #7891: rules 11 and 34 are about reads a scan does that an index could spare. Under this many rows a
+       table is a few hundred pages, its scan is a buffer pool read of a millisecond or two, and the index
+       either rule proposes costs more on every write than it saves on the read. */
+    private const long ScanRuleMinRows = 10_000;
+
+    /* #7891: an index that removed the scan outright saves at most the scan's own share of the statement's
+       elapsed time. Under a tenth, the saving sits inside a statement's run-to-run variance and the finding
+       points at nothing a person could measure. Rule 35 needs twice this share before it calls an operator
+       expensive with nothing else to say about it. */
+    private const double ScanRuleMinOwnTimeSharePct = 10;
+
+    /* #7891: rule 11 reports rows a scan read and then discarded. When at least half of the rows read were
+       returned, a seek on the predicate columns would touch most of the same pages, so the predicate is not
+       the cost the rule describes. */
+    private const double ScanPredicateMaxSelectivity = 0.5;
 
     /// <summary>
     /// Detects well-known CE default selectivity guesses by comparing EstimateRows to TableCardinality.
