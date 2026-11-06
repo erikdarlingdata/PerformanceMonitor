@@ -90,13 +90,19 @@ public sealed record PlanMissingIndexRow(
 public static class PlanFeatureExtractor
 {
     /// <summary>
+    /// 4 since the analyzer's warning set changed in one release: Bare Scan and Scan With Predicate need 10,000 rows read
+    /// and a tenth of the statement's time (#7891), Top Above Scan is quiet over an ordered scan that the Top stops early
+    /// (#7890), the Data Type Mismatch and Table-Valued Function text changed and Local Variables yields to Optimize For
+    /// Unknown (#7898), a Sort that only waited across an exchange gets no Expensive Operator warning (#7979), and a Key
+    /// Lookup's severity follows its share of the statement's time rather than its presence (#7889). One bump covers the
+    /// release, so each plan digest is parsed once more and the old and new warning rows stay apart.
     /// 3 since the exporter moved into this repository and builds against the current PlanAnalysis, not the 4d730bb42
     /// copy that version 2 used. PlanAnalysis changed by about 1,200 lines between the two, so the same plan XML can give
     /// different feature, warning and missing-index rows. A new version keeps the two sets apart in the lake.
     /// 2 since the pin moved to 4d730bb42: the parser reads an IF condition's query plan (#4470), and the analyzer's
     /// warning set changed.
     /// </summary>
-    public const int FeatureVersion = 3;
+    public const int FeatureVersion = 4;
 
     /// <summary>
     /// Parse cap (16 MiB). Measured real plans top out at 3.6 MB; this guards against a runaway document: it is never
