@@ -367,10 +367,16 @@ export function renderInvestigations(main, requestId) {
   const body = el("div", {}, [loadingStrip("Loading investigation requests…")]);
   slot = el("div", { class: "jh-detail" });
 
-  const reload = () => {
+  /* #7957: the open request is dropped and its pane emptied when a filter changes and when a re-read's list no longer holds it, as after a
+     Close under a State filter: the closed request no longer matches, so a pane still offering its Close form would be for a request
+     that is already closed. */
+  const dropRequest = () => {
     choices.requestId = null;
     closeDraft = null;
     mount(slot, []);
+  };
+  const reload = () => {
+    dropRequest();
     load();
   };
   const state = select("State", STATES, choices.state, (v) => { choices.state = v; reload(); });
@@ -388,10 +394,16 @@ export function renderInvestigations(main, requestId) {
     const res = await readTool("list_investigation_requests", listParams(choices), signal);
     if (mine !== pageSeq || res.kind === "aborted" || res.kind === "auth") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-    if (res.kind === "empty") return mount(body, emptyStrip(res.message || "No investigation requests."));
+    if (res.kind === "empty") {
+      dropRequest();
+      return mount(body, emptyStrip(res.message || "No investigation requests."));
+    }
     const data = res.data || {};
     const rows = rowsUnder(data, "requests");
-    if (!rows.length) return mount(body, emptyStrip("No investigation requests."));
+    if (!rows.length) {
+      dropRequest();
+      return mount(body, emptyStrip("No investigation requests."));
+    }
     const onRow = (r, tr) => {
       if (!r) return;
       tr.style.cursor = "pointer";
@@ -409,10 +421,7 @@ export function renderInvestigations(main, requestId) {
     mount(body, parts);
     const keep = choices.requestId ? rows.find((r) => String(r.request_id) === String(choices.requestId)) : null;
     if (keep) loadDetail(keep);
-    else {
-      choices.requestId = null;
-      closeDraft = null;
-    }
+    else dropRequest();
   }
 
   reloadList = load;
