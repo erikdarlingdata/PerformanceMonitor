@@ -191,8 +191,6 @@ ORDER BY lower(p.database_name), p.database_name, p.collection_time";
             if (unfiltered.Count > 0) snapshot = unfiltered[0].CollectionTime;
         }
 
-        if (!secondaryNoteApplies) return new PvsLatestRead(rows, null, unfiltered);
-
         var secondary = await SecondaryReplicaScope.ReadAsync(_duckDb, serverId, PvsSecondaryNote.ScopeTimeUtc(snapshot), System.Threading.CancellationToken.None);
         return new PvsLatestRead(rows, PvsSecondaryNote.WithoutRow(secondary, rows.Select(r => r.DatabaseName), databaseNames), unfiltered);
     }
