@@ -28,7 +28,9 @@ public static class DarlingPgXminReader
         bool IsWinner,
         long PeakXminAge,
         long SamplesAsWinner,
-        long Samples);
+        long Samples,
+        bool IsCurrent = true,
+        DateTime? LatestCaptureAt = null);
 
     /// <summary>
     /// The current holder per source, joined to that source's behaviour across the window.
@@ -39,10 +41,14 @@ public static class DarlingPgXminReader
     /// one is holding the horizon right now.</para>
     /// <para>Both branches read the same window, so a source present in one is present in the other and
     /// the join cannot drop a row.</para>
+    /// <para>#7878: a source whose newest row is not from the collector's newest run has cleared since (the collector stores
+    /// nothing for a source with no holder), so <c>is_current</c> is false and <c>latest_capture_at</c> is when the
+    /// collector last looked. <see cref="PgCurrentCapture"/> states the rule.</para>
     /// <para>$1 server_id, $2/$3 window (naive UTC).</para>
     /// </summary>
-    public const string PgXminHorizonSql = """
-        WITH latest AS (
+    public const string PgXminHorizonSql = $"""
+        WITH {PgCurrentCapture.XminCte},
+        latest AS (
             SELECT DISTINCT ON (source)
                 source, collection_time, xmin_age, holder, detail, is_winner
             FROM pg_xmin_horizon
@@ -72,9 +78,12 @@ public static class DarlingPgXminReader
             l.is_winner,
             w.peak_xmin_age,
             w.samples_as_winner,
-            w.samples
+            w.samples,
+            {PgCurrentCapture.IsCurrentSql} AS is_current,
+            cw.newest_at AS latest_capture_at
         FROM latest AS l
         JOIN window_stats AS w ON w.source = l.source
+        CROSS JOIN capture_window AS cw
         /* #6305: a latest row at age 0 is not a holder. The collector stores only the OLDEST holder per source,
            so its newest row at age 0 means nothing in that source was holding the horizon back then. Rows
            stored by an older build carry the monitor's own collecting session at age 0 and read here as a
@@ -129,9 +138,11 @@ public static class DarlingPgXminReader
         return value is long count ? count : Convert.ToInt64(value);
     }
 
+    /// <param name="includeCleared">False (the default) drops the sources that cleared since the collector's newest run, so a
+    /// grid shows only holders that are still there. The MCP tool passes true to report them as cleared.</param>
     public static async Task<List<PgXminRow>> GetPgXminHorizonAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, bool includeCleared = false)
     {
         var rows = new List<PgXminRow>();
         await using var command = postgres.CreateCommand(PgXminHorizonSql);
@@ -147,6 +158,12 @@ public static class DarlingPgXminReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            var isCurrent = reader.IsDBNull(9) || reader.GetBoolean(9);
+            if (!isCurrent && !includeCleared)
+            {
+                continue;
+            }
+
             rows.Add(new PgXminRow(
                 reader.GetString(0),
                 reader.GetDateTime(1),
@@ -156,7 +173,9 @@ public static class DarlingPgXminReader
                 !reader.IsDBNull(5) && reader.GetBoolean(5),
                 reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
                 reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
-                reader.IsDBNull(8) ? 0 : reader.GetInt64(8)));
+                reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
+                isCurrent,
+                reader.IsDBNull(10) ? null : reader.GetDateTime(10)));
         }
 
         return rows;

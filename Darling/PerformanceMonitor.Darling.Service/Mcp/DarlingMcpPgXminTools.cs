@@ -76,8 +76,25 @@ public sealed class DarlingMcpPgXminTools
         try
         {
             var now = windowEnd;
-            var rows = await DarlingPgXminReader.GetPgXminHorizonAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
+            /* #7878: the collector stores nothing for a source with no holder, so a source whose newest row is not from the
+               collector's newest run has cleared since. Only the sources still holding are reported as holders; the rest are
+               named in cleared_holders, with no winner flag and no remedy, and never become winning_source. */
+            var allRows = await DarlingPgXminReader.GetPgXminHorizonAsync(
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken, includeCleared: true);
+            var rows = allRows.Where(r => r.IsCurrent).ToList();
+            var clearedHolders = allRows.Where(r => !r.IsCurrent).Select(r => new
+            {
+                source = r.Source,
+                status = "holder_cleared",
+                /* The collector's newest capture, which no longer saw this source holding: the clear happened at or before it,
+                   and after last_measured_at. */
+                cleared_at = r.LatestCaptureAt,
+                last_holder = r.Holder,
+                last_xmin_age = r.XminAge,
+                last_detail = r.Detail,
+                last_measured_at = r.MeasuredAt,
+                peak_xmin_age = r.PeakXminAge,
+            }).ToList();
             var capturesInWindow = await DarlingPgXminReader.GetXminCapturesInWindowAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
 
@@ -122,12 +139,16 @@ public sealed class DarlingMcpPgXminTools
                     status = "empty",
                     hints = emptyNotice.AsHints(),
                     captures_in_window = capturesInWindow,
+                    cleared_holders = clearedHolders,
                     finding = McpHelpers.QuietUnlessCut(
                         emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                        factual: (emptyNotice.WindowTruncated
+                        factual: clearedHolders.Count > 0
+                            ? "Nothing is holding back the xmin horizon now: the collector's newest capture found no holder, and "
+                                + "the sources in cleared_holders held it earlier in the window and have cleared since"
+                            : (emptyNotice.WindowTruncated
                                 ? "Nothing is holding back the xmin horizon in the captures the store holds"
                                 : "Nothing is holding back the xmin horizon in this window")
-                            + $": the collector captured {capturesInWindow} time(s) and recorded no holder",
+                                + $": the collector captured {capturesInWindow} time(s) and recorded no holder",
                         coveredClaim: ". Vacuum is free to "
                             + "reclaim dead rows, so bloat growth has a different cause — look at whether "
                             + "autovacuum is being triggered at all (per-table thresholds and dead-tuple "
@@ -190,6 +211,7 @@ public sealed class DarlingMcpPgXminTools
                 winning_xmin_age = winner.xmin_age,
                 recommended_action = winner.remedy,
                 holders,
+                cleared_holders = clearedHolders,
             }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

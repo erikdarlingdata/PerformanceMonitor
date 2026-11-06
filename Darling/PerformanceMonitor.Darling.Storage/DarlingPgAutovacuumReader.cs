@@ -40,7 +40,9 @@ public static class DarlingPgAutovacuumReader
         DateTime? LastAutoanalyze,
         long AutovacuumCount,
         long FirstDeadTuples,
-        DateTime FirstSeenAt);
+        DateTime FirstSeenAt,
+        bool IsCurrent = true,
+        DateTime? LatestCaptureAt = null);
 
     /// <summary>
     /// Latest state per table, joined to that table's earliest reading in the window.
@@ -51,10 +53,15 @@ public static class DarlingPgAutovacuumReader
     /// <para>The earliest reading answers the follow-up question: dead tuples that are climbing mean
     /// autovacuum is losing, while a flat figure at ten times the threshold usually means it is blocked or
     /// switched off. Those need different fixes.</para>
+    /// <para>#7878: the collector stores a table only while it has dead tuples, unanalyzed modifications, insert activity or
+    /// autovacuum disabled, so a table vacuumed clean stops being written and its newest row is the last pre-vacuum sample.
+    /// Such a row has <c>is_current</c> false (<see cref="PgCurrentCapture"/> states the rule) and sorts after every current
+    /// table, so the row limit never spends a place on it.</para>
     /// <para>$1 server_id, $2/$3 window (naive UTC), $4 row limit.</para>
     /// </summary>
-    public const string PgAutovacuumSql = """
-        WITH latest AS (
+    public const string PgAutovacuumSql = $"""
+        WITH {PgCurrentCapture.AutovacuumCte},
+        latest AS (
             SELECT DISTINCT ON (database_name, schema_name, table_name)
                 database_name, schema_name, table_name, collection_time,
                 live_tuples, dead_tuples, vacuum_threshold, mods_since_analyze, analyze_threshold,
@@ -97,12 +104,15 @@ public static class DarlingPgAutovacuumReader
             l.last_autoanalyze,
             l.autovacuum_count,
             e.first_dead_tuples,
-            e.first_seen_at
+            e.first_seen_at,
+            {PgCurrentCapture.IsCurrentSql} AS is_current,
+            cw.newest_at AS latest_capture_at
         FROM latest AS l
         JOIN earliest AS e
           ON  e.database_name IS NOT DISTINCT FROM l.database_name
           AND e.schema_name   IS NOT DISTINCT FROM l.schema_name
           AND e.table_name    IS NOT DISTINCT FROM l.table_name
+        CROSS JOIN capture_window AS cw
         /* Ratio, not raw count — and a table with autovacuum switched off sorts to the top regardless,
            because that is a configuration finding rather than a workload one. NULLIF guards the
            never-analyzed case, where the threshold can be 0.
@@ -118,6 +128,7 @@ public static class DarlingPgAutovacuumReader
            producing a negative ratio. GREATEST ignores NULLs (verified on live Aurora), so a NULL dead ratio
            does not swallow a real insert ratio. */
         ORDER BY
+            ({PgCurrentCapture.IsCurrentSql}) DESC,
             l.autovacuum_disabled DESC,
             GREATEST(
                 l.dead_tuples::numeric / NULLIF(l.vacuum_threshold, 0),
@@ -131,9 +142,11 @@ public static class DarlingPgAutovacuumReader
         LIMIT $4
         """;
 
+    /// <param name="includeCleared">False (the default) drops the tables that were last written before the collector's newest
+    /// run. The MCP tool passes true so it can name them.</param>
     public static async Task<List<PgAutovacuumRow>> GetPgAutovacuumAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, bool includeCleared = false)
     {
         var rows = new List<PgAutovacuumRow>();
         await using var command = postgres.CreateCommand(PgAutovacuumSql);
@@ -150,6 +163,12 @@ public static class DarlingPgAutovacuumReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            var isCurrent = reader.IsDBNull(20) || reader.GetBoolean(20);
+            if (!isCurrent && !includeCleared)
+            {
+                continue;
+            }
+
             rows.Add(new PgAutovacuumRow(
                 reader.IsDBNull(0) ? null : reader.GetString(0),
                 reader.IsDBNull(1) ? null : reader.GetString(1),
@@ -170,7 +189,9 @@ public static class DarlingPgAutovacuumReader
                 reader.IsDBNull(16) ? null : reader.GetDateTime(16),
                 reader.IsDBNull(17) ? 0 : reader.GetInt64(17),
                 reader.IsDBNull(18) ? 0 : reader.GetInt64(18),
-                reader.GetDateTime(19)));
+                reader.GetDateTime(19),
+                isCurrent,
+                reader.IsDBNull(21) ? null : reader.GetDateTime(21)));
         }
 
         return rows;

@@ -35,7 +35,9 @@ public static class DarlingPgWraparoundReader
         long MultiXidsRemaining,
         bool AllowsConnections,
         long WindowPeakFrozenXidAge,
-        long WindowPeakMinMultiXidAge);
+        long WindowPeakMinMultiXidAge,
+        bool IsCurrent = true,
+        DateTime? LatestCaptureAt = null);
 
     /// <summary>
     /// The LATEST reading per database, plus the window's peak for each counter.
@@ -47,9 +49,14 @@ public static class DarlingPgWraparoundReader
     /// <para><c>DISTINCT ON</c> with the ordering below takes the newest row per database. The window
     /// maxima are computed before DISTINCT is applied, so they see every row in the window, not just the
     /// surviving one.</para>
+    /// <para>#7910: a row that is not from the collector's newest run belongs to something that is no longer reported, so
+    /// <c>is_current</c> is false and <c>latest_capture_at</c> is when the collector last looked. <see cref="PgCurrentCapture"/>
+    /// states the rule.</para>
     /// <para>$1 server_id, $2/$3 window (naive UTC).</para>
     /// </summary>
-    public const string PgWraparoundSql = """
+    public const string PgWraparoundSql = $"""
+        WITH {PgCurrentCapture.WraparoundCte},
+        latest AS (
         SELECT DISTINCT ON (database_name)
             database_name,
             collection_time,
@@ -71,11 +78,35 @@ public static class DarlingPgWraparoundReader
         AND   collection_time >= $2
         AND   collection_time <= $3
         ORDER BY database_name, collection_time DESC
+        )
+        SELECT
+            l.database_name,
+            l.collection_time,
+            l.frozen_xid_age,
+            l.min_multixid_age,
+            l.autovacuum_freeze_max_age,
+            l.autovacuum_multixact_freeze_max_age,
+            l.pct_toward_emergency_vacuum,
+            l.pct_toward_wraparound,
+            l.pct_toward_multixact_emergency,
+            l.pct_toward_multixact_wraparound,
+            l.xids_remaining,
+            l.multixids_remaining,
+            l.allows_connections,
+            l.window_peak_frozen_xid_age,
+            l.window_peak_min_multixid_age,
+            {PgCurrentCapture.IsCurrentSql} AS is_current,
+            cw.newest_at AS latest_capture_at
+        FROM latest AS l
+        CROSS JOIN capture_window AS cw
+        ORDER BY l.database_name
         """;
 
+    /// <param name="includeCleared">False (the default) drops the databases absent from the collector's newest run, which were
+    /// dropped. The MCP tool passes true so it can name them.</param>
     public static async Task<List<PgWraparoundRow>> GetPgWraparoundAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, bool includeCleared = false)
     {
         var rows = new List<PgWraparoundRow>();
         await using var command = postgres.CreateCommand(PgWraparoundSql);
@@ -91,6 +122,12 @@ public static class DarlingPgWraparoundReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            var isCurrent = reader.IsDBNull(15) || reader.GetBoolean(15);
+            if (!isCurrent && !includeCleared)
+            {
+                continue;
+            }
+
             rows.Add(new PgWraparoundRow(
                 reader.GetString(0),
                 reader.GetDateTime(1),
@@ -106,7 +143,9 @@ public static class DarlingPgWraparoundReader
                 reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
                 !reader.IsDBNull(12) && reader.GetBoolean(12),
                 reader.IsDBNull(13) ? 0 : reader.GetInt64(13),
-                reader.IsDBNull(14) ? 0 : reader.GetInt64(14)));
+                reader.IsDBNull(14) ? 0 : reader.GetInt64(14),
+                isCurrent,
+                reader.IsDBNull(16) ? null : reader.GetDateTime(16)));
         }
 
         return rows;
