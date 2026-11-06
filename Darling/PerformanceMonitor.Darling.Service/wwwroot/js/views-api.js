@@ -22,9 +22,17 @@ import { apiGet, apiSend } from "./util.js";
 import { REFRESH_CHOICES } from "./refresh-policy.js";
 
 let _sessionPromise = null;
+/* How long a failed session read is kept before the next getSession() asks again (#7928). One failed read (a service
+   restart behind the front door, a store 503) used to leave every edit control hidden until the tab was reloaded. The wait
+   keeps a service that is still down from being asked once per module per render. The 60 s status poll is slower than it,
+   so the poll always asks afresh. */
+export const SESSION_RETRY_MS = 5000;
+let _sessionFailedAt = 0;
 /* The resolved session, for a synchronous reader that must not start the fetch itself (peekSession). */
 let _sessionValue = null;
 let _catalogPromise = null;
+/* Callbacks waiting for the first good session answer (onFirstGoodSession). */
+let _goodSessionWaiters = [];
 
 /**
  * The session capability probe — resolves to the server's {can_edit} for this request's seat, or to
@@ -33,19 +41,47 @@ let _catalogPromise = null;
  * probe_failed is what separates "we could not ask" from "you are a read-only seat". Both deny editing, and the
  * server's own answer never carries the flag, so a caller that renders a notice can tell a transient failure worth
  * reloading from a role that reloading will not change.
+ *
+ * Only a good answer is kept for the life of the page (#7928). A failed one is kept for SESSION_RETRY_MS, so a burst of
+ * callers shares it, and the next call after that asks again. Callers that arrive while a read is in flight share it.
  */
 export function getSession() {
+  if (_sessionPromise && _sessionFailedAt && Date.now() - _sessionFailedAt >= SESSION_RETRY_MS) {
+    _sessionPromise = null;
+    _sessionFailedAt = 0;
+  }
   if (!_sessionPromise) {
     _sessionPromise = apiGet("/api/session").then((r) =>
       r.kind === "data" && r.data && typeof r.data.can_edit === "boolean"
         ? r.data
         : { can_edit: false, probe_failed: true }
-    ).then((session) => {
+    ).catch(() => ({ can_edit: false, probe_failed: true })).then((session) => {
       _sessionValue = session;
+      _sessionFailedAt = session.probe_failed ? Date.now() : 0;
+      if (!session.probe_failed && _goodSessionWaiters.length) {
+        const waiting = _goodSessionWaiters;
+        _goodSessionWaiters = [];
+        for (const cb of waiting) {
+          try { cb(session); } catch { /* one waiter's failure must not stop the others or the caller's answer */ }
+        }
+      }
       return session;
     });
   }
   return _sessionPromise;
+}
+
+/**
+ * Runs `cb(session)` once, with the first good session answer: at once when one is already kept, else when a later
+ * getSession() gets one (#7928). It never starts a read itself, so it fires when the page next asks (the 60 s status poll
+ * at the latest). Startup uses it to finish the front-door start that a failed first answer skipped.
+ */
+export function onFirstGoodSession(cb) {
+  if (_sessionValue && !_sessionValue.probe_failed) {
+    cb(_sessionValue);
+    return;
+  }
+  _goodSessionWaiters.push(cb);
 }
 
 /**

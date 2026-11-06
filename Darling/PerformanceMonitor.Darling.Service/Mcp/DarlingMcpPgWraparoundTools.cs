@@ -126,8 +126,19 @@ public sealed class DarlingMcpPgWraparoundTools
         try
         {
             var now = windowEnd;
-            var rows = await DarlingPgWraparoundReader.GetPgWraparoundAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
+            /* #7910: every capture lists every database, so one missing from the collector's newest run was dropped, and its last
+               stored sample is not the present state. The read marks it (DarlingPgWraparoundReader, PgCurrentCapture); it is left
+               out of the databases and the worst database, and named in omitted_databases so the drop is visible. measured_at on
+               each database is the sample it comes from. */
+            var allRows = await DarlingPgWraparoundReader.GetPgWraparoundAsync(
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, includeCleared: true, cancellationToken: cancellationToken);
+            var rows = allRows.Where(r => r.IsCurrent).ToList();
+            var omittedDatabases = allRows.Where(r => !r.IsCurrent).Select(r => r.DatabaseName).OrderBy(n => n, StringComparer.Ordinal).ToList();
+            var omittedNote = omittedDatabases.Count == 0
+                ? null
+                : $"{omittedDatabases.Count} database(s) had a stored sample in the window but are absent from the collector's newest run "
+                  + $"({allRows[0].LatestCaptureAt:yyyy-MM-dd HH:mm:ss} UTC), so they were dropped since and are not reported as "
+                  + "current. Their last sample is older than that run.";
 
             if (rows.Count == 0)
             {
@@ -212,6 +223,8 @@ public sealed class DarlingMcpPgWraparoundTools
                 worst_database = worst.database_name,
                 worst_severity = worst.severity,
                 worst_pct_toward_wraparound = worst.pct_toward_wraparound,
+                omitted_databases = omittedDatabases,
+                omitted_databases_note = omittedNote,
                 thresholds = new
                 {
                     anti_wraparound_vacuum_forced_at_pct_of_freeze_max_age = 100,
