@@ -2085,7 +2085,7 @@ public static class FactAdvice
         var windowMean = windowMeanKey is null ? null : FactMeta(facts, key, windowMeanKey);
         var meanSigma = FactMeta(facts, key, "mean_deviation_sigma");
         if (windowMean is not null && meanSigma is not null)
-            inv.Append($"; the window's mean of {fmt(windowMean.Value)} sat {SigmaText(meanSigma.Value)} above it (the detector fires only when the mean clears its bar as well, so this is the window running high, not one hot sample)");
+            inv.Append($"; the window's mean of {fmt(windowMean.Value)} sat {SigmaText(meanSigma.Value)} above it (the average was high across the window, so this is not one hot sample)");
         inv.Append($". {meaning} This is a deviation from normal for this time of day and week, not necessarily a sustained problem — check whether it lines up with a workload change, a deploy, or a one-off job before treating it as chronic.");
 
         var rem =
@@ -2332,10 +2332,10 @@ public static class FactAdvice
                 ? ""
                 : meanModifiedZ > 0
                     ? $"; the window's mean of {windowMean.Value:0.#} ms/sec sat {SigmaText(meanModifiedZ)} above its normal level " +
-                      "(the detector fires only when the mean clears its bar as well, so this is the profile running heavy across the window, not one hot collection)"
+                      "(the average was high across the window, so this is not one hot collection)"
                     : mean > 0
                         ? $"; the window's mean of {windowMean.Value:0.#} ms/sec was roughly {windowMean.Value / mean:0.#}× that baseline " +
-                          "(the detector fires only when the mean clears its bar as well, so this is the profile running heavy across the window, not one hot collection)"
+                          "(the average was high across the window, so this is not one hot collection)"
                         : "";
             inv =
                 $"The all-types wait rate peaked at about {current:0.#} ms/sec this window — roughly {ratio:0.#}× the " +

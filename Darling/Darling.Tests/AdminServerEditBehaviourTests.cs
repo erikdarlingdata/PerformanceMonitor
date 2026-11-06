@@ -1043,7 +1043,7 @@ public sealed class AdminServerEditBehaviourTests
         var page = Run("frame");
 
         Assert.Equal(
-            new[] { "Display Name", "Server", "Auth", "Engine", "Version", "Status", "Freshness", "Monthly Cost ($)", "Read only", "Added", "Last Collected", "Same machine as" },
+            new[] { "Display Name", "Server", "Auth", "Engine", "Version", "Status", "Freshness", "Monthly Cost", "Read only", "Added", "Last Collected", "Same machine as" },
             page.GetProperty("headers").EnumerateArray().Select(h => h.GetString()).ToArray());
         var cells = page.GetProperty("cells").EnumerateArray().Select(r => r.EnumerateArray().Select(c => c.GetString()).ToArray()).ToArray();
         Assert.Equal(2, cells.Length);

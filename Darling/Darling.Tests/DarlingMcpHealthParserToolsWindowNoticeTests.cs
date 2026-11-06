@@ -296,9 +296,9 @@ VALUES ($1,$2,$3,$4,$5,$6,$7)",
             Assert.True(cut.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
             Assert.Equal(McpHelpers.FormatEffectiveStart(added), cut.GetProperty("hints").GetProperty("effective_start").GetString());
             var message = cut.GetProperty("message").GetString()!;
-            Assert.StartsWith($"No {eventType} events were captured for {HealthName("rung2-" + tool)} in the last 168 hour(s). This server HAS captured them before", message, StringComparison.Ordinal);
+            Assert.StartsWith($"No {eventType} events were captured for {HealthName("rung2-" + tool)} in the last 168 hour(s). This server has captured them before", message, StringComparison.Ordinal);
             Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage, message, StringComparison.Ordinal);
-            Assert.DoesNotContain("genuinely quiet", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("nothing happened in this window", message, StringComparison.Ordinal);
         });
 
     [Theory]
@@ -341,7 +341,7 @@ VALUES ($1, $2, $3, $4, $5, 12, 'SUCCESS', 0, 'ring_buffer_truncated=1 ring_buff
             Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
             Assert.Contains("773 event(s) are hidden", message, StringComparison.Ordinal);
             Assert.Contains("5 h 23 min old", message, StringComparison.Ordinal);
-            Assert.DoesNotContain("quiet", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("nothing happened in this window", message, StringComparison.Ordinal);
         });
 
     /// <summary>The note the collector itself writes for a truncated read: its own measurement labels through the same render the run's note takes.</summary>
@@ -656,7 +656,7 @@ VALUES ($1, $2, $3, $4, $5, 12, $6, 0, $7)",
             var covered = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rung2cov-" + tool, 168, end));
 
             Assert.False(covered.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
-            Assert.EndsWith(", so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events.", covered.GetProperty("message").GetString()!, StringComparison.Ordinal);
+            Assert.EndsWith(", so nothing happened in this window — widen hours_back to reach the most recent events.", covered.GetProperty("message").GetString()!, StringComparison.Ordinal);
         });
 
     [Theory]
