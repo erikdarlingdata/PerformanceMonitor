@@ -298,6 +298,16 @@ public sealed class AlertHistoryRangePageTests
         Assert.Contains(links, l => l.StartsWith("Mute similar #/mute-rules?metric_name=", StringComparison.Ordinal));
     }
 
+    /// <summary>#7945: the line under the filters names the picked server the way the Server picker does, by its display name, not by the raw value.</summary>
+    [Fact]
+    public void TheFilterLine_NamesThePickedServer_ByThePickersLabel()
+    {
+        var r = Run("serverLabel");
+        Assert.Equal("Server A", r.GetProperty("optionLabel").GetString());
+        var meta = Assert.Single(r.GetProperty("meta").EnumerateArray()).GetString()!;
+        Assert.StartsWith("Server A · ", meta);
+    }
+
     /// <summary>#7943: a poll whose read failed keeps the table and says so above it, and the next good poll reconciles the same rows, so
     /// an opened Detail line stays open. Only a first load that fails draws the error strip in the table's place.</summary>
     [Fact]
