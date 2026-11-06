@@ -79,6 +79,7 @@ public sealed class AnalysisNotificationService : IDisposable
     private readonly ILogger<AnalysisNotificationService> _logger;
     private readonly Action<string, string>? _showTrayNotification;
     private readonly Func<int, string, Task<bool>>? _isStoryMuted;
+    private readonly Func<int, Task<IReadOnlyList<AnalysisFinding>>>? _getStoredFindings;
     private readonly TimeSpan _holdBack;
     private readonly Func<string, DateTime, Task<AlertAttachedToDto?>>? _findOpenEngineAlert;
 
@@ -191,6 +192,11 @@ public sealed class AnalysisNotificationService : IDisposable
     /// means no attach (the finding pages as the gate routed it); a read that throws also pages, because a missed attach
     /// costs one extra page and a swallowed page costs the operator the finding.
     /// </param>
+    /// <param name="getStoredFindings">
+    /// Optional <c>(serverId)</c> read of the server's recent stored findings (#8012), consulted when a
+    /// page-band member has no bucket and no page row under its own hash, to find a WIDER path of the same
+    /// root that was already paged. Null means no such lookup (a shorter path pages as new, as before).
+    /// </param>
     public AnalysisNotificationService(
         IFindingAlertSender sender,
         IAlertSettings settings,
@@ -199,9 +205,10 @@ public sealed class AnalysisNotificationService : IDisposable
         Func<string, bool>? isServerSilenced = null,
         Action<string, string>? showTrayNotification = null,
         Func<int, string, Task<bool>>? isStoryMuted = null,
-        Func<string, DateTime, Task<AlertAttachedToDto?>>? findOpenEngineAlert = null)
+        Func<string, DateTime, Task<AlertAttachedToDto?>>? findOpenEngineAlert = null,
+        Func<int, Task<IReadOnlyList<AnalysisFinding>>>? getStoredFindings = null)
         : this(sender, settings, serverIdResolver, logger, PageHoldBackWindow,
-               isServerSilenced, showTrayNotification, isStoryMuted, findOpenEngineAlert)
+               isServerSilenced, showTrayNotification, isStoryMuted, findOpenEngineAlert, getStoredFindings)
     {
     }
 
@@ -216,7 +223,8 @@ public sealed class AnalysisNotificationService : IDisposable
         Func<string, bool>? isServerSilenced = null,
         Action<string, string>? showTrayNotification = null,
         Func<int, string, Task<bool>>? isStoryMuted = null,
-        Func<string, DateTime, Task<AlertAttachedToDto?>>? findOpenEngineAlert = null)
+        Func<string, DateTime, Task<AlertAttachedToDto?>>? findOpenEngineAlert = null,
+        Func<int, Task<IReadOnlyList<AnalysisFinding>>>? getStoredFindings = null)
     {
         _sender = sender;
         _settings = settings;
@@ -227,6 +235,7 @@ public sealed class AnalysisNotificationService : IDisposable
         _showTrayNotification = showTrayNotification;
         _isStoryMuted = isStoryMuted;
         _findOpenEngineAlert = findOpenEngineAlert;
+        _getStoredFindings = getStoredFindings;
     }
 
     /// <summary>
@@ -407,6 +416,8 @@ public sealed class AnalysisNotificationService : IDisposable
                     if (_cooldowns.ContainsKey(seedKey))
                         continue;
                     var lastPersisted = await _sender.GetLastDeliveredPageUtcAsync(serverId, FindingMessageFormatter.MetricName(m));
+                    if (!lastPersisted.HasValue && _getStoredFindings is not null && m.Severity >= CriticalSeverityCutoff)
+                        _ = await _getStoredFindings(m.ServerId);
                     if (lastPersisted.HasValue)
                     {
                         /* #4732: a persisted notification time ahead of the clock (it stepped back across the restart)

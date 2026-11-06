@@ -69,14 +69,15 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
         Dictionary<string, double>? metadata = null,
         Dictionary<string, object>? drillDown = null,
         string rootFactKey = "CPU_SPIKE",
-        string incidentId = "")
+        string incidentId = "",
+        string storyPath = "CPU_SPIKE → PLAN_REGRESSION")
     {
         return new AnalysisFinding
         {
             ServerId = serverId,
             ServerName = "TestServer",
             Category = category,
-            StoryPath = "CPU_SPIKE → PLAN_REGRESSION",
+            StoryPath = storyPath,
             StoryPathHash = hash,
             IncidentId = incidentId,
             Severity = severity,
@@ -981,9 +982,12 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
     private sealed class SeededCapturingSender : IFindingAlertSender
     {
         public DateTime? LastAlert { get; set; }
+        /// <summary>#8012: a page row for ONE metric name. A name listed here answers with its own time; every
+        /// other name falls back to <see cref="LastAlert"/>, so a test can seed the wider path's row alone.</summary>
+        public Dictionary<string, DateTime> SeedsByMetric { get; } = new();
         public List<FindingAlert> Sent { get; } = new();
         public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName) =>
-            Task.FromResult(LastAlert);
+            Task.FromResult(SeedsByMetric.TryGetValue(metricName, out var seeded) ? seeded : LastAlert);
         /// <summary>#3916: what the fake reports the row recorded. Null = not delivered.</summary>
         public AlertDelivery? Delivery { get; set; }
         public Task<AlertDelivery?> SendFindingAlertAsync(FindingAlert alert)
@@ -1053,6 +1057,106 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
         await notifier.FlushPendingAsync();
 
         Assert.Empty(sender.Sent);
+    }
+
+    /* #8012: a story whose path loses a leaf has a new hash, so every hash-keyed "already paged?" check
+       missed it and a held story paged as new. The wider path's page row is the evidence it was heard. */
+    private const string WiderPath = "PARAMETER_SENSITIVITY → QUERY_SPILLS → TEMPDB_USAGE";
+    private const string ShorterPath = "PARAMETER_SENSITIVITY → QUERY_SPILLS";
+
+    private static AnalysisFinding MakeWiderPathFinding() =>
+        MakeFinding("aaaaaaaa11111111", severity: 1.5, rootFactKey: "PARAMETER_SENSITIVITY", storyPath: WiderPath);
+
+    private AnalysisNotificationService MakeNotifierWithStoredFindings(
+        IFindingAlertSender sender, params AnalysisFinding[] stored) =>
+        new(sender, _settings, f => f.ServerId.ToString(), new AppLoggerAdapter<AnalysisNotificationService>(),
+            getStoredFindings: _ => Task.FromResult<IReadOnlyList<AnalysisFinding>>(stored));
+
+    [Fact]
+    public async Task NotifyAsync_ShorterPath_WiderPathAlreadyPaged_StaysHeld()
+    {
+        App.AnalysisNotifySeverity = 1.5;
+        App.AnalysisNotifyCooldownMinutes = 360;
+        var wider = MakeWiderPathFinding();
+        var sender = new SeededCapturingSender();
+        sender.SeedsByMetric[FindingMessageFormatter.MetricName(wider)] = DateTime.UtcNow.AddMinutes(-5);
+        var notifier = MakeNotifierWithStoredFindings(sender, wider);
+
+        await notifier.NotifyAsync(new[]
+        {
+            MakeFinding("bbbbbbbb22222222", severity: 1.5, rootFactKey: "PARAMETER_SENSITIVITY", storyPath: ShorterPath)
+        });
+        await notifier.FlushPendingAsync();
+
+        Assert.Empty(sender.Sent);
+    }
+
+    [Fact]
+    public async Task NotifyAsync_UpgradeShortensPath_NewNotifierSeedsFromWiderPagesRow_NothingSent()
+    {
+        /* The upgrade case: the previous build paged the wider path and wrote its row; the new build's first
+           analysis run finds the same story one leaf shorter, on a notifier whose buckets are empty. */
+        App.AnalysisNotifySeverity = 1.5;
+        App.AnalysisNotifyCooldownMinutes = 360;
+        var wider = MakeWiderPathFinding();
+        var sender = new SeededCapturingSender();
+        var before = MakeNotifierWithStoredFindings(sender, wider);
+        await before.NotifyAsync(new[] { wider });
+        await before.FlushPendingAsync();
+        var paged = Assert.Single(sender.Sent);
+        sender.SeedsByMetric[paged.MetricName] = DateTime.UtcNow;
+
+        var afterRestart = MakeNotifierWithStoredFindings(sender, wider);
+        await afterRestart.NotifyAsync(new[]
+        {
+            MakeFinding("bbbbbbbb22222222", severity: 1.5, rootFactKey: "PARAMETER_SENSITIVITY", storyPath: ShorterPath)
+        });
+        await afterRestart.FlushPendingAsync();
+
+        Assert.Single(sender.Sent);
+    }
+
+    [Fact]
+    public async Task NotifyAsync_LongerPathThanAPagedOne_StillPages()
+    {
+        /* #3712 stays: a fact joining the chain is new corroboration. The stored wider path is the 3-key
+           one; this finding has those keys plus one more, so no stored path is wider than it. */
+        App.AnalysisNotifySeverity = 1.5;
+        App.AnalysisNotifyCooldownMinutes = 360;
+        var wider = MakeWiderPathFinding();
+        var sender = new SeededCapturingSender();
+        sender.SeedsByMetric[FindingMessageFormatter.MetricName(wider)] = DateTime.UtcNow.AddMinutes(-5);
+        var notifier = MakeNotifierWithStoredFindings(sender, wider);
+
+        await notifier.NotifyAsync(new[]
+        {
+            MakeFinding("cccccccc33333333", severity: 1.5, rootFactKey: "PARAMETER_SENSITIVITY",
+                storyPath: WiderPath + " → IO_READ_LATENCY_MS")
+        });
+        await notifier.FlushPendingAsync();
+
+        Assert.Single(sender.Sent);
+    }
+
+    [Fact]
+    public async Task NotifyAsync_ShorterPath_DifferentRoot_StillPages()
+    {
+        /* The keys here are a subset of the paged path's, but the root differs: a different story. */
+        App.AnalysisNotifySeverity = 1.5;
+        App.AnalysisNotifyCooldownMinutes = 360;
+        var wider = MakeWiderPathFinding();
+        var sender = new SeededCapturingSender();
+        sender.SeedsByMetric[FindingMessageFormatter.MetricName(wider)] = DateTime.UtcNow.AddMinutes(-5);
+        var notifier = MakeNotifierWithStoredFindings(sender, wider);
+
+        await notifier.NotifyAsync(new[]
+        {
+            MakeFinding("dddddddd44444444", severity: 1.5, rootFactKey: "QUERY_SPILLS",
+                storyPath: "QUERY_SPILLS → TEMPDB_USAGE")
+        });
+        await notifier.FlushPendingAsync();
+
+        Assert.Single(sender.Sent);
     }
 
     [Fact]
