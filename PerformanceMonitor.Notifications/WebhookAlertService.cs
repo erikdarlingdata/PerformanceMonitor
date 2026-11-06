@@ -91,14 +91,17 @@ public partial class WebhookAlertService
        than a settings member, matching DarlingSelfAlertEvaluator's clock seam. */
     private readonly Func<DateTime> _utcNow;
 
-    private int _consecutiveTeamsFailures;
-    private string? _lastTeamsError;
-    private int _consecutiveSlackFailures;
-    private string? _lastSlackError;
-    private int _consecutiveGenericFailures;
-    private string? _lastGenericError;
-    private int _consecutivePagerDutyFailures;
-    private string? _lastPagerDutyError;
+    /* Each webhook destination's failures in a row and last error, keyed by the channel and the route that supplies
+       the destination (null for the settings row's own). Two routes can point one channel at two destinations, and
+       a delivery to one says nothing about the other, so one count per channel would be reset by the wrong success
+       and the failing destination would never be announced. */
+    private readonly ConcurrentDictionary<(string Channel, int? RouteId), DestinationHealth> _destinationHealth = new();
+
+    private sealed class DestinationHealth
+    {
+        public int Failures;
+        public string? LastError;
+    }
 
     /// <param name="historyStore">
     /// Optional alert-history store used to seed the per-fingerprint webhook cooldown across an app
@@ -384,13 +387,13 @@ public partial class WebhookAlertService
             if (route.Teams.Destination is { } teamsUrl)
             {
                 attempted = true;
-                Record(NotificationRouter.TeamsChannel, await TrySendTeamsAlertAsync(delivery, teamsUrl, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken));
+                Record(NotificationRouter.TeamsChannel, await TrySendTeamsAlertAsync(delivery, teamsUrl, route.Teams.RouteId, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken));
             }
 
             if (route.Slack.Destination is { } slackUrl)
             {
                 attempted = true;
-                Record(NotificationRouter.SlackChannel, await TrySendSlackAlertAsync(delivery, slackUrl, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken));
+                Record(NotificationRouter.SlackChannel, await TrySendSlackAlertAsync(delivery, slackUrl, route.Slack.RouteId, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken));
             }
 
             if (route.Generic.Destination is { } genericUrl)
@@ -403,7 +406,7 @@ public partial class WebhookAlertService
                    this value. The deliverer records the same value, so a resolution closes the key the receiver opened even
                    when the filter dropped the alert's first incident (the key anchors on the first incident it keeps). */
                 genericDedupKey = DeriveGenericDedupKey(serverId, serverName, metricName, renderContext);
-                Record(NotificationRouter.GenericChannel, await TrySendGenericAlertAsync(delivery, genericUrl, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, investigationJson, GenericSigningFor(delivery, route.Generic.RouteId, genericUrl), dedupKeyOverride: genericDedupKey, cancellationToken: cancellationToken));
+                Record(NotificationRouter.GenericChannel, await TrySendGenericAlertAsync(delivery, genericUrl, route.Generic.RouteId, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, investigationJson, GenericSigningFor(delivery, route.Generic.RouteId, genericUrl), dedupKeyOverride: genericDedupKey, cancellationToken: cancellationToken));
             }
 
             if (route.PagerDuty.Destination is { } pagerDutyKey)
@@ -414,7 +417,7 @@ public partial class WebhookAlertService
                    value. The deliverer records it, so the resolve closes the incident this trigger opened even when the
                    filter dropped the alert's first incident. */
                 pagerDutyDedupKey = DerivePagerDutyDedupKey(serverId, metricName, renderContext, autoResolveFlag);
-                var pagerDutyError = await TrySendPagerDutyAlertAsync(delivery, autoResolveFlag, pagerDutyKey, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName, dedupKeyOverride: pagerDutyDedupKey, cancellationToken: cancellationToken);
+                var pagerDutyError = await TrySendPagerDutyAlertAsync(delivery, autoResolveFlag, pagerDutyKey, route.PagerDuty.RouteId, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName, dedupKeyOverride: pagerDutyDedupKey, cancellationToken: cancellationToken);
                 Record(NotificationRouter.PagerDutyChannel, pagerDutyError);
 
                 /* With auto-resolve on, a DELIVERED close re-opens the lifecycle: the cooldown entry the
@@ -583,17 +586,30 @@ public partial class WebhookAlertService
         }
     }
 
-    public (int ConsecutiveFailures, string? LastError) GetTeamsHealth() =>
-        (_consecutiveTeamsFailures, _lastTeamsError);
+    public (int ConsecutiveFailures, string? LastError) GetTeamsHealth() => ChannelHealth(NotificationRouter.TeamsChannel);
 
-    public (int ConsecutiveFailures, string? LastError) GetSlackHealth() =>
-        (_consecutiveSlackFailures, _lastSlackError);
+    public (int ConsecutiveFailures, string? LastError) GetSlackHealth() => ChannelHealth(NotificationRouter.SlackChannel);
 
-    public (int ConsecutiveFailures, string? LastError) GetGenericHealth() =>
-        (_consecutiveGenericFailures, _lastGenericError);
+    public (int ConsecutiveFailures, string? LastError) GetGenericHealth() => ChannelHealth(NotificationRouter.GenericChannel);
 
-    public (int ConsecutiveFailures, string? LastError) GetPagerDutyHealth() =>
-        (_consecutivePagerDutyFailures, _lastPagerDutyError);
+    public (int ConsecutiveFailures, string? LastError) GetPagerDutyHealth() => ChannelHealth(NotificationRouter.PagerDutyChannel);
+
+    /// <summary>One channel's worst destination: the highest failures in a row among the channel's destinations, with
+    /// that destination's last error, or (0, null) when none of them is failing.</summary>
+    private (int ConsecutiveFailures, string? LastError) ChannelHealth(string channel)
+    {
+        (int ConsecutiveFailures, string? LastError) worst = (0, null);
+        foreach (var (key, health) in _destinationHealth)
+        {
+            var failures = Volatile.Read(ref health.Failures);
+            if (key.Channel == channel && failures > worst.ConsecutiveFailures)
+            {
+                worst = (failures, health.LastError);
+            }
+        }
+
+        return worst;
+    }
 
     /// <summary>
     /// The failures in a row at which a webhook channel counts as failing (#4750). It is the count the
@@ -606,48 +622,65 @@ public partial class WebhookAlertService
     public const int FailingChannelThreshold = 3;
 
     /// <summary>
-    /// Every channel's failures in a row (#4750), for the hosts' "a channel keeps failing" signal: a channel
-    /// can fail for weeks while another one delivers every alert, and until this the counts were read only by
-    /// tests. The COUNT only, deliberately not the last error: a webhook error can carry the endpoint's URL,
-    /// and a Slack or Teams webhook URL is the credential, so nothing built from this can leak it. A channel
-    /// that never failed, or that delivered since its last failure, reads 0. Names are the
-    /// <see cref="NotificationRouter"/> channel names.
+    /// Every webhook destination's failures in a row (#4750), for the hosts' "a channel keeps failing" signal: a
+    /// destination can fail for weeks while another one delivers every alert. The COUNT only, deliberately not the
+    /// last error: a webhook error can carry the endpoint's URL, and a Slack or Teams webhook URL is the credential,
+    /// so nothing built from this can leak it. A destination that never failed, or that delivered since its last
+    /// failure, reads 0. Names are the <see cref="NotificationRouter"/> channel names.
     ///
-    /// <para><b>A channel with no destination left.</b> Turning a failing channel off is the expected response
-    /// to the signal, and a channel with nothing to send to can neither fail nor deliver, so its count would sit
-    /// at its last value until the process restarted and the signal would never close. Each count therefore
-    /// says whether the channel is still <see cref="WebhookChannelFailureCount.Configured"/>: the parent's
-    /// settings carry a destination, or an enabled route does
-    /// (<see cref="NotificationRouter.AnyRouteConfiguresWebhookChannel"/>; Lite's routes count too since #5750, read
-    /// from the cache, which the dispatcher-thread status timer reaches without loading). For a channel with none, this returns that channel's CURRENT count with Configured
-    /// false, so the host can close what it announced, and THEN resets the count to 0 and clears the last
-    /// error, as a delivery does. A channel that is turned back on starts from zero, and does not raise the
-    /// signal at once on a count from before it was turned off. So the read is not idempotent for a channel
-    /// with no destination: the second read of it returns 0.</para>
+    /// <para><b>One entry per destination.</b> The four channels' settings-row destinations are always listed
+    /// (<see cref="WebhookChannelFailureCount.RouteId"/> null), and a route's destination is listed once a send has
+    /// gone to it. Two routes can point one channel at two destinations, and a delivery to one says nothing about the
+    /// other, so each is counted and judged on its own, and a host keys its memory of what it announced by
+    /// <see cref="WebhookChannelFailureCount.Key"/>.</para>
+    ///
+    /// <para><b>A destination that is gone.</b> Turning a failing destination off is the expected response to the
+    /// signal, and a destination with nothing to send to can neither fail nor deliver, so its count would sit at its
+    /// last value until the process restarted and the signal would never close. Each entry therefore says whether
+    /// its destination is still <see cref="WebhookChannelFailureCount.Configured"/>: the settings row carries it
+    /// (enabled, with a URL or key), or its route still names it and can match
+    /// (<see cref="NotificationRouter.RouteConfiguresWebhookChannel"/>; Lite's routes are read from the cache, which
+    /// the dispatcher-thread status timer reaches without loading). A destination with none is returned with its
+    /// CURRENT count and Configured false, so the host can close what it announced, and is THEN forgotten: a
+    /// destination that is turned back on starts from zero, and does not raise the signal at once on a count from
+    /// before it was turned off. So the read is not idempotent for a destination that is gone: the second read of a
+    /// settings-row destination returns 0, and a route's destination is no longer listed.</para>
     /// </summary>
-    public IReadOnlyList<WebhookChannelFailureCount> GetChannelFailureCounts() => new[]
+    public IReadOnlyList<WebhookChannelFailureCount> GetChannelFailureCounts()
     {
-        ChannelFailureCount(NotificationRouter.TeamsChannel, TeamsConfigured, ref _consecutiveTeamsFailures, ref _lastTeamsError),
-        ChannelFailureCount(NotificationRouter.SlackChannel, SlackConfigured, ref _consecutiveSlackFailures, ref _lastSlackError),
-        ChannelFailureCount(NotificationRouter.GenericChannel, GenericConfigured, ref _consecutiveGenericFailures, ref _lastGenericError),
-        ChannelFailureCount(NotificationRouter.PagerDutyChannel, PagerDutyConfigured, ref _consecutivePagerDutyFailures, ref _lastPagerDutyError),
-    };
-
-    /// <summary>One channel's entry for <see cref="GetChannelFailureCounts"/>: a configured channel reports its
-    /// count; one with no destination reports its current count as unconfigured and clears its tallies.</summary>
-    private WebhookChannelFailureCount ChannelFailureCount(
-        string channel, bool settingsConfigured, ref int failures, ref string? lastError)
-    {
-        var configured = settingsConfigured
-            || NotificationRouter.AnyRouteConfiguresWebhookChannel(_settings.NotificationRoutes, channel);
-        if (configured)
+        var counts = new List<WebhookChannelFailureCount>
         {
-            return new WebhookChannelFailureCount(channel, Volatile.Read(ref failures), Configured: true);
+            DestinationFailureCount(NotificationRouter.TeamsChannel, null, TeamsConfigured),
+            DestinationFailureCount(NotificationRouter.SlackChannel, null, SlackConfigured),
+            DestinationFailureCount(NotificationRouter.GenericChannel, null, GenericConfigured),
+            DestinationFailureCount(NotificationRouter.PagerDutyChannel, null, PagerDutyConfigured),
+        };
+
+        var routes = _settings.NotificationRoutes;
+        foreach (var (channel, routeId) in _destinationHealth.Keys
+                     .Where(k => k.RouteId is not null)
+                     .OrderBy(k => k.Channel, StringComparer.Ordinal)
+                     .ThenBy(k => k.RouteId))
+        {
+            counts.Add(DestinationFailureCount(channel, routeId, NotificationRouter.RouteConfiguresWebhookChannel(routes, routeId!.Value, channel)));
         }
 
-        var count = Interlocked.Exchange(ref failures, 0);
-        lastError = null;
-        return new WebhookChannelFailureCount(channel, count, Configured: false);
+        return counts;
+    }
+
+    /// <summary>One destination's entry for <see cref="GetChannelFailureCounts"/>: a configured destination reports its
+    /// count; one that is gone reports its current count as unconfigured and is forgotten.</summary>
+    private WebhookChannelFailureCount DestinationFailureCount(string channel, int? routeId, bool configured)
+    {
+        var key = (channel, routeId);
+        if (configured)
+        {
+            var count = _destinationHealth.TryGetValue(key, out var health) ? Volatile.Read(ref health.Failures) : 0;
+            return new WebhookChannelFailureCount(channel, count, Configured: true, routeId);
+        }
+
+        var last = _destinationHealth.TryRemove(key, out var removed) ? removed.Failures : 0;
+        return new WebhookChannelFailureCount(channel, last, Configured: false, routeId);
     }
 }
 

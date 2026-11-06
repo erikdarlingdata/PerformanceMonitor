@@ -411,7 +411,7 @@ public sealed class NotificationChannelFailingTests
         await live.Evaluator.ApplyNotificationChannelsAsync(Ct);
         Assert.Single(live.Rig.Deliverer.Outcomes);
 
-        var slack = live.Webhooks.GetChannelFailureCounts().Single(c => c.Channel == NotificationRouter.SlackChannel);
+        var slack = live.Webhooks.GetChannelFailureCounts().Single(c => c.Channel == NotificationRouter.SlackChannel && c.RouteId == 1);
         Assert.True(slack.Configured);
         Assert.Equal(3, slack.ConsecutiveFailures);
 

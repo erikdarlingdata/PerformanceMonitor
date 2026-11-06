@@ -1076,9 +1076,10 @@ internal sealed class DarlingSelfAlertEvaluator
 
     private const string ComposeHoursStuckKey = "querystore";
 
-    /* Notification Channel Failing edge state (#4750). FLEET-level, MULTI-keyed by channel name (Teams, Slack,
-       Generic, PagerDuty). A webhook channel counts its own failures in a row and logs the first few, but
-       nothing else showed it, so a channel could fail for weeks while another one delivered every alert.
+    /* Notification Channel Failing edge state (#4750). FLEET-level, MULTI-keyed by destination
+       (WebhookChannelFailureCount.Key: the channel name for the settings row's destination, the channel name and
+       route id for a route's). A webhook destination counts its own failures in a row and logs the first few, but
+       nothing else showed it, so a destination could fail for weeks while another one delivered every alert.
        Unlike Raw Purge Over Horizon this is an EDGE, not a standing condition: it fires once when a
        channel's count first reaches WebhookAlertService.FailingChannelThreshold, does not repeat while the
        count stays there or climbs, and writes one resolution when the count is back at 0 or when the channel
@@ -8637,46 +8638,51 @@ WHERE c.is_enabled";
             return;
         }
 
+        /* One entry per destination: the channel's settings-row destination, and each route's own. The memory and the
+           alert key are the entry's Key, so two routes pointing one channel at two destinations are two alerts, and the
+           text names the route (Label), never the URL. */
         foreach (var channel in _webhookChannelFailures())
         {
             var name = channel.Channel;
+            var key = channel.Key;
+            var label = channel.Label;
             var count = channel.ConsecutiveFailures;
-            var wasFailing = _activeNotificationChannelFailing.TryGetValue(name, out var active) && active;
+            var wasFailing = _activeNotificationChannelFailing.TryGetValue(key, out var active) && active;
 
             switch (WebhookChannelFailurePolicy.Decide(wasFailing, count, channel.Configured))
             {
                 case WebhookChannelNotice.Failing:
-                    _activeNotificationChannelFailing[name] = true;
+                    _activeNotificationChannelFailing[key] = true;
                     await FireAsync(
-                        StoreKey(NotificationChannelKeyPrefix + name), _storeLabel, NotificationChannelFailingMetric,
+                        StoreKey(NotificationChannelKeyPrefix + key), _storeLabel, NotificationChannelFailingMetric,
                         $"{count} failures in a row", $"{WebhookAlertService.FailingChannelThreshold} failures in a row",
-                        detail: $"The {name} webhook channel has failed {count} times in a row, so alerts sent to " +
-                            $"{name} are not arriving there. The other channels are not affected. The service log's " +
+                        detail: $"The {label} webhook channel has failed {count} times in a row, so alerts sent to " +
+                            $"{label} are not arriving there. The other channels are not affected. The service log's " +
                             $"'{name.ToUpperInvariant()} WEBHOOK FAILED' lines name the error for each failure. This " +
                             "is stated once; a 'Notification Channel Recovered' entry follows when the channel " +
                             "delivers again.",
                         severity: AlertSeverityLevel.Warning,
-                        shortMessage: $"{name} webhook failed {count} times in a row",
+                        shortMessage: $"{label} webhook failed {count} times in a row",
                         numericCurrentValue: count,
                         numericThresholdValue: WebhookAlertService.FailingChannelThreshold,
                         cancellationToken);
                     break;
 
                 case WebhookChannelNotice.Recovered:
-                    _activeNotificationChannelFailing.TryRemove(name, out _);
+                    _activeNotificationChannelFailing.TryRemove(key, out _);
                     await RecordResolutionAsync(new AlertResolution(
-                        StoreKey(NotificationChannelKeyPrefix + name), _storeLabel, NotificationChannelFailingMetric,
+                        StoreKey(NotificationChannelKeyPrefix + key), _storeLabel, NotificationChannelFailingMetric,
                         NotificationChannelRecoveredMetric,
-                        $"{_storeLabel}: the {name} webhook channel is delivering again (failures in a row back to 0)"),
+                        $"{_storeLabel}: the {label} webhook channel is delivering again (failures in a row back to 0)"),
                         cancellationToken);
                     break;
 
                 case WebhookChannelNotice.TurnedOff:
-                    _activeNotificationChannelFailing.TryRemove(name, out _);
+                    _activeNotificationChannelFailing.TryRemove(key, out _);
                     await RecordResolutionAsync(new AlertResolution(
-                        StoreKey(NotificationChannelKeyPrefix + name), _storeLabel, NotificationChannelFailingMetric,
+                        StoreKey(NotificationChannelKeyPrefix + key), _storeLabel, NotificationChannelFailingMetric,
                         NotificationChannelRecoveredMetric,
-                        $"{_storeLabel}: the {name} webhook channel was turned off (no destination is configured for it)"),
+                        $"{_storeLabel}: the {label} webhook channel was turned off (no destination is configured for it)"),
                         cancellationToken);
                     break;
             }

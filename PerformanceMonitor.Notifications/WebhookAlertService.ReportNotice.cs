@@ -48,15 +48,17 @@ public partial class WebhookAlertService : IReportNoticeSends
             return $"{channel} does not carry a report notice";
         }
 
+        int? routeId = null;
         try
         {
             var settings = _settings.SnapshotForDelivery();
+            routeId = RouteIdOfDestination(settings, channel, destination);
             var slack = channel == NotificationRouter.SlackChannel;
             var payload = slack ? BuildReportNoticeSlackPayload(content, _branding) : BuildReportNoticeTeamsPayload(content);
             var error = await PostWebhookAsync(
                 destination, payload, slack ? settings.SlackProxyAddress : settings.TeamsProxyAddress,
                 cancellationToken: cancellationToken, bodyLog: _logger);
-            RecordReportNoticeHealth(slack, error);
+            RecordReportNoticeHealth(channel, routeId, error);
             return error;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -65,28 +67,29 @@ public partial class WebhookAlertService : IReportNoticeSends
         }
         catch (Exception ex)
         {
-            RecordReportNoticeHealth(channel == NotificationRouter.SlackChannel, ex.Message);
+            RecordReportNoticeHealth(channel, routeId, ex.Message);
             return ex.Message;
         }
     }
 
     /// <summary>
-    /// #6979: a notice send counts toward the channel's health as an alert send does (the consecutive-failure count and the last
-    /// error that <see cref="GetChannelFailureCounts"/> serves, which the "Notification Channel Failing" self-alert reads).
+    /// #6979: a notice send counts toward its destination's health as an alert send does (the consecutive-failure count and the
+    /// last error that <see cref="GetChannelFailureCounts"/> serves, which the "Notification Channel Failing" self-alert reads).
     /// It logs nothing: the caller logs a failed notice once, with the request id, the channel and the error.
     /// </summary>
-    private void RecordReportNoticeHealth(bool slack, string? error)
+    private void RecordReportNoticeHealth(string channel, int? routeId, string? error)
     {
-        if (slack)
+        var health = HealthOf(channel, routeId);
+        if (error is null)
         {
-            _consecutiveSlackFailures = error is null ? 0 : _consecutiveSlackFailures + 1;
-            _lastSlackError = error;
+            Interlocked.Exchange(ref health.Failures, 0);
         }
         else
         {
-            _consecutiveTeamsFailures = error is null ? 0 : _consecutiveTeamsFailures + 1;
-            _lastTeamsError = error;
+            Interlocked.Increment(ref health.Failures);
         }
+
+        health.LastError = error;
     }
 
     /// <summary>

@@ -58,13 +58,13 @@ public partial class WebhookAlertService
 
             /* #6928: routed at each severity the fire went out at, so the close lands on the key each fire's route carried, not on a
                route the severity filter would send another tier to. */
-            var keys = new List<string>();
+            var keys = new List<(string Key, int? RouteId)>();
             foreach (var severity in firedSeverities.Count == 0 ? new AlertSeverityLevel?[] { null } : firedSeverities)
             {
                 var route = NotificationRouter.Resolve(firingMetric, delivery.NotificationRoutes, delivery, NotificationRouter.ParseServerId(serverId), severity);
-                if (route.PagerDuty.Destination is { } pagerDutyKey && !keys.Contains(pagerDutyKey, StringComparer.Ordinal))
+                if (route.PagerDuty.Destination is { } pagerDutyKey && !keys.Any(k => string.Equals(k.Key, pagerDutyKey, StringComparison.Ordinal)))
                 {
-                    keys.Add(pagerDutyKey);
+                    keys.Add((pagerDutyKey, route.PagerDuty.RouteId));
                 }
             }
 
@@ -74,10 +74,10 @@ public partial class WebhookAlertService
             }
 
             var failed = false;
-            foreach (var pagerDutyKey in keys)
+            foreach (var (pagerDutyKey, routeId) in keys)
             {
                 var error = await TrySendPagerDutyAlertAsync(
-                    delivery, autoResolve: true, pagerDutyKey, firingMetric, serverName, "resolved", "", serverId,
+                    delivery, autoResolve: true, pagerDutyKey, routeId, firingMetric, serverName, "resolved", "", serverId,
                     context: null, triageUrl: null, detailText, _utcNow(), displayName: null,
                     resolveIncident: true, cancellationToken: cancellationToken);
                 if (error is null)
@@ -129,13 +129,15 @@ public partial class WebhookAlertService
         var serverName = facts.ServerName;
         var triageUrl = facts.TriageUrl;
         var now = facts.ClearedAtUtc;
+        /* The destination's health entry is the route that sets it, found by destination as the signing keys below are. */
+        var routeId = RouteIdOfDestination(delivery, channel, destination);
         return channel switch
         {
             NotificationRouter.TeamsChannel => await TrySendTeamsAlertAsync(
-                delivery, destination, title, serverName, "resolved", "", context: null, triageUrl, detailText, now,
+                delivery, destination, routeId, title, serverName, "resolved", "", context: null, triageUrl, detailText, now,
                 displayName: null, cancellationToken),
             NotificationRouter.SlackChannel => await TrySendSlackAlertAsync(
-                delivery, destination, title, serverName, "resolved", "", context: null, triageUrl, detailText, now,
+                delivery, destination, routeId, title, serverName, "resolved", "", context: null, triageUrl, detailText, now,
                 displayName: null, cancellationToken),
             /* #5998: a resolution names its destination, not its route, so its keys are found by URL. A destination that
                matches no configured generic URL while a signing key would not open may be the one whose key failed: it is
@@ -148,7 +150,7 @@ public partial class WebhookAlertService
             NotificationRouter.GenericChannel when genericDedupKey is null =>
                 GenericResolutionWithoutKeyText,
             NotificationRouter.GenericChannel => await TrySendGenericAlertAsync(
-                delivery, destination, title, serverName, "resolved", "", serverId, context: null, triageUrl, detailText, now,
+                delivery, destination, routeId, title, serverName, "resolved", "", serverId, context: null, triageUrl, detailText, now,
                 cancellationToken: cancellationToken, signing: GenericSigningFor(delivery, routeId: null, destination),
                 status: GenericStatusResolved,
                 dedupKeyOverride: genericDedupKey),
@@ -166,13 +168,14 @@ public partial class WebhookAlertService
     {
         var delivery = _settings.SnapshotForDelivery();
         var now = _utcNow();
+        var routeId = RouteIdOfDestination(delivery, channel, destination);
         return channel switch
         {
             NotificationRouter.TeamsChannel => await TrySendTeamsAlertAsync(
-                delivery, destination, title, serverName, currentValue, "", context: null, triageUrl: null, detailText, now,
+                delivery, destination, routeId, title, serverName, currentValue, "", context: null, triageUrl: null, detailText, now,
                 displayName: null, cancellationToken),
             NotificationRouter.SlackChannel => await TrySendSlackAlertAsync(
-                delivery, destination, title, serverName, currentValue, "", context: null, triageUrl: null, detailText, now,
+                delivery, destination, routeId, title, serverName, currentValue, "", context: null, triageUrl: null, detailText, now,
                 displayName: null, cancellationToken),
             _ => $"{channel} does not carry a notice",
         };
@@ -226,8 +229,10 @@ public partial class WebhookAlertService
         string routingKey, string dedupKey, string firingMetric, string serverName, string serverId, string? detailText,
         CancellationToken cancellationToken = default)
     {
+        var delivery = _settings.SnapshotForDelivery();
         var error = await TrySendPagerDutyAlertAsync(
-            _settings.SnapshotForDelivery(), autoResolve: true, routingKey, firingMetric, serverName, "resolved", "", serverId,
+            delivery, autoResolve: true, routingKey, RouteIdOfDestination(delivery, NotificationRouter.PagerDutyChannel, routingKey),
+            firingMetric, serverName, "resolved", "", serverId,
             context: null, triageUrl: null, detailText, _utcNow(), displayName: null,
             resolveIncident: true, dedupKeyOverride: dedupKey, cancellationToken: cancellationToken);
         if (error is null)
@@ -246,6 +251,7 @@ public partial class WebhookAlertService
         IAlertSettings settings,
         bool autoResolve,
         string routingKey,
+        int? routeId,
         string metricName,
         string serverName,
         string currentValue,
@@ -289,11 +295,11 @@ public partial class WebhookAlertService
 
             if (error != null)
             {
-                RecordChannelFailure(ref _consecutivePagerDutyFailures, ref _lastPagerDutyError, "PagerDuty", error);
+                RecordChannelFailure(NotificationRouter.PagerDutyChannel, routeId, error);
                 return error;
             }
 
-            RecordChannelRecovered(ref _consecutivePagerDutyFailures, ref _lastPagerDutyError, "PagerDuty");
+            RecordChannelRecovered(NotificationRouter.PagerDutyChannel, routeId);
             _logger.LogInformation($"PagerDuty webhook sent for {metricName} on {serverName}");
             return null;
         }
@@ -304,7 +310,7 @@ public partial class WebhookAlertService
         }
         catch (Exception ex)
         {
-            RecordChannelException(ref _consecutivePagerDutyFailures, ref _lastPagerDutyError, "PagerDuty", ex);
+            RecordChannelException(NotificationRouter.PagerDutyChannel, routeId, ex);
             return ex.Message;
         }
     }

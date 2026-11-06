@@ -32,6 +32,7 @@ public partial class WebhookAlertService
     private async Task<string?> TrySendGenericAlertAsync(
         IAlertSettings settings,
         string webhookUrl,
+        int? routeId,
         string metricName,
         string serverName,
         string currentValue,
@@ -54,7 +55,7 @@ public partial class WebhookAlertService
                report a channel that is delivering nothing, and it must never throw into the alert loop. */
             if (!TryParseHeaders(settings.GenericWebhookHeadersJson, out var headers, out var headerError))
             {
-                RecordGenericFailure(headerError!);
+                RecordGenericFailure(routeId, headerError!);
                 return headerError;
             }
 
@@ -74,7 +75,7 @@ public partial class WebhookAlertService
 
             if (!IsWellFormedJson(payload, out var bodyError))
             {
-                RecordGenericFailure(bodyError!);
+                RecordGenericFailure(routeId, bodyError!);
                 return bodyError;
             }
 
@@ -96,11 +97,11 @@ public partial class WebhookAlertService
 
             if (error != null)
             {
-                RecordGenericFailure(error);
+                RecordGenericFailure(routeId, error);
                 return error;
             }
 
-            RecordChannelRecovered(ref _consecutiveGenericFailures, ref _lastGenericError, "Generic");
+            RecordChannelRecovered(NotificationRouter.GenericChannel, routeId);
             _logger.LogInformation($"Generic webhook sent for {metricName} on {serverName}");
             return null;
         }
@@ -111,7 +112,7 @@ public partial class WebhookAlertService
         }
         catch (Exception ex)
         {
-            RecordChannelException(ref _consecutiveGenericFailures, ref _lastGenericError, "Generic", ex);
+            RecordChannelException(NotificationRouter.GenericChannel, routeId, ex);
             return ex.Message;
         }
     }
@@ -208,8 +209,8 @@ public partial class WebhookAlertService
     }
 
     /* The generic channel fails from three places (headers, body, transport); each records through the shared helper. */
-    private void RecordGenericFailure(string error) =>
-        RecordChannelFailure(ref _consecutiveGenericFailures, ref _lastGenericError, "Generic", error);
+    private void RecordGenericFailure(int? routeId, string error) =>
+        RecordChannelFailure(NotificationRouter.GenericChannel, routeId, error);
 
     /// <summary>
     /// Substitutes the alert's values into the operator's JSON body template. Every placeholder expands to
