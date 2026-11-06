@@ -919,7 +919,7 @@ public static partial class DarlingWebEndpoints
             /* ── core data reads (DarlingMcpDataTools + long-query / fleet tools) ── */
             ["get_collection_health"] = R(CatData, "Per-collector collection health for a server. server=* with collector_name answers for that one collector on every enabled server (hours: default 24).", PServer(), PText("collector_name")),
             ["get_collection_log"] = R(CatData, "Raw per-run collector log for a server, newest first — or slowest first when min_duration_ms is supplied.", PServer(), PHours(24), PLimit(200), PAsOf(), PText("collector_name"), PDouble("min_duration_ms"), PText("status")),
-            ["get_current_waits_trend"] = R(CatData, "Waiting-task and blocked-session series over time.", PServer(), PHours(4), PDatabases(), PAsOf()),
+            ["get_current_waits_trend"] = R(CatData, "Waiting-task and blocked-session series over time, in time buckets.", PServer(), PHours(4), PDatabases(), PAsOf(), PInt("bucket_minutes")),
             ["get_client_timeouts"] = R(CatData, "Client-timeout (attention) counts, rate and top databases, applications and statements over the window, with the newest sampled events (#5640).", PServer(), PHours(1), PLimit(20), PAsOf()),
             ["get_blocking_stats"] = R(CatData, "Blocking duration and deadlock severity per minute.", PServer(), PHours(24), PDatabases(), PAsOf()),
             ["get_cpu_utilization"] = R(CatData, "CPU utilization over time.", PServer(), PHours(4), PAsOf(), PInt("bucket_minutes")),
@@ -1606,9 +1606,10 @@ public static partial class DarlingWebEndpoints
     };
 
     /// <summary>The 400 sentence for a personal view a session cannot own (#6214): a session that names a person (a cookie from before
-    /// owner keys existed) signs in again; one with no person at all has none to give.</summary>
+    /// owner keys existed) signs in again; one with no person at all (the shared token, or a named web token, which is not a person and
+    /// never gets an owner key) has none to give.</summary>
     internal static string NoOwnerKeyMessage(DarlingWebSeat seat) =>
-        seat.Subject is null ? CustomViewStore.NoIdentityMessage : CustomViewStore.SignInAgainMessage;
+        seat.Subject is null || seat.TokenName is not null ? CustomViewStore.NoIdentityMessage : CustomViewStore.SignInAgainMessage;
 
     /// <summary>The bare-array list wire shape (no definition body). Carries the view <c>kind</c> — always
     /// concrete (<c>"dashboard"</c> when the stored definition declares none) so the list page/sidebar can badge
