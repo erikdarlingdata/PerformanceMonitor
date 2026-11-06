@@ -48,6 +48,38 @@ public static class QueryStoreSelfStatement
     /// no second probe, and usable inside a constant SQL string.</summary>
     public const string SelfOfStoredText = Open + "x.query_sql_text" + Close + " > 0";
 
+    /// <summary>
+    /// #7730 on the read side: the key-table test, true for the monitor's own statement (the marker, or an old statement, which the key
+    /// triggers and the backfill record). <c>x</c> is the <c>query_store_text</c> row the read already probes by key. It reads no text
+    /// and probes the key table's primary key.
+    /// </summary>
+    public const string SelfOfStoredKey = "EXISTS (SELECT 1 FROM " + QueryStoreSelfKeys.TableName + " AS sk WHERE sk.server_id = x.server_id AND sk.database_name = x.database_name AND sk.query_id = x.query_id)";
+
+    /// <summary>
+    /// #7730: <paramref name="sql"/> with <see cref="SelfOfStoredText"/> replaced by <see cref="SelfOfStoredKey"/>, for the reads that
+    /// probe <c>query_store_text AS x</c> by key (the aborts read, the plan-regression fact, the regressed-queries drill-down and the
+    /// regression targets). The caller passes it only when <see cref="QueryStoreSelfKeys.ReadyAsync"/> answered true, because before
+    /// the backfill the key table misses the text stored earlier and the marker-only text test is the safe form. The key table holds the
+    /// marker keys too, so the replaced test hides everything the text test hid, and the old statements besides.
+    /// </summary>
+    public static string WithStoredTextKeyTest(string sql)
+    {
+        ArgumentNullException.ThrowIfNull(sql);
+        return sql.Replace(SelfOfStoredText, SelfOfStoredKey, StringComparison.Ordinal);
+    }
+
+    /// <summary>The slot in a read that compares two windows by hash (the Viewer's Query Store comparison), kept in each window's
+    /// stats CTE, ahead of the top-100 cut that decides which hashes the comparison lists.</summary>
+    public const string ComparisonStatsSlot = "/*SELFKEY:stats*/";
+
+    /// <summary>#7730: <paramref name="sql"/> with the key-table test in each <see cref="ComparisonStatsSlot"/>, for a store whose backfill
+    /// has run. The tail's text test stays for the marker texts of a store the backfill has not reached.</summary>
+    public static string WithComparisonKeyTest(string sql)
+    {
+        ArgumentNullException.ThrowIfNull(sql);
+        return sql.Replace(ComparisonStatsSlot, "AND   " + NotSelfOfKey("$1", "query_store_stats.database_name", "query_store_stats.query_id"), StringComparison.Ordinal);
+    }
+
     /// <summary>The predicate over a text expression the read has already resolved.</summary>
     public static string NotSelfOfText(string textExpression)
     {
@@ -67,7 +99,8 @@ public static class QueryStoreSelfStatement
     /// #7730: the marker test OR the old-statement test (<see cref="SqlServerOwnStatement"/>) over a text expression, true for a
     /// statement the monitor sent: one that carries the marker, or one of the closed list of texts that builds before #7463 sent
     /// with no marker. The old-statement test is the whole text with its ASCII whitespace removed, hashed and compared with the list's
-    /// digests, behind a length bound so a large text is never run through the regular expression. The expression is repeated, so it
+    /// digests, behind a length bound so a large text is never run through the regular expression, and behind
+    /// <see cref="SqlServerOwnStatement.RawPrefilter"/> so a text that names no Query Store view skips the regular expression and the hash. The expression is repeated, so it
     /// is for a column reference (the key triggers and the backfill), not a subquery. NULL is not the monitor's own (every branch
     /// tests <c>COALESCE(text, '')</c>).
     /// </summary>
@@ -78,6 +111,7 @@ public static class QueryStoreSelfStatement
         var digests = string.Join(", ", System.Linq.Enumerable.Select(SqlServerOwnStatement.StrippedDigests, d => "'" + d + "'"));
         return "(" + Open + textExpression + Close + " > 0 OR (length(" + text + ") <= "
             + SqlServerOwnStatement.MaxRawLength.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            + " AND strpos(" + text + ", '" + SqlServerOwnStatement.RawPrefilter + "') > 0"
             + " AND encode(sha256(convert_to(regexp_replace(" + text + ", '" + SqlServerOwnStatement.WhitespaceClassForPostgres + "+', '', 'g'), 'UTF8')), 'hex') IN (" + digests + ")))";
     }
 

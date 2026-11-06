@@ -42,6 +42,22 @@ public sealed class SqlServerOwnStatementTests
         }
     }
 
+    /// <summary>#7749: the cheap test in front of the whole-text test (<see cref="SqlServerOwnStatement.RawPrefilter"/>, which the
+    /// trigger and the backfill run with <c>strpos</c> before the regular expression) must pass every entry, or an old statement would
+    /// never be keyed. A near-miss that lacks the word as written is still nowhere near the list.</summary>
+    [Fact]
+    public void EveryOldText_PassesThePrefilter_AndANearMissWithoutItIsNotOld()
+    {
+        foreach (var text in SqlServerOwnStatement.OldTexts)
+        {
+            Assert.Contains(SqlServerOwnStatement.RawPrefilter, text, StringComparison.Ordinal);
+            Assert.True(SqlServerOwnStatement.IsOldStatement(text));
+            var nearMiss = text.Replace(SqlServerOwnStatement.RawPrefilter, "query_stor_e", StringComparison.Ordinal);
+            Assert.NotEqual(text, nearMiss);
+            Assert.False(SqlServerOwnStatement.IsOldStatement(nearMiss));
+        }
+    }
+
     [Fact]
     public void ATextOneTokenOff_OrWithSomethingAdded_IsNotRecognized()
     {

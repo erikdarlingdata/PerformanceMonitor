@@ -1306,8 +1306,12 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
         }
 
         var readsDays = builtDays.Count > 0;
+        /* #7730: the key table's test in place of the marker-only text test once its backfill has run (as the fact's read does). */
+        var regressedSql = await QueryStoreSelfKeys.WithStoredTextKeyTestWhenReadyAsync(
+            connection, readsDays ? snapshot : null, DrillDownCommandTimeoutSeconds,
+            readsDays ? RegressedQueriesDailySql : readsTable ? RegressedQueriesTableSql : RegressedQueriesSql, context.CancellationToken);
         using var cmd = new NpgsqlCommand(
-            readsDays ? RegressedQueriesDailySql : readsTable ? RegressedQueriesTableSql : RegressedQueriesSql,
+            regressedSql,
             connection,
             /* A failed built-days read leaves the snapshot aborted, so the table read runs without it. */
             readsDays ? snapshot : null) { CommandTimeout = DrillDownCommandTimeoutSeconds };

@@ -742,6 +742,7 @@ public sealed partial class ViewerDataService
             WHERE server_id = $1
             AND   collection_time >= $2 AND collection_time <= $3
             AND   ($6::text[] IS NULL OR database_name = ANY($6))
+            /*SELFKEY:stats*/
         ),
         deduped_baseline AS (
             SELECT
@@ -764,6 +765,7 @@ public sealed partial class ViewerDataService
             WHERE server_id = $1
             AND   collection_time >= $4 AND collection_time <= $5
             AND   ($6::text[] IS NULL OR database_name = ANY($6))
+            /*SELFKEY:stats*/
         ),
         top_current AS (
             SELECT database_name, query_hash
@@ -883,7 +885,13 @@ public sealed partial class ViewerDataService
     {
         var items = new List<QueryStatsComparisonItem>();
 
-        await using var command = _dataSource.CreateCommand(QueryStoreComparisonSql);
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        /* #7730: the key table's test ahead of each window's top-100 cut once its backfill has run; the tail's text test stays for the
+           marker texts of a store the backfill has not reached. */
+        var comparisonSql = await QueryStoreSelfKeys.ReadyAsync(connection, null, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken)
+            ? QueryStoreSelfStatement.WithComparisonKeyTest(QueryStoreComparisonSql)
+            : QueryStoreComparisonSql;
+        await using var command = new Npgsql.NpgsqlCommand(comparisonSql, connection);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddComparisonParameters(command, serverId, currentStart, currentEnd, baselineStart, baselineEnd);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));

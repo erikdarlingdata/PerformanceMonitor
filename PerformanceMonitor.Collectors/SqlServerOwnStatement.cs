@@ -99,6 +99,16 @@ OPTION(RECOMPILE)";
         ForcedPlansObjectIdUpdate,
     ];
 
+    /// <summary>
+    /// The cheap test in front of the whole-text test (#7749): every entry reads a <c>sys.query_store_*</c> or
+    /// <c>sys.database_query_store_options</c> view, so every entry contains this word as written, and a text without it is not an old
+    /// statement. The Postgres test (<c>QueryStoreSelfStatement.SelfOrOldOfText</c>) applies it first with <c>strpos</c>, so the insert
+    /// trigger's WHEN and the backfill's table scan run the regular expression and the hash only over the few texts that name a Query
+    /// Store view, not over every text under the length bound. <see cref="IsOldStatement"/> applies it too, so the two agree. A test
+    /// checks that every entry passes it.
+    /// </summary>
+    public const string RawPrefilter = "query_store";
+
     /// <summary>The Postgres regex class that matches exactly the characters <see cref="StripWhitespace"/> removes.</summary>
     public const string WhitespaceClassForPostgres = @"[ \t\n\r\f\v]";
 
@@ -140,7 +150,7 @@ OPTION(RECOMPILE)";
     /// <summary>True when <paramref name="text"/> is, whitespace aside, one of <see cref="OldTexts"/>.</summary>
     public static bool IsOldStatement(string? text)
     {
-        if (string.IsNullOrEmpty(text) || text.Length > MaxRawLength)
+        if (string.IsNullOrEmpty(text) || text.Length > MaxRawLength || !text.Contains(RawPrefilter, StringComparison.Ordinal))
         {
             return false;
         }

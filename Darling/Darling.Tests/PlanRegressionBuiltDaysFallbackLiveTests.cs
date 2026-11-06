@@ -443,6 +443,54 @@ public sealed class PlanRegressionBuiltDaysFallbackLiveTests
         Assert.Null(await ReadAsync());
     }
 
+    /// <summary>
+    /// #7730: a statement the monitor sent before #7463 carries no marker, so the marker-only text test lists it as an offender until
+    /// the reopened key backfill has run. With the gate closed the PLAN_REGRESSION fact and the regressed-queries drill-down still list
+    /// it (not vacuous); once the backfill has stamped the key table, the key-table test leaves it out of both reads.
+    /// </summary>
+    [Fact]
+    public async Task AnOldUnmarkedStatement_IsAnOffenderUntilTheBackfill_ThenLeftOutOfTheFactAndTheDrillDown()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #7730 test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        var (periodStart, periodEnd) = await SeedAndBuildAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        async Task<(int Facts, int DrillDown)> ReadAsync()
+        {
+            var fact = (await new PgFactCollector(postgres).CollectFactsAsync(NewContext(periodStart, periodEnd))).SingleOrDefault(f => f.Key == "PLAN_REGRESSION");
+            var finding = new AnalysisFinding { RootFactKey = "PLAN_REGRESSION", StoryPath = "PLAN_REGRESSION", PathKeys = ["PLAN_REGRESSION"], Severity = 1.0 };
+            await new PgDrillDownCollector(postgres).EnrichFindingsAsync([finding], NewContext(periodStart, periodEnd));
+            var drill = finding.DrillDown is not null && finding.DrillDown.TryGetValue("regressed_queries", out var raw)
+                ? System.Text.Json.JsonSerializer.SerializeToElement(raw).GetArrayLength()
+                : 0;
+            return (fact is null ? 0 : (int)fact.Metadata["offender_count"], drill);
+        }
+
+        await using (var old = new NpgsqlCommand(
+            "INSERT INTO collect.query_store_text (server_id, database_name, query_id, query_sql_text, last_seen) VALUES ($1, 'fallbackdb', 1, $2, $3)", connection))
+        {
+            old.Parameters.AddWithValue(ServerId);
+            old.Parameters.AddWithValue(PerformanceMonitor.Collectors.SqlServerOwnStatement.OldTexts[0]);
+            old.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, periodEnd);
+            await old.ExecuteNonQueryAsync(ct);
+        }
+
+        /* The gate is closed on a migrated store until the backfill runs (V248 deletes the state row), so the marker-only text test
+           lets the old statement through: one offender in the fact, one row in the drill-down. */
+        Assert.False(await QueryStoreSelfKeys.ReadyAsync(connection, null, 30, ct));
+        Assert.Equal((1, 1), await ReadAsync());
+
+        Assert.NotNull(await QueryStoreSelfKeys.BackfillAsync(connection, ct));
+        Assert.True(await QueryStoreSelfKeys.ReadyAsync(connection, null, 30, ct));
+        Assert.Equal((0, 0), await ReadAsync());
+    }
+
     private static List<CollectionFailure> PlanRegressionFailures(AnalysisContext context) =>
         context.CollectionFailures.Where(f => f.Family == "plan_regression").ToList();
 

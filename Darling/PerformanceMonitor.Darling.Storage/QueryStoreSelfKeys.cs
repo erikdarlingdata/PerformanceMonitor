@@ -156,6 +156,11 @@ CREATE TRIGGER " + UpdateTriggerName + @"
     /// sort stays so the insert goes into the key table's primary key in key order. A slower disk costs the random form far more
     /// than the sequential one (inferred, not measured). A parallel scan is not available, because <c>INSERT ... SELECT</c> gets no
     /// parallel plan.</para>
+    ///
+    /// <para><b>The timing above is for the marker-only test</b> (V219's), before #7730. The test now also recognizes the old statements
+    /// (<see cref="IsSelf"/>): a text under the length bound that contains <see cref="SqlServerOwnStatement.RawPrefilter"/> goes on to
+    /// <c>regexp_replace</c> and <c>sha256</c>, and every other text stops at the <c>strpos</c>. The prefilter keeps the added work to
+    /// the few texts that name a Query Store view. No timing of the new test has been taken.</para>
     /// </summary>
     public static readonly string BackfillSql = @"
 WITH m AS MATERIALIZED (
@@ -217,6 +222,17 @@ AND   NOT EXISTS (
         await using var command = new NpgsqlCommand(ReadySql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
         return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is true;
     }
+
+    /// <summary>
+    /// #7730: <paramref name="sql"/> with <see cref="QueryStoreSelfStatement.WithStoredTextKeyTest"/> applied once the backfill has run
+    /// (<see cref="ReadyAsync"/>), else as it is, with the marker-only text test. One gate for every read that tests
+    /// <see cref="QueryStoreSelfStatement.SelfOfStoredText"/>. The gate opens once and stays open (V248 closes it only inside the
+    /// migration), so a read that asks first and runs after never meets a half-filled table.
+    /// </summary>
+    public static async Task<string> WithStoredTextKeyTestWhenReadyAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction, int commandTimeoutSeconds, string sql, CancellationToken cancellationToken) =>
+        await ReadyAsync(connection, transaction, commandTimeoutSeconds, cancellationToken).ConfigureAwait(false)
+            ? QueryStoreSelfStatement.WithStoredTextKeyTest(sql)
+            : sql;
 
     /// <summary>Runs <see cref="BackfillSql"/> once, unless the state row already exists. Returns the keys it inserted, or
     /// null when the backfill had already run.</summary>
