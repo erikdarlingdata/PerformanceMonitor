@@ -454,7 +454,6 @@ public sealed class DarlingTlsKeyAccessTests
     [InlineData("S-1-5-19")] // LocalService
     [InlineData("S-1-5-18")] // LocalSystem
     [InlineData("S-1-5-20")] // NetworkService
-    [InlineData("S-1-5-80-1111-2222-3333-4444-5555")] // a per-service virtual account
     public void Run_AServiceIdentity_IsGranted_ThroughTheRealAccountLookup(string sid)
     {
         Assert.SkipWhen(!OperatingSystem.IsWindows(), "The account lookup is Windows only.");
@@ -503,9 +502,60 @@ public sealed class DarlingTlsKeyAccessTests
         }
     }
 
+    /// <summary>A mistyped NT SERVICE name resolves to a SID Windows makes from the name, so only the service registry can
+    /// refuse it (#7718): with no service by that name the command refuses, names the account and writes nothing.</summary>
+    [Theory]
+    [InlineData(@"NT SERVICE\EventLog")]
+    [InlineData("typed-as-sid")]
+    public void Run_APerServiceAccountWithNoRegisteredService_IsRefused_WithNoWrites(string account)
+    {
+        Assert.SkipWhen(!OperatingSystem.IsWindows(), "The account lookup is Windows only.");
+
+        var typed = account == "typed-as-sid" ? DarlingTlsKeyAccess.ServiceSid("EventLog").Value : account;
+        var rig = RunWithTheRealLookup(typed, out var target, out var certificate, new[] { "Spooler", "PerformanceMonitor" });
+        using (certificate)
+        {
+            Assert.Equal(1, rig.Code);
+            Assert.Equal(0, target.Writes);
+            Assert.Equal(0, rig.StoreReads);
+            Assert.Contains(typed, rig.Error.ToString(), StringComparison.Ordinal);
+            Assert.Contains("no service with that name is registered", rig.Error.ToString(), StringComparison.Ordinal);
+        }
+    }
+
+    [Theory]
+    [InlineData(@"NT SERVICE\EventLog")]
+    [InlineData(@"NT SERVICE\eventlog")]
+    [InlineData("typed-as-sid")]
+    public void Run_APerServiceAccountOfARegisteredService_IsStillGranted(string account)
+    {
+        Assert.SkipWhen(!OperatingSystem.IsWindows(), "The account lookup is Windows only.");
+
+        var typed = account == "typed-as-sid" ? DarlingTlsKeyAccess.ServiceSid("EventLog").Value : account;
+        var rig = RunWithTheRealLookup(typed, out var target, out var certificate, new[] { "Spooler", "EventLog" });
+        using (certificate)
+        {
+            Assert.Equal(0, rig.Code);
+            Assert.Equal(1, target.Writes);
+        }
+    }
+
+    /// <summary>The SID made from a service name is what Windows makes: the check is only as right as this.</summary>
+    [Theory]
+    [InlineData("Spooler")]
+    [InlineData("EventLog")]
+    public void ServiceSid_IsTheSidWindowsMakesForTheName(string service)
+    {
+        Assert.SkipWhen(!OperatingSystem.IsWindows(), "The account lookup is Windows only.");
+
+        var windows = (SecurityIdentifier)new NTAccount(@"NT SERVICE\" + service).Translate(typeof(SecurityIdentifier));
+
+        Assert.Equal(windows, DarlingTlsKeyAccess.ServiceSid(service));
+    }
+
     [SupportedOSPlatform("windows")]
     private static (int Code, int StoreReads, StringWriter Error) RunWithTheRealLookup(
-        string sid, out FakeTarget target, out X509Certificate2 certificate)
+        string sid, out FakeTarget target, out X509Certificate2 certificate, string[]? registeredServices = null)
     {
         var made = Make("grant.corp.test");
         var fake = new FakeTarget(Descriptor(Ace(AceQualifier.AccessAllowed, FullControl, Admins)));
@@ -520,7 +570,7 @@ public sealed class DarlingTlsKeyAccessTests
                 reads++;
                 return new[] { made };
             },
-            name => DarlingTlsKeyAccess.ResolveAccount(name, "no such service here"),
+            name => DarlingTlsKeyAccess.ResolveAccount(name, "no such service here", () => registeredServices ?? Array.Empty<string>()),
             _ => fake);
 
         var code = DarlingTlsKeyAccess.Run(Args(made.Thumbprint, account: sid), seams, new StringWriter(), error);

@@ -245,6 +245,15 @@ internal static class DarlingWebTls
                 $"{setting}.store.location '{store.Location.Trim()}' is not LocalMachine or CurrentUser.");
         }
 
+        /* ResolveStore refuses a store name with a separator and the load then fails closed, so the status line and the
+           loopback scheme must say so too, not report TLS on (#7718). Same helper, same trim. */
+        if (!string.IsNullOrWhiteSpace(store.Name) && DarlingTlsStore.HasPathSeparator(store.Name.Trim()))
+        {
+            return new TlsPlan(
+                TlsShape.Invalid,
+                $"{setting}.store.name '{store.Name.Trim()}' is a store name, not a path: it cannot contain a backslash or a slash.");
+        }
+
         var hasPassword =
             !string.IsNullOrWhiteSpace(tls.PfxPassword) || !string.IsNullOrWhiteSpace(tls.EncryptedPfxPassword);
         return new TlsPlan(

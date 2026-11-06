@@ -104,6 +104,30 @@ public sealed class DarlingTlsStoreTests
         }
     }
 
+    /// <summary>ResolveStore refuses a store name with a separator and the load fails closed, so the status line and the login
+    /// hint must report the refusal too, not TLS on (#7718).</summary>
+    [Theory]
+    [InlineData(@"\\host\My")]
+    [InlineData("  //host/My ")]
+    [InlineData(@"My\Sub")]
+    public void Describe_StoreNameThatIsAPath_IsInvalid_AndTheStatusLineAndLoginHintSayNoTls(string name)
+    {
+        var tls = new WebTlsConfig { Store = new WebTlsStoreConfig { Name = name, Thumbprint = "ABCD" } };
+
+        var plan = DarlingWebTls.Describe(tls, "web", isWindows: true);
+
+        Assert.Equal(DarlingWebTls.TlsShape.Invalid, plan.Shape);
+        Assert.Equal($"web.network.tls.store.name '{name.Trim()}' is a store name, not a path: it cannot contain a backslash or a slash.", plan.Problem);
+
+        Assert.Throws<InvalidOperationException>(() => DarlingTlsStore.ResolveStore(tls.Store!, "web"));
+
+        Assert.Equal(DarlingWebTls.TlsShape.Invalid, DarlingWebTls.Describe(tls, "mcp", isWindows: true).Shape);
+
+        /* These two ask Describe for this host, where a store block is Invalid off Windows already: on Windows the name is the reason. */
+        Assert.Contains("MISCONFIGURED", DarlingCliCommands.DescribeExposureTls(tls, "web", "dashboard", "cleartext"), StringComparison.Ordinal);
+        Assert.StartsWith("    http://", DarlingCliCommands.BuildWebLoginHint("0.0.0.0", 5153, tls)[1], StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Describe_UnknownLocation_IsInvalid()
     {
@@ -474,7 +498,8 @@ public sealed class DarlingTlsStoreTests
 
         Assert.False(outcome.Expose);
         Assert.Null(outcome.Certificate);
-        Assert.StartsWith("Web dashboard TLS certificate could not be loaded (web.network.tls.store.name", Assert.Single(log.At(LogLevel.Critical)), StringComparison.Ordinal);
+        /* Describe refuses the name before the load is tried (#7718), so the Critical line is the misconfigured one and still names the setting. */
+        Assert.StartsWith("Web dashboard TLS is misconfigured (web.network.tls.store.name", Assert.Single(log.At(LogLevel.Critical)), StringComparison.Ordinal);
     }
 
     [Fact]

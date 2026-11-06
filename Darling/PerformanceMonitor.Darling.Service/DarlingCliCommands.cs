@@ -3883,7 +3883,10 @@ public static partial class DarlingCliCommands
             : DarlingWebHostService.ResolveWebBind(config.Web, managed).Mode == DarlingHostBinding.BindMode.NetworkAndLoopback;
         var listen = mcp ? config.Mcp.Network?.Listen : config.Web.Network?.Listen;
         var tls = mcp ? config.Mcp.Network?.Tls : config.Web.Network?.Tls;
-        return exposed && tls is not null
+        /* A block Describe refuses (a store name that is a path, say) is not served: the listener stays on loopback http. */
+        var tlsServed = DarlingWebTls.Describe(tls, mcp ? "mcp" : "web").Shape
+            is DarlingWebTls.TlsShape.Pfx or DarlingWebTls.TlsShape.Pem or DarlingWebTls.TlsShape.Store;
+        return exposed && tlsServed
             && IPAddress.TryParse(listen?.Trim(), out var listenIp)
             && !DarlingHostBinding.ShouldAddLoopbackListeners(listenIp)
             ? "https"

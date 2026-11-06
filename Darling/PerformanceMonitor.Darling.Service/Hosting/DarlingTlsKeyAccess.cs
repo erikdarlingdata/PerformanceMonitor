@@ -566,7 +566,8 @@ internal static class DarlingTlsKeyAccess
     /// operator running this is not the service. A service that is not registered, with no <c>--account</c>, is an error.
     /// </summary>
     [SupportedOSPlatform("windows")]
-    internal static AccountResolution ResolveAccount(string? name, string serviceName)
+    internal static AccountResolution ResolveAccount(
+        string? name, string serviceName, Func<IEnumerable<string>>? registeredServiceNames = null)
     {
         SecurityIdentifier? sid;
         if (string.IsNullOrWhiteSpace(name))
@@ -603,6 +604,17 @@ internal static class DarlingTlsKeyAccess
             display = sid.Value;
         }
 
+        /* Windows turns ANY NT SERVICE\<name> into a SID made from the name, whether or not a service has that name, so
+           a mistyped name would resolve, be granted and print Granted to a SID nobody holds (#7718). When the operator
+           typed the account, a per-service virtual account must belong to a service registered on this machine. The
+           default path (the service's own registered account) is never typed, and is registered by construction. */
+        if (!string.IsNullOrWhiteSpace(name) && IsPerServiceAccount(sid)
+            && !IsRegisteredServiceSid(sid, (registeredServiceNames ?? RegisteredServiceNames)()))
+        {
+            return new AccountResolution(
+                null, display, $"'{name.Trim()}' is a per-service virtual account, and no service with that name is registered on this machine. Check the spelling of the service name.");
+        }
+
         if (IsBroadPrincipal(sid) || IsServiceIdentity(sid))
         {
             /* A broad group is refused by Run, with the message for a broad group. A service identity is accepted whatever
@@ -622,6 +634,58 @@ internal static class DarlingTlsKeyAccess
         return refusal is null
             ? new AccountResolution(sid, display, null)
             : new AccountResolution(null, display, $"'{display}' {refusal}. This command grants to one account (the service's own), never to a group.");
+    }
+
+    /// <summary>True for a per-service virtual account SID (S-1-5-80-x), not the S-1-5-80-0 group ALL SERVICES.</summary>
+    [SupportedOSPlatform("windows")]
+    private static bool IsPerServiceAccount(SecurityIdentifier sid)
+        => sid.Value.StartsWith("S-1-5-80-", StringComparison.Ordinal) && sid.Value != "S-1-5-80-0";
+
+    /// <summary>
+    /// The SID Windows makes for <c>NT SERVICE\name</c>: S-1-5-80 and the five little-endian DWORDs of the SHA-1 of the
+    /// upper-cased UTF-16 name (what <c>sc showsid</c> prints).
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static SecurityIdentifier ServiceSid(string serviceName)
+    {
+        ArgumentNullException.ThrowIfNull(serviceName);
+
+#pragma warning disable CA5350 // Windows itself derives a service SID with SHA-1: this reproduces its name, it protects nothing
+        var hash = SHA1.HashData(System.Text.Encoding.Unicode.GetBytes(serviceName.ToUpperInvariant()));
+#pragma warning restore CA5350
+        var parts = new string[5];
+        for (var i = 0; i < parts.Length; i++)
+        {
+            parts[i] = BitConverter.ToUInt32(hash, i * 4).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        return new SecurityIdentifier("S-1-5-80-" + string.Join('-', parts));
+    }
+
+    /// <summary>True when <paramref name="sid"/> is the virtual account of one of the <paramref name="serviceNames"/>.</summary>
+    [SupportedOSPlatform("windows")]
+    internal static bool IsRegisteredServiceSid(SecurityIdentifier sid, IEnumerable<string> serviceNames)
+    {
+        ArgumentNullException.ThrowIfNull(sid);
+        ArgumentNullException.ThrowIfNull(serviceNames);
+
+        foreach (var serviceName in serviceNames)
+        {
+            if (!string.IsNullOrEmpty(serviceName) && ServiceSid(serviceName).Equals(sid))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>The name of every service registered with the service control manager on this machine.</summary>
+    [SupportedOSPlatform("windows")]
+    private static string[] RegisteredServiceNames()
+    {
+        using var services = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services");
+        return services?.GetSubKeyNames() ?? Array.Empty<string>();
     }
 
     [SupportedOSPlatform("windows")]
