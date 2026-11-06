@@ -100,25 +100,14 @@ public class DarlingPgStatementReaderTests
     }
 
     /// <summary>
-    /// #7909: a series' first sample in the window is differenced against the series' latest stored row before
-    /// the window, read by a bounded per-series lookup (the day before the window start, for the series the
-    /// window holds), and those seed rows are a baseline, not samples of the window. A sample the collector
-    /// credited with the entry's whole accrual (delta_calls = calls) contributes its cumulative figure, one it
-    /// could not measure (delta_calls = 0) contributes 0, and a series with no row before the window and one
-    /// sample in it reports 0, never its lifetime total: coalesce on the SUM, never on the cumulative column.
+    /// A series with one sample in the window and no row before it has no measurable interval, so it must
+    /// report 0, not its lifetime total. coalesce on the SUM, never on the cumulative column. The seeded
+    /// differencing and the delta_calls classification are behaviour, pinned by <c>DarlingPgTopQueriesLiveTests</c>
+    /// against a real store rather than by the statement's wording.
     /// </summary>
     [Fact]
-    public void AFirstSampleInTheWindowIsDifferencedAgainstTheSeriesLatestRowBeforeIt()
+    public void ASingleSampleSeriesReportsZeroRatherThanItsLifetimeTotal()
     {
-        Assert.Contains("DISTINCT ON (p.queryid, p.database_id, p.user_id, p.toplevel)", Sql, StringComparison.Ordinal);
-        Assert.Contains("p.collection_time < $2", Sql, StringComparison.Ordinal);
-        Assert.Contains("p.collection_time >= $2 - INTERVAL '1 day'", Sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE differenced.collection_time >= $2", Sql, StringComparison.Ordinal);
-
-        /* One per differenced column, the same seven the clamp covers. */
-        Assert.Equal(7, Sql.Split("WHEN delta_calls = calls THEN").Length - 1);
-        Assert.Equal(7, Sql.Split("WHEN delta_calls = 0 THEN 0").Length - 1);
-
         Assert.Contains("coalesce(SUM(d_shared_blks_read), 0)", Sql, StringComparison.Ordinal);
         Assert.Contains("coalesce(SUM(d_wal_bytes), 0)", Sql, StringComparison.Ordinal);
     }

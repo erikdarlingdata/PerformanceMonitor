@@ -13,7 +13,9 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -259,6 +261,94 @@ public sealed class DarlingPgTopQueriesLiveTests
         Assert.Equal(500, row.GetProperty("total_exec_time_ms").GetInt64());
         Assert.Equal(1_000, row.GetProperty("shared_blks_read").GetInt64());
         Assert.Equal(4_000, row.GetProperty("wal_bytes").GetInt64());
+    }
+
+    /// <summary>
+    /// #7909: a row the collector stored with <c>delta_calls = 0</c> is an interval it could not measure (a reset it
+    /// could not date, or a gap past its max-gap policy, re-baselined with the cumulative counters as read), so the
+    /// block and WAL figures contribute nothing beside it, however far its cumulative counters moved from the
+    /// series' row before the window. The next measured sample is differenced against that row, not against the seed.
+    /// </summary>
+    [Fact]
+    public async Task AnIntervalTheCollectorCouldNotMeasure_ContributesNothingOnAnyCounter()
+    {
+        var rows = await TopQueriesOverAsync(async (connection, ct) =>
+        {
+            var t0 = MinutesAgo(30);
+            await SeedStatsAsync(connection, ct, MinutesAgo(6 * 60), OutOfRangeQueryId, deltaCalls: 100, deltaTimeMs: 1_000, deltaRows: 10_000, walBytes: 1_000, calls: 100, sharedBlksRead: 1_000);
+            /* The re-baseline: no deltas, cumulative counters 500 blocks and 500 WAL bytes past the seed row. */
+            await SeedStatsAsync(connection, ct, t0, OutOfRangeQueryId, deltaCalls: 0, deltaTimeMs: 0, deltaRows: 0, walBytes: 1_500, calls: 150, sharedBlksRead: 1_500);
+            await SeedStatsAsync(connection, ct, t0.AddSeconds(60), OutOfRangeQueryId, deltaCalls: 10, deltaTimeMs: 100, deltaRows: 1_000, walBytes: 1_600, calls: 160, sharedBlksRead: 1_550);
+        });
+
+        var row = Assert.Single(rows);
+        Assert.Equal(10, row.GetProperty("calls").GetInt64());
+        Assert.Equal(100, row.GetProperty("total_exec_time_ms").GetInt64());
+        Assert.Equal(50, row.GetProperty("shared_blks_read").GetInt64());
+        Assert.Equal(100, row.GetProperty("wal_bytes").GetInt64());
+    }
+
+    /// <summary>
+    /// #7909: the PG_BAD_ACTOR drill-down shows the block and WAL figures the fact does not carry, and a statement that
+    /// ran once in the window reads the same figures there as in <c>get_pg_top_queries</c>: one stored row in the
+    /// window, its previous row two hours before it, so both reads difference that row against the row before the window.
+    /// </summary>
+    [Fact]
+    public async Task AStatementThatRanOnceInTheWindow_ReadsTheSameBlocksInItsBadActorDrillDown()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live PG_BAD_ACTOR drill-down parity test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            await SetEngineKindAsync(connection, ct, MonitoredEngineKind.Postgres);
+            await SeedStatsAsync(connection, ct, MinutesAgo(6 * 60), OutOfRangeQueryId, deltaCalls: 100, deltaTimeMs: 1_000, deltaRows: 10_000, walBytes: 1_000, calls: 100, sharedBlksRead: 1_000);
+            await SeedStatsAsync(connection, ct, MinutesAgo(30), OutOfRangeQueryId, deltaCalls: 10, deltaTimeMs: 100, deltaRows: 1_000, walBytes: 2_000, calls: 110, sharedBlksRead: 1_100);
+
+            var root = JsonDocument.Parse(await DarlingMcpPgTopQueries(dataSource)).RootElement;
+            Assert.False(
+                root.TryGetProperty("status", out var status) && status.GetString() == "error",
+                $"the read threw instead of executing: {root}");
+            var topQueriesRow = Assert.Single(root.GetProperty("queries").EnumerateArray());
+
+            /* The same four-hour window the tool read, through the drill-down for a finding rooted at this statement. */
+            var end = DateTime.UtcNow;
+            var key = PgTargetFactKeys.BadActorKey(OutOfRangeQueryId);
+            var context = new AnalysisContext
+            {
+                ServerId = ServerId, ServerName = ServerName, TimeRangeStart = end.AddHours(-4), TimeRangeEnd = end,
+                ServerUtcOffset = TimeSpan.Zero, CancellationToken = ct
+            };
+            var finding = new AnalysisFinding { RootFactKey = key, StoryPath = key, PathKeys = [key], Severity = 1.0 };
+            await new PgTargetDrillDownCollector(dataSource).EnrichFindingsAsync([finding], context);
+            var detail = JsonSerializer.SerializeToElement(finding.DrillDown!["pg_bad_actor_statements"]).GetProperty(key);
+
+            Assert.Equal(10, detail.GetProperty("calls").GetInt64());
+            Assert.Equal(topQueriesRow.GetProperty("calls").GetInt64(), detail.GetProperty("calls").GetInt64());
+            Assert.Equal(topQueriesRow.GetProperty("shared_blks_read").GetInt64(), detail.GetProperty("shared_blks_read").GetInt64());
+            Assert.Equal(topQueriesRow.GetProperty("shared_blks_hit").GetInt64(), detail.GetProperty("shared_blks_hit").GetInt64());
+            Assert.Equal(topQueriesRow.GetProperty("wal_bytes").GetInt64(), detail.GetProperty("wal_bytes").GetInt64());
+            Assert.Equal(100, detail.GetProperty("shared_blks_read").GetInt64());
+            Assert.Equal(1_000, detail.GetProperty("wal_bytes").GetInt64());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
     }
 
     /// <summary>Seeds through <paramref name="seed"/> on a clean store and returns the rows <c>get_pg_top_queries</c> answers for a
