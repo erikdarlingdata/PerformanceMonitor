@@ -23,8 +23,10 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// (<see cref="DarlingMcpObjectStatsTools"/>) — the SAME collected data Lite's <c>McpObjectStatsTools</c> /
 /// <c>McpServerInfoTools</c> and the viewer read, adapted here so the MCP host never references the WPF
 /// viewer project. All four read the LATEST daily snapshot (the collectors run <c>index_object_stats</c>
-/// daily and <c>database_size_stats</c> hourly) via a correlated <c>MAX(collection_time)</c> — a STORED
-/// read, no live monitored-server hit.
+/// daily and <c>database_size_stats</c> hourly) — a STORED read, no live monitored-server hit. Each resolves
+/// the server's newest <c>collection_time</c> in its own round trip first (<see cref="GetLatestSnapshotTimeAsync"/>
+/// for database sizes, <see cref="GetLatestIndexObjectStatsSnapshotTimeAsync"/> for the index reads) and binds
+/// it as a literal, so the planner excludes every other chunk at plan time.
 ///
 /// <para>
 /// get_table_index_sizes / get_index_usage / get_object_locking all read <c>v_index_object_stats</c> (the
@@ -106,7 +108,8 @@ internal static class DarlingObjectStatsReader
     /// Per-index usage at the latest snapshot — Lite's <c>GetIndexUsageAsync</c> ported to Postgres:
     /// seeks/scans/lookups/updates with the Unused / Write-only / Active classification, unused-first then
     /// largest reserved. Counters are cumulative since the last restart.
-    /// <para>$1 server_id, $2 database filter (a text[], NULL = every database; #5245, the shape of <see cref="DatabaseFilter.Clause"/>), $3 cap.</para>
+    /// <para>$1 server_id, $2 database filter (a text[], NULL = every database; #5245, the shape of <see cref="DatabaseFilter.Clause"/>), $3 cap,
+    /// $4 collection_time (the snapshot <see cref="GetLatestIndexObjectStatsSnapshotTimeAsync"/> resolved; #8013).</para>
     /// <para>#2636: the ordering and the cap interact badly and a field report found the sharp edge. Unused
     /// sorts ahead of everything SERVER-WIDE, so on an instance with 200+ unused indexes concentrated in one
     /// legacy database, the entire capped result is consumed by that database and every Active index in every
@@ -169,7 +172,7 @@ internal static class DarlingObjectStatsReader
             END AS classification
         FROM v_index_object_stats
         WHERE server_id = $1
-        AND   collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
+        AND   collection_time = $4
         AND   ($2::text[] IS NULL OR database_name = ANY($2))
         ORDER BY
             CASE WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0
@@ -189,12 +192,13 @@ internal static class DarlingObjectStatsReader
     /// <para>A second query rather than a window function over the first: the count has to be of the whole
     /// match, and a COUNT(*) OVER () inside a LIMITed statement returns the count of what survived the
     /// LIMIT — which is the exact mistake this is here to report.</para>
+    /// <para>$1 server_id, $2 database filter, $3 collection_time (the snapshot <see cref="GetLatestIndexObjectStatsSnapshotTimeAsync"/> resolved; #8013).</para>
     /// </summary>
     public const string IndexUsageMatchCountSql = """
         SELECT count(*)
         FROM v_index_object_stats
         WHERE server_id = $1
-        AND   collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
+        AND   collection_time = $3
         AND   ($2::text[] IS NULL OR database_name = ANY($2))
         """;
 
@@ -213,10 +217,24 @@ internal static class DarlingObjectStatsReader
     /// <paramref name="databases"/> is <see cref="DatabaseFilter.All"/> for every database; otherwise the rows are
     /// the unused-first, largest-first top <paramref name="top"/> of the CHOSEN databases only (the cap applies after
     /// the filter, in SQL). The snapshot anchor stays the server's newest capture, so a filtered and an unfiltered
-    /// call read the same capture.
+    /// call read the same capture. Resolves that capture itself; a caller that also reads the match count resolves it
+    /// once and passes it to <see cref="GetIndexUsageAsync(NpgsqlDataSource,int,int,DatabaseFilter,DateTime,CancellationToken)"/>
+    /// and <see cref="GetIndexUsageMatchCountAsync(NpgsqlDataSource,int,DatabaseFilter,DateTime,CancellationToken)"/>, so
+    /// the two reads cannot straddle a capture landing between them.
     /// </summary>
     public static async Task<List<IndexUsageRow>> GetIndexUsageAsync(
         NpgsqlDataSource postgres, int serverId, int top, DatabaseFilter databases, CancellationToken cancellationToken = default)
+    {
+        var snapshotTime = await GetLatestIndexObjectStatsSnapshotTimeAsync(postgres, serverId, cancellationToken);
+        return snapshotTime is null
+            ? []
+            : await GetIndexUsageAsync(postgres, serverId, top, databases, snapshotTime.Value, cancellationToken);
+    }
+
+    /// <summary>The rows of <see cref="IndexUsageSql"/> at <paramref name="snapshotTime"/>, a capture the caller resolved
+    /// through <see cref="GetLatestIndexObjectStatsSnapshotTimeAsync"/>.</summary>
+    public static async Task<List<IndexUsageRow>> GetIndexUsageAsync(
+        NpgsqlDataSource postgres, int serverId, int top, DatabaseFilter databases, DateTime snapshotTime, CancellationToken cancellationToken = default)
     {
         var rows = new List<IndexUsageRow>();
         var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
@@ -225,6 +243,7 @@ internal static class DarlingObjectStatsReader
         DarlingMcpReadParameters.AddInt(command, serverId);
         command.Parameters.Add(databases.Parameter());
         DarlingMcpReadParameters.AddInt(command, top);
+        DarlingMcpReadParameters.AddTimestamp(command, snapshotTime);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -264,15 +283,28 @@ internal static class DarlingObjectStatsReader
     /// #5245: <see cref="GetIndexUsageMatchCountAsync(NpgsqlDataSource,int,string,CancellationToken)"/> over a SET of
     /// databases: the count of the CHOSEN databases' rows, the population
     /// <see cref="GetIndexUsageAsync(NpgsqlDataSource,int,int,DatabaseFilter,CancellationToken)"/> pages over.
-    /// <see cref="DatabaseFilter.All"/> is the server-wide count.
+    /// <see cref="DatabaseFilter.All"/> is the server-wide count. Resolves the capture itself; a caller that also reads
+    /// the rows resolves it once and passes it to the <see cref="DateTime"/> overloads of both reads.
     /// </summary>
     public static async Task<long> GetIndexUsageMatchCountAsync(
         NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, CancellationToken cancellationToken = default)
+    {
+        var snapshotTime = await GetLatestIndexObjectStatsSnapshotTimeAsync(postgres, serverId, cancellationToken);
+        return snapshotTime is null
+            ? 0
+            : await GetIndexUsageMatchCountAsync(postgres, serverId, databases, snapshotTime.Value, cancellationToken);
+    }
+
+    /// <summary>The count of <see cref="IndexUsageMatchCountSql"/> at <paramref name="snapshotTime"/>, a capture the caller
+    /// resolved through <see cref="GetLatestIndexObjectStatsSnapshotTimeAsync"/>.</summary>
+    public static async Task<long> GetIndexUsageMatchCountAsync(
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, DateTime snapshotTime, CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(IndexUsageMatchCountSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         command.Parameters.Add(databases.Parameter());
+        DarlingMcpReadParameters.AddTimestamp(command, snapshotTime);
 
         return await command.ExecuteScalarAsync(cancellationToken) is long count ? count : 0;
     }
@@ -283,7 +315,8 @@ internal static class DarlingObjectStatsReader
     /// Per-index locking / latch contention at the SERVER's latest capture — the viewer's
     /// <c>IndexLockingAllSql</c> projected to the columns get_object_locking surfaces: only rows with a
     /// nonzero lock/latch wait or promotion, most contended first. Counters are cumulative since the last
-    /// restart. $1 server_id, $2 database filter (a text[], NULL = every database; #5245), $3 cap.
+    /// restart. $1 server_id, $2 database filter (a text[], NULL = every database; #5245), $3 cap, $4 collection_time
+    /// (the snapshot <see cref="GetLatestIndexObjectStatsSnapshotTimeAsync"/> resolved; #8013).
     ///
     /// <para><b>#3878: this read used to resolve "latest" PER <c>database_name</c></b> —
     /// <c>MAX(collection_time)</c> GROUPed BY the name string, joined back to the rows — which made every
@@ -312,7 +345,9 @@ internal static class DarlingObjectStatsReader
     /// <see cref="DatabaseSizeLatestSql"/> below has always had; the roster entry is gone and
     /// <c>get_object_locking</c> publishes <c>captured_at</c>. A second <c>MAX(collection_time)</c> read to
     /// fetch the stamp would have been the dishonest alternative: it can resolve to the NEXT capture landing
-    /// between the two queries, which is the rule <c>McpLatestSnapshotStampTests</c> pins per read.</para>
+    /// between the two queries, which is the rule <c>McpLatestSnapshotStampTests</c> pins per read. #8013: the
+    /// anchor is resolved BEFORE this statement and bound as $4, so the stamp projected here is the bound
+    /// instant itself, never a fresher capture.</para>
     /// <para>#5372 L1: the order ends in a total one (lock promotions, then database, schema, table and index name, as
     /// <c>get_index_usage</c> does), so two runs over a set that ties at the cap return the same rows. The rows listed
     /// only for a lock promotion all sum to 0 and tie.</para>
@@ -336,7 +371,7 @@ internal static class DarlingObjectStatsReader
             COALESCE(ios.page_io_latch_wait_in_ms, 0) AS page_io_latch_wait_in_ms
         FROM v_index_object_stats ios
         WHERE ios.server_id = $1
-        AND   ios.collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
+        AND   ios.collection_time = $4
         AND (
             COALESCE(ios.row_lock_wait_in_ms, 0) > 0
             OR COALESCE(ios.page_lock_wait_in_ms, 0) > 0
@@ -410,11 +445,18 @@ internal static class DarlingObjectStatsReader
         NpgsqlDataSource postgres, int serverId, int top, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         var rows = new List<IndexLockingRow>();
+        var snapshotTime = await GetLatestIndexObjectStatsSnapshotTimeAsync(postgres, serverId, cancellationToken);
+        if (snapshotTime is null)
+        {
+            return rows;
+        }
+
         await using var command = postgres.CreateCommand(IndexLockingSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         command.Parameters.Add(databases.Parameter());
         DarlingMcpReadParameters.AddInt(command, top);
+        DarlingMcpReadParameters.AddTimestamp(command, snapshotTime.Value);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -446,7 +488,8 @@ internal static class DarlingObjectStatsReader
     /// <c>text[]</c> parameter as the list read binds it), schema ($3), table ($4) and index name ($5; NULL names a heap,
     /// which is why it compares with <c>IS NOT DISTINCT FROM</c>). Every name is a bound parameter, never part of the
     /// statement text. The snapshot anchor is the list read's: the server's newest capture, so a detail row is the same
-    /// instant the list row it came from showed.
+    /// instant the list row it came from showed. $6 is that capture's collection_time
+    /// (<see cref="GetLatestIndexObjectStatsSnapshotTimeAsync"/>; #8013).
     /// </summary>
     public const string IndexLockingDetailSql = """
         SELECT
@@ -461,7 +504,7 @@ internal static class DarlingObjectStatsReader
             COALESCE(ios.page_io_latch_wait_count, 0) AS page_io_latch_wait_count
         FROM v_index_object_stats ios
         WHERE ios.server_id = $1
-        AND   ios.collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
+        AND   ios.collection_time = $6
         AND   ($2::text[] IS NULL OR ios.database_name = ANY($2))
         AND   ios.schema_name = $3
         AND   ios.table_name = $4
@@ -479,6 +522,8 @@ internal static class DarlingObjectStatsReader
         CancellationToken cancellationToken = default)
     {
         if (database.IsAll) throw new ArgumentException("A detail read names one database.", nameof(database));
+        var snapshotTime = await GetLatestIndexObjectStatsSnapshotTimeAsync(postgres, serverId, cancellationToken);
+        if (snapshotTime is null) return null;
         await using var command = postgres.CreateCommand(IndexLockingDetailSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
@@ -486,6 +531,7 @@ internal static class DarlingObjectStatsReader
         DarlingMcpReadParameters.AddText(command, schema);
         DarlingMcpReadParameters.AddText(command, table);
         DarlingMcpReadParameters.AddNullableText(command, index);
+        DarlingMcpReadParameters.AddTimestamp(command, snapshotTime.Value);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken)) return null;
         return new IndexLockingDetailRow(
@@ -619,11 +665,48 @@ internal static class DarlingObjectStatsReader
     /// database-size history at all. <b>Neither probe bounds above by "now"</b> — this is a latest read, and
     /// the collector host's clock is not this reader's clock; a snapshot stamped a few minutes into this
     /// reader's future is still the latest snapshot that exists (#4245 follow-up).</summary>
-    internal static async Task<DateTime?> GetLatestSnapshotTimeAsync(NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
-    {
-        var windowStart = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-2), DateTimeKind.Unspecified);
+    internal static Task<DateTime?> GetLatestSnapshotTimeAsync(NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken) =>
+        ProbeLatestSnapshotTimeAsync(
+            postgres, DatabaseSizeLatestSnapshotWindowedProbeSql, DatabaseSizeLatestSnapshotFallbackProbeSql, serverId, windowDays: 2, cancellationToken);
 
-        await using (var probe = postgres.CreateCommand(DatabaseSizeLatestSnapshotWindowedProbeSql))
+    /// <summary>The windowed half of <see cref="GetLatestIndexObjectStatsSnapshotTimeAsync"/>: bounded below so the planner
+    /// can exclude every chunk outside the window at plan time. $1 server_id, $2 window start. No upper bound, for the
+    /// reason <see cref="DatabaseSizeLatestSnapshotWindowedProbeSql"/> has none (#8013).</summary>
+    public const string IndexObjectStatsLatestSnapshotWindowedProbeSql = """
+        SELECT MAX(collection_time)
+        FROM v_index_object_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        """;
+
+    /// <summary>The fully unbounded fallback half of <see cref="GetLatestIndexObjectStatsSnapshotTimeAsync"/>, reached only
+    /// when the windowed probe finds nothing. $1 server_id (#8013).</summary>
+    public const string IndexObjectStatsLatestSnapshotFallbackProbeSql = """
+        SELECT MAX(collection_time)
+        FROM v_index_object_stats
+        WHERE server_id = $1
+        """;
+
+    /// <summary>#8013: the newest <c>index_object_stats</c> snapshot for one server, the sibling of
+    /// <see cref="GetLatestSnapshotTimeAsync"/> for the index reads (<see cref="IndexUsageSql"/>, <see cref="IndexUsageMatchCountSql"/>,
+    /// <see cref="IndexLockingSql"/>, <see cref="IndexLockingDetailSql"/>). The collector runs daily
+    /// (<c>CollectorScheduleDefaults["index_object_stats"]</c>), so the window is three days: one missed run still lands
+    /// inside it, while a retention of 100+ chunks stays excluded at plan time. The fallback keeps the result identical to
+    /// an unbounded <c>MAX(collection_time)</c> for a server whose collection stopped earlier than that. Null when the
+    /// server has no index history at all.</summary>
+    internal static Task<DateTime?> GetLatestIndexObjectStatsSnapshotTimeAsync(NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken) =>
+        ProbeLatestSnapshotTimeAsync(
+            postgres, IndexObjectStatsLatestSnapshotWindowedProbeSql, IndexObjectStatsLatestSnapshotFallbackProbeSql, serverId, windowDays: 3, cancellationToken);
+
+    /// <summary>The windowed-then-unbounded probe both resolvers above run: the windowed statement's MAX, when it finds any
+    /// row, IS the true unbounded MAX (no row older than the window can be newer than a row inside it), so the fallback
+    /// only fires when the window is genuinely empty. Neither statement bounds above by "now".</summary>
+    private static async Task<DateTime?> ProbeLatestSnapshotTimeAsync(
+        NpgsqlDataSource postgres, string windowedProbeSql, string fallbackProbeSql, int serverId, int windowDays, CancellationToken cancellationToken)
+    {
+        var windowStart = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-windowDays), DateTimeKind.Unspecified);
+
+        await using (var probe = postgres.CreateCommand(windowedProbeSql))
         {
             probe.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             DarlingMcpReadParameters.AddInt(probe, serverId);
@@ -635,7 +718,7 @@ internal static class DarlingObjectStatsReader
             }
         }
 
-        await using var fallback = postgres.CreateCommand(DatabaseSizeLatestSnapshotFallbackProbeSql);
+        await using var fallback = postgres.CreateCommand(fallbackProbeSql);
         fallback.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(fallback, serverId);
         var unbounded = await fallback.ExecuteScalarAsync(cancellationToken);

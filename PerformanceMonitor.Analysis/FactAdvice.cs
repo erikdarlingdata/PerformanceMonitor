@@ -261,11 +261,11 @@ public static class FactAdvice
             "THREADPOOL_MIXED" => ComposeThreadpoolMixed(factsByKey),
             "CONFIG_MAXDOP" => ComposeConfigMaxdop(factsByKey),
             "CONFIG_CTFP" => ComposeConfigCtfp(factsByKey),
-            // Parallelism value-gap blocks: state the server's actual MAXDOP/CTFP instead of the
-            // generic "raise CTFP to 50, cap MAXDOP" guidance (or, for CXPACKET, an audit_config
-            // deferral). All three reuse the same current-values prefix.
-            "THREADPOOL" => ComposeWithMaxdopCtfpPrefix("THREADPOOL", factsByKey),
-            "CXPACKET" => ComposeWithMaxdopCtfpPrefix("CXPACKET", factsByKey),
+            // Parallelism value-gap blocks (#7894): state the server's actual MAXDOP/CTFP and recommend
+            // only a change from them; when both are within guidance the card says so instead of the
+            // generic "raise CTFP to 50, cap MAXDOP". All three read the same ParallelismSettings.
+            "THREADPOOL" => ComposeThreadpoolGeneric(factsByKey),
+            "CXPACKET" => ComposeCxpacket(factsByKey),
             "QUERY_HIGH_DOP" => ComposeQueryHighDop(factsByKey),
             // Memory value blocks: state the server's actual max server memory + physical RAM
             // instead of deferring to audit_config (B2). The two config-rooted blocks state the
@@ -528,12 +528,18 @@ public static class FactAdvice
         if (ctfpGuarded && maxdopGuarded)
         {
             // Workload-aware override: settings are sane, so the driver is the VOLUME of concurrent
-            // parallel queries — guard harder and go after the specific offenders.
+            // parallel queries — guard harder and go after the specific offenders. #7894: the MAXDOP
+            // half is named only when the harder value is below the current one; at MAXDOP 1 or 2
+            // the threshold is the lever left.
             var harder = Math.Max(2, rec / 2);
             sb.Append(" Both are already within topology guidance, so the exhaustion is the volume of ")
               .Append("concurrent parallel queries, not loose settings: guard harder for this concurrency ")
-              .Append($"level by lowering MAXDOP from {maxdop} to {harder} and/or raising cost threshold ")
-              .Append($"for parallelism above {ctfp}, and go after the specific high-DOP offenders");
+              .Append("level by ");
+            if (maxdop > harder)
+                sb.Append($"lowering MAXDOP from {maxdop} to {harder} and/or raising cost threshold for parallelism above {ctfp}");
+            else
+                sb.Append($"raising cost threshold for parallelism above {ctfp} (MAXDOP at {maxdop} is already as low as a harder guard would set it)");
+            sb.Append(", and go after the specific high-DOP offenders");
         }
         else
         {
@@ -660,25 +666,58 @@ public static class FactAdvice
     }
 
     /// <summary>
-    /// A current-MAXDOP/CTFP sentence for the parallelism wait blocks (CXPACKET, QUERY_HIGH_DOP,
-    /// generic THREADPOOL) — states the server's actual values and names the specific change where
-    /// either is off topology guidance, so the card stops saying a generic "raise CTFP to 50, cap
-    /// MAXDOP" (or deferring to audit_config). Empty when neither config fact was collected.
+    /// The current-MAXDOP/CTFP sentence QUERY_HIGH_DOP opens with — states the server's actual values
+    /// and names the specific change where either is off topology guidance, or that both are within
+    /// it. Empty when neither config fact was collected.
     /// </summary>
     private static string MaxdopCtfpClause(IReadOnlyDictionary<string, Fact> facts)
     {
-        var maxdop = FactValue(facts, "CONFIG_MAXDOP");
-        var ctfp = FactValue(facts, "CONFIG_CTFP");
-        if (maxdop is null && ctfp is null)
+        var s = ReadParallelismSettings(facts);
+        if (!s.Read)
             return string.Empty;
 
+        var sb = new StringBuilder(s.Statement).Append(". ");
+        if (s.Recs.Count > 0)
+            sb.Append("Bring them to guidance: ").Append(s.RecsText).Append(". ");
+        else if (s.BothRead)
+            sb.Append("Both are within topology guidance, so the parallelism is coming from the plans themselves (below). ");
+
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// #7894: the server's MAXDOP and cost threshold for parallelism as collected this window, the MAXDOP guidance read off its
+    /// cores per socket (the per-NUMA-node proxy) or vCores, and the changes guidance asks for: only a change FROM what is set. An
+    /// empty <see cref="Recs"/> with both values read means both are within guidance, and every parallelism card then says so
+    /// instead of printing the fixed "raise to 50, cap at 8" sentence.
+    /// </summary>
+    private readonly record struct ParallelismSettings(long? Maxdop, long? Ctfp, FactRemediation.MaxdopBasis Basis, long Rec, IReadOnlyList<string> Recs)
+    {
+        /// <summary>At least one of the two settings was collected.</summary>
+        public bool Read => Maxdop is not null || Ctfp is not null;
+
+        /// <summary>Both settings were collected, so "within guidance" is a statement about both.</summary>
+        public bool BothRead => Maxdop is not null && Ctfp is not null;
+
+        /// <summary>A MAXDOP change is among the recommendations (0 to the cap, or above the cap down to it).</summary>
+        public bool CapsMaxdop => Maxdop is 0 || (Maxdop is not null && Maxdop > Rec);
+
+        /// <summary>"This server's MAXDOP is 4 and cost threshold for parallelism is 80 (cores per socket 4)", no full stop.</summary>
+        public string Statement =>
+            "This server's MAXDOP is " + (Maxdop?.ToString() ?? "not readable this window") +
+            " and cost threshold for parallelism is " + (Ctfp?.ToString() ?? "not readable this window") +
+            (Basis.Cores > 0 ? $" {Basis.Note}" : string.Empty);
+
+        /// <summary>The recommendations joined: "raise cost threshold for parallelism to 50, cap MAXDOP at 4 (the cores-per-socket, ≤ 8)".</summary>
+        public string RecsText => string.Join(", ", Recs);
+    }
+
+    private static ParallelismSettings ReadParallelismSettings(IReadOnlyDictionary<string, Fact> facts)
+    {
+        var maxdop = FactValue(facts, "CONFIG_MAXDOP");
+        var ctfp = FactValue(facts, "CONFIG_CTFP");
         var basis = FactRemediation.MaxdopBasisFrom(facts);
         var rec = FactRemediation.RecommendedMaxdop(basis.Cores);
-        var sb = new StringBuilder("This server's MAXDOP is ")
-            .Append(maxdop?.ToString() ?? "not readable this window")
-            .Append(" and cost threshold for parallelism is ")
-            .Append(ctfp?.ToString() ?? "not readable this window")
-            .Append(". ");
 
         var recs = new List<string>();
         if (ctfp is not null && ctfp <= 5)
@@ -690,26 +729,68 @@ public static class FactAdvice
         else if (maxdop is not null && maxdop > rec)
             recs.Add($"lower MAXDOP from {maxdop} to {rec}");
 
-        if (recs.Count > 0)
-            sb.Append("Bring them to guidance: ").Append(string.Join(", ", recs)).Append(". ");
-        else if (maxdop is not null && ctfp is not null)
-            sb.Append("Both are within topology guidance, so the parallelism is coming from the plans themselves (below). ");
+        return new ParallelismSettings(maxdop, ctfp, basis, rec, recs);
+    }
 
-        return sb.ToString();
+    /// <summary>The sentence for a window where one setting was read and found within guidance and the other was not readable.</summary>
+    private const string OtherSettingByHand =
+        "What was read is within topology guidance; check the other setting by hand (cost threshold for parallelism at 50 or above, MAXDOP at the logical processors in one NUMA node, ≤ 8). ";
+
+    /// <summary>The CXPACKET remediation's plan half, shared by the static block and the composed card.</summary>
+    private const string CxpacketPlanTail =
+        "examine the attached top parallel queries and fix the plan, or the estimate driving it; that is what removes the wait.";
+
+    /// <summary>The generic THREADPOOL remediation after its cause sentence, shared by the static block and the composed card.</summary>
+    private const string ThreadpoolGenericTail =
+        "This is a report on a window that has already passed, so the worker pool has long since recovered: aim at stopping the recurrence, not a one-off `KILL`. For the blocking case that means fixing the abandoned-transaction code path (a BEGIN TRAN left open on an error/timeout path; SET XACT_ABORT ON) or the slow operation under the held lock. Do NOT raise `max worker threads` to mask it — that trades thread exhaustion for memory pressure (each worker reserves a thread stack outside max server memory) without fixing the cause." + CollectionGapNote;
+
+    /// <summary>
+    /// CXPACKET composed from the server's MAXDOP and cost threshold for parallelism: the change from the collected values when
+    /// either is off guidance, or the statement that both are within it and the parallelism is coming from the plans. Falls back to
+    /// the static block when neither config fact was collected this window.
+    /// </summary>
+    private static AdviceBlock ComposeCxpacket(IReadOnlyDictionary<string, Fact> facts)
+    {
+        var fallback = _byKey["CXPACKET"];
+        var s = ReadParallelismSettings(facts);
+        if (!s.Read)
+            return fallback;
+
+        var sb = new StringBuilder(s.Statement).Append(". ");
+        if (s.Recs.Count > 0)
+            sb.Append("Bring them to guidance: ").Append(s.RecsText)
+              .Append(" — most OLTP queries should not go parallel. If CXPACKET persists after that, the parallelism is coming from the plans themselves — ");
+        else if (s.BothRead)
+            sb.Append("Both are within topology guidance, so the parallelism is coming from the plans themselves — ");
+        else
+            sb.Append(OtherSettingByHand).Append("If both are at guidance the parallelism is coming from the plans themselves — ");
+        sb.Append(CxpacketPlanTail);
+
+        return fallback with { Remediation = sb.ToString() };
     }
 
     /// <summary>
-    /// Returns the static block for <paramref name="key"/> with the current-MAXDOP/CTFP clause
-    /// prepended to its remediation (CXPACKET / QUERY_HIGH_DOP / generic THREADPOOL). Falls back to
-    /// the static block unchanged when the config facts were not collected this window.
+    /// The generic (unattributed) THREADPOOL composed from the server's MAXDOP and cost threshold for parallelism: the parallelism
+    /// half names the change from the collected values, or says both are within guidance, and the blocking half and the
+    /// collection-gap note stand as in the static block. Falls back to the static block when neither config fact was collected.
     /// </summary>
-    private static AdviceBlock ComposeWithMaxdopCtfpPrefix(string key, IReadOnlyDictionary<string, Fact> facts)
+    private static AdviceBlock ComposeThreadpoolGeneric(IReadOnlyDictionary<string, Fact> facts)
     {
-        var fallback = _byKey[key];
-        var clause = MaxdopCtfpClause(facts);
-        return clause.Length == 0
-            ? fallback
-            : fallback with { Remediation = clause + fallback.Remediation };
+        var fallback = _byKey["THREADPOOL"];
+        var s = ReadParallelismSettings(facts);
+        if (!s.Read)
+            return fallback;
+
+        var sb = new StringBuilder("Resolve the dominant cause — parallelism or blocking. ").Append(s.Statement).Append(". ");
+        if (s.Recs.Count > 0)
+            sb.Append("If it is parallelism, bring them to guidance: ").Append(s.RecsText).Append(". ");
+        else if (s.BothRead)
+            sb.Append("Both are within topology guidance, so if it is parallelism the driver is the volume of concurrent parallel queries, not loose settings — guard harder for that concurrency level and tune the specific high-DOP queries. ");
+        else
+            sb.Append(OtherSettingByHand);
+        sb.Append(ThreadpoolGenericTail);
+
+        return fallback with { Remediation = sb.ToString() };
     }
 
     /// <summary>
@@ -1337,7 +1418,24 @@ public static class FactAdvice
         if (signalPct is not null)
             rem.Append(" Use the signal-wait share above to size the cores question: the higher it was, the more adding cores is justified once tuning is exhausted; a low share means the CPUs were busy but not oversubscribed, so stay on the queries.");
         if (Fired(facts, "CXPACKET"))
-            rem.Append(" CXPACKET co-fired this window, so part of the CPU is parallelism overhead — raise cost threshold for parallelism to 50 and cap MAXDOP at the per-NUMA-node processor count (no more than 8).");
+        {
+            /* #7894: the parallelism sentence names the change from the collected MAXDOP and cost threshold, or says both are
+               within guidance; the fixed "raise to 50, cap at 8" stands only when neither setting was collected. */
+            rem.Append(" CXPACKET co-fired this window, so part of the CPU is parallelism overhead — ");
+            var s = ReadParallelismSettings(facts);
+            if (!s.Read)
+                rem.Append("raise cost threshold for parallelism to 50 and cap MAXDOP at the per-NUMA-node processor count (no more than 8).");
+            else
+            {
+                rem.Append(char.ToLowerInvariant(s.Statement[0])).Append(s.Statement, 1, s.Statement.Length - 1).Append("; ");
+                if (s.Recs.Count > 0)
+                    rem.Append(s.RecsText).Append('.');
+                else if (s.BothRead)
+                    rem.Append("both are within topology guidance, so the parallelism is coming from the plans themselves, and the attached top queries show which.");
+                else
+                    rem.Append(char.ToLowerInvariant(OtherSettingByHand[0])).Append(OtherSettingByHand.AsSpan(1).TrimEnd());
+            }
+        }
 
         return fallback with { Investigation = inv.ToString(), Remediation = rem.ToString() };
     }
@@ -1802,9 +1900,16 @@ public static class FactAdvice
             $"{Plural(count.Value, "query")} ran at a degree of parallelism above 8 this window. Very high DOP rarely " +
             "helps OLTP queries — each parallel branch reserves a worker thread and adds coordination overhead " +
             "(CXPACKET), and beyond the processors in a single NUMA node the returns turn negative.";
-        var rem = clause +
-            "The cap above brings these queries in line with the box's topology; genuinely large analytical " +
-            "queries that benefit from parallelism can be granted a higher degree explicitly rather than through a loose global default.";
+        /* #7894: "the cap above" is said only when the clause recommended one. A MAXDOP within guidance cannot give a query DOP
+           above 8 on its own, so the degree is coming from a database-scoped MAXDOP, a workload group or a hint. */
+        var s = ReadParallelismSettings(facts);
+        const string Explicitly = "genuinely large analytical queries that benefit from parallelism can be granted a higher degree explicitly rather than through a loose global default.";
+        var rem = clause + (
+            !s.Read || s.CapsMaxdop
+                ? "The cap above brings these queries in line with the box's topology; " + Explicitly
+                : s.Maxdop is not null
+                    ? $"MAXDOP at {s.Maxdop} is within guidance, so these queries are getting their degree from somewhere else — a database-scoped MAXDOP (ALTER DATABASE SCOPED CONFIGURATION), a Resource Governor workload group MAX_DOP, or an OPTION (MAXDOP n) hint; find which and bring it in line. Even so, " + Explicitly
+                    : "MAXDOP was not readable this window — check it by hand against the logical processors in one NUMA node (≤ 8); if it is already there, these queries are getting their degree from a database-scoped MAXDOP (ALTER DATABASE SCOPED CONFIGURATION), a Resource Governor workload group MAX_DOP, or an OPTION (MAXDOP n) hint. Even so, " + Explicitly);
 
         return fallback with { Investigation = inv, Remediation = rem };
     }
@@ -2876,10 +2981,12 @@ public static class FactAdvice
         var current = f.Metadata.GetValueOrDefault("current_mb");
         var name = string.IsNullOrEmpty(f.ObjectName) ? "A table" : f.ObjectName;
         var dbClause = string.IsNullOrEmpty(f.DatabaseName) ? string.Empty : $" in {f.DatabaseName}";
+        /* #7897: a table that held no pages in the earlier snapshot carries no growth_pct (a percent of nothing has no value), so
+           the words say "from empty" where a percent would go. */
+        var fromEmpty = f.Metadata.TryGetValue("prior_mb", out var prior) && prior <= 0 && !f.Metadata.ContainsKey("growth_pct");
+        var sizeClause = fromEmpty ? " from empty" : pct > 0 ? $" (+{pct:0.#}%)" : string.Empty;
 
-        var inv = new StringBuilder($"{name}{dbClause} grew {growth:N0} MB day-over-day");
-        if (pct > 0)
-            inv.Append($" (+{pct:0.#}%)");
+        var inv = new StringBuilder($"{name}{dbClause} grew {growth:N0} MB day-over-day{sizeClause}");
         if (current > 0)
             inv.Append($", now {current:N0} MB reserved");
         inv.Append(". This is measured from the two most recent daily object-size snapshots, so it is a genuine day-over-day jump rather than a one-off reading.");
@@ -2894,7 +3001,7 @@ public static class FactAdvice
 
         return fallback with
         {
-            Headline = $"{name} grew {growth:N0} MB day-over-day{(pct > 0 ? $" (+{pct:0.#}%)" : string.Empty)}",
+            Headline = $"{name} grew {growth:N0} MB day-over-day{sizeClause}",
             Investigation = inv.ToString(),
             Remediation = rem
         };
@@ -3039,7 +3146,7 @@ public static class FactAdvice
             Investigation:
                 "Sustained THREADPOOL (it cleared the wait-time + per-wait-average gate, so this isn't pool grow/shrink noise) means new sessions cannot start until a worker frees up. Neither CXPACKET/high-DOP (parallelism) nor blocking co-fired above their own thresholds this window, so the engine could not attribute it — which happens when a co-cause stayed just under threshold or, commonly, the collector could not sample the peak. Decide it by hand: if CXPACKET / high-DOP are present treat it as parallelism (below); if a blocking chain is present treat it as blocking. The waiting-tasks and scheduler-pressure views show what is queued.",
             Remediation:
-                "Resolve the dominant cause — parallelism (raise `cost threshold for parallelism` to 50, cap `MAXDOP` at the logical processors in a single NUMA node, ≤ 8) or blocking. This is a report on a window that has already passed, so the worker pool has long since recovered: aim at stopping the recurrence, not a one-off `KILL`. For the blocking case that means fixing the abandoned-transaction code path (a BEGIN TRAN left open on an error/timeout path; SET XACT_ABORT ON) or the slow operation under the held lock. Do NOT raise `max worker threads` to mask it — that trades thread exhaustion for memory pressure (each worker reserves a thread stack outside max server memory) without fixing the cause. Note on the data: under live thread exhaustion the collector is itself a query waiting for a worker, so expect a gap in collection during the worst of it — a missing interval in Collection Health around this window corroborates the event, it is not a separate problem.");
+                "Resolve the dominant cause — parallelism (raise `cost threshold for parallelism` to 50, cap `MAXDOP` at the logical processors in a single NUMA node, ≤ 8) or blocking. " + ThreadpoolGenericTail);
 
         t["THREADPOOL_PARALLEL"] = new AdviceBlock(
             Headline:
@@ -3071,7 +3178,7 @@ public static class FactAdvice
             Investigation:
                 "Every CX* wait (CXPACKET, CXCONSUMER, CXSYNC_PORT, CXSYNC_CONSUMER) is grouped into one parallelism-wait figure. That grouping hides producer/consumer skew — CXCONSUMER on its own specifically means one branch is doing the work while siblings stall waiting for rows. If the per-execution duration of the offending queries is closer to their CPU time than CPU÷DOP would predict, parallelism is mostly contending with itself, not paying for itself. Open the Wait Stats tab to see the breakdown over the analysis window (the server's current CTFP and MAXDOP are stated in the remediation below). The high-DOP queries — those running above DOP 8 — are the ones to look at first; the attached top parallel queries rank them.",
             Remediation:
-                "Most OLTP queries should not go parallel — raise `cost threshold for parallelism` to 50 and cap `MAXDOP` at the logical processors in a single NUMA node (≤ 8). When MAXDOP and CTFP are already at guidance and CXPACKET persists, the parallelism is coming from the plans themselves — examine the attached top parallel queries and fix the plan, or the estimate driving it; that is what removes the wait.");
+                "Most OLTP queries should not go parallel — raise `cost threshold for parallelism` to 50 and cap `MAXDOP` at the logical processors in a single NUMA node (≤ 8). When MAXDOP and CTFP are already at guidance and CXPACKET persists, the parallelism is coming from the plans themselves — " + CxpacketPlanTail);
 
         t["CPU_SQL_PERCENT"] = new AdviceBlock(
             Headline:

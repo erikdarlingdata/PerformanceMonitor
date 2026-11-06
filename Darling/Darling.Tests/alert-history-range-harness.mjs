@@ -129,6 +129,17 @@ try {
   const out = {};
 
   const scenarios = {
+    /* #7945: the filter label names the picked server as the picker does, by its display name. */
+    async serverLabel() {
+      alertsReply = { alerts: [row(1)], truncated: false };
+      const main = newMain();
+      await renderAlerts(main);
+      await pick(byLabel(main, "Server"), "srv-a");
+      const metas = [];
+      (function walk(n) { if (n.className === "meta") metas.push(n); for (const c of n.children || []) walk(c); })(main);
+      out.meta = metas.map((m) => m.textContent);
+      out.optionLabel = (byLabel(main, "Server").children.find((o) => o.attrs.value === "srv-a") || { textContent: null }).textContent;
+    },
     async reads() {
       alertsReply = { alerts: [row(1)], truncated: false };
       const main = newMain();
