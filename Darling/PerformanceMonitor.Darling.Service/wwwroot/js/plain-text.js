@@ -133,13 +133,22 @@ function toolWords(name) {
     .join(" ");
 }
 
+/* #7670: what a count means, for the few a reader cannot work out from the label. The gate skips the XML read when the extended-events counter has not moved since the last run. */
+const COUNT_MEANINGS = { shred_gated: { 1: "no new events since the last run, so the XML was not read", 0: "the XML was read" } };
+
+/** One count in words: "events read: 0", and for a count in COUNT_MEANINGS its meaning after it ("shred gated: 1 (no new events ...)"). */
+function countText(label, value) {
+  const meaning = COUNT_MEANINGS[label] && COUNT_MEANINGS[label][value];
+  return label.replace(/_/g, " ") + ": " + value + (meaning ? " (" + meaning + ")" : "");
+}
+
 /** The shown form of `label=value` counts: a run of pairs becomes "label words: value, label words: value". */
 function pairsToText(run) {
   return run
     .split(" ")
     .map((pair) => {
       const eq = pair.indexOf("=");
-      return pair.slice(0, eq).replace(/_/g, " ") + ": " + pair.slice(eq + 1);
+      return countText(pair.slice(0, eq), pair.slice(eq + 1));
     })
     .join(", ");
 }
@@ -150,7 +159,7 @@ function underscoreCountsToText(run) {
     .split(" ")
     .map((tok) => {
       const at = tok.lastIndexOf("_");
-      return tok.slice(0, at).replace(/_/g, " ") + ": " + tok.slice(at + 1);
+      return countText(tok.slice(0, at), tok.slice(at + 1));
     })
     .join(", ");
 }
@@ -393,6 +402,12 @@ export function plainText(text) {
   t = t.replace(
     /\btop_application_name, top_application_connections, top_host_name and top_host_connections are\b/g,
     "the top application, its connection count, the top host and its connection count are",
+  );
+  /* #7682: get_cpu_utilization's host_cpu_note names its fields for an MCP client. The CPU tab says what is not reported and what is drawn;
+     the engine and version words in the parenthesis stay as the reply wrote them. */
+  t = t.replace(
+    /other_process_cpu, total_cpu, idle_cpu and peak_total_cpu are null for buckets where the server cannot report host CPU( \([^)]*\))?\. Only sql_server_cpu is measured there; null is not 0\./g,
+    (_m, why) => "This server cannot report host CPU" + (why || "") + ", so only SQL Server's own CPU is drawn.",
   );
   /* #6831: the system_health event names ("1431 scheduler_monitor_system_health_ring_buffer_recorded event(s) were captured") in words, with
      the count's own plural. The same words say the name inside "No ... events were captured". */
