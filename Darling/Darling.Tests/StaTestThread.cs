@@ -39,6 +39,12 @@ using Xunit;
 /// again once its drain is done, and the tests after that run; only the slow body's own test fails (#7600).
 /// </para>
 /// <para>
+/// <b>Render engine start-up (#7600).</b> The first WPF body of a process pays WPF's render engine start-up (5 to 12 s on a green CI leg, 61 to
+/// 126 s on the stalled ones, the thread waiting in <c>wpfgfx_cor3!MilComposition_SyncFlush</c> for the render thread), and every later WPF test
+/// is fast. So the thread shows and closes one window before its first body, under the same hang guard: a start-up that overruns it is named as
+/// the start-up, not as whichever test came first, and later tests are refused until it returns. Its duration goes to the leg's log.
+/// </para>
+/// <para>
 /// <b>Where it stuck (#6216).</b> .NET Core cannot capture another thread's stack, so the timeout message carries what can be read from
 /// outside: the last step the body named with <see cref="Step"/>, how many dispatcher operations ran (a loop that never settles starts
 /// them without end; one that never finishes leaves one running; a pump waiting on a frame starts none), and the thread's state and CPU
@@ -181,6 +187,10 @@ internal sealed class StaHost
     private Dispatcher? _dispatcher;
     private volatile string? _stuckTest;
 
+    /* #7600: the host thread's start, completing with its dispatcher once the render engine start-up queued ahead of every body has run. */
+    private Task<Dispatcher>? _starting;
+    private const string RenderEngineStartUp = "WPF's render engine start-up, before the first test body";
+
     /* #7600: the job the guard gave up on. It completes when the body AND the host's drain have returned, which is when the thread is
        free again, so FailIfStuck lifts the refusal then. Read and written under _stuckLock together with _stuckTest. */
     private Task? _stuckJob;
@@ -284,7 +294,10 @@ internal sealed class StaHost
     }
 
     /// <summary>Ends the host thread's dispatcher. Only for a host a test made for itself.</summary>
-    internal void Shutdown() => _dispatcher?.BeginInvokeShutdown(DispatcherPriority.Send);
+    internal void Shutdown() =>
+        (_dispatcher ?? (_starting is { IsCompletedSuccessfully: true } started ? started.Result : null))?.BeginInvokeShutdown(DispatcherPriority.Send);
+
+    private string GuardText() => HangGuard < TimeSpan.FromSeconds(1) ? $"{HangGuard.TotalMilliseconds:0} ms" : $"{HangGuard.TotalSeconds:0} s";
 
     private void RunCore(Func<Task> body)
     {
@@ -317,7 +330,7 @@ internal sealed class StaHost
                 }
 
                 throw new TimeoutException(
-                    $"WPF test body did not return within {(HangGuard < TimeSpan.FromSeconds(1) ? $"{HangGuard.TotalMilliseconds:0} ms" : $"{HangGuard.TotalSeconds:0} s")}: {name}. The shared STA test thread is stuck inside it, "
+                    $"WPF test body did not return within {GuardText()}: {name}. The shared STA test thread is stuck inside it, "
                     + "so every WPF test that starts while it is still inside fails at once naming this test (#5602). "
                     + DescribeStuckBody(opsAtStart, engineLoadedAtStart));
             }
@@ -549,47 +562,98 @@ internal sealed class StaHost
                 return _dispatcher;
             }
 
-            using var ready = new ManualResetEventSlim();
-            Dispatcher? made = null;
-            var thread = new Thread(() =>
+            var loadedBefore = StaThreadProbe.RenderEngineLoaded();
+            var starting = _starting ??= StartThread();
+            if (!starting.Wait(HangGuard))
             {
-                var dispatcher = Dispatcher.CurrentDispatcher;
-                dispatcher.UnhandledException += (_, e) =>
+                /* #7600: the start-up is refused to later tests the way a stuck body is, and the refusal lifts the same way once it has returned. */
+                lock (_stuckLock)
                 {
-                    lock (_strays)
-                    {
-                        _strays.Add(e.Exception);
-                    }
+                    _stuckJob = starting;
+                    _stuckTest = RenderEngineStartUp;
+                }
 
-                    e.Handled = true;
-                };
-                /* #6216: the hang guard's message says what the dispatcher was doing, so every operation it starts is counted here. */
-                dispatcher.Hooks.OperationStarted += (_, e) =>
-                {
-                    Interlocked.Increment(ref _opsStarted);
-                    Interlocked.Exchange(ref _lastStartedTick, Environment.TickCount64);
-                    _lastStarted = e.Operation;
-                };
-                dispatcher.Hooks.OperationCompleted += (_, _) =>
-                {
-                    Interlocked.Increment(ref _opsCompleted);
-                };
-                _nativeThreadId = (int)GetCurrentThreadId();
-                _thread = Thread.CurrentThread;
-                made = dispatcher;
-                ready.Set();
-                Dispatcher.Run();
-            })
+                throw new TimeoutException(
+                    $"WPF's render engine did not start within {GuardText()}: the shared STA test thread shows and closes one window before its first test body, "
+                    + "so the engine's start-up is paid once per process and outside every test's hang guard (#7600). It has not returned, and this test did not run. "
+                    + DescribeStuckBody(0, loadedBefore));
+            }
+
+            _dispatcher = starting.Result;
+            return _dispatcher;
+        }
+    }
+
+    /// <summary>Starts the host thread. Its task completes, with the dispatcher, once the render engine start-up queued ahead of every body has run.</summary>
+    private Task<Dispatcher> StartThread()
+    {
+        var started = new TaskCompletionSource<Dispatcher>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thread = new Thread(() =>
+        {
+            var dispatcher = Dispatcher.CurrentDispatcher;
+            dispatcher.UnhandledException += (_, e) =>
             {
-                Name = "StaTestThread",
-                /* Background: a stuck body must not keep the test process alive after the run returns. */
-                IsBackground = true,
+                lock (_strays)
+                {
+                    _strays.Add(e.Exception);
+                }
+
+                e.Handled = true;
             };
-            thread.SetApartmentState(ApartmentState.STA);
-            thread.Start();
-            ready.Wait();
-            _dispatcher = made;
-            return made!;
+            /* #6216: the hang guard's message says what the dispatcher was doing, so every operation it starts is counted here. */
+            dispatcher.Hooks.OperationStarted += (_, e) =>
+            {
+                Interlocked.Increment(ref _opsStarted);
+                Interlocked.Exchange(ref _lastStartedTick, Environment.TickCount64);
+                _lastStarted = e.Operation;
+            };
+            dispatcher.Hooks.OperationCompleted += (_, _) =>
+            {
+                Interlocked.Increment(ref _opsCompleted);
+            };
+            _nativeThreadId = (int)GetCurrentThreadId();
+            _thread = Thread.CurrentThread;
+            dispatcher.BeginInvoke(DispatcherPriority.Send, new Action(() =>
+            {
+                StartRenderEngine();
+                started.SetResult(dispatcher);
+            }));
+            Dispatcher.Run();
+        })
+        {
+            Name = "StaTestThread",
+            /* Background: a stuck body must not keep the test process alive after the run returns. */
+            IsBackground = true,
+        };
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        return started.Task;
+    }
+
+    /// <summary>
+    /// #7600: in every leg's result file the first WPF body of the process paid WPF's render engine start-up (5 to 12 s on a green leg, 61 to 126 s on
+    /// the five stalled ones, the thread waiting in <c>wpfgfx_cor3!MilComposition_SyncFlush</c> for the render thread) and every later WPF test was fast.
+    /// Showing and closing one window makes the first MediaContext, loads the engine, starts its render thread and makes the first composition round
+    /// trip, so that cost is paid once per process, here, before any body, and never inside a test's hang guard. The duration goes to the leg's log.
+    /// </summary>
+    private void StartRenderEngine()
+    {
+        var loaded = StaThreadProbe.RenderEngineLoaded();
+        var began = Environment.TickCount64;
+        Step("starting WPF's render engine: showing and closing one window before the first test body");
+        try
+        {
+            var window = new Window { Width = 50, Height = 50, ShowInTaskbar = false };
+            window.Show();
+            window.Close();
+            Console.WriteLine(
+                $"StaTestThread: WPF's render engine {(loaded ? "was already loaded, and a first window showed and closed" : "started, with a first window shown and closed,")} "
+                + $"in {Environment.TickCount64 - began} ms before the first test body (#7600).");
+        }
+        catch (Exception ex)
+        {
+            /* The bodies find out for themselves what WPF cannot do here; the start-up only reports it. */
+            Console.WriteLine($"StaTestThread: WPF's render engine start-up failed after {Environment.TickCount64 - began} ms: {ex.GetType().Name}: {ex.Message} (#7600).");
         }
     }
 
