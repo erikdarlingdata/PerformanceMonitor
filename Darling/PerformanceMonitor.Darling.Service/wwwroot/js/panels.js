@@ -891,6 +891,8 @@ function gridFilter(desc, cols, head, tbody) {
       b.setAttribute("aria-pressed", on ? "true" : "false");
     }
     if (bar.style) bar.style.display = r.tests || gridFilterOpen.has(key) ? "" : "none";
+    /* A page that acts on the shown rows (Alert History's Dismiss All, #7919) learns here that the set changed. */
+    if (typeof desc.onFilter === "function") desc.onFilter();
   }
 
   function close(refocus) {
@@ -1307,6 +1309,12 @@ function makeGridSort(desc, cols, rows) {
     },
   };
   return grid;
+}
+
+/** Whether a rendered grid row passes the column filters (true when none is on). A page that acts on "the rows shown"
+    reads this, so it never keeps its own copy of the filter rule (#7919). */
+export function gridRowShown(tr) {
+  return !filteredOut.has(tr);
 }
 
 /** The row object a rendered grid row was built from (a sorted grid's DOM order is not the row order). */
