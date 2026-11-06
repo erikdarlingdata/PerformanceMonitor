@@ -271,6 +271,48 @@ public sealed class DailyRunLimiterTests
     }
 
     [Fact]
+    public async Task TheOldestWait_IsTheFirstQueuedRunsStamp_AndMovesAsTheQueueDrains()
+    {
+        var start = new DateTime(2026, 11, 5, 8, 0, 0, DateTimeKind.Utc);
+        var now = start;
+        var limiter = new DailyRunLimiter(1, () => now);
+        var ct = TestContext.Current.CancellationToken;
+
+        Assert.True(limiter.TryAcquire());
+        Assert.Null(limiter.OldestWaitUtc);
+
+        var first = limiter.AcquireAsync(ct);
+        now = start.AddHours(2);
+        var second = limiter.AcquireAsync(ct);
+        Assert.Equal(2, limiter.Waiting);
+        Assert.Equal(start, limiter.OldestWaitUtc);
+
+        limiter.Release();
+        await first;
+        Assert.Equal(start.AddHours(2), limiter.OldestWaitUtc);
+
+        limiter.Release();
+        await second;
+        Assert.Null(limiter.OldestWaitUtc);
+    }
+
+    [Fact]
+    public void TheBacklogLine_NamesTheWaitingRuns_TheCap_AndTheOldestWait()
+    {
+        var now = new DateTime(2026, 11, 5, 8, 0, 0, DateTimeKind.Utc);
+
+        Assert.Equal(
+            "3 daily run(s) are waiting for one of 2 permits, and the oldest has waited 26 h 10 min",
+            DailyRunLimiter.DescribeBacklog(3, 2, now.AddHours(-26).AddMinutes(-10), now));
+        Assert.Equal(
+            "1 daily run(s) are waiting for one of 4 permits, and the oldest has waited 45 min",
+            DailyRunLimiter.DescribeBacklog(1, 4, now.AddMinutes(-45), now));
+        Assert.Equal(
+            "no daily run is waiting for a permit, so the previous run is still executing",
+            DailyRunLimiter.DescribeBacklog(0, 4, null, now));
+    }
+
+    [Fact]
     public void TheCap_IsNeverBelowOne()
     {
         var limiter = new DailyRunLimiter(0);
@@ -626,6 +668,48 @@ public sealed class DailyRunWatchdogTests
             var warning = Assert.Single(Warnings(logger));
             Assert.Contains(going.Config.DisplayName, warning, StringComparison.Ordinal);
             Assert.DoesNotContain(queued.Config.DisplayName, warning, StringComparison.Ordinal);
+        }
+        finally
+        {
+            runs.ReleaseAll();
+        }
+    }
+
+    [Fact]
+    public async Task ADailyRunDueBehindItsOwnQueuedRun_CountsALostSlot_AndWarnsWithTheBacklog()
+    {
+        var logger = new DailyRunLogger();
+        var worker = DailyRunKit.MakeWorker(logger);
+        var runs = new HeldRuns(worker, DailyRunKit.Daily);
+        var going = DailyRunKit.MakeServer(7305, DailyRunKit.Daily);
+        var queued = DailyRunKit.MakeServer(7306, DailyRunKit.Daily);
+        var ct = TestContext.Current.CancellationToken;
+
+        /* One permit: the first server's run goes, the second server's run queues behind it. */
+        worker.ApplyDailyRunCap(1, 4);
+
+        try
+        {
+            await worker.RunDueCollectorsAsync(going, null!, ct);
+            await worker.RunDueCollectorsAsync(queued, null!, ct);
+            Assert.True(
+                await DailyRunKit.BecomesTrueAsync(() => runs.Started == 1 && worker.InFlightDetachedRuns.Count == 2, Patience),
+                "one daily run goes and one waits for a permit");
+
+            /* The queued server's run comes due again while its previous run is still waiting: that run is lost for the
+               day, and the loss is counted against the server and worded with the permit backlog. */
+            queued.NextDue[DailyRunKit.Daily] = DateTime.UtcNow.AddMinutes(-5);
+            await worker.RunDueCollectorsAsync(queued, null!, ct);
+            Assert.True(
+                await DailyRunKit.BecomesTrueAsync(() => queued.CycleSkips.Pending == 1, Patience),
+                "the lost daily slot is counted against the server whose run was skipped");
+            Assert.Equal(0, going.CycleSkips.Pending);
+            Assert.Equal(1, runs.Started);
+
+            var warning = Assert.Single(Warnings(logger));
+            Assert.Contains(queued.Config.DisplayName, warning, StringComparison.Ordinal);
+            Assert.Contains(DailyRunKit.Daily, warning, StringComparison.Ordinal);
+            Assert.Contains("1 daily run(s) are waiting for one of 1 permits", warning, StringComparison.Ordinal);
         }
         finally
         {

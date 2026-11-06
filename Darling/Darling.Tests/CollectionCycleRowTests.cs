@@ -32,6 +32,25 @@ public sealed class CycleSkipAccumulatorTests
 {
     private static readonly DateTime T0 = new(2026, 10, 12, 12, 0, 0, DateTimeKind.Utc);
 
+    /// <summary>A lost daily slot names the daily runs that were waiting for a permit when the cause carries them, so the row
+    /// says the day was lost to the permit backlog and not to a slow body, and says nothing of permits when none waited.</summary>
+    [Fact]
+    public void ALostDailySlot_NamesTheRunsWaitingForAPermit_WhenTheCauseCarriesThem()
+    {
+        var tally = new CycleSkipAccumulator();
+        tally.AddDailyLost("index_object_stats", 1, T0.AddMinutes(-6));
+
+        var withBacklog = DarlingCycleSkip.Build(
+            tally.TryTake(T0, DarlingCycleSkip.RowMinInterval)!,
+            new CycleSkipCauses(0, null, 0, 0, DailyRunsWaiting: 3, OldestDailyWaitMs: 94_200_000), T0)!;
+        Assert.Contains(
+            "1 run-time collector slot(s) lost their day (index object stats) while 3 daily run(s) waited for a permit, the oldest for ",
+            withBacklog.Message, StringComparison.Ordinal);
+
+        var without = DarlingCycleSkip.Build(tally.TryTake(T0, DarlingCycleSkip.RowMinInterval)!, new CycleSkipCauses(0, null, 0, 0), T0)!;
+        Assert.DoesNotContain("waited for a permit", without.Message, StringComparison.Ordinal);
+    }
+
     /// <summary>Three slots stepped over on one server, across two collectors, are one report: 3 slots, both ends of the gap
     /// named, the top collectors listed, no equals sign (a baseline marker read keys on one).</summary>
     [Fact]
