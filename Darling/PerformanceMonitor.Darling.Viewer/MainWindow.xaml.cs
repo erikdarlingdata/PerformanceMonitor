@@ -1805,16 +1805,18 @@ public partial class MainWindow : Window
         /* Fleet-wide NOC roll-up above the cards — the cross-server totals SQL aggregate (the read only
            Darling's central store can serve) plus the band counts / worst-N ranking reduced from the
            cards' own #1426 banding. The totals use the SAME one-hour window the per-server cards use, so
-           they reconcile with the sum of the card counts. A totals-read failure degrades to zero totals
-           rather than blanking the Overview — the band counts and ranking still render from the cards. */
-        FleetTotals totals;
+           they reconcile with the sum of the card counts. A totals-read failure leaves the totals null, which the
+           roll-up renders as unavailable rather than as zeros, and it does not blank the Overview — the band counts
+           and ranking still render from the cards, and a searched panel sums the matched cards' own counts. */
+        FleetTotals? totals;
         try
         {
             totals = await service.GetFleetTotalsAsync(nowUtc.AddHours(-1), nowUtc);
         }
-        catch
+        catch (Exception ex)
         {
-            totals = new FleetTotals();
+            ViewerLogger.Warn("Overview", $"fleet totals read failed: {ex.Message}");
+            totals = null;
         }
 
         /* #2753: TotalServers must be the enabled fleet size (list.Count, the servers OverviewServers picked), not
@@ -1858,6 +1860,7 @@ public partial class MainWindow : Window
     {
         _overviewCards = new List<ServerSummaryItem>();
         _overviewTotals = null;
+        _overviewRegisteredCount = 0;
         OverviewItemsControl.ItemsSource = null;
         FleetRollupContainer.Visibility = Visibility.Collapsed;
         ApplyOverviewAttentionCount(shown: 0);
@@ -1882,11 +1885,12 @@ public partial class MainWindow : Window
         ApplyOverviewAttentionCount(shown.Count);
 
         /* D9: the roll-up above the grid (Needs Attention rows, band counts, "Monitoring N enabled servers") follows the
-           search too, so it never counts servers the grid just hid. Before the first refresh there is no totals read
-           to rebuild from; the refresh builds it. */
-        if (_overviewTotals is { } totals)
+           search too, so it never counts servers the grid just hid. Before the first refresh there is no fleet to
+           rebuild from; the refresh sets the count. The totals stay null when their read failed: the roll-up renders
+           that as unavailable, or as the matched cards' own sums while a search narrows it. */
+        if (_overviewRegisteredCount > 0)
         {
-            ApplyFleetRollup(OverviewCardView.BuildRollup(_overviewCards, totals, _overviewRegisteredCount, OverviewSearchBox?.Text));
+            ApplyFleetRollup(OverviewCardView.BuildRollup(_overviewCards, _overviewTotals, _overviewRegisteredCount, OverviewSearchBox?.Text));
         }
     }
 

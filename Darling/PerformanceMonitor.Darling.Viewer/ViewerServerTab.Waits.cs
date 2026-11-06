@@ -234,9 +234,12 @@ public partial class ViewerServerTab
             ShowChartLegend(WaitStatsChart);
             WaitStatsChart.Refresh();
         }
-        catch
+        catch (Exception ex)
         {
-            /* Ignore chart update errors */
+            /* The chart was cleared above, so a failed read reaches the status line, as a slicer's does; a superseded run says nothing. */
+            var status = PickerChartReadFailure.StatusText("wait-stats", ex, gen, _waitStatsPickerGen);
+            if (status is not null)
+                StatusChanged?.Invoke(status);
         }
     }
 
