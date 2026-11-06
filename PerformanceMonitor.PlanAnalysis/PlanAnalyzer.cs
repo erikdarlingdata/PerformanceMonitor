@@ -512,11 +512,18 @@ public static partial class PlanAnalyzer
             });
         }
 
+        /* #7898: rule 27's test, read once here because rule 20 needs it too. OPTIMIZE FOR UNKNOWN also leaves a
+           parameter without a compiled value, and rule 27 reports the hint, so rule 20 leaves those to it. */
+        var hasOptimizeForUnknown = !string.IsNullOrEmpty(stmt.StatementText) &&
+            PlanRegex.IsMatch(OptimizeForUnknownRegExp(), MaskCommentsAndLiterals(stmt.StatementText), // #4524
+                "OPTIMIZE FOR UNKNOWN hint", // a regex that cannot finish gives way to a text search: the warning names a hint the text must hold
+                t => PlanTextSearch.ContainsWords(t, false, false, "OPTIMIZE", "FOR", "UNKNOWN"));
+
         // Rule 20: Local variables without RECOMPILE
         // Parameters with no CompiledValue are likely local variables — the optimizer
         // cannot sniff their values and uses density-based ("unknown") estimates.
         // Skip statements with cost < 1 (can't go parallel, estimate quality rarely matters).
-        if (!cfg.IsRuleDisabled(20) && stmt.Parameters.Count > 0 && stmt.StatementSubTreeCost >= 1.0)
+        if (!cfg.IsRuleDisabled(20) && stmt.Parameters.Count > 0 && stmt.StatementSubTreeCost >= 1.0 && !hasOptimizeForUnknown)
         {
             var unsnifffedParams = stmt.Parameters
                 .Where(p => string.IsNullOrEmpty(p.CompiledValue))
@@ -545,10 +552,7 @@ public static partial class PlanAnalyzer
         // warning about CTE reuse is guessing.
 
         // Rule 27: OPTIMIZE FOR UNKNOWN in statement text
-        if (!cfg.IsRuleDisabled(27) && !string.IsNullOrEmpty(stmt.StatementText) &&
-            PlanRegex.IsMatch(OptimizeForUnknownRegExp(), MaskCommentsAndLiterals(stmt.StatementText), // #4524
-                "OPTIMIZE FOR UNKNOWN hint", // a regex that cannot finish gives way to a text search: the warning names a hint the text must hold
-                t => PlanTextSearch.ContainsWords(t, false, false, "OPTIMIZE", "FOR", "UNKNOWN")))
+        if (!cfg.IsRuleDisabled(27) && hasOptimizeForUnknown)
         {
             stmt.PlanWarnings.Add(new PlanWarning
             {
@@ -1152,19 +1156,26 @@ public static partial class PlanAnalyzer
         // A PROBE() alone is just a bitmap filter — not a real residual predicate.
         // Skip for 0-execution nodes — the operator never ran
         if (!cfg.IsRuleDisabled(11) && nonSargableReason == null && IsRowstoreScan(node) && !string.IsNullOrEmpty(node.Predicate) &&
-            !IsProbeOnly(node.Predicate) && !(node.HasActualStats && node.ActualExecutions == 0))
+            !IsProbeOnly(node.Predicate) && !(node.HasActualStats && node.ActualExecutions == 0) &&
+            ScanPredicateIsWorthReporting(node, stmt, out var scanImpact))
         {
             var displayPredicate = StripProbeExpressions(node.Predicate);
-            var details = BuildScanImpactDetails(node, stmt);
             var severity = PlanWarningSeverity.Warning;
 
+            /* #7891: an actual plan's share is the scan's elapsed time. The cost share is the optimizer's
+               estimate, and the plans worth reading are the ones where that estimate was wrong. An estimated
+               plan, or an actual plan that carries no statement time, has only the cost share. */
+            var sharePct = node.HasActualStats && HasStatementElapsed(stmt) ? scanImpact.ElapsedPct : scanImpact.CostPct;
+
             // Elevate to Critical if the scan dominates the plan
-            if (details.CostPct >= 90 || details.ElapsedPct >= 90)
+            if (sharePct >= 90)
                 severity = PlanWarningSeverity.Critical;
 
-            var message = "Scan with residual predicate — SQL Server is reading every row and filtering after the fact.";
-            if (!string.IsNullOrEmpty(details.Summary))
-                message += $" {details.Summary}";
+            var message = node.HasActualStats && node.ActualRowsRead > 0
+                ? $"Scan with residual predicate — SQL Server read {node.ActualRowsRead:N0} rows to return {node.ActualRows:N0}, filtering after the fact."
+                : "Scan with residual predicate — SQL Server is reading every row and filtering after the fact.";
+            if (!string.IsNullOrEmpty(scanImpact.Summary))
+                message += $" {scanImpact.Summary}";
 
             // If the statement is executing a dynamic cursor, that's usually
             // the reason an index didn't get used. Call it out so the user looks there
@@ -1177,7 +1188,7 @@ public static partial class PlanAnalyzer
                 message += " Check that you have appropriate indexes.";
 
             // I/O waits specifically confirm the scan is hitting disk — elevate
-            if (HasSignificantIoWaits(stmt.WaitStats) && details.CostPct >= 50
+            if (HasSignificantIoWaits(stmt.WaitStats) && sharePct >= 50
                 && severity != PlanWarningSeverity.Critical)
                 severity = PlanWarningSeverity.Critical;
 
@@ -1232,9 +1243,22 @@ public static partial class PlanAnalyzer
         if (!cfg.IsRuleDisabled(34) && isBareScanCandidate)
         {
             var colCount = node.OutputColumns!.Split(',').Length;
-            var isSignificant = node.HasActualStats
-                ? GetOperatorOwnElapsedMs(node) > 0
-                : node.CostPercent >= 20;
+
+            /* #7891: a scan under the rows floor is a few hundred pages at most, and a narrower index cannot
+               make it cheaper. An actual plan is judged on the rows it read and the scan's own share of the
+               statement's time, with any own time at all standing in when the plan carries no statement time.
+               An estimated plan is judged on the table's cardinality and the scan's share of the plan's cost. */
+            bool isSignificant;
+            if (node.HasActualStats)
+            {
+                var ownShare = OwnTimeSharePct(node, stmt);
+                isSignificant = Math.Max(node.ActualRowsRead, node.ActualRows) >= ScanRuleMinRows
+                    && (ownShare.HasValue ? ownShare.Value >= ScanRuleMinOwnTimeSharePct : GetOperatorOwnElapsedMs(node) > 0);
+            }
+            else
+            {
+                isSignificant = node.TableCardinality >= ScanRuleMinRows && node.CostPercent >= 20;
+            }
 
             if (isSignificant)
             {
@@ -1311,9 +1335,12 @@ public static partial class PlanAnalyzer
 
             if (hasMismatch || hasConvert)
             {
+                /* #7898: GetRangeWithMismatchedTypes and GetRangeThroughConvert are the functions the optimizer
+                   uses to build a dynamic seek range through the conversion, so the index is still sought. The
+                   cost of the mismatch is the wider range and the guessed estimate for it. */
                 var reason = hasMismatch
-                    ? "Mismatched data types between the column and the parameter/literal. SQL Server is converting every row to compare, preventing index seeks. Match your data types — don't pass nvarchar to a varchar column, or int to a bigint column."
-                    : "CONVERT/CAST wrapping a column in the predicate. SQL Server is converting every row to compare, preventing index seeks. Match your data types — convert the parameter/literal instead of the column.";
+                    ? "Mismatched data types between the column and the parameter/literal. The optimizer built a dynamic seek range through the conversion, so the index is still sought, but the range is wider than an exact match and the row estimate for it is a guess. Match your data types — don't pass nvarchar to a varchar column, or int to a bigint column."
+                    : "CONVERT/CAST wrapping a column in the predicate. The optimizer built a dynamic seek range through the conversion, so the index is still sought, but the range is wider than an exact match and the row estimate for it is a guess. Match your data types — convert the parameter/literal instead of the column.";
 
                 node.Warnings.Add(new PlanWarning
                 {
@@ -1490,7 +1517,7 @@ public static partial class PlanAnalyzer
             {
                 RuleNumber = 23,
                 WarningType = "Table-Valued Function",
-                Message = $"Table-valued function: {funcName}. Multi-statement TVFs have no statistics — SQL Server guesses 1 row (pre-2017) or 100 rows (2017+) regardless of actual size. Rewrite as an inline table-valued function if possible, or dump the function results into a #temp table and join to that instead.",
+                Message = $"Table-valued function: {funcName}. Multi-statement TVFs have no statistics — SQL Server guesses 1 row (before SQL Server 2014) or 100 rows (SQL Server 2014 and later) regardless of actual size, unless interleaved execution (SQL Server 2017 and later) runs the function first and uses its real row count. Rewrite as an inline table-valued function if possible, or dump the function results into a #temp table and join to that instead.",
                 Severity = PlanWarningSeverity.Warning
             });
         }
@@ -1512,7 +1539,14 @@ public static partial class PlanAnalyzer
                     && scanCandidate.Children.Count > 0)
                     scanCandidate = scanCandidate.Children[0];
 
-                if (IsScanOperator(scanCandidate))
+                /* #7890: a plain Top over an Ordered scan, reached through streaming operators only, is
+                   the shape SELECT TOP (n) ... ORDER BY <index key> compiles to. The Top stops the scan
+                   after n rows, so there is no scan and sort to index away. A Top N Sort reads the whole
+                   scan before it returns a row, and an unordered scan carries no such guarantee, so both
+                   keep the finding. */
+                var topStopsScanEarly = isTop && scanCandidate.Ordered;
+
+                if (IsScanOperator(scanCandidate) && !topStopsScanEarly)
                 {
                     var topLabel = isTopNSort ? "Top N Sort" : "Top";
                     var onInner = node.Parent?.PhysicalOp == "Nested Loops" && node.Parent.Children.Count >= 2
@@ -2142,7 +2176,9 @@ public static partial class PlanAnalyzer
 
     /// <summary>
     /// Per-thread self-time calculation for parallel row mode operators.
-    /// For each worker thread: self = parent[t] - sum(effective children[t]).
+    /// For each worker thread: self = parent[t] - sum(effective children[t]),
+    /// less the slowest producer thread below any exchange among the children,
+    /// which comes off every thread alike (#7979).
     /// Returns max across worker threads. Thread 0 (the coordinator) is excluded
     /// from the parent side by WorkThreads, and the child side looks through
     /// batch subtrees and pass-throughs the same way the serial path does.
@@ -2154,21 +2190,42 @@ public static partial class PlanAnalyzer
         foreach (var ts in WorkThreads(node))
             parentByThread[ts.ThreadId] = ts.ActualElapsedMs;
 
-        // Build lookup: threadId -> sum of effective children's elapsed
+        // Build lookup: threadId -> sum of effective children's elapsed, plus the
+        // time that comes off every thread alike (the slowest producer below an exchange)
         var childSumByThread = new Dictionary<int, long>();
+        var everyThreadMs = 0L;
         foreach (var child in node.Children)
-            AddEffectiveChildElapsedByThread(child, childSumByThread);
+        {
+            // An exchange's own children run on the other side of it, on other threads
+            if (node.PhysicalOp == "Parallelism")
+                everyThreadMs += SlowestThreadElapsedMs(child);
+            else
+                AddEffectiveChildElapsedByThread(child, childSumByThread, ref everyThreadMs);
+        }
 
         // Self-time per thread = parent - children, take max across worker threads
         var maxSelf = 0L;
         foreach (var (threadId, parentMs) in parentByThread)
         {
             childSumByThread.TryGetValue(threadId, out var childMs);
-            var self = Math.Max(0, parentMs - childMs);
+            var self = Math.Max(0, parentMs - childMs - everyThreadMs);
             if (self > maxSelf) maxSelf = self;
         }
 
         return maxSelf;
+    }
+
+    /// <summary>
+    /// The longest any one worker thread spent in a subtree that runs on the
+    /// producer side of an exchange, by the same look-through rules as
+    /// <see cref="AddEffectiveChildElapsedByThread"/>.
+    /// </summary>
+    private static long SlowestThreadElapsedMs(PlanNode node)
+    {
+        var byThread = new Dictionary<int, long>();
+        var everyThreadMs = 0L;
+        AddEffectiveChildElapsedByThread(node, byThread, ref everyThreadMs);
+        return (byThread.Count > 0 ? byThread.Values.Max() : 0) + everyThreadMs;
     }
 
     /// <summary>
@@ -2299,21 +2356,31 @@ public static partial class PlanAnalyzer
     ///
     /// Together these can crown a row-mode operator above a batch subtree as
     /// the hottest operator in its plan, with the subtree's time double-counted.
+    ///
+    /// An exchange child adds to <paramref name="everyThreadMs"/> instead of
+    /// <paramref name="acc"/>: what is below it ran on other threads (#7979).
     /// </summary>
-    private static void AddEffectiveChildElapsedByThread(PlanNode child, Dictionary<int, long> acc)
+    private static void AddEffectiveChildElapsedByThread(PlanNode child, Dictionary<int, long> acc, ref long everyThreadMs)
     {
-        // Exchange operators have unreliable times — look through to their child
+        // An exchange moves rows between threads, so thread t above it is not doing
+        // thread t's work below it. Pairing them by number gave a Sort over a branch
+        // that ran on one producer thread the whole branch's time on every other
+        // thread (#7979). Every consumer thread waits on all the producers, and none
+        // finishes before the slowest does, so the slowest producer thread comes off
+        // every thread above: the per-thread form of the serial path's max child.
+        // The exchange's own time is not used. It soaks up time a spilling parent
+        // spends (sql.kiwi/2021/03), and subtracting it would hand that time to the
+        // exchange instead of the parent.
         if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
         {
-            var dominant = child.Children.OrderByDescending(c => c.ActualElapsedMs).First();
-            AddEffectiveChildElapsedByThread(dominant, acc);
+            everyThreadMs += child.Children.Max(SlowestThreadElapsedMs);
             return;
         }
 
         var mode = child.ActualExecutionMode ?? child.ExecutionMode;
         if (mode == "Batch" && child.HasActualStats)
         {
-            AddBatchSubtreeElapsedByThread(child, acc);
+            AddBatchSubtreeElapsedByThread(child, acc, ref everyThreadMs);
             return;
         }
 
@@ -2330,14 +2397,14 @@ public static partial class PlanAnalyzer
         // No runtime stats (e.g. a Compute Scalar pass-through): look through
         // to the descendants that have them.
         foreach (var grandchild in child.Children)
-            AddEffectiveChildElapsedByThread(grandchild, acc);
+            AddEffectiveChildElapsedByThread(grandchild, acc, ref everyThreadMs);
     }
 
     /// <summary>
     /// Per-thread sum across a contiguous batch-mode zone, stopping at exchanges.
     /// Batch operators pipeline, so their times add rather than nest.
     /// </summary>
-    private static void AddBatchSubtreeElapsedByThread(PlanNode node, Dictionary<int, long> acc)
+    private static void AddBatchSubtreeElapsedByThread(PlanNode node, Dictionary<int, long> acc, ref long everyThreadMs)
     {
         foreach (var ts in WorkThreads(node))
         {
@@ -2351,9 +2418,9 @@ public static partial class PlanAnalyzer
 
             var childMode = child.ActualExecutionMode ?? child.ExecutionMode;
             if (childMode == "Batch" && child.HasActualStats)
-                AddBatchSubtreeElapsedByThread(child, acc);
+                AddBatchSubtreeElapsedByThread(child, acc, ref everyThreadMs);
             else
-                AddEffectiveChildElapsedByThread(child, acc);
+                AddEffectiveChildElapsedByThread(child, acc, ref everyThreadMs);
         }
     }
 
@@ -2837,6 +2904,36 @@ public static partial class PlanAnalyzer
         return new ScanImpact(costPct, elapsedPct, parts.Count > 0 ? string.Join(" ", parts) : null);
     }
 
+    private static bool HasStatementElapsed(PlanStatement stmt) =>
+        stmt.QueryTimeStats != null && stmt.QueryTimeStats.ElapsedTimeMs > 0;
+
+    /* #7891: the operator's own elapsed time as a share of the statement's, or null when the plan carries
+       no statement time and there is no share to measure. */
+    private static double? OwnTimeSharePct(PlanNode node, PlanStatement stmt) =>
+        HasStatementElapsed(stmt)
+            ? (double)GetOperatorOwnElapsedMs(node) / stmt.QueryTimeStats!.ElapsedTimeMs * 100
+            : null;
+
+    /* #7891: rule 11's gate. An estimated plan is always reported. An actual plan must have read at least
+       ScanRuleMinRows rows, returned under ScanPredicateMaxSelectivity of what it read when the plan says
+       how many it read, and spent at least ScanRuleMinOwnTimeSharePct of the statement's time in the scan
+       when the plan carries statement time. The impact details come out either way, so the caller does not
+       build them twice. */
+    private static bool ScanPredicateIsWorthReporting(PlanNode node, PlanStatement stmt, out ScanImpact details)
+    {
+        details = BuildScanImpactDetails(node, stmt);
+        if (!node.HasActualStats)
+            return true;
+
+        if (Math.Max(node.ActualRowsRead, node.ActualRows) < ScanRuleMinRows)
+            return false;
+        if (node.ActualRowsRead > 0 && (double)node.ActualRows / node.ActualRowsRead >= ScanPredicateMaxSelectivity)
+            return false;
+
+        var ownShare = OwnTimeSharePct(node, stmt);
+        return ownShare is null || ownShare.Value >= ScanRuleMinOwnTimeSharePct;
+    }
+
     /// <summary>
     /// Checks whether a function call in a predicate is on the column side of the comparison.
     /// Predicate ScalarStrings look like: [db].[schema].[table].[col]>dateadd(day,(0),[@var])
@@ -3194,6 +3291,22 @@ public static partial class PlanAnalyzer
     // guesses below, and from this size up it stays clear of them (0.3% and 5.6% at this size,
     // falling as the table grows).
     private const double CeGuessMinTableRows = 100_000;
+
+    /* #7891: rules 11 and 34 are about reads a scan does that an index could spare. Under this many rows a
+       table is a few hundred pages, its scan is a buffer pool read of a millisecond or two, and the index
+       either rule proposes costs more on every write than it saves on the read. */
+    private const long ScanRuleMinRows = 10_000;
+
+    /* #7891: an index that removed the scan outright saves at most the scan's own share of the statement's
+       elapsed time. Under a tenth, the saving sits inside a statement's run-to-run variance and the finding
+       points at nothing a person could measure. Rule 35 needs twice this share before it calls an operator
+       expensive with nothing else to say about it. */
+    private const double ScanRuleMinOwnTimeSharePct = 10;
+
+    /* #7891: rule 11 reports rows a scan read and then discarded. When at least half of the rows read were
+       returned, a seek on the predicate columns would touch most of the same pages, so the predicate is not
+       the cost the rule describes. */
+    private const double ScanPredicateMaxSelectivity = 0.5;
 
     /// <summary>
     /// Detects well-known CE default selectivity guesses by comparing EstimateRows to TableCardinality.

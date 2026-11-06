@@ -235,13 +235,14 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
     /// Produces a single BLOCKING_EVENTS fact with event count, rate, and details.
     /// Value is the busiest 4-hour sub-window's events per hour (#3871), the PG collector's shape
     /// exactly — see <c>PgFactCollector.CollectBlockingFactsAsync</c> for the grain argument (the same
-    /// storm must not grade CRITICAL on a 4-hour pass and Information on a 24-hour one) and for why the
-    /// divisor is <c>min(4, observed hours)</c> (#3538 A2's observed-time rule, and the ≤4-hour
-    /// degeneracy). DuckDB's 3-arg <c>time_bucket</c> takes the same window-start origin PG's
-    /// <c>date_bin</c> does. <c>events_per_hour</c> stays published as whole-window context.
+    /// storm must not grade CRITICAL on a 4-hour pass and Information on a 24-hour one). Each bucket
+    /// divides by its OWN covered hours (#7895, <see cref="FactCollectorHelpers.PeakBucketRate"/>): its
+    /// span clipped to the window end, never more than the window's observed hours (#3538 A2's
+    /// observed-time rule), never under one hour, and the peak is the highest rate rather than the
+    /// biggest count.
+    /// DuckDB's 3-arg <c>time_bucket</c> takes the same window-start origin PG's <c>date_bin</c> does.
+    /// <c>events_per_hour</c> stays published as whole-window context.
     /// </summary>
-    private const double PeakWindowHours = 4.0;
-
     private async Task CollectBlockingFactsAsync(AnalysisContext context, List<Fact> facts)
     {
         if (context.ObservedDurationMs <= 0) return;
@@ -271,7 +272,7 @@ reports AS (
     FROM waits
 ),
 buckets AS (
-    SELECT COUNT(*) AS bucket_event_count
+    SELECT bucket_start, COUNT(*) AS bucket_event_count
     FROM reports
     GROUP BY bucket_start
 )
@@ -281,7 +282,11 @@ SELECT
     MAX(wait_time_ms) AS max_wait_time_ms,
     COUNT(DISTINCT blocking_spid) AS distinct_head_blockers,
     COUNT(CASE WHEN blocking_status = 'sleeping' THEN 1 END) AS sleeping_blocker_count,
-    (SELECT COALESCE(MAX(bucket_event_count), 0) FROM buckets) AS peak_4h_event_count
+    /* #7895: the busiest FULL bucket, and the clipped tail bucket with its own span, so each is rated by its covered
+       hours (FactCollectorHelpers.PeakBucketRate). With the window-start origin only the last bucket can be short. */
+    (SELECT COALESCE(MAX(bucket_event_count), 0) FROM buckets WHERE bucket_start + INTERVAL '4 hours' <= $3) AS peak_full_bucket_count,
+    (SELECT COALESCE(MAX(bucket_event_count), 0) FROM buckets WHERE bucket_start + INTERVAL '4 hours' > $3) AS tail_bucket_count,
+    (SELECT COALESCE(MAX(date_diff('second', bucket_start, $3)) / 3600.0, 0) FROM buckets WHERE bucket_start + INTERVAL '4 hours' > $3) AS tail_bucket_hours
 FROM reports").Replace("{SCOPE}", scopeFilter);
 
         command.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
@@ -299,12 +304,15 @@ FROM reports").Replace("{SCOPE}", scopeFilter);
         var maxWaitTimeMs = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
         var distinctHeadBlockers = reader.IsDBNull(3) ? 0L : ToInt64(reader.GetValue(3));
         var sleepingBlockerCount = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
-        var peakEventCount = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
+        var peakFullBucketCount = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
+        var tailBucketCount = reader.IsDBNull(6) ? 0L : ToInt64(reader.GetValue(6));
+        var tailBucketHours = reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7));
 
         var periodHours = context.PeriodDurationMs / 3_600_000.0;
         var observedHours = context.ObservedDurationMs / 3_600_000.0;
         var eventsPerHour = eventCount / observedHours;
-        var peakEventsPerHour = peakEventCount / Math.Min(PeakWindowHours, observedHours);
+        var (peakEventsPerHour, peakEventCount, peakCoveredHours) =
+            FactCollectorHelpers.PeakBucketRate(peakFullBucketCount, tailBucketCount, tailBucketHours, context);
 
         facts.Add(new Fact
         {
@@ -318,6 +326,7 @@ FROM reports").Replace("{SCOPE}", scopeFilter);
                 ["events_per_hour"] = eventsPerHour,
                 ["events_per_hour_peak_4h"] = peakEventsPerHour,
                 ["peak_4h_event_count"] = peakEventCount,
+                ["peak_4h_covered_hours"] = peakCoveredHours,
                 ["avg_wait_time_ms"] = avgWaitTimeMs,
                 ["max_wait_time_ms"] = maxWaitTimeMs,
                 ["distinct_head_blockers"] = distinctHeadBlockers,

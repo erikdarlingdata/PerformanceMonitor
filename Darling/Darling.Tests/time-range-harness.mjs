@@ -44,4 +44,16 @@ for (const c of fixture.cases) {
   else failures.push(c.name + " [" + c.input + " @ " + c.zone + "]: " + problems.join("; "));
 }
 
-console.log(JSON.stringify({ total: fixture.cases.length, passed, minimumSpanMinutes: fixture.minimumSpanMinutes, failures }));
+/* #7940: a length that is not a whole number of minutes. The name, the id and the length text must agree on the minute count, and the id
+   must read back as the range the name says. */
+const MINUTE = 60000;
+const lengthOf = (spanMs) => {
+  const spec = mod.relativeSpec(spanMs);
+  const id = mod.specId(spec);
+  const back = mod.specFromId(id);
+  return { name: mod.specName(spec), id, length: mod.formatLength(spanMs), idSpanMs: back ? back.spanMs : null };
+};
+const typed = mod.parseRange("7.5 minutes", Date.parse("2026-10-08T11:01:00Z"), "America/New_York");
+const fractional = { typedSpanMs: typed.ok ? typed.range.spanMs : null, sevenAndAHalf: lengthOf(7.5 * MINUTE), ninetySeconds: lengthOf(1.5 * MINUTE), whole: lengthOf(45 * MINUTE) };
+
+console.log(JSON.stringify({ total: fixture.cases.length, passed, minimumSpanMinutes: fixture.minimumSpanMinutes, failures, fractional }));

@@ -265,6 +265,90 @@ public sealed class DarlingCurrentWaitsTrendTests
     }
 
     /// <summary>
+    /// #7974: a bucket's mean is over EVERY collection that ran in it, a collection with nothing waiting or blocked counting 0. A wait type and a
+    /// database seen in 1 of 60 one-minute collections of an hour read about 1/60, not the 1.0 and the whole wait of one seen in all 60; a steady
+    /// series still reads its full figure. The second hour holds only the sporadic series (the other 59 collections ran and wrote no row at all),
+    /// so its 60 comes from the collection log and cannot be inferred from any other series' rows. collection_count is the 60 runs.
+    /// </summary>
+    [Fact]
+    public async Task ABucketMean_CoversEveryCollectionThatRan_SoASporadicSeriesReadsAFractionAndASteadyOneReadsItsFigure_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live current-waits trend test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET created_date = $2 WHERE server_id = $1", ServerId, DarlingMcpTestData.Naive(DateTime.UtcNow.AddDays(-3)));
+
+            var thisHour = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            thisHour = new DateTime(thisHour.Year, thisHour.Month, thisHour.Day, thisHour.Hour, 0, 0, DateTimeKind.Utc);
+            var steadyHour = thisHour.AddHours(-3);
+            var quietHour = thisHour.AddHours(-2);
+
+            for (var minute = 0; minute < 60; minute++)
+            {
+                await SeedCollectionLogAsync(connection, ct, steadyHour.AddMinutes(minute), "SUCCESS", null);
+                await SeedCollectionLogAsync(connection, ct, quietHour.AddMinutes(minute), "SUCCESS", null);
+                await SeedWaitAsync(connection, ct, steadyHour.AddMinutes(minute), "LCK_M_X", 500, blockingSessionId: 99, database: "SteadyDb");
+            }
+
+            /* The sporadic series: one collection of the first hour and one of the second. */
+            await SeedWaitAsync(connection, ct, steadyHour.AddMinutes(7), "PAGEIOLATCH_SH", 600, blockingSessionId: 98, database: "SporadicDb");
+            await SeedWaitAsync(connection, ct, quietHour.AddMinutes(30), "PAGEIOLATCH_SH", 600, blockingSessionId: 98, database: "SporadicDb");
+
+            var root = JsonDocument.Parse(await DarlingMcpDataTools.GetCurrentWaitsTrend(dataSource, ServerName, 6, null, null, 60)).RootElement;
+            Assert.Equal(60, root.GetProperty("bucket_minutes").GetInt32());
+
+            var steadyStamp = steadyHour.ToString("yyyy-MM-ddTHH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+            var quietStamp = quietHour.ToString("yyyy-MM-ddTHH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+            JsonElement Point(string series, string key, string name, string stamp) => root.GetProperty(series).EnumerateArray()
+                .Single(p => p.GetProperty(key).GetString() == name && p.GetProperty("collection_time").GetString()!.StartsWith(stamp, StringComparison.Ordinal));
+
+            var steadyBlocked = Point("blocked_sessions", "database_name", "SteadyDb", steadyStamp);
+            Assert.Equal(1.0, steadyBlocked.GetProperty("blocked_count").GetDouble());
+            Assert.Equal(60, steadyBlocked.GetProperty("collection_count").GetInt64());
+            var steadyWait = Point("waiting_tasks", "wait_type", "LCK_M_X", steadyStamp);
+            Assert.Equal(500, steadyWait.GetProperty("total_wait_ms").GetInt64());
+
+            var sporadicBlocked = Point("blocked_sessions", "database_name", "SporadicDb", steadyStamp);
+            Assert.Equal(1.0 / 60, sporadicBlocked.GetProperty("blocked_count").GetDouble(), 3);
+            Assert.True(sporadicBlocked.GetProperty("blocked_count").GetDouble() > 0, "a database blocked in 1 of 60 collections must not round to 0");
+            Assert.Equal(1, sporadicBlocked.GetProperty("peak_blocked_count").GetInt64());
+            Assert.Equal(60, sporadicBlocked.GetProperty("collection_count").GetInt64());
+            var sporadicWait = Point("waiting_tasks", "wait_type", "PAGEIOLATCH_SH", steadyStamp);
+            Assert.Equal(10, sporadicWait.GetProperty("total_wait_ms").GetInt64());
+            Assert.Equal(600, sporadicWait.GetProperty("peak_wait_ms").GetInt64());
+            Assert.Equal(60, sporadicWait.GetProperty("collection_count").GetInt64());
+
+            /* The hour in which the other 59 collections ran and wrote no row: still 60 runs, still 1/60. */
+            var quietBlocked = Point("blocked_sessions", "database_name", "SporadicDb", quietStamp);
+            Assert.Equal(1.0 / 60, quietBlocked.GetProperty("blocked_count").GetDouble(), 3);
+            Assert.Equal(60, quietBlocked.GetProperty("collection_count").GetInt64());
+            var quietWait = Point("waiting_tasks", "wait_type", "PAGEIOLATCH_SH", quietStamp);
+            Assert.Equal(10, quietWait.GetProperty("total_wait_ms").GetInt64());
+            Assert.Equal(60, quietWait.GetProperty("collection_count").GetInt64());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
     /// #7877 review: this read has no hours_back ceiling, and the shared ladder gives up at its widest rung (one day). A 30-day window holding
     /// 8 wait types and a database is 31 day-buckets x 9 series = 279 points: over the 200 target, inside the 1,500 cap, so the widest rung is
     /// served and the note says the target was missed. With 50 wait types it is 1,581 points, over the cap at every width, so both the automatic
