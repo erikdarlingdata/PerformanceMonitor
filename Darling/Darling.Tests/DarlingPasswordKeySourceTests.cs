@@ -438,6 +438,52 @@ public sealed class DarlingPasswordKeySourceTests
         }
     }
 
+    [Fact]
+    public void DescribeForValidation_GivesTheFingerprint_OrAWarning_AndNothingWhenUnset()
+    {
+        var (pkcs8, keyId) = NewKey();
+        var dir = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var configPath = Path.Combine(dir, "darling.json");
+            var keys = DarlingLogHashKeyFile.DirectoryFor(DarlingConfig.Parse("{\"postgres\":{\"connectionString\":\"Host=h\"}}"), configPath);
+            Directory.CreateDirectory(keys);
+            var outside = Path.Combine(dir, "password-key");
+            var inside = Path.Combine(keys, "password-key");
+            var secret = Convert.ToBase64String(pkcs8);
+            File.WriteAllText(outside, secret);
+            File.WriteAllText(inside, secret);
+
+            foreach (var setting in new[] { "", ",\"passwordKey\":\"\"", ",\"passwordKey\":\"  \"" })
+            {
+                var unset = DarlingConfig.Parse("{\"postgres\":{\"connectionString\":\"Host=h\"}" + setting + "}");
+                Assert.Null(DarlingPasswordKeySource.DescribeForValidation(unset, configPath));
+                Assert.Null(DarlingPasswordKeySource.DescribeForValidation(unset, null));
+            }
+
+            var expected = "passwordKey: password key " + PasswordSeal.DisplayKeyId(keyId);
+            Assert.Equal(expected, DarlingPasswordKeySource.DescribeForValidation(ConfigWith("file:" + outside), configPath));
+            Assert.Equal(expected, DarlingPasswordKeySource.DescribeForValidation(ConfigWith("file:" + outside), null));
+
+            var missing = DarlingPasswordKeySource.DescribeForValidation(ConfigWith("file:" + Path.Combine(dir, "missing")), configPath);
+            Assert.NotNull(missing);
+            Assert.StartsWith("WARNING: passwordKey", missing, StringComparison.Ordinal);
+
+            /* Inside the credentials directory is a warning only when the directory is known. */
+            var insideLine = DarlingPasswordKeySource.DescribeForValidation(ConfigWith("file:" + inside), configPath);
+            Assert.NotNull(insideLine);
+            Assert.StartsWith("WARNING: passwordKey", insideLine, StringComparison.Ordinal);
+            Assert.Contains("credentials directory", insideLine, StringComparison.Ordinal);
+            AssertNoKeyText(insideLine, secret);
+            Assert.Equal(expected, DarlingPasswordKeySource.DescribeForValidation(ConfigWith("file:" + inside), null));
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(pkcs8);
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
     /* A UTF-8 BOM as it reads after decoding, written as a code so no editor can strip it unseen. */
     private static readonly string Bom = ((char)0xFEFF).ToString();
 

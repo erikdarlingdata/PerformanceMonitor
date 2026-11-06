@@ -7,6 +7,9 @@
  */
 
 using System;
+using System.IO;
+using System.Security.Cryptography;
+using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -37,6 +40,50 @@ public sealed class DarlingCliSealKeyTests
         Assert.Null(decision.Notice);
         Assert.Equal("p@ss-not-real", decision.Ring.Open(decision.Ring.Seal("p@ss-not-real", Binding), Binding));
     }
+
+    /// <summary>#8006: the diagnostics ring reads the <c>passwordKey</c> key when the setting is there, never the key file
+    /// beside it (a target that cannot be read gives no ring, not the file), and without the setting reads the file as
+    /// before. <see cref="DarlingPasswordKey.Current"/> refuses in tests, so the method always reaches the loader.</summary>
+    [Fact]
+    public void TryOpenFileRing_WithPasswordKey_OpensWithTheExternalKey_AndWithoutItReadsTheFile()
+    {
+        Assert.False(DarlingPasswordKey.Current.Status.CanSeal);
+
+        var dir = Directory.CreateTempSubdirectory("cli-seal-key-test-").FullName;
+        var external = Directory.CreateTempSubdirectory("cli-seal-key-external-").FullName;
+        using var fileKey = PasswordPrivateKey.Generate();
+        using var externalKey = PasswordPrivateKey.Generate();
+        var filePkcs8 = fileKey.ExportPkcs8();
+        var externalPkcs8 = externalKey.ExportPkcs8();
+        try
+        {
+            var configPath = Path.Combine(dir, "darling.json");
+            var plain = DarlingConfig.Parse("{\"postgres\":{\"connectionString\":\"Host=h\"}}");
+            var keys = DarlingLogHashKeyFile.DirectoryFor(plain, configPath);
+            Assert.Null(DarlingPasswordKeyFile.Generate(keys, () => (byte[])filePkcs8.Clone(), NullLogger.Instance).Refusal);
+            var externalPath = Path.Combine(external, "password-key");
+            File.WriteAllText(externalPath, Convert.ToBase64String(externalPkcs8));
+
+            Assert.Equal(fileKey.PublicKey.KeyId, DarlingCliSealKey.TryOpenFileRing(plain, configPath, null)?.Status.KeyId);
+            Assert.Null(DarlingCliSealKey.TryOpenFileRing(plain, null, null));
+
+            var withSetting = WithPasswordKey("file:" + externalPath);
+            Assert.Equal(externalKey.PublicKey.KeyId, DarlingCliSealKey.TryOpenFileRing(withSetting, configPath, null)?.Status.KeyId);
+            Assert.Equal(externalKey.PublicKey.KeyId, DarlingCliSealKey.TryOpenFileRing(withSetting, null, null)?.Status.KeyId);
+
+            Assert.Null(DarlingCliSealKey.TryOpenFileRing(WithPasswordKey("file:" + Path.Combine(external, "missing")), configPath, null));
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(filePkcs8);
+            CryptographicOperations.ZeroMemory(externalPkcs8);
+            Directory.Delete(dir, recursive: true);
+            Directory.Delete(external, recursive: true);
+        }
+    }
+
+    private static DarlingConfig WithPasswordKey(string reference) =>
+        DarlingConfig.Parse("{\"postgres\":{\"connectionString\":\"Host=h\"},\"passwordKey\":\"" + reference.Replace("\\", "\\\\", StringComparison.Ordinal) + "\"}");
 
     [Fact]
     public void AKeyFileThatIsNotThePublishedKey_Refuses()

@@ -10,6 +10,7 @@ using System;
 using System.IO;
 using System.Security.Cryptography;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -88,6 +89,42 @@ public static class DarlingPasswordKeySource
         }
 
         return DarlingPasswordKeyFile.Load(DarlingLogHashKeyFile.DirectoryFor(config, configPath), logger);
+    }
+
+    /// <summary>
+    /// The line <c>--validate-config</c> prints about <c>passwordKey</c>: null when the setting is unset,
+    /// <c>passwordKey: password key {fingerprint}</c> when the key loads, otherwise <c>WARNING: </c> and the refusal. A
+    /// warning, not a failure, because the start refuses such a key without stopping collection. The key is loaded only
+    /// to work out its fingerprint, and is disposed and zeroed before this returns.
+    /// </summary>
+    internal static string? DescribeForValidation(DarlingConfig config, string? configPath)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+
+        if (string.IsNullOrWhiteSpace(config.PasswordKey))
+        {
+            return null;
+        }
+
+        var load = LoadFromSetting(
+            config.PasswordKey,
+            configPath is null ? null : DarlingLogHashKeyFile.DirectoryFor(config, configPath),
+            NullLogger.Instance);
+        var pkcs8 = load.Pkcs8;
+        if (pkcs8 is null)
+        {
+            return "WARNING: " + load.Refusal;
+        }
+
+        try
+        {
+            using var key = PasswordPrivateKey.FromPkcs8(pkcs8);
+            return $"{SettingName}: password key {PasswordSeal.DisplayKeyId(key.PublicKey.KeyId)}";
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(pkcs8);
+        }
     }
 
     /// <summary>

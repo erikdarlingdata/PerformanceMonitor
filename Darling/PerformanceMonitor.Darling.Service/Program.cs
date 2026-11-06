@@ -401,6 +401,14 @@ if (args.Length > 0 && DarlingCliCommands.IsResetPasswordKeyVerb(args[0]))
     return await DarlingCliCommands.ResetPasswordKeyAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
 }
 
+/* CLI verb: --new-password-key <path> (#8006) - write a new password key to a path that holds nothing, for an operator to put in
+   the secret store passwordKey reads, and print only its fingerprint, never the key. It reads no configuration and opens no
+   store, so it runs anywhere the exe does. */
+if (args.Length > 0 && DarlingCliCommands.IsNewPasswordKeyVerb(args[0]))
+{
+    return DarlingCliCommands.NewPasswordKey(args[1..], Console.Out, Console.Error);
+}
+
 /* CLI verb: --self-check-password-key <vector-path> (#5366) - hidden: not in the usage text. Runs the real password key file,
    file identity and sealed-value code in a fresh temporary directory and exits non-zero on any failure. The Linux build job
    runs it inside the built image, because the test project runs on Windows. It reads no configuration and opens no store. */
