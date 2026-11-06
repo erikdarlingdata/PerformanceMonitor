@@ -110,26 +110,27 @@ public partial class WebhookAlertService
 
     /// <summary>
     /// Where a send that is handed its destination and not its route (a resolution, a notice, a PagerDuty resolve)
-    /// counts its outcome. The settings row's own entry only when <paramref name="destination"/> is the settings row's
-    /// URL or key for <paramref name="channel"/>. Else the entry of the route whose own destination it is, enabled or
-    /// disabled: an alert that fired through a route is resolved after the operator turns the route off, and that
-    /// outcome is the route's, not the settings row's, whose own destination is a different endpoint. Else
+    /// counts its outcome, in the order the fan-out attributes its own sends. First the entry of the route, enabled or
+    /// disabled, whose own destination <paramref name="destination"/> is: the fan-out counts a send through a route
+    /// against the route even when the settings row names the same URL, so a delivery to that URL must clear the
+    /// route's count, and an alert that fired through a route is resolved after the operator turns the route off. Else
+    /// the settings row's own entry, when the destination is its URL or key for <paramref name="channel"/>. Else
     /// <see cref="HealthTarget.None"/>: a destination that no configured channel names (a route's URL that was edited
     /// away) belongs to no entry.
     /// </summary>
     private static HealthTarget HealthTargetOfDestination(IAlertSettings delivery, string channel, string destination)
     {
-        if (IsDestination(SettingsRowDestination(delivery, channel), destination))
-        {
-            return HealthTarget.Of(null);
-        }
-
         foreach (var route in delivery.NotificationRoutes)
         {
             if (route is not null && IsDestination(RouteDestination(route, channel), destination))
             {
                 return HealthTarget.Of(route.RouteId);
             }
+        }
+
+        if (IsDestination(SettingsRowDestination(delivery, channel), destination))
+        {
+            return HealthTarget.Of(null);
         }
 
         return HealthTarget.None;
