@@ -114,13 +114,16 @@ public sealed class QueryStoreIntervalWideGateTests
            so one server whose clock runs behind holds rows below the purge's horizon (appliedThrough - WideHorizonDays) until the next
            purge. Such a row is no purge edge. A mature server on a plain store (raw keeps 30 days, so 3a cannot pass) with a 14-day
            window: its own floor, ten days back, refuses 3b, and the whole-table floor is raised to the horizon, so it refuses too.
-           Taken as read, the skewed floor would send the window to the table and drop days 10 to 14 of it. */
+           Taken as read, the skewed floor would send the window to the table and drop days 10 to 14 of it. The coverage claim
+           starts below the window, so clause 2 holds and every refusal here is clause 3's. */
         var end = WindowEnd;
         var start = end.AddDays(-14);
         var mature = end.AddDays(-10);
-        Assert.False(Rule(windowStart: start, tableFloor: mature, appliedThrough: end));
-        Assert.False(Rule(windowStart: start, tableFloor: mature, appliedThrough: end, tableFloorAllServers: end.AddDays(-20)));
-        Assert.False(Rule(windowStart: start, tableFloor: mature, appliedThrough: end, tableFloorAllServers: end.AddDays(-QueryStoreIntervalPartitions.WideHorizonDays).AddMinutes(-1)));
+        var filled = start.AddDays(-1);
+        Assert.False(Rule(filledSince: filled, windowStart: start, tableFloor: mature, appliedThrough: end));
+        Assert.False(Rule(filledSince: filled, windowStart: start, tableFloor: mature, appliedThrough: end, tableFloorAllServers: end.AddDays(-20)));
+        /* The skewed floor exactly at S - 26 h is the edge 3b would pass on as read. */
+        Assert.False(Rule(filledSince: filled, windowStart: start, tableFloor: mature, appliedThrough: end, tableFloorAllServers: start - QueryStoreIntervalWide.PurgeEdgeMargin));
         /* The clamp only raises: a young server still passes on a whole-table floor at the horizon, which is past the margin. */
         Assert.True(Rule(tableFloor: WindowStart.AddHours(-6), tableFloorAllServers: WindowEnd.AddDays(-QueryStoreIntervalPartitions.WideHorizonDays)));
     }
