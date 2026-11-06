@@ -310,13 +310,38 @@ AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
 /// colour). The Lite twin of the viewer's ServerTagPill; the constant light label reads in either theme.</summary>
 public sealed class ServerTagPill
 {
-    public ServerTagPill(string name, string? colour)
+    public ServerTagPill(string name, string? colour, System.Collections.Generic.IReadOnlyList<string>? ancestorNames = null)
     {
         Name = name;
         Fill = TagColorBrushes.Fill(colour);
+        AncestorNames = ancestorNames ?? System.Array.Empty<string>();
     }
 
     public string Name { get; }
+
+    /// <summary>The names of the tags above this one, nearest first (#7984). The Overview search matches them, so a
+    /// server tagged HOSTS under PROD &gt; BULK is found by "BULK"; the pill itself shows only <see cref="Name"/>.</summary>
+    public System.Collections.Generic.IReadOnlyList<string> AncestorNames { get; }
+
+    /// <summary>The pills for one card: its assigned tags that exist, ordered by name so a card is stable, each
+    /// carrying the names of the tags above it for the search (#7984). The pill shows only its own tag's name.</summary>
+    public static System.Collections.Generic.IReadOnlyList<ServerTagPill> ForServer(
+        System.Collections.Generic.IReadOnlyList<ServerTag> tags, System.Collections.Generic.IEnumerable<int> assignedTagIds)
+    {
+        System.ArgumentNullException.ThrowIfNull(tags);
+        System.ArgumentNullException.ThrowIfNull(assignedTagIds);
+
+        var tagById = tags.ToDictionary(t => t.Id);
+        var nodes = tags.Select(t => new PerformanceMonitor.Common.Tags.TagTreeNode(t.Id, t.Name, t.ParentId)).ToList();
+        return assignedTagIds
+            .Select(id => tagById.TryGetValue(id, out var tag) ? tag : null)
+            .Where(t => t is not null)
+            .OrderBy(t => t!.Name, System.StringComparer.OrdinalIgnoreCase)
+            .Select(t => new ServerTagPill(
+                t!.Name, t!.Colour,
+                PerformanceMonitor.Common.Tags.TagTreeRules.Ancestors(nodes, t!.Id).Select(a => a.Name).ToList()))
+            .ToList();
+    }
 
     public System.Windows.Media.Brush Fill { get; }
 

@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using PerformanceMonitor.Darling.Viewer;
 using PerformanceMonitor.Ui;
 using Xunit;
@@ -195,5 +196,93 @@ public sealed class ViewerOverviewSearchTests
         var none = OverviewCardView.BuildRollup(cards, fleetWide, registeredCount: 4, search: "nothing-matches");
         Assert.Equal(0, none.TotalBlockingEvents);
         Assert.Equal(0, none.TotalDeadlocks);
+    }
+
+    // ── #7984: a search matches the tags above a card's tags, the way an alert rule on a tag covers its subtree ──
+
+    private static DarlingTag Tag(int id, string name, int? parentId = null) => new(id, name, parentId, 0);
+
+    /* PROD > BULK > HOSTS and PROD > BULK > LISTENERS, plus DR as a second root. */
+    private static List<DarlingTag> Forest() => new()
+    {
+        Tag(1, "PROD"), Tag(2, "BULK", 1), Tag(3, "HOSTS", 2), Tag(4, "LISTENERS", 2), Tag(5, "DR"),
+    };
+
+    /// <summary>The Viewer's pill builder, reached by name so this file compiles against a Viewer that stamps pills
+    /// in its window code and fails here, at an assert, rather than at the compiler.</summary>
+    private static IReadOnlyList<ServerTagPill> Pills(IReadOnlyList<DarlingTag> tags, params int[] assigned)
+    {
+        var builder = typeof(OverviewCardView).GetMethod("TagPills", BindingFlags.Public | BindingFlags.Static);
+        Assert.True(builder is not null,
+            "OverviewCardView.TagPills does not exist: a pill carries only its own tag's name, so a search for the name of a tag above it matches no server.");
+        return (IReadOnlyList<ServerTagPill>)builder!.Invoke(null, new object[] { tags, assigned })!;
+    }
+
+    private static ServerSummaryItem TaggedCard(string name, int id, IReadOnlyList<DarlingTag> tags, params int[] assigned) =>
+        new() { DisplayName = name, ServerName = name + ".corp", ServerId = id, IsOnline = true, TagPills = Pills(tags, assigned) };
+
+    [Fact]
+    public void Search_MatchesTheNameOfEveryTagAboveAnAssignedTag()
+    {
+        var cards = new List<ServerSummaryItem>
+        {
+            TaggedCard("bulk-host-1", 1, Forest(), 3),
+            TaggedCard("ag-listener", 2, Forest(), 4),
+            TaggedCard("standby", 3, Forest(), 5),
+        };
+
+        Assert.Equal(new[] { "bulk-host-1", "ag-listener" }, Names(OverviewCardView.Project(cards, false, "BULK")));
+        Assert.Equal(new[] { "bulk-host-1", "ag-listener" }, Names(OverviewCardView.Project(cards, false, "prod")));
+        Assert.Equal(new[] { "bulk-host-1" }, Names(OverviewCardView.Project(cards, false, "HOSTS")));
+        Assert.Equal(new[] { "ag-listener" }, Names(OverviewCardView.Project(cards, false, "listeners")));
+        Assert.Equal(new[] { "standby" }, Names(OverviewCardView.Project(cards, false, "DR")));
+        Assert.Equal(ServerOverviewFilter.NoMatchText, OverviewCardView.CountText(cards, 0, false, "zzz"));
+    }
+
+    [Fact]
+    public void ThePill_StillShowsOnlyTheAssignedTag_OrderedByName()
+    {
+        var pills = Pills(Forest(), 4, 3);
+        Assert.Equal(new[] { "HOSTS", "LISTENERS" }, pills.Select(p => p.Name));
+
+        /* An assignment to a tag that no longer exists stamps nothing. */
+        Assert.Empty(Pills(Forest(), 42));
+    }
+
+    [Fact]
+    public void BuildRollup_WithAParentTagSearch_CountsTheServersUnderIt()
+    {
+        var cards = new List<ServerSummaryItem>
+        {
+            TaggedCard("bulk-host-1", 1, Forest(), 3),
+            TaggedCard("ag-listener", 2, Forest(), 4),
+            TaggedCard("standby", 3, Forest(), 5),
+        };
+
+        var bulk = OverviewCardView.BuildRollup(cards, new FleetTotals(), registeredCount: 3, search: "BULK");
+        Assert.Equal(2, bulk.TotalServers);
+        Assert.Equal(3, bulk.FilteredOfTotal);
+    }
+
+    [Fact]
+    public void AParentCycle_ADanglingParent_AndADeepChain_AllEndTheWalk()
+    {
+        /* A under B under A cannot be written through the tag rules, but a store can hold it; the walk must end. */
+        var cycle = new List<DarlingTag> { Tag(1, "A", 2), Tag(2, "B", 1) };
+        var looped = TaggedCard("looped", 1, cycle, 1);
+        Assert.Equal(new[] { "looped" }, Names(OverviewCardView.Project(new[] { looped }, false, "B")));
+        Assert.Equal(new[] { "A", "B" }, OverviewCardView.SearchFields(looped).Skip(2));
+
+        /* A parent id with no row contributes no name and is not an error. */
+        var dangling = new List<DarlingTag> { Tag(1, "ORPHAN", 99) };
+        var orphan = TaggedCard("orphaned", 2, dangling, 1);
+        Assert.Equal(new[] { "orphaned" }, Names(OverviewCardView.Project(new[] { orphan }, false, "orphan")));
+        Assert.Equal(new[] { "ORPHAN" }, OverviewCardView.SearchFields(orphan).Skip(2));
+
+        /* A chain far deeper than the tag rules allow still stamps, and the nearest parents are searchable. */
+        var chain = Enumerable.Range(1, 200).Select(i => Tag(i, "level-" + i, i == 1 ? null : i - 1)).ToList();
+        var deep = TaggedCard("deep", 3, chain, 200);
+        Assert.Equal(new[] { "deep" }, Names(OverviewCardView.Project(new[] { deep }, false, "level-199")));
+        Assert.Equal(new[] { "deep" }, Names(OverviewCardView.Project(new[] { deep }, false, "level-150")));
     }
 }
