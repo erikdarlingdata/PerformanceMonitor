@@ -402,6 +402,105 @@ public sealed class DarlingTlsStoreTests
         Assert.DoesNotContain("certlm.msc", ex.Message, StringComparison.Ordinal);
     }
 
+    /* ---- #7865: subject mode falls back to an older match whose key opens ---- */
+
+    private const string FallbackAccount = @"NT SERVICE\PerformanceMonitor Darling";
+
+    [Fact]
+    public void Load_Subject_TheNewestKeyCannotBeOpened_ServesTheOlderMatchWhoseKeyOpens()
+    {
+        var all = new List<X509Certificate2> { Make(Name, Now.AddDays(-30), Now.AddDays(60)), Make(Name, Now.AddDays(-5), Now.AddDays(90)) };
+        var older = all[0].Thumbprint;
+        var newer = all[1].Thumbprint;
+
+        using var loaded = DarlingTlsStore.Load(
+            new WebTlsStoreConfig { Subject = Name },
+            "web",
+            (_, _) => all,
+            c => c.Thumbprint == newer ? new CryptographicException("Keyset does not exist") : null,
+            () => FallbackAccount,
+            Now);
+
+        Assert.Equal(older, loaded.Leaf.Thumbprint);
+    }
+
+    [Fact]
+    public void Load_Subject_EveryKeyFails_KeepsTodaysRefusal_NamingTheNewestCertificate()
+    {
+        var all = new List<X509Certificate2> { Make(Name, Now.AddDays(-30), Now.AddDays(60)), Make(Name, Now.AddDays(-5), Now.AddDays(90)) };
+        var older = all[0].Thumbprint;
+        var newer = all[1].Thumbprint;
+
+        var ex = Assert.Throws<InvalidOperationException>(() => DarlingTlsStore.Load(
+            new WebTlsStoreConfig { Subject = Name },
+            "web",
+            (_, _) => all,
+            _ => new CryptographicException("Keyset does not exist"),
+            () => FallbackAccount,
+            Now));
+
+        Assert.StartsWith("web.network.tls.store: the private key of certificate " + newer, ex.Message, StringComparison.Ordinal);
+        Assert.Contains($"--grant-cert-key-access {newer}", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(older, ex.Message, StringComparison.Ordinal);
+        Assert.Contains("Keyset does not exist", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Load_Thumbprint_AFailingKey_NeverFallsBackToAnOlderCertificateWithTheSameName()
+    {
+        var all = new List<X509Certificate2> { Make(Name, Now.AddDays(-30), Now.AddDays(60)), Make(Name, Now.AddDays(-5), Now.AddDays(90)) };
+        var pinned = all[0].Thumbprint;
+
+        var ex = Assert.Throws<InvalidOperationException>(() => DarlingTlsStore.Load(
+            new WebTlsStoreConfig { Thumbprint = pinned },
+            "web",
+            (_, _) => all,
+            c => c.Thumbprint == pinned ? new CryptographicException("denied") : null,
+            () => FallbackAccount,
+            Now));
+
+        Assert.StartsWith("web.network.tls.store: the private key of certificate " + pinned, ex.Message, StringComparison.Ordinal);
+    }
+
+    /* ---- #7865: a certificate whose Subject Alternative Name cannot be read is skipped, not fatal ---- */
+
+    [Fact]
+    public void Select_Subject_ACertificateWithAnUnreadableSan_IsSkipped_AndTheValidMatchIsSelected()
+    {
+        using var bad = MakeWithUnreadableSan(Now.AddDays(-1), Now.AddDays(90));
+        using var good = Make(Name, Now.AddDays(-30), Now.AddDays(60));
+        var certs = new List<X509Certificate2> { bad, good };
+
+        var chosen = DarlingTlsStore.Select(certs, new WebTlsStoreConfig { Subject = Name }, Now, "web");
+
+        Assert.Same(good, chosen);
+    }
+
+    [Fact]
+    public void Select_Subject_OnlyAnUnreadableSan_IsARefusalThatCountsIt_NotACryptographicException()
+    {
+        using var bad = MakeWithUnreadableSan(Now.AddDays(-1), Now.AddDays(90));
+
+        var ex = Assert.Throws<InvalidOperationException>(() => DarlingTlsStore.Select(
+            new List<X509Certificate2> { bad }, new WebTlsStoreConfig { Subject = Name }, Now, "web"));
+
+        Assert.Contains($"web.network.tls.store.subject '{Name}' matches no certificate", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("1 certificate(s) in the LocalMachine\My store have a Subject Alternative Name that could not be read", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Select_Subject_AnUnreadableSan_IsCountedInTheSkipSummary()
+    {
+        using var bad = MakeWithUnreadableSan(Now.AddDays(-1), Now.AddDays(90));
+        using var expired = Make(Name, Now.AddDays(-90), Now.AddDays(-1));
+
+        var ex = Assert.Throws<InvalidOperationException>(() => DarlingTlsStore.Select(
+            new List<X509Certificate2> { bad, expired }, new WebTlsStoreConfig { Subject = Name }, Now, "web"));
+
+        Assert.Contains("matches 1 certificate(s) in the LocalMachine\My store but none can be served (expired: 1,", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("1 certificate(s) in the LocalMachine\My store have a Subject Alternative Name that could not be read", ex.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Load_AStoreThatCannotBeOpened_NamesTheSettingAndTheStore()
     {
@@ -648,6 +747,21 @@ public sealed class DarlingTlsStoreTests
         {
             return X509CertificateLoader.LoadCertificate(created.Export(X509ContentType.Cert));
         }
+    }
+
+    /// <summary>A certificate whose Subject Alternative Name extension is malformed DER (#7865): reading its names
+    /// throws <see cref="CryptographicException"/>. It carries the key and Server Authentication, so only the SAN
+    /// stands between it and being a candidate.</summary>
+    private static X509Certificate2 MakeWithUnreadableSan(DateTimeOffset notBefore, DateTimeOffset notAfter)
+    {
+        using var rsa = RSA.Create(2048);
+        var request = new CertificateRequest(
+            "CN=darling-store-test-bad-san", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        request.CertificateExtensions.Add(new X509Extension("2.5.29.17", new byte[] { 0x30, 0x03, 0x82 }, false));
+        request.CertificateExtensions.Add(
+            new X509EnhancedKeyUsageExtension(new OidCollection { new Oid(ServerAuth) }, critical: false));
+
+        return request.CreateSelfSigned(notBefore, notAfter);
     }
 
     /// <summary>A list of certificates the test owns and disposes. A certificate added twice is disposed once.</summary>
