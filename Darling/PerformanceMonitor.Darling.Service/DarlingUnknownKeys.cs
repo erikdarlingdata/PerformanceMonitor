@@ -45,6 +45,18 @@ internal static class DarlingUnknownKeys
                 // The web section is walked whole (its direct keys and, through them, web.network), so a misspelled
                 // "allowAdminWrite" is named at start rather than silently leaving the default (#6600).
                 Walk(root.Value, typeof(WebConfig), "web", found);
+
+                // #7735: each web.network.tokens entry is walked too, as each mcp.tokens entry is: a mistyped "rol" binds to nothing and
+                // the entry is refused for having no role, so the start names the key the operator meant.
+                if (TryGetIgnoreCase(root.Value, "network", out var webNetwork)
+                    && TryGetIgnoreCase(webNetwork, "tokens", out var webTokens) && webTokens.ValueKind == JsonValueKind.Array)
+                {
+                    var index = 0;
+                    foreach (var entry in webTokens.EnumerateArray())
+                    {
+                        Walk(entry, typeof(WebTokenEntry), "web.network.tokens[" + index++ + "]", found);
+                    }
+                }
             }
             else if (sectionType is not null)
             {

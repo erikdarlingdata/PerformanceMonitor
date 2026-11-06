@@ -709,6 +709,15 @@ public static partial class DarlingCliCommands
     internal static async Task ReportAgentDispatchAsync(
         DarlingConfig config, TextWriter output, CancellationToken cancellationToken)
     {
+        /* #7735: the named web tokens' findings print whenever web.network.tokens is set, the way the mcp.tokens findings print below.
+           Nothing is read from the store for them. Never a token value. */
+        foreach (var finding in DarlingWebTokenSet.Check(
+            config.Web.Network, DarlingAgentDispatchChecks.ResolveWebToken(config.Web), DarlingAgentDispatchChecks.ResolveAllTokens(config.Mcp),
+            DarlingWebTokenSet.ResolveEntry, out _))
+        {
+            output.WriteLine("WARNING: " + finding);
+        }
+
         if (!config.Mcp.AllowInvestigations && !config.Mcp.HasNamedTokens)
         {
             return;
