@@ -852,11 +852,25 @@ AND   delta_execution_count > 0";
                 using var command = connection.CreateCommand();
                 command.CommandText = @"
 SELECT query_plan_xml
-FROM v_query_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-AND   query_plan_xml IS NOT NULL
+FROM
+(
+    SELECT
+        query_plan_xml,
+        delta_worker_time,
+        /* #7886: one row per plan. v_query_stats holds one row per query per snapshot, and every snapshot
+           row of a cached plan resolves to the same plan XML. Without this rank the hottest plan fills all
+           ten slots and is parsed once per snapshot, so PLAN_WARNING's warning_count and critical_count
+           multiply by its snapshot count and the two facts cover one to three plans instead of ten. The
+           plan's costliest snapshot row stands for it, and the limit below counts distinct plans. A row
+           stored without a query_plan_hash keys on its plan_handle, so a missing hash never merges two plans. */
+        ROW_NUMBER() OVER (PARTITION BY COALESCE(query_plan_hash, plan_handle) ORDER BY delta_worker_time DESC) AS plan_rank
+    FROM v_query_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   query_plan_xml IS NOT NULL
+) AS ranked
+WHERE plan_rank = 1
 ORDER BY delta_worker_time DESC
 LIMIT 10";
                 command.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
