@@ -390,10 +390,9 @@ public partial class ServerTab : UserControl
         double xMax = rangeEnd.ToOADate();
 
         /* Only count rows where SQL Server reported actual pressure (indicator >= 2 matches sp_pressuredetector). */
-        var pressureRows = data
+        var pressureRows = MemoryPressureEventCount.OnePerEvent(data
             .Where(d => d.MemoryIndicatorsProcess >= 2 || d.MemoryIndicatorsSystem >= 2)
-            .OrderBy(d => d.SampleTime)
-            .ToList();
+            .OrderBy(d => d.SampleTime));
 
         bool hasData = false;
         int maxBarCount = 0;

@@ -170,6 +170,9 @@ const PRESSURE_COVERAGE_CAVEAT = "No bar means no event was recorded, which for 
  */
 export function pressureEventBuckets(events, win) {
   const counts = new Map();
+  /* #7691: a server with several memory nodes stores one record per node for the same event, so one event is one
+     (second, notification): a sample counts once however many nodes reported it, 1 ms apart or at the same instant. */
+  const seen = new Set();
   let drawn = 0;
   for (const e of Array.isArray(events) ? events : []) {
     const at = parseUtc(e && e.sample_time);
@@ -177,6 +180,9 @@ export function pressureEventBuckets(events, win) {
     const process = Number(e.memory_indicators_process);
     const system = Number(e.memory_indicators_system);
     if (!(process >= 2 || system >= 2)) continue;
+    const eventKey = Math.floor(at.getTime() / 1000) + "|" + e.memory_notification;
+    if (seen.has(eventKey)) continue;
+    seen.add(eventKey);
     drawn++;
     const hour = Math.floor(at.getTime() / HOUR_MS) * HOUR_MS;
     const row = counts.get(hour) || { sql_medium: 0, sql_severe: 0, os_medium: 0, os_severe: 0 };

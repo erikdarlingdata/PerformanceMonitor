@@ -562,7 +562,7 @@ WHERE rnk = 1";
 
     public const string MemoryPressureEventsSql = @"
 SELECT
-    SUM(CASE WHEN memory_indicators_process >= 2 OR memory_indicators_system >= 2 THEN 1 ELSE 0 END) AS pressure_event_count,
+    COUNT(DISTINCT concat(CAST(date_trunc('second', sample_time) AS VARCHAR), '|', memory_notification)) FILTER (WHERE memory_indicators_process >= 2 OR memory_indicators_system >= 2) AS pressure_event_count,
     MAX(memory_indicators_process) AS max_process,
     MAX(memory_indicators_system) AS max_system
 FROM memory_pressure_events
