@@ -482,6 +482,13 @@ function severityText(severity) {
   return Number.isFinite(n) ? " (score " + n.toFixed(2) + ")" : "";
 }
 
+/* #7726: the advice text writes code in backticks (a setting, a statement). The page draws each backtick span as <code>, built as an element with the
+   text set as text, so the span's content is escaped as it was; an unpaired backtick stays a character. */
+export function adviceNodes(text) {
+  /* split with one capture group: the even entries are plain text, the odd ones the text between a pair of backticks. */
+  return String(text).split(/`([^`]+)`/).map((part, i) => (i % 2 === 1 ? el("code", { text: part }) : part)).filter((n) => n !== "");
+}
+
 /* #6159: a lone finding's title is already on its group's summary line directly above, so its card does not repeat it as a heading. */
 function card(server, f, showTitle) {
   const label = severityLabel(f.severity);
@@ -492,8 +499,8 @@ function card(server, f, showTitle) {
       f.category ? el("span", { class: "muted", text: " · " + (f.category_name || f.category) }) : null,
     ]),
     showTitle ? el("h4", { text: findingTitle(f) }) : null,
-    advice.investigation ? el("p", { class: "reco-advice", text: advice.investigation }) : null,
-    advice.remediation ? el("p", { class: "reco-advice", text: advice.remediation }) : null,
+    advice.investigation ? el("p", { class: "reco-advice" }, adviceNodes(advice.investigation)) : null,
+    advice.remediation ? el("p", { class: "reco-advice" }, adviceNodes(advice.remediation)) : null,
     el("div", { class: "muted", text: "Seen " + f.occurrences + "× · last " + localTime(f.last_seen) + (f.recurring_at_this_hour ? " · recurs at this hour" : "") }),
   ];
   if (f.chains && f.chains.length > 1) {

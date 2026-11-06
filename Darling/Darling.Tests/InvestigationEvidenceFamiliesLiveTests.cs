@@ -252,6 +252,49 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         });
     }
 
+    /// <summary>
+    /// #7730: a statement the monitor sent before #7463 carries no marker. With the key backfill not yet run (V248 reopens it), the
+    /// marker-only text test lets it through, so it is still a regression target (not vacuous); once the backfill has stamped the key
+    /// table, the key-table test leaves it out and the application query leads.
+    /// </summary>
+    [Theory]
+    [InlineData(false, new long[] { 521, 522 })]
+    [InlineData(true, new long[] { 521 })]
+    public async Task AnOldUnmarkedStatement_IsATargetUntilTheBackfill_ThenLeftOut(bool backfilled, long[] expectedTargets)
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            await PlantQueryStoreAsync(setup.Connection, ct, 521, 31, 1, cpuUs: 1_000, lastExec: AlertAt.AddMinutes(-4));
+            await PlantQueryStoreAsync(setup.Connection, ct, 521, 32, 2, cpuUs: 10_000, lastExec: AlertAt.AddMinutes(-1));
+            await PlantQueryStoreAsync(setup.Connection, ct, 522, 33, 1, cpuUs: 1_000, lastExec: AlertAt.AddMinutes(-4));
+            await PlantQueryStoreAsync(setup.Connection, ct, 522, 34, 2, cpuUs: 200_000, lastExec: AlertAt.AddMinutes(-1));
+            foreach (var (queryId, text) in new[]
+            {
+                (521L, "SELECT * FROM dbo.Orders"),
+                (522L, PerformanceMonitor.Collectors.SqlServerOwnStatement.OldTexts[2]),
+            })
+            {
+                await DarlingMcpTestData.ExecAsync(setup.Connection, ct,
+                    "INSERT INTO collect.query_store_text (server_id, database_name, query_id, query_sql_text, last_seen) VALUES ($1, $2, $3, $4, $5)",
+                    ServerId, Db, queryId, text, DarlingMcpTestData.Naive(AlertAt));
+            }
+
+            if (backfilled)
+            {
+                Assert.NotNull(await PerformanceMonitor.Darling.Storage.QueryStoreSelfKeys.BackfillAsync(setup.Connection, ct));
+            }
+            else
+            {
+                Assert.False(await PerformanceMonitor.Darling.Storage.QueryStoreSelfKeys.ReadyAsync(setup.Connection, null, 30, ct));
+            }
+
+            var requestId = await OpenQueryPerformanceAndCaptureAsync(setup, ct);
+
+            var targets = Rows(await setup.Requests.ReadEvidenceAsync(requestId, ct), "regression_targets");
+            Assert.Equal(expectedTargets, targets.Select(t => t["query_id"]!.GetValue<long>()).Order().ToArray());
+        });
+    }
+
     [Fact]
     public async Task GoodAndBadCompiledValues_BothAppear_AndNeitherSurvivesMetadataOnly()
     {

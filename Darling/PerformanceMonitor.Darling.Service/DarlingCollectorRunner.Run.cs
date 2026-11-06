@@ -1391,6 +1391,16 @@ public sealed partial class DarlingCollectorRunner
                         _logger, LogLevel.Warning, context, sqlSlice,
                         server.Config.DisplayName, definition.Name, databaseName, "budget expired");
                 }
+                catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException
+                                           && cancellationToken.IsCancellationRequested)
+                {
+                    /* The service is stopping, and the read's cancellation arrived as the PROVIDER's exception
+                       rather than an OperationCanceledException (SqlClient reports a cancelled command as a
+                       SqlException). Surfaced as the cancellation it is, so RunOneAsync's cancellation arm
+                       claims the run: the skip arm below would count a stop as a failed database and, on the
+                       last database, rethrow it as an ERROR run. The same arm the shared driver has. */
+                    throw new OperationCanceledException(ex.Message, ex, cancellationToken);
+                }
                 catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
                 {
                     /* OOM is filtered OUT of this per-database skip and propagates: it is fatal, not a
@@ -2434,7 +2444,18 @@ public sealed partial class DarlingCollectorRunner
                         ServerLastReadMs: context.ServerScopeLastReadMs,
                         TargetSessionId: context.TargetSessionId);
                 }
-
+                catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException
+                                           && cancellationToken.IsCancellationRequested)
+                {
+                    /* The service is stopping, and the read's cancellation arrived as the PROVIDER's exception rather
+                       than an OperationCanceledException (SqlClient reports a cancelled command as a SqlException).
+                       Surfaced as the cancellation it is, so RunOneAsync's cancellation arm claims the run: left as
+                       the provider's exception, it reaches the generic error arm (Darling has no SQL error arm ahead of its cancellation
+                       arm, DarlingWorker.Targets.cs) and is recorded as an ERROR run.
+                       The same arm the Azure per-database loop has. Stores nothing, like the arm below. */
+                    baselineRollback?.RollBackBaselines();
+                    throw new OperationCanceledException(ex.Message, ex, cancellationToken);
+                }
                 catch
                 {
                     /* #7419: any other end of the read or the target phases before the store (a stop, a fault) stores nothing. */

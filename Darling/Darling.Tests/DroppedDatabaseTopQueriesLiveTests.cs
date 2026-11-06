@@ -111,6 +111,7 @@ public sealed class DroppedDatabaseTopQueriesLiveTests
             /* #7725: GoneDb has no row in this reply, so the reply names it, as get_top_procedures_by_cpu does. */
             Assert.Equal(new[] { "GoneDb" }, twoDocument.RootElement.GetProperty("databases_left_out").EnumerateArray().Select(n => n.GetString()!).ToArray());
             Assert.Contains("no longer lists", twoDocument.RootElement.GetProperty("databases_left_out_note").GetString(), StringComparison.Ordinal);
+            Assert.Equal(1, twoDocument.RootElement.GetProperty("databases_left_out_count").GetInt32());
         }
 
         /* One slot left over: the fill takes the dropped database's row. */

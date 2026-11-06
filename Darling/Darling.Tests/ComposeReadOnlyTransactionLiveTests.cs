@@ -93,4 +93,42 @@ public sealed class ComposeReadOnlyTransactionLiveTests
         Assert.True(outcome.Error is null, $"compose run failed: {outcome.Error}");
         Assert.NotNull(outcome.Payload!["rows"]);
     }
+
+    /// <summary>
+    /// #7668: a panel saved before #7565 charts a /sec perfmon counter as its running total, and the reply that runs it must carry the validator's
+    /// warning (the same sentence a save returns), so the page can print it. A panel on the rate ratio carries none, and the key is absent.
+    /// </summary>
+    [Theory]
+    [InlineData("\"measure\":\"perfmon_value\",\"aggregate\":\"avg\"", true)]
+    [InlineData("\"ratio\":\"perfmon_value_per_second\"", false)]
+    public async Task APerfmonPanel_RunReplyCarriesTheValidatorsWarning_OnlyForTheRunningTotal(string measure, bool warns)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString, ct);
+        await using (var setup = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await setup.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(setup, ct);
+        }
+
+        await using var store = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var panelJson = "{\"panel\":{\"source\":\"perfmon_stats\"," + measure + ",\"timeBucket\":\"hour\",\"viz\":\"line\"," +
+            "\"filters\":[{\"dimension\":\"counter_name\",\"op\":\"eq\",\"value\":\"Transactions/sec\"},{\"dimension\":\"instance_name\",\"op\":\"eq\",\"value\":\"_Total\"},{\"dimension\":\"server\",\"op\":\"eq\",\"value\":\"SQL01\"}]}}";
+
+        var outcome = await DarlingWebEndpoints.RunComposedPanelAsync(
+            store, (JsonObject)JsonNode.Parse(panelJson)!, ct, null, DarlingWebEndpoints.ComposeClientDeadlineHeadroomSeconds, remapClientTimeout: true);
+
+        Assert.True(outcome.Error is null, $"compose run failed: {outcome.Error}");
+        if (warns)
+        {
+            var warning = Assert.Single(outcome.Payload!["warnings"]!.AsArray())!.GetValue<string>();
+            Assert.StartsWith("this panel:", warning, StringComparison.Ordinal);
+            Assert.Contains("running total", warning, StringComparison.Ordinal);
+            Assert.Contains("perfmon_value_per_second", warning, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Null(outcome.Payload!["warnings"]);
+        }
+    }
 }

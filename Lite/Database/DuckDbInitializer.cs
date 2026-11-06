@@ -1490,7 +1490,7 @@ public partial class DuckDbInitializer : IDisposable
     /// must NOT match, or the destructive Parquet rebuild fires on a database
     /// that is merely locked or recovering a WAL from an unclean shutdown.
     /// </summary>
-    private static bool IsStorageVersionError(Exception ex)
+    internal static bool IsStorageVersionError(Exception ex)
     {
         /* DuckDB reports a genuine version mismatch as one of:
            - "Serialization Error: Failed to deserialize: ..." (incompatible storage format)
@@ -1498,7 +1498,7 @@ public partial class DuckDbInitializer : IDisposable
               but we can only read version Y"
            Since DuckDB v0.10+, newer libraries read older files, so this almost
            always means an older library was pointed at a newer file. */
-        var message = ex.ToString().ToLowerInvariant();
+        var message = DuckDbFailureText.Of(ex);
         return message.Contains("failed to deserialize")
             || message.Contains("trying to read a database file with version")
             || message.Contains("storage version");
@@ -1509,19 +1509,36 @@ public partial class DuckDbInitializer : IDisposable
     /// another process (a just-killed prior instance, antivirus) is holding it.
     /// These are safe to retry and must never trigger the Parquet rebuild.
     /// </summary>
-    private static bool IsTransientLockError(Exception ex)
+    internal static bool IsTransientLockError(Exception ex)
     {
-        var message = ex.ToString().ToLowerInvariant();
+        var message = DuckDbFailureText.Of(ex);
         return message.Contains("conflicting lock")
             || message.Contains("could not set lock")
             || message.Contains("being used by another process");
+    }
+
+    /* Test seam (#7769): a test replaces the file move to make the backup rename fail. Production leaves it null
+       and the move is File.Move. */
+    internal Action<string, string>? MoveFileForTests { get; set; }
+
+    /// <summary>#7812: set when a rebuild left the new database without all of the old data, null otherwise. The window
+    /// shows it once after the database is open at start. A database reset that reaches the same rebuild sets it too, but
+    /// nothing shows it then: it is a once-at-start notice.</summary>
+    internal DatabaseRebuildOutcome? RebuildOutcome { get; private set; }
+
+    private void MoveFile(string source, string destination)
+    {
+        if (MoveFileForTests is { } move)
+            move(source, destination);
+        else
+            File.Move(source, destination);
     }
 
     /// <summary>
     /// Exports all tables from the old database to Parquet, deletes the database, and reimports.
     /// Uses DuckDB's EXPORT DATABASE which writes one Parquet file per table.
     /// </summary>
-    private async Task MigrateViaParquetAsync(string archivePath)
+    internal async Task MigrateViaParquetAsync(string archivePath)
     {
         var exportDir = Path.Combine(archivePath, $"upgrade_{DateTime.Now:yyyyMMdd_HHmmss}");
         Directory.CreateDirectory(exportDir);
@@ -1554,28 +1571,67 @@ public partial class DuckDbInitializer : IDisposable
             _logger?.LogWarning(ex, "Could not export old database — data will be preserved as backup file only");
         }
 
-        /* Step 2: Back up and delete the old database file */
+        /* Step 2: Move the old database file (and its .wal) aside as a backup.
+           #7769: when the move fails the file is NEVER deleted. With the export failed too, it is the only copy of the
+           collected history. Both files stay where they are and the start stops with a message that names the file.
+           The .wal moves first: if it fails nothing has moved, and if the main file then fails the .wal goes back, so a
+           backup never ends up without its .wal and a stale .wal never sits beside a fresh database. */
         var backupPath = _databasePath + $".backup_{DateTime.Now:yyyyMMdd_HHmmss}";
+        var walPath = _databasePath + ".wal";
+        var walMoved = false;
         try
         {
-            /* DuckDB may have .wal files too */
-            File.Move(_databasePath, backupPath);
-            _logger?.LogInformation("Backed up old database to {BackupPath}", backupPath);
-
-            var walPath = _databasePath + ".wal";
             if (File.Exists(walPath))
             {
-                File.Move(walPath, backupPath + ".wal");
+                MoveFile(walPath, backupPath + ".wal");
+                walMoved = true;
+            }
+
+            MoveFile(_databasePath, backupPath);
+            _logger?.LogInformation("Backed up old database to {BackupPath}", backupPath);
+            if (!exported)
+            {
+                /* The old file is unreadable here and is not imported: the new database starts empty, so say where the old
+                   one went (#7769). */
+                _logger?.LogWarning("The old database could not be read. Lite is starting with a new empty database. " +
+                    "The old file is preserved at {BackupPath}.", backupPath);
             }
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Failed to back up old database, deleting instead");
-            File.Delete(_databasePath);
+            var walRestoreFailed = false;
+            if (walMoved)
+            {
+                try
+                {
+                    MoveFile(backupPath + ".wal", walPath);
+                }
+                catch (Exception restoreEx)
+                {
+                    walRestoreFailed = true;
+                    _logger?.LogError(restoreEx, "Could not put the write-ahead log back at {WalPath}; it is at {BackupWalPath}",
+                        walPath, backupPath + ".wal");
+                }
+            }
 
-            var walPath = _databasePath + ".wal";
-            if (File.Exists(walPath)) File.Delete(walPath);
+            /* When the export worked, a full Parquet copy of the data is in exportDir: say so, it is the way out if the
+               rename keeps failing. Each retried start writes another upgrade_<time> folder and nothing removes the old
+               ones (#7769), which is why the message names the folder. */
+            var copyNote = exported
+                ? $"A full copy of its data was written to {exportDir}. "
+                : "";
+            _logger?.LogError(ex, "Failed to back up old database {DatabasePath}; leaving it in place and not starting. " +
+                "Export succeeded: {Exported}, export folder: {ExportDir}", _databasePath, exported, exportDir);
+            throw new InvalidOperationException(
+                $"Lite could not move the database file {_databasePath} aside to back it up before rebuilding it, so it was left in place and not deleted. " +
+                copyNote +
+                (walRestoreFailed ? $"Its write-ahead log is at {backupPath}.wal. " : "") +
+                $"Close any other copy of Lite, check that the folder allows renaming files, and start Lite again. ({ex.Message})", ex);
         }
+
+        /* The old file moved aside and nothing will be imported from it: record where it went (#7812). */
+        if (!exported)
+            RebuildOutcome = new DatabaseRebuildOutcome(backupPath, null);
 
         /* Step 3: If we exported successfully, import into the fresh database */
         if (exported)
@@ -1593,9 +1649,12 @@ public partial class DuckDbInitializer : IDisposable
             catch (Exception ex)
             {
                 /* Import may fail if schema changed between versions — that's okay,
-                   the normal initialization will create fresh tables */
-                _logger?.LogWarning(ex, "Could not import Parquet data — starting with fresh tables. " +
-                    "Parquet files preserved at {ExportDir} for manual recovery.", exportDir);
+                   the normal initialization will create any missing tables. IMPORT DATABASE is not one
+                   transaction, so a failure partway can leave some tables loaded. */
+                _logger?.LogWarning(ex, "Could not import Parquet data — starting without all of the old data (none or only part of it was loaded). " +
+                    "Parquet files preserved at {ExportDir} for manual recovery; the old database file is preserved at {BackupPath}.",
+                    exportDir, backupPath);
+                RebuildOutcome = new DatabaseRebuildOutcome(backupPath, exportDir);
             }
         }
     }

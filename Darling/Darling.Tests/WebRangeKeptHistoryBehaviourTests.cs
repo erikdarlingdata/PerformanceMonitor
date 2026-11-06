@@ -286,6 +286,45 @@ public sealed class WebRangeKeptHistoryBehaviourTests
         Assert.Equal(0, r.GetProperty("loading").GetInt32());
     }
 
+    /// <summary>#7538, #7651: the Queries tab's Top Queries composite names the databases a read left out. It draws the window note first, then
+    /// the left-out sentence, then the grid; with no window note the left-out sentence is first. A read that left none out draws neither.</summary>
+    [Fact]
+    public void TheTopQueriesCard_DrawsTheLeftOutSentenceAfterTheWindowNote_AndBeforeTheGrid()
+    {
+        const string WindowNote = "The window reaches further back than this server's raw query_stats retains, so the older part of it was not read.";
+        const string LeftOut = "2 databases were left out because the server no longer lists them. They were dropped or detached: a_old, b_old.";
+        var rows = new System.Text.Json.Nodes.JsonArray(new System.Text.Json.Nodes.JsonObject { ["query_id"] = 1, ["query_text"] = "select 1" });
+        string Reply(bool withWindowNote, bool withLeftOut)
+        {
+            var o = new System.Text.Json.Nodes.JsonObject { ["queries"] = rows.DeepClone() };
+            if (withWindowNote)
+            {
+                o["window_truncated"] = true;
+                o["effective_start"] = "2026-01-02T00:00:00.0000000";
+                o["truncation_note"] = WindowNote;
+            }
+
+            if (withLeftOut)
+            {
+                o["databases_left_out"] = new System.Text.Json.Nodes.JsonArray("a_old", "b_old");
+                o["databases_left_out_count"] = 2;
+                o["databases_left_out_note"] = "These databases were left out of this read because the server's newest database snapshot no longer lists them. Name one in database_name to read its history.";
+            }
+
+            return o.ToJsonString();
+        }
+
+        string[] Order(bool withWindowNote, bool withLeftOut)
+        {
+            if (!TryRun("topQueriesLeftOutOrder", out var r, Reply(withWindowNote, withLeftOut))) return Array.Empty<string>();
+            return r.GetProperty("found").GetProperty("order").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        }
+
+        Assert.Equal(new[] { "notice: " + WindowNote, "notice: " + LeftOut, "table" }, Order(true, true));
+        Assert.Equal(new[] { "notice: " + LeftOut, "table" }, Order(false, true));
+        Assert.Equal(new[] { "notice: " + WindowNote, "table" }, Order(true, false));
+    }
+
     /// <summary>
     /// The same routing as source, so it holds where Node is not installed: the descriptor loader runs through the
     /// shared helper, and no hand-built composite calls <c>readTool</c> directly with a window.

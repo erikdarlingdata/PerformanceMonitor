@@ -372,7 +372,7 @@ public sealed class ViewerFleetRollupBuilderTests
         Assert.Empty(rollup.WorstServers);
         Assert.Equal(0, rollup.AdditionalProblemCount);
         Assert.Equal("", rollup.AdditionalProblemText);
-        Assert.Equal("All 2 servers healthy", rollup.AllHealthyText);
+        Assert.Equal("All 2 enabled servers healthy", rollup.AllHealthyText);
     }
 
     [Fact]
@@ -427,7 +427,7 @@ public sealed class ViewerFleetRollupBuilderTests
            problems — HasProblems is legitimately false (nothing to rank), but IsAllClear MUST be false,
            because 3 servers' status this cycle is unknown, not confirmed healthy. Before this fix,
            AllHealthyText's visibility was gated on HasProblems alone, so the UI would have rendered
-           "All 5 servers healthy" here despite 3 of them having no data at all this cycle. */
+           "All 5 enabled servers healthy" here despite 3 of them having no data at all this cycle. */
         var summaries = new[] { Healthy("h1", 1), Healthy("h2", 2) };
 
         var rollup = FleetRollup.Build(summaries, NoTotals, totalServerCount: 5);
@@ -562,15 +562,15 @@ public sealed class ViewerFleetRollupBuilderTests
     public void DisplayHelpers_Pluralize()
     {
         var one = FleetRollup.Build(new[] { Healthy("h1", 1) }, NoTotals);
-        Assert.Equal("Monitoring 1 server", one.MonitoringText);
-        Assert.Equal("All 1 server healthy", one.AllHealthyText);
+        Assert.Equal("Monitoring 1 enabled server", one.MonitoringText);
+        Assert.Equal("All 1 enabled server healthy", one.AllHealthyText);
 
         var many = FleetRollup.Build(new[]
         {
             Healthy("h1", 1),
             new ServerSummaryItem { DisplayName = "w1", ServerId = 2, IsOnline = true, FailedCollectorCount = 1 },
         }, NoTotals);
-        Assert.Equal("Monitoring 2 servers", many.MonitoringText);
+        Assert.Equal("Monitoring 2 enabled servers", many.MonitoringText);
         Assert.Equal("1 server", many.CollectionFailuresText);
 
         var twoFailing = FleetRollup.Build(new[]
@@ -913,7 +913,7 @@ public sealed class ViewerFleetDeadlockCoverageTests
         Assert.Equal(0, rollup.DeadlockCoverage.ServersRead);
         Assert.True(rollup.HasDeadlockCoverage);
         Assert.True(rollup.DeadlockCoverageIsPartial);
-        Assert.Equal("Deadlock coverage: read 0 of 5 servers", rollup.DeadlockCoverageText);
+        Assert.Equal("Deadlock coverage: read 0 of 5 enabled servers", rollup.DeadlockCoverageText);
     }
 
     /// <summary>
@@ -1000,12 +1000,12 @@ public sealed class ViewerFleetDeadlockCoverageTests
 
         Assert.True(rollup.HasDeadlockCoverage);
         Assert.False(rollup.DeadlockCoverageIsPartial);
-        Assert.Equal("Deadlock coverage: read all 2 servers", rollup.DeadlockCoverageText);
+        Assert.Equal("Deadlock coverage: read all 2 enabled servers", rollup.DeadlockCoverageText);
     }
 
     /// <summary>
     /// A large deadlock count with complete coverage still reads as complete: the line's own state tracks
-    /// COVERAGE, not the count's severity. "read all 2 servers" beside a bad number is good news about a
+    /// COVERAGE, not the count's severity. "read all 2 enabled servers" beside a bad number is good news about a
     /// bad number and must not be painted as part of the alarm.
     /// </summary>
     [Fact]
@@ -1016,7 +1016,7 @@ public sealed class ViewerFleetDeadlockCoverageTests
             new FleetTotals { TotalDeadlocks = 900 });
 
         Assert.False(rollup.DeadlockCoverageIsPartial);
-        Assert.Equal("Deadlock coverage: read all 2 servers", rollup.DeadlockCoverageText);
+        Assert.Equal("Deadlock coverage: read all 2 enabled servers", rollup.DeadlockCoverageText);
     }
 
     /// <summary>The issue's measured case, reversed by #3539: a PostgreSQL-only fleet whose
@@ -1039,7 +1039,7 @@ public sealed class ViewerFleetDeadlockCoverageTests
         Assert.Equal(3, rollup.DeadlockCoverage.ServersRead);
         Assert.Equal(3, rollup.DeadlockCoverage.PostgresServers);
         Assert.False(rollup.DeadlockCoverageIsPartial);
-        Assert.Equal("Deadlock coverage: read all 3 servers", rollup.DeadlockCoverageText);
+        Assert.Equal("Deadlock coverage: read all 3 enabled servers", rollup.DeadlockCoverageText);
         Assert.Contains("3 servers: " + FleetRollup.DeadlockPostgresCause, rollup.DeadlockCoverageTooltip, StringComparison.Ordinal);
         Assert.DoesNotContain("cannot count", rollup.DeadlockCoverageTooltip, StringComparison.Ordinal);
 
@@ -1050,7 +1050,7 @@ public sealed class ViewerFleetDeadlockCoverageTests
         Assert.Equal(0, silent.DeadlockCoverage.ServersRead);
         Assert.Equal(0, silent.DeadlockCoverage.PostgresServers);
         Assert.Equal(3, silent.DeadlockCoverage.ServersCollectorSilent);
-        Assert.Equal("Deadlock coverage: read 0 of 3 servers", silent.DeadlockCoverageText);
+        Assert.Equal("Deadlock coverage: read 0 of 3 enabled servers", silent.DeadlockCoverageText);
         Assert.Contains("3 servers: " + FleetRollup.DeadlockCollectorSilentCause, silent.DeadlockCoverageTooltip, StringComparison.Ordinal);
     }
 
@@ -1059,11 +1059,11 @@ public sealed class ViewerFleetDeadlockCoverageTests
     public void TheCoverageLine_AgreesWithItselfOnNumber()
     {
         Assert.Equal(
-            "Deadlock coverage: read all 1 server",
+            "Deadlock coverage: read all 1 enabled server",
             FleetRollup.Build(new[] { Card(1, band: CollectorHealthClassifier.Healthy) }, NoTotals).DeadlockCoverageText);
 
         Assert.Equal(
-            "Deadlock coverage: read 0 of 1 server",
+            "Deadlock coverage: read 0 of 1 enabled server",
             FleetRollup.Build(new[] { Card(1, band: CollectorHealthClassifier.Stopped) }, NoTotals).DeadlockCoverageText);
     }
 
@@ -1200,7 +1200,7 @@ public sealed class ViewerFleetDeadlockCoverageTests
         var row = xaml[start..end];
 
         /* The total is still there, and the coverage is in the same row. */
-        Assert.Contains("{Binding TotalDeadlocks, StringFormat='Deadlocks: {0}'}", row, StringComparison.Ordinal);
+        Assert.Contains("{Binding TotalDeadlocksText}", row, StringComparison.Ordinal);
         Assert.Contains("{Binding DeadlockCoverageText}", row, StringComparison.Ordinal);
 
         /* Visible without hovering: the text is bound to Text, and the detail hangs off BOTH the count and

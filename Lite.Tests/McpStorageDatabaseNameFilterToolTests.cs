@@ -392,4 +392,191 @@ INSERT INTO file_io_stats
      sample_interval_seconds)
 VALUES ($1, $2, $3, $4, $5, $6, 'ROWS', '', 100, 10, 10, 81920, 81920, 20, 30, 60)",
             _nextId++, Minute(minutesAgo), _serverId, ServerName, databaseName, fileName);
+
+    // ── get_pvs_stats: secondary_replica_note (#7706) ──
+
+    /// <summary>The node is the local SECONDARY of AG1 for each named database, as of six minutes ago: before the PVS snapshot (five minutes ago) the note is judged at.</summary>
+    private async Task SeedSecondaryAsync(params string[] databases)
+    {
+        const string Replica = "INSERT INTO ag_replica_states (collection_id, collection_time, server_id, server_name, ag_name, replica_server_name, role_desc, is_local) VALUES ($1,$2,$3,$4,'AG1',$5,$6,$7)";
+        await ExecAsync(Replica, _nextId++, Minute(6), _serverId, ServerName, "NODE1", "SECONDARY", true);
+        await ExecAsync(Replica, _nextId++, Minute(6), _serverId, ServerName, "NODE2", "PRIMARY", false);
+        const string Db = "INSERT INTO ag_database_replica_states (collection_id, collection_time, server_id, server_name, ag_name, database_name, replica_server_name, is_local) VALUES ($1,$2,$3,$4,'AG1',$5,'NODE1',true)";
+        foreach (var database in databases)
+            await ExecAsync(Db, _nextId++, Minute(6), _serverId, ServerName, database);
+    }
+
+    private static string? SecondaryNoteOf(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        return doc.RootElement.TryGetProperty("secondary_replica_note", out var note) && note.ValueKind == JsonValueKind.String ? note.GetString() : null;
+    }
+
+    [Fact]
+    public async Task PvsStats_ASecondaryCopyWithNoPvsRow_CarriesTheNote_AndOnlyThen()
+    {
+        await SeedPvsAsync("DbA", 5, 10);
+        await SeedPvsAsync("DbB", 5, 10);
+
+        // No availability group snapshot: nothing is a secondary copy here, so there is no note.
+        Assert.Null(SecondaryNoteOf(await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName)));
+
+        // A secondary copy that has no PVS row at the snapshot: the one shared sentence, on the rows reply.
+        await SeedSecondaryAsync("DbSecondary");
+        var expected = PvsSecondaryNote.WithoutRow(new[] { "DbSecondary" }, new[] { "DbA", "DbB" });
+        Assert.StartsWith("1 database has no row here:", expected, StringComparison.Ordinal);
+        Assert.Equal(expected, SecondaryNoteOf(await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName)));
+
+        // A database filter that leaves the secondary copy out says nothing about it.
+        Assert.Null(SecondaryNoteOf(await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName, database_name: "DbA")));
+    }
+
+    [Fact]
+    public async Task PvsStats_ASecondaryCopyThatHasItsOwnPvsRow_CarriesNoNote()
+    {
+        await SeedPvsAsync("DbA", 5, 10);
+        await SeedPvsAsync("DbSecondary", 5, 10);
+        await SeedSecondaryAsync("DbSecondary");
+
+        Assert.Null(SecondaryNoteOf(await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName)));
+    }
+
+    [Fact]
+    public async Task PvsStatsLatestWithNote_TheDesktopGridStripIsFedTheSameSentence()
+    {
+        // The grid strip shows exactly the text this read returns (FinOpsTab.LoadPvsStatsAsync); the WPF control itself is not constructed here.
+        await SeedPvsAsync("DbA", 5, 10);
+        await SeedSecondaryAsync("DbSecondary");
+
+        var (rows, note) = await _dataService.GetPvsStatsLatestWithNoteAsync(_serverId, _serverManager);
+        Assert.Equal("DbA", Assert.Single(rows).DatabaseName);
+        Assert.Equal(PvsSecondaryNote.WithoutRow(new[] { "DbSecondary" }, new[] { "DbA" }), note);
+
+        var (_, filtered) = await _dataService.GetPvsStatsLatestWithNoteAsync(_serverId, _serverManager, new[] { "DbA" });
+        Assert.Null(filtered);
+    }
+
+    [Fact]
+    public async Task PvsStats_AFilterThatPicksOnlyASecondaryCopy_GetsTheNoteOnTheEmptyReply()
+    {
+        await SeedPvsAsync("DbA", 5, 10);
+
+        // No availability group snapshot: a filter that matches nothing is empty and carries no note.
+        var plain = await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName, database_name: "DbSecondary");
+        Assert.Equal("empty", StatusOf(plain));
+        Assert.Null(SecondaryNoteOf(plain));
+
+        // The filter picked only the secondary copy, which has no PVS row: the empty reply carries the sentence.
+        await SeedSecondaryAsync("DbSecondary");
+        var empty = await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName, database_name: "DbSecondary");
+        Assert.Equal("empty", StatusOf(empty));
+        Assert.Equal(PvsSecondaryNote.WithoutRow(new[] { "DbSecondary" }, Array.Empty<string>(), new[] { "DbSecondary" }), SecondaryNoteOf(empty));
+
+        // The desktop grid strip is fed the same sentence for the empty row set.
+        var (rows, note) = await _dataService.GetPvsStatsLatestWithNoteAsync(_serverId, _serverManager, new[] { "DbSecondary" });
+        Assert.Empty(rows);
+        Assert.Equal(SecondaryNoteOf(empty), note);
+    }
+
+    [Fact]
+    public async Task PvsStats_TheReplicaRolesAreJudgedAtTheSnapshotsOwnTime_NotTodays()
+    {
+        // The newest PVS snapshot is five hours old. DbSecondary was a secondary copy then; the node has since become its primary.
+        await SeedPvsAsync("DbA", 5 * 60, 10);
+        const string Replica = "INSERT INTO ag_replica_states (collection_id, collection_time, server_id, server_name, ag_name, replica_server_name, role_desc, is_local) VALUES ($1,$2,$3,$4,'AG1','NODE1',$5,true)";
+        const string Db = "INSERT INTO ag_database_replica_states (collection_id, collection_time, server_id, server_name, ag_name, database_name, replica_server_name, is_local) VALUES ($1,$2,$3,$4,'AG1','DbSecondary','NODE1',true)";
+        foreach (var (role, minutesAgo) in new[] { ("SECONDARY", 5 * 60 + 1), ("PRIMARY", 1) })
+        {
+            await ExecAsync(Replica, _nextId++, Minute(minutesAgo), _serverId, ServerName, role);
+            await ExecAsync(Db, _nextId++, Minute(minutesAgo), _serverId, ServerName);
+        }
+
+        var expected = PvsSecondaryNote.WithoutRow(new[] { "DbSecondary" }, new[] { "DbA" });
+        Assert.Equal(expected, SecondaryNoteOf(await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName)));
+
+        var empty = await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName, database_name: "DbSecondary");
+        Assert.Equal(PvsSecondaryNote.WithoutRow(new[] { "DbSecondary" }, Array.Empty<string>(), new[] { "DbSecondary" }), SecondaryNoteOf(empty));
+    }
+
+    private void SetServerMajorVersion(int major) =>
+        _serverManager.GetConnectionStatus(_serverManager.GetEnabledServers()[0].Id).SqlMajorVersion = major;
+
+    [Fact]
+    public async Task PvsStats_ASql2017Secondary_SaysTheVersionHasNoPvs_AndNeverTellsYouToCheckThePrimary()
+    {
+        // SQL Server 2017 has no persistent version store, so no database has a row and the primary has none either (#7822).
+        SetServerMajorVersion(14);
+        await SeedSecondaryAsync("DbSecondary");
+
+        foreach (var database in new string?[] { null, "DbSecondary" })
+        {
+            var reply = await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName, database_name: database);
+            Assert.Equal("empty", StatusOf(reply));
+            using var doc = JsonDocument.Parse(reply);
+            Assert.Contains("no persistent version store", doc.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.Null(SecondaryNoteOf(reply));
+        }
+    }
+
+    [Fact]
+    public async Task PvsStats_ASql2019SecondaryWithNoRowForADatabase_StillGetsTheNote()
+    {
+        SetServerMajorVersion(15);
+        await SeedPvsAsync("DbA", 5, 10);
+        await SeedSecondaryAsync("DbSecondary");
+
+        var expected = PvsSecondaryNote.WithoutRow(new[] { "DbSecondary" }, new[] { "DbA" });
+        Assert.NotNull(expected);
+        Assert.Equal(expected, SecondaryNoteOf(await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName)));
+
+        var filtered = await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName, database_name: "DbSecondary");
+        Assert.Equal("empty", StatusOf(filtered));
+        Assert.Equal(PvsSecondaryNote.WithoutRow(new[] { "DbSecondary" }, Array.Empty<string>(), new[] { "DbSecondary" }), SecondaryNoteOf(filtered));
+    }
+
+    [Fact]
+    public async Task PvsStats_ASql2019SecondaryWithNoPvsRowsAtAll_KeepsTheNoteOnTheNoRowsReply()
+    {
+        SetServerMajorVersion(15);
+        await SeedSecondaryAsync("DbSecondary");
+
+        var reply = await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName);
+        Assert.Equal("empty", StatusOf(reply));
+        Assert.Equal(PvsSecondaryNote.WithoutRow(new[] { "DbSecondary" }, Array.Empty<string>()), SecondaryNoteOf(reply));
+    }
+
+    [Fact]
+    public async Task PvsStatsLatestWithNote_TheDesktopGridOnASql2017Secondary_HasNoNote()
+    {
+        // #7822: SQL Server 2017 has no persistent version store, so the primary has none either and "check the primary" is wrong. The grid
+        // strip is fed by this read, so the gate has to be here and not only in the MCP tool.
+        SetServerMajorVersion(14);
+        await SeedSecondaryAsync("DbSecondary");
+
+        var (rows, note) = await _dataService.GetPvsStatsLatestWithNoteAsync(_serverId, _serverManager);
+        Assert.Empty(rows);
+        Assert.Null(note);
+
+        var (_, filtered) = await _dataService.GetPvsStatsLatestWithNoteAsync(_serverId, _serverManager, new[] { "DbSecondary" });
+        Assert.Null(filtered);
+    }
+
+    [Fact]
+    public async Task PvsStatsLatestWithNote_TheDesktopGridOnASql2019Secondary_KeepsTheNote()
+    {
+        SetServerMajorVersion(15);
+        await SeedSecondaryAsync("DbSecondary");
+
+        var (rows, note) = await _dataService.GetPvsStatsLatestWithNoteAsync(_serverId, _serverManager);
+        Assert.Empty(rows);
+        var expected = PvsSecondaryNote.WithoutRow(new[] { "DbSecondary" }, Array.Empty<string>());
+        Assert.NotNull(expected);
+        Assert.Equal(expected, note);
+    }
+
+    private static string StatusOf(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        return doc.RootElement.TryGetProperty("status", out var status) ? status.GetString() ?? "" : "rows";
+    }
 }

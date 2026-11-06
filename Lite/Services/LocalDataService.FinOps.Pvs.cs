@@ -8,9 +8,13 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Analysis;
+using PerformanceMonitorLite.Mcp;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -148,6 +152,53 @@ ORDER BY lower(p.database_name), p.database_name, p.collection_time";
         }
 
         return items;
+    }
+
+    /// <summary>
+    /// #7706: the latest PVS rows plus the one-sentence note for a database this server holds only as an availability group secondary
+    /// copy and that has no row here (<see cref="PvsSecondaryNote"/>, the same sentence Darling's tool and grid use). The note is built
+    /// for an empty row set too: a database filter that picks only secondary copies returns no rows, which is the case it explains. It
+    /// is judged at the time of the snapshot it explains (the rows' collection time, or the server's newest snapshot when the filter
+    /// matched none of it, or now when there is none), so an old snapshot is not judged against today's replica roles. It fails open:
+    /// stale or missing snapshots, a standalone server and Azure SQL Database give no note.
+    /// </summary>
+    public async Task<(List<PvsStatsRow> Rows, string? SecondaryNote)> GetPvsStatsLatestWithNoteAsync(
+        int serverId, ServerManager serverManager, IReadOnlyList<string>? databaseNames = null)
+    {
+        var read = await ReadPvsStatsLatestAsync(serverId, serverManager, databaseNames);
+        return (read.Rows, read.SecondaryNote);
+    }
+
+    /// <summary>
+    /// #7822: <see cref="GetPvsStatsLatestWithNoteAsync"/> with the unfiltered newest snapshot it had to read handed back, so the MCP tool's
+    /// "the snapshot holds other databases" probe does not read it a second time. A server whose SQL Server version has no persistent version
+    /// store (before 2019, judged from <paramref name="serverManager"/>) gets no note: no database has a row there and the primary has none
+    /// either, so the replica scope is not read.
+    /// </summary>
+    /// <returns><c>UnfilteredRows</c> is the server's newest snapshot with every database, and is read only when a filter matched nothing in
+    /// it (null otherwise).</returns>
+    public async Task<PvsLatestRead> ReadPvsStatsLatestAsync(
+        int serverId, ServerManager serverManager, IReadOnlyList<string>? databaseNames = null)
+    {
+        var rows = await GetPvsStatsLatestAsync(serverId, databaseNames);
+
+        /* The anchor is the snapshot the rows came from. A filter that matched none of the newest snapshot has no row to read it from, so
+           the unfiltered newest snapshot supplies it (and the tool's "other databases" probe reuses it). */
+        DateTime? snapshot = rows.Count > 0 ? rows[0].CollectionTime : null;
+        List<PvsStatsRow>? unfiltered = null;
+        if (snapshot is null && databaseNames is { Count: > 0 })
+        {
+            unfiltered = await GetPvsStatsLatestAsync(serverId);
+            if (unfiltered.Count > 0) snapshot = unfiltered[0].CollectionTime;
+        }
+
+        /* #7822: the note only for a server whose SQL Server version has a persistent version store. Before 2019 no database has a row and the
+           primary has none either, so "check the primary replica" is wrong there. The gate lives here, where the note is built, so the MCP tool
+           and the desktop grid both get it. The replica scope is not read for a server it does not apply to. */
+        if (!McpEngineCapability.PvsVersionHasStore(serverManager, serverId)) return new PvsLatestRead(rows, null, unfiltered);
+
+        var secondary = await SecondaryReplicaScope.ReadAsync(_duckDb, serverId, PvsSecondaryNote.ScopeTimeUtc(snapshot), System.Threading.CancellationToken.None);
+        return new PvsLatestRead(rows, PvsSecondaryNote.WithoutRow(secondary, rows.Select(r => r.DatabaseName), databaseNames), unfiltered);
     }
 
     /// <summary>
@@ -331,3 +382,6 @@ public class PvsStatsRow
 /// <see cref="PvsSizeMb"/> is null for an UNMEASURED collection (#3653) — the DMV reported no size that
 /// pass — never coerced to 0.</summary>
 public sealed record PvsTrendPoint(string DatabaseName, DateTime CollectionTime, double? PvsSizeMb, double? PctOfDatabase);
+
+/// <summary>#7822: the latest PVS rows, the secondary replica note, and the server's unfiltered newest snapshot when a filter matched nothing in it (else null).</summary>
+public sealed record PvsLatestRead(List<PvsStatsRow> Rows, string? SecondaryNote, List<PvsStatsRow>? UnfilteredRows);

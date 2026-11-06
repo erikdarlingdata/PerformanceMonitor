@@ -1259,8 +1259,30 @@ internal static class McpHelpers
     }
 
     /// <summary>
+    /// #7706: <paramref name="statusJson"/> (an <c>empty</c> envelope another helper built) with <see cref="PvsSecondaryNote.Key"/> beside
+    /// its message, so a database filter that picks only availability group secondary copies, which have no PVS row, still gets the
+    /// sentence that explains why. Null in, null out; unchanged when <paramref name="note"/> is null or the envelope already carries the key.
+    /// </summary>
+    public static string? WithSecondaryReplicaNote(string? statusJson, string? note)
+    {
+        if (statusJson is null || note is null)
+        {
+            return statusJson;
+        }
+
+        var node = System.Text.Json.Nodes.JsonNode.Parse(statusJson) as System.Text.Json.Nodes.JsonObject;
+        if (node is null || node.ContainsKey(PvsSecondaryNote.Key))
+        {
+            return statusJson;
+        }
+
+        node[PvsSecondaryNote.Key] = note;
+        return node.ToJsonString(JsonOptions);
+    }
+
+    /// <summary>
     /// #5633 review (finding D): <paramref name="statusJson"/> (an envelope another helper built) with the databases the read
-    /// left out beside it: <see cref="DatabasesLeftOut.NamesKey"/> (the names, capped) and
+    /// left out beside it: <see cref="DatabasesLeftOut.NamesKey"/> (the names, capped), <see cref="DatabasesLeftOut.CountKey"/> (how many in all) and
     /// <see cref="DatabasesLeftOut.NoteKey"/>. Null in, null out; an envelope returned unchanged
     /// when nothing was left out or when it already carries the key.
     /// </summary>
@@ -1279,6 +1301,7 @@ internal static class McpHelpers
 
         node[DatabasesLeftOut.NamesKey] =
             JsonSerializer.SerializeToNode(DatabasesLeftOut.Named(leftOut), JsonOptions);
+        node[DatabasesLeftOut.CountKey] = DatabasesLeftOut.Count(leftOut);
         node[DatabasesLeftOut.NoteKey] = DatabasesLeftOut.Note(leftOut);
         return node.ToJsonString(JsonOptions);
     }

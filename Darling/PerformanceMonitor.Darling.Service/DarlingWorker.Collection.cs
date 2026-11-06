@@ -1768,30 +1768,30 @@ public sealed partial class DarlingWorker
                     fleetSweepServers.Add((target.Config.ServerId, target.Config.DisplayName));
                 }
 
-                /* #4925: an Azure SQL Database master's signals count only its own blocking and deadlocks. A target
+                /* #4925: an Azure SQL Database master's signals count only its own blocking and deadlocks. A master that is
+                   disconnected when the sweep fires has no runtime to ask, so its list comes from the stored edition and the
+                   registry, the same way the MCP and web hosts get it; reading it unscoped would count its earlier events
+                   twice in the sweep band. That lookup is a store read per disconnected target, so it runs inside the
+                   tracked task with the sweep it scopes (RunFleetSweepAsync), never on this loop thread. The runtimes are
+                   snapshotted here like the server list above, and the registry is read once here: every lookup in the
+                   sweep, stored or runtime, takes this one snapshot, so a reload during the sweep cannot mix two. A target
                    whose list cannot be built reads unscoped (null), never fails the sweep. */
-                var fleetSweepSeparate = new Dictionary<int, IReadOnlyList<string>?>();
+                var fleetSweepRegistry = _registryState?.Read();
+                var fleetSweepTargets = new List<(int ServerId, ServerRuntime? Runtime)>(sweepTargets.Length);
                 foreach (var target in sweepTargets)
                 {
-                    try
-                    {
-                        /* A master that is disconnected when the sweep fires has no runtime to ask, so its list comes from the
-                           stored edition and the registry, the same way the MCP and web hosts get it; reading it unscoped
-                           would count its earlier events twice in the sweep band. */
-                        fleetSweepSeparate[target.Config.ServerId] = target.Runtime is null
-                            ? await AnalysisSeparatelyMonitoredDatabasesAsync(target.Config.ServerId, _registryState?.Read(), postgres, stoppingToken)
-                            : AnalysisSeparatelyMonitoredDatabases(target.Runtime);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        _logger.LogWarning(ex, "Fleet sweep could not list the separately monitored databases for server {ServerId}; reading it unscoped", target.Config.ServerId);
-                        fleetSweepSeparate[target.Config.ServerId] = null;
-                    }
+                    fleetSweepTargets.Add((target.Config.ServerId, target.Runtime));
                 }
 
-                _fleetSweep = FleetSweepEngine.RunAsync(
-                    postgres, fleetSweepServers, TimeSpan.FromMinutes(fleetSweepMinutes),
-                    config.Alerts.Enabled, _logger, fleetSweepSeparate, stoppingToken);
+                var fleetSweepSpan = TimeSpan.FromMinutes(fleetSweepMinutes);
+                var fleetSweepAlertsEnabled = config.Alerts.Enabled;
+                _fleetSweep = RunFleetSweepAsync(
+                    fleetSweepTargets,
+                    fleetSweepRegistry?.Servers,
+                    storedLookup: (serverId, token) => AnalysisSeparatelyMonitoredDatabasesAsync(serverId, fleetSweepRegistry, postgres, token),
+                    runSweep: (separate, token) => FleetSweepEngine.RunAsync(
+                        postgres, fleetSweepServers, fleetSweepSpan, fleetSweepAlertsEnabled, _logger, separate, token),
+                    _logger, stoppingToken);
             }
 
             /* #4823: the once-a-minute checkpointer sync-time sample, AHEAD of the hourly tick below so the sample taken
@@ -2280,7 +2280,7 @@ public sealed partial class DarlingWorker
                catch-all for): one server's unexpected throw must never kill the collection loop, and a faulted
                fire-and-track Task must never surface as an unobserved exception. Log and isolate; the server
                retries on its next sweep exactly like a failed collector. */
-            _logger.LogError("[{Server}] Collection sweep failed: {Message}", server.Config.DisplayName, ex.Message);
+            _logger.LogError(ex, "[{Server}] Collection sweep failed: {Message}", server.Config.DisplayName, ex.Message);
         }
         finally
         {

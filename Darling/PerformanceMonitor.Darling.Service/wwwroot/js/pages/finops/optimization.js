@@ -63,13 +63,13 @@ const QUERY_COLUMNS = [
   { key: "est_cost_usd", label: "Est. cost share ($)", format: "num2" },
 ];
 
-const GRANT_COLUMNS = [
+export const GRANT_COLUMNS = [
   { key: "day", label: "Day (UTC)" },
-  { key: "avg_granted_mb", label: "Avg granted (MB)", format: "num1" },
-  { key: "avg_used_mb", label: "Avg used (MB)", format: "num1" },
+  { key: "avg_granted_mb", label: "Avg granted", format: "mbfit" },
+  { key: "avg_used_mb", label: "Avg used", format: "mbfit" },
   { key: "efficiency_pct", label: "Efficiency (%)", format: "num1" },
-  { key: "peak_granted_mb", label: "Peak granted (MB)", format: "num1" },
-  { key: "wasted_mb", label: "Wasted (MB)", format: "num1" },
+  { key: "peak_granted_mb", label: "Peak granted", format: "mbfit" },
+  { key: "wasted_mb", label: "Wasted", format: "mbfit" },
   { key: "total_grantees", label: "Grantees", format: "int" },
   { key: "total_waiters", label: "Waiters", format: "int" },
   { key: "timeout_errors", label: "Timeouts", format: "int" },
@@ -158,7 +158,7 @@ export const tab = {
           sectionView("Idle Databases", data.idle_databases, IDLE_COLUMNS, "No idle databases detected", idleNotice),
           sectionView("tempdb Pressure", data.tempdb_pressure, TEMPDB_COLUMNS, "No tempdb data available", windowNotice),
           sectionView("Wait Stats Summary", data.wait_categories, WAIT_COLUMNS, "No wait stats data available", windowNotice),
-          sectionView("Expensive Queries (Top " + LIMIT + " by CPU)", data.expensive_queries, [...QUERY_COLUMNS, planColumn(server)], "No expensive queries found", queryNotice, queryWindowShortened),
+          sectionView("Expensive Queries", data.expensive_queries, [...QUERY_COLUMNS, planColumn(server)], "No expensive queries found", queryNotice, queryWindowShortened),
           sectionView("Memory Grant Efficiency", data.memory_grant_efficiency, GRANT_COLUMNS, "No memory grant data available", windowNotice),
         ]);
       } catch (e) {

@@ -68,12 +68,12 @@ import { slicedPanel, DEADLOCKS_EMPTY_TEXT, COUNT_SERIES, BLOCKING_REPORT_SERIES
 import { SERVER_CHANGE_COLUMNS, DB_CHANGE_COLUMNS, TRACE_FLAG_CHANGE_COLUMNS } from "./server-tabs/sql-changes.js";
 import { SERVER_CONFIG_COLUMNS, DB_CONFIG_COLUMNS, scopedConfigPanel, QS_HEALTH_COLUMNS, TRACE_FLAG_COLUMNS, AUDIT_COLUMNS, identityCapacityPanels, AGENT_ALERT_SPECS, DATABASE_PROTECTION_SPECS } from "./server-tabs/sql-config.js";
 import { SCHEDULER_STATS, CPU_SERIES } from "./server-tabs/sql-cpu.js";
-import { HEALTH_CPU_SERIES, HEALTH_ENTRY_COLUMNS, SEVERE_ERROR_COLUMNS, SCHEDULER_ISSUE_COLUMNS, IO_ISSUE_COLUMNS, CPU_TASK_COLUMNS, MEMORY_CONDITION_COLUMNS, MEMORY_CONDITION_GROUPS, MEMORY_BROKER_COLUMNS, SIGNIFICANT_WAIT_COLUMNS, MEMORY_OOM_COLUMNS, MEMORY_OOM_GROUPS, DEFAULT_TRACE_COLUMNS } from "./server-tabs/sql-events.js";
+import { HEALTH_CPU_SERIES, HEALTH_ENTRY_COLUMNS, SEVERE_ERROR_COLUMNS, SCHEDULER_ISSUE_COLUMNS, IO_ISSUE_COLUMNS, CPU_TASK_COLUMNS, MEMORY_CONDITION_COLUMNS, MEMORY_CONDITION_GROUPS, MEMORY_BROKER_COLUMNS, SIGNIFICANT_WAIT_COLUMNS, MEMORY_OOM_COLUMNS, MEMORY_OOM_GROUPS, DEFAULT_TRACE_COLUMNS, defaultTraceByEventNote } from "./server-tabs/sql-events.js";
 import { pickCollector, collectionLogPanel } from "./server-tabs/sql-health.js";
 import { fileIoPanel, TEMPDB_SERIES, FILE_IO_COLUMNS, DB_SIZE_COLUMNS, TABLE_SIZE_COLUMNS, PVS_COLUMNS } from "./server-tabs/sql-io.js";
 import { MEMORY_STATS, PLAN_CACHE_STATS, MEMORY_SERIES, CLERK_COLUMNS, GRANT_WINDOW_COLUMNS, SEMAPHORE_WINDOW_COLUMNS, GRANT_COLUMNS, SEMAPHORE_COLUMNS, memoryClerksTrendPanel, memoryPressurePanels, CACHE_TYPE_COLUMNS } from "./server-tabs/sql-memory.js";
 import { overviewStripsPanel, dailySummaryPanels, OVERVIEW_STATS } from "./server-tabs/sql-overview.js";
-import { topQueriesPanel, tagFilteredCard, slicedTagCard, DURATION_SERIES, EXECUTION_RATE_SERIES, activeQueriesPanel, QUERY_STORE_REGRESSION_GROUPS, QUERY_STORE_REGRESSION_COLUMNS, QUERY_HEATMAP_COLUMNS, QUERY_STORE_COLUMNS, QS_CLUTTER_COLUMNS, QS_OVERHEAD_WAIT_COLUMNS, QS_CLERK_STATS, LONG_QUERY_GROUPS, LONG_QUERY_COLUMNS, PLAN_CORRECTION_GROUPS, PLAN_CORRECTION_COLUMNS, AUTO_TUNING_COLUMNS } from "./server-tabs/sql-queries.js";
+import { topQueriesPanel, tagFilteredCard, slicedTagCard, DURATION_SERIES, EXECUTION_RATE_SERIES, activeQueriesPanel, QUERY_STORE_REGRESSION_GROUPS, orderRegressionRows, qsWaitsWithDelta, QUERY_STORE_REGRESSION_COLUMNS, QUERY_HEATMAP_COLUMNS, QUERY_STORE_COLUMNS, QS_CLUTTER_COLUMNS, QS_OVERHEAD_WAIT_COLUMNS, QS_CLERK_STATS, LONG_QUERY_GROUPS, LONG_QUERY_COLUMNS, PLAN_CORRECTION_GROUPS, PLAN_CORRECTION_COLUMNS, AUTO_TUNING_COLUMNS } from "./server-tabs/sql-queries.js";
 import { waitsPanel, waitingTasksPanel, LATCH_COLUMNS, SPINLOCK_COLUMNS, namedTrendPanel } from "./server-tabs/sql-waits.js";
 export { serverTrendPanel, seriesTrendPanel } from "./server-tabs/shared.js";
 export { perfmonPanel, drawPerfmonTrends, sessionStatsTrendPanel } from "./server-tabs/sql-activity.js";
@@ -181,7 +181,7 @@ export const SERVER_TABS = [
           "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) before it reports non-zero values.",
           2,
           "truncation_note",
-          null,
+          ["databases_left_out_note"],
           TOP_QUERY_GROUPS,
           picker,
           null,
@@ -202,7 +202,7 @@ export const SERVER_TABS = [
           "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
           2,
           "truncation_note",
-          null,
+          ["databases_left_out_note"],
           TOP_PROC_GROUPS,
           picker,
           null,
@@ -578,6 +578,8 @@ export const SERVER_TABS = [
           series: DURATION_SERIES,
           format: "ms",
           span: 2,
+          /* #7692: rows exist only where queries ran, so the gap rule needs the reply's bucket. */
+          bucketKey: "bucket_minutes",
           emptyText: "No query duration samples in this window.",
         },
         {
@@ -588,6 +590,7 @@ export const SERVER_TABS = [
           xKey: "time",
           series: EXECUTION_RATE_SERIES,
           span: 2,
+          bucketKey: "bucket_minutes",
           emptyText: "No query executions recorded in this window.",
         },
       ]),
@@ -602,6 +605,7 @@ export const SERVER_TABS = [
           subtitle: ctx.label,
           format: "ms",
           span: 2,
+          bucketKey: "bucket_minutes",
           emptyText:
             "No stored-procedure activity in this window. A server that runs no stored procedures shows nothing here.",
         }
@@ -618,6 +622,7 @@ export const SERVER_TABS = [
           format: "ms",
           span: 2,
           seamKey: "routing.raw_from",
+          seamCaption: queryStoreSeamCaption,
           emptyText:
             "No Query Store activity in this window.",
         }
@@ -638,7 +643,7 @@ export const SERVER_TABS = [
           "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
           2,
           "truncation_note",
-          null,
+          ["databases_left_out_note"],
           TOP_PROC_GROUPS,
           picker,
           null,
@@ -689,10 +694,14 @@ export const SERVER_TABS = [
         ctx.label,
         "No query regressed against its baseline in this window. A server with no earlier history has nothing to compare against.",
         2,
-        /* #6654: the read leaves out databases the server dropped; the note names them (drawn on an empty answer too, panels.js). */
+        /* #6654, #7538, #7651: the read leaves out databases the server dropped; the strip says so and lists their names from the reply's
+           `databases_left_out` (drawn on an empty answer too, panels.js, util.js leftOutNoteText). */
         "databases_left_out_note",
         null,
-        QUERY_STORE_REGRESSION_GROUPS
+        QUERY_STORE_REGRESSION_GROUPS,
+        null, null, null, false, null, false,
+        /* #7729: severity first, then the duration added. */
+        { orderRows: orderRegressionRows }
       ),
       /* #3797: the clutter view. ONE fetch, three panels — the per-database rows, the per-server QDS wait
          block and the per-server memory clerk — because the read composes four arms over two raw hypertables
@@ -717,6 +726,8 @@ export const SERVER_TABS = [
           floorKey: "window",
           columns: QS_CLUTTER_COLUMNS,
           noteKey: "server_note",
+          /* #7538, #7651: the read leaves out databases the server dropped; the strip names them. */
+          moreNoteKeys: ["databases_left_out_note"],
           noteShort: "Every database here that has Query Store is a readable secondary, so its Query Store is a copy of the primary's and no verdict is given for it. Read the primary for the clutter. The overhead panels below are still measured on this server.",
           emptyText:
             "No Query Store rows, no Query Store collection run and no Query Store health capture for this " +
@@ -730,6 +741,8 @@ export const SERVER_TABS = [
           rowsKey: "qs_overhead.wait_stats.included",
           floorKey: "window",
           columns: QS_OVERHEAD_WAIT_COLUMNS,
+          /* #7729: a wait with no delta in the window is left out, so the empty sentence prints when none has one. */
+          orderRows: qsWaitsWithDelta,
           noteKey: "qs_overhead.wait_stats.excluded_note",
           noteQuiet: true,
           noteShort: "Query Store's idle sleep waits are left out of this table on purpose. It lists only the waits that cost something, and it is not the whole of Query Store's cost.",
@@ -1095,11 +1108,15 @@ export const SERVER_TABS = [
       tablePanel(
         "Default Trace",
         "get_default_trace_events",
-        { server, hours: ctx.hours, limit: 100 },
+        /* #7729: 100 rows cut a 105-event window and one event filled all 100 of a 143-event one. 1000 is the read's ceiling, and the note
+           under the heading counts every event in the window, so the page still says what a capped window left out. */
+        { server, hours: ctx.hours, limit: 1000 },
         "events",
         DEFAULT_TRACE_COLUMNS,
         ctx.label,
-        "No significant default trace events in this window."
+        "No significant default trace events in this window.",
+        2, null, null, null, null, null, null, false, null, false,
+        { noteFrom: defaultTraceByEventNote, noteQuiet: true }
       ),
     ],
   },
@@ -1343,7 +1360,7 @@ export const POSTGRES_TABS = [
         },
         {
           title: "Extension Install Census",
-          subtitle: "one row per extension created anywhere on this server; NO row limit touches this",
+          subtitle: "One row per extension on this server",
           viz: "table",
           rowsKey: "install_census",
           columns: PG_EXTENSION_CENSUS_COLUMNS,
@@ -1553,14 +1570,15 @@ export const POSTGRES_TABS = [
          The "check the error log" panel. Newest 50 across every family; the MCP read carries the family and
          severity filters, and total_events on its payload is the window's count, so the panel note says
          which of the two this grid is. */
-      tablePanel(
+      /* #7726: the tool's empty text is written for an MCP client (setting names, locale, facet names). The page says one sentence that names the panel holding the answer, as Deadlocks above does (#7548). */
+      tablePanelPlain(
         "Log Events",
         "get_pg_log_events",
         { server, hours: ctx.hours, limit: 50 },
         "events",
         PG_LOG_EVENT_COLUMNS,
         ctx.label + ", newest 50 across every family, statements never stored",
-        "No classified log event was stored in this window. That is the healthy answer for the error and lock-wait families - and it is also what a target with the relevant log_* setting off looks like (log_connections, log_lock_waits, log_temp_files, log_autovacuum_min_duration), or one whose log cannot be read, is not stamped UTC, or is not written in English: the Plan Capture Readiness panel above reads the same file and reports those three."
+        "No log event in this window. If you expected one, Plan Capture Readiness above shows whether the server log can be read."
       ),
       /* #2663 the regression read: what ONE execution of the busiest statement cost, interval by interval.
          The statement grid above ranks by total time across the window, which hides a step change - a query
@@ -1741,7 +1759,9 @@ export const POSTGRES_TABS = [
         /* #7409: Amazon Aurora has its own instrument and answers "not collected" here, so the panel is not drawn there. */
         true,
         /* #7428: what Backends Seen counts differs by instrument, and the answer says which instrument fed it. */
-        { noteFrom: pgWaitSamplingBackendsNote, noteQuiet: true }
+        { noteFrom: pgWaitSamplingBackendsNote, noteQuiet: true,
+          /* #7684 item 4: a true negative says one plain sentence; the tool's long text (instrument names, the sampler's floor) is behind "More detail". */
+          emptyLine: true }
       ),
       tablePanel(
         "OS CPU by Query (pg_stat_kcache)",
@@ -2063,6 +2083,17 @@ export function runningJobsEmptyText(ctx) {
   return ctx && ctx.offline === true
     ? "No running jobs can be shown: collection for this server is stale, so the last snapshot is not a current reading. See Collection Health."
     : "No SQL Agent jobs were running at the last collection — the normal state for most servers.";
+}
+
+/** #7699: the sentence under the Query Store Duration Trend. The line is hourly until routing.raw_from, then one point per collection (#7508),
+ *  and nothing on the page said so. The instant is in the browser's zone like the chart's axis, with its day when that is not today. */
+export function queryStoreSeamCaption(seam) {
+  if (!(seam instanceof Date) || isNaN(seam.getTime())) return null;
+  const time = seam.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const today = new Date();
+  const sameDay = seam.getFullYear() === today.getFullYear() && seam.getMonth() === today.getMonth() && seam.getDate() === today.getDate();
+  const at = sameDay ? time : seam.toLocaleDateString([], { month: "short", day: "numeric" }) + ", " + time;
+  return "Hourly averages until " + at + ", then one point per collection.";
 }
 
 /** The tab's note as a rendered strip, or null. Kept here so the shell has no opinion about its wording. A note can be

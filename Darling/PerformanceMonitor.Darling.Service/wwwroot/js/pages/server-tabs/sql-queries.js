@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, readToolWithinKeptHistory, keptWindowStrip, mount, truncate, loadingStrip, readErrorStrip, emptyStrip, plainEmptyStrip, disclosure, noticeStrip, chartNoteText, trendHeadNote, fmtInt, fmtMs, localTime, windowFromHours, queryWaitFilter, setQueryWaitFilter } from "../../util.js";
+import { el, readToolWithinKeptHistory, keptWindowStrip, mount, truncate, loadingStrip, readErrorStrip, emptyStrip, plainEmptyStrip, disclosure, noticeStrip, leftOutNoteStrip, chartNoteText, trendHeadNote, fmtInt, fmtMs, localTime, windowFromHours, queryWaitFilter, setQueryWaitFilter } from "../../util.js";
 import { setPanelSignal, getPanelSignal, VIZ } from "../../panels.js";
 import { activeQueriesSnapshotSlot, SNAPSHOT_ROW_CAP } from "../active-snapshots.js";
 import { activeQueriesLiveBar } from "../active-live.js";
@@ -66,7 +66,7 @@ function topQueriesCard(server, ctx, ranking, picker, w = ctx, onRow = null) {
     if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     /* #7552: the same plain sentence the CPU tab shows for a window with snapshots and no measured change, with the tool's paragraph behind "More detail". */
-    if (res.kind === "empty") return mount(body, [keptWindowStrip(res), plainEmptyStrip(res)]);
+    if (res.kind === "empty") return mount(body, [keptWindowStrip(res), leftOutNoteStrip(res.data), plainEmptyStrip(res)]);
 
     const queries = res.data.queries || [];
     const parts = [
@@ -89,6 +89,9 @@ function topQueriesCard(server, ctx, ranking, picker, w = ctx, onRow = null) {
     if (typeof res.data.truncation_note === "string" && res.data.truncation_note.trim()) {
       parts.unshift(noticeStrip(res.data.truncation_note));
     }
+    /* #7538, #7651, #7745: a read that left out databases the server no longer lists names them, as the plain tables do. */
+    const leftOut = leftOutNoteStrip(res.data);
+    if (leftOut) parts.splice(typeof res.data.truncation_note === "string" && res.data.truncation_note.trim() ? 1 : 0, 0, leftOut);
     const kept = keptWindowStrip(res);
     if (kept) parts.unshift(kept);
 
@@ -337,6 +340,19 @@ const QUERY_TREND_COLUMNS = [
    count and the reason the row is listed stay in the always-visible columns, so a timeout row is never hidden. */
 export const QUERY_STORE_REGRESSION_GROUPS = { groups: ["CPU", "Executions and plans", "Timeouts (Aborted)", "Errors (Exception)"], defaultGroups: [] };
 
+/* #7729: the page lists the worst first. The read puts its cost rows ahead of its failure-only rows so its cap keeps them, and that left 9 LOW rows
+   above 12 HIGH ones on a 7-day range. The order here is severity (CRITICAL, HIGH, MEDIUM, LOW, none), then the duration the regression added, most
+   first. Only the order changes: the rows and the read's cap are the read's. A header click still sorts from here. */
+const SEVERITY_RANK = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
+export function orderRegressionRows(rows) {
+  const rank = (r) => (r && typeof r.severity === "string" && r.severity.toUpperCase() in SEVERITY_RANK ? SEVERITY_RANK[r.severity.toUpperCase()] : 4);
+  const added = (r) => (r && r.additional_duration_ms != null && isFinite(Number(r.additional_duration_ms)) ? Number(r.additional_duration_ms) : -Infinity);
+  return rows
+    .map((r, i) => ({ r, i }))
+    .sort((a, b) => rank(a.r) - rank(b.r) || (added(b.r) > added(a.r) ? 1 : added(b.r) < added(a.r) ? -1 : 0) || a.i - b.i)
+    .map((x) => x.r);
+}
+
 export const QUERY_STORE_REGRESSION_COLUMNS = [
   { key: "severity", label: "Severity" },
   { key: "regression_reason", label: "Why" },
@@ -476,6 +492,12 @@ export const QS_CLUTTER_COLUMNS = [
 
 /* The per-server overhead proxy's wait rows. wait_ms_per_hour is the server's own rating over the seconds
    those rows measured; a null is an unknowable interval, which the generic formatter renders as a dash. */
+/* #7729: the note over the Query Store overhead waits says it lists only the waits that cost something, and a wait the read lists with no wait time and no
+   waiting tasks in the window (QDS_LOADDB at 0.0 ms/hour) cost nothing. It is left out, so a window with no delta prints the panel's empty sentence. */
+export function qsWaitsWithDelta(rows) {
+  return rows.filter((w) => !w || Number(w.wait_ms_total) > 0 || Number(w.waiting_tasks_total) > 0 || w.wait_ms_total == null);
+}
+
 export const QS_OVERHEAD_WAIT_COLUMNS = [
   { key: "wait_type", label: "Wait Type" },
   { key: "wait_ms_per_hour", label: "Wait ms/hour", format: "num1" },

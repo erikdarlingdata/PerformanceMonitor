@@ -3157,6 +3157,55 @@ namespace PerformanceMonitor.Common
         }
 
         /// <summary>
+        /// #7670: <see cref="FormatCollectionNote"/> as the two desktop apps' health grids show it. A measuring collector's counts
+        /// (<c>shred_gated=1 events_read=0</c>) read as words, the way the web page words them (<c>shred gated: 1 (no new events since
+        /// the last run, so the XML was not read), events read: 0</c>). <see cref="FormatCollectionNote"/> itself keeps the raw
+        /// counts, because the MCP <c>note_summary</c> and the health bands are built on that text.
+        /// </summary>
+        public static string FormatCollectionNoteForDisplay(
+            string? lastNote,
+            long noteCount,
+            long totalRuns,
+            string? collectorName = null,
+            bool targetHasUserDatabases = false,
+            string? recoveredNote = null,
+            string? readSource = null)
+        {
+            var text = FormatCollectionNote(lastNote, noteCount, totalRuns, collectorName, targetHasUserDatabases, recoveredNote, readSource);
+            if (!HasMeasurements(lastNote))
+            {
+                return text;
+            }
+
+            var cut = lastNote!.LastIndexOf("; ", StringComparison.Ordinal);
+            var counts = cut >= 0 ? lastNote[(cut + 2)..] : lastNote;
+            return text.Replace(counts, CountsInWords(counts), StringComparison.Ordinal);
+        }
+
+        /// <summary>The meaning of a count a reader cannot work out from its label, worded as the web page words it (plain-text.js COUNT_MEANINGS).</summary>
+        private static string CountMeaning(string label, string value) => (label, value) switch
+        {
+            ("shred_gated", "1") => " (no new events since the last run, so the XML was not read)",
+            ("shred_gated", "0") => " (the XML was read)",
+            _ => string.Empty,
+        };
+
+        /// <summary><c>shred_gated=1 events_read=0</c> as <c>shred gated: 1 (...), events read: 0</c>. The input is a run of counts that passed <see cref="HasMeasurements"/>.</summary>
+        private static string CountsInWords(string counts)
+        {
+            var words = new List<string>();
+            foreach (var token in counts.Split(' '))
+            {
+                var eq = token.IndexOf('=', StringComparison.Ordinal);
+                var label = token[..eq];
+                var value = token[(eq + 1)..];
+                words.Add(label.Replace('_', ' ') + ": " + value + CountMeaning(label, value));
+            }
+
+            return string.Join(", ", words);
+        }
+
+        /// <summary>
         /// #6254: the per-run Collection Log grids' message cell. A run's own message (its error, or the note it left) with the run's
         /// <c>read_source</c> after it, worded as the health views word it (<c>read source: replica 12, primary 2</c>). A run with no
         /// read source (every run of a server with the replica setting off, every collector but Query Store, every run stored before the
@@ -3169,9 +3218,15 @@ namespace PerformanceMonitor.Common
         /// #7416: the store keeps ONE text column per log row (<c>error_message</c>) and the collectors write their run notes into it on
         /// SUCCESS rows ("shred gated: 1", "plans rendered: 0, ..."). On a row that did not succeed the same column holds the error. A
         /// SUCCESS row therefore has no error, only a note, and the Error column of a log grid must not show it.
+        /// #7690: the same holds for an ANALYZED row, the scheduled analysis pass that finished ("Scheduled analysis pass ran in 4.3s, ...").
+        /// ABANDONED, ERROR and the rest keep their text under Error.
         /// </summary>
-        public static bool IsRunNote(string? status) =>
-            string.Equals(status?.Trim(), "SUCCESS", StringComparison.OrdinalIgnoreCase);
+        public static bool IsRunNote(string? status)
+        {
+            var word = status?.Trim();
+            return string.Equals(word, "SUCCESS", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(word, "ANALYZED", StringComparison.OrdinalIgnoreCase);
+        }
 
         /// <summary>#7416: the row's error text: its stored message unless the row succeeded (then the message is a note, see <see cref="IsRunNote"/>). Null for none.</summary>
         public static string? RunError(string? status, string? message) =>

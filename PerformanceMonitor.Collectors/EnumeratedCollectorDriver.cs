@@ -941,6 +941,16 @@ public static class EnumeratedCollectorDriver
                 firstError ??= budgetFailure;
                 onItemError(item, budgetFailure);
             }
+            catch (Exception ex) when (ex is not OperationCanceledException && cancellationToken.IsCancellationRequested)
+            {
+                /* The host is stopping, and the read's cancellation arrived as the PROVIDER's exception rather
+                   than an OperationCanceledException (SqlClient reports a cancelled command as a SqlException).
+                   The token says what happened; the type does not. Surfaced as the cancellation it is, so the
+                   host's cancellation arm claims the run: the skip arm below would count a stop as a failed
+                   database and, on the last item, as an ERROR run. The provider's exception rides along as the
+                   cause. */
+                throw new OperationCanceledException(ex.Message, ex, cancellationToken);
+            }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 /* One item failing is routine (an offline/mid-restore database, a permissions oddity, a

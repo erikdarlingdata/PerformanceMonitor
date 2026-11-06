@@ -103,7 +103,7 @@ ORDER BY ds.total_size_mb DESC";
     /// the last 7 UTC days) that idle cannot be judged yet. An empty grid after a collection gap must not read as a clean bill.</summary>
     public static string IdleDatabasesEmptyText(bool hasCoverage) => hasCoverage
         ? "No idle databases detected"
-        : "Idle databases cannot be judged yet: query stats do not cover each of the last 7 days";
+        : "Idle databases cannot be judged yet: query stats do not cover each of the last 7 days.";
 
     /// <summary>
     /// The oldest query-stats sample, and the number of distinct COMPLETE UTC days in [$2, $3) that hold one. The advice text claims
@@ -277,6 +277,8 @@ categorized AS (
             WHEN wait_type IN ('RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE', 'CMEMTHREAD') THEN 'Memory'
             WHEN wait_type = 'ASYNC_NETWORK_IO' THEN 'Network'
             WHEN wait_type ILIKE 'LCK_M_%' THEN 'Locks'
+            WHEN wait_type ILIKE 'LATCH_%'
+            OR   wait_type ILIKE 'PAGELATCH_%' THEN 'Latches'
             ELSE 'Other'
         END AS category,
         wait_type,

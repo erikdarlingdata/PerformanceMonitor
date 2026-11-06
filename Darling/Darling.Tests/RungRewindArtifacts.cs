@@ -703,6 +703,14 @@ CREATE OR REPLACE VIEW collect.v_blocked_process_reports AS SELECT * FROM collec
         // sentinel, so the rewind drops it and the re-run of V247 adds it back empty. Safe on a store that never had it.
         new(247, "hasXeSessionDatabases",
             @"ALTER TABLE IF EXISTS config.config_monitored_servers DROP COLUMN IF EXISTS xe_session_databases;"),
+        // V248 (#7730): the key trigger also recognizes the old statements, and the state row is deleted so the backfill runs again. The rewind puts
+        // V219's marker-only function back (the probe's sentinel is the digest test in the function's source), so a re-run of V248 replaces it
+        // again. The state row is left as it is: the re-run deletes it.
+        new(248, "hasSelfKeysOldStatements", PerformanceMonitor.Darling.Storage.QueryStoreSelfKeys.MarkerOnlyTriggerSql),
+        // V249 (#7731): the database name on the statement stats. A plain nullable column with no view over it, so the rewind is the drop alone, and the
+        // re-run of V249 adds it back. Safe on a store that never had it.
+        new(249, "hasStatementStatsDatabaseName",
+            @"ALTER TABLE IF EXISTS collect.pg_statement_stats DROP COLUMN IF EXISTS database_name;"),
         // V250 (#7691): the memory node on the memory pressure events. The column is the probe's newest sentinel, so the rewind drops the view,
         // drops the column and creates the view again over the older shape (V199's shape); the re-run of V250 adds the column and re-expands the
         // view. Safe on a store that never had it.

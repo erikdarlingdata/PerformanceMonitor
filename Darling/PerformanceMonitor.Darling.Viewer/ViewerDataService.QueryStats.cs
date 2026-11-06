@@ -158,7 +158,7 @@ public sealed partial class ViewerDataService
     /// limit (#5313: top + 5 first, larger on a refill round), $7 the databases to leave out (#7725: the ones the server dropped; NULL
     /// leaves out none).
     /// </summary>
-    public const string TopQueriesSql = """
+    public static readonly string TopQueriesSql = $"""
         WITH ranked AS MATERIALIZED (
             SELECT
                 database_name,
@@ -220,7 +220,7 @@ public sealed partial class ViewerDataService
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
-            AND   ($7::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($7))
+           {DatabaseFilter.ExcludeClause("database_name", 7)}
             /*TAG:hash:query_hash*/
             GROUP BY database_name, query_hash, host_object_name
             HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0

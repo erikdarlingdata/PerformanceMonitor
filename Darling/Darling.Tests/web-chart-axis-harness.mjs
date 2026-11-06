@@ -70,7 +70,7 @@ globalThis.document = {
 globalThis.location = { hash: "#/server/A/cpu" };
 
 const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "chart-axis-")));
-let charts, util, compose, panels;
+let charts, util, compose, panels, findings, shared, serverPage;
 try {
   fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
@@ -78,6 +78,9 @@ try {
   util = await import(pathToFileURL(path.join(scratch, "util.js")).href);
   compose = await import(pathToFileURL(path.join(scratch, "compose.js")).href);
   panels = await import(pathToFileURL(path.join(scratch, "panels.js")).href);
+  findings = await import(pathToFileURL(path.join(scratch, "pages", "analysis-findings.js")).href);
+  shared = await import(pathToFileURL(path.join(scratch, "pages", "server-tabs", "shared.js")).href);
+  serverPage = await import(pathToFileURL(path.join(scratch, "pages", "server.js")).href);
 } catch (e) {
   fs.rmSync(scratch, { recursive: true, force: true });
   throw e;
@@ -319,6 +322,21 @@ out.composed = {
 };
 out.formatters = {
   msNoStep: [0.4, 1.6, 999, 1500].map((v) => util.fmtMs(v)),
+  /* #7726: a positive figure under 1 ms is whole microseconds; zero stays "0 ms"; 0.9996 rounds to 1000 us and reads "1 ms". */
+  msMicro: [0.03235, 0.0254, 0.0003, 0.5, 0.9996, 0].map((v) => util.fmtMs(v)),
+  /* #7726: a trace flag is an identifier, copied into DBCC TRACEON, so the id format prints 3895 with no separator. */
+  traceFlag: [3895, 1117, 12345].map((v) => util.applyFormat("id", v)),
+  /* #7726: the unreachable-since sentence has no seconds ("2026-11-05 16:52 UTC"). Only a caller that opts in with { minutes: true } shifts it:
+     with the reply's own `since` in the same minute it prints that instant (seconds included, the tile's time); without one it prints the minute. */
+  unreachable: "Server unreachable since 2026-11-05 16:52 UTC: refused. Next retry at 2026-11-05 17:51:35 UTC.",
+  localSentence: util.localizeIsoText("Server unreachable since 2026-11-05 16:52 UTC: refused. Next retry at 2026-11-05 17:51:35 UTC.", { minutes: true }),
+  localWithSince: util.localizeIsoText("Server unreachable since 2026-11-05 16:52 UTC: refused.", { minutes: true, since: "2026-11-05T16:52:26.1230000" }),
+  localOtherMinute: util.localizeIsoText("Server unreachable since 2026-11-05 16:52 UTC: refused.", { minutes: true, since: "2026-11-05T16:53:26" }),
+  localDefault: util.localizeIsoText("Server unreachable since 2026-11-05 16:52 UTC: refused. Next retry at 2026-11-05 17:51:35 UTC."),
+  localExpected: [new Date("2026-11-05T16:52:00Z").toLocaleString(undefined, { year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" }), new Date("2026-11-05T17:51:35Z").toLocaleString(), new Date("2026-11-05T16:52:26Z").toLocaleString()],
+  noZoneKept: util.localizeIsoText("saw 2026-11-05 16:52 here and 2026-11-05T16:52 there", { minutes: true }),
+  /* #7726: backtick spans in advice text become code elements whose text is the span as text (never markup). */
+  adviceSpans: findings.adviceNodes("Set `max server memory` (see `sp_configure 'max server memory (MB)', 1000`) and a stray ` tick <b>x</b>.").map((n) => (typeof n === "string" ? "t:" + n : n.tag + ":" + n.text)),
   msStep: [0, 0.2, 0.4].map((v) => util.fmtMs(v, { step: 0.2 })),
   msSeconds: [1000, 1050, 1100].map((v) => util.fmtMs(v, { step: 50 })),
   pctStep: [0, 0.5, 1].map((v) => util.fmtPct(v, { step: 0.5 })),
@@ -326,6 +344,28 @@ out.formatters = {
   intStep: [0, 0.2].map((v) => util.fmtInt(v, { step: 0.2 })),
   mapIndex: [5, 7].map(util.fmtMs),
   mb: [200, 1023, 1024, 2048].map((v) => util.fmtMb(v)),
+};
+
+/* #7726: the wiring, not just localizeIsoText. The real Server Connection descriptor drawn by the real stat viz, and the real server head
+   (the strip's dot, badge tooltip and sentence), each over a reply whose sentence has no seconds and whose own `since` has them. A descriptor
+   that lost its `sinceKey`, or a head that stopped passing `connect_down_since`, prints the bare minute instead of the tile's time. */
+const sinceSentence = "Server unreachable since 2026-11-05 16:52 UTC: refused.";
+const connectionPanel = panels.VIZ.stat({ server_connection: { message: sinceSentence, since: "2026-11-05T16:52:26.1230000", status: "Unreachable" } }, shared.SERVER_CONNECTION_PANEL);
+const connectionNoSince = panels.VIZ.stat({ server_connection: { message: sinceSentence, status: "Unreachable" } }, shared.SERVER_CONNECTION_PANEL);
+const headSlots = () => ({ title: new FakeNode("h1"), dot: new FakeNode("span"), badge: new FakeNode("span"), engine: new FakeNode("span"), why: new FakeNode("div") });
+function serverHead(card) {
+  const h = headSlots();
+  serverPage.fillServerHead(h.title, h.dot, h.badge, h.engine, h.why, card, sinceSentence);
+  return {
+    badgeTitle: find(h.badge, (n) => n.tag === "span" && n.attrs.title != null).map((n) => n.attrs.title)[0] ?? null,
+    reason: find(h.why, (n) => cls(n).includes("server-reason")).map((n) => n.textContent)[0] ?? null,
+  };
+}
+out.wiring = {
+  panelSentence: find(connectionPanel, (n) => cls(n).includes("stat-sentence")).map((n) => n.textContent)[0] ?? null,
+  panelSentenceNoSince: find(connectionNoSince, (n) => cls(n).includes("stat-sentence")).map((n) => n.textContent)[0] ?? null,
+  head: serverHead({ display_name: "SRV1", band: "red", status: "Unreachable", connect_down_since: "2026-11-05T16:52:26.1230000" }),
+  headNoSince: serverHead({ display_name: "SRV1", band: "red", status: "Unreachable" }),
 };
 
 /* #7586: the FinOps Version Store (PVS) tab's size trend, drawn by the real tab. Its read is answered by a stand-in fetch; the tab
@@ -350,11 +390,35 @@ async function pvsAxis(sizes) {
 out.pvsSmall = await pvsAxis([0.001, 0.004, 0.002, 0.009, 0.003, 0.006, 0.0005]);
 out.pvsLarge = await pvsAxis([1200, 4800, 2500, 9100, 3300, 6000, 700]);
 
+/* #7670: the Collector Duration Trends panel (get_server_trend, collector_duration), drawn by the shipped panel from a stand-in read. The longest run is
+   78,000 ms, so the axis reads in minutes: its ticks have to be picked in minutes too (0, 0.5, 1.0, 1.5 min), not at 20 s steps that print as 0.3 and 0.7. */
+async function collectorDurationAxis(maxes) {
+  const now = Date.now();
+  const trend = maxes.map((v, i) => ({ time: new Date(now - (maxes.length - i) * 600000).toISOString().slice(0, 19), max_duration_ms: v }));
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    const raw = JSON.stringify({ as_of: iso(now), series: [{ collector_name: "query_stats", trend }] });
+    return { status: 200, ok: true, text: async () => raw };
+  };
+  try {
+    const shared = await import(pathToFileURL(path.join(scratch, "pages", "server-tabs", "shared.js")).href);
+    const panel = shared.seriesTrendPanel("SRV1", { hours: 6, label: "last 6 hours" }, "collector_duration");
+    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+    return axesOf(panel).leftLabels;
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+out.collectorDurationMinutes = await collectorDurationAxis([12000, 30000, 78000, 45000]);
+out.collectorDurationSeconds = await collectorDurationAxis([4000, 9000, 31000, 12000]);
+
 /* #7578: a unit is printed once. A caption over the axis shows only when the tick labels do not carry the unit already. */
 const captionsOf = (spec) => find(charts.renderLineChart({ xKey: "t", series: [{ key: "a", label: "A", color: "#f00" }], ...spec }), (n) => n.tag === "text" && cls(n).includes("axis-unit")).map((n) => n.text);
 out.unitCaptions = {
   ticksWithUnit: captionsOf({ points: rows([100, 200, 300, 400]), formatValue: (v, o) => util.applyFormat("ms", v, o), unit: "ms" }),
   ticksWithRateUnit: captionsOf({ points: rows([0.1, 0.2, 0.3]), formatValue: (v) => v.toFixed(1) + " MB/s", unit: "MB/s" }),
+  /* #7670: a Custom View stacked wait chart in seconds: its ticks read "800 s", so no "s" caption sits above them. */
+  stackedSecondsTicks: captionsOf({ mode: "stacked", points: rows([100, 400, 800]), formatValue: (v, o) => compose.formatComposedValue(v, "s", o), unit: "s" }),
   bareTicks: captionsOf({ points: rows([100, 200, 300, 400]), formatValue: (v) => util.fmtInt(v), unit: "MB" }),
   secondAxisWithUnit: captionsOf({ points: rows([1, 2, 3], "a", [10, 20, 30]), formatValue: (v) => String(v), unit: "n", series2: { key: "b", label: "B", color: "#00f", formatValue: (v) => v + " ms", unit: "ms" } }),
 };

@@ -119,10 +119,10 @@ export const MEMORY_BROKER_COLUMNS = [
   { key: "notification", label: "Notification" },
   { key: "pool_metadata_id", label: "Pool Meta ID", format: "int" },
   { key: "delta_time", label: "Delta Time", format: "int" },
-  { key: "memory_ratio", label: "Mem Ratio", format: "num2" },
+  { key: "memory_ratio", label: "Mem Ratio", format: "int" },
   { key: "new_target", label: "New Target", format: "int" },
   { key: "overall", label: "Overall", format: "int" },
-  { key: "rate", label: "Rate", format: "num2" },
+  { key: "rate", label: "Rate", format: "int" },
   { key: "currently_predicated", label: "Predicated", format: "int" },
   { key: "currently_allocated", label: "Allocated", format: "int" },
   { key: "previously_allocated", label: "Prev Allocated", format: "int" },
@@ -193,4 +193,15 @@ export const DEFAULT_TRACE_COLUMNS = [
   { key: "error_number", label: "Error #", format: "int" },
   { key: "text_data", label: "Details", wrap: true },
 ];
+
+/* #7729: the Default Trace read answers `by_event`, the count of each event over the whole window (not the page), so a window that
+   one noisy event fills (143 Server Memory Change rows) still shows the others, and a page that stops at its row limit says what it
+   left out. The note lists the first twelve by count and counts the rest. */
+export function defaultTraceByEventNote(data) {
+  const by = data && Array.isArray(data.by_event) ? data.by_event.filter((e) => e && e.event_name != null) : [];
+  if (by.length === 0) return null;
+  const top = by.slice(0, 12).map((e) => e.event_name + " " + Number(e.count).toLocaleString());
+  const rest = by.length - top.length;
+  return "Events in this window: " + top.join(", ") + (rest > 0 ? ", and " + rest + " more kinds" : "") + ".";
+}
 

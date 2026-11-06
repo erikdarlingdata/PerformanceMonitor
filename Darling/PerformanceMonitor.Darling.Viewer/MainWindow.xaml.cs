@@ -57,6 +57,13 @@ public partial class MainWindow : Window
     private ViewerDataService? _dataService;
     private DispatcherTimer? _refreshTimer;
     private bool _storeUnavailable;
+
+    /// <summary>True while the message is up because the server-list reload failed: the one failure the refresh tick
+    /// retries, since a later successful list read proves the store is back.</summary>
+    private bool _serverListReadFailed;
+
+    /// <summary>Single-flight guard for the tick's retry of the server-list read.</summary>
+    private bool _storeRetryInFlight;
     private DispatcherTimer? _overviewTimer;
     private bool _refreshInFlight;
     private bool _refreshRequested;
@@ -583,6 +590,7 @@ public partial class MainWindow : Window
 
         _refreshTimer = new DispatcherTimer { Interval = _refreshInterval };
         _refreshTimer.Tick += OnRefreshTimerTick;
+        _refreshTimer.Tick += OnStoreRetryTick;
         _refreshTimer.Start();
 
         /* The Overview keeps its own timer so it refreshes when it is the visible tab and the aggregate timer
@@ -687,6 +695,21 @@ public partial class MainWindow : Window
         }
 
         await RefreshVisibleAsync();
+    }
+
+    /// <summary>
+    /// The refresh timer's second handler: while the full-window message is up because the server-list reload failed,
+    /// retry that read, so the shell comes back when the store does instead of staying locked until a restart. It is
+    /// its own handler because <see cref="OnRefreshTimerTick"/> makes no store read while the message is up (#4648),
+    /// and that guard has to stay the tick's first statement. The server-list read is the one read that can take the
+    /// message down; <see cref="StoreUnavailableShell.RetryServerListOnTick"/> is the rule for when it is retried.
+    /// </summary>
+    private void OnStoreRetryTick(object? sender, EventArgs e)
+    {
+        if (StoreUnavailableShell.RetryServerListOnTick(_storeUnavailable, _serverListReadFailed, _storeRetryInFlight))
+        {
+            _ = RetryServerListAsync();
+        }
     }
 
     private async void OnOverviewTimerTick(object? sender, EventArgs e)
@@ -1156,6 +1179,13 @@ public partial class MainWindow : Window
                once. Stamp the viewer's favorite pins (matched by server id) and sort favorites-first. */
             var servers = ApplyFavoritesAndSort(await _dataService.GetManagedServersAsync());
 
+            /* The read succeeded, so a message put up by an earlier failed reload no longer describes the store. */
+            _serverListReadFailed = false;
+            if (_storeUnavailable)
+            {
+                ClearStoreUnavailable();
+            }
+
             /* Read the servers to keep AFTER the await: a sidebar or picker change made while the list loads is
                the user's latest choice, and the reload keeps it. */
             var previousSelection = (ServerList.SelectedItem as FleetServerRow)?.Server.ServerId;
@@ -1229,6 +1259,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            _serverListReadFailed = true;
             ShowConnectionFailure($"Cannot read the Darling store: {ex.Message}");
         }
     }
@@ -1640,11 +1671,17 @@ public partial class MainWindow : Window
         ApplyOverviewCardFilter();
     }
 
+    /// <summary>The servers the Overview builds cards for: the enabled fleet. A disabled server collects nothing by
+    /// the operator's choice, so a card for it would read Offline and rank at the top of Needs Attention for as long
+    /// as it stays disabled. The MCP fleet reader scopes its fleet the same way.</summary>
+    internal static List<DarlingServer> OverviewServers(IReadOnlyList<DarlingServer> fleet) =>
+        fleet.Where(s => s.IsEnabled).ToList();
+
     /// <summary>
-    /// Loads a summary card for every registered server (Lite's RefreshOverviewAsync), reading each
+    /// Loads a summary card for every enabled server (Lite's RefreshOverviewAsync), reading each
     /// server's latest metrics concurrently over the pooled data source. Status is derived from
     /// collection freshness — the viewer has no live ping — via <see cref="ServerSummaryItem.ApplyFreshness"/>.
-    /// This aggregate ignores the sidebar selection; it always shows all servers.
+    /// This aggregate ignores the sidebar selection; it always shows all enabled servers.
     /// </summary>
     private async Task LoadOverviewAsync()
     {
@@ -1653,7 +1690,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var servers = _fleet.All;
+        var servers = OverviewServers(_fleet.All);
         if (servers.Count == 0)
         {
             ClearOverviewCards();
@@ -1768,21 +1805,25 @@ public partial class MainWindow : Window
         /* Fleet-wide NOC roll-up above the cards — the cross-server totals SQL aggregate (the read only
            Darling's central store can serve) plus the band counts / worst-N ranking reduced from the
            cards' own #1426 banding. The totals use the SAME one-hour window the per-server cards use, so
-           they reconcile with the sum of the card counts. A totals-read failure degrades to zero totals
-           rather than blanking the Overview — the band counts and ranking still render from the cards. */
-        FleetTotals totals;
+           they reconcile with the sum of the card counts. A totals-read failure leaves the totals null, which the
+           roll-up renders as unavailable rather than as zeros, and it does not blank the Overview — the band counts
+           and ranking still render from the cards, and a searched panel sums the matched cards' own counts. */
+        FleetTotals? totals;
         try
         {
             totals = await service.GetFleetTotalsAsync(nowUtc.AddHours(-1), nowUtc);
         }
-        catch
+        catch (Exception ex)
         {
-            totals = new FleetTotals();
+            ViewerLogger.Warn("Overview", $"fleet totals read failed: {ex.Message}");
+            totals = null;
         }
 
-        /* #2753: TotalServers must be the registered fleet size (list.Count, the same source the sidebar's
-           "Servers: N" reads), not cards.Count — cards silently drops any server whose per-server summary
-           read failed this cycle, which made the Overview's total wobble against the stable sidebar count. */
+        /* #2753: TotalServers must be the enabled fleet size (list.Count, the servers OverviewServers picked), not
+           cards.Count — cards silently drops any server whose per-server summary read failed this cycle, which made
+           the Overview's total wobble against the stable sidebar count. The two counts differ on purpose: the
+           sidebar's "Servers: N" counts every registered server, disabled ones included, so they can be re-enabled
+           from the list, while this counts the enabled servers the Overview reads, and the roll-up's text says so. */
         _overviewTotals = totals;
         _overviewRegisteredCount = list.Count;
         ApplyFleetRollup(OverviewCardView.BuildRollup(cards, totals, list.Count, OverviewSearchBox?.Text));
@@ -1794,12 +1835,12 @@ public partial class MainWindow : Window
     /// Renders the fleet roll-up above the Overview cards: sets the FleetRollupContainer's DataContext and
     /// toggles the worst-first "Needs Attention" ranking against the all-clear line (there is no
     /// inverse-visibility converter, so the swap is done here). The container shows only when there are
-    /// registered servers to roll up (a search that matches none keeps it, #7354).
+    /// enabled servers to roll up (a search that matches none keeps it, #7354).
     /// </summary>
     private void ApplyFleetRollup(FleetRollup rollup)
     {
         FleetRollupContainer.DataContext = rollup;
-        /* #7354: gated on the registered fleet, not the servers the search left, so a search that matches
+        /* #7354: gated on the enabled fleet, not the servers the search left, so a search that matches
            nothing keeps the Search box on screen to be cleared. */
         FleetRollupContainer.Visibility = OverviewCardView.ShowsRollup(rollup) ? Visibility.Visible : Visibility.Collapsed;
 
@@ -1819,6 +1860,7 @@ public partial class MainWindow : Window
     {
         _overviewCards = new List<ServerSummaryItem>();
         _overviewTotals = null;
+        _overviewRegisteredCount = 0;
         OverviewItemsControl.ItemsSource = null;
         FleetRollupContainer.Visibility = Visibility.Collapsed;
         ApplyOverviewAttentionCount(shown: 0);
@@ -1842,12 +1884,13 @@ public partial class MainWindow : Window
         OverviewItemsControl.ItemsSource = shown;
         ApplyOverviewAttentionCount(shown.Count);
 
-        /* D9: the roll-up above the grid (Needs Attention rows, band counts, "Monitoring N servers") follows the
-           search too, so it never counts servers the grid just hid. Before the first refresh there is no totals read
-           to rebuild from; the refresh builds it. */
-        if (_overviewTotals is { } totals)
+        /* D9: the roll-up above the grid (Needs Attention rows, band counts, "Monitoring N enabled servers") follows the
+           search too, so it never counts servers the grid just hid. Before the first refresh there is no fleet to
+           rebuild from; the refresh sets the count. The totals stay null when their read failed: the roll-up renders
+           that as unavailable, or as the matched cards' own sums while a search narrows it. */
+        if (_overviewRegisteredCount > 0)
         {
-            ApplyFleetRollup(OverviewCardView.BuildRollup(_overviewCards, totals, _overviewRegisteredCount, OverviewSearchBox?.Text));
+            ApplyFleetRollup(OverviewCardView.BuildRollup(_overviewCards, _overviewTotals, _overviewRegisteredCount, OverviewSearchBox?.Text));
         }
     }
 
@@ -2496,6 +2539,35 @@ public partial class MainWindow : Window
         _storeUnavailable = true;
         ApplyStoreUnavailableShell();
         StatusText.Text = "";
+    }
+
+    /// <summary>Takes the full-window message down and re-enables the store-dependent shell, after a server-list read
+    /// that succeeded while the message was up.</summary>
+    private void ClearStoreUnavailable()
+    {
+        _storeUnavailable = false;
+        ApplyStoreUnavailableShell();
+    }
+
+    /// <summary>The retry of the server-list read while the message is up for that read's failure. Single-flight: the
+    /// guard is tested and claimed here, ahead of the await, so a tick that fires while a retry is still running drops.
+    /// A failed retry re-shows the message and the next tick tries again.</summary>
+    private async Task RetryServerListAsync()
+    {
+        if (_storeRetryInFlight)
+        {
+            return;
+        }
+
+        _storeRetryInFlight = true;
+        try
+        {
+            await LoadServersAsync(preserveSelection: true);
+        }
+        finally
+        {
+            _storeRetryInFlight = false;
+        }
     }
 
     /// <summary>

@@ -310,7 +310,7 @@ public sealed class DarlingMcpDataTools
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
                             factual: $"No wait types recorded for {resolved.DisplayName} in the last {hours_back} hour(s)",
-                            coveredClaim: ". This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples."),
+                            coveredClaim: ". This server has collected wait stats before, so this window was quiet — widen hours_back to find the most recent samples."),
                         emptyNotice.AsHints())
                     : McpHelpers.Status(
                         "unavailable",
@@ -1135,6 +1135,7 @@ public sealed class DarlingMcpDataTools
                 /* #7725: disclosed, never silent (get_top_procedures_by_cpu's rule): the dropped databases this read left out and that have
                    no row in the reply, in the same words. Null when every one of them got rows, or the read left none out. */
                 databases_left_out = DatabasesLeftOut.Named(droppedWithoutRows),
+                databases_left_out_count = DatabasesLeftOut.Count(droppedWithoutRows),
                 databases_left_out_note = DatabasesLeftOut.Note(droppedWithoutRows),
                 queries = result
             }, McpHelpers.JsonOptions)!.AsObject();
@@ -1477,6 +1478,7 @@ public sealed class DarlingMcpDataTools
                 retention_notice = routed.RetentionNotice,
                 /* #5633 review (finding D): null when the read left no database out. */
                 databases_left_out = DatabasesLeftOut.Named(leftOutWithoutRows),
+                databases_left_out_count = DatabasesLeftOut.Count(leftOutWithoutRows),
                 databases_left_out_note = DatabasesLeftOut.Note(leftOutWithoutRows),
                 procedures = result
             }, McpHelpers.JsonOptions)!.AsObject();
@@ -3940,7 +3942,7 @@ ORDER BY server_name";
                                 ? $"No blocking or deadlocks recorded for {resolved.DisplayName} in the last {hours_back} hour(s)"
                                 : $"No blocking{DarlingMcpBlockingTools.ForChosenDatabases(databases)} "
                                   + $"(and no deadlocks, which are not limited by database) recorded for {resolved.DisplayName} in the last {hours_back} hour(s)",
-                            coveredClaim: ". The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind."),
+                            coveredClaim: ". The blocking collectors have run successfully for this server, so there was no blocking or deadlock in this window."),
                         emptyNotice.AsHints())
                     : McpHelpers.Status(
                         "unavailable",

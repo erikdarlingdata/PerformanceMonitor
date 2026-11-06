@@ -159,6 +159,13 @@ public sealed class DarlingMcpDefaultTraceTools
                 truncation_note = notice.TruncationNote,
                 database_name = databases.Describe(),
                 total_events = significant.Count,
+                /* #7729: how many of the window's events each name holds, from every significant row (not the page), so one noisy event
+                   (143 Server Memory Change rows) cannot hide the others, and a page that stops at the limit still says what it left out. */
+                by_event = significant
+                    .GroupBy(r => r.EventName)
+                    .Select(g => new { event_name = g.Key, count = g.Count() })
+                    .OrderByDescending(g => g.count).ThenBy(g => g.event_name, StringComparer.Ordinal)
+                    .ToList(),
                 shown = events.Count,
                 events
             }, McpHelpers.JsonOptions);

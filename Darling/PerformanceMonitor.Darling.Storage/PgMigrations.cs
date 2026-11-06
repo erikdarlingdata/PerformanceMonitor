@@ -2444,7 +2444,7 @@ END $do$;";
     /// idempotent. <b>No Lite twin:</b> Lite keeps the text inline and the collector drops the monitor's own row there.
     /// </summary>
     private static readonly string V219Sql =
-        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreSelfKeys.CreateSql + "\n" + QueryStoreSelfKeys.TriggerSql;
+        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreSelfKeys.CreateSql + "\n" + QueryStoreSelfKeys.MarkerOnlyTriggerSql;
 
     /// <summary>
     /// V220 (#6798): <c>idx_job_history_job_success</c> on <c>collect.job_history (server_id, job_id, run_datetime DESC) INCLUDE
@@ -2616,6 +2616,29 @@ ALTER TABLE config.config_monitored_servers
     ADD COLUMN IF NOT EXISTS xe_session_databases text[] NOT NULL DEFAULT '{}'::text[];";
 
     /// <summary>
+    /// V248 (#7730): the key trigger of <c>collect.query_store_text</c> now also keys the old statements that builds before #7463 sent
+    /// with no marker (<see cref="SqlServerOwnStatement"/>), so a new text of one gets its key, and the backfill runs again for the
+    /// text stored earlier: the state row is deleted (<see cref="QueryStoreSelfKeys.ReopenBackfillSql"/>), <c>RunDelayedAsync</c> keys the
+    /// old rows in the background after start, and the reads use the text probe until it has. <b>No full-table scan here.</b> The
+    /// function is replaced and both triggers are created again (the rung's <c>WHEN</c> clause carries the new test), which takes a SHARE
+    /// ROW EXCLUSIVE lock on the text table, so the lock timeout is V219's. Every statement is idempotent. <b>No Lite twin of the
+    /// rung:</b> Lite has no key table.
+    /// </summary>
+    private static readonly string V248Sql =
+        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreSelfKeys.TriggerSql + "\n" + QueryStoreSelfKeys.ReopenBackfillSql;
+
+    /// <summary>
+    /// V249 (#7731): <c>collect.pg_statement_stats.database_name</c>, the name of the database the row's <c>dbid</c> belongs to, from the same
+    /// <c>pg_database</c> join the kernel stats collector uses. The Top Query Shapes read groups by <c>(queryid, database_id)</c>, so one statement in two
+    /// databases is two rows, and with a number alone nothing said why. One nullable <c>text</c>, no DEFAULT, no backfill, no scan of the table (V243's
+    /// shape): a row stored before this rung never knew the name, so NULL is the honest value and the reply says <c>database &lt;id&gt;</c> for it.
+    /// A catalog-only change, accepted on the compressed hypertable the way V128's identical <c>ALTER</c> on this table was. <b>Appended LAST</b>, the
+    /// position the collector's payload gives it, so a fresh store (the generated V1 table carries the column and this ALTER no-ops there) and an
+    /// upgraded one share one physical order. <c>pg_statement_stats</c> has no <c>v_</c> view, and no rollup or hourly tier reads it. An older build
+    /// writes its own column list, so the column stays NULL for the rows it writes.
+    /// </summary>
+    private const string V249Sql = @"
+ALTER TABLE collect.pg_statement_stats ADD COLUMN IF NOT EXISTS database_name text;";
     /// V250 (#7691): <c>collect.memory_pressure_events.memory_node_id</c>, the memory node a resource monitor ring buffer record came from. A server
     /// with several memory nodes writes one record per node for the same event, so the grid listed one event once per node with nothing to tell the
     /// rows apart. One nullable <c>integer</c>, no DEFAULT, no backfill, no scan of the table (V241's shape): a row stored before this rung never read
@@ -3134,6 +3157,8 @@ $rung$;";
         new Migration(245, "database-protection-thresholds", V245Sql),
         new Migration(246, "query-store-corrected-hourly-hash-index", V246Sql),
         new Migration(247, "xe-session-databases", V247Sql),
+        new Migration(248, "query-store-self-keys-old-statements", V248Sql),
+        new Migration(249, "pg-statement-stats-database-name", V249Sql),
         new Migration(250, "memory-pressure-node", V250Sql),
     };
 
@@ -7045,7 +7070,8 @@ CREATE TABLE IF NOT EXISTS collect.pg_statement_stats (
     delta_calls bigint,
     delta_total_exec_time_ms bigint,
     delta_rows bigint,
-    sample_interval_seconds integer
+    sample_interval_seconds integer,
+    database_name text
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_statement_stats_time

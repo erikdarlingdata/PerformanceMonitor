@@ -124,6 +124,14 @@ public sealed partial class ViewerDataService
     /// </summary>
     public const string QueryStoreTopSql = QueryStoreTopRawPrefix + QueryStoreTopSuffix;
 
+    /// <summary>#7776: the collection_time bounds beside the interval-start window on the raw top read and the slicer. The floor is the
+    /// clock-skew slack below the window and the ceiling is a day of engine maximum interval plus collector-outage allowance above it
+    /// (see <see cref="QueryStoreSlicerSql"/>). The top read's inline-text fallback uses the ceiling too, so it reaches the fact rows.</summary>
+    private const string CollectionFloorSlackSql = "interval '1 hour'";
+
+    /// <summary>The ceiling half of <see cref="CollectionFloorSlackSql"/>.</summary>
+    private const string CollectionCeilingSql = "interval '30 days'";
+
     /// <summary>
     /// The raw read's head (#3953 split it off <see cref="QueryStoreTopSql"/>'s prior single-string form,
     /// byte-identical — the split itself changes nothing about the text a raw call sends): the interval dedupe
@@ -131,7 +139,7 @@ public sealed partial class ViewerDataService
     /// <see cref="QueryStoreTopTableSql"/>, so the two reads cannot drift above <c>ranked</c>.
     /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 top, $5 database filter.
     /// </summary>
-    private const string QueryStoreTopRawPrefix = """
+    private const string QueryStoreTopRawPrefix = $$"""
         WITH deduped AS (
             /* LOAD-BEARING (correctness, not just perf) — #1841. query_store_stats rows are CUMULATIVE
                per-Query-Store-interval snapshots, and the collector re-fetches the OPEN interval every
@@ -170,8 +178,18 @@ public sealed partial class ViewerDataService
                 ) AS rn
             FROM query_store_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
+            /* #7776: the window is the interval's own start, the expression the slicer's bars are keyed on (QueryStoreSlicerSql, #1892),
+               so a slice's grid rows are the intervals its bars draw. It was collection_time, which trails the interval by up to the
+               interval's length: an interval collected inside the slice but started before it showed here with no bar, and the slice's
+               last interval, collected after its end, was missing. Legacy rows have no interval start and keep collection_time.
+               The collection_time bounds below are chunk exclusion, not filters, with the slicer read's reasoning: the floor is implied
+               by the predicate (an interval is collected after it starts; the hour is clock-skew slack) and the ceiling is the
+               slicer's 30 days (a day of engine maximum interval, the rest collector-outage allowance). They keep the
+               (server_id, collection_time) index and the chunk pruning. */
+            AND   COALESCE(interval_start_time_utc, collection_time) >= $2
+            AND   COALESCE(interval_start_time_utc, collection_time) <= $3
+            AND   collection_time >= $2 - {{CollectionFloorSlackSql}}
+            AND   collection_time <= $3 + {{CollectionCeilingSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
         ),
 
@@ -197,12 +215,13 @@ public sealed partial class ViewerDataService
     /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> is that bound plus an hour (the argument is in
     /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>'s summary). A static readonly rather than a const
     /// because the interval literal is derived from that TimeSpan; <c>$$"""</c> keeps <c>$1</c> literal.</para>
-    /// <para><b>The upper bound (#5523).</b> A window with an end ($3 not NULL) also carries
-    /// <c>first_execution_time &lt;= $3 + </c><see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/>, so the
+    /// <para><b>The upper bound (#5523, #7776).</b> A window with an end ($3 not NULL) also carries
+    /// <c>first_execution_time &lt;= $3 + </c><see cref="QueryStoreIntervalWide.IntervalStartFirstExecMarginSql"/>, so the
     /// <c>(server_id, first_execution_time)</c> btree scans a range finite at both ends instead of everything newer than
-    /// the window start. An open end (NULL) reads to now, as before. It drops a row only for a monitored-server clock more
-    /// than the slack (twelve hours) ahead of the service's, or a collection cycle longer than that
-    /// (<see cref="QueryStoreIntervalWide.FirstExecUpperSlack"/>'s summary).</para>
+    /// the window start. An open end (NULL) reads to now, as before. The window is placed by the interval's start
+    /// (<c>COALESCE(interval_start_time_utc, collection_time)</c>, #7776), so the margin is the one the duration trend's start-placed
+    /// arm uses: an interval that starts before $3 can have a first execution up to its own length (a day) after it. It was
+    /// <see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/> while the window was placed by <c>collection_time</c>.</para>
     /// </summary>
     private static readonly string QueryStoreTopTablePrefix = $$"""
         WITH deduped AS (
@@ -211,10 +230,13 @@ public sealed partial class ViewerDataService
                 1 AS rn
             FROM query_store_interval_wide
             WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   ($3::timestamp IS NULL OR collection_time <= $3)
+            /* #7776: placed by the interval's start, as the raw read and the slicer's bars are (QueryStoreTopRawPrefix). The
+               first_execution_time range below is what the btree serves; this is a residual filter, and no collection_time
+               bound is added because none could drop a row here (an interval is collected after it starts). */
+            AND   COALESCE(interval_start_time_utc, collection_time) >= $2
+            AND   ($3::timestamp IS NULL OR COALESCE(interval_start_time_utc, collection_time) <= $3)
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
-            AND   ($3::timestamp IS NULL OR first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}})
+            AND   ($3::timestamp IS NULL OR first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}})
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
         ),
 
@@ -303,6 +325,7 @@ public sealed partial class ViewerDataService
                 MAX(CAST(max_num_physical_io_reads AS double precision)) AS max_num_physical_io_reads
             FROM deduped
             WHERE rn = 1
+            /*SELFKEY:deduped*/
             /*TAG:hash:query_hash*/
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             ORDER BY {{QueryStoreWeightedAverage.RankByDuration}} DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
@@ -399,13 +422,16 @@ public sealed partial class ViewerDataService
                                WHERE s.server_id = $1
                                AND   s.query_id = r.query_id
                                AND   s.database_name = r.database_name
-                               /* #5420: bounded to the read's own window ($2 through $3, the same bound the fact rows
-                                  above were read with). Without it a query with no inline text anywhere walked every
+                               /* #5420: bounded to the read's own window ($2 through $3). Without it a query with no inline text anywhere walked every
                                   retained chunk of query_store_stats on the time index looking for one. A query whose
                                   only inline text is older than the window now shows none, as a query with no text
-                                  at all already did. Twins the other copy of this tail; keep them matching. */
+                                  at all already did. #7776: the ceiling is the one the fact rows above are read with (CollectionCeilingSql), not the
+                                  bare $3, because the fact rows are windowed by interval start and an interval started in the window
+                                  can be collected after $3; a bare $3 left its inline-only text blank. The floor stays $2: a fact row's
+                                  collection is never before its interval's start, and text only older than the window shows none. The Darling MCP copy of this tail (DarlingDataReader) keeps the bare window with its own
+                                  collection_time window (#7814 is the twin). */
                                AND   s.collection_time >= $2
-                               AND   ($3::timestamp IS NULL OR s.collection_time <= $3)
+                               AND   ($3::timestamp IS NULL OR s.collection_time <= $3 + {{CollectionCeilingSql}})
                                AND   s.query_text IS NOT NULL
                                ORDER BY s.collection_time DESC, s.collection_id DESC
                                LIMIT 1
@@ -500,8 +526,18 @@ public sealed partial class ViewerDataService
            at TopFill's final limit, not up to three rounds that each re-read the window; the tail looks up text only
            until the page is full, so the answer is the rounds' own (TopFill.FinalCandidates). */
         List<ViewerQueryStoreRow> rows;
-        await using (var command = _dataSource.CreateCommand(QueryTagReadJoin.Apply(QueryStoreTopSql, serverId, tags)))
+        /* #7736: the monitor's own statements leave ranked before its candidate limit once the key backfill has run, so the gate and
+           the read are one snapshot: one read-only REPEATABLE READ transaction, as the interval-table read below runs in. */
+        await using (var connection = await _dataSource.OpenConnectionAsync(cancellationToken))
+        await using (var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken))
         {
+            await using (var readOnly = new Npgsql.NpgsqlCommand("SET TRANSACTION READ ONLY", connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
+            {
+                await readOnly.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            var rawSql = await WithSelfKeysBeforeCandidateLimitAsync(connection, transaction, QueryTagReadJoin.Apply(QueryStoreTopSql, serverId, tags), cancellationToken);
+            await using var command = new Npgsql.NpgsqlCommand(rawSql, connection, transaction);
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             AddServerWindowParameters(command, serverId, startUtc, endUtc);
             command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
@@ -513,6 +549,15 @@ public sealed partial class ViewerDataService
 
         return (rows, null);
     }
+
+    /// <summary>#7736: <paramref name="sql"/> with the self-statement test on the key table in <c>ranked</c>, ahead of its candidate limit,
+    /// once its backfill has run (<see cref="QueryStoreSelfKeys.ReadyAsync"/>, read in this read's snapshot, closed on a store without
+    /// the state table), else as it is. The tail's text test still removes the monitor's own statements from a store the backfill has
+    /// not reached. The MCP read's <c>DarlingDataReader.WithSelfKeysBeforeCandidateLimitAsync</c> is the same shape.</summary>
+    private static async Task<string> WithSelfKeysBeforeCandidateLimitAsync(Npgsql.NpgsqlConnection connection, Npgsql.NpgsqlTransaction transaction, string sql, CancellationToken cancellationToken) =>
+        await QueryStoreSelfKeys.ReadyAsync(connection, transaction, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken)
+            ? QueryStoreSelfStatement.WithRankedKeyTest(sql)
+            : sql;
 
     /// <summary>
     /// #3953's gate and table read, on ONE connection in ONE read-only REPEATABLE READ transaction (M1, ruling
@@ -562,6 +607,9 @@ public sealed partial class ViewerDataService
             }
 
             topSql = QueryTagReadJoin.Apply(topSql, serverId, tags);
+
+            /* #7736: the monitor's own statements leave ranked before its candidate limit, once the key backfill has run. */
+            topSql = await WithSelfKeysBeforeCandidateLimitAsync(connection, transaction, topSql, cancellationToken);
             await using (var command = new Npgsql.NpgsqlCommand(topSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
             {
                 command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
@@ -719,6 +767,7 @@ public sealed partial class ViewerDataService
             WHERE server_id = $1
             AND   collection_time >= $2 AND collection_time <= $3
             AND   ($6::text[] IS NULL OR database_name = ANY($6))
+            /*SELFKEY:stats*/
         ),
         deduped_baseline AS (
             SELECT
@@ -741,6 +790,7 @@ public sealed partial class ViewerDataService
             WHERE server_id = $1
             AND   collection_time >= $4 AND collection_time <= $5
             AND   ($6::text[] IS NULL OR database_name = ANY($6))
+            /*SELFKEY:stats*/
         ),
         top_current AS (
             SELECT database_name, query_hash
@@ -860,7 +910,13 @@ public sealed partial class ViewerDataService
     {
         var items = new List<QueryStatsComparisonItem>();
 
-        await using var command = _dataSource.CreateCommand(QueryStoreComparisonSql);
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        /* #7730: the key table's test ahead of each window's top-100 cut once its backfill has run; the tail's text test stays for the
+           marker texts of a store the backfill has not reached. */
+        var comparisonSql = await QueryStoreSelfKeys.ReadyAsync(connection, null, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken)
+            ? QueryStoreSelfStatement.WithComparisonKeyTest(QueryStoreComparisonSql)
+            : QueryStoreComparisonSql;
+        await using var command = new Npgsql.NpgsqlCommand(comparisonSql, connection);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddComparisonParameters(command, serverId, currentStart, currentEnd, baselineStart, baselineEnd);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
@@ -901,7 +957,7 @@ public sealed partial class ViewerDataService
     /// the slicer does not, and this is its only statement.
     /// $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
-    public const string QueryStoreSlicerSql = """
+    public const string QueryStoreSlicerSql = $$"""
         WITH deduped AS (
             /* LOAD-BEARING (correctness, not just perf) — #1841. The rows are CUMULATIVE per-interval
                snapshots and the collector re-fetches the OPEN interval every cycle, so summing the raw
@@ -959,8 +1015,8 @@ public sealed partial class ViewerDataService
                and 29 of collector-outage allowance. A month-long outage that then back-collects an interval
                straddling an old window's edge could still omit that one bar; the data stays in the store,
                and the alternative (no ceiling) makes every historical window scan to the present. */
-            AND   collection_time >= $2 - interval '1 hour'
-            AND   collection_time <= $3 + interval '30 days'
+            AND   collection_time >= $2 - {{CollectionFloorSlackSql}}
+            AND   collection_time <= $3 + {{CollectionCeilingSql}}
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
         )
         SELECT

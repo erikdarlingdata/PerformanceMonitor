@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -33,7 +34,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpPvsTools
 {
     [McpServerTool(Name = "get_pvs_stats"), Description(
-        "ADR PVS state per database: size, % of database, aborted-txn count, cleaner times (a start with no end = mid-run). LATEST IS A TIME: the newest snapshot, not a window; as_of is when it was taken. trend_hours_back (0 = off) looks back from now, not from as_of, over the top-5 databases by current size. Cleaner times are de-skewed to UTC, like as_of. pct_of_database is null only if PVS size is unmeasured (pvs_measured false) or database size is missing or 0 (pct_of_database_reason says why); else measured 0 MB = 0.00. No rows: not_collected if this engine can't collect PVS, else empty. <<GUIDE>> Gets the Accelerated Database Recovery (ADR) persistent version store state per database: PVS size and percent-of-database, online-index version store size, aborted transaction count, version-cleaner run state (a start time without an end time means the cleaner is mid-run), and the oldest active/aborted transaction ids. Use when a database's size is growing without table growth, when ADR cleanup looks stuck, or alongside the PVS pressure alert. A large PVS is pinned by long-running or aborted transactions; the id gap shows how far cleanup is behind. Optionally returns the size trend for the top-5 databases over a window. Every timestamp here is UTC, the four cleaner times included - the DMV reports those in the monitored server's local clock and this read de-skews them - so a cleaner time compares directly against as_of. pvs_measured says whether the DMV reported a size for that database at all; a measured 0 MB is published as pvs_size_mb 0 and pct_of_database 0.00 (the healthy, fully-cleaned state), and pct_of_database is null only when the numerator was not measured or the denominator is absent or zero, with pct_of_database_reason saying which.")]
+        "ADR PVS state per database: size, % of database, aborted-txn count, cleaner times (a start with no end = mid-run). LATEST IS A TIME: the newest snapshot, not a window; as_of is when it was taken. trend_hours_back (0 = off) looks back from now, not from as_of, over the top-5 databases by current size. Cleaner times are de-skewed to UTC, like as_of. pct_of_database is null only if PVS size is unmeasured (pvs_measured false) or database size is missing or 0 (pct_of_database_reason says why); else measured 0 MB = 0.00. No rows: not_collected if this engine can't collect PVS, else empty. <<GUIDE>> Gets the Accelerated Database Recovery (ADR) persistent version store state per database: PVS size and percent-of-database, online-index version store size, aborted transaction count, version-cleaner run state (a start time without an end time means the cleaner is mid-run), and the oldest active/aborted transaction ids. Use when a database's size is growing without table growth, when ADR cleanup looks stuck, or alongside the PVS pressure alert. A large PVS is pinned by long-running or aborted transactions; the id gap shows how far cleanup is behind. Optionally returns the size trend for the top-5 databases over a window. Every timestamp here is UTC, the four cleaner times included - the DMV reports those in the monitored server's local clock and this read de-skews them - so a cleaner time compares directly against as_of. pvs_measured says whether the DMV reported a size for that database at all; a measured 0 MB is published as pvs_size_mb 0 and pct_of_database 0.00 (the healthy, fully-cleaned state), and pct_of_database is null only when the numerator was not measured or the denominator is absent or zero, with pct_of_database_reason saying which. secondary_replica_note is on the reply that has database rows (null when there is nothing to say) and on the empty reply (present only when there is something to say), so a database filter that picks only secondary copies still gets it. It has a sentence only when this server holds a secondary copy, in an availability group, of a database that has no row in this snapshot and is among the databases chosen. It is not added when this server's SQL Server version has no persistent version store (before 2019), where the primary has none either, and never on a not_collected reply. It then says how many: the DMV reports no row for a secondary copy here, so check the primary replica for its persistent version store.")]
     public static Task<string> GetPvsStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -41,6 +42,40 @@ public sealed class DarlingMcpPvsTools
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         CancellationToken cancellationToken = default) =>
         GetPvsStats(postgres, server_name, trend_hours_back, DatabaseFilter.One(database_name), cancellationToken);
+
+    /// <summary>
+    /// #7699 item 7, #7822: the server's engine facts from the registry, the way the hints tool reads them. They pick the empty sentence for a
+    /// server with no PVS rows (no persistent version store before SQL Server 2019, or the collector has not completed a cycle) and decide whether
+    /// the availability group secondary note applies. A registry that cannot be read keeps the unknown-version target, which is assumed newest.
+    /// </summary>
+    internal static async Task<PerformanceMonitor.Collectors.CollectorTargetInfo> ReadTargetAsync(NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
+        var target = new PerformanceMonitor.Collectors.CollectorTargetInfo();
+        try
+        {
+            await using var command = postgres.CreateCommand(DarlingMcpForcedPlanTools.HintsTargetFactsSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            command.Parameters.AddWithValue(serverId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                var edition = reader.IsDBNull(0) ? 0 : reader.GetInt32(0);
+                target = new PerformanceMonitor.Collectors.CollectorTargetInfo
+                {
+                    IsAzureSqlDb = edition == PerformanceMonitor.Collectors.CollectorEngineCapability.AzureSqlDatabaseEngineEdition,
+                    IsAzureManagedInstance = edition == PerformanceMonitor.Collectors.CollectorEngineCapability.AzureManagedInstanceEngineEdition,
+                    SqlMajorVersion = reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+                };
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* The version only picks between two sentences about an answer that is already empty, so a failed registry read keeps the
+               unknown-version target (assumed newest), which gets the "not completed a cycle" sentence. */
+        }
+
+        return target;
+    }
 
     /// <summary>
     /// #5244: get_pvs_stats over a SET of databases (<see cref="DatabaseFilter.All"/> = every database): the chosen databases'
@@ -68,6 +103,23 @@ public sealed class DarlingMcpPvsTools
         try
         {
             var rows = await DarlingPvsReader.GetPvsStatsLatestAsync(postgres, resolved.ServerId, databaseFilter, cancellationToken);
+
+            /* #7706: the note for a chosen database this server holds only as an availability group secondary copy, which has no PVS row.
+               Judged at the snapshot's own time, not today's roles for an old snapshot, and built on the empty replies too: a filter that
+               picks only such copies returns no rows, which is exactly the case the note explains. */
+            /* #7822: and only for a server whose version has a persistent version store. Before SQL Server 2019 no database has a row and the
+               primary has no PVS either, so "check the primary replica" is wrong there. The registry read happens only when a note would be added. */
+            PerformanceMonitor.Collectors.CollectorTargetInfo? target = null;
+            async Task<PerformanceMonitor.Collectors.CollectorTargetInfo> TargetAsync() =>
+                target ??= await ReadTargetAsync(postgres, resolved.ServerId, cancellationToken);
+            async Task<string?> SecondaryNoteAsync(DateTime? snapshotUtc)
+            {
+                var note = PvsSecondaryNote.WithoutRow(
+                    await PgSecondaryReplicaScope.ReadAsync(postgres, resolved.ServerId, PvsSecondaryNote.ScopeTimeUtc(snapshotUtc), null, cancellationToken),
+                    rows.Select(r => r.DatabaseName), databaseFilter.Names, databaseFilter.ExcludedNames);
+                return note is not null && PerformanceMonitor.Collectors.PvsStatsCollector.Instance.AppliesTo(await TargetAsync()) ? note : null;
+            }
+
             if (rows.Count == 0)
             {
                 /* #5244: a filter that matches no database is a different answer from a server with no PVS data. The probe is the
@@ -77,22 +129,27 @@ public sealed class DarlingMcpPvsTools
                     var serverRows = await DarlingPvsReader.GetPvsStatsLatestAsync(postgres, resolved.ServerId, DatabaseFilter.All, cancellationToken);
                     if (serverRows.Count > 0)
                     {
-                        return McpHelpers.StatusForDatabase("empty",
+                        return McpHelpers.WithSecondaryReplicaNote(McpHelpers.StatusForDatabase("empty",
                             $"No PVS rows for {DarlingMcpObjectStatsTools.DescribeScope(databaseFilter)} on {resolved.DisplayName} in the snapshot taken at "
                             + $"{serverRows[0].CollectionTime:o}, though it holds {serverRows.Count:N0} other database(s). Check the database "
                             + $"{(databaseFilter.Names.Count == 1 ? "name" : "names")}: the filter matches exactly, and a database with no row at that "
                             + "snapshot looks identical to one that does not exist.",
-                            databaseFilter.Describe());
+                            databaseFilter.Describe()),
+                            await SecondaryNoteAsync(serverRows[0].CollectionTime))!;
                     }
                 }
 
-                return McpHelpers.WithDatabase(
-                           await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "pvs_stats", cancellationToken),
-                           databaseFilter.Describe())
-                    ?? McpHelpers.StatusForDatabase("empty",
-                        "No PVS data collected for this server. The collector reads sys.dm_tran_persistent_version_store_stats " +
-                        "(SQL Server 2019+); a server with no rows either predates ADR or has not completed a pvs_stats cycle yet.",
-                        databaseFilter.Describe());
+                /* #7822: a not_collected reply is about the engine and never carries the note. */
+                var notCollected = McpHelpers.WithDatabase(
+                    await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "pvs_stats", cancellationToken),
+                    databaseFilter.Describe());
+                if (notCollected != null) return notCollected;
+
+                return McpHelpers.WithSecondaryReplicaNote(
+                    McpHelpers.StatusForDatabase("empty",
+                        PerformanceMonitor.Collectors.PvsStatsCollector.NoRowsMessage(await TargetAsync()),
+                        databaseFilter.Describe()),
+                    await SecondaryNoteAsync(null))!;
             }
 
             var databases = rows.Select(r => new
@@ -170,6 +227,8 @@ public sealed class DarlingMcpPvsTools
                 server = resolved.DisplayName,
                 database_name = databaseFilter.Describe(),
                 as_of = rows[0].CollectionTime.ToString("o"),
+                /* #7706: null when every secondary copy here has a row (or there is none); the empty replies carry the same key. Fails open like every AG note. */
+                secondary_replica_note = await SecondaryNoteAsync(rows[0].CollectionTime),
                 databases,
                 trend_hours_back = trend_hours_back > 0 ? trend_hours_back : (int?)null,
                 trend,

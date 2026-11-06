@@ -347,6 +347,7 @@ export function memoryPressurePanels(server, ctx) {
           integerTicks: true,
           mode: "stacked-bar",
           unit: "events",
+          tooltipOffsetMs: HOUR_MS / 2, /* #7679: the bar is stamped at the middle of its hour, the tooltip names the hour's start */
           ...windowFromHours(hours),
         }, "memory-pressure-events", chartZoomScope(ctx.hours)),
       ];

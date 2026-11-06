@@ -109,7 +109,8 @@ public sealed class WebTrendSeriesBehaviourTests
     {
         var chart = Card(Run("data"), "collectors").GetProperty("charts").EnumerateArray().Single();
         Assert.Equal(["wait_stats"], Labels(chart));
-        Assert.Equal("1,000 ms", Top(chart));
+        /* #7670: a duration axis reads in the unit it tops out in, so the 900 ms peak reads in seconds, not "1,000 ms". */
+        Assert.Equal("1.0 s", Top(chart));
     }
 
     /// <summary>Every chart says why it is empty in the read's own sentence, and draws no chart.</summary>

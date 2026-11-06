@@ -604,7 +604,7 @@ internal static class ComposePanelRunner
 
             if (ComposeStoreAvailability.CombineNotices(
                     retentionNotice,
-                    ComposeStoreAvailability.BuildRowCapNotice(plan.Mode, rows.Count)) is string notice)
+                    ComposeStoreAvailability.BuildRowCapNotice(plan.Mode, rows.Count, rows.Count >= ComposeLimits.HardRowCap ? EarliestBucket(rows) : null)) is string notice)
             {
                 payload["notice"] = notice;
 
@@ -640,6 +640,22 @@ internal static class ComposePanelRunner
                 payload["query_store_raw_servers_note"] = rawServerIds.Count == 1
                     ? "1 server whose interval table could not serve the window was read from the raw tables, from the window's own start (#6115)."
                     : $"{rawServerIds.Count} servers whose interval table could not serve the window were read from the raw tables, from the window's own start (#6115).";
+            }
+
+            /* #7668: the validator's warnings for this panel ride the run's answer, so a panel saved before #7565 (a perfmon counter ending in /sec
+               charted as its running total) says so wherever it is run, not only in the reply to a save. The same sentences validate_custom_view and a
+               save return, from the same function; the stored definition is untouched. Absent when there are none, so a clean answer keeps its shape. */
+            var panelWarnings = new List<string>();
+            CustomViewValidation.AddCumulativePerfmonWarnings(panelWarnings, plan, "this panel");
+            if (panelWarnings.Count > 0)
+            {
+                var list = new JsonArray();
+                foreach (var warning in panelWarnings)
+                {
+                    list.Add(warning);
+                }
+
+                payload["warnings"] = list;
             }
 
             return ComposeRunOutcome.Ok(payload);
@@ -1297,6 +1313,24 @@ internal static class ComposePanelRunner
 
             return null;
         }
+    }
+
+    /// <summary>#7729: the earliest <c>bucket</c> of a time-series answer (UTC, written as <c>yyyy-MM-ddTHH:mm:ss</c> by <see cref="DbValueToJson"/>), or null when no row
+    /// carries one. The row-cap notice names it as where the capped data starts.</summary>
+    internal static DateTime? EarliestBucket(JsonArray rows)
+    {
+        DateTime? earliest = null;
+        foreach (var node in rows)
+        {
+            if (node is JsonObject row && row["bucket"] is JsonValue value && value.TryGetValue<string>(out var text)
+                && DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var at)
+                && (earliest is null || at < earliest))
+            {
+                earliest = at;
+            }
+        }
+
+        return earliest;
     }
 
     /// <summary>Runs a compiled composed query on the viewer pool and serializes its rows to a JSON array of
