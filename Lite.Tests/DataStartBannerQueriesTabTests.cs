@@ -585,6 +585,10 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
 
         Assert.Equal(1d, result.Intensities[0, 6]);
         Assert.Equal(1d, result.Intensities.Cast<double>().Max());
+
+        /* The read behind get_query_heatmap is a second query over the same rows and must agree. */
+        var cells = await Service().GetQueryHeatmapCellsAsync(ServerId, HeatmapMetric.Duration, hoursBack: 2, asOfUtc: end);
+        Assert.Equal(1L, Assert.Single(cells).QueryCount);
     }
 
     /// <summary>A recommendation re-captured every <paramref name="everyMinutes"/> minutes, from <paramref name="firstUtc"/> to <paramref name="lastUtc"/>.</summary>
