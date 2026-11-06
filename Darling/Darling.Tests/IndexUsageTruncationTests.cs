@@ -105,10 +105,8 @@ public sealed class IndexUsageTruncationTests
             Assert.Contains(clause, DarlingObjectStatsReaderSource.IndexUsageMatchCountSql, StringComparison.Ordinal);
         }
 
-        /* #8013: both bind the snapshot GetLatestIndexObjectStatsSnapshotTimeAsync resolved (the rows' $4 and the count's
-           $3, each the statement's last parameter) rather than deriving it per statement, so the two still read one capture. */
-        Assert.Contains("collection_time = $4", ReaderSql, StringComparison.Ordinal);
-        Assert.Contains("collection_time = $3", DarlingObjectStatsReaderSource.IndexUsageMatchCountSql, StringComparison.Ordinal);
+        /* That the count and the rows come from ONE capture, even when a newer one lands between the two reads, is
+           asserted by running the tool, in LatestSnapshotLookupLiveTests.IndexUsageTool_CountsTheCaptureItReturned_WhenANewerOneLandsBetweenTheReads. */
     }
 
     /// <summary>
