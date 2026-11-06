@@ -1462,7 +1462,7 @@ SELECT
             AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_alert_settings') AND attname = 'checkdb_overdue_threshold_hours' AND NOT attisdropped))),
     /* V247 (#7639) adds the per-server list of databases that get Extended Events sessions to the server registry. Found by catalog so the
        answer does not depend on the connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
-    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_monitored_servers') AND attname = 'xe_session_databases' AND NOT attisdropped)",
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_monitored_servers') AND attname = 'xe_session_databases' AND NOT attisdropped),
     /* V248 (#7730) makes the key trigger of the Query Store text table recognize the old statements. Found by catalog so the answer does not depend on the
        connecting role's privileges: the trigger function's source carries the digest test. A store without the function (no key table yet) is behind V219. */
     EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'query_store_self_keys_track' AND prosrc LIKE '%sha256%')";
