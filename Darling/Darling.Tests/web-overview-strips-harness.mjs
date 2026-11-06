@@ -345,6 +345,54 @@ if (scenario === "crosshair") {
   strips.applyBaselines(cpu2, half, window, {});
   out.droppedStepBands = cpu2[0].band.length;
   out.droppedStepMarked = cpu2[0].markers.map((m) => (m.t - T0) / MIN);
+} else if (scenario === "baselinereasons") {
+  /* #7663: why a lane has no band. A step with samples and no spread is a metric that sat at 0 (the reply marks it zero_activity); a lane that is
+     null, or a step with no samples, is "not enough history". */
+  const window = { windowStart: T0, windowEnd: T0 + 60 * MIN };
+  const step = (extra) => ({ from: new Date(T0 - 60 * MIN).toISOString(), to: new Date(T0 + 180 * MIN).toISOString(), tier: "Full", ...extra });
+  const zero = step({ mean: 0, effective_std_dev: 0, sample_count: 300, zero_activity: true });
+  const usable = step({ mean: 20, effective_std_dev: 5, sample_count: 300 });
+  const noSamples = step({ mean: 0, effective_std_dev: 0, sample_count: 0 });
+  const note = (cpu) => {
+    const list = strips.applyBaselines(strips.buildStrips(reads), { kind: "data", data: { baselines: { cpu } } }, window, {});
+    const s = list.find((x) => x.key === "cpu");
+    return { note: s.baselineNote, band: s.band ? s.band.length : 0, markers: s.markers ? s.markers.length : 0 };
+  };
+  out.zero = note({ steps: [zero] });
+  out.nullLane = note(null);
+  out.noSamples = note({ steps: [noSamples] });
+  out.mixed = note({ steps: [zero, noSamples] });
+  out.zeroPlusBand = note({ steps: [zero, usable] });
+  out.unmarkedZero = note({ steps: [step({ mean: 0, effective_std_dev: 0, sample_count: 300 })] });
+  /* The sentence is drawn in the strip's header. */
+  const drawn = strips.drawStrips(strips.applyBaselines(strips.buildStrips(reads), { kind: "data", data: { baselines: { cpu: { steps: [zero] } } } }, window, {}), domain, 1000, null);
+  out.drawnNote = find(find(drawn.node, (n) => n.attrs["data-strip"] === "cpu")[0], (n) => n.attrs.class === "strip-baseline-note").map((n) => n.textContent);
+} else if (scenario === "markerruns") {
+  /* #7678: a run of neighbouring points above the band is one mark, a lone point is one small dot, never a circle per point. 600 points: the waits
+     line sits at 100 and is above the band (mean 105, sigma 66: top 237) in three runs (60, 200 and 130 points) and at two lone points. */
+  const n = 600;
+  const above = new Set();
+  for (let i = 100; i < 160; i++) above.add(i);
+  for (let i = 250; i < 450; i++) above.add(i);
+  for (let i = 470; i < 620 && i < n; i++) above.add(i);
+  above.add(10); above.add(30);
+  const line = Array.from({ length: n }, (_, i) => ({ t: T0 + i * MIN, v: above.has(i) ? 300 : 100 }));
+  const wide = { windowStart: T0, windowEnd: T0 + n * MIN };
+  const wideDomain = { from: T0, to: T0 + n * MIN };
+  const res = { kind: "data", data: { baselines: { waits: { steps: [{ from: new Date(T0 - 60 * MIN).toISOString(), to: new Date(T0 + (n + 60) * MIN).toISOString(), mean: 105, effective_std_dev: 66, sample_count: 600, tier: "Full" }] } } } };
+  for (const width of [1280, 2560]) {
+    const list = [{ key: "waits", title: "Waits", unit: "ms/s", min: 0, series: [{ label: "Wait time", color: "#ffb74d", points: line }] }];
+    strips.applyBaselines(list, res, wide, {});
+    const drawn = strips.drawStrips(list, wideDomain, width, null);
+    const g = find(drawn.node, (x) => x.attrs["data-strip"] === "waits")[0];
+    out["w" + width] = {
+      markedPoints: list[0].markers.length,
+      circles: find(g, (x) => x.attrs.class === "strip-anomaly").length,
+      runs: find(g, (x) => x.attrs.class === "strip-anomaly-run").length,
+      runPointCounts: find(g, (x) => x.attrs.class === "strip-anomaly-run").map((x) => x.attrs.points.split(" ").length),
+      allCircles: find(g, (x) => x.tag === "circle").length,
+    };
+  }
 } else if (scenario === "linuxcpu") {
   /* #7682: SQL Server on Linux before 2025 CU1 cannot report host CPU: other_process_cpu is null on every sample. The CPU strip draws the SQL line
      alone and says so; a Total line over a null Other would sit on the SQL line and claim the host was measured. */
