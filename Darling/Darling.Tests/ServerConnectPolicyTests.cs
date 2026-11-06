@@ -17,9 +17,13 @@ using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -566,15 +570,6 @@ public sealed class ConnectionFaultDispositionTests
         Assert.Equal(0, probes);
     }
 
-    [Fact]
-    public void TheWorker_SettlesATimeoutWithAProbe_NotADrop()
-    {
-        var source = ServerConnectBackoffTests.ReadWorkerSource();
-
-        Assert.Contains("ConnectionFaultDisposition.ShouldDropRuntimeAsync(", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("sqlEx.Number == -2", source, StringComparison.Ordinal);
-    }
-
     private static readonly DateTime T0 = new(2026, 11, 5, 12, 0, 0, DateTimeKind.Utc);
 
     [Theory]
@@ -584,7 +579,8 @@ public sealed class ConnectionFaultDispositionTests
     {
         var memo = new LivenessProbeMemo();
         var probes = 0;
-        Func<ServerRuntime, CancellationToken, Task<bool>> probe = (_, _) => { probes++; return Task.FromResult(alive); };
+        var outcome = alive ? LivenessProbeOutcome.LoggedIn : LivenessProbeOutcome.Dead;
+        Func<ServerRuntime, CancellationToken, Task<LivenessProbeOutcome>> probe = (_, _) => { probes++; return Task.FromResult(outcome); };
         var ct = TestContext.Current.CancellationToken;
 
         var first = await memo.ProbeAsync(SqlRuntime(), probe, T0, ct);
@@ -599,9 +595,9 @@ public sealed class ConnectionFaultDispositionTests
     public async Task ATimeout_PastTheReuseWindow_ProbesAgain_AndTakesTheNewVerdict()
     {
         var memo = new LivenessProbeMemo();
-        var answers = new Queue<bool>([true, false]);
+        var answers = new Queue<LivenessProbeOutcome>([LivenessProbeOutcome.LoggedIn, LivenessProbeOutcome.Dead]);
         var probes = 0;
-        Func<ServerRuntime, CancellationToken, Task<bool>> probe = (_, _) => { probes++; return Task.FromResult(answers.Dequeue()); };
+        Func<ServerRuntime, CancellationToken, Task<LivenessProbeOutcome>> probe = (_, _) => { probes++; return Task.FromResult(answers.Dequeue()); };
         var ct = TestContext.Current.CancellationToken;
 
         Assert.True(await memo.ProbeAsync(SqlRuntime(), probe, T0, ct));
@@ -614,7 +610,7 @@ public sealed class ConnectionFaultDispositionTests
     {
         var memo = new LivenessProbeMemo();
         var probes = 0;
-        Func<ServerRuntime, CancellationToken, Task<bool>> probe = (_, _) => { probes++; return Task.FromResult(true); };
+        Func<ServerRuntime, CancellationToken, Task<LivenessProbeOutcome>> probe = (_, _) => { probes++; return Task.FromResult(LivenessProbeOutcome.LoggedIn); };
         var ct = TestContext.Current.CancellationToken;
 
         await memo.ProbeAsync(SqlRuntime(), probe, T0, ct);
@@ -628,7 +624,7 @@ public sealed class ConnectionFaultDispositionTests
     {
         var memo = new LivenessProbeMemo();
         var probes = 0;
-        Func<ServerRuntime, CancellationToken, Task<bool>> probe = (_, _) => { probes++; return Task.FromResult(true); };
+        Func<ServerRuntime, CancellationToken, Task<LivenessProbeOutcome>> probe = (_, _) => { probes++; return Task.FromResult(LivenessProbeOutcome.LoggedIn); };
         var ct = TestContext.Current.CancellationToken;
 
         for (var i = 0; i < 3; i++)
@@ -650,7 +646,7 @@ public sealed class ConnectionFaultDispositionTests
     {
         var memo = new LivenessProbeMemo();
         var probes = 0;
-        Func<ServerRuntime, CancellationToken, Task<bool>> probe = (_, _) => { probes++; return Task.FromResult(true); };
+        Func<ServerRuntime, CancellationToken, Task<LivenessProbeOutcome>> probe = (_, _) => { probes++; return Task.FromResult(LivenessProbeOutcome.LoggedIn); };
         var ct = TestContext.Current.CancellationToken;
 
         await memo.ProbeAsync(SqlRuntime(), probe, T0, ct);
@@ -661,25 +657,46 @@ public sealed class ConnectionFaultDispositionTests
         Assert.Equal(2, probes);
     }
 
-    [Fact]
-    public void AProbeWhoseOwnLoginTimesOut_CountsTheServerAlive_AndOtherProbeFaultsDoNot()
-    {
-        Assert.True(ConnectionFaultDisposition.ProbeTimeoutMeansAlive(SqlExceptionFactory.Create(-2, 11)));
-        Assert.False(ConnectionFaultDisposition.ProbeTimeoutMeansAlive(SqlExceptionFactory.Create(53, 20)));
-        Assert.False(ConnectionFaultDisposition.ProbeTimeoutMeansAlive(SqlExceptionFactory.Create(18456, 14)));
-        Assert.False(ConnectionFaultDisposition.ProbeTimeoutMeansAlive(new InvalidOperationException("not a driver fault")));
-    }
-
     /// <summary>The real probe with its login replaced by one that throws <paramref name="fault"/>.</summary>
-    private static Func<ServerRuntime, CancellationToken, Task<bool>> ProbeWhoseLoginThrows(Exception fault) =>
+    private static Func<ServerRuntime, CancellationToken, Task<LivenessProbeOutcome>> ProbeWhoseLoginThrows(Exception fault) =>
         (runtime, token) => ConnectionFaultDisposition.ProbeFreshConnectionAsync(runtime, (_, _) => Task.FromException(fault), token);
+
+    /// <summary>The real probe with its login replaced by one that completes.</summary>
+    private static readonly Func<ServerRuntime, CancellationToken, Task<LivenessProbeOutcome>> ProbeWhoseLoginSucceeds =
+        (runtime, token) => ConnectionFaultDisposition.ProbeFreshConnectionAsync(runtime, (_, _) => Task.CompletedTask, token);
+
+    private static SqlException Timeout() => SqlExceptionFactory.Create(-2, 11);
+
+    /// <summary>
+    /// The production wiring short of the worker: a command timeout settled by <see cref="ConnectionFaultDisposition.ShouldDropRuntimeAsync"/>
+    /// through <paramref name="memo"/> as of <paramref name="at"/>, with <paramref name="probe"/> standing where the real login would.
+    /// True when the runtime is to be dropped.
+    /// </summary>
+    private static Task<bool> SettleTimeoutAsync(LivenessProbeMemo memo, Func<ServerRuntime, CancellationToken, Task<LivenessProbeOutcome>> probe, DateTime at) =>
+        ConnectionFaultDisposition.ShouldDropRuntimeAsync(
+            Timeout(), SqlRuntime(),
+            (runtime, token) => memo.ProbeAsync(runtime, probe, at, token), TestContext.Current.CancellationToken);
+
+    /// <summary>The instant of the n-th timeout when they arrive one memo window apart, so each one probes afresh.</summary>
+    private static DateTime Window(int n) => T0.AddSeconds(n * LivenessProbeMemo.ReuseSeconds);
+
+    [Fact]
+    public async Task TheProbe_TellsATimedOutLoginFromADeadServer_AndFromOneThatLoggedIn()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        Assert.Equal(LivenessProbeOutcome.LoggedIn, await ProbeWhoseLoginSucceeds(SqlRuntime(), ct));
+        Assert.Equal(LivenessProbeOutcome.TimedOut, await ProbeWhoseLoginThrows(Timeout())(SqlRuntime(), ct));
+        Assert.Equal(LivenessProbeOutcome.Dead, await ProbeWhoseLoginThrows(SqlExceptionFactory.Create(10061, 20))(SqlRuntime(), ct));
+        Assert.Equal(LivenessProbeOutcome.Dead, await ProbeWhoseLoginThrows(SqlExceptionFactory.Create(53, 20))(SqlRuntime(), ct));
+        Assert.Equal(LivenessProbeOutcome.Dead, await ProbeWhoseLoginThrows(SqlExceptionFactory.Create(18456, 14))(SqlRuntime(), ct));
+        Assert.Equal(LivenessProbeOutcome.Dead, await ProbeWhoseLoginThrows(new InvalidOperationException("not a driver fault"))(SqlRuntime(), ct));
+    }
 
     [Fact]
     public async Task CommandTimeout_WhenTheProbesOwnLoginTimesOut_KeepsTheRuntime()
     {
-        var drop = await ConnectionFaultDisposition.ShouldDropRuntimeAsync(
-            SqlExceptionFactory.Create(-2, 11), SqlRuntime(),
-            ProbeWhoseLoginThrows(SqlExceptionFactory.Create(-2, 11)), TestContext.Current.CancellationToken);
+        var drop = await SettleTimeoutAsync(new LivenessProbeMemo(), ProbeWhoseLoginThrows(Timeout()), T0);
 
         Assert.False(drop);
     }
@@ -690,9 +707,7 @@ public sealed class ConnectionFaultDispositionTests
     [InlineData(18456, 14)]
     public async Task CommandTimeout_WhenTheProbeIsRefusedOrFailsToLogIn_DropsTheRuntime(int number, byte errorClass)
     {
-        var drop = await ConnectionFaultDisposition.ShouldDropRuntimeAsync(
-            SqlExceptionFactory.Create(-2, 11), SqlRuntime(),
-            ProbeWhoseLoginThrows(SqlExceptionFactory.Create(number, errorClass)), TestContext.Current.CancellationToken);
+        var drop = await SettleTimeoutAsync(new LivenessProbeMemo(), ProbeWhoseLoginThrows(SqlExceptionFactory.Create(number, errorClass)), T0);
 
         Assert.True(drop);
     }
@@ -700,9 +715,7 @@ public sealed class ConnectionFaultDispositionTests
     [Fact]
     public async Task CommandTimeout_WhenTheProbeFaultsOutsideTheDriver_DropsTheRuntime()
     {
-        var drop = await ConnectionFaultDisposition.ShouldDropRuntimeAsync(
-            SqlExceptionFactory.Create(-2, 11), SqlRuntime(),
-            ProbeWhoseLoginThrows(new InvalidOperationException("not a driver fault")), TestContext.Current.CancellationToken);
+        var drop = await SettleTimeoutAsync(new LivenessProbeMemo(), ProbeWhoseLoginThrows(new InvalidOperationException("not a driver fault")), T0);
 
         Assert.True(drop);
     }
@@ -710,12 +723,136 @@ public sealed class ConnectionFaultDispositionTests
     [Fact]
     public async Task CommandTimeout_WhenTheProbeLogsIn_KeepsTheRuntime()
     {
-        var drop = await ConnectionFaultDisposition.ShouldDropRuntimeAsync(
-            SqlExceptionFactory.Create(-2, 11), SqlRuntime(),
-            (runtime, token) => ConnectionFaultDisposition.ProbeFreshConnectionAsync(runtime, (_, _) => Task.CompletedTask, token),
-            TestContext.Current.CancellationToken);
+        var drop = await SettleTimeoutAsync(new LivenessProbeMemo(), ProbeWhoseLoginSucceeds, T0);
 
         Assert.False(drop);
+    }
+
+    [Fact]
+    public async Task TimeoutsWhoseProbeLoginsAllTimeOut_PastTheMemoWindow_KeepTheRuntimeThreeTimes_AndDropItOnTheFourth()
+    {
+        var memo = new LivenessProbeMemo();
+        var timedOut = ProbeWhoseLoginThrows(Timeout());
+
+        for (var n = 0; n < LivenessProbeMemo.MaxTimedOutProbesInARow; n++)
+        {
+            Assert.False(await SettleTimeoutAsync(memo, timedOut, Window(n)));
+            Assert.Equal(n + 1, memo.TimedOutProbesInARow);
+            Assert.Equal(LivenessProbeOutcome.TimedOut, memo.Last!.Outcome);
+        }
+
+        Assert.True(await SettleTimeoutAsync(memo, timedOut, Window(LivenessProbeMemo.MaxTimedOutProbesInARow)));
+        Assert.False(memo.Last!.Alive);
+        Assert.Equal(3, LivenessProbeMemo.MaxTimedOutProbesInARow);
+    }
+
+    [Fact]
+    public async Task ACompletedRun_EndsTheTimedOutStreak_SoTheNextTimedOutProbeKeepsTheRuntime()
+    {
+        var memo = new LivenessProbeMemo();
+        var timedOut = ProbeWhoseLoginThrows(Timeout());
+        for (var n = 0; n < LivenessProbeMemo.MaxTimedOutProbesInARow; n++)
+        {
+            Assert.False(await SettleTimeoutAsync(memo, timedOut, Window(n)));
+        }
+
+        memo.RunCompleted();
+
+        Assert.Equal(0, memo.TimedOutProbesInARow);
+        Assert.False(await SettleTimeoutAsync(memo, timedOut, Window(LivenessProbeMemo.MaxTimedOutProbesInARow)));
+        Assert.Equal(1, memo.TimedOutProbesInARow);
+    }
+
+    [Fact]
+    public async Task AProbeThatLogsIn_EndsTheTimedOutStreak_SoTheNextTimedOutProbeKeepsTheRuntime()
+    {
+        var memo = new LivenessProbeMemo();
+        var timedOut = ProbeWhoseLoginThrows(Timeout());
+        for (var n = 0; n < LivenessProbeMemo.MaxTimedOutProbesInARow; n++)
+        {
+            Assert.False(await SettleTimeoutAsync(memo, timedOut, Window(n)));
+        }
+
+        Assert.False(await SettleTimeoutAsync(memo, ProbeWhoseLoginSucceeds, Window(LivenessProbeMemo.MaxTimedOutProbesInARow)));
+        Assert.Equal(0, memo.TimedOutProbesInARow);
+
+        Assert.False(await SettleTimeoutAsync(memo, timedOut, Window(LivenessProbeMemo.MaxTimedOutProbesInARow + 1)));
+        Assert.Equal(1, memo.TimedOutProbesInARow);
+    }
+
+    /// <summary>A worker whose store nothing listens on: the collection_log write fails and is swallowed, as it is for any observability write.</summary>
+    private static DarlingWorker NewWorker(LivenessProbeOutcome probeFinds)
+    {
+        var worker = new DarlingWorker(
+            NullLogger<DarlingWorker>.Instance,
+            NullLoggerFactory.Instance,
+            new McpRuntimeState(),
+            new WebRuntimeState(),
+            new MonitoredServerRegistryState(),
+            new CollectorRuntimeState(),
+            new WebTlsCertificateState(),
+            new BaselineCache(),
+            new ReadLatencyAccumulator())
+        {
+            StoreForTests = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=x;Database=x;Timeout=1"),
+            LivenessProbeOverride = (_, _) => Task.FromResult(probeFinds),
+        };
+        worker.SelfAlertsForTests = new DarlingSelfAlertEvaluator(
+            new DarlingSelfAlertTests.FakeSettings(), new DarlingSelfAlertTests.RecordingDeliverer(),
+            new DarlingSelfAlertTests.FakeHistoryStore(), _ => false);
+        return worker;
+    }
+
+    private static DarlingCollectorRunner NewRunner() => new(
+        NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=x;Database=x"),
+        new CollectorDeltaCalculator(),
+        new CapturingTestLogger(),
+        databaseScope: (_, _) => new List<string>(),
+        separatelyMonitoredDatabases: _ => new List<string>(),
+        installId: () => "x");
+
+    /// <summary>One collector run through the worker's real RunOneAsync, with the collector's own dispatch replaced by <paramref name="dispatch"/>.</summary>
+    private static async Task RunOneAsync(DarlingWorker worker, DarlingWorker.ServerLoopState server, Func<Task<CollectorRunResult>> dispatch)
+    {
+        worker.DispatchOverrideForTests = (_, _, _) => dispatch();
+        var runOne = typeof(DarlingWorker).GetMethod("RunOneAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        await (Task<int>)runOne.Invoke(
+            worker, [server, NewRunner(), "wait_stats", null, TestContext.Current.CancellationToken, false, null, null])!;
+    }
+
+    [Fact]
+    public async Task TheWorker_KeepsTheRuntime_WhenTheProbesOwnLoginTimesOut_AndACompletedRunEndsTheStreak()
+    {
+        var worker = NewWorker(LivenessProbeOutcome.TimedOut);
+        var runtime = SqlRuntime();
+        var server = new DarlingWorker.ServerLoopState { Config = runtime.Config, Runtime = runtime };
+
+        await RunOneAsync(worker, server, () => throw Timeout());
+
+        Assert.Same(runtime, server.Runtime);
+        Assert.Equal(DateTime.MinValue, server.NextConnectAttempt);
+        Assert.Equal(LivenessProbeOutcome.TimedOut, server.Liveness.Last?.Outcome);
+        Assert.Equal(1, server.Liveness.TimedOutProbesInARow);
+
+        await RunOneAsync(worker, server, () => Task.FromResult(new CollectorRunResult(3, 5, 7, [])));
+
+        Assert.Same(runtime, server.Runtime);
+        Assert.Equal(0, server.Liveness.TimedOutProbesInARow);
+    }
+
+    [Fact]
+    public async Task TheWorker_DropsTheRuntime_ClearsTheMemo_AndArmsTheReconnect_WhenTheProbeFindsTheServerDead()
+    {
+        var worker = NewWorker(LivenessProbeOutcome.Dead);
+        var runtime = SqlRuntime();
+        var server = new DarlingWorker.ServerLoopState { Config = runtime.Config, Runtime = runtime };
+        var before = DateTime.UtcNow;
+
+        await RunOneAsync(worker, server, () => throw Timeout());
+
+        Assert.Null(server.Runtime);
+        Assert.Null(server.Liveness.Last);
+        Assert.True(server.NextConnectAttempt >= before.AddSeconds(60));
     }
 
     /// <summary>SqlException has no public constructor; this builds one through the driver's internals.</summary>
