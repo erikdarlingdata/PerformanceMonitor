@@ -375,12 +375,17 @@ FROM generate_series(0, {days * 24 - 1}) AS g CROSS JOIN generate_series(1, 2) A
             var clock = Yesterday().AddHours(3).AddMinutes(30);
             await ExecAsync(connection, "ALTER TABLE collect.query_store_hash_daily ADD CONSTRAINT ck_fail CHECK (false)", ct);
 
-            for (var attempt = 1; attempt <= QueryStoreComposeStamp.FailuresBeforeBackoff; attempt++)
+            /* #7762: the day builds inside the 15-minute compose tick, so the backoff counts three hours of ticks (twelve), not three failures
+               (45 minutes). Every failure before the last is retried the next tick: the day is still due, not backed off. */
+            Assert.Equal(12, QueryStoreComposeStamp.ComposeFailuresBeforeBackoff);
+            for (var attempt = 1; attempt <= QueryStoreComposeStamp.ComposeFailuresBeforeBackoff; attempt++)
             {
                 var tick = await ComposeStampLiveSupport.TickAtAsync(source, clock, ct);
                 Assert.Equal(0, tick.DaysBuilt);
                 Assert.Equal(1, tick.DaysFailed);
                 Assert.Equal(attempt, await CountAsync(connection, "SELECT failures FROM collect.query_store_hash_daily_failures", ct));
+                var stillDue = attempt < QueryStoreComposeStamp.ComposeFailuresBeforeBackoff ? 1 : 0;
+                Assert.Equal(stillDue, await CountAsync(connection, "SELECT count(*) FROM collect.query_store_hash_daily_failures WHERE retry_at <= TIMESTAMP '" + At(clock) + "'", ct));
             }
 
             /* Backed off: the next tick does not try the day. */

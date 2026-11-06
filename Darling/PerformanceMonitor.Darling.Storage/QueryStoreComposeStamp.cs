@@ -92,7 +92,7 @@ public static class QueryStoreComposeStamp
     /// (#7762), one hour in V173's literal: a row is marked from H + 1 h on (it was H + 2 h). More rows are marked, each costing one upsert per (server,
     /// hour) per transaction, so a build or two more an hour rebuilds an hour that was written after its first build (estimated 1 + p builds an hour,
     /// p the share of hours written after their first build). The offset is a literal in the rung (a shipped migration is never edited);
-    /// <see cref="LateMarkThresholdSql"/> is the text the V251 rung is built from.</summary>
+    /// <see cref="LateMarkThresholdSql"/> is the same text, kept here for a test to compare to the rung. The rung does not read it.</summary>
     public static readonly TimeSpan WhenOffset = TimeSpan.Zero;
 
     /// <summary>The row trigger's threshold from V251: the hour of the writer's clock (UTC). A row older than it is marked.</summary>
@@ -132,25 +132,18 @@ public static class QueryStoreComposeStamp
     /// <summary>The failure record of each hour whose last build threw (#5867): one row per hour, removed when the hour builds.</summary>
     public const string FailuresTable = "collect.query_store_compose_stamp_failures";
 
-    /// <summary>
-    /// The consecutive failures after which an hour of a rollup that builds once an hour is retried once a day instead of every tick (#5867).
-    /// Three, because the failures a retry cures (a deadlock, a lock or serialization failure, a dropped connection, a restart of the store) clear
-    /// within a tick or two: past that, a retry every tick only repeats the error and spends the build's timeout every tick. The hash daily rollup
-    /// (<c>QueryStoreHashDaily</c>) passes this count. The compose build runs every <see cref="ComposeTickInterval"/> (#7762) and counts
-    /// <see cref="ComposeFailuresBeforeBackoff"/> instead, which is the same three hours.
-    /// </summary>
-    public const int FailuresBeforeBackoff = 3;
-
     /// <summary>How often the service runs the compose build (#7762): the 15-minute timer's period. The worker's timer reads this.</summary>
     public static readonly TimeSpan ComposeTickInterval = TimeSpan.FromMinutes(15);
 
-    /// <summary>How long failures of one compose hour go on before it is retried once a day (#5867, #7762): three hours, as when the build ran
-    /// once an hour and three failures in a row spanned about that.</summary>
+    /// <summary>How long failures of one compose hour (or one hash day) go on before it is retried once a day (#5867, #7762): three hours. Three,
+    /// because the failures a retry cures (a deadlock, a lock or serialization failure, a dropped connection, a restart of the store) clear
+    /// within an hour or two: past that, a retry every tick only repeats the error and spends the build's timeout every tick. It was three
+    /// failures of an hourly tick, and it stays three hours of the 15-minute tick (#7762) so a short fault does not hold an hour or a day back for a day.</summary>
     public static readonly TimeSpan ComposeBackoffAfter = TimeSpan.FromHours(3);
 
     /// <summary>The consecutive compose-build failures after which an hour is retried once a day: <see cref="ComposeBackoffAfter"/> at one
-    /// attempt per <see cref="ComposeTickInterval"/> (twelve). The compose rollup's failure record, its self-alert and <c>get_store_metrics</c>
-    /// all read this one count.</summary>
+    /// attempt per <see cref="ComposeTickInterval"/> (twelve). The compose rollup's failure record, the hash daily rollup's
+    /// failure record (<c>QueryStoreHashDaily</c>, which runs in the same tick), the self-alert and <c>get_store_metrics</c> all read this one count.</summary>
     public static readonly int ComposeFailuresBeforeBackoff = (int)(ComposeBackoffAfter / ComposeTickInterval);
 
     /// <summary>How long an hour in backoff waits between attempts (#5867): one attempt, and one WARN, a day.</summary>
@@ -1632,7 +1625,7 @@ WHERE hour < $1;";
     /// <summary>
     /// One maintenance tick: remove the expired hours, plan, then build each hour in its own transaction. A build that fails is
     /// logged (naming the hour), recorded (<see cref="RecordFailureSql"/>, #5867) and the loop goes on: the next tick retries it, under
-    /// <see cref="ExtendedBuildStatementTimeoutSeconds"/> after a statement timeout, until it has failed <see cref="FailuresBeforeBackoff"/>
+    /// <see cref="ExtendedBuildStatementTimeoutSeconds"/> after a statement timeout, until it has failed <see cref="ComposeFailuresBeforeBackoff"/>
     /// times in a row (or timed out under the extended timeout), and once a day after that. Once <see cref="MaxTickDuration"/> has passed
     /// no further build starts, and the planned hours left are reported as deferred.
     /// </summary>

@@ -109,8 +109,6 @@ EXECUTE FUNCTION collect.fail_5867();", ct);
 
             /* Ticks 2 on: each failure is retried next tick, until the one that makes ComposeFailuresBeforeBackoff in a row (three hours of
                the 15-minute timer, #7762, not three failures) moves the hour to its daily attempt. */
-            /* The loop passes the old count (FailuresBeforeBackoff, which the hash daily rollup still uses) without a backoff. */
-            Assert.True(QueryStoreComposeStamp.ComposeFailuresBeforeBackoff > QueryStoreComposeStamp.FailuresBeforeBackoff);
             for (var tick = 2; tick < QueryStoreComposeStamp.ComposeFailuresBeforeBackoff; tick++)
             {
                 var retried = await TickAsync(source, logger, hourNow, ct);
