@@ -357,14 +357,8 @@ public static class NotificationRouter
     public static bool AnyRouteConfiguresAWebhook(IReadOnlyList<NotificationRoute>? routes) =>
         routes is not null && routes.Any(r => r is not null && r.CanMatch && r.HasAnyWebhookDestination);
 
-    /// <summary>Whether any enabled route names a destination for ONE webhook channel (#4750) — the
-    /// per-channel counterpart of <see cref="AnyRouteConfiguresAWebhook"/>, for "does this channel still have
-    /// somewhere to send". Configuration only; never resolves a metric.</summary>
-    public static bool AnyRouteConfiguresWebhookChannel(IReadOnlyList<NotificationRoute>? routes, string channel) =>
-        routes is not null && routes.Any(r => r is not null && r.CanMatch && r.HasWebhookDestinationFor(channel));
-
     /// <summary>Whether the route <paramref name="routeId"/> still names a destination for ONE webhook channel and can
-    /// match (#4750): the per-route form of <see cref="AnyRouteConfiguresWebhookChannel"/>, for "does this route's
+    /// match (#4750): the per-route counterpart of <see cref="AnyRouteConfiguresAWebhook"/>, for "does this route's
     /// destination still exist to send to". A route that is gone, disabled, orphaned, or whose destination for the
     /// channel is off or empty does not. Configuration only; never resolves a metric.</summary>
     public static bool RouteConfiguresWebhookChannel(IReadOnlyList<NotificationRoute>? routes, int routeId, string channel) =>
