@@ -93,8 +93,9 @@ public sealed class QueryStoreRunGroup
  *
  * Differences from Darling's, none of them in which rows the read returns: the query-text sample comes only from the fact rows
  * (Darling resolves it from collect.query_store_text, #2150, a Darling-store table Lite has no equivalent of); Lite keeps no
- * per-day totals table, so the baseline always comes from the fact rows; and an interval belongs to the baseline or the recent
- * window by the collection_time of its latest snapshot, as this read always did.
+ * per-day totals table, so the baseline always comes from the fact rows. An interval belongs to the baseline or the recent
+ * window by the last_execution_time of its latest snapshot (#7875, the line Darling's read splits on), so one that has a snapshot
+ * on each side of the window start is counted on one side only.
  */
 public partial class LocalDataService
 {
@@ -161,29 +162,14 @@ public partial class LocalDataService
         var limit = "CAST($" + limitIndex + " AS INTEGER)";
 
         command.CommandText = @"
-WITH deduped_baseline AS (
+WITH latest AS (
     /* LOAD-BEARING (correctness, not just perf) - #1841. Keep the LATEST cumulative snapshot per
        interval before aggregating; see the file header for why this read is the most exposed to it. Every outcome is
-       kept (#6268): the Regular cost below and the Aborted and Exception counts are separate FILTERs over this set. */
-    SELECT
-        database_name,
-        query_id,
-        plan_id,
-        execution_type_desc,
-        execution_count,
-        avg_duration_us,
-        avg_cpu_time_us,
-        ROW_NUMBER() OVER
-        (
-            PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
-            ORDER BY collection_time DESC, execution_count DESC
-        ) AS rn
-    FROM v_query_store_stats
-    WHERE server_id = $1
-    AND   collection_time >= $" + baselineParamIndex + @"
-    AND   collection_time < $2" + dbClause + @"
-),
-deduped_recent AS (
+       kept (#6268): the Regular cost below and the Aborted and Exception counts are separate FILTERs over this set.
+       #7875: ONE dedupe over the whole span, baseline start to window end. Two arms, each deduping inside its own
+       collection_time range, kept an interval that has a snapshot on each side of the window start as the latest of the
+       baseline AND the latest of the recent window, counting its executions in both. The interval's latest snapshot is
+       now assigned to one side by its last_execution_time, the line Darling's read splits on (#6750). */
     SELECT
         collection_id,
         collection_time,
@@ -202,8 +188,40 @@ deduped_recent AS (
         ) AS rn
     FROM v_query_store_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time >= $" + baselineParamIndex + @"
     AND   collection_time <= $3" + dbClause + @"
+),
+deduped_baseline AS (
+    SELECT
+        database_name,
+        query_id,
+        plan_id,
+        execution_type_desc,
+        execution_count,
+        avg_duration_us,
+        avg_cpu_time_us,
+        rn
+    FROM latest
+    WHERE rn = 1
+    AND   last_execution_time >= $" + baselineParamIndex + @"
+    AND   last_execution_time < $2
+),
+deduped_recent AS (
+    SELECT
+        collection_id,
+        collection_time,
+        database_name,
+        query_id,
+        plan_id,
+        execution_type_desc,
+        execution_count,
+        avg_duration_us,
+        avg_cpu_time_us,
+        last_execution_time,
+        rn
+    FROM latest
+    WHERE rn = 1
+    AND   last_execution_time >= $2
 ),
 baseline_performance AS (
     SELECT
@@ -541,22 +559,29 @@ LIMIT " + limit;
 
         var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
 
+        /* #7875: the sides are the read's own (GetQueryStoreRegressionsAsync): an interval's latest snapshot in [baseline start, window
+           end] is on the baseline side when its last_execution_time is before the window start, on the recent side when it is at or
+           after it. Probing collection_time instead said a side had rows when the read, which splits on the interval's last run,
+           put them on the other side. */
         command.CommandText = @"
+WITH latest AS (
+    SELECT
+        last_execution_time,
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
+            ORDER BY collection_time DESC, execution_count DESC
+        ) AS rn
+    FROM v_query_store_stats
+    WHERE server_id = $1
+    AND   collection_time >= $4
+    AND   collection_time <= $3" + dbClause + @"
+)
 SELECT
-    EXISTS (
-        SELECT 1
-        FROM v_query_store_stats
-        WHERE server_id = $1
-        AND   collection_time >= $4
-        AND   collection_time < $2" + dbClause + @"
-    ) AS has_baseline,
-    EXISTS (
-        SELECT 1
-        FROM v_query_store_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3" + dbClause + @"
-    ) AS has_recent";
+    COALESCE(BOOL_OR(last_execution_time >= $4 AND last_execution_time < $2), FALSE) AS has_baseline,
+    COALESCE(BOOL_OR(last_execution_time >= $2), FALSE) AS has_recent
+FROM latest
+WHERE rn = 1";
 
         command.CommandText = SwapArchiveView(command.CommandText, "query_store_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
