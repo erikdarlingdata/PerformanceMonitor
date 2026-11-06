@@ -137,8 +137,9 @@ public static class DailySummarySql
         ),
         mem AS (
             SELECT date_trunc('day', collection_time) AS d,
-                   COUNT(*) FILTER (WHERE memory_indicators_process >= 2 OR memory_indicators_system >= 2) AS pressure,
-                   COUNT(*) FILTER (WHERE memory_indicators_process >= 3) AS critical
+                   /* #7691: one event is one (second, notification), however many memory nodes reported it. */
+                   COUNT(DISTINCT concat(CAST(date_trunc('second', sample_time) AS VARCHAR), '|', memory_notification)) FILTER (WHERE memory_indicators_process >= 2 OR memory_indicators_system >= 2) AS pressure,
+                   COUNT(DISTINCT concat(CAST(date_trunc('second', sample_time) AS VARCHAR), '|', memory_notification)) FILTER (WHERE memory_indicators_process >= 3) AS critical
             FROM v_memory_pressure_events
             WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
             GROUP BY 1

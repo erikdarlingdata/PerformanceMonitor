@@ -312,8 +312,8 @@ internal static class DarlingMemoryGrantReader
     public const string MemoryPressureSummarySql = """
         SELECT
             memory_notification,
-            COUNT(*) AS events,
-            COUNT(*) FILTER (WHERE memory_indicators_process >= 2 OR memory_indicators_system >= 2) AS medium_or_worse_events
+            COUNT(DISTINCT date_trunc('second', sample_time)) AS events,
+            COUNT(DISTINCT date_trunc('second', sample_time)) FILTER (WHERE memory_indicators_process >= 2 OR memory_indicators_system >= 2) AS medium_or_worse_events
         FROM v_memory_pressure_events
         WHERE server_id = $1
         AND   sample_time >= $2
