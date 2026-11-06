@@ -978,11 +978,10 @@ export const SERVER_CONNECTION_PANEL = {
   viz: "stat",
   emptyText: "Connected: the service's last connect to this server succeeded.",
   stats: [
-    { key: "server_connection.message", label: "Connection", format: "text", sentence: true },
+    { key: "server_connection.message", label: "Connection", format: "text", sentence: true, localizeText: true },
     { key: "server_connection.status", label: "Collection", format: "status", small: true },
     { key: "server_connection.since", label: "Unreachable since", format: "time", small: true },
     { key: "server_connection.next_connect_attempt", label: "Next retry", format: "time", small: true },
-    { key: "server_connection.last_connect_error", label: "Last error", format: "text", small: true },
   ],
 };
 

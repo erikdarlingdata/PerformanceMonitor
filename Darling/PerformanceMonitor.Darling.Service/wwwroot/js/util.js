@@ -443,12 +443,16 @@ export function chartNote(data, kind) {
  * in local time. The separator is a "T" or a space and the fraction is 0-7 digits. A "T" stamp with no zone is UTC, as
  * parseUtc reads it everywhere; a space-separated one is rewritten ONLY with a "Z" or " UTC" after it, because the same
  * shape without one is a monitored server's own wall clock ("2026-09-27 21:32:43 (server clock)") and shifting it would
- * state the wrong hour. Text with no such stamp, and a non-string, come back as given.
+ * state the wrong hour. A stamp with no seconds ("2026-11-05 16:52 UTC") is rewritten the same way, and only with a zone after it.
+ * Text with no such stamp, and a non-string, come back as given.
  */
 export function localizeIsoText(text) {
   if (typeof text !== "string") return text;
-  return text.replace(/(\d{4}-\d\d-\d\d)([T ])(\d\d:\d\d:\d\d)(?:\.(\d{1,7}))?(Z(?![A-Za-z])| UTC(?![A-Za-z])|[+-]\d\d:?\d\d)?/g, (m, date, sep, time, frac, zone) => {
+  return text.replace(/(\d{4}-\d\d-\d\d)([T ])(\d\d:\d\d(?::\d\d)?)(?:\.(\d{1,7}))?(Z(?![A-Za-z])| UTC(?![A-Za-z])|[+-]\d\d:?\d\d)?/g, (m, date, sep, hm, frac, zone) => {
     if (sep === " " && !zone) return m;
+    /* #7726: "2026-11-05 16:52 UTC" (the unreachable-since sentence) has no seconds. A stamp with no seconds is shifted only with a zone after it. */
+    if (hm.length === 5 && !zone) return m;
+    const time = hm.length === 5 ? hm + ":00" : hm;
     const iso = date + "T" + time + (frac ? "." + frac.slice(0, 3).padEnd(3, "0") : "") + (zone === " UTC" ? "Z" : zone || "");
     const d = parseUtc(iso);
     return d ? d.toLocaleString() : m;
@@ -1094,6 +1098,12 @@ export function fmtMs(v, o) {
      tooltip or grid cell (no axisMax) picks the unit from its own value. */
   const top = axisTopOf(o);
   const basis = top == null ? Math.abs(n) : top;
+  /* #7726: a positive figure under 1 ms in a cell or tooltip (no axis step, no axis top) is printed in whole microseconds, so a query that
+     ran a million times at 0.03 ms reads "32 µs" and not "0 ms". Exactly 0 stays "0 ms". An axis tick keeps its decimals of ms. */
+  if (top == null && stepOf(o) == null && n > 0 && n < 1) {
+    const us = Math.max(1, Math.round(n * 1000));
+    if (us < 1000) return us.toLocaleString(undefined, { maximumFractionDigits: 0 }) + " µs";
+  }
   if (basis < 1000) return fmtInt(n, stepArg(o)) + " ms";
   const per = basis < 60000 ? 1000 : basis < 3600000 ? 60000 : 3600000;
   const unit = per === 1000 ? " s" : per === 60000 ? " min" : " h";
