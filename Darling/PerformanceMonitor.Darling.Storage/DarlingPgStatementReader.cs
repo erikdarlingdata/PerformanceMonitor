@@ -58,7 +58,7 @@ public static class DarlingPgStatementReader
            queryid (PgOwnStatement). Per ENTRY, so the application's statement under another login is false even when it
            shares the queryid. False for a statement whose text has not been read yet. */
         bool IsServiceStatement = false,
-        /* #7731: the database's name, or null when no snapshot in the window carried one (rows stored before V247). The reply and the grids then
+        /* #7731: the database's name, or null when no snapshot in the window carried one (rows stored before V248). The reply and the grids then
            say "database <id>"; the null is kept here so a caller never mistakes the placeholder for a real name. */
         string? DatabaseName = null);
 

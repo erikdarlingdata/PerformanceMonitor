@@ -140,7 +140,7 @@ public sealed class PgStatementStatsCollector : PostgresCollectorDefinitionBase<
            row's groups, so 0 means "no delta in this row is knowable". Computed beside the deltas in
            ReadAsync because that is where the calculator is called. */
         int SampleIntervalSeconds,
-        /* #7731 (Darling V247): the database's name, from the pg_database join; NULL when the database was dropped between the two reads. */
+        /* #7731 (Darling V248): the database's name, from the pg_database join; NULL when the database was dropped between the two reads. */
         string? DatabaseName);
 
     /* Column names DIFFER between PostgreSQL 16 and 17 and our fleet spans both, so the query is
@@ -546,7 +546,7 @@ WHERE calls > 0";
            reset, gap re-baseline — the three cases the skip deliberately lets through) carried delta 0s
            that the per-statement duration trend divided by a LAG-derived span into 0.00 calls/sec. */
         new CollectorColumn("sample_interval_seconds", CollectorColumnType.Integer),
-        /* Appended LAST (Darling V247, #7731): the database name beside database_id, so a reader can say which database a (queryid, database_id) group is. */
+        /* Appended LAST (Darling V248, #7731): the database name beside database_id, so a reader can say which database a (queryid, database_id) group is. */
         new CollectorColumn("database_name", CollectorColumnType.Varchar),
     };
 
