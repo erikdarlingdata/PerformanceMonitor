@@ -2975,10 +2975,12 @@ public static class FactAdvice
         var current = f.Metadata.GetValueOrDefault("current_mb");
         var name = string.IsNullOrEmpty(f.ObjectName) ? "A table" : f.ObjectName;
         var dbClause = string.IsNullOrEmpty(f.DatabaseName) ? string.Empty : $" in {f.DatabaseName}";
+        /* #7897: a table that held no pages in the earlier snapshot carries no growth_pct (a percent of nothing has no value), so
+           the words say "from empty" where a percent would go. */
+        var fromEmpty = f.Metadata.TryGetValue("prior_mb", out var prior) && prior <= 0 && !f.Metadata.ContainsKey("growth_pct");
+        var sizeClause = fromEmpty ? " from empty" : pct > 0 ? $" (+{pct:0.#}%)" : string.Empty;
 
-        var inv = new StringBuilder($"{name}{dbClause} grew {growth:N0} MB day-over-day");
-        if (pct > 0)
-            inv.Append($" (+{pct:0.#}%)");
+        var inv = new StringBuilder($"{name}{dbClause} grew {growth:N0} MB day-over-day{sizeClause}");
         if (current > 0)
             inv.Append($", now {current:N0} MB reserved");
         inv.Append(". This is measured from the two most recent daily object-size snapshots, so it is a genuine day-over-day jump rather than a one-off reading.");
@@ -2993,7 +2995,7 @@ public static class FactAdvice
 
         return fallback with
         {
-            Headline = $"{name} grew {growth:N0} MB day-over-day{(pct > 0 ? $" (+{pct:0.#}%)" : string.Empty)}",
+            Headline = $"{name} grew {growth:N0} MB day-over-day{sizeClause}",
             Investigation = inv.ToString(),
             Remediation = rem
         };
