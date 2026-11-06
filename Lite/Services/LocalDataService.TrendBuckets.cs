@@ -875,7 +875,7 @@ objects AS
         CASE WHEN bool_or(instance_name = '_Total')
              THEN SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total')
              ELSE SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) END AS delta_cntr_value,
-        MAX(sample_interval_seconds) AS sample_interval_seconds,
+        CAST(SUM(sample_interval_seconds) AS INTEGER) AS sample_interval_seconds,
         MIN(cntr_type) AS min_type,
         MAX(cntr_type) AS max_type,
         COUNT(*) FILTER (WHERE is_artifact) AS artifacts
