@@ -111,7 +111,9 @@ public static class DarlingPgStatementReader
     /// Every counter is reported for the WINDOW, never as a lifetime total. Summing the cumulative
     /// counters directly would multiply each query's whole history by the number of snapshots in the
     /// window, so the time/call/row figures come from the stored delta columns and the block/WAL figures
-    /// are differenced here.
+    /// are differenced here. Every counter covers the same intervals (#7909): a series' first sample in the
+    /// window contributes nothing to any of them, because its interval began before the window, so a window
+    /// with one sample of a series reads 0 for it on every column and the <c>HAVING</c> leaves it out.
     /// <para>The block and WAL columns keep no stored deltas, and reporting them as the window's MAX —
     /// which is what this read used to do — put a lifetime cumulative figure in the same row as a
     /// windowed one. A consumer has no way to see that: it reads <c>total_exec_time_ms</c> for the last
@@ -151,9 +153,16 @@ public static class DarlingPgStatementReader
                 database_name,
                 collection_time,
                 user_id,
-                delta_calls,
-                delta_total_exec_time_ms,
-                delta_rows,
+                /* #7909: every counter measures the same intervals. A stored delta is the interval that ENDED at
+                   its sample, so a series' first sample in the window carries an interval that began before the
+                   window. The block and WAL differences below are 0 on that sample (their LAG is NULL there), and
+                   so are these three, which keeps calls, time and rows on the intervals the block figures cover
+                   and a per-call figure such as blocks per call honest over a short window. The collector's reset
+                   and first-sighting classification stays in the stored deltas, which is why they are zeroed on
+                   the first sample rather than re-derived from the cumulative columns. */
+                CASE WHEN LAG(collection_time) OVER series IS NULL THEN 0 ELSE delta_calls END              AS delta_calls,
+                CASE WHEN LAG(collection_time) OVER series IS NULL THEN 0 ELSE delta_total_exec_time_ms END AS delta_total_exec_time_ms,
+                CASE WHEN LAG(collection_time) OVER series IS NULL THEN 0 ELSE delta_rows END               AS delta_rows,
                 max_exec_time_ms,
                 max_exec_peakmem_bytes,
                 /* Carried RAW alongside their deltas (#2625). The aggregate below has to separate two
@@ -194,7 +203,7 @@ public static class DarlingPgStatementReader
             CAST(SUM(delta_rows) AS bigint) AS rows_returned,
             MAX(max_exec_time_ms) AS max_exec_time_ms,
             /* coalesce to 0, not to the cumulative value: a series with a single sample in the window
-               has no measurable interval, and its increment happened before the window began. */
+               has no measurable interval (the first-sample rule stated in the CTE above). */
             CAST(coalesce(SUM(d_shared_blks_hit), 0) AS bigint) AS shared_blks_hit,
             CAST(coalesce(SUM(d_shared_blks_read), 0) AS bigint) AS shared_blks_read,
             /* NULL when the source never reported it, 0 when it did and the window holds no interval.
