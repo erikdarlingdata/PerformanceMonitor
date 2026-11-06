@@ -258,7 +258,7 @@ public sealed class ViewerFinOpsRecommendationsTests
         Assert.Equal("Storage", rec!.Category);
         Assert.Equal("High", rec.Severity); // 60 GB total > 50
         Assert.Equal("High", rec.Confidence);
-        Assert.Equal("2 uncompressed object(s) >= 1GB (60.0GB total)", rec.Finding);
+        Assert.Equal("2 uncompressed objects over 1 GB (60.0 GB total)", rec.Finding);
         Assert.Contains("dbo.Orders", rec.Detail, StringComparison.Ordinal);
         Assert.Null(rec.EstMonthlySavings); // compression candidates carry no dollar estimate (mirrors Lite)
     }

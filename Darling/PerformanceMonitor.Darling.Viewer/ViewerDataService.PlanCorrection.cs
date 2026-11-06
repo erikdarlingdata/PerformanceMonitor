@@ -92,6 +92,10 @@ public sealed partial class ViewerDataService
         AND   collection_time = (SELECT MAX(collection_time) FROM plan_correction WHERE server_id = $1)
         AND   ($2::text[] IS NULL OR database_name = ANY($2))
         ) AS d
+        WHERE d.force_last_good_plan_desired_state IS NOT NULL
+        OR    d.force_last_good_plan_actual_state IS NOT NULL
+        OR    d.create_index_actual_state IS NOT NULL
+        OR    d.drop_index_actual_state IS NOT NULL
         ORDER BY lower(database_name), database_name
         """;
 

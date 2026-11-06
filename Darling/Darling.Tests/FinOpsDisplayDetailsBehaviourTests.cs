@@ -107,6 +107,7 @@ public sealed class FinOpsDisplayDetailsBehaviourTests
         Assert.Equal("short", run.GetProperty("hostOsFallback").GetString());
         Assert.Equal("named", run.GetProperty("hostOsFallbackText").GetString());
         Assert.True(run.GetProperty("hostOsLinux").GetBoolean());
+        Assert.True(run.GetProperty("hostOsNt").GetBoolean());
     }
 
     [Fact]
