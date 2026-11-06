@@ -95,6 +95,29 @@ public sealed class QuerySpillsDistinctQueryCountTests : IClassFixture<SharedDuc
         Assert.Equal(2.0, dop.Metadata["high_dop_query_count"]);
     }
 
+    /// <summary>
+    /// #7884: the fact carries the window it was summed over, <c>period_duration_ms</c> and <c>coverage_fraction</c>, the same
+    /// stamps the wait facts carry, so the scorer grades pages per observed hour rather than the window total.
+    /// </summary>
+    [Fact]
+    public async Task SpillsFact_CarriesThePeriodAndCoverage_LikeTheWaitFacts()
+    {
+        await SeedAsync("0xSPILLA", 90, 100);
+
+        var facts = await new DuckDbFactCollector(_duckDb).CollectFactsAsync(new AnalysisContext
+        {
+            ServerId = ServerId,
+            ServerName = ServerName,
+            TimeRangeStart = WindowEnd.AddHours(-4),
+            TimeRangeEnd = WindowEnd,
+        });
+
+        var spills = Assert.Single(facts, f => f.Key == "QUERY_SPILLS");
+        Assert.True(spills.Metadata.TryGetValue("period_duration_ms", out var periodMs), "QUERY_SPILLS carries period_duration_ms");
+        Assert.Equal(TimeSpan.FromHours(4).TotalMilliseconds, periodMs);
+        Assert.Contains("coverage_fraction", spills.Metadata.Keys);
+    }
+
     private async Task SeedAsync(string queryHash, int minutesBeforeEnd, long spills, int maxDop = 1)
     {
         using var readLock = _duckDb.AcquireReadLock();

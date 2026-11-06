@@ -187,7 +187,7 @@ public sealed class AggregateJobGraceReopenTests
     private const string ReopenFailed = "The retired-baseline sweep's connection broke and could not be reopened, so the rest of the sweep is skipped until the next pass retries it: {Message}";
 
     private static NpgsqlConnection ClosedConnection()
-        => new("Host=127.0.0.1;Port=1;Username=nobody;Database=none;Timeout=1");
+        => new("Host=127.0.0.1;Port=1;Username=nobody;Database=none;Timeout=15");
 
     [Fact]
     public async Task ReopenThatOutlastsTheGrace_EndsTheSweepAndNamesTheStoppedJobs_NotACancellation()

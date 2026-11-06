@@ -162,4 +162,17 @@ public sealed class WebServerTrendsBehaviourTests
         Assert.Empty(r.GetProperty("reads").EnumerateArray());
         Assert.Single(Strings(r.GetProperty("empties")));
     }
+
+    /// <summary>#7941: the Queries tab's chart fan-out and the Top card's slicer strip both read the duration trend. One paint sends the
+    /// tool one request, plot-sized (#7661), which the two share, instead of a plot-sized one for the chart and a second, unsized one for
+    /// the strip. The procedure trend and its strip are the same shape.</summary>
+    [Fact]
+    public void TheQueriesTab_ReadsEachDurationTrendOnce_TheStripSharingTheChartsRequest()
+    {
+        var r = Run("queriesTabReads");
+        var query = Assert.Single(Strings(r.GetProperty("queryDurationReads")));
+        Assert.Contains("points=", query);
+        var procedure = Assert.Single(Strings(r.GetProperty("procedureDurationReads")));
+        Assert.Contains("points=", procedure);
+    }
 }
