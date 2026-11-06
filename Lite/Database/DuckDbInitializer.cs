@@ -1566,27 +1566,55 @@ public partial class DuckDbInitializer : IDisposable
             _logger?.LogWarning(ex, "Could not export old database — data will be preserved as backup file only");
         }
 
-        /* Step 2: Back up and delete the old database file */
+        /* Step 2: Move the old database file (and its .wal) aside as a backup.
+           #7769: when the move fails the file is NEVER deleted. With the export failed too, it is the only copy of the
+           collected history. Both files stay where they are and the start stops with a message that names the file.
+           The .wal moves first: if it fails nothing has moved, and if the main file then fails the .wal goes back, so a
+           backup never ends up without its .wal and a stale .wal never sits beside a fresh database. */
         var backupPath = _databasePath + $".backup_{DateTime.Now:yyyyMMdd_HHmmss}";
+        var walPath = _databasePath + ".wal";
+        var walMoved = false;
         try
         {
-            /* DuckDB may have .wal files too */
-            MoveFile(_databasePath, backupPath);
-            _logger?.LogInformation("Backed up old database to {BackupPath}", backupPath);
-
-            var walPath = _databasePath + ".wal";
             if (File.Exists(walPath))
             {
                 MoveFile(walPath, backupPath + ".wal");
+                walMoved = true;
+            }
+
+            MoveFile(_databasePath, backupPath);
+            _logger?.LogInformation("Backed up old database to {BackupPath}", backupPath);
+            if (!exported)
+            {
+                /* The old file is unreadable here and is not imported: the new database starts empty, so say where the old
+                   one went (#7769). */
+                _logger?.LogWarning("The old database could not be read. Lite is starting with a new empty database. " +
+                    "The old file is preserved at {BackupPath}.", backupPath);
             }
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Failed to back up old database, deleting instead");
-            File.Delete(_databasePath);
+            var walRestoreFailed = false;
+            if (walMoved)
+            {
+                try
+                {
+                    MoveFile(backupPath + ".wal", walPath);
+                }
+                catch (Exception restoreEx)
+                {
+                    walRestoreFailed = true;
+                    _logger?.LogError(restoreEx, "Could not put the write-ahead log back at {WalPath}; it is at {BackupWalPath}",
+                        walPath, backupPath + ".wal");
+                }
+            }
 
-            var walPath = _databasePath + ".wal";
-            if (File.Exists(walPath)) File.Delete(walPath);
+            _logger?.LogError(ex, "Failed to back up old database {DatabasePath}; leaving it in place and not starting",
+                _databasePath);
+            throw new InvalidOperationException(
+                $"Lite could not move the database file {_databasePath} aside to back it up before rebuilding it, so it was left in place and not deleted. " +
+                (walRestoreFailed ? $"Its write-ahead log is at {backupPath}.wal. " : "") +
+                $"Close any other copy of Lite, check that the folder allows renaming files, and start Lite again. ({ex.Message})", ex);
         }
 
         /* Step 3: If we exported successfully, import into the fresh database */
@@ -1607,7 +1635,8 @@ public partial class DuckDbInitializer : IDisposable
                 /* Import may fail if schema changed between versions — that's okay,
                    the normal initialization will create fresh tables */
                 _logger?.LogWarning(ex, "Could not import Parquet data — starting with fresh tables. " +
-                    "Parquet files preserved at {ExportDir} for manual recovery.", exportDir);
+                    "Parquet files preserved at {ExportDir} for manual recovery; the old database file is preserved at {BackupPath}.",
+                    exportDir, backupPath);
             }
         }
     }
