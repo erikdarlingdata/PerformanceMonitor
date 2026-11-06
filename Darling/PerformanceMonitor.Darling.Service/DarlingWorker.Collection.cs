@@ -1773,8 +1773,9 @@ public sealed partial class DarlingWorker
                    registry, the same way the MCP and web hosts get it; reading it unscoped would count its earlier events
                    twice in the sweep band. That lookup is a store read per disconnected target, so it runs inside the
                    tracked task with the sweep it scopes (RunFleetSweepAsync), never on this loop thread. The runtimes are
-                   snapshotted here like the server list above; the registry is read once per fire. A target whose list
-                   cannot be built reads unscoped (null), never fails the sweep. */
+                   snapshotted here like the server list above, and the registry is read once here: every lookup in the
+                   sweep, stored or runtime, takes this one snapshot, so a reload during the sweep cannot mix two. A target
+                   whose list cannot be built reads unscoped (null), never fails the sweep. */
                 var fleetSweepRegistry = _registryState?.Read();
                 var fleetSweepTargets = new List<(int ServerId, ServerRuntime? Runtime)>(sweepTargets.Length);
                 foreach (var target in sweepTargets)
@@ -1786,8 +1787,8 @@ public sealed partial class DarlingWorker
                 var fleetSweepAlertsEnabled = config.Alerts.Enabled;
                 _fleetSweep = RunFleetSweepAsync(
                     fleetSweepTargets,
+                    fleetSweepRegistry?.Servers,
                     storedLookup: (serverId, token) => AnalysisSeparatelyMonitoredDatabasesAsync(serverId, fleetSweepRegistry, postgres, token),
-                    runtimeLookup: runtime => AnalysisSeparatelyMonitoredDatabases(runtime),
                     runSweep: (separate, token) => FleetSweepEngine.RunAsync(
                         postgres, fleetSweepServers, fleetSweepSpan, fleetSweepAlertsEnabled, _logger, separate, token),
                     _logger, stoppingToken);
