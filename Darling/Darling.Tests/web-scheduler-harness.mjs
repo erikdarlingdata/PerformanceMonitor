@@ -132,7 +132,7 @@ const sandbox = {
   storeHash: (h) => h,
   storeHeaders: (h) => h,
   loadingStrip: () => ({}),
-  initFrontDoor: async () => {},
+  startFrontDoorIn: async () => {},
   refreshPicker() {},
   rememberStore() {},
   frontDoorStores: () => [],

@@ -80,8 +80,8 @@ function firstRunHero(canEdit, templates) {
       el("div", {
         class: "hero-pitch",
         text:
-          "Your session couldn't be confirmed, so authoring is read-only right now — reload the page to create a " +
-          "rule. Once created, alert rules evaluate on every collection and deliver to your configured channels.",
+          "Your session could not be confirmed yet, so authoring is not available — reload the page to try again. Once " +
+          "a rule is created, alert rules evaluate on every collection and deliver to your configured channels.",
       }),
     ]);
   }

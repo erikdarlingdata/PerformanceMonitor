@@ -18,8 +18,8 @@
  * agents over MCP only). A report is an agent's own claim, unreviewed and self-attributed, and the page says so.
  *
  * The list keeps the order the read gave (opened_at DESC, request_id) and the journal keeps its own (event_time
- * DESC, journal_id DESC). The filters and the picked request live at MODULE scope, so the poll's rebuild of the page shows the
- * same choices and the same open request.
+ * DESC, journal_id DESC). The filters, the picked request and the Close reason being typed live at MODULE scope, so the poll's
+ * rebuild of the page shows the same choices, the same open request and the same reason (#7956).
  *
  * R4 (XSS): every value, the brief and the report text included, reaches the DOM as text through el()'s text path
  * (a <pre> or a cell), never as HTML.
@@ -105,6 +105,15 @@ export function listParams(choices) {
 }
 
 const choices = { state: "", family: "", requestId: null };
+/* #7956: the Close reason as typed for ONE request, with whether its box has the focus and where the caret is. The poll's rebuild draws
+   the form from it, as Job History does for its job box. A successful close, the pane's Close button, a filter change and picking
+   another request drop it. */
+let closeDraft = null;
+/* #7956: the requests whose close PUT is out. A form the poll draws while one is out has its button disabled, and a press on it sends
+   nothing (the pressing set of proposals.js). */
+const closing = new Set();
+/* The newest Close form's nodes, so an answer that lands after the poll redrew the form reaches the form on the page. */
+let closeNodes = null;
 let pageSeq = 0;
 let detailSeq = 0;
 let pageAbort = null;
@@ -133,21 +142,52 @@ function closeForm(row, access, offNote) {
   if (access === "off") return section("Close this request", [el("div", { class: "muted", "data-close-off": "1", text: offNote })]);
   if (access === "sign-in") return section("Close this request", [el("div", { class: "muted", "data-close-sign-in": "1", text: SIGN_IN_SENTENCE })]);
   const reason = el("input", { type: "text", maxlength: String(CLOSE_REASON_MAX_LENGTH), "aria-label": "Reason for closing this request", "data-close-reason": "1", placeholder: "Why is this request being closed?" });
+  if (closeDraft && String(closeDraft.requestId) === String(row.request_id)) reason.value = closeDraft.reason;
+  const remember = (focused) => {
+    closeDraft = { requestId: row.request_id, reason: reason.value, focused, caret: [reason.selectionStart, reason.selectionEnd] };
+  };
+  reason.addEventListener("input", () => remember(true));
+  reason.addEventListener("focus", () => remember(true));
+  /* The rebuild removes this box, and the browser fires blur during the removal while the box is still connected, so the check waits a
+     turn: a removed box leaves the focus to the box that replaces it. */
+  reason.addEventListener("blur", () => setTimeout(() => { if (reason.isConnected) remember(false); }, 0));
   const status = el("div", { class: "muted", role: "status", "data-close-status": "1" });
   const button = el("button", { type: "button", class: "btn", "data-close-request": row.request_id, text: "Close request" });
+  button.disabled = closing.has(row.request_id);
   button.addEventListener("click", async () => {
+    if (closing.has(row.request_id)) return;
+    closing.add(row.request_id);
     button.disabled = true;
-    const out = await closeRequest(row.request_id, reason.value);
-    button.disabled = false;
+    let out;
+    try {
+      out = await closeRequest(row.request_id, reason.value);
+    } finally {
+      closing.delete(row.request_id);
+    }
+    const now = closeNodes && String(closeNodes.requestId) === String(row.request_id) ? closeNodes : { button, status };
+    now.button.disabled = false;
     if (out.message === null) return;
-    status.textContent = out.message;
-    if (out.ok && reloadList) await reloadList();
+    now.status.textContent = out.message;
+    if (out.ok) {
+      closeDraft = null;
+      if (reloadList) await reloadList();
+    }
   });
+  closeNodes = { requestId: row.request_id, reason, button, status };
   return section("Close this request", [
     el("div", { class: "muted", text: "Closing ends the request for good and is recorded in its journal under your name. Give a reason." }),
     el("div", {}, [reason, button]),
     status,
   ]);
+}
+
+/* #7956: once the pane is on the page, the reason box that had the focus before the rebuild gets it back, with its caret. */
+function focusCloseReason() {
+  if (!closeDraft || !closeDraft.focused || !closeNodes || String(closeNodes.requestId) !== String(closeDraft.requestId)) return;
+  const box = closeNodes.reason;
+  if (!box.isConnected) return;
+  box.focus();
+  if (closeDraft.caret && typeof box.setSelectionRange === "function") box.setSelectionRange(closeDraft.caret[0], closeDraft.caret[1]);
 }
 
 function section(title, children) {
@@ -198,7 +238,7 @@ function detailPane(row, data, access, single, offNote) {
   const parts = [
     el("div", { class: "jh-detail-head" }, [
       el("strong", { text: "Request on " + (row.server_name || "?") + " (" + (row.family || "?") + ")" }),
-      single ? null : el("button", { type: "button", class: "jh-detail-close", text: "Close", onClick: () => { choices.requestId = null; mount(slot, []); } }),
+      single ? null : el("button", { type: "button", class: "jh-detail-close", text: "Close", onClick: () => { choices.requestId = null; closeDraft = null; mount(slot, []); } }),
     ].filter(Boolean)),
     el("div", { class: "muted", text: facts }),
   ];
@@ -240,6 +280,7 @@ async function loadDetail(row) {
   if (res.kind === "empty") return mount(slot, [emptyStrip(res.message || "This request has no stored report or journal.")]);
   try {
     mount(slot, detailPane(row, res.data || {}, writeAccess(session), false, closeOffNote(session)));
+    focusCloseReason();
   } catch (e) {
     mount(slot, [errorStrip("Could not draw this request: " + (e && e.message ? e.message : String(e)))]);
   }
@@ -308,6 +349,7 @@ function renderOneRequest(main, requestId) {
     if (changes.kind === "aborted" || changes.kind === "auth") return;
     try {
       mount(slot, [...detailPane(row, data, writeAccess(session), true, closeOffNote(session)), changesSection(changes)]);
+      focusCloseReason();
     } catch (e) {
       mount(slot, [errorStrip("Could not draw this request: " + (e && e.message ? e.message : String(e)))]);
     }
@@ -327,6 +369,7 @@ export function renderInvestigations(main, requestId) {
 
   const reload = () => {
     choices.requestId = null;
+    closeDraft = null;
     mount(slot, []);
     load();
   };
@@ -354,6 +397,7 @@ export function renderInvestigations(main, requestId) {
       tr.style.cursor = "pointer";
       tr.setAttribute("title", "Show this request's report and journal");
       makeActivatable(tr, () => {
+        if (closeDraft && String(closeDraft.requestId) !== String(r.request_id)) closeDraft = null;
         choices.requestId = r.request_id;
         loadDetail(r);
       });
@@ -365,7 +409,10 @@ export function renderInvestigations(main, requestId) {
     mount(body, parts);
     const keep = choices.requestId ? rows.find((r) => String(r.request_id) === String(choices.requestId)) : null;
     if (keep) loadDetail(keep);
-    else choices.requestId = null;
+    else {
+      choices.requestId = null;
+      closeDraft = null;
+    }
   }
 
   reloadList = load;
