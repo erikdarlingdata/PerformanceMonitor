@@ -161,7 +161,7 @@ SELECT
                 EngineEdition = reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10)),
                 IsHadrEnabled = reader.IsDBNull(11) ? null : Convert.ToInt32(reader.GetValue(11)) == 1,
                 IsClustered = reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12)) == 1,
-                HostOsVersion = reader.IsDBNull(13) ? "" : reader.GetString(13).Trim(),
+                HostOsVersion = HostOsText.Clean(reader.IsDBNull(13) ? null : reader.GetString(13)),
                 AgReplicaRole = reader.IsDBNull(14) ? "Standalone" : reader.GetString(14),
                 LastUpdated = DateTime.Now
             };
