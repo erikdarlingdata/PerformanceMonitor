@@ -38,7 +38,7 @@ internal static class DarlingTlsStore
     /// <summary>The Server Authentication extended key usage.</summary>
     internal const string ServerAuthenticationOid = "1.3.6.1.5.5.7.3.1";
 
-    private const string DefaultStoreName = "My";
+    internal const string DefaultStoreName = "My";
 
     /// <summary>
     /// A thumbprint with its separators removed and its case folded away. Certificate snap-ins show a thumbprint in
@@ -97,12 +97,15 @@ internal static class DarlingTlsStore
         var setting = $"{section}.network.tls.store";
 
         return !string.IsNullOrWhiteSpace(store.Thumbprint)
-            ? SelectByThumbprint(candidates, store.Thumbprint, where, setting)
+            ? SelectByThumbprint(candidates, store.Thumbprint, where, $"{setting}.thumbprint")
             : SelectBySubject(candidates, store.Subject!.Trim(), nowUtc, where, setting);
     }
 
-    private static X509Certificate2 SelectByThumbprint(
-        IReadOnlyList<X509Certificate2> candidates, string thumbprint, string where, string setting)
+    /// <summary><paramref name="label"/> names what was asked for in each refusal: <c>web.network.tls.store.thumbprint</c>
+    /// for the config, plain <c>thumbprint</c> for <c>--grant-cert-key-access</c>, which has no setting. One rule, one
+    /// copy: the command refuses zero, two and keyless matches with exactly these sentences.</summary>
+    internal static X509Certificate2 SelectByThumbprint(
+        IReadOnlyList<X509Certificate2> candidates, string thumbprint, string where, string label)
     {
         var wanted = NormalizeThumbprint(thumbprint);
         var matches = candidates
@@ -112,21 +115,21 @@ internal static class DarlingTlsStore
         if (matches.Count == 0)
         {
             throw new InvalidOperationException(
-                $"{setting}.thumbprint {wanted} matches no certificate in the {where} store — check the thumbprint, "
+                $"{label} {wanted} matches no certificate in the {where} store — check the thumbprint, "
                 + "and that the certificate is in the store location this service reads (not another account's).");
         }
 
         if (matches.Count > 1)
         {
             throw new InvalidOperationException(
-                $"{setting}.thumbprint {wanted} matches {matches.Count} certificates in the {where} store — "
+                $"{label} {wanted} matches {matches.Count} certificates in the {where} store — "
                 + "it must name exactly one.");
         }
 
         if (!matches[0].HasPrivateKey)
         {
             throw new InvalidOperationException(
-                $"{setting}.thumbprint {wanted} names a certificate with no private key in the {where} store — "
+                $"{label} {wanted} names a certificate with no private key in the {where} store — "
                 + "a TLS server certificate must carry its key.");
         }
 
@@ -314,7 +317,9 @@ internal static class DarlingTlsStore
                     $"{section}.network.tls.store: the private key of certificate {chosen.Thumbprint} "
                     + $"(subject {chosen.Subject}) could not be opened by the service account {account} ({failure.Message}). "
                     + $"Give {account} Read on the key: {tool} > the certificate > All Tasks > Manage Private Keys > "
-                    + $"add {account} with Read, then restart the service.",
+                    + $"add {account} with Read, or from an elevated prompt run: "
+                    + DarlingTlsKeyAccess.GrantCommandFor(chosen.Thumbprint, location, name, account)
+                    + ", then restart the service.",
                     failure);
             }
 

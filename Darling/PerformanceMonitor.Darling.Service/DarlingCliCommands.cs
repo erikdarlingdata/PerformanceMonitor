@@ -123,6 +123,30 @@ public static partial class DarlingCliCommands
     public static bool IsHardenFilesVerb(string arg) =>
         string.Equals(arg, "--harden-files", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The verb <see cref="GrantCertKeyAccess"/> handles: give the service account Read on the private key
+    /// of a certificate in a Windows certificate store, from an elevated prompt (#7718).</summary>
+    public static bool IsGrantCertKeyAccessVerb(string arg) =>
+        string.Equals(arg, DarlingTlsKeyAccess.VerbName, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// <c>--grant-cert-key-access &lt;thumbprint&gt; [--account &lt;name&gt;] [--store-location &lt;LocalMachine|CurrentUser&gt;]
+    /// [--store-name &lt;name&gt;]</c> (#7718): adds one Read entry for one account (the service's registered account unless
+    /// <c>--account</c> names another) to the private key of the certificate the thumbprint names, keeping every existing
+    /// entry, and changes nothing without elevation (LocalMachine) or when the account already has Read. The rules and
+    /// the seams are <see cref="DarlingTlsKeyAccess"/>. Returns the process exit code.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public static int GrantCertKeyAccess(string[] rest, TextWriter output, TextWriter error)
+    {
+        if (!DarlingTlsKeyAccess.TryParseArgs(rest, out var parsed, out var problem))
+        {
+            error.WriteLine(problem);
+            return 1;
+        }
+
+        return DarlingTlsKeyAccess.RunForReal(parsed!, output, error);
+    }
+
     /// <summary>The flag that makes <see cref="IsHardenFilesVerb"/>'s verb run only <see cref="HardenTlsKeyFilesOnly(string?, TextWriter, TextWriter)"/>
     /// (#5700); the scripts pass it, and it is not in the help text.</summary>
     public static bool IsTlsKeyFilesOnlyFlag(string arg) =>
@@ -394,6 +418,7 @@ public static partial class DarlingCliCommands
         || IsConfigureNetworkVerb(arg)
         || IsConfigureFirewallVerb(arg)
         || IsHardenFilesVerb(arg)
+        || IsGrantCertKeyAccessVerb(arg)
         || IsEnableMcpVerb(arg)
         || IsDisableMcpVerb(arg)
         || IsEnableWebVerb(arg)
@@ -489,6 +514,7 @@ public static partial class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --configure-network Interactive LAN-exposure wizard." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-firewall  Create/remove the scoped firewall rules to match darling.json (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --harden-files      Re-apply the ACLs on darling.json, the store credentials, the log-hash key and the TLS key files darling.json names (run elevated)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --grant-cert-key-access <thumbprint> [--account <name>] [--store-location LocalMachine|CurrentUser] [--store-name <name>]   Give the service account (or --account) Read on the private key of a certificate in a Windows certificate store, for web.network.tls.store and mcp.network.tls.store. Adds one Read entry and keeps the rest (run elevated for LocalMachine; restart the service after)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-mcp        Enable the MCP endpoint in the store and open its firewall (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-mcp       Disable the MCP endpoint in the store and remove its firewall rule (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-web        Enable the web dashboard in the store and open its firewall (run elevated)." + Environment.NewLine +
@@ -3698,7 +3724,7 @@ public static partial class DarlingCliCommands
 
     /// <summary>True when the current process is running elevated (Administrators role) — required to control the service.</summary>
     [SupportedOSPlatform("windows")]
-    private static bool IsElevated()
+    internal static bool IsElevated()
     {
         using var identity = WindowsIdentity.GetCurrent();
         return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);

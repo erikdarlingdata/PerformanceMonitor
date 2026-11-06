@@ -38,6 +38,7 @@ Exit codes are numbers. The [exit code table](#exit-codes) below says what each 
 | `--configure-network` | Asks questions, then edits `darling.json` to expose the store, MCP or web endpoint on the network. Windows only. | no, but the service restart and firewall steps need it | either | `0`, `1` | [Guided setup](network-endpoints.md#guided-setup---configure-network) |
 | `--configure-firewall` | Creates or removes the scoped firewall rules so they match `darling.json`. Windows only. | yes | either | `0`, `1` | [Firewall rules](network-endpoints.md#firewall-rules---configure-firewall) |
 | `--harden-files` | Applies the locked-down permissions to `darling.json`, the store credentials, the log-hash key and the TLS key files. Windows only. | yes | either | `0`, `1` | [harden-files](#--harden-files) |
+| `--grant-cert-key-access` | Gives the service account Read on the private key of a certificate in the Windows certificate store, for the `store` form of `web.network.tls` and `mcp.network.tls`. Windows only. | yes, for `LocalMachine` | either | `0`, `1` | [Certificate from the Windows certificate store](network-endpoints.md#certificate-from-the-windows-certificate-store) |
 | `--enable-mcp`, `--disable-mcp` | Turns the MCP endpoint on or off in the store. Windows only. | no, but the firewall step needs it | either (1) | `0`, `1` | [Headless enable and disable](network-endpoints.md#headless-enabledisable--firewall---enable-mcp----enable-web) |
 | `--enable-web`, `--disable-web` | Turns the web dashboard on or off in the store. Windows only. | no, but the firewall step needs it | either (1) | `0`, `1` | [Headless enable and disable](network-endpoints.md#headless-enabledisable--firewall---enable-mcp----enable-web) |
 | `--enable-collector`, `--disable-collector` | Turns one collector on or off, for every server or one server. | no | either (1) | `0`, `1`, `2` | [Enable or disable a collector](collector-settings.md#enable-or-disable-a-collector-headlessly---enable-collector----disable-collector) |
@@ -70,7 +71,7 @@ Most verbs use two numbers:
 
 These verbs use only `0` and `1`:
 
-`--test-connection`, `--validate-config`, `--encrypt-password`, `--add-server`, `--grant-script`, `--print-viewer-connection`, `--export-viewer-config`, `--print-mcp-token`, `--print-web-token`, `--configure-network`, `--configure-firewall`, `--harden-files`, `--enable-mcp`, `--disable-mcp`, `--enable-web`, `--disable-web`, `--backfill-rollups`, `--collapse-legacy-slices` and `--recompress-plan-dim`.
+`--test-connection`, `--validate-config`, `--encrypt-password`, `--add-server`, `--grant-script`, `--print-viewer-connection`, `--export-viewer-config`, `--print-mcp-token`, `--print-web-token`, `--configure-network`, `--configure-firewall`, `--harden-files`, `--grant-cert-key-access`, `--enable-mcp`, `--disable-mcp`, `--enable-web`, `--disable-web`, `--backfill-rollups`, `--collapse-legacy-slices` and `--recompress-plan-dim`.
 
 `--help` and `--version` always exit `0`.
 
@@ -139,6 +140,14 @@ PerformanceMonitor.Darling.Service.exe --harden-files [--config <path to darling
 ```
 
 The service knows the correct permissions for its secret files but cannot apply them. This verb applies them, then checks every file and reports it as secured or still readable. The config path can also be the one bare argument after the verb. Do not give both forms.
+
+### `--grant-cert-key-access`
+
+```
+PerformanceMonitor.Darling.Service.exe --grant-cert-key-access <thumbprint> [--account <name>] [--store-location LocalMachine|CurrentUser] [--store-name <name>]
+```
+
+Adds one Read entry for one account to the private key of the certificate the thumbprint names, and keeps every existing entry. The account is the one the service is registered under unless `--account` names another. The location and the store name default as they do in `darling.json`: `LocalMachine` and `My`. It refuses Everyone, Users and Authenticated Users. It needs an elevated prompt for `LocalMachine`, and says so and changes nothing without one. An account that already has Read gets `Already granted`. Restart the service after it. The rules and the failures are in [Certificate from the Windows certificate store](network-endpoints.md#certificate-from-the-windows-certificate-store).
 
 ### Collector settings
 
