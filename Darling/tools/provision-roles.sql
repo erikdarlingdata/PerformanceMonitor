@@ -3684,6 +3684,22 @@ BEGIN
    GRANT SELECT ON config.agent_action_proposals TO admin, viewer, web;
 END $do$;
 
+-- 3j5. The request Slack threads (V252, #7656), mirroring managed provisioning's section 10e5: the channel and parent ts of each request's
+--     thread. NO role but the store owner (the service) writes them: REVOKE ALL ... CASCADE takes every privilege (the default privileges
+--     would give admin INSERT/UPDATE/DELETE on a table made after them), and SELECT goes back to admin alone. The table has no sequence. It
+--     is created by V252: on a store below it the block warns and skips, so the rest of the script still runs; re-run the script once the
+--     service has migrated the store.
+DO $do$
+BEGIN
+   IF pg_catalog.to_regclass('config.investigation_request_threads') IS NULL THEN
+      RAISE WARNING 'The request Slack thread table was not found, so its grants were skipped. Run this script again after the service has upgraded the store.';
+      RETURN;
+   END IF;
+
+   REVOKE ALL ON config.investigation_request_threads FROM PUBLIC, admin, viewer, web, mcp CASCADE;
+   GRANT SELECT ON config.investigation_request_threads TO admin;
+END $do$;
+
 -- 3k. Query-tag tables (V192, #5977), mirroring managed provisioning's grants for them. mcp writes the three tables a person
 --     edits: the tags, the hand assignments and the rules. The map and the sightings are the service's (the owner writes
 --     them), so mcp holds only DELETE on the map, which remove_server runs to clear a removed server's map rows (a server_id is

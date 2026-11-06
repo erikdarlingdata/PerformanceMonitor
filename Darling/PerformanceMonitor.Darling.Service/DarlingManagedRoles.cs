@@ -2136,6 +2136,12 @@ END $people_seq$;
 REVOKE ALL ON {config}.agent_action_proposals FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
 GRANT SELECT ON {config}.agent_action_proposals TO {admin}, {viewer}, {web};
 
+-- 10e5. The request Slack threads (V252, #7656): the channel and parent ts of each request's thread. NO role but the store owner (the
+--     service's thread poster) writes them: REVOKE ALL ... CASCADE takes every privilege the default privileges gave, and SELECT goes
+--     back to admin alone. No viewer, web or MCP read exists. The table has no sequence. provision-roles.sql step 3j5 mirrors it.
+REVOKE ALL ON {config}.investigation_request_threads FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
+GRANT SELECT ON {config}.investigation_request_threads TO {admin};
+
 -- 10f. Phase C tables (V193, #5997): the evidence of a request, the daily deadlock signature counts and the signature
 --     merges. Only the store owner (the service) writes them. The default privileges would give admin INSERT/UPDATE/DELETE
 --     on a table made after them, so REVOKE ALL ... CASCADE (which also takes TRIGGER and REFERENCES) takes every privilege

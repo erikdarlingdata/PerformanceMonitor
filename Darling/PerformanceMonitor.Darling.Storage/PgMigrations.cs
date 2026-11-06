@@ -2642,7 +2642,9 @@ ALTER TABLE collect.pg_statement_stats ADD COLUMN IF NOT EXISTS database_name te
 
     /* V252 (#7656): the Slack bot. A route's bot channel id, the sealed bot and app tokens on the notification settings row (opened like
        the webhook URLs), and one thread per investigation request: the channel the parent post went to and its ts. The thread table is
-       owner-written, as config_server_actions is: admin reads it and nothing else. The REVOKE and GRANT run only where the role exists. */
+       owner-written, as config_server_actions is: REVOKE ALL ... CASCADE takes every privilege the default privileges gave from PUBLIC
+       and each of the four roles that exists, and SELECT goes back to admin alone. Managed provisioning section 10e5 and
+       provision-roles.sql step 3j5 do the same after their blanket grants. */
     private const string V252Sql = @"
 ALTER TABLE config.config_notification_routes ADD COLUMN IF NOT EXISTS slack_bot_channel text NOT NULL DEFAULT '';
 ALTER TABLE config.config_notification ADD COLUMN IF NOT EXISTS slack_bot_token text NOT NULL DEFAULT '';
@@ -2653,14 +2655,26 @@ CREATE TABLE IF NOT EXISTS config.investigation_request_threads (
     thread_ts text NOT NULL,
     posted_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC')
 );
-DO $$
+
+REVOKE ALL ON config.investigation_request_threads FROM PUBLIC CASCADE;
+
+DO $do$
 BEGIN
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'admin') THEN
-        REVOKE ALL ON config.investigation_request_threads FROM admin;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'admin') THEN
+        REVOKE ALL ON config.investigation_request_threads FROM admin CASCADE;
         GRANT SELECT ON config.investigation_request_threads TO admin;
     END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'viewer') THEN
+        REVOKE ALL ON config.investigation_request_threads FROM viewer CASCADE;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'web') THEN
+        REVOKE ALL ON config.investigation_request_threads FROM web CASCADE;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'mcp') THEN
+        REVOKE ALL ON config.investigation_request_threads FROM mcp CASCADE;
+    END IF;
 END
-$$;";
+$do$;";
 
     /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
