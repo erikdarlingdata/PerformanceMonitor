@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
@@ -31,9 +32,9 @@ public class AnalysisService
 
     /// <summary>
     /// Per-server failure streaks of the pass's catch-all, so a store fault that persists writes its stack once per
-    /// streak rather than for every server on every scheduled pass (<see cref="FailureStreakLog"/>).
+    /// streak rather than for every server on every scheduled pass (<see cref="FailureStreakLog{TKey}"/>).
     /// </summary>
-    private readonly FailureStreakLog _passFailures = new();
+    private readonly FailureStreakLog<int> _passFailures = new();
 
     /// <summary>
     /// #4726: the shared baseline tier this instance was handed (null when it keeps a private one). The MCP host

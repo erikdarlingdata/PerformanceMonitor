@@ -118,6 +118,21 @@ public sealed class AlertEngine
     private readonly ILogger? _logger;
     private readonly Func<DateTime> _utcNow;
 
+    /// <summary>
+    /// Per-(server, check) failure streaks of the log-and-skip arms below, so a store fault that persists writes its stack
+    /// once per streak rather than for every check of every server on every sweep (<see cref="FailureStreakLog{TKey}"/>).
+    /// The check is named as the read-failure counter names it. A check that runs to the end of its try ends its streak;
+    /// a check that skips the sweep (disabled, no row, waiting out a back-off) leaves it as it is.
+    /// </summary>
+    private readonly FailureStreakLog<(string Key, string Check)> _checkFailures = new();
+
+    /// <summary>
+    /// Writes a check's log-and-skip failure through its (server, check) streak: the exception on the first failure of a
+    /// streak, the message alone after that, and the streak's length on every <see cref="FailureStreakLine.CountEvery"/>th.
+    /// </summary>
+    private void LogCheckFailure(string key, string check, Exception ex, string message, params object?[] args) =>
+        _logger.LogFailure(_checkFailures.Failed((key, check)), ex, message, args);
+
     /* Per-serverKey evaluation gate: serializes EvaluateServerAsync for the SAME server. */
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _serverGates = new();
 
@@ -1852,6 +1867,7 @@ public sealed class AlertEngine
                 blockingEvents = blockingWaits;
                 /* #7083: the page rule needs the longest wait among these events (BlockingPageRule). */
                 worstBlockingWaitMs = blockingWaits.Count == 0 ? 0 : blockingWaits.Max(w => w.WaitTimeMs);
+                _checkFailures.Succeeded((key, "blocking"));
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -1861,7 +1877,7 @@ public sealed class AlertEngine
             {
                 /* :129-132 shape — log and skip this check for the sweep (class remarks
                    adaptation (2)): never run the gate on a fabricated zero count. */
-                _logger?.LogError(ex, "Failed to check blocking for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+                LogCheckFailure(key, "blocking", ex, "Failed to check blocking for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
                 _readFailures?.RecordReadFailure(key, "blocking", readClock.ElapsedMilliseconds);
                 return;
             }
@@ -2184,6 +2200,7 @@ public sealed class AlertEngine
         try
         {
             current = await _readAdapter.GetCurrentBlockingWaitAsync(key, ct);
+            _checkFailures.Succeeded((key, "blocking wait time"));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -2193,7 +2210,7 @@ public sealed class AlertEngine
         {
             /* Log and skip for the sweep — state untouched, so a transient store error neither
                fires nor resolves (the same adaptation (2) shape as the count gate). */
-            _logger?.LogError(ex, "Failed to check blocking wait time for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            LogCheckFailure(key, "blocking wait time", ex, "Failed to check blocking wait time for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "blocking wait time", readClock.ElapsedMilliseconds);
             return;
         }
@@ -2377,6 +2394,7 @@ public sealed class AlertEngine
                     effectiveDeadlockCount = deadlockRows
                         .Count(r => !AlertContextBuilders.IsDeadlockExcluded(r, excludedDatabases));
                 }
+                _checkFailures.Succeeded((key, "deadlocks"));
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -2385,7 +2403,7 @@ public sealed class AlertEngine
             catch (Exception ex)
             {
                 /* :207-210 shape — log and skip (class remarks adaptation (2)). */
-                _logger?.LogError(ex, "Failed to check deadlocks for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+                LogCheckFailure(key, "deadlocks", ex, "Failed to check deadlocks for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
                 _readFailures?.RecordReadFailure(key, "deadlocks", readClock.ElapsedMilliseconds);
                 return;
             }
@@ -2678,6 +2696,7 @@ public sealed class AlertEngine
                     readClock.Restart();
                 }
             }
+            _checkFailures.Succeeded((key, "poison waits"));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -2685,7 +2704,7 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Failed to check poison waits for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :337 */
+            LogCheckFailure(key, "poison waits", ex, "Failed to check poison waits for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :337 */
             _readFailures?.RecordReadFailure(key, "poison waits", readClock.ElapsedMilliseconds);
         }
     }
@@ -2904,6 +2923,7 @@ public sealed class AlertEngine
                     readClock.Restart();
                 }
             }
+            _checkFailures.Succeeded((key, "runnable queue"));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -2911,7 +2931,7 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Failed to check runnable queue for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            LogCheckFailure(key, "runnable queue", ex, "Failed to check runnable queue for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "runnable queue", readClock.ElapsedMilliseconds);
         }
     }
@@ -3112,6 +3132,7 @@ public sealed class AlertEngine
                     readClock.Restart();
                 }
             }
+            _checkFailures.Succeeded((key, "client timeouts"));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -3119,7 +3140,7 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Failed to check client timeouts for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            LogCheckFailure(key, "client timeouts", ex, "Failed to check client timeouts for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "client timeouts", readClock.ElapsedMilliseconds);
         }
     }
@@ -3409,6 +3430,7 @@ public sealed class AlertEngine
                         $"{serverName}: No queries over threshold"), ct);           /* :402 */
                 }
             }
+            _checkFailures.Succeeded((key, "long-running queries"));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -3416,7 +3438,7 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Failed to check long-running queries for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :409 */
+            LogCheckFailure(key, "long-running queries", ex, "Failed to check long-running queries for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :409 */
             _readFailures?.RecordReadFailure(key, "long-running queries", readClock.ElapsedMilliseconds);
         }
     }
@@ -3529,6 +3551,7 @@ public sealed class AlertEngine
                         $"{serverName}: tempdb reserved space back to {tempDb.ReservedPercent:F0}%"), ct); /* :461,:464 */
                 }
             }
+            _checkFailures.Succeeded((key, "TempDB space"));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -3536,7 +3559,7 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Failed to check TempDB space for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :471 */
+            LogCheckFailure(key, "TempDB space", ex, "Failed to check TempDB space for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :471 */
             _readFailures?.RecordReadFailure(key, "TempDB space", readClock.ElapsedMilliseconds);
         }
     }
@@ -3683,6 +3706,7 @@ public sealed class AlertEngine
                         $"{serverName}: All volumes back above threshold"), ct);    /* :546 */
                 }
             }
+            _checkFailures.Succeeded((key, "volume free space"));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -3690,7 +3714,7 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Failed to check volume free space for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :553 */
+            LogCheckFailure(key, "volume free space", ex, "Failed to check volume free space for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :553 */
             _readFailures?.RecordReadFailure(key, "volume free space", readClock.ElapsedMilliseconds);
         }
 
@@ -3808,6 +3832,7 @@ public sealed class AlertEngine
                         $"{serverName}: All version stores back below threshold"), ct);
                 }
             }
+            _checkFailures.Succeeded((key, "PVS pressure"));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -3815,7 +3840,7 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Failed to check PVS pressure for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            LogCheckFailure(key, "PVS pressure", ex, "Failed to check PVS pressure for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "PVS pressure", readClock.ElapsedMilliseconds);
         }
     }
@@ -4039,6 +4064,7 @@ public sealed class AlertEngine
                         $"{serverName}: no file is growing past the threshold or filling its volume"), ct);
                 }
             }
+            _checkFailures.Succeeded((key, "database file growth"));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -4046,7 +4072,7 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Failed to check database file growth for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            LogCheckFailure(key, "database file growth", ex, "Failed to check database file growth for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "database file growth", readClock.ElapsedMilliseconds);
         }
     }
@@ -4152,6 +4178,7 @@ public sealed class AlertEngine
                         $"{serverName}: No jobs exceeding threshold"), ct);         /* :623 */
                 }
             }
+            _checkFailures.Succeeded((key, "anomalous jobs"));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -4159,7 +4186,7 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Failed to check anomalous jobs for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :630 */
+            LogCheckFailure(key, "anomalous jobs", ex, "Failed to check anomalous jobs for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :630 */
             _readFailures?.RecordReadFailure(key, "anomalous jobs", readClock.ElapsedMilliseconds);
         }
     }
@@ -4280,6 +4307,7 @@ public sealed class AlertEngine
                     }
                 }
             }
+            _checkFailures.Succeeded((key, "failed jobs"));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -4297,7 +4325,7 @@ public sealed class AlertEngine
                not persist failed-job watermark" without rethrowing), so it cannot reach this catch at
                all. The write sitting inside this try where the blocking, deadlock and database-state
                checks keep theirs outside is a real asymmetry and an inert one. */
-            _logger?.LogError(ex, "Failed to check failed jobs for {Server}: {Message}", serverName, ex.Message); /* :715 */
+            LogCheckFailure(key, "failed jobs", ex, "Failed to check failed jobs for {Server}: {Message}", serverName, ex.Message); /* :715 */
         }
 
         return conditionPresent;
@@ -4332,6 +4360,7 @@ public sealed class AlertEngine
         try
         {
             deviations = await _readAdapter.GetDatabaseStatesAsync(key, ct);
+            _checkFailures.Succeeded((key, "database state"));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -4341,7 +4370,7 @@ public sealed class AlertEngine
         {
             /* Log-and-skip, like the other collected reads: never resolve an active database on a
                failed fetch (that would fabricate a recovery), and never fire on absent evidence. */
-            _logger?.LogError(ex, "Failed to check database state for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            LogCheckFailure(key, "database state", ex, "Failed to check database state for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "database state", readClock.ElapsedMilliseconds);
             return;
         }
@@ -4582,6 +4611,7 @@ public sealed class AlertEngine
         try
         {
             failures = await _readAdapter.GetForcePlanFailuresAsync(key, ct);
+            _checkFailures.Succeeded((key, "forced-plan failures"));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -4591,7 +4621,7 @@ public sealed class AlertEngine
         {
             /* Log-and-skip, like every other collected read: never resolve an active plan on a failed
                fetch (that would fabricate a recovery), and never fire on absent evidence. */
-            _logger?.LogError(ex, "Failed to check forced-plan failures for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            LogCheckFailure(key, "forced-plan failures", ex, "Failed to check forced-plan failures for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "forced-plan failures", readClock.ElapsedMilliseconds);
             return;
         }

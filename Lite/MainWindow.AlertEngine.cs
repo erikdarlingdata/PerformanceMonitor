@@ -36,10 +36,10 @@ public partial class MainWindow : Window
     /// <summary>
     /// Per-server failure streaks of the engine sweep's and the Availability Group evaluation's catch-alls, so a fault
     /// that persists writes its stack once per streak rather than for every server on every tick
-    /// (<see cref="FailureStreakLog"/>). One each, because a sweep that completes says nothing about the other.
+    /// (<see cref="FailureStreakLog{TKey}"/>). One each, because a sweep that completes says nothing about the other.
     /// </summary>
-    private readonly FailureStreakLog _sweepFailures = new();
-    private readonly FailureStreakLog _agSweepFailures = new();
+    private readonly FailureStreakLog<int> _sweepFailures = new();
+    private readonly FailureStreakLog<int> _agSweepFailures = new();
 
     /// <summary>
     /// Seeds <see cref="_engineEditions"/> with every server's stored edition in one read. MainWindow_Loaded awaits it

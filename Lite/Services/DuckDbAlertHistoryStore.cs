@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
@@ -43,6 +44,13 @@ public sealed class DuckDbAlertHistoryStore : IAlertHistoryStore
 
     /* Failure tracking for louder logging — moved with LogAlertAsync. */
     private int _consecutiveLogFailures;
+
+    /// <summary>
+    /// Per-(server, operation) failure streaks of the catch arms below, so a store fault that persists writes its stack once
+    /// per streak rather than on every sweep's read or write for every server (<see cref="FailureStreakLog{TKey}"/>). The two
+    /// bulk watermark loads run once at startup and <see cref="RecordAlertAsync"/> keeps its own counter, so they are not here.
+    /// </summary>
+    private readonly FailureStreakLog<(int ServerId, string Operation)> _failures = new();
 
     public DuckDbAlertHistoryStore(DuckDbInitializer? duckDb = null)
     {
@@ -187,6 +195,7 @@ AND   send_error IS NULL"
                 command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = AlertContextSerializer.BuildDedupKeyLikePattern(dedupKey) });
 
             var result = await command.ExecuteScalarAsync();
+            _failures.Succeeded((sid.Value, nameof(GetLastEmailSentUtcAsync)));
             if (result == null || result == DBNull.Value) return null;
 
             /* alert_time is written as DateTime.UtcNow; tag it UTC so the kind
@@ -195,7 +204,7 @@ AND   send_error IS NULL"
         }
         catch (Exception ex)
         {
-            AppLogger.Error("EmailAlert", $"Could not read persisted alert cooldown: {ex.Message}", ex);
+            _failures.Failed("EmailAlert", (sid.Value, nameof(GetLastEmailSentUtcAsync)), $"Could not read persisted alert cooldown: {ex.Message}", ex);
             return null;
         }
     }
@@ -256,6 +265,7 @@ AND   notification_type IN ('webhook', 'email+webhook')"
                 command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = AlertContextSerializer.BuildDedupKeyLikePattern(dedupKey) });
 
             var result = await command.ExecuteScalarAsync();
+            _failures.Succeeded((sid.Value, nameof(GetLastWebhookSentUtcAsync)));
             if (result == null || result == DBNull.Value) return null;
 
             /* alert_time is written as DateTime.UtcNow; tag it UTC so the kind
@@ -264,7 +274,7 @@ AND   notification_type IN ('webhook', 'email+webhook')"
         }
         catch (Exception ex)
         {
-            AppLogger.Error("WebhookAlert", $"Could not read persisted webhook cooldown: {ex.Message}", ex);
+            _failures.Failed("WebhookAlert", (sid.Value, nameof(GetLastWebhookSentUtcAsync)), $"Could not read persisted webhook cooldown: {ex.Message}", ex);
             return null;
         }
     }
@@ -330,13 +340,14 @@ AND   metric_name = $2"
                 command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = AlertContextSerializer.BuildDedupKeyLikePattern(dedupKey) });
 
             var result = await command.ExecuteScalarAsync();
+            _failures.Succeeded((sid.Value, nameof(GetLastAlertTimeAsync)));
             if (result == null || result == DBNull.Value) return null;
 
             return DateTime.SpecifyKind(Convert.ToDateTime(result), DateTimeKind.Utc);
         }
         catch (Exception ex)
         {
-            AppLogger.Error("AnalysisNotify", $"Could not read persisted analysis cooldown: {ex.Message}", ex);
+            _failures.Failed("AnalysisNotify", (sid.Value, nameof(GetLastAlertTimeAsync)), $"Could not read persisted analysis cooldown: {ex.Message}", ex);
             return null;
         }
     }
@@ -508,13 +519,14 @@ AND   alert_sent"
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
 
             var result = await command.ExecuteScalarAsync();
+            _failures.Succeeded((sid.Value, nameof(GetLastDeliveredPageUtcAsync)));
             if (result == null || result == DBNull.Value) return null;
 
             return DateTime.SpecifyKind(Convert.ToDateTime(result), DateTimeKind.Utc);
         }
         catch (Exception ex)
         {
-            AppLogger.Error("AnalysisNotify", $"Could not read persisted delivered-page seed: {ex.Message}", ex);
+            _failures.Failed("AnalysisNotify", (sid.Value, nameof(GetLastDeliveredPageUtcAsync)), $"Could not read persisted delivered-page seed: {ex.Message}", ex);
             return null;
         }
     }
@@ -661,10 +673,11 @@ VALUES ($1, $2, $3, $4)";
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DateTime.UtcNow });
 
             await command.ExecuteNonQueryAsync();
+            _failures.Succeeded((serverId, nameof(SaveEdgeTriggerWatermarkAsync)));
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Could not persist edge-trigger watermark ({metricName}): {ex.Message}", ex);
+            _failures.Failed("Alerts", (serverId, nameof(SaveEdgeTriggerWatermarkAsync)), $"Could not persist edge-trigger watermark ({metricName}): {ex.Message}", ex);
         }
     }
 
@@ -715,10 +728,11 @@ AND   metric_name = $2";
                     Convert.ToDateTime(reader.GetValue(3)),
                     Convert.ToDateTime(reader.GetValue(4))));
             }
+            _failures.Succeeded((serverId, nameof(LoadIncidentOccurrencesAsync)));
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Could not load incident occurrences ({metricName}): {ex.Message}", ex);
+            _failures.Failed("Alerts", (serverId, nameof(LoadIncidentOccurrencesAsync)), $"Could not load incident occurrences ({metricName}): {ex.Message}", ex);
             return new List<(string, long, int, DateTime, DateTime)>();
         }
         return result;
@@ -810,13 +824,14 @@ AND   metric_name = $2"
             }
 
             transaction.Commit();
+            _failures.Succeeded((serverId, nameof(SaveIncidentOccurrencesAsync)));
         }
         catch (Exception ex)
         {
             /* A dropped write costs accuracy on the NEXT delivery's total — the fingerprint reads as new and
                restarts, with a fresh start time saying so — never a missed or duplicated alert, which the
                gate has already decided by this point. */
-            AppLogger.Error("Alerts", $"Could not persist incident occurrences ({metricName}): {ex.Message}", ex);
+            _failures.Failed("Alerts", (serverId, nameof(SaveIncidentOccurrencesAsync)), $"Could not persist incident occurrences ({metricName}): {ex.Message}", ex);
         }
     }
 
@@ -855,7 +870,9 @@ AND   metric_name = $2";
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
 
             using var reader = await command.ExecuteReaderAsync();
-            if (!await reader.ReadAsync())
+            var hasRow = await reader.ReadAsync();
+            _failures.Succeeded((serverId, nameof(LoadAlertPersistenceAsync)));
+            if (!hasRow)
             {
                 return null;
             }
@@ -868,7 +885,7 @@ AND   metric_name = $2";
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Could not load the alert persistence gate ({metricName}): {ex.Message}", ex);
+            _failures.Failed("Alerts", (serverId, nameof(LoadAlertPersistenceAsync)), $"Could not load the alert persistence gate ({metricName}): {ex.Message}", ex);
             throw;
         }
     }
@@ -924,10 +941,11 @@ ON CONFLICT (server_id, metric_name) DO UPDATE SET
             });
             upsert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DateTime.UtcNow });
             await upsert.ExecuteNonQueryAsync();
+            _failures.Succeeded((serverId, nameof(SaveAlertPersistenceAsync)));
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Could not persist the alert persistence gate ({metricName}): {ex.Message}", ex);
+            _failures.Failed("Alerts", (serverId, nameof(SaveAlertPersistenceAsync)), $"Could not persist the alert persistence gate ({metricName}): {ex.Message}", ex);
         }
     }
 
@@ -1016,10 +1034,11 @@ VALUES ($1, $2, 0, $3, $4)";
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DateTime.UtcNow });
 
             await command.ExecuteNonQueryAsync();
+            _failures.Succeeded((serverId, nameof(SaveFailedJobWatermarkAsync)));
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Could not persist failed-job watermark: {ex.Message}", ex);
+            _failures.Failed("Alerts", (serverId, nameof(SaveFailedJobWatermarkAsync)), $"Could not persist failed-job watermark: {ex.Message}", ex);
         }
     }
 
@@ -1062,10 +1081,11 @@ AND   database_name = $2";
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DateTime.UtcNow });
 
             await command.ExecuteNonQueryAsync();
+            _failures.Succeeded((serverId, nameof(SaveDatabaseStateAlertedAsync)));
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Could not record the alerted database state for {databaseName}: {ex.Message}", ex);
+            _failures.Failed("Alerts", (serverId, nameof(SaveDatabaseStateAlertedAsync)), $"Could not record the alerted database state for {databaseName}: {ex.Message}", ex);
         }
     }
 
@@ -1106,10 +1126,11 @@ AND   database_name = $2";
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
 
             await command.ExecuteNonQueryAsync();
+            _failures.Succeeded((serverId, nameof(ClearDatabaseStateAlertedAsync)));
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Could not clear the alerted database state for {databaseName}: {ex.Message}", ex);
+            _failures.Failed("Alerts", (serverId, nameof(ClearDatabaseStateAlertedAsync)), $"Could not clear the alerted database state for {databaseName}: {ex.Message}", ex);
         }
     }
 }
