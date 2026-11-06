@@ -35,8 +35,8 @@ public sealed partial class PgTargetDrillDownCollector
     /// The statements that wrote the most temp blocks in the window, for a <c>PG_TEMP_SPILL</c> root (lane 6 of
     /// #3542): <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC), <c>$4</c> the row cap. The text comes back whole and the reader judges it, then cuts it to
     /// <see cref="StatementTextCap"/> (#5320). <c>temp_blks_written</c> is a lifetime counter on <c>pg_statement_stats</c>, so it is
-    /// differenced the way <see cref="PgTargetBadActorDetailSql"/> differences the block counters —
-    /// <c>GREATEST(x − LAG(x), 0)</c> over the full series identity — and summed per <c>queryid</c>; the calls
+    /// differenced inside the window — <c>GREATEST(x − LAG(x), 0)</c> over the full series identity — and summed per
+    /// <c>queryid</c>; this list ranks offenders and is not seeded the way <see cref="PgTargetBadActorDetailSql"/> is. The calls
     /// and time beside it are the stored deltas, so the reader can see whether the spill is one heavy report or
     /// a hot statement spilling a little every call. <c>temp_blks_read</c> rides along: a statement that writes
     /// temp blocks and reads them back is a sort or hash that overflowed; one that only writes is a
@@ -88,10 +88,16 @@ LIMIT $4";
     /// text with its hash. <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC), <c>$4</c> queryid. The text comes back whole and the reader judges it, then cuts it to
     /// <see cref="StatementTextCap"/> (#5320).
     ///
-    /// <para>The same differencing as the collector's read and <c>DarlingPgStatementReader.PgTopQueriesSql</c>:
-    /// stored deltas for calls / time / rows, <c>GREATEST(x − LAG(x), 0)</c> over the full series identity
-    /// for the block and WAL counters, high-water marks as <c>MAX</c>. The per-database rows are an ARRAY
-    /// aggregate over the same grouped result so the detail is one row and one statement, and so the
+    /// <para>The same differencing as <c>DarlingPgStatementReader.PgTopQueriesSql</c> (#7909), so a statement reads
+    /// the same block and WAL figures here as in <c>get_pg_top_queries</c>: stored deltas for calls / time / rows,
+    /// high-water marks as <c>MAX</c>, and for the block and WAL counters each series' first in-window sample is
+    /// differenced against the series' latest stored row before the window (the <c>seed</c> CTE, bounded to
+    /// <see cref="DarlingPgStatementReader.SeedLookbackSql"/> before the window start), a sample the collector stored
+    /// with <c>delta_calls = calls</c> contributes its cumulative figure, one stored with <c>delta_calls = 0</c>
+    /// contributes nothing, and otherwise the increment is <c>GREATEST(x − LAG(x), 0)</c> over the full series
+    /// identity. The seed rows are the baseline and are dropped before the aggregates, so <c>snapshot_count</c>, the
+    /// first and last snapshot and the per-database rows cover the window's rows alone. The per-database rows are an
+    /// ARRAY aggregate over the same grouped result so the detail is one row and one statement, and so the
     /// <c>database_id</c> OIDs (the collector's key; #3540 A11c — an OID is reused across DROP / CREATE and this
     /// read reproduces the key as written) are listed rather than summed away.</para>
     ///
@@ -102,7 +108,63 @@ LIMIT $4";
     /// one record of when the shape first appeared on this server that survives the same re-key.</para>
     /// </summary>
     public const string PgTargetBadActorDetailSql = @"
-WITH stmt_series AS (
+WITH in_window AS (
+    SELECT
+        queryid,
+        database_id,
+        user_id,
+        toplevel,
+        collection_time,
+        calls,
+        delta_calls,
+        delta_total_exec_time_ms,
+        delta_rows,
+        max_exec_time_ms,
+        shared_blks_hit,
+        shared_blks_read,
+        temp_blks_read,
+        temp_blks_written,
+        wal_bytes
+    FROM pg_statement_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   queryid = $4
+),
+/* #7909: each series' latest stored row before the window, the baseline the first in-window sample's block and WAL
+   increments are taken against: the seed PgTopQueriesSql reads, bounded to DarlingPgStatementReader.SeedLookbackSql
+   before the window start and filtered to this statement's series the window holds, never the series' whole history. */
+seed AS (
+    SELECT DISTINCT ON (p.queryid, p.database_id, p.user_id, p.toplevel)
+        p.queryid,
+        p.database_id,
+        p.user_id,
+        p.toplevel,
+        p.collection_time,
+        p.calls,
+        p.delta_calls,
+        p.delta_total_exec_time_ms,
+        p.delta_rows,
+        p.max_exec_time_ms,
+        p.shared_blks_hit,
+        p.shared_blks_read,
+        p.temp_blks_read,
+        p.temp_blks_written,
+        p.wal_bytes
+    FROM pg_statement_stats AS p
+    WHERE p.server_id = $1
+    AND   p.collection_time < $2
+    AND   p.collection_time >= $2 - " + DarlingPgStatementReader.SeedLookbackSql + @"
+    AND   p.queryid = $4
+    AND   EXISTS (SELECT 1
+                  FROM in_window AS w
+                  WHERE w.queryid = p.queryid
+                  AND   w.database_id = p.database_id
+                  AND   w.user_id = p.user_id
+                  AND   w.toplevel = p.toplevel)
+    ORDER BY p.queryid, p.database_id, p.user_id, p.toplevel, p.collection_time DESC
+),
+differenced AS (
     SELECT
         queryid,
         database_id,
@@ -111,21 +173,28 @@ WITH stmt_series AS (
         delta_total_exec_time_ms,
         delta_rows,
         max_exec_time_ms,
-        GREATEST(shared_blks_hit   - LAG(shared_blks_hit)   OVER identity, 0) AS d_shared_blks_hit,
-        GREATEST(shared_blks_read  - LAG(shared_blks_read)  OVER identity, 0) AS d_shared_blks_read,
-        GREATEST(temp_blks_read    - LAG(temp_blks_read)    OVER identity, 0) AS d_temp_blks_read,
-        GREATEST(temp_blks_written - LAG(temp_blks_written) OVER identity, 0) AS d_temp_blks_written,
-        wal_bytes                                                         AS raw_wal_bytes,
-        GREATEST(wal_bytes         - LAG(wal_bytes)         OVER identity, 0) AS d_wal_bytes
-    FROM pg_statement_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
-    AND   queryid = $4
+        /* #7909: the increment follows how the collector classified the sample's interval, as PgTopQueriesSql reads it.
+           delta_calls equal to calls is a first sighting or a reset the collector could date, credited with the entry's
+           whole accrual, so the block figure is the cumulative value. delta_calls of 0 is an interval it could not
+           measure, and the block figure is 0 beside it. Otherwise the increment is the difference from the series'
+           previous row, the seed row for the first in-window sample, clamped at 0. */
+        CASE WHEN delta_calls = calls THEN shared_blks_hit   WHEN delta_calls = 0 THEN 0 ELSE GREATEST(shared_blks_hit   - LAG(shared_blks_hit)   OVER identity, 0) END AS d_shared_blks_hit,
+        CASE WHEN delta_calls = calls THEN shared_blks_read  WHEN delta_calls = 0 THEN 0 ELSE GREATEST(shared_blks_read  - LAG(shared_blks_read)  OVER identity, 0) END AS d_shared_blks_read,
+        CASE WHEN delta_calls = calls THEN temp_blks_read    WHEN delta_calls = 0 THEN 0 ELSE GREATEST(temp_blks_read    - LAG(temp_blks_read)    OVER identity, 0) END AS d_temp_blks_read,
+        CASE WHEN delta_calls = calls THEN temp_blks_written WHEN delta_calls = 0 THEN 0 ELSE GREATEST(temp_blks_written - LAG(temp_blks_written) OVER identity, 0) END AS d_temp_blks_written,
+        wal_bytes                                                                                                                                    AS raw_wal_bytes,
+        CASE WHEN delta_calls = calls THEN wal_bytes         WHEN delta_calls = 0 THEN 0 ELSE GREATEST(wal_bytes         - LAG(wal_bytes)         OVER identity, 0) END AS d_wal_bytes
+    FROM (SELECT * FROM in_window UNION ALL SELECT * FROM seed) AS samples
     WINDOW identity AS (
         PARTITION BY queryid, database_id, user_id, toplevel
         ORDER BY collection_time
     )
+),
+/* The seed rows are the baseline for the first in-window sample and are not samples of the window. */
+stmt_series AS (
+    SELECT *
+    FROM differenced
+    WHERE collection_time >= $2
 ),
 per_database AS (
     SELECT

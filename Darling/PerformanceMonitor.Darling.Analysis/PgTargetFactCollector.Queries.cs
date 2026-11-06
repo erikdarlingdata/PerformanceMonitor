@@ -40,9 +40,11 @@ public sealed partial class PgTargetFactCollector
     /// <c>DarlingPgTrendReader.QueryDurationTrendSql</c> / <c>DarlingPgStatementReader.PgTopQueriesSql</c>
     /// discipline, copied, not reinvented. The one column that keeps no stored delta and matters to this
     /// family — <c>temp_blks_written</c>, the per-statement half of lane 6's spill evidence — is differenced
-    /// the way <c>PgTopQueriesSql</c> differences the block columns: <c>GREATEST(x − LAG(x), 0)</c> over the
-    /// FULL series identity <c>(queryid, database_id, user_id, toplevel)</c>, so a reset interval drops and
-    /// two databases' series never interleave.</para>
+    /// inside the window: <c>GREATEST(x − LAG(x), 0)</c> over the FULL series identity
+    /// <c>(queryid, database_id, user_id, toplevel)</c>, so a reset interval drops and two databases' series
+    /// never interleave. The scorer reads that figure only as a yes/no spill signal (<c>&gt; 0</c>), so it is not
+    /// seeded from the row before the window the way <c>PgTopQueriesSql</c> and the bad-actor drill-down seed
+    /// the block figures they show.</para>
     ///
     /// <para><b><c>database_id</c> is the collector's key and stays so (#3540 A11c).</b> It is the
     /// <c>datid</c> OID <c>pg_stat_statements</c> reports, and an OID is reused after <c>DROP DATABASE</c> /
