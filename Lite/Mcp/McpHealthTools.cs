@@ -1469,12 +1469,12 @@ public sealed class McpHealthTools
             /* #7877: bucketed and sized as get_wait_trend is (TrendBuckets.WaitMaxPoints), for the wait types plus the databases the window holds.
                The desktop chart's readers (GetWaitingTaskTrendAsync, GetBlockedSessionTrendAsync) are not this read: the first SUMS a bucket. */
             var budget = TrendBudget.Mcp(TrendBuckets.WaitMaxPoints);
-            var seriesCount = await dataService.CountCurrentWaitsSeriesAsync(resolved.ServerId, hours, windowEnd, filter);
+            var seriesCount = await dataService.CountCurrentWaitsSeriesAsync(resolved.ServerId, hours, asOfUtc: windowEnd, databaseNames: filter);
             var bucketError = TrendBuckets.Resolve(hours, bucket_minutes, Math.Max(1, seriesCount), budget, out var bucketMinutes);
             if (bucketError != null) return bucketError;
 
-            var waits = await dataService.GetCurrentWaitsWaitPointsAsync(resolved.ServerId, hours, windowEnd, bucketMinutes);
-            var blocked = await dataService.GetCurrentWaitsBlockedPointsAsync(resolved.ServerId, hours, windowEnd, filter, bucketMinutes);
+            var waits = await dataService.GetCurrentWaitsWaitPointsAsync(resolved.ServerId, hours, asOfUtc: windowEnd, bucketMinutes: bucketMinutes);
+            var blocked = await dataService.GetCurrentWaitsBlockedPointsAsync(resolved.ServerId, hours, asOfUtc: windowEnd, databaseNames: filter, bucketMinutes: bucketMinutes);
 
             if (waits.Count == 0 && blocked.Count == 0)
             {
