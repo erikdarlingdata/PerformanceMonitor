@@ -737,6 +737,31 @@ public class IndexCleanupAnalyzerTests
     }
 
     [Fact]
+    public void Compression_NoRows_NotCandidate_AndTheNoteSaysWhatIsLeftOut()
+    {
+        // #7706: an empty index has nothing to compress, however large it is reserved. A neighbour with rows is still offered.
+        var empty = Idx("IX_Empty", "[a]", indexId: 2, compression: "NONE", reservedMb: 512m, rows: 0, seeks: 10);
+        var full = Idx("IX_Full", "[b]", indexId: 3, compression: "NONE", reservedMb: 512m, rows: 1000, seeks: 10);
+        var opts = new IndexCleanupOptions { ServerUptimeDays = 30, MinSizeGb = 0.01m, ServerSupportsCompression = true };
+
+        var r = IndexCleanupAnalyzer.Analyze(new[] { empty, full }, opts);
+
+        Assert.Null(Rec(r, "IX_Empty"));
+        Assert.Equal(IndexCleanupResultKind.Compress, Rec(r, "IX_Full")!.ResultKind);
+        Assert.Equal(1, r.OverallRollup.CompressableIndexes);
+        Assert.Contains(r.Notes, n => n.Contains("no rows or under 0.01 GB are not offered for compression", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Compression_UnderTheSmallMinimum_NotCandidate()
+    {
+        // #7706: 5 MB is 0.0049 GB, under the 0.01 GB the Darling reader passes.
+        var tiny = Idx("IX_Tiny", "[a]", indexId: 2, compression: "NONE", reservedMb: 5m, rows: 100, seeks: 10);
+        var r = IndexCleanupAnalyzer.Analyze(new[] { tiny }, new IndexCleanupOptions { ServerUptimeDays = 30, MinSizeGb = 0.01m, ServerSupportsCompression = true });
+        Assert.Empty(r.Recommendations);
+    }
+
+    [Fact]
     public void Compression_EditionUnsupported_Excluded()
     {
         var ix = Idx("CX_T", "[a]", indexId: 1, type: "CLUSTERED", compression: "NONE", reservedMb: 10240m, seeks: 10);

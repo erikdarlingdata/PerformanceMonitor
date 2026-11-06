@@ -413,6 +413,63 @@ FROM generate_series(0, 9) AS i", ct);
         });
     }
 
+    private const long FirstOwn = 5000;
+
+    /// <summary>#7736: more of the monitor's own statements than the read has candidates, each ranking above every real query (the
+    /// longest duration), in the unbuilt part of the window, with their text (the marker) in the text table and their keys backfilled.</summary>
+    private static async Task SeedOwnRowsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var count = TopFill.FinalCandidates(Top) + 20;
+        await ExecAsync(connection, $@"
+INSERT INTO collect.query_store_interval_wide
+(collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
+ query_hash, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads,
+ avg_rowcount, query_plan_hash, runtime_stats_interval_id, interval_start_time_utc)
+SELECT TIMESTAMP '2026-01-14 03:00:00', 1, 'db0', q, q, 'Regular', TIMESTAMP '2026-01-14 02:50:00', TIMESTAMP '2026-01-14 03:00:00',
+       'own' || q, 1000, 900000000, 5, 5, 5, 5, 5, 'own', q, TIMESTAMP '2026-01-14 02:50:00'
+FROM generate_series({FirstOwn}, {FirstOwn + count - 1}) AS q;
+INSERT INTO collect.query_store_text (server_id, database_name, query_id, query_sql_text, last_seen)
+SELECT 1, 'db0', q, '(@cutoff_time datetime2(7))SELECT /* {PerformanceMonitor.Collectors.QueryStoreCollector.SelfQueryMarker} */ qsrs.plan_id', TIMESTAMP '2026-01-14 03:00:00'
+FROM generate_series({FirstOwn}, {FirstOwn + count - 1}) AS q;", ct);
+        Assert.NotNull(await QueryStoreSelfKeys.BackfillAsync(connection, ct));
+        Assert.True(await QueryStoreSelfKeys.ReadyAsync(connection, null, 30, ct));
+    }
+
+    /// <summary>
+    /// #7736: the MCP daily read (and, with no built day, the interval-table read) leaves the monitor's own statements out in
+    /// <c>ranked</c>, ahead of its candidate limit. More of them than candidates, ranking first: left to the tail they would use up every
+    /// candidate and the page would come back empty, so a real page here is the proof that the slot is filled and its columns resolve.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task MoreOfTheMonitorsOwnRowsThanCandidates_StillFillTheTablePage_OnTheDailyAndTheIntervalTableRoute(bool daily)
+    {
+        await RunLiveAsync(async (connection, source, ct) =>
+        {
+            if (!daily)
+            {
+                await ExecAsync(connection, "DELETE FROM collect.query_store_top_daily; DELETE FROM collect.query_store_top_daily_built", ct);
+            }
+
+            await SeedOwnRowsAsync(connection, ct);
+
+            /* Not vacuous: with the gate closed the own statements still take every candidate, so the tail leaves the one candidate that is not the monitor's (query 40, whose NULL durations sort first), a short page. */
+            await ExecAsync(connection, QueryStoreSelfKeys.ReopenBackfillSql, ct);
+            var gateClosed = await RouteAsync(source, End.AddHours(-168), End, null, null, null, ct);
+            Assert.NotNull(gateClosed.Table);
+            Assert.Single(gateClosed.Rows);
+            Assert.NotNull(await QueryStoreSelfKeys.BackfillAsync(connection, ct));
+
+            var read = await RouteAsync(source, End.AddHours(-168), End, null, null, null, ct);
+
+            Assert.NotNull(read.Table);
+            Assert.Equal(daily, read.DailyDaysUsed > 0);
+            Assert.Equal(Top, read.Rows.Count);
+            Assert.DoesNotContain(read.Rows, r => r.QueryId >= FirstOwn);
+        });
+    }
+
     private static async Task<System.Text.Json.JsonElement> ToolAnswerAsync(NpgsqlDataSource source, int hours, CancellationToken ct) =>
         System.Text.Json.JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(
             source, "srv1", hours, Top, null, "2026-01-14T06:00:00Z", null, null, false, 400, ct)).RootElement.Clone();
