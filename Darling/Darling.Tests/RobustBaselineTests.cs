@@ -818,18 +818,18 @@ public sealed class RobustBaselineTests
         var story = Story(gateArm);
         Assert.Contains("peaked at about 3200 ms/sec", story, StringComparison.Ordinal);
         Assert.Contains("the window's mean of 1606.3 ms/sec sat 9.5 times its usual variation above its normal level", story, StringComparison.Ordinal);
-        Assert.Contains("fires only when the mean clears its bar as well", story, StringComparison.Ordinal);
+        Assert.Contains("(the average was high across the window, so this is not one hot collection)", story, StringComparison.Ordinal);
 
         var ratioArm = Profile(withMean: true, robust: false, isNew: false);
         var ratioStory = Story(ratioArm);
         Assert.Contains("the window's mean of 1606.3 ms/sec was roughly 8× that baseline", ratioStory, StringComparison.Ordinal);
-        Assert.Contains("fires only when the mean clears its bar as well", ratioStory, StringComparison.Ordinal);
+        Assert.Contains("(the average was high across the window, so this is not one hot collection)", ratioStory, StringComparison.Ordinal);
         Assert.DoesNotContain("times its usual variation", ratioStory, StringComparison.Ordinal);
 
         var isNewArm = Profile(withMean: true, robust: false, isNew: true);
         var isNewStory = Story(isNewArm);
         Assert.Contains("(the window's mean was about 1606.3 ms/sec)", isNewStory, StringComparison.Ordinal);
-        Assert.DoesNotContain("fires only when", isNewStory, StringComparison.Ordinal); // the bar is on the peak alone here
+        Assert.DoesNotContain("the average was high across the window", isNewStory, StringComparison.Ordinal); // the bar is on the peak alone here, so no mean claim
 
         var legacy = Profile(withMean: false, robust: true, isNew: false);
         var legacyStory = Story(legacy);

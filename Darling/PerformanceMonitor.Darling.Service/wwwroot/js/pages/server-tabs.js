@@ -1742,7 +1742,9 @@ export const POSTGRES_TABS = [
         /* #7409: Amazon Aurora has its own instrument and answers "not collected" here, so the panel is not drawn there. */
         true,
         /* #7428: what Backends Seen counts differs by instrument, and the answer says which instrument fed it. */
-        { noteFrom: pgWaitSamplingBackendsNote, noteQuiet: true }
+        { noteFrom: pgWaitSamplingBackendsNote, noteQuiet: true,
+          /* #7684 item 4: a true negative says one plain sentence; the tool's long text (instrument names, the sampler's floor) is behind "More detail". */
+          emptyLine: true }
       ),
       tablePanel(
         "OS CPU by Query (pg_stat_kcache)",

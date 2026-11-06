@@ -140,9 +140,12 @@ const CAN_DECIDE =
   "An administrator sign-in with no person mapped can approve only on a route that lets one person approve alone. Every change is recorded with your name.";
 const KEY_NOTE =
   "Your sign-in key. Give it to an administrator to link this sign-in to your name. It is a hash of your sign-in, and knowing it signs nobody in.";
-const NO_KEY =
+/* #7684 item 13: the closing step is a link to the sign-out path, not a path for the reader to type. */
+const NO_KEY_HEAD =
   "This session has no sign-in key, so it cannot be linked to a person. The shared web token has none. A person signed in through the identity " +
-  "provider has one: if you are, open /auth/logout and sign in again.";
+  "provider has one: if you are, ";
+const noKeyStrip = () =>
+  el("div", { class: "strip notice", role: "status" }, [NO_KEY_HEAD, el("a", { href: "/auth/logout", text: "sign out" }), " and sign in again."]);
 
 /** The saving line a person reads while a change is in flight. */
 export const SAVING_PEOPLE = "Saving the change. The buttons are locked until it finishes.";
@@ -189,7 +192,7 @@ const field = (text, control) => el("label", { class: "tag-field" }, [el("span",
 
 /** The sign-in key panel every session sees: its own key with a copy button, or why it has none. A session that is not an administrator sees only this. */
 function keyPanel(key) {
-  if (!key) return noticeStrip(NO_KEY);
+  if (!key) return noKeyStrip();
   const copy = el("button", { class: "btn", type: "button", text: "Copy", "aria-label": "Copy your sign-in key" });
   copy.addEventListener("click", async () => {
     try {

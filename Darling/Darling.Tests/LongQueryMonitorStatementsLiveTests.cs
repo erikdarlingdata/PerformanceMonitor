@@ -58,7 +58,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
-            $"DELETE FROM long_query_completions WHERE server_id = {ServerId}; DELETE FROM servers WHERE server_id = {ServerId};", connection);
+            $"DELETE FROM long_query_completions WHERE server_id = {ServerId}; DELETE FROM config.config_collector_schedules WHERE server_id = {ServerId}; DELETE FROM servers WHERE server_id = {ServerId};", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
 
@@ -123,6 +123,77 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
             Assert.Contains("monitor's own statements are left out", def.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
 
             Assert.Single(AppsOf(await DarlingMcpLongQueryTools.GetLongQueryCompletions(postgres, ServerName, 24, 30, include_monitor: true, cancellationToken: ct)));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) => await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /* #7684 item 1, the filtered branches of the rule the deleted pin held: with the collector off (no schedule row, the shipped default),
+       a chosen database is blamed on the opt-in switch only when the store holds no long-query row for the server in the window. With
+       rows for other databases the collector is on, so the answer is about the chosen database and leaves the switch out. */
+    [Fact]
+    public async Task AFilteredEmptyWindow_NamesTheOptInSwitchOnlyWhenTheStoreHoldsNoRow()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+        try
+        {
+            await SeedAsync(cs!, Array.Empty<string?>(), ct);
+            using (var noRows = JsonDocument.Parse(await DarlingMcpLongQueryTools.GetLongQueryCompletions(postgres, ServerName, 24, 30, database_name: "OtherDb", cancellationToken: ct)))
+            {
+                Assert.Equal("empty", noRows.RootElement.GetProperty("status").GetString());
+                Assert.Contains("opt-in (default OFF)", noRows.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+            }
+
+            await SeedAsync(cs!, new string?[] { null }, ct);
+            using var otherRows = JsonDocument.Parse(await DarlingMcpLongQueryTools.GetLongQueryCompletions(postgres, ServerName, 24, 30, database_name: "OtherDb", cancellationToken: ct));
+            Assert.Equal("empty", otherRows.RootElement.GetProperty("status").GetString());
+            Assert.DoesNotContain("opt-in", otherRows.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) => await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /* #7684 item 1: the empty text points at the opt-in switch only when the schedule has the collector off. A server whose own
+       schedule row switches it on, with nothing captured in the window, was told to enable it. */
+    [Fact]
+    public async Task AnEmptyWindow_NamesTheOptInSwitchOnlyWhenTheCollectorIsOff()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+        try
+        {
+            await SeedAsync(cs!, Array.Empty<string?>(), ct);
+
+            foreach (var (enabled, expectSentence) in new[] { (true, false), (false, true) })
+            {
+                using (var connection = new NpgsqlConnection(cs))
+                {
+                    await connection.OpenAsync(ct);
+                    await DarlingMcpTestData.ExecAsync(connection, ct, $"DELETE FROM config.config_collector_schedules WHERE server_id = {ServerId}");
+                    await DarlingMcpTestData.ExecAsync(connection, ct,
+                        "INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled) VALUES ($1,'long_query_completions',1,30,$2)",
+                        ServerId, enabled);
+                }
+
+                using var doc = JsonDocument.Parse(await DarlingMcpLongQueryTools.GetLongQueryCompletions(postgres, ServerName, 24, 30, cancellationToken: ct));
+                Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+                Assert.Equal(expectSentence, doc.RootElement.GetProperty("message").GetString()!.Contains("opt-in (default OFF)", StringComparison.Ordinal));
+            }
+
             bodySucceeded = true;
         }
         finally
