@@ -76,12 +76,15 @@ public sealed partial class ViewerDataService
     /// typed <c>GetInt64</c> reader would throw against a numeric — the same typed-reader reason the
     /// tempdb/CPU trends CAST their aggregates. A caller passing <paramref name="counterCount"/> = 0 is
     /// a bug the <see cref="GetPerfmonTrendsByCountersAsync"/> guard prevents.
-    /// <para>The type column is <c>CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END</c>
-    /// (V132): a type only where the instance rows summed into the point agree on one. A pre-rung row has
+    /// <para>The type column (V132) is a type only where the instance rows summed into the point agree on one.
+    /// The per-object layer carries <c>MIN(cntr_type) AS min_type</c> and <c>MAX(cntr_type) AS max_type</c>, and
+    /// the per-collection layer reads <c>CASE WHEN MIN(min_type) = MAX(max_type) THEN MAX(max_type) END</c>
+    /// over the objects, so the equality spans every row under the counter name: an object whose own rows
+    /// disagree leaves the point NULL even beside a second object that agrees on a type. A pre-rung row has
     /// NULL and so does a mixed-type family, and both fall to the name proxy in the chart — the MIN/MAX
     /// equality is what stops a mixed sum (the wait-statistics object's instances are a rate, a gauge and
     /// an average under one counter name) from being classified by whichever instance's id happened to
-    /// sort first. Byte-identical to Lite's expression.</para>
+    /// sort first. Byte-identical to Lite's expressions.</para>
     /// <para>
     /// #4234: the per-collection SUM above, BUCKETED — the per-collection read this replaced kept every row,
     /// up to 102,012 for 12 counters over 7 days (the issue's measured number). Wraps the unchanged
@@ -126,6 +129,15 @@ public sealed partial class ViewerDataService
     /// row measured 12 counters over 7 days at 2.3-2.4s against ~800ms unwindowed, because the sort touched
     /// rows that could never be an artifact and pushed the planner off its index scan onto a parallel seq scan.
     /// Same shape as the MCP twin's <c>PerfmonTrendSql</c>.</para>
+    /// <para>The per-collection point is built per object first. Within one (counter, collection, object), an
+    /// object whose instances include <c>_Total</c> (the Databases and Locks objects) contributes that row alone,
+    /// since <c>_Total</c> already is the sum of its other instances and adding them again doubles the point; an
+    /// object with no <c>_Total</c> row contributes the sum of its instances. The per-collection layer then sums
+    /// the objects, so a counter name two objects share (Transaction Delay on Database Replica and Database
+    /// Mirroring, #7416) keeps both objects' rows whichever of them carries <c>_Total</c>. The interval is MAX
+    /// at both layers, the per-object layer carries the smallest and largest type its rows hold and the
+    /// per-collection layer compares those across the objects, and the artifact count is summed up through
+    /// them.</para>
     /// $1 server_id, $2/$3 window (naive UTC), $4.. counter names, last $ the bucket width in minutes.
     /// </summary>
     public static string PerfmonTrendsSql(int counterCount)
@@ -150,37 +162,26 @@ public sealed partial class ViewerDataService
                 SELECT
                     counter_name,
                     collection_time,
-                    CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS cntr_value,
-                    CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS delta_cntr_value,
+                    CAST(SUM(cntr_value) AS bigint) AS cntr_value,
+                    CAST(SUM(delta_cntr_value) AS bigint) AS delta_cntr_value,
                     CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds,
-                    CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
-                    COUNT(*) FILTER (WHERE is_artifact) AS artifacts
+                    CASE WHEN MIN(min_type) = MAX(max_type) THEN MAX(max_type) END AS cntr_type,
+                    SUM(artifacts) AS artifacts
                 FROM (
                     SELECT
                         counter_name,
                         collection_time,
-                        cntr_value,
-                        delta_cntr_value,
-                        sample_interval_seconds,
-                        cntr_type,
-                        false AS is_artifact
-                    FROM v_perfmon_stats
-                    WHERE server_id = $1
-                    AND   collection_time >= $2
-                    AND   collection_time <= $3
-                    AND   counter_name IN ({{nameParams}})
-                    AND   NOT ({{isWaitStatistics}})
-
-                    UNION ALL
-
-                    SELECT
-                        counter_name,
-                        collection_time,
-                        cntr_value,
-                        delta_cntr_value,
-                        sample_interval_seconds,
-                        cntr_type,
-                        {{isArtifact}} AS is_artifact
+                        object_name,
+                        CASE WHEN bool_or(instance_name = '_Total')
+                             THEN SUM(cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total')
+                             ELSE SUM(cntr_value) FILTER (WHERE NOT is_artifact) END AS cntr_value,
+                        CASE WHEN bool_or(instance_name = '_Total')
+                             THEN SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total')
+                             ELSE SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) END AS delta_cntr_value,
+                        MAX(sample_interval_seconds) AS sample_interval_seconds,
+                        MIN(cntr_type) AS min_type,
+                        MAX(cntr_type) AS max_type,
+                        COUNT(*) FILTER (WHERE is_artifact) AS artifacts
                     FROM (
                         SELECT
                             counter_name,
@@ -190,17 +191,50 @@ public sealed partial class ViewerDataService
                             delta_cntr_value,
                             sample_interval_seconds,
                             cntr_type,
-                            lag(cntr_value) OVER w AS prev_value,
-                            lead(cntr_value) OVER w AS next_value
+                            instance_name,
+                            false AS is_artifact
                         FROM v_perfmon_stats
                         WHERE server_id = $1
                         AND   collection_time >= $2
                         AND   collection_time <= $3
                         AND   counter_name IN ({{nameParams}})
-                        AND   {{isWaitStatistics}}
-                        WINDOW w AS (PARTITION BY object_name, counter_name, instance_name ORDER BY collection_time)
-                    ) AS raw
-                ) AS flagged
+                        AND   NOT ({{isWaitStatistics}})
+
+                        UNION ALL
+
+                        SELECT
+                            counter_name,
+                            collection_time,
+                            object_name,
+                            cntr_value,
+                            delta_cntr_value,
+                            sample_interval_seconds,
+                            cntr_type,
+                            instance_name,
+                            {{isArtifact}} AS is_artifact
+                        FROM (
+                            SELECT
+                                counter_name,
+                                collection_time,
+                                object_name,
+                                instance_name,
+                                cntr_value,
+                                delta_cntr_value,
+                                sample_interval_seconds,
+                                cntr_type,
+                                lag(cntr_value) OVER w AS prev_value,
+                                lead(cntr_value) OVER w AS next_value
+                            FROM v_perfmon_stats
+                            WHERE server_id = $1
+                            AND   collection_time >= $2
+                            AND   collection_time <= $3
+                            AND   counter_name IN ({{nameParams}})
+                            AND   {{isWaitStatistics}}
+                            WINDOW w AS (PARTITION BY object_name, counter_name, instance_name ORDER BY collection_time)
+                        ) AS raw
+                    ) AS flagged
+                    GROUP BY counter_name, collection_time, object_name
+                ) AS objects
                 GROUP BY counter_name, collection_time
             ) AS collections
             GROUP BY counter_name, 2

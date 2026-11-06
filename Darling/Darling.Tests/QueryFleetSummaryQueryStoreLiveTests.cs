@@ -313,16 +313,15 @@ public sealed class QueryFleetSummaryQueryStoreLiveTests
             Assert.True(await IndexExistsAsync(connection, ct), "a fresh store has the (query_hash, bucket) index");
             Assert.True(await ProbeSentinelAsync(connection, ct));
 
-            /* A store at V245: the index and the stamp are gone, and V247's column and V248's trigger function with them (the probe's newest sentinels
-               are theirs now, so a store at V245 has neither), the probe reads rung 245, and the migration puts V246, V247 and V248 back. */
-            await DarlingMcpTestData.ExecAsync(connection, ct, RungRewindArtifacts.Ladder.Single(r => r.Version == 248).DropSql!);
-            await DarlingMcpTestData.ExecAsync(connection, ct, RungRewindArtifacts.Ladder.Single(r => r.Version == 247).DropSql!);
-            await DarlingMcpTestData.ExecAsync(connection, ct, RungRewindArtifacts.Ladder.Single(r => r.Version == 246).DropSql!);
+            /* A store at V245: the index and the stamp are gone, and the artifacts of every later rung with them (the probe's newest sentinels
+               are theirs, so a store at V245 has none of them), the probe reads rung 245, and the migration puts every rung above 245 back.
+               Rewound newest first, and the expected count is the ladder's own, so a rung added later moves neither list by hand. */
+            await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 245, ct);
             await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM darling_schema_version WHERE version >= 246");
             Assert.False(await IndexExistsAsync(connection, ct));
             Assert.False(await ProbeSentinelAsync(connection, ct));
 
-            Assert.Equal(3, await PgMigrations.MigrateAsync(connection, ct));
+            Assert.Equal(PgMigrations.Scripts.Count(s => s.Version >= 246), await PgMigrations.MigrateAsync(connection, ct));
             Assert.True(await IndexExistsAsync(connection, ct), "the V245 to V246 upgrade builds the index");
             Assert.True(await ProbeSentinelAsync(connection, ct));
             await using (var stamp = new NpgsqlCommand("SELECT max(version) FROM darling_schema_version", connection))
@@ -338,12 +337,13 @@ public sealed class QueryFleetSummaryQueryStoreLiveTests
         }
     }
 
-    /// <summary>The Viewer's schema probe, the V246 sentinel: the column before the last two, now that V247's (#7639) and V248's (#7730) sentinels are the last two.</summary>
+    /// <summary>The Viewer's schema probe, the V246 sentinel: the column before the last three, now that V247's (#7639), V248's (#7730) and V249's (#7731) sentinels are the last three.</summary>
     private static async Task<bool> ProbeSentinelAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(ViewerDataService.StoreSchemaProbeSql, connection);
         await using var reader = await command.ExecuteReaderAsync(ct);
         Assert.True(await reader.ReadAsync(ct));
-        return reader.GetBoolean(reader.FieldCount - 3);
+        /* The V246 sentinel is no longer the last column: V247's (#7639), V248's (#7730) and V249's (#7731) follow it. */
+        return reader.GetBoolean(reader.FieldCount - 4);
     }
 }

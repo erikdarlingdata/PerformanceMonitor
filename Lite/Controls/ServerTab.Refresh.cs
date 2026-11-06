@@ -898,7 +898,7 @@ public partial class ServerTab : UserControl
     /// of "Last refresh" once the badges have run, so the failure costs the badges nothing.</summary>
     private async System.Threading.Tasks.Task<string?> RefreshOverviewAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
-        try
+        return await ReadOverviewAsync(() =>
         {
             /* #4296, #4766: the lanes plot the UTC instant, and the comparison is "the same wall-clock hours N days
                earlier" on the clock of the server THIS tab monitors -- read once, so the range and the refresh use
@@ -911,12 +911,32 @@ public partial class ServerTab : UserControl
                 ? null
                 : CorrelatedTimelineLanesControl.GetOverviewComparisonRange(
                     CompareToCombo.SelectedIndex, hoursBack, fromDate, toDate, DateTime.UtcNow, clock);
-            return await CorrelatedLanes.RefreshAsync(hoursBack, fromDate, toDate, clock, comparison);
+            return CorrelatedLanes.RefreshAsync(hoursBack, fromDate, toDate, clock, comparison);
+        }, ex => AppLogger.Info("ServerTab", $"[{_server.DisplayName}] RefreshOverviewAsync failed: {ex}"));
+    }
+
+    /// <summary>
+    /// #7837: runs the Overview's refresh and names a failure for the status line. The lanes control handles each lane read's
+    /// own failure and returns the lanes that did not read; an exception that leaves it anyway (the setup before the reads, the
+    /// axis and plot code after them) can leave the lanes part drawn, and returning null for it made the pass call the tab
+    /// refreshed and write "Last refresh". It returns the failure instead, so the status line shows an error. A cancellation is
+    /// not a failure: it is logged and returns null, as before. internal (not private) so it is tested without a WPF control.
+    /// </summary>
+    internal static async System.Threading.Tasks.Task<string?> ReadOverviewAsync(Func<System.Threading.Tasks.Task<string?>> refreshLanes, Action<Exception> log)
+    {
+        try
+        {
+            return await refreshLanes();
+        }
+        catch (OperationCanceledException ex)
+        {
+            log(ex);
+            return null;
         }
         catch (Exception ex)
         {
-            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] RefreshOverviewAsync failed: {ex.Message}");
-            return null;
+            log(ex);
+            return $"Overview lanes did not refresh: {ex.Message}";
         }
     }
 

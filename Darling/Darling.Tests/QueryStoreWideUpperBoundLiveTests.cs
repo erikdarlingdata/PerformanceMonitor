@@ -109,8 +109,12 @@ public sealed class QueryStoreWideUpperBoundLiveTests
         var mcpNew = DarlingDataReader.QueryStoreTopTableSql;
         var mcpOld = Cut(mcpNew, @"\s*AND\s+first_execution_time <= \$3 \+ interval '\d+ minutes'");
         var mcpTop = await TopIdsAsync(connection, mcpNew, ct);
-        Assert.Equal(ExpectedTop, mcpTop);
-        Assert.Equal(ExpectedTop.Append(11).OrderBy(q => q), await TopIdsAsync(connection, mcpOld, ct));
+        /* #7814: the MCP read places an interval by its start as the grid does (see the grid's note below), so its window holds the
+           same rows as the grid's: row 7 and not row 2, and row 11 inside the day-plus-an-hour start margin. No seeded row is past
+           that margin, so cutting the bound out changes nothing here. */
+        int[] expectedMcp = { 1, 3, 4, 5, 7, 9, 10, 11, 12, 13 };
+        Assert.Equal(expectedMcp, mcpTop);
+        Assert.Equal(expectedMcp, await TopIdsAsync(connection, mcpOld, ct));
 
         /* ---- The long-window read: only the two edge arms read the wide table; no daily row is built, so the middle
            days contribute nothing, and the edges are what the bound could clip. ---- */

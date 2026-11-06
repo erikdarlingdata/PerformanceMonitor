@@ -208,14 +208,14 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     }
 
     [Fact]
-    public void PerfmonTrendSql_SingleCounter_SumsInstances_CastsBigint()
+    public void PerfmonTrendSql_SingleCounter_OnePointPerCollection_AndTheBucketsCountTheArtifactsSetAside()
     {
         var sql = DarlingTrendReader.PerfmonTrendSql;
         Assert.Contains("FROM v_perfmon_stats", sql, StringComparison.Ordinal);
         Assert.Contains("counter_name = $2", sql, StringComparison.Ordinal);
-        /* #4476: the SUMs exclude an isolated single-sample Wait Statistics artifact row before casting. */
-        Assert.Contains("CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS bigint)", sql, StringComparison.Ordinal);       /* PG SUM(bigint) is numeric */
-        Assert.Contains("CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS bigint)", sql, StringComparison.Ordinal);
+        /* Which instance rows the value and the delta sum is pinned against a live store in
+           PerfmonTotalInstanceLiveTests, and that the SUMs exclude an isolated single-sample Wait Statistics
+           artifact (#4476) in PerfmonWaitStatisticsArtifactMcpLiveTests, not against the statement text. */
         Assert.Contains("GROUP BY collection_time", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(artifacts) AS artifacts_set_aside", DarlingTrendReader.PerfmonTrendBucketedSql, StringComparison.Ordinal);
 
