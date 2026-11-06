@@ -154,10 +154,14 @@ public sealed class StatementFilterWarmUpWaitTests
         var limit = TimeSpan.FromMilliseconds(500);
         var started = Stopwatch.GetTimestamp();
 
+        // The async wait on a running warm-up is counted once (SensitiveStatements.WarmUpWaits): the positive side of
+        // the counter the warm-up's own-calls test reads as unchanged.
+        var before = SensitiveStatements.WarmUpWaits;
         var watch = Stopwatch.StartNew();
         await SensitiveStatements.WhenWarmAsync(running.Task, started, limit);
         var afterAsync = watch.ElapsedMilliseconds;
         Assert.InRange(afterAsync, 400, 2500);
+        Assert.Equal(before + 1, SensitiveStatements.WarmUpWaits);
 
         Assert.False(SensitiveStatements.WaitForWarmUp(running.Task, started, limit));
         watch.Stop();
@@ -237,6 +241,9 @@ public sealed class StatementFilterWarmUpWaitTests
         {
             var entered = new TaskCompletionSource();
             long returnedAt = 0;
+            // The outside call's blocking wait is counted once (SensitiveStatements.WarmUpWaits): the positive side of
+            // the counter the warm-up's own-calls test reads as unchanged.
+            var before = SensitiveStatements.WarmUpWaits;
             var apply = Task.Run(() =>
             {
                 entered.SetResult();
@@ -254,6 +261,7 @@ public sealed class StatementFilterWarmUpWaitTests
             release.Set();
             var filtered = await apply.WaitAsync(TimeSpan.FromSeconds(20));
             Assert.True(returnedAt >= releasedAt, "Apply returned before the warm-up was released");
+            Assert.Equal(before + 1, SensitiveStatements.WarmUpWaits);
 
             StatementFilterAlertTests.AssertNoSecret(filtered!.AttachmentXml!);
             Assert.Contains(StatementScrubCanary.PlainStatement, filtered.AttachmentXml!, StringComparison.Ordinal);
