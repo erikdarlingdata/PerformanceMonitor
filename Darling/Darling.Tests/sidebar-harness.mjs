@@ -277,6 +277,36 @@ try {
         painted: names(list),
       };
     }
+  } else if (scenario === "parentTags") {
+    /* #7984: PROD > BULK > HOSTS and PROD > BULK > LISTENERS, DR as a second root, a parent cycle, a dangling parent,
+       and a chain far deeper than the tag rules allow. A search for a tag's name finds the servers tagged under it. */
+    const chain = Array.from({ length: 200 }, (_, i) => tag(100 + i, "level-" + (i + 1), i === 0 ? null : 99 + i, 0));
+    const forest2 = [
+      tag(10, "PROD", null, 0), tag(11, "BULK", 10, 0), tag(12, "HOSTS", 11, 0), tag(13, "LISTENERS", 11, 1), tag(14, "DR", null, 1),
+      tag(20, "CYC-A", 21, 0), tag(21, "CYC-B", 20, 0), tag(22, "ORPHAN", 99, 0), ...chain,
+    ];
+    const cards2 = [
+      card(1, "node-a", "node-a.example.test", [{ id: 12, name: "HOSTS" }]),
+      card(2, "ag-listener", "ag-listener.example.test", [{ id: 13, name: "LISTENERS" }]),
+      card(3, "standby", "standby.example.test", [{ id: 14, name: "DR" }]),
+      card(4, "looped", "looped.example.test", [{ id: 20, name: "CYC-A" }]),
+      card(5, "orphaned", "orphaned.example.test", [{ id: 22, name: "ORPHAN" }]),
+      card(6, "deep", "deep.example.test", [{ id: 299, name: "level-200" }]),
+    ];
+    const rows2 = (term, grouped) => groups.sidebarRows(cards2, forest2, { term, grouped, sortFn: byName, isFavorite: () => false, isCollapsed: () => false });
+    const flat = (term) => rows2(term, false).rows.map((r) => r.card.display_name);
+    out.bulk = flat("BULK");
+    out.prod = flat("prod");
+    out.hosts = flat("HOSTS");
+    out.dr = flat("DR");
+    out.cycle = flat("cyc-b");
+    out.dangling = flat("orphan");
+    out.deep199 = flat("level-199");
+    out.deep150 = flat("level-150");
+    out.grouped = shape(rows2("BULK", true));
+    /* The Fleet page filters its cards with cardMatches itself, handing it the forest's ancestor names. */
+    const ancestors = groups.tagAncestorNames ? groups.tagAncestorNames(forest2) : undefined;
+    out.fleetPage = cards2.filter((c) => groups.cardMatches(c, "BULK", ancestors)).map((c) => c.display_name);
   } else {
     throw new Error("unknown scenario " + scenario);
   }

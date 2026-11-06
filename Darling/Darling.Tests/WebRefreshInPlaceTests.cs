@@ -129,6 +129,17 @@ public sealed class WebRefreshInPlaceTests
     }
 
     [Fact]
+    public void WholeGridSwap_WhoseLastPanelToAnswerHidesItself_StillLands()
+    {
+        // #7934: hiding a panel changes its attributes only, so the swap's watcher must see attribute changes as well as children.
+        if (!TryRun("hiddenLastPanelSwap", out var r)) return;
+        Assert.False(r.GetProperty("swappedBeforeHide").GetBoolean());
+        Assert.Equal(1, r.GetProperty("doneRuns").GetInt32());
+        Assert.True(r.GetProperty("swapped").GetBoolean(), "the grid was not swapped in after the last panel hid itself");
+        Assert.Contains("new", r.GetProperty("textAfter").GetString());
+    }
+
+    [Fact]
     public void ServerPoll_OfAGridWithALoneHalfWidthPanel_RefreshesPanelsInPlace_AndKeepsTheSoloMark()
     {
         // #7534: span-solo sits on the live panel only, so it must not make the poll fall back to a whole-grid swap or be dropped by it.
@@ -177,5 +188,23 @@ public sealed class WebRefreshInPlaceTests
         Assert.True(r.GetProperty("keepsNewScope").GetBoolean());
         Assert.Contains("new-scope", r.GetProperty("text").GetString());
         Assert.True(r.GetProperty("swapsWhenUnchanged").GetBoolean());
+    }
+
+    [Fact]
+    public void SavedViewPoll_WhosePanelIsRefusedBusy_KeepsTheOldDataAndHoldsThePageUntilTheSecondAnswer()
+    {
+        // #7942: the Retry-After wait is neither a loading strip nor a counted read, so without this the notice replaced the data and the
+        // page was stamped updated while the panel's second read had not run.
+        if (!TryRun("busyRetryPoll", out var r)) return;
+        Assert.Contains("value-1", r.GetProperty("firstText").GetString());
+        Assert.True(r.GetProperty("samePanel").GetBoolean());
+        var duringWait = r.GetProperty("textDuringWait").GetString()!;
+        Assert.Contains("value-1", duringWait);
+        Assert.DoesNotContain("Retrying", duringWait);
+        Assert.True(r.GetProperty("inFlightDuringWait").GetBoolean(), "the Retry-After wait did not count as a read of the page");
+        Assert.Contains("value-2", r.GetProperty("textAfter").GetString());
+        Assert.False(r.GetProperty("inFlightAfter").GetBoolean());
+        Assert.Equal(0, r.GetProperty("loadingAfter").GetInt32());
+        Assert.Equal(3, r.GetProperty("readCalls").GetInt32());
     }
 }

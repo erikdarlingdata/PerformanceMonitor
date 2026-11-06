@@ -40,7 +40,7 @@ namespace Darling.Tests;
 public sealed class RdsPlanIngestorTests
 {
     private const string DeadStore =
-        "Host=127.0.0.1;Port=1;Username=none;Password=none;Database=none;Timeout=1";
+        "Host=127.0.0.1;Port=1;Username=none;Password=none;Database=none;Timeout=15";
 
     private const string Host = "solo.abc123.us-east-1.rds.amazonaws.com";
 

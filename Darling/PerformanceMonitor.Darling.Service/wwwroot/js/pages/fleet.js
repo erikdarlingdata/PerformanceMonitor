@@ -18,7 +18,7 @@ import { el, mount, readTool, apiGetFleet, loadingStrip, errorStrip, emptyStrip,
 import { frontDoorStores, healthBandClass, healthLabel, currentFirst, currentMark } from "../store-picker.js";
 import { VIZ, navigateServer, navigateServerPanel } from "../panels.js";
 import { favoritesFirst, onChange as onLocalChange } from "../viewer-local.js";
-import { buildTagGroups, cardMatches } from "../fleet-groups.js";
+import { buildTagGroups, cardMatches, tagAncestorNames } from "../fleet-groups.js";
 import { favoriteStar, alertBadge } from "../viewer-local-ui.js";
 import * as api from "../alerts-api.js";
 import { plainText } from "../plain-text.js";
@@ -422,7 +422,8 @@ function redrawCards() {
   /* The two filters compose, and the search's result is the denominator the notice reports against. With a
      term typed, "showing 4 of 57" invites reading 4 as the fleet's problem count, which it is not — the other
      53 were not judged healthy, they were never looked at. The label has to mean what the grid holds. */
-  const searched = lastCards.filter((c) => cardMatches(c, fleetFilter));
+  const ancestors = tagAncestorNames(lastTags);
+  const searched = lastCards.filter((c) => cardMatches(c, fleetFilter, ancestors));
   const matched = (attentionOnly ? searched.filter(cardNeedsAttention) : searched)
     .slice()
     .sort(favoritesFirst(SORTS[fleetSort] || SORTS.severity));

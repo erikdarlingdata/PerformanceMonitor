@@ -59,6 +59,12 @@ internal static class StaThreadProbe
     [DllImport("kernel32.dll")]
     private static extern IntPtr GetCurrentProcess();
 
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr GetModuleHandleW(string moduleName);
+
     [DllImport("ntdll.dll")]
     private static extern IntPtr RtlLookupFunctionEntry(ulong controlPc, out ulong imageBase, IntPtr historyTable);
 
@@ -176,6 +182,69 @@ internal static class StaThreadProbe
 
         return string.Join(" < ", frames.Select(Symbolize)) + (frames.Count >= MaxFrames ? " < ..." : "");
     }
+
+    /// <summary>WPF's native render engine, without its extension. Its render thread is the one the UI thread waits for in <c>MilComposition_SyncFlush</c>.</summary>
+    internal const string RenderEngine = "wpfgfx_cor3";
+
+    /// <summary>
+    /// #7600: whether WPF's render engine is loaded in the process. It loads when the first MediaContext is made (the first visual that invalidates
+    /// its layout, or the first window), and that first use starts the render thread and its rendering device. Read when a body begins, so the
+    /// guard's message can say whether the stuck body was the one that paid for the start-up.
+    /// </summary>
+    internal static bool RenderEngineLoaded() => GetModuleHandleW(RenderEngine + ".dll") != IntPtr.Zero;
+
+    /// <summary>
+    /// #7600: the native stacks, leaf first, of the threads that are inside WPF's render engine, found by the wpfgfx frames on their stacks (the
+    /// thread's start address is not a reliable sign of it). The three stalls of 11-06 had the STA thread waiting in <c>MilComposition_SyncFlush</c>
+    /// for this thread, and what the render thread itself waited on is what those reports could not say. At most three threads, twelve frames each.
+    /// The STA thread and the calling thread are skipped.
+    /// </summary>
+    internal static string RenderThreadStacks(int staThreadId)
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        {
+            return "(the render thread's stack is only read on x64)";
+        }
+
+        if (!RenderEngineLoaded())
+        {
+            return $"WPF's render engine ({RenderEngine}) is not loaded, so there is no render thread to read.";
+        }
+
+        /* Listed again here: the engine may have loaded after the module list was first taken. */
+        s_modules = ListModules();
+        var engine = s_modules.Where(m => m.ModuleName.StartsWith("wpfgfx", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var self = GetCurrentThreadId();
+        var found = new List<string>();
+        using var process = System.Diagnostics.Process.GetCurrentProcess();
+        foreach (System.Diagnostics.ProcessThread thread in process.Threads)
+        {
+            if (thread.Id == staThreadId || thread.Id == self)
+            {
+                continue;
+            }
+
+            var frames = CaptureFrames((uint)thread.Id, out _);
+            if (!frames.Any(frame => engine.Any(module => Within(frame, module))))
+            {
+                continue;
+            }
+
+            var state = thread.ThreadState == System.Diagnostics.ThreadState.Wait ? $"Wait ({thread.WaitReason})" : thread.ThreadState.ToString();
+            found.Add($"WPF's render thread (native id {thread.Id}, {state}) was at: {string.Join(" < ", frames.Take(12).Select(Symbolize))}{(frames.Count > 12 ? " < ..." : "")}.");
+            if (found.Count == 3)
+            {
+                break;
+            }
+        }
+
+        return found.Count == 0
+            ? "No other thread in the process had a wpfgfx frame on its stack at the sample, so the render thread was not inside the engine's own code then."
+            : string.Join(" ", found);
+    }
+
+    private static bool Within(ulong address, System.Diagnostics.ProcessModule module) =>
+        address >= (ulong)module.BaseAddress && address < (ulong)module.BaseAddress + (ulong)module.ModuleMemorySize;
 
     private static List<ulong> CaptureFrames(uint threadId, out string failure)
     {

@@ -168,4 +168,17 @@ public sealed class WebSizeCellsBehaviourTests
         Assert.Equal("0.5 MB", Tile("templateBox", "Available"));
         Assert.Equal("0.25 MB", Tile("templateAzure", "Available under limit"));
     }
+
+    /// <summary>#7945: the FinOps Database Sizes volume total reads as the volume free beside it does (one decimal, stepped to the unit that fits),
+    /// and the PostgreSQL Activity byte columns and the Temp bytes tile read in bytes, not as bare counts.</summary>
+    [Fact]
+    public void TheVolumeTotal_AndThePostgresByteColumns_ReadAsSizes()
+    {
+        var r = Run().GetProperty("r2");
+        string[] One(string name) => r.GetProperty(name).GetProperty("texts").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        Assert.Equal(new[] { "500.0 MB", "78.1 GB" }, One("finopsVolumeTotal"));
+        Assert.Equal(new[] { "2.0 MB" }, One("pgTempBytes"));
+        Assert.Equal(new[] { "1.5 KB" }, One("pgAvgTempFile"));
+        Assert.Equal("1.5 KB", r.GetProperty("pgTotalTempBytesStat").GetString());
+    }
 }
