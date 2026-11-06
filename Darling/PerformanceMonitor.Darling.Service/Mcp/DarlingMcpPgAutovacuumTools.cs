@@ -139,7 +139,7 @@ public sealed class DarlingMcpPgAutovacuumTools
                             + "its last vacuum, or autovacuum disabled in the captures the store holds for the window",
                         coveredClaim: ". The collector records only tables with "
                             + "pending work, so an empty result is the healthy case rather than missing data."),
-                }, McpHelpers.JsonOptions), emptyNotice), cancellationToken);
+                }, McpHelpers.JsonOptions), emptyNotice), cancellationToken, now.AddHours(-hours_back));
             }
 
             /* #3603: the cost half, read once for every table on the page and attached per table below. The

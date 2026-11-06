@@ -955,7 +955,7 @@ public sealed class DarlingMcpHealthParserTools
                     factual: $"No {eventType} events were captured for {c.DisplayName} in the last {hoursBack} hour(s). This server HAS captured them before (the newest was stored at {Stamp(seen)})",
                     coveredClaim: ", so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events."),
                 sourceObserved: true, c.LastCapturedAt, lastCapturedOfTypeAt: seen, eventsInWindow: 0,
-                hints: notice.AsHints()), cancellationToken);
+                hints: notice.AsHints()), cancellationToken, c.WindowEnd.AddHours(-hoursBack));
         }
 
         if (c.LastCapturedAt is DateTime alive)
@@ -964,7 +964,7 @@ public sealed class DarlingMcpHealthParserTools
                 "empty",
                 $"No {eventType} events have been captured for {c.DisplayName} at any time, but its system_health session IS being read — the collector last stored an event of another type at {Stamp(alive)} — so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot, and a wider window would not change it.",
                 sourceObserved: true, alive, lastCapturedOfTypeAt: null, eventsInWindow: 0,
-                hints: (await NoticeAsync(postgres, c, hoursBack, null, emptyAnswer: true, logger, cancellationToken)).AsHints()), cancellationToken);
+                hints: (await NoticeAsync(postgres, c, hoursBack, null, emptyAnswer: true, logger, cancellationToken)).AsHints()), cancellationToken, c.WindowEnd.AddHours(-hoursBack));
         }
 
         if (await DarlingEngineCapability.NotCollectedStatusAsync(postgres, c.ServerId, c.DisplayName, SystemHealthCollectorName, cancellationToken) is { } notCollected)
@@ -984,7 +984,7 @@ public sealed class DarlingMcpHealthParserTools
                 "empty",
                 $"No system_health events of ANY type have been captured for {c.DisplayName}, and that is a true negative rather than missing data: the system_health collector's newest run read the live session through its event_file target and found no events. get_collection_health shows the run history.",
                 sourceObserved: true, lastCapturedAt: null, lastCapturedOfTypeAt: null, eventsInWindow: 0,
-                hints: (await NoticeAsync(postgres, c, hoursBack, null, emptyAnswer: true, logger, cancellationToken)).AsHints()), cancellationToken);
+                hints: (await NoticeAsync(postgres, c, hoursBack, null, emptyAnswer: true, logger, cancellationToken)).AsHints()), cancellationToken, c.WindowEnd.AddHours(-hoursBack));
         }
 
         return WitnessStatus(

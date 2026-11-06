@@ -348,8 +348,8 @@ internal static class DarlingMcpWindowNotice
     /// </summary>
     internal static async Task<string> FinishEmptyAsync(
         NpgsqlDataSource postgres, int serverId, string displayName, DateTime windowEndUtc, string json, McpWindowNotice notice,
-        CancellationToken cancellationToken) =>
-        await DarlingServerOfflineNote.EmptyAsync(postgres, serverId, displayName, windowEndUtc, FinishEmpty(json, notice), cancellationToken);
+        CancellationToken cancellationToken, DateTime? windowStartUtc = null) =>
+        await DarlingServerOfflineNote.EmptyAsync(postgres, serverId, displayName, windowEndUtc, FinishEmpty(json, notice), cancellationToken, windowStartUtc);
 
     /// <summary>A test's stand-in for the coverage probe, per async flow (null: the store is asked).</summary>
     private static readonly AsyncLocal<Func<Task<DateTime?>>?> s_testOnlyProbe = new();

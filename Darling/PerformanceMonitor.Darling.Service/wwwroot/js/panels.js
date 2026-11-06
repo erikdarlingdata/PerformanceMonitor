@@ -1371,7 +1371,7 @@ function cell(row, c) {
      "n/a (log service)" for the log file of a Hyperscale database). The server wrote the sentence; the page only
      shows it in place of the bare em dash. */
   const why = raw == null && c.nullKey ? getPath(row, c.nullKey) : null;
-  const shown =
+  const shownPlain =
     why != null && why !== ""
       ? String(why)
       : typeof c.display === "function"
@@ -1387,6 +1387,9 @@ function cell(row, c) {
               : c.plain
                 ? plainText(String(raw))
                 : String(raw);
+  /* #7725: a row the server marked database_dropped (work in a database the server no longer lists) reads "<name> (dropped)" in its Database cell,
+     on every grid that has one (Top Procedures, Top Queries, and the FinOps lists). The name itself is untouched in the row. */
+  const shown = c.key === "database_name" && getPath(row, "database_dropped") === true ? shownPlain + " (dropped)" : shownPlain;
   /* #5644 W20: a column marked `localizeText` (a message or note: collection-health notes, collector errors) shows any ISO
      instant in its sentence in local time, like the grids beside it. Opt-in: query text, statement text, details and
      identifiers are data, and a literal such as '2026-01-01T00:00:00' inside them must show as written. */

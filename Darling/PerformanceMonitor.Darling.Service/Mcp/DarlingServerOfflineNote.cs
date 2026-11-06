@@ -70,23 +70,29 @@ internal static class DarlingServerOfflineNote
     /// </summary>
     internal static async Task<string?> LeadAsync(
         NpgsqlDataSource postgres, int serverId, string displayName, DateTime nowUtc, CancellationToken cancellationToken,
-        DateTime? windowEndUtc = null)
+        DateTime? windowEndUtc = null) =>
+        (await LeadWithNewestAsync(postgres, serverId, displayName, nowUtc, windowEndUtc, cancellationToken)).Lead;
+
+    /// <summary><see cref="LeadAsync"/>, with the newest SUCCESS collection it judged by (#7724), so a caller can say what was collected.</summary>
+    private static async Task<(string? Lead, DateTime? Newest)> LeadWithNewestAsync(
+        NpgsqlDataSource postgres, int serverId, string displayName, DateTime nowUtc, DateTime? windowEndUtc,
+        CancellationToken cancellationToken)
     {
         if (await ReadFreshnessAsync(postgres, serverId, cancellationToken, successOnly: true) is not var (registered, last))
         {
-            return null;
+            return (null, null);
         }
 
         /* #6155: a window that ends at or before the newest collection lies inside collected history, so an empty read there is a true
            negative even though the server has gone quiet since. Only a window that reaches into the silence is missing data. */
         if (windowEndUtc is { } windowEnd && last is { } newest && windowEnd <= newest)
         {
-            return null;
+            return (null, last);
         }
 
         /* #7590: a stored failed connect is Offline whatever the collection age, and the note says so instead of the age. */
         var (connectDownSince, lastConnectError) = await ReadConnectDownAsync(postgres, serverId, cancellationToken);
-        return LeadFor(displayName, last, registered, nowUtc, connectDownSince, lastConnectError);
+        return (LeadFor(displayName, last, registered, nowUtc, connectDownSince, lastConnectError), last);
     }
 
     /// <summary>The registry's failed-connect state for one server (#7590): since when and the last error, or nulls while the last connect succeeded
@@ -180,11 +186,13 @@ internal static class DarlingServerOfflineNote
     /// the SUCCESS-run rule, as an <c>unavailable</c> answer that opens with <see cref="LeadAsync"/>'s sentence. An offline server's
     /// empty read is not a true negative: nothing has been arriving, so "no dead tuples", "no replication slots" or "nothing held the
     /// xmin horizon" would be a healthy all-clear built from missing data. The original answer's own wording is dropped with its word.
+    /// With <paramref name="windowStartUtc"/> and a collection inside the window (#7724) the <c>unavailable</c> answer is <see cref="McpHelpers.CollectedThroughStatus"/> instead (the offline lead, then the collected-through sentence).
     /// Any other answer, any answer for a server that is not offline, and any answer whose window ends at or before the server's newest
     /// collection (it is inside collected history, so its emptiness is a real finding), comes back unchanged.
     /// </summary>
     internal static async Task<string> EmptyAsync(
-        NpgsqlDataSource postgres, int serverId, string displayName, DateTime windowEndUtc, string answer, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int serverId, string displayName, DateTime windowEndUtc, string answer, CancellationToken cancellationToken,
+        DateTime? windowStartUtc = null)
     {
         if (!IsEmptyAnswer(answer))
         {
@@ -193,8 +201,15 @@ internal static class DarlingServerOfflineNote
 
         /* The caller's window end is the read's anchor (as_of, or now for a live read), so offline is judged as of it, not as of the
            clock: an as_of read of a past window must not answer as the server is today. */
-        var lead = await LeadAsync(postgres, serverId, displayName, windowEndUtc, cancellationToken, windowEndUtc);
-        return lead is null ? answer : OfflineInsteadOfEmpty(lead);
+        var (lead, newest) = await LeadWithNewestAsync(postgres, serverId, displayName, windowEndUtc, windowEndUtc, cancellationToken);
+        if (lead is null)
+        {
+            return answer;
+        }
+
+        /* #7724: the window holds a collection (the server went quiet partway through it), so say what was collected through, not that nothing is known.
+           A caller that does not pass its window start keeps the offline sentence. */
+        return McpHelpers.OfflineEmptyAnswer(lead, newest, windowEndUtc, windowStartUtc, OfflineInsteadOfEmpty(lead)) ?? answer;
     }
 
     /// <summary>
@@ -231,9 +246,12 @@ internal static class DarlingServerOfflineNote
     /// <summary>
     /// <paramref name="answer"/>, when it is an <c>unavailable</c> envelope for an offline server, with <see cref="LeadAsync"/>'s
     /// sentence put in front of its <c>message</c>. Any other answer, and any answer for a server that is not offline, comes back unchanged.
+    /// With <paramref name="windowEndUtc"/> (#7724) offline is judged as of the read's window end, as <see cref="EmptyAsync"/> does, so an as_of
+    /// read of a window inside collected history keeps its own answer; without it, as of now.
     /// </summary>
     internal static async Task<string> WithLeadAsync(
-        string answer, NpgsqlDataSource postgres, int serverId, string displayName, CancellationToken cancellationToken)
+        string answer, NpgsqlDataSource postgres, int serverId, string displayName, CancellationToken cancellationToken,
+        DateTime? windowEndUtc = null)
     {
         JsonObject? node;
         try
@@ -252,7 +270,7 @@ internal static class DarlingServerOfflineNote
             return answer;
         }
 
-        var lead = await LeadAsync(postgres, serverId, displayName, DateTime.UtcNow, cancellationToken);
+        var lead = await LeadAsync(postgres, serverId, displayName, windowEndUtc ?? DateTime.UtcNow, cancellationToken, windowEndUtc);
         if (lead is null)
         {
             return answer;

@@ -90,6 +90,7 @@ public sealed class ViewerTopQueriesModuleLiveTests
             explain.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 50 });
             explain.Parameters.Add(ViewerDataService.DatabaseFilterParameter(null));
             explain.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 55 });
+            explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = DBNull.Value });
             var json = (string)(await explain.ExecuteScalarAsync(ct))!;
             using var document = JsonDocument.Parse(json);
             var ranked = RowsRankedFromProcedureStats(document.RootElement[0].GetProperty("Plan"));

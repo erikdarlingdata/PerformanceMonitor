@@ -149,7 +149,7 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var queryStats = await Task.Run(() => QueryTagGrid.ReadAsync(_dataService, _serverId, _queryTagChoice, tags => _dataService.GetTopQueriesByCpuAsync(_serverId, 0, 50, e.StartUtc, e.EndUtc, ServerClock, SelectedDatabaseFilter, tags: tags)));
+            var queryStats = await ReadTopQueriesAsync(0, e.StartUtc, e.EndUtc);
             _queryStatsFilterMgr!.UpdateData(queryStats);
             /* #4284: the comparison reads UTC collection_time directly, with no offset conversion of its own
                (same as the banner below), so it takes e.StartUtc/e.EndUtc -- the same pair the grid read above takes. */

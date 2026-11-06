@@ -191,9 +191,9 @@ public sealed partial class DarlingMcpFinOpsTools
                 //
                 // FinOps web parity (#4843), set B: append new FinOps entries below this line only.
                 case HighImpactView:
-                    return await ReadHighImpactAsync(postgres, resolved, hours_back, limit, cancellationToken);
+                    return await ReadHighImpactAsync(postgres, resolved, hours_back, limit, cancellationToken, logger);
                 case DatabaseResourcesView:
-                    return await ReadDatabaseResourcesAsync(postgres, resolved, hours_back, limit, cancellationToken);
+                    return await ReadDatabaseResourcesAsync(postgres, resolved, hours_back, limit, cancellationToken, logger);
                 case ApplicationConnectionsView:
                     return await ReadApplicationConnectionsAsync(postgres, resolved, hours_back, limit, cancellationToken);
                 case OptimizationView:

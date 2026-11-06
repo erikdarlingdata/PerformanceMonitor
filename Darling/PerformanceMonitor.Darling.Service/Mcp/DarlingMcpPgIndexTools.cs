@@ -150,7 +150,7 @@ public sealed class DarlingMcpPgIndexTools
                     $"No index bloat rows for {resolved.DisplayName} in the last {hours_back} "
                     + "hour(s). This collector runs DAILY, so a window shorter than a day can be empty "
                     + "on a perfectly healthy server — widen it before concluding anything. "
-                    + coverage.Message), cancellationToken);
+                    + coverage.Message), cancellationToken, windowEnd.AddHours(-hours_back));
             }
 
             coverage = await DarlingPgIndexBloatReader.GetCoverageVerdictAsync(
@@ -465,7 +465,7 @@ public sealed class DarlingMcpPgIndexTools
                    diagnosis of it - measured on a 50-target fleet where the answer was the privilege
                    filter on every one of them and no read said so. */
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd,
-                    EmptyColumnStatsReply(resolved.DisplayName, hours_back, coverage), cancellationToken);
+                    EmptyColumnStatsReply(resolved.DisplayName, hours_back, coverage), cancellationToken, windowStart);
             }
 
             coverage = await DarlingPgColumnStatsReader.GetCoverageVerdictAsync(
