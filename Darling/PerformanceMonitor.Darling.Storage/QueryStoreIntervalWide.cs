@@ -421,10 +421,15 @@ FROM batch_rows AS b;";
 
     /// <summary>
     /// This table's store-shape inputs for one server: its coverage row's <c>filled_since</c> and
-    /// <c>applied_through</c> (both NULL when there is no coverage row), whether it has pending batches, and
-    /// whether TimescaleDB's catalog views exist on this store. Same shape as
+    /// <c>applied_through</c> (both NULL when there is no coverage row), whether it has pending batches,
+    /// whether TimescaleDB's catalog views exist on this store, and the store's UTC clock. Same shape as
     /// <see cref="QueryStoreIntervalLatest.ReadSourceInputsSql"/> plus <c>applied_through</c>, which this gate's
-    /// clause 4 needs and V143's PLAN_REGRESSION gate does not (PLAN_REGRESSION's read has no upper bound).
+    /// clause 4 needs and V143's PLAN_REGRESSION gate does not (PLAN_REGRESSION's read has no upper bound), and the
+    /// clock (#7746), which clause 3 raises the whole-table floor by (<see cref="PlainTableFloorAllServersSql"/>). The purge
+    /// cuts at the service's UTC clock minus <see cref="QueryStoreIntervalPartitions.WideHorizonDays"/>
+    /// (<c>DarlingRetention.PurgeIntervalTableAsync</c>); <see cref="ResolveReadAsync"/> is static and runs in the viewer and the MCP
+    /// tools as well as the service, so it takes the store's clock, which keeps time with the service's where a server's
+    /// <c>applied_through</c> does not: that stops where the server's batches stopped while the purge keeps cutting.
     /// </summary>
     public const string ReadSourceInputsSql = @"
 SELECT
@@ -437,7 +442,8 @@ SELECT
         FROM collect.query_store_interval_wide_pending AS p
         WHERE p.server_id = $1
     ) AS has_pending,
-    to_regclass('timescaledb_information.chunks') IS NOT NULL AS has_timescale
+    to_regclass('timescaledb_information.chunks') IS NOT NULL AS has_timescale,
+    now() AT TIME ZONE 'UTC' AS store_now
 FROM (SELECT 1) AS one
 LEFT JOIN collect.query_store_interval_wide_coverage AS c
   ON c.server_id = $1;";
@@ -477,13 +483,21 @@ WHERE t.server_id = $1;";
     /// stands in for that cutoff where a server's own floor (<see cref="PlainTableFloorSql"/>) is the age of its history instead.
     /// It can sit below the cutoff: <see cref="UpsertSql"/> copies <c>first_execution_time</c> from raw with no lower bound, and raw
     /// takes it from the monitored server's clock, so one server whose clock runs behind holds rows below the horizon until the next
-    /// purge. <see cref="UseTable"/> therefore raises it to <c>applied_through - <see cref="QueryStoreIntervalPartitions.WideHorizonDays"/></c>
-    /// before taking the lower of it and the server's own floor: a server whose own floor is young, because it was enrolled a day or
-    /// two ago and its first intervals are all the table has of it, is proved by this floor where its own cannot be, and a mature server
-    /// whose own floor refuses is never let through by a skewed row. Read only when a server's own floor refused clause 3, and
-    /// tried once per check through <see cref="StoreWideInputsCache"/> (<see cref="StoreWideInputsCache.ReadTableFloorAllServersAsync"/>),
-    /// success or fault, under a savepoint inside the tag rollup's transaction. It has no server predicate, so it reads the index the
-    /// one-server statement uses from its lowest key over the whole table.
+    /// purge. <see cref="UseTable"/> therefore raises it to the store's UTC clock (<see cref="ReadSourceInputsSql"/>'s last column) minus
+    /// <see cref="QueryStoreIntervalPartitions.WideHorizonDays"/>, the purge's own cutoff, before taking the lower of it and the
+    /// server's own floor. Only a young server asks for it (<see cref="IsYoungFloor"/>): one enrolled recently enough that its own floor
+    /// sits within <see cref="YoungFloorSpan"/> of its <c>filled_since</c>, so its first intervals are all the table has of it and this
+    /// floor proves what its own cannot. A mature server's own floor is the purge's last cutoff, and it never pays for this read and is
+    /// never let through by another server's row. Read only when such a server's own floor refused clause 3, and tried once per check
+    /// through <see cref="StoreWideInputsCache"/> (<see cref="StoreWideInputsCache.ReadTableFloorAllServersAsync"/>), success or fault,
+    /// under a savepoint inside the tag rollup's transaction. It has no server predicate, so the one-server statement's
+    /// <c>(server_id, first_execution_time)</c> index cannot serve it: it reads <c>idx_query_store_interval_wide_first_exec</c> (V154),
+    /// the btree on <c>first_execution_time</c> alone, from its lowest key on each partition (the legacy table's is
+    /// <c>idx_query_store_interval_wide_first_exec_legacy</c>), one index-only probe per partition under the <c>LIMIT 1</c> the planner
+    /// turns the <c>MIN</c> into. After a retention drain the lowest entries of a row-deleted partition (the legacy table before
+    /// promotion, DEFAULT after it) are dead until vacuum removes them or a read marks them, and this statement walks them with a heap
+    /// fetch each: the one-server warm-up (#5581, <c>QueryStoreIntervalFloorWarmUp</c>) walks the other index and marks nothing here, so
+    /// the warm-up runs this statement too, once per pass. Change this statement and that warm-up follows, because it executes this constant.
     /// </summary>
     public const string PlainTableFloorAllServersSql = @"
 SELECT
@@ -903,6 +917,25 @@ FROM (
 ) AS t";
 
     /// <summary>
+    /// #7746: how far a newly enrolled server's own floor can sit from its <c>filled_since</c> while that floor is still its first interval
+    /// and not a purge edge: <see cref="IntervalSpanMargin"/> plus <see cref="PurgeEdgeMargin"/>. The coverage row is created at the
+    /// service clock just before the server's first batch is applied (<see cref="EnsureCoverageSql"/>), that batch's rows have
+    /// <c>first_execution_time &gt; collection_time - (IntervalSpanMargin + MaxCatchup)</c> (<see cref="PurgeEdgeMarginSql"/>'s argument)
+    /// and their <c>collection_time</c> is before the claim, so the first row sits within <see cref="PurgeEdgeMargin"/> below the claim,
+    /// or within a clock's skew above it, and the extra interval length is slack for the batch in flight. A mature server's own floor is
+    /// the purge's last cutoff, days above its claim.
+    /// </summary>
+    public static readonly TimeSpan YoungFloorSpan = IntervalSpanMargin + PurgeEdgeMargin;
+
+    /// <summary>#7746: whether <paramref name="tableFloor"/>, a server's own floor on the table, sits within <see cref="YoungFloorSpan"/> of
+    /// <paramref name="filledSince"/> on either side: the server was enrolled recently enough that its oldest interval is its first, and
+    /// its floor says nothing about the purge. Only such a server asks for the whole-table floor (<see cref="PlainTableFloorAllServersSql"/>)
+    /// in <see cref="ResolveReadAsync"/>, and only for such a server does <see cref="UseTable"/> take it, so a mature server never pays for
+    /// the read and is never let through by another server's row.</summary>
+    public static bool IsYoungFloor(DateTime filledSince, DateTime tableFloor) =>
+        (tableFloor >= filledSince ? tableFloor - filledSince : filledSince - tableFloor) <= YoungFloorSpan;
+
+    /// <summary>
     /// The rule: read <c>query_store_interval_wide</c> for a grid/MCP top read if and only if all five of
     /// these hold, otherwise run today's raw statement unchanged (ruling issuecomment-5836972848; review D4R
     /// items H3, M1). Two further clauses are the caller's, checked outside this pure function because each
@@ -927,13 +960,16 @@ FROM (
     /// <c>first_execution_time</c>, and a snapshot lands in raw up to <see cref="PurgeEdgeMargin"/> after its interval
     /// began. With <c>R</c> only at or above <c>H</c>, raw can still hold a snapshot of an interval that began below
     /// <c>H</c> and that the table dropped. A NULL <paramref name="tableFloor"/> means the table holds nothing
-    /// for the server, and clause 2 already refuses that case. <c>H</c> is the lower of the server's own floor and
-    /// <paramref name="tableFloorAllServers"/>, the table's floor over every server (#7746, <see cref="PlainTableFloorAllServersSql"/>):
-    /// the purge runs over the whole table with one cutoff, so a newly enrolled server, whose own floor is the age of its history
-    /// and not a purge edge, passes on the whole-table floor. That floor is first raised to <paramref name="appliedThrough"/> minus
-    /// <see cref="QueryStoreIntervalPartitions.WideHorizonDays"/>, the purge's cutoff by the service clock: a monitored clock running
-    /// behind writes rows below it that sit in the table until the next purge, and they are not a purge edge either.
-    /// NULL leaves the server's own floor alone.</item>
+    /// for the server, and clause 2 already refuses that case. For a young server (<see cref="IsYoungFloor"/>: its own floor within
+    /// <see cref="YoungFloorSpan"/> of <paramref name="filledSince"/>, so its oldest interval is its first and not a purge edge) <c>H</c>
+    /// is the lower of its own floor and <paramref name="tableFloorAllServers"/>, the table's floor over every server (#7746,
+    /// <see cref="PlainTableFloorAllServersSql"/>): the purge runs over the whole table with one cutoff, so that floor bounds what it
+    /// dropped of this server too. That floor is first raised to <paramref name="utcNow"/> minus
+    /// <see cref="QueryStoreIntervalPartitions.WideHorizonDays"/>, the purge's cutoff by its own clock: a monitored clock running
+    /// behind writes rows below it that sit in the table until the next purge, and they are not a purge edge either. The clock is the
+    /// purge's, never <paramref name="appliedThrough"/>, which stops where the server's batches stopped while the purge keeps cutting.
+    /// A mature server's own floor stands alone: another server's row cannot show that the purge dropped nothing of its own. A NULL
+    /// <paramref name="tableFloorAllServers"/> or a NULL <paramref name="utcNow"/> leaves the server's own floor alone.</item>
     /// <item>A literal <paramref name="literalWindowEnd"/> (a custom range, MCP <c>as_of</c>) must be at or
     /// after <paramref name="appliedThrough"/>. NULL means an open end (a preset), which skips this clause
     /// entirely: the WPF preset's own end is the viewer's clock, not the store's, so comparing it against
@@ -955,7 +991,8 @@ FROM (
         DateTime appliedThrough,
         DateTime? tableFloor,
         TimeSpan minWindow,
-        DateTime? tableFloorAllServers = null)
+        DateTime? tableFloorAllServers = null,
+        DateTime? utcNow = null)
     {
         if (filledSince is not DateTime f || hasPending)
         {
@@ -971,16 +1008,19 @@ FROM (
         if (tableFloor is DateTime h)
         {
             /* #7746: the server's own floor is at or above the last cutoff the purge applied, because the purge deletes oldest first on
-               first_execution_time. The whole-table floor need not be: UpsertSql copies first_execution_time from raw with no lower bound,
-               and raw takes it from the monitored server's clock, so one server whose clock runs behind holds rows below the horizon
-               until the next purge (QueryStoreIntervalPartitions reports them in DEFAULT). The horizon is the service clock minus
-               WideHorizonDays, the purge's own cutoff, and appliedThrough is that clock at this server's last applied batch, so the
-               whole-table floor is raised to appliedThrough - WideHorizonDays before the lower of the two floors is taken. A skewed row
-               can lower H to the horizon and no further, and the clamp only ever raises the whole-table floor. */
-            if (tableFloorAllServers is DateTime all)
+               first_execution_time. For a young server (IsYoungFloor) that floor is its first interval, not a purge edge, and the table's
+               floor over every server bounds the cutoff for it. The whole-table floor need not be at or above the cutoff: UpsertSql copies
+               first_execution_time from raw with no lower bound, and raw takes it from the monitored server's clock, so one server whose
+               clock runs behind holds rows below the horizon until the next purge (QueryStoreIntervalPartitions reports them in DEFAULT).
+               The purge cuts at the service's UTC clock minus WideHorizonDays (DarlingRetention.PurgeIntervalTableAsync), so the whole-table
+               floor is raised to utcNow - WideHorizonDays before the lower of the two floors is taken. appliedThrough is not that clock: it
+               stops where this server's batches stopped while the purge keeps cutting, and a horizon taken from it sits below the purge's.
+               A skewed row can lower H to the horizon and no further, and the clamp only ever raises the whole-table floor. A mature server
+               keeps its own floor: another server's row cannot show the purge dropped nothing of its own. */
+            if (tableFloorAllServers is DateTime all && utcNow is DateTime now && IsYoungFloor(f, h))
             {
                 var horizon = TimeSpan.FromDays(QueryStoreIntervalPartitions.WideHorizonDays);
-                var purgeHorizon = appliedThrough - DateTime.MinValue >= horizon ? appliedThrough - horizon : DateTime.MinValue;
+                var purgeHorizon = now - DateTime.MinValue >= horizon ? now - horizon : DateTime.MinValue;
                 if (all < purgeHorizon)
                 {
                     all = purgeHorizon;
@@ -1368,8 +1408,8 @@ FROM (
         internal Dictionary<int, DateTime?>? TableFloors;
 
         /// <summary>#7746: the table's floor over every server (<see cref="PlainTableFloorAllServersSql"/>), tried at most once per check and
-        /// only when a server's own floor refused clause 3. <see cref="TableFloorAllServersRead"/> says the statement was tried; a NULL answer
-        /// is an empty table, or a statement that faulted.</summary>
+        /// only when a young server's own floor (<see cref="IsYoungFloor"/>) refused clause 3. <see cref="TableFloorAllServersRead"/> says the
+        /// statement was tried; a NULL answer is an empty table, or a statement that faulted.</summary>
         internal DateTime? TableFloorAllServers;
 
         internal bool TableFloorAllServersRead;
@@ -1461,8 +1501,8 @@ FROM (
             }
         }
 
-        /// <summary>#7746: runs <see cref="PlainTableFloorAllServersSql"/> once per check, at the first server whose own floor refused clause 3,
-        /// and answers every later one from <see cref="TableFloorAllServers"/>. Marked tried before the statement runs, so a fault leaves
+        /// <summary>#7746: runs <see cref="PlainTableFloorAllServersSql"/> once per check, at the first young server (<see cref="IsYoungFloor"/>)
+        /// whose own floor refused clause 3, and answers every later one from <see cref="TableFloorAllServers"/>. Marked tried before the statement runs, so a fault leaves
         /// a NULL answer for every later server instead of each paying the statement, and its deadline, again. Inside an explicit
         /// transaction the statement runs under the prefetch's savepoint, so a fault undoes only itself and the transaction's snapshot and
         /// every later statement on it, the decisions after this one and the read, are untouched. The fault itself propagates: it is this
@@ -1567,6 +1607,7 @@ FROM (
             DateTime appliedThrough;
             bool hasPending;
             bool hasTimescale;
+            DateTime storeNow;
             await using (var inputs = new NpgsqlCommand(ReadSourceInputsSql, connection) { CommandTimeout = commandTimeoutSeconds })
             {
                 inputs.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
@@ -1576,6 +1617,7 @@ FROM (
                 appliedThrough = reader.IsDBNull(1) ? DateTime.MinValue : reader.GetDateTime(1);
                 hasPending = reader.GetBoolean(2);
                 hasTimescale = reader.GetBoolean(3);
+                storeNow = reader.GetDateTime(4);
             }
 
             if (filledSince is null || hasPending)
@@ -1634,14 +1676,16 @@ FROM (
             }
 
             var useTable = UseTable(filledSince, hasPending, rawFloor, windowStart, windowEnd, literalWindowEnd, appliedThrough, tableFloor, minWindow);
-            if (!useTable && tableFloor is not null)
+            if (!useTable && tableFloor is DateTime ownFloor && IsYoungFloor(filledSince.Value, ownFloor))
             {
-                /* #7746: clauses 1, 2, 4 and 5 were checked above, so this refusal is clause 3's, on the server's own floor. The table's
-                   floor over every server bounds the purge's cutoff for this server too (PlainTableFloorAllServersSql), so the clause is asked
-                   once more with it. A server it refuses again reads raw, as before. A fault here is the decision's, and reads raw; through
-                   storeWide the statement is tried once per check, and inside a transaction it runs under a savepoint. */
+                /* #7746: clauses 1, 2, 4 and 5 were checked above, so this refusal is clause 3's, on the server's own floor, and the server is
+                   young: its own floor is its first interval, not a purge edge. The table's floor over every server bounds the purge's cutoff
+                   for this server too (PlainTableFloorAllServersSql), so the clause is asked once more with it, raised to the store clock
+                   minus the horizon. A server it refuses again reads raw, as before, and a mature server never reaches this read. A fault
+                   here is the decision's, and reads raw; through storeWide the statement is tried once per check, and inside a transaction
+                   it runs under a savepoint. */
                 var allServersFloor = await ReadTableFloorAllServersAsync(connection, storeWide, commandTimeoutSeconds, logger, cancellationToken);
-                useTable = UseTable(filledSince, hasPending, rawFloor, windowStart, windowEnd, literalWindowEnd, appliedThrough, tableFloor, minWindow, allServersFloor);
+                useTable = UseTable(filledSince, hasPending, rawFloor, windowStart, windowEnd, literalWindowEnd, appliedThrough, tableFloor, minWindow, allServersFloor, storeNow);
             }
 
             var clampedStart = ClampedStart(rawFloor, windowStart);
@@ -1699,8 +1743,9 @@ FROM (
     }
 
     /// <summary>#7746: <see cref="PlainTableFloorAllServersSql"/>, through <paramref name="storeWide"/> when the caller passed one
-    /// (<see cref="StoreWideInputsCache.ReadTableFloorAllServersAsync"/>), so a fleet check tries it once for every server whose own floor
-    /// refused clause 3. A caller without a cache runs the statement as it runs the server's own floor read.</summary>
+    /// (<see cref="StoreWideInputsCache.ReadTableFloorAllServersAsync"/>), so a fleet check tries it once for every young server
+    /// (<see cref="IsYoungFloor"/>) whose own floor refused clause 3. A caller without a cache runs the statement as it runs the server's
+    /// own floor read.</summary>
     private static async Task<DateTime?> ReadTableFloorAllServersAsync(
         NpgsqlConnection connection, StoreWideInputsCache? storeWide, int commandTimeoutSeconds, ILogger? logger, CancellationToken cancellationToken)
     {
