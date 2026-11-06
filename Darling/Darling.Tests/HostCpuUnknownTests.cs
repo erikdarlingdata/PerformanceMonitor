@@ -60,29 +60,22 @@ public sealed class HostCpuUnknownTests
         Assert.Contains("SQL Server on Linux before 2025 CU1", root.GetProperty("host_cpu_note").GetString());
     }
 
-    /// <summary>#7945: the shown CPU parts add up to the shown total. Rounded on their own, 10.4 and 20.4 read 10 and 20 beside a total of 31
-    /// (30.8 rounded), and 10.6 and 20.6 read 11 and 21 beside 31. The total is the sum of the rounded parts, as the web's overview strip
-    /// computes it, so the three numbers a reader sees agree.</summary>
+    /// <summary>#7945: a bucket's total_cpu is its own stored average, never the sum of the shown parts. sql_server_cpu is averaged over every sample
+    /// in the bucket; other_process_cpu, total_cpu and idle_cpu only over the samples that carry a host figure (#7682), so on a bucket where one of
+    /// three samples lacks it (40 / 15 / 65 / 35) the parts add to 55 while the total is 65, and 65 is what reads beside idle 35.</summary>
     [Fact]
-    public void CpuUtilizationReply_ShownPartsAddUpToTheShownTotal()
+    public void CpuUtilizationReply_OnAMixedBucket_KeepsTheStoredTotalBesideItsIdle()
     {
         var start = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-        var points = new List<CpuBucketPoint>
-        {
-            new(start, 10.4, 20.4, 30.8, 69.2, 12, 40, 5),
-            new(start.AddHours(1), 10.6, 20.6, 31.2, 68.8, 12, 40, 5),
-        };
+        var points = new List<CpuBucketPoint> { new(start, 40, 15, 65, 35, 60, 80, 3) };
 
         using var doc = JsonDocument.Parse(TrendPayloads.CpuUtilization("srv", 2, points, 60, false, 500));
-        var samples = doc.RootElement.GetProperty("samples");
+        var sample = doc.RootElement.GetProperty("samples")[0];
 
-        Assert.Equal(10, samples[0].GetProperty("sql_server_cpu").GetInt32());
-        Assert.Equal(20, samples[0].GetProperty("other_process_cpu").GetInt32());
-        Assert.Equal(30, samples[0].GetProperty("total_cpu").GetInt32());
-        foreach (var sample in samples.EnumerateArray())
-        {
-            Assert.Equal(sample.GetProperty("sql_server_cpu").GetInt32() + sample.GetProperty("other_process_cpu").GetInt32(), sample.GetProperty("total_cpu").GetInt32());
-        }
+        Assert.Equal(40, sample.GetProperty("sql_server_cpu").GetInt32());
+        Assert.Equal(15, sample.GetProperty("other_process_cpu").GetInt32());
+        Assert.Equal(65, sample.GetProperty("total_cpu").GetInt32());
+        Assert.Equal(35, sample.GetProperty("idle_cpu").GetInt32());
     }
 
     [Fact]
