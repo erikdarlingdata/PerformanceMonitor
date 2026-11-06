@@ -81,6 +81,54 @@ public sealed class KnownPatternsPageBehaviourTests
         Assert.Equal(new[] { "=Every server", "7=Server A", "9=srv-b" }, r.GetProperty("serverChoices").EnumerateArray().Select(x => x.GetString()).ToArray());
     }
 
+    /// <summary>#7958: two clicks on Save before the service answers send one POST, not two; Save is disabled while the write is out, and
+    /// enabled again on a refusal so the entry can be corrected and saved.</summary>
+    [Fact]
+    public void TwoClicksOnSave_BeforeTheServiceAnswers_SendOnePost_AndTheButtonIsDisabledWhileItIsOut()
+    {
+        var r = Run("doubleSave");
+
+        Assert.Equal(1, r.GetProperty("postsBeforeReply").GetInt32());
+        Assert.True(r.GetProperty("disabledWhileOut").GetBoolean());
+        Assert.Equal(1, r.GetProperty("postsAfterReply").GetInt32());
+        Assert.True(r.GetProperty("formClosed").GetBoolean());
+        Assert.Equal(1, r.GetProperty("rows").GetInt32());
+        Assert.True(r.GetProperty("refusalShown").GetBoolean());
+        Assert.True(r.GetProperty("enabledAfterRefusal").GetBoolean());
+        Assert.Equal(2, r.GetProperty("writesInAll").GetInt32());
+    }
+
+    /// <summary>#7989: a save's answer acts on the form it was sent from. Save, Cancel, then New known pattern with its own text: when
+    /// the first save succeeds, the new form stays open as drawn with its text and its Save enabled, and the list is re-read once.</summary>
+    [Fact]
+    public void ASaveAnsweredAfterCancel_LeavesTheNewFormAsItIs_AndReReadsTheListOnce()
+    {
+        var r = Run("cancelDuringSave");
+
+        Assert.True(r.GetProperty("secondFormOpen").GetBoolean());
+        Assert.False(r.GetProperty("secondFormRedrawn").GetBoolean());
+        Assert.Equal("Second entry.", r.GetProperty("secondTyped").GetString());
+        Assert.True(r.GetProperty("secondSaveEnabled").GetBoolean());
+        Assert.Equal(1, r.GetProperty("listReads").GetInt32());
+        Assert.Equal(1, r.GetProperty("rows").GetInt32());
+        Assert.Equal(1, r.GetProperty("writes").GetInt32());
+    }
+
+    /// <summary>#7989: the same sequence with a save the service refuses. The refusal belongs to the cancelled form: the new form is not
+    /// redrawn and shows no refusal, its Save is enabled, and the list is not re-read.</summary>
+    [Fact]
+    public void ARefusedSaveAnsweredAfterCancel_DoesNotRedrawTheNewForm()
+    {
+        var r = Run("cancelDuringRefusedSave");
+
+        Assert.False(r.GetProperty("secondFormRedrawn").GetBoolean());
+        Assert.Equal("Second entry.", r.GetProperty("secondTyped").GetString());
+        Assert.False(r.GetProperty("refusalShown").GetBoolean());
+        Assert.True(r.GetProperty("secondSaveEnabled").GetBoolean());
+        Assert.Equal(0, r.GetProperty("listReads").GetInt32());
+        Assert.Equal(1, r.GetProperty("writes").GetInt32());
+    }
+
     [Fact]
     public void ABlankScope_SendsNulls_AndNoZoneOrWindowWithoutATimeOfDay()
     {
@@ -185,5 +233,15 @@ public sealed class KnownPatternsPageBehaviourTests
         Assert.Equal("The refusal.", r.GetProperty("interpret400").GetProperty("message").GetString());
         Assert.Equal("notfound", r.GetProperty("interpret404").GetString());
         Assert.Equal("readonly", r.GetProperty("interpret403").GetString());
+
+        /* A stamp without a zone suffix is UTC: the same instant as its suffixed twin in the expiry box and in the expired test. */
+        Assert.Equal(r.GetProperty("suffixedLocalInput").GetString(), r.GetProperty("bareLocalInput").GetString());
+        Assert.Matches("^2030-01-0[12]T\\d\\d:\\d\\d$", r.GetProperty("bareLocalInput").GetString());
+        Assert.Equal("", r.GetProperty("unreadableLocalInput").GetString());
+        var expired = r.GetProperty("bareExpired");
+        Assert.True(expired.GetProperty("atTheInstant").GetBoolean());
+        Assert.False(expired.GetProperty("aMinuteBefore").GetBoolean());
+        Assert.False(expired.GetProperty("noExpiry").GetBoolean());
+        Assert.False(expired.GetProperty("unreadable").GetBoolean());
     }
 }
