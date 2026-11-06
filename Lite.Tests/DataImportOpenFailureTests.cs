@@ -270,4 +270,53 @@ public sealed class DataImportOpenFailureTests : IDisposable
         Assert.Contains("duckdb said so", text, StringComparison.Ordinal);
         Assert.DoesNotContain("lock", text, StringComparison.OrdinalIgnoreCase);
     }
+
+    /// <summary>
+    /// #7824: DuckDB quotes the database file path in its messages, so a data folder named after a phrase the
+    /// classifier looks for must not change the class. The quoted path is not evidence of anything.
+    /// </summary>
+    [Theory]
+    [InlineData("IO Error: Cannot open file \"D:\\storage version backups\\monitor.duckdb\": Zugriff verweigert")]
+    [InlineData("IO Error: Cannot open file \"D:\\already open in backups\\monitor.duckdb\": Zugriff verweigert")]
+    [InlineData("IO Error: Cannot open file \"D:\\failed to deserialize\\monitor.duckdb\": Zugriff verweigert")]
+    [InlineData("IO Error: Cannot open file \"D:\\corrupt database file\\monitor.duckdb\": Zugriff verweigert")]
+    public void Classify_IgnoresAPhraseInAQuotedFolderPath(string message)
+    {
+        Assert.Equal(DataImportOpenFailure.Unknown, DataImportOpenFailureClassifier.Classify(new InvalidOperationException(message)));
+    }
+
+    [Fact]
+    public void Classify_StillReadsARealStorageMessage_WhenThePathIsQuotedToo()
+    {
+        var message = "IO Error: Trying to read a database file with version number 65, but we can only read version 64. File \"D:\\backups\\monitor.duckdb\"";
+
+        Assert.Equal(DataImportOpenFailure.StorageVersion, DataImportOpenFailureClassifier.Classify(new InvalidOperationException(message)));
+    }
+
+    [Fact]
+    public void Classify_ReadsAPhraseOnlyAnInnerExceptionCarries_InAnAggregate()
+    {
+        var aggregate = new AggregateException("open failed", new InvalidOperationException("first"), new InvalidOperationException("wrapper", new IOException("Failed to deserialize: unknown field id 7")));
+
+        Assert.Equal(DataImportOpenFailure.StorageVersion, DataImportOpenFailureClassifier.Classify(aggregate));
+    }
+
+    [Theory]
+    [InlineData("IO Error: Cannot open file \"D:\\storage version backups\\monitor.duckdb\": Zugriff verweigert", false)]
+    [InlineData("IO Error: Cannot open file \"D:\\failed to deserialize\\monitor.duckdb\": Zugriff verweigert", false)]
+    [InlineData("IO Error: Trying to read a database file with version number 65, but we can only read version 64.", true)]
+    [InlineData("Serialization Error: Failed to deserialize: unknown field id 7", true)]
+    [InlineData("IO Error: The database file was written with a newer storage version than this build reads.", true)]
+    public void IsStorageVersionError_ReadsTheMessage_NotTheQuotedPath(string message, bool expected)
+    {
+        Assert.Equal(expected, DuckDbInitializer.IsStorageVersionError(new InvalidOperationException(message)));
+        Assert.Equal(expected, DuckDbInitializer.IsStorageVersionError(new InvalidOperationException("open failed", new IOException(message))));
+    }
+
+    [Fact]
+    public void IsTransientLockError_IgnoresAPhraseInAQuotedFolderPath()
+    {
+        Assert.False(DuckDbInitializer.IsTransientLockError(new InvalidOperationException("IO Error: Cannot open file \"D:\\conflicting lock\\monitor.duckdb\": Zugriff verweigert")));
+        Assert.True(DuckDbInitializer.IsTransientLockError(new InvalidOperationException("IO Error: Could not set lock on file \"D:\\old\\monitor.duckdb\": Conflicting lock is held")));
+    }
 }
