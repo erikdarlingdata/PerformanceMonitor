@@ -207,6 +207,25 @@ public sealed class ViewerClutterAndMemoryPressureDataStartTests : IDisposable
         Assert.Equal("Showing since 2026-09-11 08:00:00", MemoryBannerFor(Answer(At(3)), Event(At(1, 8), process: 0, system: 2)));
     }
 
+    /* #7691: a server with several memory nodes stores one record per node for the same event. The chart counts an event once: one
+       notification twice at one instant or 1 ms apart in one second is one event, two notifications at one second are two. */
+    [Fact]
+    public void Memory_RecordsOfOneEventOnSeveralNodes_AreOneEventTheChartDraws()
+    {
+        var at = new DateTime(2026, 9, 12, 10, 0, 5, DateTimeKind.Utc);
+        var rows = new[]
+        {
+            new MemoryPressureEventRow(at, "RESOURCE_MEMPHYSICAL_LOW", 2, 0),
+            new MemoryPressureEventRow(at, "RESOURCE_MEMPHYSICAL_LOW", 2, 0),
+            new MemoryPressureEventRow(at.AddHours(1), "RESOURCE_MEMPHYSICAL_LOW", 2, 0),
+            new MemoryPressureEventRow(at.AddHours(1), "RESOURCE_MEM_STEADY", 2, 0),
+            new MemoryPressureEventRow(at.AddHours(2), "RESOURCE_MEMPHYSICAL_LOW", 2, 0),
+            new MemoryPressureEventRow(at.AddHours(2).AddMilliseconds(1), "RESOURCE_MEMPHYSICAL_LOW", 2, 0),
+        };
+
+        Assert.Equal(4, ViewerServerTab.PressureRowsDrawn(rows).Count);
+    }
+
     /* A probe that throws costs the note and not the chart: the step answers a hidden banner instead of throwing, and the rows the
        chart draws are unchanged by it. A failed probe names nothing, and the chart's own first event does not stand in for coverage. */
     [Fact]

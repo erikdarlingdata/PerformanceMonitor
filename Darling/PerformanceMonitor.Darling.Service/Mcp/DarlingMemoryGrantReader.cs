@@ -279,7 +279,7 @@ internal static class DarlingMemoryGrantReader
     /// <summary>One RING_BUFFER_RESOURCE_MONITOR sample — the sample time plus the SQL Server (process) and OS
     /// (system) memory-pressure indicators. Mirror of the viewer's <c>MemoryPressureEventRow</c>.</summary>
     public sealed record MemoryPressureEventRow(
-        DateTime SampleTime, string MemoryNotification, int MemoryIndicatorsProcess, int MemoryIndicatorsSystem);
+        DateTime SampleTime, string MemoryNotification, int MemoryIndicatorsProcess, int MemoryIndicatorsSystem, int? MemoryNodeId = null);
 
     /// <summary>
     /// The RING_BUFFER_RESOURCE_MONITOR memory-pressure samples over the window, newest first — the viewer's
@@ -295,7 +295,8 @@ internal static class DarlingMemoryGrantReader
             sample_time,
             memory_notification,
             memory_indicators_process,
-            memory_indicators_system
+            memory_indicators_system,
+            memory_node_id
         FROM v_memory_pressure_events
         WHERE server_id = $1
         AND   sample_time >= $2
@@ -312,8 +313,8 @@ internal static class DarlingMemoryGrantReader
     public const string MemoryPressureSummarySql = """
         SELECT
             memory_notification,
-            COUNT(*) AS events,
-            COUNT(*) FILTER (WHERE memory_indicators_process >= 2 OR memory_indicators_system >= 2) AS medium_or_worse_events
+            COUNT(DISTINCT date_trunc('second', sample_time)) AS events,
+            COUNT(DISTINCT date_trunc('second', sample_time)) FILTER (WHERE memory_indicators_process >= 2 OR memory_indicators_system >= 2) AS medium_or_worse_events
         FROM v_memory_pressure_events
         WHERE server_id = $1
         AND   sample_time >= $2
@@ -351,7 +352,8 @@ internal static class DarlingMemoryGrantReader
                     reader.GetDateTime(0),
                     reader.IsDBNull(1) ? "" : reader.GetString(1),
                     reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
-                    reader.IsDBNull(3) ? 0 : reader.GetInt32(3)));
+                    reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
+                    reader.IsDBNull(4) ? null : reader.GetInt32(4)));
             }
         }
 

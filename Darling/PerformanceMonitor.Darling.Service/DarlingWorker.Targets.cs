@@ -3731,11 +3731,20 @@ LIMIT 1";
                The PostgreSQL arm keeps its rule: ANY exception on a PostgreSQL target, not just a
                PostgresException, because a dead socket surfaces as a plain NpgsqlException with no SQLSTATE, and
                the provider already classifies that as ConnectionFatal. */
+            /* The probe's result is kept here for the log below, not read back from the memo: another run's drop may
+               have cleared the memo while this probe was in flight (#7851). */
+            LivenessProbeResult? probeResult = null;
             if (await ConnectionFaultDisposition.ShouldDropRuntimeAsync(
                     ex,
                     server.Runtime,
-                    (probed, token) => server.Liveness.ProbeAsync(
-                        probed, LivenessProbeOverride ?? ConnectionFaultDisposition.ProbeFreshConnectionAsync, DateTime.UtcNow, token),
+                    async (probed, token) =>
+                    {
+                        var result = await server.Liveness.ProbeWithResultAsync(
+                            probed, LivenessProbeOverride ?? ConnectionFaultDisposition.ProbeFreshConnectionAsync, DateTime.UtcNow, token)
+                            .ConfigureAwait(false);
+                        probeResult = result;
+                        return result.Alive;
+                    },
                     cancellationToken))
             {
                 server.Runtime = null;
@@ -3745,11 +3754,18 @@ LIMIT 1";
             }
             else if (ex is SqlException { Number: -2 })
             {
-                if (server.Liveness.Last is { Outcome: LivenessProbeOutcome.TimedOut })
+                if (probeResult is { Stale: true } stale)
+                {
+                    _logger.LogInformation(
+                        "[{Server}] {Collector} timed out, and the liveness probe {ProbeOutcome}, but another run already dropped and reset the connection — nothing more to do (#7851)",
+                        server.Config.DisplayName, collectorName,
+                        stale.Outcome == LivenessProbeOutcome.TimedOut ? "timed out" : "logged in");
+                }
+                else if (probeResult is { Outcome: LivenessProbeOutcome.TimedOut } timedOut)
                 {
                     _logger.LogInformation(
                         "[{Server}] {Collector} timed out, and so did the liveness probe's own login — keeping the connection, since open sessions answer while new logins wait; probe {Streak} of {Limit} in a row to time out (#4710)",
-                        server.Config.DisplayName, collectorName, server.Liveness.TimedOutProbesInARow, LivenessProbeMemo.MaxTimedOutProbesInARow);
+                        server.Config.DisplayName, collectorName, timedOut.TimedOutInARow, LivenessProbeMemo.MaxTimedOutProbesInARow);
                 }
                 else
                 {
