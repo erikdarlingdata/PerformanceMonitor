@@ -10,7 +10,10 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Notifications;
@@ -87,12 +90,13 @@ public sealed class WebhookChannelFailureNoticeTests
 
     private static int s_serverSequence;
 
-    /// <summary>Slack-only settings the test can change, which is how the user turns a channel off. Lite has no
-    /// routes, so <see cref="IAlertSettings.NotificationRoutes"/> is left at its empty default.</summary>
+    /// <summary>Slack-only settings the test can change, which is how the user turns a channel off. The routes are
+    /// empty unless a test sets them.</summary>
     private sealed class SlackSettings : IAlertSettings
     {
         public bool SlackWebhookEnabled { get; set; } = true;
         public string SlackWebhookUrl { get; set; } = "not-a-webhook-url";
+        public IReadOnlyList<NotificationRoute> NotificationRoutes { get; set; } = Array.Empty<NotificationRoute>();
 
         public bool SmtpEnabled => false;
         public string SmtpServer => "";
@@ -343,6 +347,117 @@ public sealed class WebhookChannelFailureNoticeTests
         Assert.Contains("_webhookAlertService.GetChannelFailureCounts()", window, StringComparison.Ordinal);
         Assert.Contains("WebhookChannelFailurePolicy.Decide(wasFailing, channel.ConsecutiveFailures, channel.Configured)", window, StringComparison.Ordinal);
         Assert.Contains("WebhookChannelTrayNotice.For(", window, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Lite shares the service, so two routes that point Slack at two destinations are counted apart here too: a
+    /// delivery to the healthy destination is not a recovery of the broken one, whose count climbs to the threshold
+    /// and is announced.
+    /// </summary>
+    [Fact]
+    public async Task TwoRoutesOnOneChannel_TheBrokenDestinationKeepsCounting_WhileTheOtherDelivers()
+    {
+        using var healthy = new OkEndpoint();
+        var settings = new SlackSettings
+        {
+            SlackWebhookEnabled = false,
+            SlackWebhookUrl = "",
+            NotificationRoutes = new[]
+            {
+                new NotificationRoute(RouteId: 1, MetricMatch: "High CPU", TeamsUrl: "", SlackUrl: "not-a-webhook-url", GenericUrl: "",
+                    PagerDutyRoutingKey: "", SmtpRecipients: "", Enabled: true),
+                new NotificationRoute(RouteId: 2, MetricMatch: "Spare Metric", TeamsUrl: "", SlackUrl: healthy.Url, GenericUrl: "",
+                    PagerDutyRoutingKey: "", SmtpRecipients: "", Enabled: true),
+            },
+        };
+        var webhooks = Service(settings);
+
+        /* A failure on route 1 and a delivery on route 2, three times over. Distinct servers, by name and id, so neither the
+           per-server cooldown a delivery stamps nor anything else stands between a destination and its next post. */
+        for (var i = 0; i < 3; i++)
+        {
+            var server = "SQL" + Interlocked.Increment(ref s_serverSequence);
+            Assert.Equal(AlertChannelOutcome.Failed, (await webhooks.TrySendWebhookAlertsAsync("High CPU", server, "97%", "90%", serverId: server)).Outcome);
+            Assert.Equal(AlertChannelOutcome.Delivered, (await webhooks.TrySendWebhookAlertsAsync("Spare Metric", server, "1", "0", serverId: server)).Outcome);
+        }
+
+        var slack = webhooks.GetChannelFailureCounts().Where(c => c.Channel == NotificationRouter.SlackChannel).ToList();
+        var broken = slack.OrderByDescending(c => c.ConsecutiveFailures).First();
+        Assert.Equal(3, broken.ConsecutiveFailures);
+        Assert.True(broken.Configured);
+        Assert.Contains(slack, c => c.ConsecutiveFailures == 0 && c.Configured);
+        Assert.Equal(WebhookChannelNotice.Failing, WebhookChannelFailurePolicy.Decide(false, broken.ConsecutiveFailures, broken.Configured));
+    }
+
+    /// <summary>A loopback endpoint that answers every post with 200, so a route pointed at it delivers.</summary>
+    private sealed class OkEndpoint : IDisposable
+    {
+        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+        private readonly CancellationTokenSource _stop = new();
+
+        public OkEndpoint()
+        {
+            _listener.Start();
+            Url = $"http://127.0.0.1:{((IPEndPoint)_listener.LocalEndpoint).Port}/hook";
+            _ = Task.Run(AcceptLoopAsync);
+        }
+
+        public string Url { get; }
+
+        private async Task AcceptLoopAsync()
+        {
+            try
+            {
+                while (!_stop.IsCancellationRequested)
+                {
+                    using var client = await _listener.AcceptTcpClientAsync(_stop.Token);
+                    using var stream = client.GetStream();
+                    await DrainRequestAsync(stream);
+                    await stream.WriteAsync(Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"), _stop.Token);
+                    await stream.FlushAsync(_stop.Token);
+                }
+            }
+            catch (OperationCanceledException) { /* Dispose */ }
+            catch (SocketException) { /* listener stopped */ }
+            catch (ObjectDisposedException) { /* listener stopped */ }
+        }
+
+        /// <summary>Reads the headers and the Content-Length body, so the whole request is accepted before the reply.</summary>
+        private static async Task DrainRequestAsync(NetworkStream stream)
+        {
+            var buffer = new byte[16 * 1024];
+            var received = new List<byte>();
+            int headerEnd;
+            while ((headerEnd = Encoding.ASCII.GetString(received.ToArray()).IndexOf("\r\n\r\n", StringComparison.Ordinal)) < 0)
+            {
+                var read = await stream.ReadAsync(buffer);
+                if (read == 0) return;
+                received.AddRange(new ArraySegment<byte>(buffer, 0, read));
+            }
+
+            var length = 0;
+            foreach (var line in Encoding.ASCII.GetString(received.ToArray(), 0, headerEnd).Split("\r\n"))
+            {
+                if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
+                {
+                    length = int.Parse(line["Content-Length:".Length..].Trim(), System.Globalization.CultureInfo.InvariantCulture);
+                }
+            }
+
+            while (received.Count - (headerEnd + 4) < length)
+            {
+                var read = await stream.ReadAsync(buffer);
+                if (read == 0) return;
+                received.AddRange(new ArraySegment<byte>(buffer, 0, read));
+            }
+        }
+
+        public void Dispose()
+        {
+            _stop.Cancel();
+            _listener.Stop();
+            _stop.Dispose();
+        }
     }
 
     private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
