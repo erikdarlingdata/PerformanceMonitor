@@ -524,6 +524,60 @@ public sealed class DarlingTlsStoreTests
     }
 
     [Fact]
+    public void Load_Subject_ServesTheValidMatch_AndNamesACertificateSkippedForAnUnreadableSan()
+    {
+        var bad = MakeWithUnreadableSan(Now.AddDays(-1), Now.AddDays(90));
+        var good = Make(Name, Now.AddDays(-30), Now.AddDays(60));
+        var all = new List<X509Certificate2> { bad, good };
+        var goodThumbprint = good.Thumbprint;
+
+        using var loaded = DarlingTlsStore.Load(
+            new WebTlsStoreConfig { Subject = Name }, "web", (_, _) => all,
+            _ => null, () => FallbackAccount, Now);
+
+        Assert.Equal(goodThumbprint, loaded.Leaf.Thumbprint);
+        Assert.NotNull(loaded.FallbackNote);
+        Assert.Equal(
+            "web.network.tls.store: 1 certificate(s) in the LocalMachine\\My store have a Subject Alternative Name that could not be read and were skipped.",
+            loaded.FallbackNote);
+    }
+
+    [Fact]
+    public void Load_Subject_AKeyFallbackAndAnUnreadableSan_ShareOneNote()
+    {
+        var all = new List<X509Certificate2>
+        {
+            MakeWithUnreadableSan(Now.AddDays(-1), Now.AddDays(90)), Make(Name, Now.AddDays(-30), Now.AddDays(60)), Make(Name, Now.AddDays(-5), Now.AddDays(90)),
+        };
+        var olderThumbprint = all[1].Thumbprint;
+        var newerThumbprint = all[2].Thumbprint;
+
+        using var loaded = DarlingTlsStore.Load(
+            new WebTlsStoreConfig { Subject = Name }, "web", (_, _) => all,
+            c => c.Thumbprint == newerThumbprint ? new CryptographicException("Keyset does not exist") : null, () => FallbackAccount, Now);
+
+        Assert.Equal(olderThumbprint, loaded.Leaf.Thumbprint);
+        Assert.Contains($"newer certificate {newerThumbprint}", loaded.FallbackNote, StringComparison.Ordinal);
+        Assert.Contains("1 certificate(s) in the LocalMachine\\My store have a Subject Alternative Name that could not be read", loaded.FallbackNote, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Load_Subject_SeveralNewerKeysFail_SaysTheOthersAlsoCouldNotBeOpened()
+    {
+        var all = new List<X509Certificate2>
+        {
+            Make(Name, Now.AddDays(-30), Now.AddDays(60)), Make(Name, Now.AddDays(-10), Now.AddDays(90)), Make(Name, Now.AddDays(-5), Now.AddDays(95)),
+        };
+        var older = all[0].Thumbprint;
+
+        using var loaded = DarlingTlsStore.Load(
+            new WebTlsStoreConfig { Subject = Name }, "web", (_, _) => all,
+            c => c.Thumbprint == older ? null : new CryptographicException("Keyset does not exist"), () => FallbackAccount, Now);
+
+        Assert.Contains(", and 1 other newer certificate(s) also could not be opened.", loaded.FallbackNote, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Load_AStoreThatCannotBeOpened_NamesTheSettingAndTheStore()
     {
         var ex = Assert.Throws<InvalidOperationException>(() => DarlingTlsStore.Load(

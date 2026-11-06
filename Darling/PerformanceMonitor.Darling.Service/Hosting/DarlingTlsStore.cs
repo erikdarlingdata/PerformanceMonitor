@@ -105,15 +105,17 @@ internal static class DarlingTlsStore
         WebTlsStoreConfig store,
         DateTimeOffset nowUtc,
         string section)
-        => SelectAll(candidates, store, nowUtc, section)[0];
+        => SelectAll(candidates, store, nowUtc, section).Ordered[0];
 
     /// <summary>
     /// <see cref="Select"/>'s whole answer (#7865): every certificate that qualifies, in the order to try them. A
     /// thumbprint names one certificate, so the list holds that one and the loader never falls back from an exact pin.
     /// A subject lists every qualifying certificate newest first, by the rule <see cref="Select"/> documents, so the
     /// loader can serve the next one when the newest one's key cannot be opened. Never empty: nothing qualifying throws.
+    /// <c>UnreadableSan</c> counts the certificates whose Subject Alternative Name could not be read and were skipped,
+    /// so the loader can tell the operator a damaged certificate sits in the store even when another one is served.
     /// </summary>
-    internal static IReadOnlyList<X509Certificate2> SelectAll(
+    internal static (IReadOnlyList<X509Certificate2> Ordered, int UnreadableSan) SelectAll(
         IReadOnlyList<X509Certificate2> candidates,
         WebTlsStoreConfig store,
         DateTimeOffset nowUtc,
@@ -127,7 +129,7 @@ internal static class DarlingTlsStore
         var setting = $"{section}.network.tls.store";
 
         return !string.IsNullOrWhiteSpace(store.Thumbprint)
-            ? [SelectByThumbprint(candidates, store.Thumbprint, where, $"{setting}.thumbprint")]
+            ? ([SelectByThumbprint(candidates, store.Thumbprint, where, $"{setting}.thumbprint")], 0)
             : SelectBySubject(candidates, store.Subject!.Trim(), nowUtc, where, setting);
     }
 
@@ -166,7 +168,7 @@ internal static class DarlingTlsStore
         return matches[0];
     }
 
-    private static List<X509Certificate2> SelectBySubject(
+    private static (IReadOnlyList<X509Certificate2> Ordered, int UnreadableSan) SelectBySubject(
         IReadOnlyList<X509Certificate2> candidates, string dnsName, DateTimeOffset nowUtc, string where, string setting)
     {
         /* #7865: the whole store is read, and it is shared. One unrelated certificate with a corrupt Subject
@@ -192,7 +194,7 @@ internal static class DarlingTlsStore
 
         var unreadableNote = unreadableSan == 0
             ? string.Empty
-            : $" {unreadableSan} certificate(s) in the {where} store have a Subject Alternative Name that could not be read and were skipped.";
+            : " " + UnreadableSanNote(unreadableSan, where);
 
         if (named.Count == 0)
         {
@@ -235,12 +237,16 @@ internal static class DarlingTlsStore
                 + $"no private key: {noKey})." + unreadableNote);
         }
 
-        return qualifying
+        var ordered = qualifying
             .OrderByDescending(c => c.NotBefore.ToUniversalTime())
             .ThenByDescending(c => c.NotAfter.ToUniversalTime())
             .ThenBy(c => c.Thumbprint, StringComparer.Ordinal)
             .ToList();
+        return (ordered, unreadableSan);
     }
+
+    private static string UnreadableSanNote(int count, string where)
+        => $"{count} certificate(s) in the {where} store have a Subject Alternative Name that could not be read and were skipped.";
 
     /// <summary>True when the certificate lists the Server Authentication extended key usage. A certificate with no
     /// extended key usage at all does not count: the selector asks for the usage by name.</summary>
@@ -364,7 +370,7 @@ internal static class DarlingTlsStore
 
             /* #7865: subject mode tries the qualifying certificates newest first and serves the first whose key
                opens. A thumbprint is one entry, so an exact pin never falls back. */
-            var ordered = SelectAll(all, store, nowUtc, section);
+            var (ordered, unreadableSan) = SelectAll(all, store, nowUtc, section);
             Exception? newestFailure = null;
             var skipped = 0;
             foreach (var candidate in ordered)
@@ -404,11 +410,19 @@ internal static class DarlingTlsStore
                     $"{section}.network.tls.store: the private key of the newer certificate {newer.Thumbprint} "
                     + $"(subject {newer.Subject}, valid from {newer.NotBefore.ToUniversalTime():u}) could not be opened by the service account "
                     + $"{account} ({newestFailure!.Message})"
-                    + (skipped > 1 ? $", and {skipped - 1} other newer certificate(s) failed the same way" : string.Empty)
+                    + (skipped > 1 ? $", and {skipped - 1} other newer certificate(s) also could not be opened" : string.Empty)
                     + $". Serving the older certificate {chosen.Thumbprint} until it expires on {chosen.NotAfter.ToUniversalTime():u}. "
                     + $"Give {account} Read on the newer key before then: {tool} > the certificate > All Tasks > Manage Private Keys, or from an elevated prompt run: "
                     + DarlingTlsKeyAccess.GrantCommandFor(newer.Thumbprint, location, name, account)
                     + ", then restart the service.";
+            }
+
+            /* A certificate skipped for an unreadable SAN used to stop the load on dev. With a valid match served it
+               would pass unnoticed, so say so through the same note the listener logs once as a Warning. */
+            if (unreadableSan > 0)
+            {
+                var unreadable = $"{section}.network.tls.store: " + UnreadableSanNote(unreadableSan, $"{location}\\{name}");
+                fallbackNote = fallbackNote is null ? unreadable : fallbackNote + " " + unreadable;
             }
 
             return new DarlingWebTls.LoadedCertificate(chosen, new X509Certificate2Collection(), fallbackNote);

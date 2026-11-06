@@ -256,12 +256,15 @@ The command follows these rules:
 
 #### When the newest certificate's key cannot be opened
 
-An Active Directory autoenrollment renewal usually brings a new key, and the service account has Read on the old key only. With `subject`, the service does not go loopback-only for that. It serves the next newest certificate that meets the same four rules and whose key it can open, and logs one Warning. The Warning names the newer certificate (thumbprint, subject and start date), says the service serves the older one until it expires, and gives the `--grant-cert-key-access` command for the newer one. Run that command and restart the service before the older certificate expires.
+A renewal usually brings a new key, and the service account has Read on the old key only. With `subject`, the service does not go loopback-only for that when the older certificate is still in the store and listed. It serves the next newest certificate that meets the same four rules and whose key it can open, and logs one Warning. The Warning names the newer certificate (thumbprint, subject and start date), says the service serves the older one until it expires, and gives the `--grant-cert-key-access` command for the newer one. Run that command and restart the service before the older certificate expires.
 
 - The service serves the older certificate only for as long as the newer key is out of reach. Restart after the grant and it picks the newest again.
 - The expiry alerts read the certificate that is served, so they warn before the older one expires.
 - When no matching certificate's key opens, nothing changes: the endpoint goes loopback-only and the Critical line names the newest certificate.
 - A `thumbprint` is an exact pin. Its key failure never falls back to another certificate.
+- The service reads the store without archived certificates, as a certificate marked archived is one Windows treats as retired. The fallback covers an older certificate that is still in the store and not archived, for example one you imported by hand, or a client that keeps the previous certificate. Windows can mark the certificate a renewal replaces as archived, and an archived certificate is not listed, so it is not a fallback. When an Active Directory autoenrollment renewal archives the old certificate, the service behaves as before: the endpoint goes loopback-only and the Critical line names the newest certificate until you run the grant command.
+- If you replaced a certificate because its key was exposed, delete the old one from the store or pin the new one by `thumbprint`. Otherwise the fallback serves the old certificate until you grant the new key.
+- A certificate whose Subject Alternative Name cannot be read is skipped. When the service serves another certificate in that case, the same Warning says how many were skipped.
 
 #### Renewal needs a restart
 
