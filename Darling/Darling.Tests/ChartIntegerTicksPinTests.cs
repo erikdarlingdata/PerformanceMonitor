@@ -26,7 +26,7 @@ namespace Darling.Tests;
 /// for the dual-axis overlay) that holds the step at 1 or more, so a small-count axis reads 0, 1, 2. Nothing else
 /// changes: without the option <c>niceScale</c> is byte-for-byte what it was. Whoever declares that a series is a
 /// count now gets it: a line panel with <c>format: "int"</c> (the Blocking Events and Deadlocks charts on the
-/// Overview and Locking tabs, the Blocked Sessions chart, and the Blocking and deadlocks starter dashboard), and a
+/// Overview and Locking tabs, and the Blocking and deadlocks starter dashboard), and a
 /// composed panel whose unit is <c>count</c>.</para>
 ///
 /// <para>This repository carries no JavaScript test runner, so these are source pins over the shipped modules (the
@@ -55,8 +55,8 @@ public sealed class ChartIntegerTicksPinTests
         Assert.Equal(2, countPanels);
         Assert.Equal(countPanels, Regex.Matches(tabs, @"(?:COUNT_SERIES|BLOCKING_REPORT_SERIES), \{\n\s+subtitle: ctx\.label,\n\s+format: ""int"",").Count);
 
-        /* The Blocked Sessions chart is a fanout spec rather than a linePanel() call. */
-        Assert.Matches(@"series: BLOCKED_SESSION_SERIES,\n\s+format: ""int"",", tabs);
+        /* The Blocked Sessions chart is no longer pinned here: since #7877 its points are bucket means, not counts, so it prints one decimal
+           and asks for no whole-number ticks (WaitingTasksBarsBehaviourTests covers what the hover prints). */
     }
 
     /// <summary>The starter dashboard that charts the same two count trends declares them whole-number too, and a

@@ -34,6 +34,7 @@ export const TREND_POINT_READS = new Set([
 /* The reads whose chart draws a level as a bucket mean: they never take a plot-sized ask. */
 export const MEAN_ONLY_READS = new Set([
   "get_cpu_utilization",
+  "get_current_waits_trend", /* per-collection averages: a level, drawn as the bucket mean */
   "get_pg_cpu_utilization",
   "get_tempdb_trend",
   "get_memory_trend",
