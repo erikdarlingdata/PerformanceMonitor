@@ -543,25 +543,36 @@ internal static class DarlingTlsKeyAccess
     {
         ArgumentNullException.ThrowIfNull(certificate);
 
-        using var rsa = certificate.GetRSAPrivateKey();
+        /* A CNG key's handle belongs to the algorithm object that produced it: disposing the object closes the handle.
+           So the target takes the object and closes it itself. */
+        var rsa = certificate.GetRSAPrivateKey();
         switch (rsa)
         {
             case RSACng cng:
-                return new CngKeyAclTarget(cng.Key);
+                return new CngKeyAclTarget(cng.Key, rsa);
 
             case RSACryptoServiceProvider capi:
-                /* Disposing a provider whose key is not persisted DELETES the key. A certificate's key is persisted, but
-                   the flag is set here so that this command can never be the thing that removes one. */
-                capi.PersistKeyInCsp = true;
-                return new CapiFileAclTarget(CapiKeyFile(capi));
+                try
+                {
+                    /* Disposing a provider whose key is not persisted DELETES the key. A certificate's key is persisted,
+                       but the flag is set here so that this command can never be the thing that removes one. */
+                    capi.PersistKeyInCsp = true;
+                    return new CapiFileAclTarget(CapiKeyFile(capi));
+                }
+                finally
+                {
+                    rsa.Dispose();
+                }
         }
 
-        using var ecdsa = certificate.GetECDsaPrivateKey();
+        rsa?.Dispose();
+        var ecdsa = certificate.GetECDsaPrivateKey();
         if (ecdsa is ECDsaCng ecCng)
         {
-            return new CngKeyAclTarget(ecCng.Key);
+            return new CngKeyAclTarget(ecCng.Key, ecdsa);
         }
 
+        ecdsa?.Dispose();
         throw new InvalidOperationException("the private key is not a CNG key or a legacy CAPI RSA key, so its access list cannot be changed here");
     }
 
@@ -591,8 +602,13 @@ internal static class DarlingTlsKeyAccess
         private const CngPropertyOptions DaclPersisted = CngPropertyOptions.Persist | (CngPropertyOptions)4;
 
         private readonly CngKey _key;
+        private readonly IDisposable _owner;
 
-        public CngKeyAclTarget(CngKey key) => _key = key;
+        public CngKeyAclTarget(CngKey key, IDisposable owner)
+        {
+            _key = key;
+            _owner = owner;
+        }
 
         public string Kind => "CNG key";
 
@@ -603,7 +619,11 @@ internal static class DarlingTlsKeyAccess
         public void WriteDescriptor(byte[] descriptor)
             => _key.SetProperty(new CngProperty(SecurityDescriptorProperty, descriptor, DaclPersisted));
 
-        public void Dispose() => _key.Dispose();
+        public void Dispose()
+        {
+            _key.Dispose();
+            _owner.Dispose();
+        }
     }
 
     [SupportedOSPlatform("windows")]
