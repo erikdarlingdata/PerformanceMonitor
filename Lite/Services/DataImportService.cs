@@ -53,7 +53,7 @@ public class DataImportService
     /// <summary>
     /// Opens the old DuckDB in read-write mode to flush hot table data to parquet. <c>Failure</c> says why the open
     /// failed, <see cref="DataImportOpenFailure.None"/> when it opened. <c>FailureMessage</c> is the user-facing text for a
-    /// failure no retry can fix, and null for a lock, which the caller handles with its retry prompt.
+    /// failure no retry can fix, and null for a lock or an unknown failure, which the caller handles with its retry prompt.
     /// </summary>
     public static (DataImportOpenFailure Failure, int TablesFlushed, string? FailureMessage) FlushOldDatabase(string folderPath)
     {
@@ -72,7 +72,7 @@ public class DataImportService
             connection?.Dispose();
             var failure = DataImportOpenFailureClassifier.Classify(ex);
             AppLogger.Warn("DataImport", $"Could not open old database for flushing ({failure}): {ex.Message}");
-            return (failure, 0, failure == DataImportOpenFailure.Locked ? null : DataImportOpenFailureClassifier.UserMessage(failure, ex));
+            return (failure, 0, failure is DataImportOpenFailure.Locked or DataImportOpenFailure.Unknown ? null : DataImportOpenFailureClassifier.UserMessage(failure, ex));
         }
 
         try
@@ -211,11 +211,12 @@ public class DataImportService
         {
             AppLogger.Info("DataImport", $"Starting import from {sourceFolder}");
 
-            /* Step 1: Flush old database. Only a lock earns the retry prompt: the previous Lite is still running, and
-               closing it frees the file. A storage-version mismatch or a corrupt file ends the import at once, naming
-               the cause, because no retry can change it. */
+            /* Step 1: Flush old database. A lock earns the retry prompt: the previous Lite is still running, and closing
+               it frees the file. A failure no known shape matches gets the same prompt, since that is the one remedy a
+               user can try. A storage-version mismatch or a corrupt file is final: the hot data cannot be read, so the
+               import goes on to the archive folder and reports the failure next to what it copied. */
             var (failure, tablesFlushed, failureMessage) = FlushOldDatabase(sourceFolder);
-            while (failure == DataImportOpenFailure.Locked)
+            while (failure is DataImportOpenFailure.Locked or DataImportOpenFailure.Unknown)
             {
                 var retry = await tryLockOldDb(sourceFolder);
                 if (!retry)
@@ -226,19 +227,31 @@ public class DataImportService
                 (failure, tablesFlushed, failureMessage) = FlushOldDatabase(sourceFolder);
             }
 
-            if (failure != DataImportOpenFailure.None)
+            if (failure == DataImportOpenFailure.None)
             {
-                AppLogger.Warn("DataImport", $"Import stopped: the old database could not be opened ({failure})");
-                return new ImportResult { Success = false, ErrorMessage = failureMessage };
+                AppLogger.Info("DataImport", $"Flushed {tablesFlushed} tables from old database");
             }
-
-            AppLogger.Info("DataImport", $"Flushed {tablesFlushed} tables from old database");
+            else
+            {
+                AppLogger.Warn("DataImport", $"The old database could not be opened ({failure}); importing the archive folder only");
+            }
 
             /* Step 2: Copy parquet files */
             var filesCopied = CopyParquetFiles(sourceFolder);
 
             /* Step 3: Refresh archive views */
             await RefreshViewsAsync();
+
+            if (failure != DataImportOpenFailure.None)
+            {
+                AppLogger.Warn("DataImport", $"Import finished without the old hot data: {filesCopied} files imported");
+                return new ImportResult
+                {
+                    Success = false,
+                    FilesImported = filesCopied,
+                    ErrorMessage = DataImportOpenFailureClassifier.WithArchiveOutcome(failureMessage!, filesCopied)
+                };
+            }
 
             AppLogger.Info("DataImport", $"Import complete: {tablesFlushed} tables flushed, {filesCopied} files imported");
 

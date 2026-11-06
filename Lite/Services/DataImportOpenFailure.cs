@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.ComponentModel;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -24,23 +25,48 @@ public enum DataImportOpenFailure
     /// <summary>The file was written by a DuckDB storage version this build does not read. Retrying cannot fix this.</summary>
     StorageVersion,
 
-    /// <summary>Any other open failure, such as a corrupt or truncated file. Retrying cannot fix this.</summary>
-    Other,
+    /// <summary>The file is not a readable DuckDB database: bad header bytes or a failed block checksum. Retrying cannot fix this.</summary>
+    Corrupt,
+
+    /// <summary>A failure none of the known shapes match. The import treats it as a lock and offers the retry prompt, the one remedy a user can try.</summary>
+    Unknown,
 }
 
 /// <summary>
-/// Tells a real file lock apart from the open failures no retry can fix, so Import Data asks the user to close the
-/// previous application only when that is the cause. Matches on the exception's full text, inner exceptions included,
-/// with the phrases DuckDB uses for each cause: a lock reports "Could not set lock on file" or "Conflicting lock", and a
-/// storage mismatch reports "Trying to read a database file with version number" or "Failed to deserialize". Pure, so a
-/// test drives it with the message shapes alone.
+/// Sorts a failure to open the old store into the one cause a retry can fix (a lock) and the two known causes no retry
+/// can fix, so Import Data asks the user to close the previous application only when that is the remedy.
+/// <para>A lock is read from the whole exception chain, in three forms. DuckDB's own text: "Could not set lock on file"
+/// and "Conflicting lock" (Unix), "being used by another process" (English Windows) and "File is already open in", the
+/// suffix DuckDB appends on Windows when it can name the holder, which survives an OS message in another language. A
+/// Win32 sharing-violation (32) or lock-violation (33) code carried as an exception HResult. The same code on an inner
+/// <see cref="Win32Exception"/>.</para>
+/// <para>A storage mismatch reports "Trying to read a database file with version number" or "Failed to deserialize".
+/// Corruption reports "not a valid DuckDB database file" or "Corrupt database file". Anything else is
+/// <see cref="DataImportOpenFailure.Unknown"/>. Pure, so a test drives it with the exception shapes alone.</para>
 /// </summary>
 public static class DataImportOpenFailureClassifier
 {
+    private const int SharingViolation = 32;
+    private const int LockViolation = 33;
+
     public static DataImportOpenFailure Classify(Exception ex)
     {
+        for (var e = ex; e != null; e = e.InnerException)
+        {
+            if (e is Win32Exception win32 && IsSharingOrLockViolation(win32.NativeErrorCode))
+            {
+                return DataImportOpenFailure.Locked;
+            }
+
+            if (IsWin32HResult(e.HResult) && IsSharingOrLockViolation(e.HResult & 0xFFFF))
+            {
+                return DataImportOpenFailure.Locked;
+            }
+        }
+
         var text = ex.ToString().ToLowerInvariant();
-        if (text.Contains("conflicting lock") || text.Contains("could not set lock") || text.Contains("being used by another process"))
+        if (text.Contains("conflicting lock") || text.Contains("could not set lock")
+            || text.Contains("being used by another process") || text.Contains("already open in"))
         {
             return DataImportOpenFailure.Locked;
         }
@@ -50,8 +76,18 @@ public static class DataImportOpenFailureClassifier
             return DataImportOpenFailure.StorageVersion;
         }
 
-        return DataImportOpenFailure.Other;
+        if (text.Contains("not a valid duckdb database file") || text.Contains("corrupt database file"))
+        {
+            return DataImportOpenFailure.Corrupt;
+        }
+
+        return DataImportOpenFailure.Unknown;
     }
+
+    /// <summary>An HResult of the form 0x8007xxxx carries a Win32 error code in its low 16 bits.</summary>
+    private static bool IsWin32HResult(int hresult) => (hresult & unchecked((int)0xFFFF0000)) == unchecked((int)0x80070000);
+
+    private static bool IsSharingOrLockViolation(int code) => code is SharingViolation or LockViolation;
 
     /// <summary>
     /// The message the import reports for a failure no retry can fix. It names the cause and carries DuckDB's own text.
@@ -61,6 +97,14 @@ public static class DataImportOpenFailureClassifier
         DataImportOpenFailure.StorageVersion =>
             "The previous install's database was written by a DuckDB storage version this build does not read, so the data it has not yet archived cannot be imported. Closing the previous application will not help.\n\n" + ex.Message,
         _ =>
-            "The previous install's database could not be opened. The file may be corrupt or incomplete, so the data it has not yet archived cannot be imported. Closing the previous application will not help.\n\n" + ex.Message,
+            "The previous install's database could not be opened. The file is corrupt or incomplete, so the data it has not yet archived cannot be imported. Closing the previous application will not help.\n\n" + ex.Message,
     };
+
+    /// <summary>
+    /// Appends what the import still did when the hot database could not be read: the parquet files copied from the
+    /// previous install's archive folder, or that there were none.
+    /// </summary>
+    public static string WithArchiveOutcome(string failureMessage, int filesCopied) => filesCopied == 0
+        ? failureMessage + "\n\nNo parquet files were found in the previous install's archive folder, so nothing was imported."
+        : failureMessage + $"\n\nThe previous install's archive folder was still imported: {filesCopied} parquet file(s) copied and the views refreshed. Only the data it had not yet archived is missing.";
 }

@@ -19,9 +19,10 @@ namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
 /// Import Data opens the previous install's <c>monitor.duckdb</c> to flush its hot tables. A file another process holds
-/// is a lock, and closing the previous Lite and retrying fixes it, so the import asks. Any other open failure, a store
-/// written by a newer DuckDB storage version or a corrupt file, cannot be fixed by retrying, so the import must stop
-/// and name the real cause instead of asking the user to close an application that is not running.
+/// is a lock, and closing the previous Lite and retrying fixes it, so the import asks. The two known failures no retry
+/// can fix, a store written by a DuckDB storage version this build does not read and a corrupt file, must not get that
+/// prompt: the import names the real cause, still imports the old archive folder, and says what it copied. A failure
+/// no known shape matches gets the prompt, the one remedy a user can try.
 /// </summary>
 public sealed class DataImportOpenFailureTests : IDisposable
 {
@@ -78,8 +79,9 @@ public sealed class DataImportOpenFailureTests : IDisposable
     [InlineData("The process cannot access the file because it is being used by another process.", DataImportOpenFailure.Locked)]
     [InlineData("IO Error: Trying to read a database file with version number 65, but we can only read version 64.", DataImportOpenFailure.StorageVersion)]
     [InlineData("Serialization Error: Failed to deserialize: unknown field id 7", DataImportOpenFailure.StorageVersion)]
-    [InlineData("IO Error: The file \"C:/old/monitor.duckdb\" exists, but it is not a valid DuckDB database file!", DataImportOpenFailure.Other)]
-    [InlineData("IO Error: Checksum mismatch in block 12", DataImportOpenFailure.Other)]
+    [InlineData("IO Error: The file \"C:/old/monitor.duckdb\" exists, but it is not a valid DuckDB database file!", DataImportOpenFailure.Corrupt)]
+    [InlineData("IO Error: Corrupt database file: computed checksum 1a2b does not match stored checksum 3c4d in block at location 262144", DataImportOpenFailure.Corrupt)]
+    [InlineData("IO Error: Cannot open file \"C:/old/monitor.duckdb\": Zugriff verweigert", DataImportOpenFailure.Unknown)]
     public void Classify_TellsALockApartFromTheFailuresNoRetryCanFix(string message, DataImportOpenFailure expected)
     {
         Assert.Equal(expected, DataImportOpenFailureClassifier.Classify(new InvalidOperationException(message)));
@@ -164,7 +166,7 @@ public sealed class DataImportOpenFailureTests : IDisposable
 
     [Theory]
     [InlineData(DataImportOpenFailure.StorageVersion, "storage version")]
-    [InlineData(DataImportOpenFailure.Other, "corrupt")]
+    [InlineData(DataImportOpenFailure.Corrupt, "corrupt")]
     public void UserMessage_NamesTheCause_CarriesDuckDbsText_AndDoesNotBlameALock(DataImportOpenFailure failure, string cause)
     {
         var text = DataImportOpenFailureClassifier.UserMessage(failure, new InvalidOperationException("duckdb said so"));
