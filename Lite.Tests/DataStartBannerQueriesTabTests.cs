@@ -566,6 +566,27 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
         Assert.Equal(1d, result.Intensities[0, 6]);
     }
 
+    /// <summary>
+    /// #7881: a cell counts the distinct queries in it, not the sample rows. One query_hash collected five times
+    /// in consecutive minutes of one 5-minute bin is ONE query (the old per-row count read 5, a red cell).
+    /// </summary>
+    [Fact]
+    public async Task QueryHeatmap_OneQueryCollectedFiveTimesInACell_CountsAsOneQuery()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        var start = new DateTime(2026, 6, 1, 10, 0, 0, DateTimeKind.Unspecified);
+        var end = start.AddHours(1);
+        for (var minute = 30; minute < 35; minute++)
+        {
+            await SeedQueryStatsAsync(start.AddMinutes(minute));
+        }
+
+        var result = await Service().GetQueryHeatmapAsync(ServerId, HeatmapMetric.Duration, hoursBack: 24, fromDate: start, toDate: end);
+
+        Assert.Equal(1d, result.Intensities[0, 6]);
+        Assert.Equal(1d, result.Intensities.Cast<double>().Max());
+    }
+
     /// <summary>A recommendation re-captured every <paramref name="everyMinutes"/> minutes, from <paramref name="firstUtc"/> to <paramref name="lastUtc"/>.</summary>
     private Task SeedPlanCorrectionEveryAsync(DateTime firstUtc, DateTime lastUtc, int everyMinutes) =>
         SeedPlanCorrectionEverySecondsAsync(firstUtc, lastUtc, everyMinutes * 60);
