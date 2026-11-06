@@ -1521,8 +1521,9 @@ public partial class DuckDbInitializer : IDisposable
        and the move is File.Move. */
     internal Action<string, string>? MoveFileForTests { get; set; }
 
-    /// <summary>#7812: set when a rebuild left the new database without the old data, null otherwise. The window shows
-    /// it once after the database is open.</summary>
+    /// <summary>#7812: set when a rebuild left the new database without all of the old data, null otherwise. The window
+    /// shows it once after the database is open at start. A database reset that reaches the same rebuild sets it too, but
+    /// nothing shows it then: it is a once-at-start notice.</summary>
     internal DatabaseRebuildOutcome? RebuildOutcome { get; private set; }
 
     private void MoveFile(string source, string destination)
@@ -1648,8 +1649,9 @@ public partial class DuckDbInitializer : IDisposable
             catch (Exception ex)
             {
                 /* Import may fail if schema changed between versions — that's okay,
-                   the normal initialization will create fresh tables */
-                _logger?.LogWarning(ex, "Could not import Parquet data — starting with fresh tables. " +
+                   the normal initialization will create any missing tables. IMPORT DATABASE is not one
+                   transaction, so a failure partway can leave some tables loaded. */
+                _logger?.LogWarning(ex, "Could not import Parquet data — starting without all of the old data (none or only part of it was loaded). " +
                     "Parquet files preserved at {ExportDir} for manual recovery; the old database file is preserved at {BackupPath}.",
                     exportDir, backupPath);
                 RebuildOutcome = new DatabaseRebuildOutcome(backupPath, exportDir);

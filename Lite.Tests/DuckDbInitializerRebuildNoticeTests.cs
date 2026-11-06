@@ -104,11 +104,27 @@ public sealed class DuckDbInitializerRebuildNoticeTests : IDisposable
     {
         var withoutFolder = new DatabaseRebuildOutcome(@"C:\data\lite.duckdb.backup_1", null).Describe();
         Assert.Contains(@"C:\data\lite.duckdb.backup_1", withoutFolder);
-        Assert.Contains("started with an empty one", withoutFolder);
+        Assert.Contains("started without all of its old data", withoutFolder);
+        Assert.DoesNotContain("empty", withoutFolder);
         Assert.DoesNotContain("Parquet", withoutFolder);
 
         var withFolder = new DatabaseRebuildOutcome(@"C:\data\lite.duckdb.backup_1", @"C:\data\archive\upgrade_1").Describe();
         Assert.Contains(@"C:\data\lite.duckdb.backup_1", withFolder);
         Assert.Contains(@"C:\data\archive\upgrade_1", withFolder);
+    }
+
+    [Fact]
+    public void StartupFailureMessage_AddsTheBackupPath_OnlyWhenARebuildHappened()
+    {
+        var plain = DatabaseRebuildOutcome.StartupFailureMessage("the file is locked", @"C:\logs\lite.log", null);
+        Assert.Contains("the file is locked", plain);
+        Assert.Contains(@"C:\logs\lite.log", plain);
+        Assert.DoesNotContain("backup_", plain);
+
+        var rebuilt = DatabaseRebuildOutcome.StartupFailureMessage(
+            "the file is locked", @"C:\logs\lite.log", new DatabaseRebuildOutcome(@"C:\data\lite.duckdb.backup_1", @"C:\data\archive\upgrade_1"));
+        Assert.Contains("the file is locked", rebuilt);
+        Assert.Contains(@"C:\data\lite.duckdb.backup_1", rebuilt);
+        Assert.Contains(@"C:\data\archive\upgrade_1", rebuilt);
     }
 }

@@ -316,6 +316,7 @@ public partial class MainWindow : Window
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
+        var rebuildNoticeQueued = false;
         try
         {
             StatusText.Text = "Initializing database...";
@@ -326,9 +327,10 @@ public partial class MainWindow : Window
             /* #7812: a rebuild that left the new database without the old data says where the old file went. */
             if (_databaseInitializer.RebuildOutcome is { } rebuild)
             {
+                rebuildNoticeQueued = true;
                 var notice = rebuild.Describe();
                 _ = Dispatcher.BeginInvoke(() =>
-                    MessageBox.Show(this, notice, "Lite started with an empty database", MessageBoxButton.OK, MessageBoxImage.Warning));
+                    MessageBox.Show(this, notice, DatabaseRebuildOutcome.NoticeTitle, MessageBoxButton.OK, MessageBoxImage.Warning));
             }
 
             /* The first run of the per-user record of confirmed server settings, before anything below connects: a user who
@@ -571,8 +573,11 @@ public partial class MainWindow : Window
             AppLogger.Error("MainWindow", "Failed to initialize the application", ex);
             AppLogger.Flush();
             StatusText.Text = $"Error: {ex.Message}";
+            /* #7812: a rebuild that moved the old file aside before the start failed says where it went, in this one message
+               (unless the notice for it is already on its way). */
             MessageBox.Show(
-                $"Failed to initialize the application:\n\n{ex.Message}\n\nSee the log for details: {AppLogger.GetCurrentLogFile()}. If the database is locked, close any other copy of Lite and start it again.",
+                DatabaseRebuildOutcome.StartupFailureMessage(
+                    ex.Message, AppLogger.GetCurrentLogFile(), rebuildNoticeQueued ? null : _databaseInitializer.RebuildOutcome),
                 "Initialization Error",
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
