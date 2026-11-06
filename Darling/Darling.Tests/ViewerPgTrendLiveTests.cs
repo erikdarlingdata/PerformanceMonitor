@@ -258,6 +258,33 @@ ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET state_value = E
         });
     }
 
+    /// <summary>#7876: the collector writes <c>sampled_ms = 0</c> when a batch yields no snapshots. The <c>&gt; 0</c> guard keeps that row from
+    /// dividing by zero (which would fail the whole read) and leaves its point NULL, neither 0 nor a missing neighbour, while the points
+    /// either side keep their own rates.</summary>
+    [Fact]
+    public async Task WaitTrend_ZeroSampledMsRow_IsNullAndDoesNotFailTheRead()
+    {
+        await RunAsync(async (connection, postgres, viewer, ct) =>
+        {
+            var seeds = new (DateTime T, long Samples, long SampledMs)[]
+            {
+                (T0, 100, 30_000), (T0.AddMinutes(5), 160, 30_000), (T0.AddMinutes(10), 160, 0), (T0.AddMinutes(15), 280, 30_000),
+            };
+            foreach (var s in seeds)
+            {
+                await SeedWaitAsync(connection, ct, s.T, s.Samples, periodMs: 1000, sampledMs: s.SampledMs);
+            }
+
+            var (start, end) = Window();
+            var points = await DarlingPgTrendReader.GetWaitTrendAsync(postgres, ServerId, "relation", start, end, ct);
+
+            Assert.Equal(3, points.Count);
+            Assert.Equal(2_000d, points[0].EstimatedWaitMsPerSecond!.Value, 6);
+            Assert.Null(points[1].EstimatedWaitMsPerSecond);
+            Assert.Equal(4_000d, points[2].EstimatedWaitMsPerSecond!.Value, 6);
+        });
+    }
+
     private static Task SeedWaitAsync(NpgsqlConnection connection, CancellationToken ct, DateTime t, long samples, int periodMs, long? sampledMs) =>
         DarlingMcpTestData.ExecAsync(connection, ct,
             "INSERT INTO pg_wait_sampling (collection_id, collection_time, server_id, server_name, event_type, event, query_id, sample_count, profile_period_ms, backend_count, sampled_ms) VALUES ($1, $2, $3, $4, 'Lock', 'relation', 1, $5, $6, 2, $7)",

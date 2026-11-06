@@ -86,9 +86,9 @@ public sealed class DarlingMcpPgTrendTools
 
             var resets = points.Count(p => p.CounterReset);
 
-            /* #7876: which arm produced the figures, on the data path as well as the empty one. The same recorded token
-               get_pg_wait_sampling echoes, so a caller can tell a service-sampled rate (over the 30 watched seconds of
-               each cycle) from the extension's. */
+            /* #7876: the instrument the NEWEST cycle recorded, on the data path as well as the empty one. The same recorded token
+               get_pg_wait_sampling echoes. It is not derived from the rows: a NULL sampled_ms means either the extension arm or a
+               row from before V133, so the rows cannot name the arm, and a window from before a switch can hold the other one's. */
             var instrument = DarlingMcpPgWaitSamplingTools.InstrumentToken(
                 await DarlingPgWaitSamplingReader.GetWaitInstrumentAsync(postgres, resolved.ServerId, cancellationToken));
 
@@ -119,8 +119,10 @@ public sealed class DarlingMcpPgTrendTools
                      + "the service_sampled instrument the seconds each collection actually sampled (30 of every "
                      + "300), the same denominator analyze_server uses. An estimate from a sampling profiler, not "
                      + "a measured duration, so the shape over time is the finding rather than the absolute value. "
-                     + "The instrument key says which one produced these rows (unknown when no collection has "
-                     + "recorded it). Per SECOND because "
+                     + "The instrument key is the instrument the newest collection cycle recorded for this server "
+                     + "(unknown when no collection has recorded it). Each point's rate is worked out from what that "
+                     + "point's own cycle observed, so the rates stay right across a switch of instrument, but a window "
+                     + "from before a switch can hold the other instrument's rows. Per SECOND because "
                      + "collection intervals are not uniform: a restart or a slow cycle stretches one, and a "
                      + "per-interval total would render that as a spike. backend_count is null on a point with no samples, "
                      + "because no backend waited on the event in that interval. On a point with samples it is the number of "
