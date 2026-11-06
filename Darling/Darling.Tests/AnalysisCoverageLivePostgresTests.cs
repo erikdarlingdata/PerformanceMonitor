@@ -329,6 +329,127 @@ public sealed class AnalysisCoverageLivePostgresTests
     }
 
     /// <summary>
+    /// #7895 on the real store: the BLOCKING_EVENTS peak divides each 4 h bucket's waits by that bucket's own covered
+    /// hours, its span clipped to the window end and never under one hour, and the peak is the busiest rate, not the
+    /// biggest count. A 6 h read is a full bucket and a two-hour tail: thirty waits in the tail are 15/h, and they
+    /// outrank forty waits spread over the full bucket (10/h). Lite's <c>BlockingPeakBucketHoursTests</c> is the twin.
+    /// </summary>
+    [Fact]
+    public async Task ASixHourWindow_PeaksOnTheTailBucketsOwnHours_AndOnRateNotCount()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live peak-bucket test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await RegisterServerAsync(connection, ct);
+
+            var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+            var windowStart = windowEnd.AddHours(-6);
+
+            /* Full coverage: a wait sample every fifteen minutes across the six hours. */
+            for (var i = 0; i <= 24; i++)
+                await PlantWaitAsync(connection, windowStart.AddMinutes(15 * i), "CXPACKET", i == 0 ? 0L : 1_000L, ct);
+
+            /* Forty waits across the full [0h, 4h) bucket and thirty inside the two-hour [4h, 6h) tail. */
+            for (var i = 0; i < 40; i++)
+                await PlantBlockingAsync(connection, windowStart.AddMinutes(6 * i), 100 + i, ct);
+            for (var i = 0; i < 30; i++)
+                await PlantBlockingAsync(connection, windowStart.AddHours(4).AddMinutes(3 * i), 200 + i, ct);
+
+            var context = new AnalysisContext
+            {
+                ServerId = ServerId,
+                ServerName = ServerName,
+                TimeRangeStart = windowStart,
+                TimeRangeEnd = windowEnd,
+                ServerUtcOffset = TimeSpan.Zero
+            };
+            var facts = await new PgFactCollector(postgres).CollectFactsAsync(context);
+
+            var blocking = Assert.Single(facts, f => f.Key == "BLOCKING_EVENTS");
+            Assert.Equal(70.0, blocking.Metadata["event_count"], precision: 6);
+            Assert.Equal(15.0, blocking.Value, precision: 6);
+            Assert.Equal(15.0, blocking.Metadata["events_per_hour_peak_4h"], precision: 6);
+            Assert.Equal(30.0, blocking.Metadata["peak_4h_event_count"], precision: 6);
+            Assert.True(blocking.Metadata.TryGetValue("peak_4h_covered_hours", out var covered), "the fact carries the peak bucket's covered hours");
+            Assert.Equal(2.0, covered, precision: 6);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #7895 on the real store: a tail bucket shorter than an hour is judged as an hour, so three waits in a
+    /// thirty-minute tail are 3/h, not 6/h.
+    /// </summary>
+    [Fact]
+    public async Task ATailBucketUnderAnHour_IsJudgedAsOneHour()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live peak-bucket floor test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await RegisterServerAsync(connection, ct);
+
+            var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+            var windowStart = windowEnd.AddMinutes(-270);
+
+            for (var i = 0; i <= 18; i++)
+                await PlantWaitAsync(connection, windowStart.AddMinutes(15 * i), "CXPACKET", i == 0 ? 0L : 1_000L, ct);
+            for (var i = 0; i < 3; i++)
+                await PlantBlockingAsync(connection, windowStart.AddHours(4).AddMinutes(5 * i), 100 + i, ct);
+
+            var context = new AnalysisContext
+            {
+                ServerId = ServerId,
+                ServerName = ServerName,
+                TimeRangeStart = windowStart,
+                TimeRangeEnd = windowEnd,
+                ServerUtcOffset = TimeSpan.Zero
+            };
+            var facts = await new PgFactCollector(postgres).CollectFactsAsync(context);
+
+            var blocking = Assert.Single(facts, f => f.Key == "BLOCKING_EVENTS");
+            Assert.Equal(3.0, blocking.Value, precision: 6);
+            Assert.Equal(3.0, blocking.Metadata["peak_4h_event_count"], precision: 6);
+            Assert.True(blocking.Metadata.TryGetValue("peak_4h_covered_hours", out var covered), "the fact carries the peak bucket's covered hours");
+            Assert.Equal(1.0, covered, precision: 6);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
     /// #7178 on the real store: the engine's LCK_M_SCH_M wait reaches its own SCH_M fact instead of
     /// folding into LCK with the writer/writer lock modes, so the SCH_M scorer ramp, advice card and
     /// RUNNING_JOBS edge can fire. LCK_M_SCH_S still folds into LCK. Lite's
