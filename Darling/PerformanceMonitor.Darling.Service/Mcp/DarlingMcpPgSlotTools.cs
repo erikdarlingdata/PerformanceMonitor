@@ -92,8 +92,18 @@ public sealed class DarlingMcpPgSlotTools
         try
         {
             var now = windowEnd;
-            var rows = await DarlingPgSlotReader.GetPgSlotsAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
+            /* #7910: every capture lists every slot, so a slot missing from the collector's newest run was dropped, and its
+               last stored sample is not the present state. The read marks it (DarlingPgSlotReader, PgCurrentCapture); it is
+               left out of the slots, the worst slot and the totals, and named in omitted_slots so the drop is visible. */
+            var allRows = await DarlingPgSlotReader.GetPgSlotsAsync(
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, includeCleared: true, cancellationToken: cancellationToken);
+            var rows = allRows.Where(r => r.IsCurrent).ToList();
+            var omittedSlots = allRows.Where(r => !r.IsCurrent).Select(r => r.SlotName).OrderBy(n => n, StringComparer.Ordinal).ToList();
+            var omittedNote = omittedSlots.Count == 0
+                ? null
+                : $"{omittedSlots.Count} slot(s) had a stored sample in the window but are absent from the collector's newest run "
+                  + $"({allRows[0].LatestCaptureAt:yyyy-MM-dd HH:mm:ss} UTC), so they were dropped since and are not reported as "
+                  + "current. Their last sample is older than that run.";
 
             /* No slots is the common, healthy case on most servers — say so rather than returning an
                "unavailable" envelope that reads like a collection problem.
@@ -123,9 +133,14 @@ public sealed class DarlingMcpPgSlotTools
                     hours_back,
                     status = "empty",
                     hints = emptyNotice.AsHints(),
+                    omitted_slots = omittedSlots,
+                    omitted_slots_note = omittedNote,
                     finding = McpHelpers.QuietUnlessCut(
                         emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                        factual: "This instance has no replication slots in the captures the store holds for the window",
+                        factual: omittedSlots.Count > 0
+                            ? "This instance has no replication slots in the collector's newest run; the slots in omitted_slots "
+                                + "were present earlier in the window and have been dropped since"
+                            : "This instance has no replication slots in the captures the store holds for the window",
                         coveredClaim: ", so it is not itself retaining WAL or pinning vacuum through one."),
                     scope = "Per-instance. Slots live on the writer, so if this target is a replica, check "
                           + "the cluster's writer before concluding the cluster has no abandoned slot.",
@@ -148,6 +163,8 @@ public sealed class DarlingMcpPgSlotTools
                 return new
                 {
                     slot_name = r.SlotName,
+                    /* #7910: the sample every figure below comes from. */
+                    last_seen = r.MeasuredAt,
                     severity = Classify(r.WalStatus, r.IsActive, growing),
                     slot_type = r.SlotType,
                     plugin = r.Plugin,
@@ -205,6 +222,8 @@ public sealed class DarlingMcpPgSlotTools
                 inactive_count = slots.Count(s => !s.is_active),
                 worst_slot = worst.slot_name,
                 worst_severity = worst.severity,
+                omitted_slots = omittedSlots,
+                omitted_slots_note = omittedNote,
                 total_retained_wal_gb = Math.Round(
                     slots.Where(s => s.retained_wal_bytes > 0).Sum(s => s.retained_wal_bytes ?? 0) / 1024.0 / 1024.0 / 1024.0, 2),
                 slots,

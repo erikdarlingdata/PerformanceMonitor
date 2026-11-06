@@ -107,9 +107,28 @@ public sealed class DarlingMcpPgAutovacuumTools
                honest page in the repository speaks. This replaced `limit_reached = tables.Count >= limit`, which
                read a server with exactly `limit` tables behind on vacuum as a cut page and told the caller to
                raise a limit that had nothing more to give. */
-            var fetched = await DarlingPgAutovacuumReader.GetPgAutovacuumAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, cancellationToken);
-            var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
+            /* #7878: the collector stores a table only while it has pending work, so a table vacuumed clean stops being written
+               and its newest row is its last pre-vacuum sample. Such a row is not graded, ranked, counted or compared for
+               growth: the read marks it (DarlingPgAutovacuumReader, PgCurrentCapture) and sorts it after every current table,
+               and it is named in cleared_tables instead. */
+            var allFetched = await DarlingPgAutovacuumReader.GetPgAutovacuumAsync(
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, includeCleared: true, cancellationToken: cancellationToken);
+            var currentFetched = allFetched.Where(r => r.IsCurrent).ToList();
+            var (rows, truncated) = McpHelpers.BoundPage(currentFetched, limit);
+            var cleared = allFetched.Where(r => !r.IsCurrent).Select(r => new
+            {
+                database = r.DatabaseName,
+                table = $"{r.SchemaName}.{r.TableName}",
+                last_measured_at = r.MeasuredAt,
+                last_dead_tuples = r.DeadTuples,
+            }).ToList();
+            var clearedNote = cleared.Count == 0
+                ? null
+                : $"{cleared.Count} table(s) had a stored sample in the window but are not in the collector's newest complete capture "
+                  + $"(its last capture was {allFetched[0].LatestCaptureAt:yyyy-MM-dd HH:mm:ss} UTC), which stores a table only "
+                  + "while it has pending work. They may have been vacuumed or analyzed clean, dropped, or fallen out of scope; "
+                  + "the store cannot tell which. They are not graded, ranked or counted. last_measured_at is the sample they were last seen in; the list holds only the tables "
+                  + "this page read reached.";
 
             if (rows.Count == 0)
             {
@@ -133,9 +152,15 @@ public sealed class DarlingMcpPgAutovacuumTools
                     hours_back,
                     status = "empty",
                     hints = emptyNotice.AsHints(),
+                    cleared_tables = cleared,
+                    cleared_note = clearedNote,
                     finding = McpHelpers.QuietUnlessCut(
                         emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                        factual: "No table on this server has dead tuples, pending analyze work, inserts since "
+                        factual: cleared.Count > 0
+                            ? "No table on this server has dead tuples, pending analyze work, inserts since its last vacuum, or "
+                                + "autovacuum disabled in the collector's newest complete capture; the tables in cleared_tables had it earlier "
+                                + "in the window and are not in that capture"
+                            : "No table on this server has dead tuples, pending analyze work, inserts since "
                             + "its last vacuum, or autovacuum disabled in the captures the store holds for the window",
                         coveredClaim: ". The collector records only tables with "
                             + "pending work, so an empty result is the healthy case rather than missing data."),
@@ -264,6 +289,8 @@ public sealed class DarlingMcpPgAutovacuumTools
                 past_threshold_count = tables.Count(t => t.threshold_ratio >= 1 || t.insert_threshold_ratio >= 1),
                 growing_count = tables.Count(t => t.dead_tuples_growing == true),
                 truncated,
+                cleared_tables = cleared,
+                cleared_note = clearedNote,
                 worst_table = tables[0].table_name,
                 worst_severity = tables[0].severity,
                 /* #3603: how much of the page the cost half could speak for, and — when it is none — the

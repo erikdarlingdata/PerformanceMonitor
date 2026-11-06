@@ -39,7 +39,7 @@
  */
 
 import { el, mount, apiGet, apiGetFleet, readTool, localTime, hasInFlightReads, beginPageScope, readErrorCount, isSessionExpired, onSessionExpired, frontDoor, currentStore, routeHash, splitStoreHash, storeHash, storeHeaders, loadingStrip } from "./util.js";
-import { initFrontDoor, refreshPicker, rememberStore, frontDoorStores, isKnownStore, locateServer, ambiguousStrip, locateFailureStrip } from "./store-picker.js";
+import { startFrontDoor as startFrontDoorIn, refreshPicker, rememberStore, frontDoorStores, isKnownStore, locateServer, ambiguousStrip, locateFailureStrip } from "./store-picker.js";
 import { makeScrollReset } from "./scroll-reset.js";
 import { renderFleet } from "./pages/fleet.js";
 import { renderAg } from "./pages/ag.js";
@@ -895,16 +895,23 @@ function initAutoRefreshToggle() {
   });
 }
 
-/* #6840: ask the session whether this is a front door before anything else reads, because every read after it names a store. */
-async function startFrontDoor() {
-  const session = await getSession();
-  if (!session || session.front_door !== true) return;
-  await initFrontDoor(document.getElementById("store-picker"), location.hash || "");
-  /* The menu's own links open in the store in use, so "open in a new tab" keeps it. */
-  for (const a of document.querySelectorAll("#sidebar .nav a")) {
-    const href = a.getAttribute("href");
-    if (href && href.startsWith("#/")) a.setAttribute("href", storeHash(href));
-  }
+/* #6840: ask the session whether this is a front door before anything else reads (startFrontDoor in store-picker.js). When the
+   first answer failed, the start finishes on the first good one (#7928), and `late` is true: the page was drawn without a store, so
+   the shell and the page are read again now that the store is set. */
+function startFrontDoor() {
+  return startFrontDoorIn(document.getElementById("store-picker"), (late) => {
+    /* The menu's own links open in the store in use, so "open in a new tab" keeps it. */
+    for (const a of document.querySelectorAll("#sidebar .nav a")) {
+      const href = a.getAttribute("href");
+      if (href && href.startsWith("#/")) a.setAttribute("href", storeHash(href));
+    }
+    if (late) {
+      refreshSidebar();
+      refreshViewList();
+      refreshAgNav();
+      route();
+    }
+  });
 }
 
 function start() {

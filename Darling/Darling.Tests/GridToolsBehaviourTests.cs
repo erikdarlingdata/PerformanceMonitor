@@ -206,7 +206,7 @@ public sealed class GridToolsBehaviourTests
     {
         var js = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "alerts.js").ReplaceLineEndings("\n");
         Assert.Contains("{ rowsKey: \"alerts\", columns: alertColumns(), tools: false }", js);
-        Assert.Contains("{ rowsKey: \"alerts\", columns: alertColumns() });", js);
+        Assert.Contains("{ rowsKey: \"alerts\", columns: alertColumns(), onFilter: () => updateDismissBar(state) });", js);
         Assert.Contains("label: \"Triage\", csv: false", js);
         Assert.Contains("label: \"Mute\", csv: false", js);
         Assert.Contains("copyValue: (a) => detailFullText(a)", js);
