@@ -334,21 +334,19 @@ public sealed class WebhookChannelFailureNoticeTests
     }
 
     /// <summary>The window wires the check onto the status timer that runs the connection checks, reads the
-    /// counts from the webhook service it built, and hands them with its memory to <see cref="WebhookChannelCheck"/>,
-    /// which decides with the shared policy. A WPF window cannot be driven from a unit test, so the wiring is pinned
-    /// from source; the deciding is pinned by behaviour below.</summary>
+    /// counts from the webhook service it built, and hands them with its memory to <see cref="WebhookChannelCheck"/>.
+    /// A WPF window cannot be driven from a unit test, so the wiring is pinned from source. The deciding is the
+    /// helper's, and the tests below drive it.</summary>
     [Fact]
     public void TheStatusTimer_RunsTheChannelCheck_RightAfterTheConnectionCheck()
     {
         var window = ReadRepoFile(Path.Combine("Lite", "MainWindow.xaml.cs"));
-        var check = ReadRepoFile(Path.Combine("Lite", "Services", "WebhookChannelCheck.cs"));
 
         Assert.Contains(
             "CheckConnectionsAndNotify();\r\n            CheckWebhookChannelsAndNotify();",
             window.Replace("\r\n", "\n").Replace("\n", "\r\n"), StringComparison.Ordinal);
         Assert.Contains("_webhookAlertService.GetChannelFailureCounts()", window, StringComparison.Ordinal);
         Assert.Contains("WebhookChannelCheck.Look(_webhookAlertService.GetChannelFailureCounts(), _webhookChannelFailing)", window, StringComparison.Ordinal);
-        Assert.Contains("WebhookChannelFailurePolicy.Decide(wasFailing, destination.ConsecutiveFailures, destination.Configured)", check, StringComparison.Ordinal);
         Assert.Contains("WebhookChannelTrayNotice.For(", window, StringComparison.Ordinal);
     }
 
