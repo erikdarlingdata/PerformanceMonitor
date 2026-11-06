@@ -48,7 +48,7 @@ public static class PgCurrentCapture
                 AND   collection_time >= $2
                 AND   collection_time <= $3
                 ORDER BY collection_time DESC
-                LIMIT 2
+                FETCH FIRST 2 ROWS ONLY
             ) AS runs
         )
         """;

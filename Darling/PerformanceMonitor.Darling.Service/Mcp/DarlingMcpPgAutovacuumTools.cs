@@ -113,7 +113,8 @@ public sealed class DarlingMcpPgAutovacuumTools
                and it is named in cleared_tables instead. */
             var allFetched = await DarlingPgAutovacuumReader.GetPgAutovacuumAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, includeCleared: true, cancellationToken: cancellationToken);
-            var (rows, truncated) = McpHelpers.BoundPage(allFetched.Where(r => r.IsCurrent).ToList(), limit);
+            var currentFetched = allFetched.Where(r => r.IsCurrent).ToList();
+            var (rows, truncated) = McpHelpers.BoundPage(currentFetched, limit);
             var cleared = allFetched.Where(r => !r.IsCurrent).Select(r => new
             {
                 database = r.DatabaseName,
