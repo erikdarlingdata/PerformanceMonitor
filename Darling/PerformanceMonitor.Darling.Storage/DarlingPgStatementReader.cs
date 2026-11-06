@@ -111,9 +111,14 @@ public static class DarlingPgStatementReader
     /// Every counter is reported for the WINDOW, never as a lifetime total. Summing the cumulative
     /// counters directly would multiply each query's whole history by the number of snapshots in the
     /// window, so the time/call/row figures come from the stored delta columns and the block/WAL figures
-    /// are differenced here. Every counter covers the same intervals (#7909): a series' first sample in the
-    /// window contributes nothing to any of them, because its interval began before the window, so a window
-    /// with one sample of a series reads 0 for it on every column and the <c>HAVING</c> leaves it out.
+    /// are differenced here. Every counter covers the same intervals (#7909): a stored delta is the interval
+    /// that ended at its sample, and the block and WAL increments cover those same intervals because a series'
+    /// first sample in the window is differenced against the series' latest stored row before the window (the
+    /// <c>seed</c> CTE), a sample the collector credited with its whole accrual (stored with
+    /// <c>delta_calls = calls</c>) contributes its cumulative figures, and a sample it could not measure
+    /// (<c>delta_calls = 0</c>) contributes nothing on any counter. A statement that ran in one collection
+    /// interval of the window has one stored row in it, because the collector stores nothing for a pass with
+    /// no new calls, and it ranks with that row's deltas and its increment since the row before the window.
     /// <para>The block and WAL columns keep no stored deltas, and reporting them as the window's MAX —
     /// which is what this read used to do — put a lifetime cumulative figure in the same row as a
     /// windowed one. A consumer has no way to see that: it reads <c>total_exec_time_ms</c> for the last
@@ -145,7 +150,7 @@ public static class DarlingPgStatementReader
     /// the page read and to <see cref="PgTopQueriesGridRowCap"/> by the unpaged one.</para>
     /// </summary>
     public const string PgTopQueriesSql = $"""
-        WITH differenced AS (
+        WITH in_window AS (
             SELECT
                 queryid,
                 database_id,
@@ -153,16 +158,79 @@ public static class DarlingPgStatementReader
                 database_name,
                 collection_time,
                 user_id,
-                /* #7909: every counter measures the same intervals. A stored delta is the interval that ENDED at
-                   its sample, so a series' first sample in the window carries an interval that began before the
-                   window. The block and WAL differences below are 0 on that sample (their LAG is NULL there), and
-                   so are these three, which keeps calls, time and rows on the intervals the block figures cover
-                   and a per-call figure such as blocks per call honest over a short window. The collector's reset
-                   and first-sighting classification stays in the stored deltas, which is why they are zeroed on
-                   the first sample rather than re-derived from the cumulative columns. */
-                CASE WHEN LAG(collection_time) OVER series IS NULL THEN 0 ELSE delta_calls END              AS delta_calls,
-                CASE WHEN LAG(collection_time) OVER series IS NULL THEN 0 ELSE delta_total_exec_time_ms END AS delta_total_exec_time_ms,
-                CASE WHEN LAG(collection_time) OVER series IS NULL THEN 0 ELSE delta_rows END               AS delta_rows,
+                toplevel,
+                calls,
+                delta_calls,
+                delta_total_exec_time_ms,
+                delta_rows,
+                max_exec_time_ms,
+                max_exec_peakmem_bytes,
+                shared_blks_hit,
+                shared_blks_read,
+                storage_blks_read,
+                orcache_blks_hit,
+                temp_blks_read,
+                temp_blks_written,
+                wal_bytes
+            FROM pg_statement_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+        ),
+        /* #7909: each series' latest stored row before the window, the baseline the first in-window sample's block and
+           WAL increments are taken against. The collector stores a row only for a pass with new calls, and
+           pg_stat_statements advances the block and WAL counters only on a call, so that row carries the cumulative
+           figures every pass between it and the first in-window sample also saw, and the difference is exactly the
+           interval that sample's stored delta_calls covers. Without it a statement that ran in one collection interval
+           of the window, one stored row with its previous row hours earlier, would read 0 on every block and WAL figure.
+           Bounded to the day before the window start, the chunk interval: one pass over at most two chunks beside the
+           window's own, filtered to the series the window holds, never the series' whole history. A series idle for
+           longer than that reads as one with no earlier row and starts its block figures at its second in-window sample. */
+        seed AS (
+            SELECT DISTINCT ON (p.queryid, p.database_id, p.user_id, p.toplevel)
+                p.queryid,
+                p.database_id,
+                p.database_name,
+                p.collection_time,
+                p.user_id,
+                p.toplevel,
+                p.calls,
+                p.delta_calls,
+                p.delta_total_exec_time_ms,
+                p.delta_rows,
+                p.max_exec_time_ms,
+                p.max_exec_peakmem_bytes,
+                p.shared_blks_hit,
+                p.shared_blks_read,
+                p.storage_blks_read,
+                p.orcache_blks_hit,
+                p.temp_blks_read,
+                p.temp_blks_written,
+                p.wal_bytes
+            FROM pg_statement_stats AS p
+            WHERE p.server_id = $1
+            AND   p.collection_time < $2
+            AND   p.collection_time >= $2 - INTERVAL '1 day'
+            AND   EXISTS (SELECT 1
+                          FROM in_window AS w
+                          WHERE w.queryid = p.queryid
+                          AND   w.database_id = p.database_id
+                          AND   w.user_id = p.user_id
+                          AND   w.toplevel = p.toplevel)
+            ORDER BY p.queryid, p.database_id, p.user_id, p.toplevel, p.collection_time DESC
+        ),
+        differenced AS (
+            SELECT
+                queryid,
+                database_id,
+                database_name,
+                collection_time,
+                user_id,
+                /* The stored deltas, each the interval that ended at its sample, as the collector measured it against its
+                   previous pass. The block and WAL increments below cover the same intervals. */
+                delta_calls,
+                delta_total_exec_time_ms,
+                delta_rows,
                 max_exec_time_ms,
                 max_exec_peakmem_bytes,
                 /* Carried RAW alongside their deltas (#2625). The aggregate below has to separate two
@@ -173,17 +241,21 @@ public static class DarlingPgStatementReader
                 storage_blks_read AS raw_storage_blks_read,
                 orcache_blks_hit  AS raw_orcache_blks_hit,
                 wal_bytes         AS raw_wal_bytes,
-                GREATEST(shared_blks_hit    - LAG(shared_blks_hit)    OVER series, 0) AS d_shared_blks_hit,
-                GREATEST(shared_blks_read   - LAG(shared_blks_read)   OVER series, 0) AS d_shared_blks_read,
-                GREATEST(storage_blks_read  - LAG(storage_blks_read)  OVER series, 0) AS d_storage_blks_read,
-                GREATEST(orcache_blks_hit   - LAG(orcache_blks_hit)   OVER series, 0) AS d_orcache_blks_hit,
-                GREATEST(temp_blks_read     - LAG(temp_blks_read)     OVER series, 0) AS d_temp_blks_read,
-                GREATEST(temp_blks_written  - LAG(temp_blks_written)  OVER series, 0) AS d_temp_blks_written,
-                GREATEST(wal_bytes          - LAG(wal_bytes)          OVER series, 0) AS d_wal_bytes
-            FROM pg_statement_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
+                /* #7909: the increment follows how the collector classified the sample's interval. delta_calls equal to
+                   calls is a first sighting or a reset the collector could date, credited with the entry's whole accrual,
+                   so the block figure is the cumulative value too and there is nothing earlier to difference against.
+                   delta_calls of 0 is an interval the collector could not measure (a first sighting or reset it could not
+                   date, or a gap past its max-gap policy), and the block figure is 0 beside it. Otherwise the increment is
+                   the difference from the series' previous row, the seed row for the first in-window sample, clamped at 0
+                   so a reset between two measured samples drops that interval rather than going negative. */
+                CASE WHEN delta_calls = calls THEN shared_blks_hit   WHEN delta_calls = 0 THEN 0 ELSE GREATEST(shared_blks_hit   - LAG(shared_blks_hit)   OVER series, 0) END AS d_shared_blks_hit,
+                CASE WHEN delta_calls = calls THEN shared_blks_read  WHEN delta_calls = 0 THEN 0 ELSE GREATEST(shared_blks_read  - LAG(shared_blks_read)  OVER series, 0) END AS d_shared_blks_read,
+                CASE WHEN delta_calls = calls THEN storage_blks_read WHEN delta_calls = 0 THEN 0 ELSE GREATEST(storage_blks_read - LAG(storage_blks_read) OVER series, 0) END AS d_storage_blks_read,
+                CASE WHEN delta_calls = calls THEN orcache_blks_hit  WHEN delta_calls = 0 THEN 0 ELSE GREATEST(orcache_blks_hit  - LAG(orcache_blks_hit)  OVER series, 0) END AS d_orcache_blks_hit,
+                CASE WHEN delta_calls = calls THEN temp_blks_read    WHEN delta_calls = 0 THEN 0 ELSE GREATEST(temp_blks_read    - LAG(temp_blks_read)    OVER series, 0) END AS d_temp_blks_read,
+                CASE WHEN delta_calls = calls THEN temp_blks_written WHEN delta_calls = 0 THEN 0 ELSE GREATEST(temp_blks_written - LAG(temp_blks_written) OVER series, 0) END AS d_temp_blks_written,
+                CASE WHEN delta_calls = calls THEN wal_bytes         WHEN delta_calls = 0 THEN 0 ELSE GREATEST(wal_bytes         - LAG(wal_bytes)         OVER series, 0) END AS d_wal_bytes
+            FROM (SELECT * FROM in_window UNION ALL SELECT * FROM seed) AS samples
             WINDOW series AS (
                 PARTITION BY queryid, database_id, user_id, toplevel
                 ORDER BY collection_time
@@ -202,8 +274,8 @@ public static class DarlingPgStatementReader
             CAST(SUM(delta_total_exec_time_ms) AS bigint) AS total_exec_time_ms,
             CAST(SUM(delta_rows) AS bigint) AS rows_returned,
             MAX(max_exec_time_ms) AS max_exec_time_ms,
-            /* coalesce to 0, not to the cumulative value: a series with a single sample in the window
-               has no measurable interval (the first-sample rule stated in the CTE above). */
+            /* coalesce to 0, not to the cumulative value: a series with no row before the window and one sample in it
+               has no measurable interval unless the collector credited that sample (the CASE in the CTE above). */
             CAST(coalesce(SUM(d_shared_blks_hit), 0) AS bigint) AS shared_blks_hit,
             CAST(coalesce(SUM(d_shared_blks_read), 0) AS bigint) AS shared_blks_read,
             /* NULL when the source never reported it, 0 when it did and the window holds no interval.
@@ -239,6 +311,8 @@ public static class DarlingPgStatementReader
         LEFT JOIN collect.pg_statement_text AS t
                ON  t.server_id = $1
                AND t.queryid = differenced.queryid
+        /* #7909: the seed rows are the baseline for the first in-window sample and are not samples of the window. */
+        WHERE differenced.collection_time >= $2
         GROUP BY differenced.queryid, database_id
         HAVING SUM(delta_total_exec_time_ms) > 0
         /* $5 = include the service's own statements. Change Watch passes false, so the sampler cannot take one of its top-N slots (#7567). */
