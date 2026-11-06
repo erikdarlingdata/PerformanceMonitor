@@ -197,6 +197,9 @@ export async function renderKnownPatterns(main) {
 
 async function refreshList(state) {
   const res = await readTool("get_known_patterns", { include_expired: true });
+  /* #7959: a 401 has put the shell's sign-in strip up, and an aborted read is a route change. The list is left as it is rather than drawn
+     as empty, which would say no pattern is recorded. */
+  if (res.kind === "aborted" || res.kind === "auth") return;
   if (res.kind === "error") return mount(state.listBox, errorStrip(res.message));
   if (res.kind === "empty") {
     state.entries = [];
