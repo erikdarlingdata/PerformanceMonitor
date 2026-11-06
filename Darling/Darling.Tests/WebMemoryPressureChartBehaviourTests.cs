@@ -80,6 +80,22 @@ public sealed class WebMemoryPressureChartBehaviourTests
         Assert.Equal("stacked-bar", chart.GetProperty("mode").GetString());
     }
 
+    /// <summary>#7691: a server with several memory nodes stores one record per node for the same event. The chart counts an event
+    /// once: rows at one second with one notification, or 1 ms apart in one second, are one; two notifications at one second are two.</summary>
+    [Fact]
+    public void RecordsOfOneEventOnSeveralNodes_AreCountedOnce_ButTwoNotificationsAreTwo()
+    {
+        var chart = Run("nodes").GetProperty("charts")[0];
+        var rows = chart.GetProperty("points").EnumerateArray()
+            .Select(p => p.EnumerateArray().Select(v => v.ValueKind == JsonValueKind.Number ? v.GetInt32() : -1).Skip(1).ToArray())
+            .Where(r => r.Sum() > 0)
+            .Select(r => r[0])
+            .ToArray();
+
+        // Hours oldest first, SQL medium count: 1 (same second twice), 2 (two notifications), 1 (1 ms apart).
+        Assert.Equal(new[] { 1, 2, 1 }, rows);
+    }
+
     [Fact]
     public void HoursWithNoSample_AreDrawnAsZero_AcrossTheWindow_AndTheNoticeSaysWhatAZeroMeans()
     {
@@ -123,6 +139,24 @@ public sealed class WebMemoryPressureChartBehaviourTests
         Assert.Contains(r.GetProperty("empties").EnumerateArray(), e => e.GetString()!.Contains("healthy state", StringComparison.Ordinal)
             && e.GetString()!.Contains("before collection began", StringComparison.Ordinal));
         Assert.Single(r.GetProperty("fetches").EnumerateArray());
+    }
+
+    [Fact]
+    public void TheGrid_ShowsANodeColumn_OnlyWhenTheRowsInViewHoldMoreThanOneNode()
+    {
+        // #7691: one event is stored once per memory node, so on a multi-node server the twin rows need the node to tell them apart.
+        var two = Run("twonodes");
+        var heads = two.GetProperty("tableHeads").EnumerateArray().Select(h => h.GetString()!).ToArray();
+        Assert.Equal(new[] { "Time", "Notification", "Node", "SQL Server process", "Operating system" }, heads);
+        var cells = two.GetProperty("tableCells").EnumerateArray()
+            .Select(row => row.EnumerateArray().Select(c => c.GetString()!).ToArray()).ToArray();
+        Assert.Equal(2, cells.Length);
+        Assert.Equal(new[] { "0", "1" }, cells.Select(c => c[2]).OrderBy(n => n, StringComparer.Ordinal).ToArray());
+
+        // One node on every row, or no node at all (rows stored before the column), is not worth a column.
+        var one = Run("onenode");
+        Assert.DoesNotContain("Node", one.GetProperty("tableHeads").EnumerateArray().Select(h => h.GetString()!));
+        Assert.Equal(3, one.GetProperty("tableRows").GetInt32());
     }
 
     [Fact]
