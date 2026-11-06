@@ -158,16 +158,17 @@ public sealed class MemoryPressureEventsCollectorDefinitionTests
 
     /// <summary>
     /// One query row: sample_time, notification, the two indicators, the raw ring buffer timestamp, then the
-    /// instance start time. Without an explicit raw value it is the stamp's offset from a fixed anchor, so rows in
+    /// instance start time, then the memory node (NULL when none is given, #7691). Without an explicit raw value it is the stamp's offset from a fixed anchor, so rows in
     /// one read keep their real order and spacing (what the query returns, since both come from the same
     /// ms_ticks). Without an explicit start time it is <see cref="s_startTime"/>.
     /// </summary>
-    private static object[] Rec(object stamp, string notification, int process, int system, long? raw = null, DateTime? startTime = null)
+    private static object[] Rec(object stamp, string notification, int process, int system, long? raw = null, DateTime? startTime = null, int? node = null)
         => new object[]
         {
             stamp, notification, process, system,
             raw ?? (stamp is DateTime d ? (long)(d - s_bootAnchor).TotalMilliseconds : 0L),
             startTime ?? s_startTime,
+            node is { } n ? n : DBNull.Value,
         };
 
     private static readonly DateTime s_startTime = new(2026, 5, 20, 8, 0, 0, DateTimeKind.Unspecified);
@@ -202,7 +203,7 @@ public sealed class MemoryPressureEventsCollectorDefinitionTests
     public void PayloadColumns_MatchSchemaOrder()
     {
         Assert.Equal(
-            new[] { "sample_time", "memory_notification", "memory_indicators_process", "memory_indicators_system" },
+            new[] { "sample_time", "memory_notification", "memory_indicators_process", "memory_indicators_system", "memory_node_id" },
             MemoryPressureEventsCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray());
     }
 
@@ -250,7 +251,44 @@ public sealed class MemoryPressureEventsCollectorDefinitionTests
 
         var writer = new RecordingCollectorRowWriter();
         MemoryPressureEventsCollector.Instance.WritePayload(row, writer, CollectorTestContext.Make(s_deltas));
-        Assert.Equal(new object?[] { watermark.AddMinutes(5), "RESOURCE_MEMPHYSICAL_HIGH", 0, 0 }, writer.Values);
+        Assert.Equal(new object?[] { watermark.AddMinutes(5), "RESOURCE_MEMPHYSICAL_HIGH", 0, 0, null }, writer.Values);
+    }
+
+    [Fact]
+    public async Task ReadAsync_TwoRecordsAtOneTimestampOnTwoNodes_AreBothKept_AndBothWrittenWithTheirNode()
+    {
+        /* #7691: a server with several memory nodes writes one ring buffer record per node for the same event, to the 100 ns of sample_time.
+           Both rows are real records, so both are kept, and the node is what tells them apart. */
+        var stamp = new DateTime(2026, 7, 1, 19, 7, 58, DateTimeKind.Utc);
+        using var reader = new FakeCollectorDataReader(
+            Rec(stamp, "RESOURCE_MEMPHYSICAL_LOW", 2, 0, node: 0),
+            Rec(stamp, "RESOURCE_MEMPHYSICAL_LOW", 2, 0, node: 1),
+            Rec(stamp.AddMinutes(1), "RESOURCE_MEMPHYSICAL_HIGH", 0, 0));
+
+        var rows = await MemoryPressureEventsCollector.Instance.ReadAsync(
+            reader, CollectorTestContext.Make(s_deltas, serverId: NewServer()), CancellationToken.None);
+
+        Assert.Equal(3, rows.Count);
+        Assert.Equal(new int?[] { 0, 1, null }, rows.Select(r => r.NodeId).ToArray());
+
+        var written = rows.Select(row =>
+        {
+            var writer = new RecordingCollectorRowWriter();
+            MemoryPressureEventsCollector.Instance.WritePayload(row, writer, CollectorTestContext.Make(s_deltas));
+            return writer.Values[^1];
+        }).ToArray();
+        Assert.Equal(new object?[] { 0, 1, null }, written);
+    }
+
+    [Fact]
+    public void BuildQuery_ReadsTheMemoryNodeFromTheRecord_LastSoTheOtherPositionsStay()
+    {
+        var plan = MemoryPressureEventsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas));
+
+        Assert.Contains("memory_node_id = t.record.value('(/Record/ResourceMonitor/NodeId)[1]', 'integer')", plan.Text, StringComparison.Ordinal);
+        Assert.True(
+            plan.Text.IndexOf("start_time = @start_time", StringComparison.Ordinal) < plan.Text.IndexOf("memory_node_id =", StringComparison.Ordinal),
+            "the node is the last column, after the start time ReadAsync reads at position 5");
     }
 
     [Fact]
