@@ -329,11 +329,14 @@ internal static class DarlingTrendReader
     /// the same silent corruption this read exists to expose, pointed the other way. MAX also ignores a
     /// 0 from an instance seen for the first time, while still reporting 0 when every instance is
     /// unknown.</para>
-    /// <para>The type column is <c>CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END</c>
-    /// (V132): a type only where the instance rows summed into the point agree on one. A pre-rung row has
+    /// <para>The type column (V132) is a type only where the instance rows summed into the point agree on one.
+    /// The per-object layer carries <c>MIN(cntr_type) AS min_type</c> and <c>MAX(cntr_type) AS max_type</c>, and
+    /// the per-collection layer reads <c>CASE WHEN MIN(min_type) = MAX(max_type) THEN MAX(max_type) END</c>
+    /// over the objects, so the equality spans every row under the counter name: an object whose own rows
+    /// disagree leaves the point NULL even beside a second object that agrees on a type. A pre-rung row has
     /// NULL and so does a mixed-type family (the wait-statistics object's instances are a rate, a gauge and
     /// an average under one counter name) — the equality is what stops a mixed sum being classified by
-    /// whichever instance's id sorts first. Byte-identical to the viewer's and Lite's expression.</para>
+    /// whichever instance's id sorts first. Byte-identical to the viewer's and Lite's expressions.</para>
     /// <para>#4476: a raw-row layer sits under the per-collection SUM, carrying <c>lag</c>/<c>lead</c> of
     /// <c>cntr_value</c> per instance (<c>PARTITION BY object_name, instance_name ORDER BY collection_time</c>
     /// — this read is already scoped to one counter name by <c>$2</c>, unlike the viewer's several-counter
@@ -370,7 +373,7 @@ internal static class DarlingTrendReader
                 CAST(SUM(cntr_value) AS bigint) AS cntr_value,
                 CAST(SUM(delta_cntr_value) AS bigint) AS delta_cntr_value,
                 CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds,
-                CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
+                CASE WHEN MIN(min_type) = MAX(max_type) THEN MAX(max_type) END AS cntr_type,
                 SUM(artifacts) AS artifacts
             FROM (
                 SELECT
@@ -383,7 +386,8 @@ internal static class DarlingTrendReader
                          THEN SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total')
                          ELSE SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) END AS delta_cntr_value,
                     MAX(sample_interval_seconds) AS sample_interval_seconds,
-                    CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
+                    MIN(cntr_type) AS min_type,
+                    MAX(cntr_type) AS max_type,
                     COUNT(*) FILTER (WHERE is_artifact) AS artifacts
                 FROM (
                     SELECT

@@ -798,8 +798,9 @@ ORDER BY 1";
     /// the object's other instances and adding them again doubles the point; an object with no <c>_Total</c> row
     /// contributes the sum of its instances. <c>collections</c> then sums the objects, so a counter name two
     /// objects share (Transaction Delay on Database Replica and Database Mirroring, #7416) keeps both objects'
-    /// rows whichever of them carries <c>_Total</c>. The interval is MAX at both layers, the type rule is applied
-    /// at both, and the artifact count is summed up through them.</para>
+    /// rows whichever of them carries <c>_Total</c>. The interval is MAX at both layers, <c>objects</c> carries the
+    /// smallest and largest type its rows hold and <c>collections</c> compares those across the objects, and the
+    /// artifact count is summed up through them.</para>
     /// </summary>
     internal async Task<PerfmonBucketsResult> GetPerfmonBucketsAsync(int serverId, string counterName, int hoursBack, DateTime asOfUtc, int bucketMinutes)
     {
@@ -875,7 +876,8 @@ objects AS
              THEN SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total')
              ELSE SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) END AS delta_cntr_value,
         MAX(sample_interval_seconds) AS sample_interval_seconds,
-        CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
+        MIN(cntr_type) AS min_type,
+        MAX(cntr_type) AS max_type,
         COUNT(*) FILTER (WHERE is_artifact) AS artifacts
     FROM flagged
     GROUP BY collection_time, object_name
@@ -887,7 +889,7 @@ collections AS
         SUM(cntr_value) AS cntr_value,
         SUM(delta_cntr_value) AS delta_cntr_value,
         MAX(sample_interval_seconds) AS sample_interval_seconds,
-        CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
+        CASE WHEN MIN(min_type) = MAX(max_type) THEN MAX(max_type) END AS cntr_type,
         SUM(artifacts) AS artifacts
     FROM objects
     GROUP BY collection_time

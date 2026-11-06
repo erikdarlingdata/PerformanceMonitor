@@ -139,8 +139,9 @@ ORDER BY lower(counter_name), counter_name";
     /// other instances and adding them again doubles the point; an object with no <c>_Total</c> row contributes
     /// the sum of its instances. The objects are then summed, so a counter name two objects share (Transaction
     /// Delay on Database Replica and Database Mirroring, #7416) keeps both objects' rows whichever of them carries
-    /// <c>_Total</c>. The interval is MAX at both layers and the type rule is applied at both. Darling's twin is
-    /// <c>DarlingTrendReader.PerfmonTrendSql</c>.</para>
+    /// <c>_Total</c>. The interval is MAX at both layers. The per-object layer carries the smallest and largest type
+    /// its rows hold and the per-collection layer compares those across the objects, so the point is typed only when
+    /// every row under the counter name agrees. Darling's twin is <c>DarlingTrendReader.PerfmonTrendSql</c>.</para>
     /// </summary>
     public async Task<List<PerfmonTrendPoint>> GetPerfmonTrendAsync(int serverId, string counterName, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
@@ -155,7 +156,7 @@ SELECT
     SUM(cntr_value) AS cntr_value,
     SUM(delta_cntr_value) AS delta_cntr_value,
     MAX(sample_interval_seconds) AS sample_interval_seconds,
-    CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type
+    CASE WHEN MIN(min_type) = MAX(max_type) THEN MAX(max_type) END AS cntr_type
 FROM (
     SELECT
         collection_time,
@@ -166,7 +167,8 @@ FROM (
              THEN SUM(delta_cntr_value) FILTER (WHERE instance_name = '_Total')
              ELSE SUM(delta_cntr_value) END AS delta_cntr_value,
         MAX(sample_interval_seconds) AS sample_interval_seconds,
-        CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type
+        MIN(cntr_type) AS min_type,
+        MAX(cntr_type) AS max_type
     FROM v_perfmon_stats
     WHERE server_id = $1
     AND   counter_name = $2
@@ -228,8 +230,9 @@ ORDER BY collection_time";
     /// other instances and adding them again doubles the point; an object with no <c>_Total</c> row contributes
     /// the sum of its instances. The per-collection layer then sums the objects, so a counter name two objects
     /// share (Transaction Delay on Database Replica and Database Mirroring, #7416) keeps both objects' rows
-    /// whichever of them carries <c>_Total</c>. The interval is MAX at both layers, the type rule is applied at
-    /// both, and the artifact count is summed up through them.</para>
+    /// whichever of them carries <c>_Total</c>. The interval is MAX at both layers, the per-object layer carries the
+    /// smallest and largest type its rows hold and the per-collection layer compares those across the objects, and
+    /// the artifact count is summed up through them.</para>
     /// </summary>
     internal static string PerfmonTrendsSql(int counterCount)
     {
@@ -255,7 +258,7 @@ FROM (
         CAST(SUM(cntr_value) AS BIGINT) AS cntr_value,
         CAST(SUM(delta_cntr_value) AS BIGINT) AS delta_cntr_value,
         CAST(MAX(sample_interval_seconds) AS BIGINT) AS sample_interval_seconds,
-        CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
+        CASE WHEN MIN(min_type) = MAX(max_type) THEN MAX(max_type) END AS cntr_type,
         SUM(artifacts) AS artifacts
     FROM (
         SELECT
@@ -269,7 +272,8 @@ FROM (
                  THEN SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total')
                  ELSE SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) END AS delta_cntr_value,
             MAX(sample_interval_seconds) AS sample_interval_seconds,
-            CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
+            MIN(cntr_type) AS min_type,
+            MAX(cntr_type) AS max_type,
             COUNT(*) FILTER (WHERE is_artifact) AS artifacts
         FROM (
             SELECT

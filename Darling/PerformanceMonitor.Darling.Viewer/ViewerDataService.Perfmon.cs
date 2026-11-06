@@ -76,12 +76,15 @@ public sealed partial class ViewerDataService
     /// typed <c>GetInt64</c> reader would throw against a numeric — the same typed-reader reason the
     /// tempdb/CPU trends CAST their aggregates. A caller passing <paramref name="counterCount"/> = 0 is
     /// a bug the <see cref="GetPerfmonTrendsByCountersAsync"/> guard prevents.
-    /// <para>The type column is <c>CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END</c>
-    /// (V132): a type only where the instance rows summed into the point agree on one. A pre-rung row has
+    /// <para>The type column (V132) is a type only where the instance rows summed into the point agree on one.
+    /// The per-object layer carries <c>MIN(cntr_type) AS min_type</c> and <c>MAX(cntr_type) AS max_type</c>, and
+    /// the per-collection layer reads <c>CASE WHEN MIN(min_type) = MAX(max_type) THEN MAX(max_type) END</c>
+    /// over the objects, so the equality spans every row under the counter name: an object whose own rows
+    /// disagree leaves the point NULL even beside a second object that agrees on a type. A pre-rung row has
     /// NULL and so does a mixed-type family, and both fall to the name proxy in the chart — the MIN/MAX
     /// equality is what stops a mixed sum (the wait-statistics object's instances are a rate, a gauge and
     /// an average under one counter name) from being classified by whichever instance's id happened to
-    /// sort first. Byte-identical to Lite's expression.</para>
+    /// sort first. Byte-identical to Lite's expressions.</para>
     /// <para>
     /// #4234: the per-collection SUM above, BUCKETED — the per-collection read this replaced kept every row,
     /// up to 102,012 for 12 counters over 7 days (the issue's measured number). Wraps the unchanged
@@ -132,7 +135,9 @@ public sealed partial class ViewerDataService
     /// object with no <c>_Total</c> row contributes the sum of its instances. The per-collection layer then sums
     /// the objects, so a counter name two objects share (Transaction Delay on Database Replica and Database
     /// Mirroring, #7416) keeps both objects' rows whichever of them carries <c>_Total</c>. The interval is MAX
-    /// at both layers, the type rule is applied at both, and the artifact count is summed up through them.</para>
+    /// at both layers, the per-object layer carries the smallest and largest type its rows hold and the
+    /// per-collection layer compares those across the objects, and the artifact count is summed up through
+    /// them.</para>
     /// $1 server_id, $2/$3 window (naive UTC), $4.. counter names, last $ the bucket width in minutes.
     /// </summary>
     public static string PerfmonTrendsSql(int counterCount)
@@ -160,7 +165,7 @@ public sealed partial class ViewerDataService
                     CAST(SUM(cntr_value) AS bigint) AS cntr_value,
                     CAST(SUM(delta_cntr_value) AS bigint) AS delta_cntr_value,
                     CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds,
-                    CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
+                    CASE WHEN MIN(min_type) = MAX(max_type) THEN MAX(max_type) END AS cntr_type,
                     SUM(artifacts) AS artifacts
                 FROM (
                     SELECT
@@ -174,7 +179,8 @@ public sealed partial class ViewerDataService
                              THEN SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total')
                              ELSE SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) END AS delta_cntr_value,
                         MAX(sample_interval_seconds) AS sample_interval_seconds,
-                        CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
+                        MIN(cntr_type) AS min_type,
+                        MAX(cntr_type) AS max_type,
                         COUNT(*) FILTER (WHERE is_artifact) AS artifacts
                     FROM (
                         SELECT
