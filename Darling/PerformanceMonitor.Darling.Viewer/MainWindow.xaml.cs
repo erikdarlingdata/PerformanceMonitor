@@ -1671,11 +1671,17 @@ public partial class MainWindow : Window
         ApplyOverviewCardFilter();
     }
 
+    /// <summary>The servers the Overview builds cards for: the enabled fleet. A disabled server collects nothing by
+    /// the operator's choice, so a card for it would read Offline and rank at the top of Needs Attention for as long
+    /// as it stays disabled. The MCP fleet reader scopes its fleet the same way.</summary>
+    internal static List<DarlingServer> OverviewServers(IReadOnlyList<DarlingServer> fleet) =>
+        fleet.Where(s => s.IsEnabled).ToList();
+
     /// <summary>
-    /// Loads a summary card for every registered server (Lite's RefreshOverviewAsync), reading each
+    /// Loads a summary card for every enabled server (Lite's RefreshOverviewAsync), reading each
     /// server's latest metrics concurrently over the pooled data source. Status is derived from
     /// collection freshness — the viewer has no live ping — via <see cref="ServerSummaryItem.ApplyFreshness"/>.
-    /// This aggregate ignores the sidebar selection; it always shows all servers.
+    /// This aggregate ignores the sidebar selection; it always shows all enabled servers.
     /// </summary>
     private async Task LoadOverviewAsync()
     {
@@ -1684,7 +1690,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var servers = _fleet.All;
+        var servers = OverviewServers(_fleet.All);
         if (servers.Count == 0)
         {
             ClearOverviewCards();
@@ -1811,9 +1817,11 @@ public partial class MainWindow : Window
             totals = new FleetTotals();
         }
 
-        /* #2753: TotalServers must be the registered fleet size (list.Count, the same source the sidebar's
-           "Servers: N" reads), not cards.Count — cards silently drops any server whose per-server summary
-           read failed this cycle, which made the Overview's total wobble against the stable sidebar count. */
+        /* #2753: TotalServers must be the enabled fleet size (list.Count, the servers OverviewServers picked), not
+           cards.Count — cards silently drops any server whose per-server summary read failed this cycle, which made
+           the Overview's total wobble against the stable sidebar count. The two counts differ on purpose: the
+           sidebar's "Servers: N" counts every registered server, disabled ones included, so they can be re-enabled
+           from the list, while this counts the enabled servers the Overview reads, and the roll-up's text says so. */
         _overviewTotals = totals;
         _overviewRegisteredCount = list.Count;
         ApplyFleetRollup(OverviewCardView.BuildRollup(cards, totals, list.Count, OverviewSearchBox?.Text));
@@ -1825,12 +1833,12 @@ public partial class MainWindow : Window
     /// Renders the fleet roll-up above the Overview cards: sets the FleetRollupContainer's DataContext and
     /// toggles the worst-first "Needs Attention" ranking against the all-clear line (there is no
     /// inverse-visibility converter, so the swap is done here). The container shows only when there are
-    /// registered servers to roll up (a search that matches none keeps it, #7354).
+    /// enabled servers to roll up (a search that matches none keeps it, #7354).
     /// </summary>
     private void ApplyFleetRollup(FleetRollup rollup)
     {
         FleetRollupContainer.DataContext = rollup;
-        /* #7354: gated on the registered fleet, not the servers the search left, so a search that matches
+        /* #7354: gated on the enabled fleet, not the servers the search left, so a search that matches
            nothing keeps the Search box on screen to be cleared. */
         FleetRollupContainer.Visibility = OverviewCardView.ShowsRollup(rollup) ? Visibility.Visible : Visibility.Collapsed;
 
@@ -1873,7 +1881,7 @@ public partial class MainWindow : Window
         OverviewItemsControl.ItemsSource = shown;
         ApplyOverviewAttentionCount(shown.Count);
 
-        /* D9: the roll-up above the grid (Needs Attention rows, band counts, "Monitoring N servers") follows the
+        /* D9: the roll-up above the grid (Needs Attention rows, band counts, "Monitoring N enabled servers") follows the
            search too, so it never counts servers the grid just hid. Before the first refresh there is no totals read
            to rebuild from; the refresh builds it. */
         if (_overviewTotals is { } totals)
