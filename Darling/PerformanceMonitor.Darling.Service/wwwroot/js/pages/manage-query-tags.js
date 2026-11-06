@@ -183,7 +183,7 @@ export async function renderManageQueryTags(main) {
   const newRule = canEdit ? lockButton({ class: "btn", type: "button", text: "New rule", onClick: () => openForm(ruleFormFor(null)) }) : null;
   const headEl = el("div", { class: "page-head" }, [
     el("h2", { text: "Manage Query Tags" }),
-    el("div", { class: "meta", text: canEdit ? "a hand assignment beats any rule" : "read-only sign-in: query tags can be viewed, not changed" }),
+    el("div", { class: "meta", text: canEdit ? "a hand assignment beats any rule" : session.probe_failed === true ? "could not check this sign-in: query tags can be viewed, not changed until you reload" : "read-only sign-in: query tags can be viewed, not changed" }),
     el("div", { class: "spacer" }),
     newRoot,
     newRule,

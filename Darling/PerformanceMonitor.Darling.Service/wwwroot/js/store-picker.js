@@ -19,7 +19,7 @@
 
 import { el, mount, apiGet, currentStore, setStore, setFrontDoor, frontDoor, storeHash, splitStoreHash, networkErrorText } from "./util.js";
 import { setStoreScope } from "./viewer-local.js";
-import { peekSession } from "./views-api.js";
+import { peekSession, getSession, onFirstGoodSession } from "./views-api.js";
 
 const REMEMBER_KEY = "darling.frontDoor.store";
 
@@ -132,6 +132,27 @@ export async function initFrontDoor(host, hash) {
   if (pick) rememberStore(pick);
   applyStoreSession(peekSession());
   paintPicker();
+}
+
+/**
+ * #6840: asks the session whether this is a front door before anything else reads, because every read after it names a store.
+ * When it is, runs initFrontDoor and then `onStarted(false)`. When the first answer FAILED (the front door restarting while the
+ * page loaded) it cannot tell yet, so it returns at once, with no store scope and no edit controls (a failed answer carries
+ * can_edit: false), and finishes the same start when the first good answer arrives (#7928): initFrontDoor, then `onStarted(true)`
+ * so the caller can redraw what was drawn without a store. A good answer without front_door: true starts nothing.
+ */
+export async function startFrontDoor(host, onStarted) {
+  const run = async (session, late) => {
+    if (!session || session.front_door !== true) return;
+    await initFrontDoor(host, location.hash || "");
+    if (onStarted) onStarted(late);
+  };
+  const first = await getSession();
+  if (first && first.probe_failed) {
+    onFirstGoodSession((good) => { run(good, true).catch(() => {}); });
+    return;
+  }
+  await run(first, false);
 }
 
 /** Polls the store list (health changes) and repaints the picker. */
