@@ -89,7 +89,9 @@ public sealed class QueryStoreTopDailyReadLiveTests
     /// <summary>The wide table for server 1 from 2026-01-05 to 2026-01-14 12:00, one row per query per hour for most
     /// hours (a row at every midnight among them), with nulls where the facts need them. 40 queries: query 40 has every
     /// average NULL, queries divisible by 7 have a NULL cpu on odd hours, queries divisible by 4 change module
-    /// between hours, queries divisible by 5 are Aborted, and queries divisible by 6 carry a replica role.</summary>
+    /// between hours, queries divisible by 5 are Aborted, and queries divisible by 6 carry a replica role. #7814: every row's interval start is its collection time, so the table read
+    /// (placed by the interval's start) and the daily summary (built on collection days) place each row in the same window, which the
+    /// bit-for-bit comparisons need; an interval that started before its collection moves a row across an outer window edge in one and not the other.</summary>
     private const string SeedSql = @"
 INSERT INTO collect.query_store_interval_wide
 (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
@@ -107,7 +109,7 @@ SELECT
     CASE WHEN q = 40 THEN NULL ELSE (q + h * 5) % 211 END,
     CASE WHEN q = 40 THEN NULL ELSE 1 + (q * 29 + h * 3) % 1009 END,
     'ph' || (h % 5), CASE WHEN q % 6 = 0 THEN 'PRIMARY' ELSE NULL END,
-    q * 100000 + h, ct - interval '10 minutes'
+    q * 100000 + h, ct
 FROM
 (
     SELECT q, h, TIMESTAMP '2026-01-05 00:00:00' + make_interval(hours => h) AS ct
@@ -126,16 +128,17 @@ FROM
     }
 
     /// <summary>One extra wide-table row for query <paramref name="queryId"/> with a duration large enough to rank first.</summary>
-    private static async Task InsertRowAsync(NpgsqlConnection connection, DateTime collectionTime, long queryId, CancellationToken ct, long duration = 90_000_000, DateTime? firstExecution = null)
+    private static async Task InsertRowAsync(NpgsqlConnection connection, DateTime collectionTime, long queryId, CancellationToken ct, long duration = 90_000_000, DateTime? firstExecution = null, DateTime? intervalStart = null)
     {
         await using var command = new NpgsqlCommand(@"
 INSERT INTO collect.query_store_interval_wide
 (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
  query_hash, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads,
  avg_rowcount, query_plan_hash, runtime_stats_interval_id, interval_start_time_utc)
-VALUES (@ct, 1, 'db0', @q, @q, 'Regular', COALESCE(@fet, @ct - interval '10 minutes'), @ct, 'h' || @q, 1000, @dur, 5, 5, 5, 5, 5, 'late', @q, @ct - interval '10 minutes')", connection);
+VALUES (@ct, 1, 'db0', @q, @q, 'Regular', COALESCE(@fet, @ct - interval '10 minutes'), @ct, 'h' || @q, 1000, @dur, 5, 5, 5, 5, 5, 'late', @q, COALESCE(@ist, @ct))", connection);
         command.Parameters.Add(new NpgsqlParameter("ct", NpgsqlDbType.Timestamp) { Value = collectionTime });
         command.Parameters.Add(new NpgsqlParameter("fet", NpgsqlDbType.Timestamp) { Value = (object?)firstExecution ?? DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter("ist", NpgsqlDbType.Timestamp) { Value = (object?)intervalStart ?? DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter("q", NpgsqlDbType.Bigint) { Value = queryId });
         command.Parameters.Add(new NpgsqlParameter("dur", NpgsqlDbType.Bigint) { Value = duration });
         await command.ExecuteNonQueryAsync(ct);
@@ -274,7 +277,7 @@ INSERT INTO collect.query_store_interval_wide
 (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
  query_hash, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads,
  avg_rowcount, query_plan_hash, runtime_stats_interval_id, interval_start_time_utc)
-VALUES (@ct, 1, 'dbskew', @q, @q, 'Regular', @ct - interval '10 minutes', @ct, 'h' || @q, @ec, @dur, @dur, @dur, 0, 0, 1, 'skew', @q * 1000 + EXTRACT(HOUR FROM @ct)::bigint, @ct - interval '10 minutes')", connection);
+VALUES (@ct, 1, 'dbskew', @q, @q, 'Regular', @ct - interval '10 minutes', @ct, 'h' || @q, @ec, @dur, @dur, @dur, 0, 0, 1, 'skew', @q * 1000 + EXTRACT(HOUR FROM @ct)::bigint, @ct)", connection);
         command.Parameters.Add(new NpgsqlParameter("ct", NpgsqlDbType.Timestamp) { Value = collectionTime });
         command.Parameters.Add(new NpgsqlParameter("q", NpgsqlDbType.Bigint) { Value = queryId });
         command.Parameters.Add(new NpgsqlParameter("ec", NpgsqlDbType.Bigint) { Value = executions });
@@ -583,6 +586,38 @@ FROM generate_series({FirstOwn}, {FirstOwn + count - 1}) AS q;", ct);
             Assert.DoesNotContain(9106L, today);
             Assert.Contains(9107L, today);
             Assert.Contains(9108L, today);
+        });
+    }
+
+    /// <summary>
+    /// #7814: the interval-table read places a window by the interval's start, the daily route by <c>collection_time</c> at its two
+    /// outer edges (a continuous aggregate buckets on the one column it was built on). So over the same window the two disagree
+    /// by the intervals that straddle an outer edge, and by no more: an interval that started before the window and was collected
+    /// inside it is read by the route and not by the table read, and one that started inside the window and was collected after its
+    /// end is read by the table read and not by the route. An interval whose start equals its collection time, as the other cases
+    /// here seed, shows neither.
+    /// </summary>
+    [Fact]
+    public async Task TheOuterEdges_PlaceByCollectionTime_WhereTheTableReadPlacesByTheIntervalStart()
+    {
+        await RunLiveAsync(async (connection, source, ct) =>
+        {
+            var readStart = End.AddHours(-72);
+            /* Collected 10 minutes into the window, started 20 minutes before it. */
+            await InsertRowAsync(connection, readStart.AddMinutes(10), 9201, ct, intervalStart: readStart.AddMinutes(-20));
+            /* Started 20 minutes before the window's end, collected 10 minutes after it. */
+            await InsertRowAsync(connection, End.AddMinutes(10), 9202, ct, firstExecution: End.AddMinutes(-15), intervalStart: End.AddMinutes(-20));
+
+            var route = await RouteAsync(source, readStart, End, null, null, null, ct);
+            Assert.Equal((new DateOnly(2026, 1, 12), new DateOnly(2026, 1, 14)), route.DailySpan);
+            var routeIds = route.Rows.Select(r => r.QueryId).ToHashSet();
+            var table = (await RunSqlAsync(connection, DarlingDataReader.QueryStoreTopTableSql, readStart, End, null, null, null, null, ct))
+                .Select(v => (long)v[1]!).ToHashSet();
+
+            Assert.Contains(9201L, routeIds);
+            Assert.DoesNotContain(9201L, table);
+            Assert.DoesNotContain(9202L, routeIds);
+            Assert.Contains(9202L, table);
         });
     }
 

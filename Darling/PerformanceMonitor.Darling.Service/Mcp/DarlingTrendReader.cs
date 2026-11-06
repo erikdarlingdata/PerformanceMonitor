@@ -312,9 +312,14 @@ internal static class DarlingTrendReader
 
     /// <summary>
     /// A single counter's value + per-interval delta trend — Lite's <c>GetPerfmonTrendAsync</c> / the
-    /// viewer's perfmon read: SUM the counter's instances per collection. Postgres <c>SUM(bigint)</c> is
-    /// numeric, so both SUMs CAST back to bigint for the typed GetInt64 reader (the viewer's PerfmonTrendsSql
-    /// makes the same cast). $1 server_id, $2 counter_name, $3/$4 window (naive UTC).
+    /// viewer's perfmon read: per collection, SUM the counter's instances object by object. An object whose
+    /// instances include <c>_Total</c> (the Databases and Locks objects) contributes that row alone, since it
+    /// already is the sum of the object's other instances and adding them again doubles the point; an object with
+    /// no <c>_Total</c> row contributes the sum of its instances; the objects are then summed, so a counter name
+    /// two objects share (Transaction Delay on Database Replica and Database Mirroring, #7416) keeps both objects'
+    /// rows whichever of them carries <c>_Total</c>. Postgres <c>SUM(bigint)</c> is numeric, so the outer SUMs
+    /// CAST back to bigint for the typed GetInt64 reader (the viewer's PerfmonTrendsSql makes the same cast).
+    /// $1 server_id, $2 counter_name, $3/$4 window (naive UTC).
     /// <para>The interval is MAX, not SUM, and that distinction is load-bearing. cntr_value and
     /// delta_cntr_value are additive across a counter's instance rows — summing Transactions/sec over
     /// every database is a meaningful total — but the interval is the same measured sweep gap repeated
@@ -324,11 +329,14 @@ internal static class DarlingTrendReader
     /// the same silent corruption this read exists to expose, pointed the other way. MAX also ignores a
     /// 0 from an instance seen for the first time, while still reporting 0 when every instance is
     /// unknown.</para>
-    /// <para>The type column is <c>CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END</c>
-    /// (V132): a type only where the instance rows summed into the point agree on one. A pre-rung row has
+    /// <para>The type column (V132) is a type only where the instance rows summed into the point agree on one.
+    /// The per-object layer carries <c>MIN(cntr_type) AS min_type</c> and <c>MAX(cntr_type) AS max_type</c>, and
+    /// the per-collection layer reads <c>CASE WHEN MIN(min_type) = MAX(max_type) THEN MAX(max_type) END</c>
+    /// over the objects, so the equality spans every row under the counter name: an object whose own rows
+    /// disagree leaves the point NULL even beside a second object that agrees on a type. A pre-rung row has
     /// NULL and so does a mixed-type family (the wait-statistics object's instances are a rate, a gauge and
     /// an average under one counter name) — the equality is what stops a mixed sum being classified by
-    /// whichever instance's id sorts first. Byte-identical to the viewer's and Lite's expression.</para>
+    /// whichever instance's id sorts first. The type expression and the artifact-filtered per-object arms (<c>NOT is_artifact</c>, #4476) match Lite's batched <c>GetPerfmonTrendsByCountersAsync</c> and bucketed <c>GetPerfmonBucketsAsync</c> reads; Lite's single-counter <c>GetPerfmonTrendAsync</c> omits the <c>NOT is_artifact</c> filter (#4476).</para>
     /// <para>#4476: a raw-row layer sits under the per-collection SUM, carrying <c>lag</c>/<c>lead</c> of
     /// <c>cntr_value</c> per instance (<c>PARTITION BY object_name, instance_name ORDER BY collection_time</c>
     /// — this read is already scoped to one counter name by <c>$2</c>, unlike the viewer's several-counter
@@ -362,19 +370,25 @@ internal static class DarlingTrendReader
         return $$"""
             SELECT
                 collection_time,
-                CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS cntr_value,
-                CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS delta_cntr_value,
+                CAST(SUM(cntr_value) AS bigint) AS cntr_value,
+                CAST(SUM(delta_cntr_value) AS bigint) AS delta_cntr_value,
                 CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds,
-                CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
-                COUNT(*) FILTER (WHERE is_artifact) AS artifacts
+                CASE WHEN MIN(min_type) = MAX(max_type) THEN MAX(max_type) END AS cntr_type,
+                SUM(artifacts) AS artifacts
             FROM (
                 SELECT
                     collection_time,
-                    cntr_value,
-                    delta_cntr_value,
-                    sample_interval_seconds,
-                    cntr_type,
-                    {{isArtifact}} AS is_artifact
+                    object_name,
+                    CASE WHEN bool_or(instance_name = '_Total')
+                         THEN SUM(cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total')
+                         ELSE SUM(cntr_value) FILTER (WHERE NOT is_artifact) END AS cntr_value,
+                    CASE WHEN bool_or(instance_name = '_Total')
+                         THEN SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total')
+                         ELSE SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) END AS delta_cntr_value,
+                    MAX(sample_interval_seconds) AS sample_interval_seconds,
+                    MIN(cntr_type) AS min_type,
+                    MAX(cntr_type) AS max_type,
+                    COUNT(*) FILTER (WHERE is_artifact) AS artifacts
                 FROM (
                     SELECT
                         collection_time,
@@ -383,35 +397,49 @@ internal static class DarlingTrendReader
                         delta_cntr_value,
                         sample_interval_seconds,
                         cntr_type,
-                        lag(cntr_value) OVER w AS prev_value,
-                        lead(cntr_value) OVER w AS next_value
-                    FROM v_perfmon_stats
-                    WHERE server_id = $1
-                    AND   counter_name = $2
-                    AND   collection_time >= $3
-                    AND   collection_time <= $4
-                    AND   {{isWaitStatistics}}
-                    WINDOW w AS (PARTITION BY object_name, instance_name ORDER BY collection_time)
+                        instance_name,
+                        {{isArtifact}} AS is_artifact
+                    FROM (
+                        SELECT
+                            collection_time,
+                            object_name,
+                            instance_name,
+                            cntr_value,
+                            delta_cntr_value,
+                            sample_interval_seconds,
+                            cntr_type,
+                            lag(cntr_value) OVER w AS prev_value,
+                            lead(cntr_value) OVER w AS next_value
+                        FROM v_perfmon_stats
+                        WHERE server_id = $1
+                        AND   counter_name = $2
+                        AND   collection_time >= $3
+                        AND   collection_time <= $4
+                        AND   {{isWaitStatistics}}
+                        WINDOW w AS (PARTITION BY object_name, instance_name ORDER BY collection_time)
 
-                    UNION ALL
+                        UNION ALL
 
-                    SELECT
-                        collection_time,
-                        object_name,
-                        cntr_value,
-                        delta_cntr_value,
-                        sample_interval_seconds,
-                        cntr_type,
-                        NULL AS prev_value,
-                        NULL AS next_value
-                    FROM v_perfmon_stats
-                    WHERE server_id = $1
-                    AND   counter_name = $2
-                    AND   collection_time >= $3
-                    AND   collection_time <= $4
-                    AND   NOT ({{isWaitStatistics}})
-                ) AS raw
-            ) AS flagged
+                        SELECT
+                            collection_time,
+                            object_name,
+                            instance_name,
+                            cntr_value,
+                            delta_cntr_value,
+                            sample_interval_seconds,
+                            cntr_type,
+                            NULL AS prev_value,
+                            NULL AS next_value
+                        FROM v_perfmon_stats
+                        WHERE server_id = $1
+                        AND   counter_name = $2
+                        AND   collection_time >= $3
+                        AND   collection_time <= $4
+                        AND   NOT ({{isWaitStatistics}})
+                    ) AS raw
+                ) AS flagged
+                GROUP BY collection_time, object_name
+            ) AS objects
             GROUP BY collection_time
             ORDER BY collection_time
             """;

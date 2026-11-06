@@ -707,6 +707,10 @@ CREATE OR REPLACE VIEW collect.v_blocked_process_reports AS SELECT * FROM collec
         // V219's marker-only function back (the probe's sentinel is the digest test in the function's source), so a re-run of V248 replaces it
         // again. The state row is left as it is: the re-run deletes it.
         new(248, "hasSelfKeysOldStatements", PerformanceMonitor.Darling.Storage.QueryStoreSelfKeys.MarkerOnlyTriggerSql),
+        // V249 (#7731): the database name on the statement stats. A plain nullable column with no view over it, so the rewind is the drop alone, and the
+        // re-run of V249 adds it back. Safe on a store that never had it.
+        new(249, "hasStatementStatsDatabaseName",
+            @"ALTER TABLE IF EXISTS collect.pg_statement_stats DROP COLUMN IF EXISTS database_name;"),
     ];
 
     /// <summary>

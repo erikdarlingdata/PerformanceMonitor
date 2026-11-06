@@ -176,9 +176,11 @@ public sealed class DeltaGapPolicyTests
 
         Assert.Contains("MAX(sample_interval_seconds)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("SUM(sample_interval_seconds)", sql, StringComparison.Ordinal);
-        /* The additive pair must stay additive — this guards the fix from being over-applied. */
-        Assert.Contains("SUM(cntr_value)", sql, StringComparison.Ordinal);
-        Assert.Contains("SUM(delta_cntr_value)", sql, StringComparison.Ordinal);
+        /* The additive pair is never taken as MAX — this guards the fix from being over-applied. Which instance
+           rows each one sums is pinned against a live store in PerfmonTotalInstanceLiveTests, not against the
+           statement text. */
+        Assert.DoesNotContain("MAX(cntr_value)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("MAX(delta_cntr_value)", sql, StringComparison.Ordinal);
     }
 
     private static string RepoRoot()

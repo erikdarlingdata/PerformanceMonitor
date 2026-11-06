@@ -3167,6 +3167,10 @@ LIMIT 1";
             if (!result.Abandoned)
             {
                 RepeatLog.Clear(server.Config.DisplayName, collectorName);
+
+                /* #4710: a run completed on this connection, so the server answers: the liveness memo's count of probes whose
+                   own login timed out starts over (LivenessProbeMemo.MaxTimedOutProbesInARow). */
+                server.Liveness.RunCompleted();
             }
 
             return result.Rows;
@@ -3717,24 +3721,42 @@ LIMIT 1";
                snapshot, so one slow statement cost a stressed server 75 s or more of collection, alerts and
                analysis. ShouldDropRuntimeAsync settles a timeout with a probe on a fresh connection and drops
                only when the probe fails (a pre-login timeout on a hung server is also -2). Class 20+ still
-               drops at once. The PostgreSQL arm keeps its rule: ANY exception on a PostgreSQL target, not just
-               a PostgresException, because a dead socket surfaces as a plain NpgsqlException with no SQLSTATE,
-               and the provider already classifies that as ConnectionFatal. */
+               drops at once. The probe goes through the server's LivenessProbeMemo, so the timeouts a stressed
+               server raises close together share one probe login instead of each opening its own against it.
+               A probe whose own login times out counts the server alive, because under thread-pool starvation
+               the sessions already open answer while new logins wait, but only
+               LivenessProbeMemo.MaxTimedOutProbesInARow times in a row: every collector run opens a fresh login,
+               so a hung or black-holed server times out every probe the same way and would otherwise never be
+               dropped. A run that completes (the success path above) or a probe that logs in ends the streak.
+               The PostgreSQL arm keeps its rule: ANY exception on a PostgreSQL target, not just a
+               PostgresException, because a dead socket surfaces as a plain NpgsqlException with no SQLSTATE, and
+               the provider already classifies that as ConnectionFatal. */
             if (await ConnectionFaultDisposition.ShouldDropRuntimeAsync(
                     ex,
                     server.Runtime,
-                    LivenessProbeOverride ?? ConnectionFaultDisposition.ProbeFreshConnectionAsync,
+                    (probed, token) => server.Liveness.ProbeAsync(
+                        probed, LivenessProbeOverride ?? ConnectionFaultDisposition.ProbeFreshConnectionAsync, DateTime.UtcNow, token),
                     cancellationToken))
             {
                 server.Runtime = null;
+                server.Liveness.Clear();
                 server.NextConnectAttempt = DateTime.UtcNow.AddSeconds(60);
                 _logger.LogWarning("[{Server}] Connection-level failure — will reconnect", server.Config.DisplayName);
             }
             else if (ex is SqlException { Number: -2 })
             {
-                _logger.LogInformation(
-                    "[{Server}] {Collector} timed out, but a fresh connection answered — keeping the connection (#4710)",
-                    server.Config.DisplayName, collectorName);
+                if (server.Liveness.Last is { Outcome: LivenessProbeOutcome.TimedOut })
+                {
+                    _logger.LogInformation(
+                        "[{Server}] {Collector} timed out, and so did the liveness probe's own login — keeping the connection, since open sessions answer while new logins wait; probe {Streak} of {Limit} in a row to time out (#4710)",
+                        server.Config.DisplayName, collectorName, server.Liveness.TimedOutProbesInARow, LivenessProbeMemo.MaxTimedOutProbesInARow);
+                }
+                else
+                {
+                    _logger.LogInformation(
+                        "[{Server}] {Collector} timed out, but a fresh connection answered — keeping the connection (#4710)",
+                        server.Config.DisplayName, collectorName);
+                }
             }
 
             /* Best-effort store write (#1556): this is also the OutOfMemoryException landing pad (OOM is an

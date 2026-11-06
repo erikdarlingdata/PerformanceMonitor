@@ -14,6 +14,7 @@ using DuckDB.NET.Data;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Analysis;
+using PerformanceMonitorLite.Mcp;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -162,22 +163,22 @@ ORDER BY lower(p.database_name), p.database_name, p.collection_time";
     /// stale or missing snapshots, a standalone server and Azure SQL Database give no note.
     /// </summary>
     public async Task<(List<PvsStatsRow> Rows, string? SecondaryNote)> GetPvsStatsLatestWithNoteAsync(
-        int serverId, IReadOnlyList<string>? databaseNames = null)
+        int serverId, ServerManager serverManager, IReadOnlyList<string>? databaseNames = null)
     {
-        var read = await ReadPvsStatsLatestAsync(serverId, databaseNames);
+        var read = await ReadPvsStatsLatestAsync(serverId, serverManager, databaseNames);
         return (read.Rows, read.SecondaryNote);
     }
 
     /// <summary>
     /// #7822: <see cref="GetPvsStatsLatestWithNoteAsync"/> with the unfiltered newest snapshot it had to read handed back, so the MCP tool's
-    /// "the snapshot holds other databases" probe does not read it a second time. <paramref name="secondaryNoteApplies"/> is false for a
-    /// server whose SQL Server version has no persistent version store (before 2019), where no database has a row and the primary has none
-    /// either: no note is built and the replica scope is not read.
+    /// "the snapshot holds other databases" probe does not read it a second time. A server whose SQL Server version has no persistent version
+    /// store (before 2019, judged from <paramref name="serverManager"/>) gets no note: no database has a row there and the primary has none
+    /// either, so the replica scope is not read.
     /// </summary>
     /// <returns><c>UnfilteredRows</c> is the server's newest snapshot with every database, and is read only when a filter matched nothing in
     /// it (null otherwise).</returns>
     public async Task<PvsLatestRead> ReadPvsStatsLatestAsync(
-        int serverId, IReadOnlyList<string>? databaseNames = null, bool secondaryNoteApplies = true)
+        int serverId, ServerManager serverManager, IReadOnlyList<string>? databaseNames = null)
     {
         var rows = await GetPvsStatsLatestAsync(serverId, databaseNames);
 
@@ -191,7 +192,10 @@ ORDER BY lower(p.database_name), p.database_name, p.collection_time";
             if (unfiltered.Count > 0) snapshot = unfiltered[0].CollectionTime;
         }
 
-        if (!secondaryNoteApplies) return new PvsLatestRead(rows, null, unfiltered);
+        /* #7822: the note only for a server whose SQL Server version has a persistent version store. Before 2019 no database has a row and the
+           primary has none either, so "check the primary replica" is wrong there. The gate lives here, where the note is built, so the MCP tool
+           and the desktop grid both get it. The replica scope is not read for a server it does not apply to. */
+        if (!McpEngineCapability.PvsVersionHasStore(serverManager, serverId)) return new PvsLatestRead(rows, null, unfiltered);
 
         var secondary = await SecondaryReplicaScope.ReadAsync(_duckDb, serverId, PvsSecondaryNote.ScopeTimeUtc(snapshot), System.Threading.CancellationToken.None);
         return new PvsLatestRead(rows, PvsSecondaryNote.WithoutRow(secondary, rows.Select(r => r.DatabaseName), databaseNames), unfiltered);

@@ -41,16 +41,14 @@ public sealed class ViewerPerfmonSqlTests
     }
 
     [Fact]
-    public void PerfmonTrendsSql_SumsValueAndDelta_ButTakesTheIntervalAsMax()
+    public void PerfmonTrendsSql_TakesTheIntervalAsMax_ThenSumsItAcrossCollections()
     {
         var sql = ViewerDataService.PerfmonTrendsSql(3);
 
         Assert.Contains("FROM v_perfmon_stats", sql, StringComparison.Ordinal);
-        /* Every aggregate is CAST to bigint for the typed GetInt64 reader (Postgres SUM(bigint)
-           returns numeric). #4476: the per-collection SUMs now exclude any raw instance row flagged as an
-           isolated single-sample Wait Statistics artifact. */
-        Assert.Contains("CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS bigint)", sql, StringComparison.Ordinal);
-        Assert.Contains("CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS bigint)", sql, StringComparison.Ordinal);
+        /* Which instance rows the value and the delta sum is pinned against a live store in
+           PerfmonTotalInstanceLiveTests, and that the SUMs exclude an isolated single-sample Wait Statistics
+           artifact (#4476) in PerfmonWaitStatisticsArtifactViewerLiveTests, not against the statement text. */
         /* The interval is NOT additive across a counter's instance rows — it is one measured sweep gap
            repeated per instance, so SUM would multiply the denominator by the instance count (12-17 for
            Transactions/sec on the fleet). Same pin as the MCP read carries, #2234. This is the INNER
