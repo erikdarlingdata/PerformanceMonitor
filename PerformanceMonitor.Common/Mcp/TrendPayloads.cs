@@ -697,11 +697,11 @@ internal static class TrendPayloads
     /// </summary>
     public static string CurrentWaitsTrend(
         Dictionary<string, object?> head, IReadOnlyList<CurrentWaitsWaitPoint> waits, IReadOnlyList<CurrentWaitsBlockedPoint> blocked,
-        int bucketMinutes, bool requested, int autoBudget)
+        int bucketMinutes, bool requested, int autoBudget, int? pointsOverTarget = null)
     {
         head["bucket"] = TrendBuckets.Word(bucketMinutes);
         head["bucket_minutes"] = bucketMinutes;
-        head["aggregate_note"] = TrendBuckets.Sizing(requested, autoBudget);
+        head["aggregate_note"] = TrendBuckets.Sizing(requested, autoBudget, pointsOverTarget);
         head["note"] = $"Each point is one {TrendBuckets.Adjective(bucketMinutes)} bucket stamped at the bucket's start (the first point at the window's start). {CurrentWaitsFiguresNote}";
         /* Two series in one payload because they are read together: a wait-type spike with no blocked sessions is a resource wait,
            and the same spike WITH them is contention. */

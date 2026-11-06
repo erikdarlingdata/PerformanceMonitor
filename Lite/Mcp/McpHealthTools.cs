@@ -1470,8 +1470,11 @@ public sealed class McpHealthTools
                The desktop chart's readers (GetWaitingTaskTrendAsync, GetBlockedSessionTrendAsync) are not this read: the first SUMS a bucket. */
             var budget = TrendBudget.Mcp(TrendBuckets.WaitMaxPoints);
             var seriesCount = await dataService.CountCurrentWaitsSeriesAsync(resolved.ServerId, hours, asOfUtc: windowEnd, databaseNames: filter);
-            var bucketError = TrendBuckets.Resolve(hours, bucket_minutes, Math.Max(1, seriesCount), budget, out var bucketMinutes);
+            var bucketError = TrendBuckets.Resolve(
+                hours, bucket_minutes, Math.Max(1, seriesCount), budget, out var bucketMinutes,
+                "Narrow hours_back, move as_of, or filter database_name to read this.");
             if (bucketError != null) return bucketError;
+            var overTarget = TrendBuckets.PointsOverTarget(hours, bucketMinutes, Math.Max(1, seriesCount), budget.AutoFor(Math.Max(1, seriesCount)), bucket_minutes is not null);
 
             var waits = await dataService.GetCurrentWaitsWaitPointsAsync(resolved.ServerId, hours, asOfUtc: windowEnd, bucketMinutes: bucketMinutes);
             var blocked = await dataService.GetCurrentWaitsBlockedPointsAsync(resolved.ServerId, hours, asOfUtc: windowEnd, databaseNames: filter, bucketMinutes: bucketMinutes);
@@ -1520,7 +1523,7 @@ public sealed class McpHealthTools
             };
             /* One builder for both SKUs' envelope (TrendPayloads), so the keys and the meaning of each figure cannot drift. */
             return await McpQueryTools.WithDataWindowNoticeAsync(
-                TrendPayloads.CurrentWaitsTrend(head, waits, blocked, bucketMinutes, bucket_minutes is not null, budget.AutoPoints),
+                TrendPayloads.CurrentWaitsTrend(head, waits, blocked, bucketMinutes, bucket_minutes is not null, budget.AutoPoints, overTarget),
                 dataService, QueryWindowRelation.WaitingTasks, resolved.ServerId, windowEnd.AddHours(-hours), windowEnd, "waiting_tasks");
         }
         catch (Exception ex)

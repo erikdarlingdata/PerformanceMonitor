@@ -3752,7 +3752,7 @@ ORDER BY server_name";
             TrendBudget.Mcp(TrendBuckets.WaitMaxPoints), cancellationToken);
 
     /// <summary>
-    /// #5244: <see cref="GetCurrentWaitsTrend(NpgsqlDataSource,string,int,string,string,CancellationToken)"/> over a SET of
+    /// #5244: <see cref="GetCurrentWaitsTrend(NpgsqlDataSource,string,int,string,string,int?,CancellationToken)"/> over a SET of
     /// databases. The list limits the BLOCKED-SESSION series only (the waiting-task series is per wait type, whole, as the tool's head
     /// says). The echoed <c>database_name</c> is the name for one database and "the chosen databases" for two or more. The
     /// both-series-empty answers below name no database: "nothing was waiting" is true of the whole server, because the
@@ -3795,8 +3795,11 @@ ORDER BY server_name";
 
             var seriesCount = await DarlingDataReader.CountWaitingTaskSeriesAsync(postgres, resolved.ServerId, start, end, cancellationToken)
                 + await DarlingDataReader.CountBlockedSessionSeriesAsync(postgres, resolved.ServerId, start, end, databases, cancellationToken);
-            var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, Math.Max(1, seriesCount), budget, out var bucketMinutes);
+            var bucketError = TrendBuckets.Resolve(
+                hours_back, bucket_minutes, Math.Max(1, seriesCount), budget, out var bucketMinutes,
+                "Narrow hours_back, move as_of, or filter database_name to read this.");
             if (bucketError != null) return bucketError;
+            var overTarget = TrendBuckets.PointsOverTarget(hours_back, bucketMinutes, Math.Max(1, seriesCount), budget.AutoFor(Math.Max(1, seriesCount)), bucket_minutes is not null);
 
             var waits = await DarlingDataReader.GetWaitingTaskTrendAsync(postgres, resolved.ServerId, start, end, bucketMinutes, cancellationToken);
             var blocked = await DarlingDataReader.GetBlockedSessionTrendAsync(
@@ -3858,7 +3861,7 @@ ORDER BY server_name";
             };
             /* One builder for both SKUs' envelope (TrendPayloads), so the keys and the meaning of each figure cannot drift. */
             return DarlingMcpWindowNotice.Finish(
-                TrendPayloads.CurrentWaitsTrend(head, waits, blocked, bucketMinutes, bucket_minutes is not null, budget.AutoPoints), notice);
+                TrendPayloads.CurrentWaitsTrend(head, waits, blocked, bucketMinutes, bucket_minutes is not null, budget.AutoPoints, overTarget), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

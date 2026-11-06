@@ -212,14 +212,22 @@ internal static class TrendBuckets
     /// <param name="seriesCount">How many series the answer will carry (1 for a single-series read).</param>
     /// <param name="budget">The auto target and the explicit cap.</param>
     /// <param name="bucketMinutes">The resolved width, meaningful only when this returns null.</param>
-    public static string? Resolve(int hoursBack, int? requested, int seriesCount, TrendBudget budget, out int bucketMinutes)
+    /// <param name="narrowHint">The sentence a refusal ends with when even a day-wide bucket cannot bring the window under
+    /// the cap (#7877): what the caller can change, named by the read (a read with a database filter says so).</param>
+    public static string? Resolve(
+        int hoursBack, int? requested, int seriesCount, TrendBudget budget, out int bucketMinutes,
+        string narrowHint = "Narrow hours_back or move as_of to a shorter window.")
     {
         var windowMinutes = hoursBack * 60;
 
         if (requested is not int width)
         {
             bucketMinutes = AutoMinutes(windowMinutes, seriesCount, budget.AutoFor(seriesCount));
-            return null;
+            /* AutoMinutes gives up at the top rung. Inside a seven-day window cap that rung always fits the cap, but a read with no
+               hours_back ceiling (get_current_waits_trend) can hold a window no width serves, and serving it would break the cap. */
+            return bucketMinutes == MaxBucketMinutes && PointsFor(windowMinutes, MaxBucketMinutes, seriesCount) > budget.MaxPoints
+                ? WidestOverCapRefusal(hoursBack, windowMinutes, seriesCount, budget, narrowHint)
+                : null;
         }
 
         bucketMinutes = width;
@@ -232,6 +240,12 @@ internal static class TrendBuckets
         var points = PointsFor(windowMinutes, width, seriesCount);
         if (points > budget.MaxPoints)
         {
+            /* No width remedies it: say so, rather than name a width that is itself refused. */
+            if (PointsFor(windowMinutes, MaxBucketMinutes, seriesCount) > budget.MaxPoints)
+            {
+                return WidestOverCapRefusal(hoursBack, windowMinutes, seriesCount, budget, narrowHint);
+            }
+
             var fits = NarrowestFitting(windowMinutes, seriesCount, budget.MaxPoints, width);
             var across = seriesCount > 1 ? $" across {seriesCount} series" : string.Empty;
             return McpHelpers.Refusal(
@@ -240,6 +254,26 @@ internal static class TrendBuckets
         }
 
         return null;
+    }
+
+    /// <summary>The refusal for a window that is over the cap even at the widest bucket (#7877): the remedy is a smaller
+    /// window or fewer series, never a width.</summary>
+    private static string WidestOverCapRefusal(int hoursBack, int windowMinutes, int seriesCount, TrendBudget budget, string narrowHint) =>
+        McpHelpers.Refusal(
+            "hours_back",
+            $"{hoursBack} hour(s) across {seriesCount} series is up to {PointsFor(windowMinutes, MaxBucketMinutes, seriesCount).ToString(CultureInfo.InvariantCulture)} points even at the widest bucket ({MaxBucketMinutes} minutes), over this read's {budget.MaxPoints.ToString(CultureInfo.InvariantCulture)}-point cap, so no bucket_minutes can serve it. {narrowHint}");
+
+    /// <summary>The points an automatic width serves when it could not meet the auto target (the widest bucket still holds more
+    /// than <paramref name="autoTarget"/>), else null (#7877). The payload names the miss instead of claiming the target.</summary>
+    public static int? PointsOverTarget(int hoursBack, int bucketMinutes, int seriesCount, int autoTarget, bool requested)
+    {
+        if (requested)
+        {
+            return null;
+        }
+
+        var points = PointsFor(hoursBack * 60, bucketMinutes, seriesCount);
+        return points > autoTarget ? points : null;
     }
 
     /// <summary>
@@ -327,8 +361,10 @@ internal static class TrendBuckets
         + Sizing(requested, budgetPoints);
 
     /// <summary>The closing sentence both notes share: where the width came from, and how to ask for another.</summary>
-    public static string Sizing(bool requested, int budgetPoints) =>
-        requested
+    public static string Sizing(bool requested, int budgetPoints, int? pointsOverTarget = null) =>
+        pointsOverTarget is int served
+            ? $"The width is the widest bucket ({MaxBucketMinutes} minutes), and even that could not bring this answer near {budgetPoints.ToString(CultureInfo.InvariantCulture)} points: it serves {served.ToString(CultureInfo.InvariantCulture)}. Narrow hours_back for fewer points."
+        : requested
             ? "The width is the bucket_minutes you passed."
             : $"The width was chosen to keep this answer near {budgetPoints.ToString(CultureInfo.InvariantCulture)} points; pass bucket_minutes (1-{MaxBucketMinutes}) for another width, or narrow hours_back for finer points.";
 }

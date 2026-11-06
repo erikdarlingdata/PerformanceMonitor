@@ -264,6 +264,81 @@ public sealed class DarlingCurrentWaitsTrendTests
         }
     }
 
+    /// <summary>
+    /// #7877 review: this read has no hours_back ceiling, and the shared ladder gives up at its widest rung (one day). A 30-day window holding
+    /// 8 wait types and a database is 31 day-buckets x 9 series = 279 points: over the 200 target, inside the 1,500 cap, so the widest rung is
+    /// served and the note says the target was missed. With 50 wait types it is 1,581 points, over the cap at every width, so both the automatic
+    /// path and an explicit width are refused, and the refusal names the window, never a width that is itself refused.
+    /// </summary>
+    [Fact]
+    public async Task AWindowNoWidthFits_IsRefusedOnBothPaths_AndOneThatOnlyMissesTheTargetServesTheWidestWithAnHonestNote_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live current-waits trend test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            for (var type = 0; type < 8; type++)
+            {
+                await SeedWaitAsync(connection, ct, MinutesAgo(5), $"WT_{type:000}", 500, blockingSessionId: 99, database: "AppDb");
+            }
+
+            /* 9 series x 31 day-buckets: over the 200 target, inside the cap. */
+            var missed = JsonDocument.Parse(await DarlingMcpDataTools.GetCurrentWaitsTrend(dataSource, ServerName, 720, null)).RootElement;
+            Assert.Equal(1440, missed.GetProperty("bucket_minutes").GetInt32());
+            var points = missed.GetProperty("waiting_tasks").GetArrayLength() + missed.GetProperty("blocked_sessions").GetArrayLength();
+            Assert.Equal(9, points);
+            var note = missed.GetProperty("aggregate_note").GetString()!;
+            Assert.Contains("widest bucket", note, StringComparison.Ordinal);
+            Assert.Contains("could not bring this answer near 200 points", note, StringComparison.Ordinal);
+            Assert.Contains("it serves 279", note, StringComparison.Ordinal);
+            Assert.DoesNotContain("chosen to keep this answer near", note, StringComparison.Ordinal);
+
+            /* The same window at the width the caller names is served, and says the width is theirs. */
+            var named = JsonDocument.Parse(await DarlingMcpDataTools.GetCurrentWaitsTrend(dataSource, ServerName, 720, null, null, 1440)).RootElement;
+            Assert.Equal("The width is the bucket_minutes you passed.", named.GetProperty("aggregate_note").GetString());
+
+            for (var type = 8; type < 50; type++)
+            {
+                await SeedWaitAsync(connection, ct, MinutesAgo(5), $"WT_{type:000}", 500, blockingSessionId: 99, database: "AppDb");
+            }
+
+            /* 51 series x 31 buckets = 1,581 points: over the 1,500 cap at the widest width, so nothing serves it. */
+            foreach (var requested in new int?[] { null, 1440, 60 })
+            {
+                var refused = await DarlingMcpDataTools.GetCurrentWaitsTrend(dataSource, ServerName, 720, null, null, requested);
+                var root = JsonDocument.Parse(refused).RootElement;
+                Assert.Equal("invalid", root.GetProperty("status").GetString());
+                Assert.Equal("hours_back", root.GetProperty("hints").GetProperty("parameter").GetString());
+                var message = root.GetProperty("message").GetString()!;
+                Assert.Contains("even at the widest bucket", message, StringComparison.Ordinal);
+                Assert.Contains("1581 points", message, StringComparison.Ordinal);
+                Assert.Contains("Narrow hours_back, move as_of, or filter database_name", message, StringComparison.Ordinal);
+                Assert.DoesNotContain("Use bucket_minutes", message, StringComparison.Ordinal);
+                Assert.DoesNotContain("waiting_tasks", refused, StringComparison.Ordinal);
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static async Task SeedCollectionLogAsync(
         NpgsqlConnection connection, CancellationToken ct, DateTime collectionTimeUtc, string status, string? errorMessage) =>
         await DarlingMcpTestData.ExecAsync(connection, ct, @"

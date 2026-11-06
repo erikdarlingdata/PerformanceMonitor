@@ -193,6 +193,84 @@ public sealed class CurrentWaitsTrendToolTests : IClassFixture<SharedDuckDbFixtu
         Assert.Equal(1, shortWindow.GetProperty("waiting_tasks")[0].GetProperty("collection_count").GetInt64());
     }
 
+    /// <summary>
+    /// #7877 review, Darling's twin: no hours_back ceiling here either, and the ladder gives up at one day. 9 series x 31 day-buckets = 279 points
+    /// misses the 200 target but fits the 1,500 cap, so the widest width is served with a note that says so. 51 series is 1,581, over the cap at
+    /// every width, so the automatic path and an explicit width are both refused, and the refusal names the window, not a width.
+    /// </summary>
+    [Fact]
+    public async Task AWindowNoWidthFits_IsRefusedOnBothPaths_AndOneThatOnlyMissesTheTargetServesTheWidestWithAnHonestNote()
+    {
+        var service = new LocalDataService(_duckDb);
+        for (var type = 0; type < 8; type++)
+        {
+            await SeedWaitAsync(DateTime.UtcNow.AddMinutes(-5), $"WT_{type:000}", 500, blockingSessionId: 99, database: "AppDb");
+        }
+
+        var missed = JsonDocument.Parse(await McpHealthTools.GetCurrentWaitsTrend(service, _serverManager, ServerName, 720, null)).RootElement;
+        Assert.Equal(1440, missed.GetProperty("bucket_minutes").GetInt32());
+        Assert.Equal(9, missed.GetProperty("waiting_tasks").GetArrayLength() + missed.GetProperty("blocked_sessions").GetArrayLength());
+        var note = missed.GetProperty("aggregate_note").GetString()!;
+        Assert.Contains("widest bucket", note, StringComparison.Ordinal);
+        Assert.Contains("could not bring this answer near 200 points", note, StringComparison.Ordinal);
+        Assert.Contains("it serves 279", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("chosen to keep this answer near", note, StringComparison.Ordinal);
+
+        var named = JsonDocument.Parse(await McpHealthTools.GetCurrentWaitsTrend(service, _serverManager, ServerName, 720, null, null, 1440)).RootElement;
+        Assert.Equal("The width is the bucket_minutes you passed.", named.GetProperty("aggregate_note").GetString());
+
+        for (var type = 8; type < 50; type++)
+        {
+            await SeedWaitAsync(DateTime.UtcNow.AddMinutes(-5), $"WT_{type:000}", 500, blockingSessionId: 99, database: "AppDb");
+        }
+
+        foreach (var requested in new int?[] { null, 1440, 60 })
+        {
+            var refused = await McpHealthTools.GetCurrentWaitsTrend(service, _serverManager, ServerName, 720, null, null, requested);
+            var root = JsonDocument.Parse(refused).RootElement;
+            Assert.Equal("invalid", root.GetProperty("status").GetString());
+            Assert.Equal("hours_back", root.GetProperty("hints").GetProperty("parameter").GetString());
+            var message = root.GetProperty("message").GetString()!;
+            Assert.Contains("even at the widest bucket", message, StringComparison.Ordinal);
+            Assert.Contains("1581 points", message, StringComparison.Ordinal);
+            Assert.Contains("Narrow hours_back, move as_of, or filter database_name", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("Use bucket_minutes", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("waiting_tasks", refused, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// #7877 review: the blocked series' width is a parameter placed after a variable-length database list. Two databases of three are asked for
+    /// at a 10-minute width: only those two come back, and each point is a 10-minute bucket holding ten one-minute collections. A width read from
+    /// the wrong parameter position would bucket at a database name, fail, or leave the series unfiltered.
+    /// </summary>
+    [Fact]
+    public async Task TheBlockedSeries_UnderADatabaseFilter_IsBucketedAtTheWidthAsked()
+    {
+        var service = new LocalDataService(_duckDb);
+        var asOf = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+        for (var minute = 0; minute < 30; minute++)
+        {
+            foreach (var database in new[] { "AppDb", "OtherDb", "ThirdDb" })
+            {
+                await SeedWaitAsync(asOf.AddMinutes(-60 + minute), "LCK_M_X", 500, blockingSessionId: 99, database: database);
+            }
+        }
+
+        var points = await service.GetCurrentWaitsBlockedPointsAsync(_serverId, 2, asOf, new[] { "AppDb", "OtherDb" }, 10);
+
+        Assert.Equal(new[] { "AppDb", "OtherDb" }, points.Select(p => p.DatabaseName).Distinct().OrderBy(n => n, StringComparer.Ordinal).ToArray());
+        Assert.Equal(6, points.Count);
+        Assert.All(points, p =>
+        {
+            Assert.Equal(10, p.CollectionCount);
+            Assert.Equal(0, p.BucketStart.Minute % 10);
+        });
+        Assert.Equal(
+            new[] { 11, 11, 11 },
+            points.Where(p => p.DatabaseName == "AppDb").Select(p => p.BucketStart.Hour).ToArray());
+    }
+
     /// <summary>#5244 L3: a blank database_name is "no filter" and is echoed as null, the way Darling's twin echoes it; a name is echoed as sent.</summary>
     [Theory]
     [InlineData("   ", null)]
