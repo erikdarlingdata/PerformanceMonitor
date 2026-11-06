@@ -19,7 +19,7 @@ namespace PerformanceMonitor.Collectors;
 /// whose <c>WritePayload</c> advances them (<see cref="DeltaBaselineRollbackRows.Capture{TRow}"/>), or one by one through
 /// <see cref="CaptureKey"/> for a family that differences each row as the reader yields it. The snapshot restores only what
 /// the run itself wrote: a row the failed write never reached has not advanced and is left alone, and so is a baseline
-/// anyone else replaced or cleared since. A key with no baseline before the run keeps the one the run gave it, so its next delta is one interval, as it is when nothing fails.
+/// anyone else replaced or cleared since. A key with no baseline before the run keeps the one the run gave it, so its next delta is one interval, as it is when nothing fails, unless the family asks <see cref="CaptureKey"/> to drop it.
 /// </summary>
 public sealed class DeltaBaselineRollbackRows<TRow> : List<TRow>, IBaselineRollback
 {
@@ -35,22 +35,27 @@ public sealed class DeltaBaselineRollbackRows<TRow> : List<TRow>, IBaselineRollb
         _groups = groups;
     }
 
-    /// <summary>Captures <paramref name="key"/>'s baselines unless this run already has. Call before its first delta call.</summary>
-    public void CaptureKey(string key)
+    /// <summary>
+    /// Captures <paramref name="key"/>'s baselines unless this run already has. Call before its first delta call.
+    /// <paramref name="keepIfNew"/> false drops a baseline the run creates for a key it first saw, so the next run meets the key
+    /// with none: for a family that knows the key's counters began since the previous run and credits them in full on that
+    /// evidence (pg_statement_stats, stats_since). True keeps it, so the next delta is one interval.
+    /// </summary>
+    public void CaptureKey(string key, bool keepIfNew = true)
     {
         if (_captured.Add(key))
         {
-            Snapshot(new[] { key });
+            Snapshot(new[] { key }, keepIfNew);
         }
     }
 
-    /// <summary>Captures every key of <paramref name="keys"/> this run has not captured yet, in one snapshot.</summary>
+    /// <summary>Captures every key of <paramref name="keys"/> this run has not captured yet, in one snapshot. A key new to the run keeps the baseline the run gives it.</summary>
     public void CaptureKeys(IEnumerable<string> keys)
     {
         var fresh = keys.Where(_captured.Add).ToList();
         if (fresh.Count > 0)
         {
-            Snapshot(fresh);
+            Snapshot(fresh, keepNewKeys: true);
         }
     }
 
@@ -63,9 +68,9 @@ public sealed class DeltaBaselineRollbackRows<TRow> : List<TRow>, IBaselineRollb
         }
     }
 
-    private void Snapshot(IReadOnlyCollection<string> keys)
+    private void Snapshot(IReadOnlyCollection<string> keys, bool keepNewKeys)
     {
-        var snapshot = _context.Deltas.CaptureBaselines(_context.ServerId, _groups, keys, _context.CollectionTime, keepNewKeys: true);
+        var snapshot = _context.Deltas.CaptureBaselines(_context.ServerId, _groups, keys, _context.CollectionTime, keepNewKeys);
         if (snapshot is not null)
         {
             _snapshots?.Add(snapshot);

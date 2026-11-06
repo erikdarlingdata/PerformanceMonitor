@@ -627,9 +627,18 @@ WHERE calls > 0";
 
                 var previousTargetNow = context.Deltas.PreviousPass(context.ServerId, "pg_statement_stats_target_clock", targetNow);
 
+                /* #4428, #7189: stats_since strictly after the previous pass's target_now says the entry was created inside the
+                   gap, so its whole count belongs to the interval this run opens. Decided on the target's own clock, never on
+                   context.CollectionTime, and used both for the placement below and for the capture here. */
+                var createdSincePreviousPass = statsSince.HasValue && previousTargetNow.HasValue
+                    && statsSince.Value > previousTargetNow.Value;
+
                 /* Captured before the first delta call of the run for this key, so a store write that fails before the rows are
-                   stored can hand the baseline back (DeltaBaselineRollbackRows). */
-                rows.CaptureKey(key);
+                   stored can hand the baseline back (DeltaBaselineRollbackRows). A key with no baseline before the run keeps the one
+                   the run gives it, unless the entry was created since the previous pass: then the rollback drops it too, so the
+                   next run meets the entry with no baseline and the #7189 path below credits its whole count over the restored
+                   target-clock gap, rather than differencing from the abandoned run's value and losing the count before it. */
+                rows.CaptureKey(key, keepIfNew: !createdSincePreviousPass);
                 var deltaCalls = context.Deltas.CalculateDeltaWithInterval(
                     context.ServerId, "pg_statement_stats_calls", key, calls, out var callsIntervalSeconds,
                     collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
@@ -664,9 +673,7 @@ WHERE calls > 0";
                     ? (int)(targetNow - previousTargetNow.Value).TotalSeconds
                     : 0;
 
-                var creditedInGap = statsSince.HasValue && previousTargetNow.HasValue
-                    && statsSince.Value > previousTargetNow.Value
-                    && gapSeconds > 0;
+                var creditedInGap = createdSincePreviousPass && gapSeconds > 0;
 
                 /* #7189: a key with no usable baseline (a first sighting, or a collector-clock gap re-baseline)
                    comes back from the three calls above as (0, 0), the right answer when nothing says when the

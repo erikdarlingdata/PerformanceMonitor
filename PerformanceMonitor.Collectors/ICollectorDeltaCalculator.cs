@@ -270,7 +270,9 @@ public interface ICollectorDeltaCalculator
     /// return null (nothing captured, nothing to restore) like <see cref="PeekBaselines"/>, so every test double compiles.
     /// </summary>
     /// <param name="keepNewKeys">True leaves a key the run saw for the first time in place on restore, so its next delta is one
-    /// interval, as it is when nothing fails. False (query_stats, #7419) removes it, which its series-age credit relies on.</param>
+    /// interval, as it is when nothing fails. False removes it, so the next run meets the key with no baseline and credits its
+    /// whole count on its own evidence that the counters began since the previous run: query_stats (#7419) for every key, through
+    /// its series age, and pg_statement_stats for an entry whose stats_since places it after the previous run (#7189).</param>
     IDeltaBaselineSnapshot? CaptureBaselines(int serverId, IReadOnlyList<string> groups, IReadOnlyCollection<string> keys, DateTime collectionTime, bool keepNewKeys = false)
         => null;
 
