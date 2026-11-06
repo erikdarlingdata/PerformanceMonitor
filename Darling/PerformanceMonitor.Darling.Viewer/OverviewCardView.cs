@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using PerformanceMonitor.Common.Tags;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -22,17 +23,42 @@ namespace PerformanceMonitor.Darling.Viewer;
 public static class OverviewCardView
 {
     /// <summary>
-    /// The fields a search term matches for a card: display name, instance name, and each tag pill's name, so
-    /// "prod" finds <c>sql-prod-01</c> and every server tagged Production. The same fields as Lite's Overview
-    /// search and the sidebar's.
+    /// The fields a search term matches for a card: display name, instance name, each tag pill's name, and the
+    /// names of the tags above each pill (#7984), so "prod" finds <c>sql-prod-01</c>, every server tagged
+    /// Production, and every server tagged under Production, the way a custom alert rule on Production covers
+    /// them. The same fields as Lite's Overview search and the sidebar's.
     /// </summary>
     public static string?[] SearchFields(ServerSummaryItem card)
     {
         ArgumentNullException.ThrowIfNull(card);
 
         var fields = new List<string?> { card.DisplayName, card.ServerName };
-        fields.AddRange(card.TagPills.Select(p => p.Name));
+        foreach (var pill in card.TagPills)
+        {
+            fields.Add(pill.Name);
+            fields.AddRange(pill.AncestorNames);
+        }
+
         return fields.ToArray();
+    }
+
+    /// <summary>
+    /// The pills for one card: its assigned tags that exist, ordered by name so a card is stable, each carrying
+    /// the names of the tags above it for the search (#7984). The pill shows only its own tag's name.
+    /// </summary>
+    public static IReadOnlyList<ServerTagPill> TagPills(IReadOnlyList<DarlingTag> tags, IEnumerable<int> assignedTagIds)
+    {
+        ArgumentNullException.ThrowIfNull(tags);
+        ArgumentNullException.ThrowIfNull(assignedTagIds);
+
+        var tagById = tags.ToDictionary(t => t.Id);
+        var nodes = tags.Select(t => new TagTreeNode(t.Id, t.Name, t.ParentId)).ToList();
+        return assignedTagIds
+            .Select(id => tagById.TryGetValue(id, out var tag) ? tag : null)
+            .Where(t => t is not null)
+            .OrderBy(t => t!.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(t => new ServerTagPill(t!.Name, t!.Colour, TagTreeRules.Ancestors(nodes, t!.Id).Select(a => a.Name).ToList()))
+            .ToList();
     }
 
     /// <summary>
