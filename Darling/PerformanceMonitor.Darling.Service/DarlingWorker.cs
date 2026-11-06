@@ -535,7 +535,7 @@ public sealed partial class DarlingWorker : BackgroundService
     /* #7762: the Query Store compose rollup's own timer. The build used to be the last tenant of the hourly maintenance tick, so an hour became
        readable at the service's start minute and the fleet panel's tail depended on when the service started. At 15 minutes an hour that comes
        of age (QueryStoreComposeStamp.BuildLag) waits at most 15 minutes for its build, and a tick with nothing to build is a plan read. */
-    private static readonly TimeSpan s_composeStampInterval = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan s_composeStampInterval = QueryStoreComposeStamp.ComposeTickInterval;
 
     /* #4823: the checkpointer's cumulative sync time is read once a minute, so the hourly Store Checkpointer Pressure
        evaluation can judge the LONGEST single sync as well as the hour's average (a difference of two hourly rows is

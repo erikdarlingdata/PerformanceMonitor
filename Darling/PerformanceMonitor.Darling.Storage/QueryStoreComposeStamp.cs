@@ -133,12 +133,25 @@ public static class QueryStoreComposeStamp
     public const string FailuresTable = "collect.query_store_compose_stamp_failures";
 
     /// <summary>
-    /// The consecutive failures after which an hour is retried once a day instead of every tick (#5867). Three, because the failures a
-    /// retry cures (a deadlock, a lock or serialization failure, a dropped connection, a restart of the store) clear within a tick or
-    /// two, and at the service's 15-minute compose timer (#7762, once an hourly tick) three failures in a row are 45 minutes of the same error: past
-    /// that, a retry every tick only repeats it, and spends the build's timeout every tick.
+    /// The consecutive failures after which an hour of a rollup that builds once an hour is retried once a day instead of every tick (#5867).
+    /// Three, because the failures a retry cures (a deadlock, a lock or serialization failure, a dropped connection, a restart of the store) clear
+    /// within a tick or two: past that, a retry every tick only repeats the error and spends the build's timeout every tick. The hash daily rollup
+    /// (<c>QueryStoreHashDaily</c>) passes this count. The compose build runs every <see cref="ComposeTickInterval"/> (#7762) and counts
+    /// <see cref="ComposeFailuresBeforeBackoff"/> instead, which is the same three hours.
     /// </summary>
     public const int FailuresBeforeBackoff = 3;
+
+    /// <summary>How often the service runs the compose build (#7762): the 15-minute timer's period. The worker's timer reads this.</summary>
+    public static readonly TimeSpan ComposeTickInterval = TimeSpan.FromMinutes(15);
+
+    /// <summary>How long failures of one compose hour go on before it is retried once a day (#5867, #7762): three hours, as when the build ran
+    /// once an hour and three failures in a row spanned about that.</summary>
+    public static readonly TimeSpan ComposeBackoffAfter = TimeSpan.FromHours(3);
+
+    /// <summary>The consecutive compose-build failures after which an hour is retried once a day: <see cref="ComposeBackoffAfter"/> at one
+    /// attempt per <see cref="ComposeTickInterval"/> (twelve). The compose rollup's failure record, its self-alert and <c>get_store_metrics</c>
+    /// all read this one count.</summary>
+    public static readonly int ComposeFailuresBeforeBackoff = (int)(ComposeBackoffAfter / ComposeTickInterval);
 
     /// <summary>How long an hour in backoff waits between attempts (#5867): one attempt, and one WARN, a day.</summary>
     public static readonly TimeSpan BackoffInterval = TimeSpan.FromDays(1);
@@ -986,8 +999,8 @@ ORDER BY p.stale DESC, p.blocked, p.hour DESC;";
     /// Records a failed build of an hour (#5867) and returns its consecutive failures, its next attempt, and whether that is a backoff:
     /// $1 the hour, $2 the SQLSTATE (NULL when the error had none), $3 the error message, $4 the <c>statement_timeout</c> the attempt ran
     /// under, $5 the store clock a test passes (NULL in the service: the store's own, as <see cref="PlanSql"/>'s), $6
-    /// <see cref="FailuresBeforeBackoff"/>, $7 <see cref="ExtendedBuildStatementTimeoutSeconds"/>, $8 <see cref="BackoffInterval"/>, $9 <see cref="StatementTimeoutSqlState"/>. The
-    /// next attempt is the next tick (<c>retry_at</c> = now) until the hour has failed <see cref="FailuresBeforeBackoff"/> times in
+    /// <see cref="ComposeFailuresBeforeBackoff"/>, $7 <see cref="ExtendedBuildStatementTimeoutSeconds"/>, $8 <see cref="BackoffInterval"/>, $9 <see cref="StatementTimeoutSqlState"/>. The
+    /// next attempt is the next tick (<c>retry_at</c> = now) until the hour has failed <see cref="ComposeFailuresBeforeBackoff"/> times in
     /// a row, or until a build under the extended timeout has timed out too; from then on it is one attempt a day. Runs after the
     /// build's transaction rolled back.
     /// </summary>
@@ -1020,7 +1033,7 @@ WHERE hour < $1;";
 
     /// <summary>
     /// Every hour with a failure record (#5867), newest first: what <c>get_store_metrics</c> lists and the self-alert reads. An hour is
-    /// in backoff when its next attempt is later than its last failure (it has failed <see cref="FailuresBeforeBackoff"/> times in a row,
+    /// in backoff when its next attempt is later than its last failure (it has failed <see cref="ComposeFailuresBeforeBackoff"/> times in a row,
     /// or timed out under the extended timeout); the others are retried next tick.
     /// </summary>
     public const string ReadFailuresSql = @"
@@ -1557,7 +1570,7 @@ WHERE hour < $1;";
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = reason ?? string.Empty });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = timeoutSeconds });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = storeNow is { } at ? Unspecified(at) : DBNull.Value });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = FailuresBeforeBackoff });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = ComposeFailuresBeforeBackoff });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = ExtendedBuildStatementTimeoutSeconds });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Interval, Value = BackoffInterval });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = StatementTimeoutSqlState });

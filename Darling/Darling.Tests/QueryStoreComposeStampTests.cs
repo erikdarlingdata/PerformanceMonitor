@@ -250,7 +250,7 @@ public sealed class QueryStoreComposeStampTests
         Assert.Contains("coalesce(w.xact_start AT TIME ZONE 'UTC', '-infinity'::timestamp)", plan, StringComparison.Ordinal);
         Assert.Contains("'infinity'::timestamp", plan, StringComparison.Ordinal);
         /* Both arms carry the bound, and it is the guard's strict comparison. */
-        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(plan, @"interval '2 hours' > cutoff\.since").Count);
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(plan, System.Text.RegularExpressions.Regex.Escape(QueryStoreComposeStamp.WriterGuardSql) + @" > cutoff\.since").Count);
     }
 
     [Fact]

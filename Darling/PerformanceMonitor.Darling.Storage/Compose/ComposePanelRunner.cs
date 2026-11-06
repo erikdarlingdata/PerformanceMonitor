@@ -735,9 +735,7 @@ internal static class ComposePanelRunner
             }
 
             var wideServers = new List<(int Id, string Name)>();
-            /* #5582 L4: the stamp-through lookup takes every server in scope, enabled or not, because the read and the fleet stale arm
-               cover a disabled server's rows too. The eligibility checks and the group-member count below still see the enabled ones only. */
-            var scopedServerIds = new List<int>();
+            /* The eligibility checks and the group-member count below see the enabled servers only. */
             await using (var servers = new NpgsqlCommand(QueryStoreWideServerIdsSql, connection) { CommandTimeout = StorageCommandDeadlines.ComposedReadSeconds })
             {
                 servers.Parameters.Add(new NpgsqlParameter
@@ -748,7 +746,6 @@ internal static class ComposePanelRunner
                 await using var reader = await servers.ExecuteReaderAsync(cancellationToken);
                 while (await reader.ReadAsync(cancellationToken))
                 {
-                    scopedServerIds.Add(reader.GetInt32(0));
                     if (reader.GetBoolean(2))
                     {
                         wideServers.Add((reader.GetInt32(0), reader.GetString(1)));
@@ -835,8 +832,7 @@ internal static class ComposePanelRunner
                 : await QueryStoreGroupMembers.ResolveAsync(connection, groupMembersFor, wideServers.Count, StorageCommandDeadlines.ComposedReadSeconds, cancellationToken, ComposeReadNotes.CurrentLogger);
 
             /* #5582 part 3: where the compose rollup stops answering, on this same connection. Null (today's route) on any fault. */
-            var stampThrough = await ResolveQueryStoreStampThroughAsync(
-                connection, (rawServerIds is null ? scopedServerIds : scopedServerIds.Except(rawServerIds).ToList()).ToArray(), wideStart, end, schemaVersion, cancellationToken);
+            var stampThrough = await ResolveQueryStoreStampThroughAsync(connection, wideStart, end, schemaVersion, cancellationToken);
 
             return (true, wideStart, bound, settingServer, groupMembers, stampThrough, rawServerIds, schemaVersion >= QueryStoreComposeStamp.FleetRungVersion);
         }
@@ -891,7 +887,7 @@ internal static class ComposePanelRunner
     /// end, because a later instant makes the rollup arm read rows the statement's outer WHERE throws away.
     /// </summary>
     internal static async Task<DateTime?> ResolveQueryStoreStampThroughAsync(
-        NpgsqlConnection connection, int[] serverIds, DateTime wideStart, DateTime end, int schemaVersion, System.Threading.CancellationToken cancellationToken)
+        NpgsqlConnection connection, DateTime wideStart, DateTime end, int schemaVersion, System.Threading.CancellationToken cancellationToken)
     {
         if (schemaVersion < QueryStoreComposeStamp.RungVersion || end <= wideStart)
         {
@@ -903,7 +899,6 @@ internal static class ComposePanelRunner
             await using var lookup = new NpgsqlCommand(QueryStoreStampThroughSql, connection) { CommandTimeout = StorageCommandDeadlines.ComposedReadSeconds };
             lookup.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(wideStart, DateTimeKind.Unspecified) });
             lookup.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(end, DateTimeKind.Unspecified) });
-            lookup.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Integer, Value = serverIds });
             var found = await lookup.ExecuteScalarAsync(cancellationToken);
             /* The series stops at the hour of the window end, so a found hour is never after the end, and it is never before the hour
                of wideStart: the one test against wideStart covers "the very first hour is already unusable". */
@@ -917,8 +912,8 @@ internal static class ComposePanelRunner
         }
     }
 
-    /// <summary>#5582 part 3: see <see cref="ResolveQueryStoreStampThroughAsync"/>. $1 wide start, $2 window end, $3 server ids in scope (#7762: no longer read, the
-    /// statement binds it and the lookup ignores it, because the stale pairs are the statement's stale arm's, not this lookup's).</summary>
+    /// <summary>#5582 part 3: see <see cref="ResolveQueryStoreStampThroughAsync"/>. $1 wide start, $2 window end. (#7762: the lookup no longer takes the servers in scope,
+    /// because the stale pairs are the statement's stale arm's, not this lookup's.)</summary>
     internal const string QueryStoreStampThroughSql = """
         SELECT MIN(g.hour)
         FROM generate_series(date_trunc('hour', $1::timestamp), date_trunc('hour', $2::timestamp), interval '1 hour') AS g(hour)

@@ -22,7 +22,7 @@ namespace Darling.Tests;
 /// (<see cref="QueryStoreComposeStampLiveTests"/>): 30 hours of Query Store wide rows ending at the current hour, three servers
 /// (ids 1 to 3, registered as srv1 to srv3), 12 stamps an hour, six query hashes with three plans each, with NULL modules, hashes,
 /// durations and counts, Aborted and Exception rows, and products that pass a bigint. The builder then runs hour by hour, so the
-/// store has 28 built hours: hourNow - 30 h up to hourNow - 3 h.
+/// store has <see cref="BuiltHours"/> built hours (every seeded hour since #7762's 90-minute lag; it was 28, up to hourNow - 3 h, at three hours).
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. This class reaches DARLING_TEST_PG only to CREATE and DROP each
    test's own database through ScratchPostgres and works entirely inside it, so it never touches the shared database and cannot race the
@@ -211,9 +211,50 @@ VALUES (TIMESTAMP '{At(collectionTime)}', {serverId}, 'dbX', 99, 99, 'Regular', 
         'modX', 'hashX', 7, 1000, 500, 2000, 900, {interval})", ct);
 
     /// <summary>The 'now' a builder tick is given: half past <paramref name="hourNow"/>, taken from the same clock read as the seed's hour so a run that crosses an hour boundary mid-test cannot move the builder's cut-off past the seeded data.</summary>
-    internal static DateTime ClockWithin(DateTime hourNow) => hourNow.AddMinutes(30);
+    internal static DateTime ClockWithin(DateTime hourNow) => hourNow + ClockOffset;
 
-    /// <summary>A migrated scratch store with the three servers enrolled, the 30-hour seed, and every due hour built (28). <paramref name="at"/>: the seed's hour (a whole hour), default this hour.</summary>
+    /// <summary>The store's own clock (UTC), as the plan reads it.</summary>
+    internal static async Task<DateTime> StoreClockAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT clock_timestamp() AT TIME ZONE 'UTC'", connection);
+        return (DateTime)(await command.ExecuteScalarAsync(ct))!;
+    }
+
+    /// <summary>The newest hour the builder reads at the store clock <paramref name="storeNow"/>: the hour of <c>storeNow - BuildLag</c> (#7762).</summary>
+    internal static DateTime NewestDueHour(DateTime storeNow)
+    {
+        var cut = storeNow - QueryStoreComposeStamp.BuildLag;
+        return new DateTime(cut.Ticks - (cut.Ticks % TimeSpan.TicksPerHour), DateTimeKind.Unspecified);
+    }
+
+    /// <summary>How far past <c>hourNow</c> <see cref="ClockWithin"/> is.</summary>
+    internal static readonly TimeSpan ClockOffset = TimeSpan.FromMinutes(30);
+
+    /// <summary>The hours of the seed, hourNow - 30 h up to hourNow - 1 h.</summary>
+    internal const int SeedHours = 30;
+
+    /// <summary>
+    /// The seeded hours the builder reads at <see cref="ClockWithin"/> (#7762): an hour <c>hourNow - i h</c> is due when its start plus
+    /// <see cref="QueryStoreComposeStamp.BuildLag"/> is not past the clock, so a change of the lag moves this count and no test carries it as a number.
+    /// </summary>
+    internal static int BuiltHours
+    {
+        get
+        {
+            var due = 0;
+            for (var i = 1; i <= SeedHours; i++)
+            {
+                if (TimeSpan.FromHours(-i) + QueryStoreComposeStamp.BuildLag <= ClockOffset)
+                {
+                    due++;
+                }
+            }
+
+            return due;
+        }
+    }
+
+    /// <summary>A migrated scratch store with the three servers enrolled, the 30-hour seed, and every due hour built (<see cref="BuiltHours"/>). <paramref name="at"/>: the seed's hour (a whole hour), default this hour.</summary>
     internal static async Task<(ScratchPostgres Scratch, NpgsqlConnection Connection, NpgsqlDataSource Source, DateTime HourNow)> ArrangeAsync(
         CancellationToken ct, int servers = 3, bool build = true, DateTime? at = null)
     {
@@ -231,16 +272,16 @@ VALUES (TIMESTAMP '{At(collectionTime)}', {serverId}, 'dbX', 99, 99, 'Regular', 
         var source = NpgsqlDataSource.Create(scratch.ConnectionString);
         if (build)
         {
-            Assert.Equal(28, await BuildAllAsync(source, ct, ClockWithin(hourNow)));
+            Assert.Equal(BuiltHours, await BuildAllAsync(source, ct, ClockWithin(hourNow)));
         }
 
         return (scratch, connection, source, hourNow);
     }
 
-    /// <summary>The runner's StampThrough lookup on a connection, for the servers 1 to <paramref name="servers"/>.</summary>
-    internal static Task<DateTime?> StampThroughAsync(NpgsqlConnection connection, DateTime wideStart, DateTime end, CancellationToken ct, int servers = 3) =>
+    /// <summary>The runner's StampThrough lookup on a connection (it reads no server list since #7762).</summary>
+    internal static Task<DateTime?> StampThroughAsync(NpgsqlConnection connection, DateTime wideStart, DateTime end, CancellationToken ct) =>
         PerformanceMonitor.Darling.Storage.ComposePanelRunner.ResolveQueryStoreStampThroughAsync(
-            connection, System.Linq.Enumerable.ToArray(System.Linq.Enumerable.Range(1, servers)), wideStart, end, QueryStoreComposeStamp.RungVersion, ct);
+            connection, wideStart, end, QueryStoreComposeStamp.RungVersion, ct);
 
     internal static async Task CleanupAsync(ScratchPostgres scratch, NpgsqlConnection connection, NpgsqlDataSource source, bool bodySucceeded)
     {

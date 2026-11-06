@@ -155,12 +155,15 @@ public sealed class QueryStoreComposeStampRaceLiveTests
         var bodySucceeded = false;
         try
         {
-            /* A service clock two hours ahead of the store would plan the hour that is only an hour old by the store's clock, where the
-               trigger's margin is still open. The plan reads the store's clock, so the newest hour it plans is three hours old by it. */
+            /* A service clock two hours ahead of the store would plan an hour that is younger than BuildLag by the store's clock, where the
+               trigger's margin is still open. The plan reads the store's clock, so the newest hour it plans is the newest one BuildLag old by it
+               (read on both sides of the plan, so a boundary crossed between the reads cannot fail the run). */
+            var before = await StoreClockAsync(connection, ct);
             var plan = await QueryStoreComposeStamp.PlanBuildsAsync(connection, ClockWithin(hourNow).AddHours(2), RetentionDays, ct);
+            var after = await StoreClockAsync(connection, ct);
             Assert.NotEmpty(plan);
-            Assert.Equal(hourNow.AddHours(-3), plan[0].Hour);
-            Assert.All(plan, b => Assert.True(b.Hour <= hourNow.AddHours(-3), $"{b.Hour:O} is too young"));
+            Assert.Contains(plan[0].Hour, new[] { NewestDueHour(before), NewestDueHour(after) });
+            Assert.All(plan, b => Assert.True(b.Hour <= NewestDueHour(after), $"{b.Hour:O} is too young"));
             bodySucceeded = true;
         }
         finally
@@ -170,7 +173,7 @@ public sealed class QueryStoreComposeStampRaceLiveTests
     }
 
     [Fact]
-    public async Task AWriterThatBumpedThePairBeforeStep1AndHasNotCommitted_LeavesThePairStale_AndTheLookupRoutesTheHourToTheWideTable()
+    public async Task AWriterThatBumpedThePairBeforeStep1AndHasNotCommitted_LeavesThePairStale_AndTheStaleArmReadsTheHour()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
@@ -194,11 +197,11 @@ public sealed class QueryStoreComposeStampRaceLiveTests
             await open.CommitAsync(ct);
             Assert.NotNull(await build);
 
-            /* The pair ends stale (late_seq is above the built_seq the build read), so the lookup stops the rollup at the hour and the
-               panel reads the wide table from it on: the answer is exact even though the rollup lacks the row. */
+            /* The pair ends stale (late_seq is above the built_seq the build read). Since #7762 the lookup does not stop the rollup at the
+               hour: the statement's stale arm reads the pair's rows from the wide table, so the answer is exact though the rollup lacks the row. */
             Assert.Equal(Pair(1, hour), await StaleListAsync(connection, ct));
             Assert.True(await MismatchesAsync(connection, hour, hour.AddHours(1), ct) > 0, "the rollup does not hold the writer's row");
-            Assert.Equal(hour, await StampThroughAsync(connection, hour.AddHours(-2), hourNow.AddHours(-2), ct));
+            Assert.Equal(hourNow.AddHours(-2), await StampThroughAsync(connection, hour.AddHours(-2), hourNow.AddHours(-2), ct));
 
             var tick = await ComposeStampLiveSupport.TickAtAsync(source, ClockWithin(hourNow), ct);
             Assert.Equal(0, tick.Failed);

@@ -402,7 +402,7 @@ public sealed class DarlingMcpStoreMetricsTools
                             : "These hours of the Query Store compose rollup failed to build. An hour is retried next tick (after a statement timeout, under a "
                               + QueryStoreComposeStamp.ExtendedBuildStatementTimeoutSeconds.ToString(CultureInfo.InvariantCulture)
                               + " s timeout) until it has failed "
-                              + QueryStoreComposeStamp.FailuresBeforeBackoff.ToString(CultureInfo.InvariantCulture)
+                              + QueryStoreComposeStamp.ComposeFailuresBeforeBackoff.ToString(CultureInfo.InvariantCulture)
                               + " times in a row or timed out under the longer timeout; then in_backoff is true and it is tried once a "
                               + "day, at retry_at. A successful build removes the hour from this list. Times are UTC.",
                     hours = composePage.Select(f => new

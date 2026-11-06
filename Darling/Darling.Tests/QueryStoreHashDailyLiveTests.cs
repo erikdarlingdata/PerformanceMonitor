@@ -57,7 +57,7 @@ UPDATE collect.query_store_interval_wide
 SET avg_logical_io_reads = CASE WHEN query_id % 4 = 0 THEN NULL ELSE ((query_id * 7 + plan_id) % 1000) + 1 END,
     avg_logical_io_writes = CASE WHEN query_id % 3 = 0 THEN NULL ELSE query_id * 5 + (plan_id % 7) END,
     max_query_max_used_memory = CASE WHEN query_id % 5 = 0 THEN NULL ELSE (runtime_stats_interval_id % 5000) + 1 END", ct);
-        Assert.Equal(28, await ComposeStampLiveSupport.BuildAllAsync(arranged.Source, ct, ComposeStampLiveSupport.ClockWithin(arranged.HourNow)));
+        Assert.Equal(ComposeStampLiveSupport.BuiltHours, await ComposeStampLiveSupport.BuildAllAsync(arranged.Source, ct, ComposeStampLiveSupport.ClockWithin(arranged.HourNow)));
         return arranged;
     }
 

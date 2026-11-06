@@ -55,7 +55,7 @@ UPDATE collect.query_store_interval_wide
 SET avg_logical_io_reads = CASE WHEN query_id % 4 = 0 THEN NULL ELSE ((query_id * 7 + plan_id) % 1000) + 1 END,
     avg_logical_io_writes = CASE WHEN query_id % 3 = 0 THEN NULL ELSE query_id * 5 + (plan_id % 7) END,
     max_query_max_used_memory = CASE WHEN query_id % 5 = 0 THEN NULL ELSE (runtime_stats_interval_id % 5000) + 1 END", ct);
-        Assert.Equal(28, await ComposeStampLiveSupport.BuildAllAsync(arranged.Source, ct, ComposeStampLiveSupport.ClockWithin(arranged.HourNow)));
+        Assert.Equal(ComposeStampLiveSupport.BuiltHours, await ComposeStampLiveSupport.BuildAllAsync(arranged.Source, ct, ComposeStampLiveSupport.ClockWithin(arranged.HourNow)));
         return arranged;
     }
 
@@ -103,12 +103,12 @@ SELECT (SELECT count(*) FROM (SELECT * FROM direct EXCEPT SELECT * FROM stored) 
         {
             /* Teeth: the compared side is not empty, covers all three servers and holds the NULL-hash groups, and the sums are not all one value. */
             /* 28 hours x 3 servers x 6 hashes (one of them NULL): the plans of a hash and the stamps of an hour are merged into one row. */
-            Assert.Equal(28 * 3 * 6, await CountAsync(connection, "SELECT count(*) FROM collect.query_store_hash_hourly", ct));
+            Assert.Equal(ComposeStampLiveSupport.BuiltHours * 3 * 6, await CountAsync(connection, "SELECT count(*) FROM collect.query_store_hash_hourly", ct));
             Assert.Equal(3, await CountAsync(connection, "SELECT count(DISTINCT server_id) FROM collect.query_store_hash_hourly", ct));
-            Assert.Equal(28 * 3, await CountAsync(connection, "SELECT count(*) FROM collect.query_store_hash_hourly WHERE query_hash IS NULL", ct));
+            Assert.Equal(ComposeStampLiveSupport.BuiltHours * 3, await CountAsync(connection, "SELECT count(*) FROM collect.query_store_hash_hourly WHERE query_hash IS NULL", ct));
             Assert.True(await CountAsync(connection, "SELECT count(DISTINCT reads_wsum) FROM collect.query_store_hash_hourly", ct) > 10);
             Assert.True(await CountAsync(connection, "SELECT count(*) FROM collect.query_store_hash_hourly WHERE mem_max IS NULL", ct) > 0);
-            Assert.Equal(28, await CountAsync(connection, "SELECT count(DISTINCT hour) FROM collect.query_store_hash_hourly", ct));
+            Assert.Equal(ComposeStampLiveSupport.BuiltHours, await CountAsync(connection, "SELECT count(DISTINCT hour) FROM collect.query_store_hash_hourly", ct));
             Assert.Equal(0, await MismatchesAsync(connection, ct));
             Assert.Equal(0, await HashStalePairsAsync(connection, ct));
             Assert.Equal(0, await CustomViewsStalePairsAsync(connection, ct));
@@ -193,7 +193,7 @@ WHERE server_id = 1 AND query_id = 3 AND plan_id = 31 AND collection_time >= TIM
             await ExecAsync(connection, "UPDATE collect.query_store_compose_stamp_built SET hash_built_seq = NULL", ct);
             await ExecAsync(connection, "DELETE FROM collect.query_store_hash_hourly", ct);
             Assert.Equal(0, await CustomViewsStalePairsAsync(connection, ct));
-            Assert.Equal(28 * 3, await HashStalePairsAsync(connection, ct));
+            Assert.Equal(ComposeStampLiveSupport.BuiltHours * 3, await HashStalePairsAsync(connection, ct));
 
             var plan = await PlanAsync(connection, hourNow, ct);
             Assert.Equal(QueryStoreComposeStamp.MaxBuildsPerTick, plan.Builds.Count);
@@ -204,9 +204,9 @@ WHERE server_id = 1 AND query_id = 3 AND plan_id = 31 AND collection_time >= TIM
 
             var tick = await ComposeStampLiveSupport.TickAtAsync(source, ComposeStampLiveSupport.ClockWithin(hourNow), ct);
             /* #6865: the six normal builds, then the extra backlog builds (up to 24 more): the 28 hours are done in one tick. */
-            Assert.Equal(28, tick.Built);
-            Assert.Equal(28, tick.BuiltBacklog);
-            Assert.Equal(28, await CountAsync(connection, "SELECT count(DISTINCT hour) FROM collect.query_store_hash_hourly", ct));
+            Assert.Equal(ComposeStampLiveSupport.BuiltHours, tick.Built);
+            Assert.Equal(ComposeStampLiveSupport.BuiltHours, tick.BuiltBacklog);
+            Assert.Equal(ComposeStampLiveSupport.BuiltHours, await CountAsync(connection, "SELECT count(DISTINCT hour) FROM collect.query_store_hash_hourly", ct));
             Assert.Equal(hourNow.AddHours(-3), (DateTime)(await ScalarAsync(connection, "SELECT max(hour) FROM collect.query_store_hash_hourly", ct))!);
 
             Assert.Equal(0, await ComposeStampLiveSupport.BuildAllAsync(source, ct, ComposeStampLiveSupport.ClockWithin(hourNow)));
@@ -258,7 +258,7 @@ WHERE server_id = 1 AND query_id = 3 AND plan_id = 31 AND collection_time >= TIM
             Assert.Equal(0, tick.Failed);
             /* 26 backlog hours: 4 in the normal builds and 22 extra, far above the 3 the old half-and-half split gave. */
             Assert.Equal(26, tick.BuiltBacklog);
-            Assert.Equal(28, await CountAsync(connection, "SELECT count(DISTINCT hour) FROM collect.query_store_hash_hourly", ct));
+            Assert.Equal(ComposeStampLiveSupport.BuiltHours, await CountAsync(connection, "SELECT count(DISTINCT hour) FROM collect.query_store_hash_hourly", ct));
             Assert.Equal(0, await HashStalePairsAsync(connection, ct));
             bodySucceeded = true;
         }

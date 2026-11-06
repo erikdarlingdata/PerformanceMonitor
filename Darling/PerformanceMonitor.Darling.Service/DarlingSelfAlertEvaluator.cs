@@ -1059,7 +1059,7 @@ internal sealed class DarlingSelfAlertEvaluator
     private const string RawPurgeOverHorizonKeyPrefix = "rawpurgehorizon:";
 
     /* Query Store Compose Hours Stuck edge state (#5867). FLEET-level, ONE key: the store has hours of the Query Store compose
-       rollup whose build has failed often enough to be retried only once a day (QueryStoreComposeStamp.FailuresBeforeBackoff, or a
+       rollup whose build has failed often enough to be retried only once a day (QueryStoreComposeStamp.ComposeFailuresBeforeBackoff, or a
        statement timeout under the extended timeout). STANDING, the Raw Purge Over Horizon idiom: fire once, re-fire on the state
        cooldown while it persists, one clearing resolution when no hour is in backoff. */
     private readonly ConcurrentDictionary<string, bool> _activeComposeStuck = new(StringComparer.Ordinal);
@@ -8504,7 +8504,7 @@ WHERE c.is_enabled";
     /// <summary>
     /// Applies the fleet-level Compose Rollup Hours Stuck condition (#5867): one WARNING while any hour of the Query Store compose
     /// rollup is in backoff (<see cref="QueryStoreComposeStamp.HourFailure.InBackoff"/>: its build has failed
-    /// <see cref="QueryStoreComposeStamp.FailuresBeforeBackoff"/> times in a row, or timed out under the extended timeout, and is now
+    /// <see cref="QueryStoreComposeStamp.ComposeFailuresBeforeBackoff"/> times in a row, or timed out under the extended timeout, and is now
     /// tried once a day). The alert names how many hours, the oldest, its count and its last reason; <c>get_store_metrics</c> lists
     /// them all. Hours that failed but are still retried every tick do not fire it. A STANDING condition, the Raw Purge Over Horizon
     /// idiom: fire once, re-fire on the cooldown while it persists, one clearing resolution once no hour is in backoff. Gated on the
@@ -8535,7 +8535,7 @@ WHERE c.is_enabled";
                     StoreKey(ComposeHoursStuckKeyPrefix + key), _storeLabel, ComposeHoursStuckMetric,
                     $"{stuck.Count} {(stuck.Count == 1 ? "hour" : "hours")}", "0 hours",
                     detail: StateRepeatNote(decision, refire) +
-                        $"{stuck.Count} {(stuck.Count == 1 ? "hour" : "hours")} of the Query Store compose rollup failed to build {QueryStoreComposeStamp.FailuresBeforeBackoff} times in a row " +
+                        $"{stuck.Count} {(stuck.Count == 1 ? "hour" : "hours")} of the Query Store compose rollup failed to build {QueryStoreComposeStamp.ComposeFailuresBeforeBackoff} times in a row " +
                         $"(or timed out under the longer timeout) and {(stuck.Count == 1 ? "is" : "are")} now retried once a day. " +
                         $"The oldest is {oldest.Hour:yyyy-MM-dd HH}:00 UTC: {oldest.Failures} {(oldest.Failures == 1 ? "failure" : "failures")}, last reason {reason}, next attempt {oldest.NextAttemptAt:yyyy-MM-dd HH:mm} UTC. " +
                         "get_store_metrics lists every such hour under query_store_compose; the service log's 'Query Store compose rollup: building hour' " +

@@ -92,7 +92,7 @@ JOIN (VALUES (1, 'hash1', 'tag-a'), (1, 'hash2', 'tag-b'), (2, 'hash1', 'tag-a')
             await ExecAsync(connection, preBuildSql(hourNow), ct);
         }
 
-        Assert.Equal(28, await ComposeStampLiveSupport.BuildAllAsync(source, ct, ComposeStampLiveSupport.ClockWithin(hourNow)));
+        Assert.Equal(ComposeStampLiveSupport.BuiltHours, await ComposeStampLiveSupport.BuildAllAsync(source, ct, ComposeStampLiveSupport.ClockWithin(hourNow)));
         foreach (var server in Servers)
         {
             await ComposeStampLiveSupport.InsertRowAsync(connection, server, hourNow.AddHours(-72), 900_000 + server, ct);
