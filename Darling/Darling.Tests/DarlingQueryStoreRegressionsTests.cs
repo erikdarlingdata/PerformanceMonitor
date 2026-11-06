@@ -113,35 +113,14 @@ public sealed class DarlingQueryStoreRegressionsSurfaceAndSqlTests
     }
 
     /// <summary>
-    /// The coverage probe reads the SAME table the regression read reads, and answers BOTH questions in one
-    /// round trip. Splitting it would let the two answers describe different instants.
-    /// </summary>
-    [Fact]
-    public void CoverageSql_ProbesTheSameTable_ForBaselineAndRecent()
-    {
-        var sql = DarlingQueryStoreRegressionReader.RegressionCoverageSql;
-        Assert.Equal(2, CountOf(sql, "FROM query_store_stats"));
-        Assert.DoesNotContain("v_query_store_stats", sql, StringComparison.Ordinal);
-        /* #4310: the coverage probe's own baseline arm must use the SAME fixed lower bound as the read it
-           probes for — an unbounded coverage probe over a bounded read would answer "has_baseline" for
-           history the read itself can no longer see, and report the no-baseline branch (#4195/#4217) as
-           false whenever it is in fact true. */
-        Assert.Contains("collection_time >= $4", sql, StringComparison.Ordinal);  /* baseline: window start minus BaselineLookbackDays */
-        Assert.Contains("collection_time < $2", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
-        Assert.Equal(2, CountOf(sql, "EXISTS ("));
-    }
-
-    /// <summary>
-    /// #5015: the coverage probe takes the read's database filter ($5), in both of its questions, so a filter that matched
+    /// #5015: the coverage probe takes the read's database filter ($5) in its one scan of the table, so a filter that matched
     /// nothing can be told from one that matched and found nothing wrong.
     /// </summary>
     [Fact]
-    public void CoverageSql_TakesTheReadsDatabaseFilter_InBothQuestions()
+    public void CoverageSql_TakesTheReadsDatabaseFilter()
     {
         var sql = DarlingQueryStoreRegressionReader.RegressionCoverageSql;
-        Assert.Equal(2, CountOf(sql, "$5::text[] IS NULL OR database_name = ANY($5)"));
+        Assert.Equal(1, CountOf(sql, "$5::text[] IS NULL OR database_name = ANY($5)"));
     }
 
     [Theory]

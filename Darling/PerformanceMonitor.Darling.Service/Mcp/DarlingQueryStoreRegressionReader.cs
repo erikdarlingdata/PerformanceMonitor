@@ -162,28 +162,45 @@ internal static class DarlingQueryStoreRegressionReader
     /// means there is no BEFORE to compare against: a regression needs one, and a server whose entire
     /// collected history sits inside the requested window can never show a regression however bad it got.
     /// Reporting that as "no regressions" is the failure this exists to prevent.</para>
-    /// <para>Probes the base <c>query_store_stats</c> table, the same source the read itself uses.
+    /// <para>Probes the base <c>query_store_stats</c> table, the same source the read itself uses, and splits it the way the read does
+    /// (#7962, <see cref="QueryStoreRegressionBaseline.RawArmsSql"/>): the latest snapshot of each interval collected in
+    /// [baseline start, window end] (#1841) is on the baseline side when its <c>last_execution_time</c> is in [baseline start,
+    /// window start) and on the recent side when it is at or after the window start. Splitting on <c>collection_time</c> instead put an
+    /// interval that last ran before the window start but was snapshotted after it on the recent side, so a short window on a quiet server
+    /// read as "recent activity was checked and nothing regressed". The <c>collection_time</c> bounds stay: they are what the table's
+    /// time index (and chunk exclusion) is read by, and an interval's latest snapshot is never collected before its last run.
     /// $1 server_id, $2 window start, $3 window end, $4 baseline start (#4195), $5 database filter (text[] or
     /// NULL, #5015: the same match the read makes, so a caller that filtered can tell a filter that matched nothing
     /// from one that matched and found nothing wrong).</para>
     /// </summary>
     public const string RegressionCoverageSql = """
+        WITH latest AS (
+            SELECT
+                last_execution_time,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
+                    ORDER BY collection_time DESC, execution_count DESC
+                ) AS rn
+            FROM query_store_stats
+            WHERE server_id = $1
+            AND   collection_time >= $4
+            AND   collection_time <= $3
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        )
         SELECT
             EXISTS (
                 SELECT 1
-                FROM query_store_stats
-                WHERE server_id = $1
-                AND   collection_time >= $4
-                AND   collection_time < $2
-                AND   ($5::text[] IS NULL OR database_name = ANY($5))
+                FROM latest
+                WHERE rn = 1
+                AND   last_execution_time >= $4
+                AND   last_execution_time < $2
             ) AS has_baseline,
             EXISTS (
                 SELECT 1
-                FROM query_store_stats
-                WHERE server_id = $1
-                AND   collection_time >= $2
-                AND   collection_time <= $3
-                AND   ($5::text[] IS NULL OR database_name = ANY($5))
+                FROM latest
+                WHERE rn = 1
+                AND   last_execution_time >= $2
             ) AS has_recent
         """;
 
