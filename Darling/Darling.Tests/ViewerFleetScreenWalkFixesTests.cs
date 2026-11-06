@@ -148,7 +148,7 @@ public sealed class ViewerFleetScreenWalkFixesTests : IDisposable
 
         Assert.Equal(4, rollup.TotalServers);
         Assert.Null(rollup.FilteredOfTotal);
-        Assert.Equal("Monitoring 4 servers", rollup.MonitoringText);
+        Assert.Equal("Monitoring 4 enabled servers", rollup.MonitoringText);
         Assert.Equal(2, rollup.WorstServers.Count);
     }
 
@@ -161,7 +161,7 @@ public sealed class ViewerFleetScreenWalkFixesTests : IDisposable
 
         Assert.Equal(2, rollup.TotalServers);
         Assert.Equal(4, rollup.FilteredOfTotal);
-        Assert.Equal("Monitoring 2 of 4 servers", rollup.MonitoringText);
+        Assert.Equal("Monitoring 2 of 4 enabled servers", rollup.MonitoringText);
         Assert.Equal(new[] { "prod-b" }, rollup.WorstServers.Select(w => w.DisplayName).ToArray());
         Assert.Equal(0, rollup.UnknownCount);
     }
@@ -173,13 +173,13 @@ public sealed class ViewerFleetScreenWalkFixesTests : IDisposable
 
         var rollup = OverviewCardView.BuildRollup(cards, new FleetTotals(), registeredCount: 1, search: "zzz");
 
-        Assert.Equal("Monitoring 0 of 1 server", rollup.MonitoringText);
+        Assert.Equal("Monitoring 0 of 1 enabled server", rollup.MonitoringText);
         Assert.Empty(rollup.WorstServers);
     }
 
     /// <summary>#7354: typing a term that matches no server hid the whole Fleet Health block, Search box included,
     /// because the block was gated on the matched count. It must stay drawn so the term can be cleared, and
-    /// must not claim "All 0 servers healthy".</summary>
+    /// must not claim "All 0 enabled servers healthy".</summary>
     [Fact]
     public void Rollup_WithASearchThatMatchesNothing_KeepsTheBlockAndNeverClaimsAllHealthy()
     {

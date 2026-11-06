@@ -214,7 +214,8 @@ public sealed class QueryStoreIntervalBoundedReadPruningLiveTests
             new ReadCase(
                 "viewer grid top read", ViewerDataService.QueryStoreTopTableSql, "integer, timestamp, timestamp, integer, text[], integer",
                 $"1, {f}, {t}, 10, NULL::text[], 50",
-                new[] { new Bounds(from - purge, to + slack) }, new[] { new Bounds(from - purge, null) }),
+                /* #7776: the grid places its window by interval start, so its upper bound is the day-plus-hour margin of the duration trend's start-placed arm. */
+                new[] { new Bounds(from - purge, to + QueryStoreIntervalWide.IntervalStartFirstExecMargin) }, new[] { new Bounds(from - purge, null) }),
             new ReadCase(
                 "MCP top-queries table read", DarlingDataReader.QueryStoreTopTableSql, "integer, timestamp, timestamp, integer, text[], text, text, integer",
                 $"1, {f}, {t}, 10, NULL::text[], NULL::text, NULL::text, 50",
