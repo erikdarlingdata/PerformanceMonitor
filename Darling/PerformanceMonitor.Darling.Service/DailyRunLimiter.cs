@@ -102,23 +102,29 @@ internal sealed class DailyRunLimiter
     }
 
     /// <summary>
-    /// The backlog in words, for the line a lost daily run logs and the server's collection_cycle row: how many runs wait
-    /// for one of <paramref name="cap"/> permits and how long the oldest has waited, or that none waits, which means the
-    /// run that holds the collector's slot is still executing.
+    /// The permit backlog in words, for the line a refused daily run logs: how many runs are waiting for one of
+    /// <paramref name="cap"/> permits and how long the oldest has waited. It states the fleet's queue beside the skip and
+    /// does not name it as the cause: the limiter cannot say whether the refused collector's own previous run is one of the
+    /// waiters or is still executing.
     /// </summary>
     internal static string DescribeBacklog(int waiting, int cap, DateTime? oldestWaitUtc, DateTime nowUtc)
     {
         if (waiting <= 0 || oldestWaitUtc is not { } oldest)
         {
-            return "No daily run is waiting for a permit, so the previous run is still executing";
+            return string.Create(CultureInfo.InvariantCulture, $"Daily permits: 0 waiting of {cap}");
         }
 
-        var minutes = nowUtc > oldest ? (int)(nowUtc - oldest).TotalMinutes : 0;
-        var age = minutes < 60
+        return string.Create(CultureInfo.InvariantCulture,
+            $"Daily permits: {waiting} waiting of {cap}, oldest {DescribeWait(nowUtc > oldest ? nowUtc - oldest : TimeSpan.Zero)}");
+    }
+
+    /// <summary>A wait in whole minutes, as "45 min" or "26 h 10 min".</summary>
+    internal static string DescribeWait(TimeSpan wait)
+    {
+        var minutes = (int)Math.Max(0, wait.TotalMinutes);
+        return minutes < 60
             ? string.Create(CultureInfo.InvariantCulture, $"{minutes} min")
             : string.Create(CultureInfo.InvariantCulture, $"{minutes / 60} h {minutes % 60} min");
-        return string.Create(CultureInfo.InvariantCulture,
-            $"{waiting} daily run(s) are waiting for one of {cap} permits, and the oldest has waited {age}");
     }
 
     /// <summary>

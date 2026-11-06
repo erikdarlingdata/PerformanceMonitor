@@ -142,6 +142,53 @@ internal sealed class FleetGateStats
         }
     }
 
+    /// <summary>
+    /// #4938: moves one slot from run to skipped. A daily collector on the interval grid is counted as run
+    /// (<see cref="RecordSlot"/>) when the pass dispatches it, and the run is then refused at its single-flight gate when the
+    /// previous day's run still holds it: that slot came due and never ran, so it reads as one skipped slot and no run, as a
+    /// run-time collector's lost day does (<see cref="RecordSkippedSlots"/>). The run is taken back from the newest minute in
+    /// the window that holds one (the current minute, or an earlier one when the minute turned over between the two records),
+    /// and the skip lands in the current minute. When no minute in the window holds a run (the window or a clock step has moved
+    /// on), only the skip is recorded, so no count goes below zero. The judged counts move the same way when that minute holds
+    /// a judged run.
+    /// </summary>
+    public void MoveRunToSkipped()
+    {
+        var judged = IsJudgedNow();
+        lock (_lock)
+        {
+            ref var current = ref BucketFor(_utcNow());
+            var minute = current.Minute;
+            var source = -1;
+            var sourceMinute = long.MinValue;
+            for (var i = 0; i < _buckets.Length; i++)
+            {
+                ref var bucket = ref _buckets[i];
+                if (bucket.Run > 0 && bucket.Minute > minute - WindowMinutes && bucket.Minute > sourceMinute)
+                {
+                    source = i;
+                    sourceMinute = bucket.Minute;
+                }
+            }
+
+            if (source >= 0)
+            {
+                ref var from = ref _buckets[source];
+                from.Run--;
+                if (judged && from.JudgedRun > 0)
+                {
+                    from.JudgedRun--;
+                }
+            }
+
+            current.Skipped++;
+            if (judged)
+            {
+                current.JudgedSkipped++;
+            }
+        }
+    }
+
     /// <summary>Records how long one collection body waited for a fleet gate slot.</summary>
     public void RecordQueueWait(TimeSpan wait)
     {

@@ -866,7 +866,8 @@ public sealed partial class DarlingWorker
             var now = DateTime.UtcNow;
 
             /* #5735: what the PREVIOUS body measured is the cause of any slot this one steps over, so it is read before this
-               body overwrites it. The daily-run permit backlog is read as it stands now: a lost daily slot was lost to it. */
+               body overwrites it. The daily-run permit backlog is read as it stands now, so a row that carries a lost daily
+               slot can state it beside the loss. */
             var priorCauses = new CycleSkipCauses(
                 server.LastBodyMs, server.LastBodySlowestName, server.LastBodySlowestMs, server.LastGateWaitMs,
                 server.LastAnalysisMs, server.LastGateWaitAnalysisHolders,
@@ -1165,7 +1166,8 @@ public sealed partial class DarlingWorker
     internal async Task FlushCycleSkipAsync(ServerLoopState server, ServerRuntime runtime, CycleSkipCauses causes, CancellationToken cancellationToken)
     {
         var postgres = _postgres;
-        if (postgres is null || server.Retired)
+        var write = CycleSkipWriteOverride;
+        if ((postgres is null && write is null) || server.Retired)
         {
             return;
         }
@@ -1183,11 +1185,18 @@ public sealed partial class DarlingWorker
             return;
         }
 
-        if (await DarlingObservability.LogCycleSkipAsync(postgres, runtime, now, report, _logger, cancellationToken))
+        var written = write is not null
+            ? await write(report)
+            : await DarlingObservability.LogCycleSkipAsync(postgres!, runtime, now, report, _logger, cancellationToken);
+        if (written)
         {
             server.CycleSkips.Commit(taken, now);
         }
     }
+
+    /// <summary>Test seam: stands in for the <c>collection_cycle</c> row write in <see cref="FlushCycleSkipAsync"/>, so a test
+    /// reads the row a pass flushes without a store. Returns whether the row was written.</summary>
+    internal Func<CycleSkipReport, Task<bool>>? CycleSkipWriteOverride { get; set; }
 
     /// <summary>
     /// The <c>snapshot_now</c> command handler (Lite's Live Snapshot, control-plane form): runs EVERY
@@ -2827,14 +2836,18 @@ LIMIT 1";
                    still be waiting for a permit, has not finished by the time this one comes due. On a fleet whose
                    daily runs need more permit time than a day holds, that is some collector every day, so the lost
                    day is counted where the fleet gate and the server's collection_cycle row (what
-                   get_collection_health reads) see it, as a run-time collector's lost day is, and the line names
-                   the permit backlog: how many daily runs are waiting and how long the oldest has waited. */
+                   get_collection_health reads) see it. Only a daily on the interval grid reaches this skip (the pass
+                   does not hand off a run-time daily whose slot is held), and the grid counted this slot as run when
+                   it dispatched it, so that run is moved to skipped: the slot reads as one skipped slot and no run, as
+                   a run-time collector's lost day does. The line states the permit backlog beside the skip, how many
+                   daily runs are waiting and for how long, without naming it as the cause: the gate cannot tell a
+                   previous run that is waiting for a permit from one that is still executing. */
                 var skippedAt = DateTime.UtcNow;
-                _fleetGateStats?.RecordSkippedSlots(1);
+                _fleetGateStats?.MoveRunToSkipped();
                 server.CycleSkips.AddDailyLost(collectorName, 1, skippedAt);
                 _logger.LogWarning(
                     "  [{Server}] {Collector} skipped this run — its previous daily run has not finished (#4938). " +
-                    "It runs again at its next daily interval. {Backlog}",
+                    "It runs again at its next daily interval. {Backlog}.",
                     server.Config.DisplayName, collectorName,
                     DailyRunLimiter.DescribeBacklog(_dailyRunPermits.Waiting, _dailyRunPermits.Cap, _dailyRunPermits.OldestWaitUtc, skippedAt));
                 return 0;

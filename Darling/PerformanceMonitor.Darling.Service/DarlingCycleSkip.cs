@@ -257,11 +257,12 @@ internal static class DarlingCycleSkip
         if (dailySlots > 0)
         {
             var lost = string.Join(", ", snapshot.DailyLostSlots.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).Select(k => k.Replace('_', ' ')));
-            /* A day lost while daily runs were queued for a permit was lost to the permit backlog, not to this server, so
-               the row says how deep the queue was and how long its oldest run had waited. */
+            /* The permit backlog as the pass read it, stated beside the lost day: how many daily runs were waiting and how long
+               the oldest had waited. It is not named as the cause, because the row cannot tell whether this server's own
+               previous run was one of the waiters or was still executing. */
             var backlog = causes.DailyRunsWaiting > 0
                 ? string.Create(CultureInfo.InvariantCulture,
-                    $" while {causes.DailyRunsWaiting} daily run(s) waited for a permit, the oldest for {Format(causes.OldestDailyWaitMs)}")
+                    $", daily permits: {causes.DailyRunsWaiting} waiting, oldest {DailyRunLimiter.DescribeWait(TimeSpan.FromMilliseconds(causes.OldestDailyWaitMs))}")
                 : string.Empty;
             candidates.Add((
                 string.Create(CultureInfo.InvariantCulture, $"{dailySlots} run-time collector slot(s) lost their day ({lost}){backlog}"),
