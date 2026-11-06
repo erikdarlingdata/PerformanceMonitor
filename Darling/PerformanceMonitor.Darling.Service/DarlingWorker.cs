@@ -599,7 +599,7 @@ public sealed partial class DarlingWorker : BackgroundService
     internal Func<MonitoredServer, CancellationToken, Task<ServerRuntime>>? ConnectOverride { get; set; }
 
     /// <summary>Test seam: replaces the fresh-connection probe that settles a command timeout (#4710).</summary>
-    internal Func<ServerRuntime, CancellationToken, Task<bool>>? LivenessProbeOverride { get; set; }
+    internal Func<ServerRuntime, CancellationToken, Task<LivenessProbeOutcome>>? LivenessProbeOverride { get; set; }
 
     /// <summary>
     /// Test seam (#4938): replaces what one collector run does once its permits are held, so a test can block a
@@ -1771,7 +1771,9 @@ LIMIT 1";
         public RefusedCollectorBackoff RefusedBackoff { get; } = new();
 
         /* The verdict of this server's last liveness probe (#4710), reused for the command timeouts that follow it within
-           LivenessProbeMemo.ReuseSeconds. Cleared when the runtime is dropped, so a reconnected server is probed afresh. */
+           LivenessProbeMemo.ReuseSeconds, and the count of probes in a row whose own login timed out, which the probe past
+           LivenessProbeMemo.MaxTimedOutProbesInARow turns into a drop. Cleared when the runtime is dropped, so a reconnected
+           server is probed afresh. */
         public LivenessProbeMemo Liveness { get; } = new();
 
         /* #4938: what a daily collector's run-time stamp in NextDue was computed from: the run time, the clock and the
