@@ -2450,7 +2450,8 @@ public sealed partial class DarlingCollectorRunner
                     /* The service is stopping, and the read's cancellation arrived as the PROVIDER's exception rather
                        than an OperationCanceledException (SqlClient reports a cancelled command as a SqlException).
                        Surfaced as the cancellation it is, so RunOneAsync's cancellation arm claims the run: left as
-                       the provider's exception, it reaches the SQL error arm first and is recorded as an ERROR run.
+                       the provider's exception, it reaches the generic error arm (Darling has no SQL error arm ahead of its cancellation
+                       arm, DarlingWorker.Targets.cs) and is recorded as an ERROR run.
                        The same arm the Azure per-database loop has. Stores nothing, like the arm below. */
                     baselineRollback?.RollBackBaselines();
                     throw new OperationCanceledException(ex.Message, ex, cancellationToken);

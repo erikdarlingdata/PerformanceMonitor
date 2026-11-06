@@ -195,6 +195,29 @@ public sealed class QueryStatsBaselineRollbackRunnerTests(SharedDuckDbFixture fi
         Assert.Equal(100, ExecBaseline());
     }
 
+    /// <summary>
+    /// The stop arm's own rollback. The stop lands as the provider's exception (SqlClient reports a cancelled command as a
+    /// SqlException) at the end of the read, after the rows exist and before the store: no delta collector has a provider call
+    /// between its read and the store but the reader's disposal. The run surfaces a cancellation carrying that exception, and
+    /// the baseline the stopped run advanced to 160 is put back to the 100 of the last stored run.
+    /// </summary>
+    [Fact]
+    public async Task AStopThatArrivesAsTheProvidersException_RollsTheBaselineBack_AndSurfacesACancellation()
+    {
+        using var stop = new CancellationTokenSource();
+        _collector.ServerReaderOverrideForTests = _ => new HookedReader(MainQuery(), onDispose: () =>
+        {
+            stop.Cancel();
+            throw SqlExceptionFactory.Create(0, errorClass: 11, message: "Operation cancelled by user.");
+        });
+
+        var thrown = await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            _collector.RunCollectorDefinitionAsync(QueryStatsCollector.Instance, _server, stop.Token));
+
+        Assert.IsType<Microsoft.Data.SqlClient.SqlException>(thrown.InnerException);
+        Assert.Equal(100, ExecBaseline());
+    }
+
     [Fact]
     public async Task AFaultAfterTheRead_BeforeTheStore_LeavesTheBaselineWhereTheLastStoredRunPutIt()
     {
