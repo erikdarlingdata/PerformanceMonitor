@@ -129,6 +129,49 @@ public sealed class QueryStoreIntervalWideGateTests
     }
 
     [Fact]
+    public void Clause3_AStaleAppliedThrough_DoesNotLowerThePurgeHorizon_ForAMatureServer()
+    {
+        /* #7746: the purge cuts at the service clock minus WideHorizonDays. A server whose batches stopped keeps its applied_through where
+           they stopped while the purge keeps cutting, so a horizon taken from applied_through sits below the purge's, and a skewed row
+           between the two would be taken as read. The round-2 shape with the batches stopped six days ago: the mature server's own
+           floor, ten days back, refuses the 14-day window, and a skewed row 15 days 6 hours back sits below the window's edge
+           (S - 26 h, 15 days 2 hours back) and above applied_through minus ten days. Taken as read it sends the window to the table,
+           which drops days 10 to 14 that raw holds. */
+        var end = WindowEnd;
+        var start = end.AddDays(-14);
+        var mature = end.AddDays(-10);
+        var filled = start.AddDays(-1);
+        Assert.False(Rule(filledSince: filled, windowStart: start, tableFloor: mature, appliedThrough: end.AddDays(-6), tableFloorAllServers: end.AddDays(-15).AddHours(-6)));
+    }
+
+    [Fact]
+    public void Clause3_AYoungServersWholeTableFloor_IsRaisedToThePurgesClock_NotToItsAppliedThrough()
+    {
+        /* #7746: a server enrolled ten days ago, whose batches stopped six days ago. Its coverage claim and its own floor are ten days
+           back (the floor an hour above the claim, its first interval), and the window is the ten days since the claim, so clause 2
+           holds and the own floor refuses 3b by the margin. The purge has cut at the service clock minus ten days, so intervals of this
+           server that began just below the claim are gone while raw still holds snapshots of them collected inside the window. A
+           skewed row 20 days back, raised only to applied_through minus ten days (16 days back), would pass 3b and lose them. Raised
+           to the purge's own horizon it refuses. */
+        var end = WindowEnd;
+        var filled = end.AddDays(-10);
+        Assert.False(Rule(filledSince: filled, windowStart: filled, tableFloor: filled.AddHours(1), appliedThrough: end.AddDays(-6), tableFloorAllServers: end.AddDays(-20)));
+    }
+
+    [Fact]
+    public void Clause3_AMatureServer_NeverTakesTheWholeTableFloor()
+    {
+        /* #7746's shape is the newly enrolled server, whose own floor is its first interval and sits within one interval plus the margin
+           of its filled_since. A mature server's own floor is far above its filled_since: the purge's last cutoff, or a gap in its own
+           history, and another server's row tells the two apart no better than its own floor does. So it keeps raw on its own floor
+           and never pays for the whole-table read. Plain store, 7-day window, own floor 8 days back (inside S - 26 h), another server's
+           row 9 days back, above the purge horizon and so untouched by the clamp, that would pass 3b taken as H. */
+        var end = WindowEnd;
+        var start = end.AddDays(-7);
+        Assert.False(Rule(filledSince: end.AddDays(-60), windowStart: start, tableFloor: end.AddDays(-8), appliedThrough: end, tableFloorAllServers: end.AddDays(-9)));
+    }
+
+    [Fact]
     public void Clause3_RawFloorAtOrAboveTableFloorPlusMargin_ReadsTheTable_EvenOutsideTheMargin()
     {
         /* The table floor sits 12h under the window start, short of the purge-edge margin, so only 3a can pass. */
