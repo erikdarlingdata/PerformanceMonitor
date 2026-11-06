@@ -194,6 +194,63 @@ public sealed class CurrentWaitsTrendToolTests : IClassFixture<SharedDuckDbFixtu
     }
 
     /// <summary>
+    /// #7974, Darling's twin: a bucket's mean is over EVERY collection that ran in it, a collection with nothing waiting or blocked counting 0.
+    /// A wait type and a database seen in 1 of 60 one-minute collections of an hour read about 1/60; a steady series reads its full figure. The
+    /// second hour holds only the sporadic series (the other 59 collections ran and wrote no row at all), so its 60 comes from the collection log.
+    /// </summary>
+    [Fact]
+    public async Task ABucketMean_CoversEveryCollectionThatRan_SoASporadicSeriesReadsAFractionAndASteadyOneReadsItsFigure()
+    {
+        var service = new LocalDataService(_duckDb);
+        var now = DateTime.UtcNow;
+        var thisHour = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Utc);
+        var steadyHour = thisHour.AddHours(-3);
+        var quietHour = thisHour.AddHours(-2);
+
+        for (var minute = 0; minute < 60; minute++)
+        {
+            await SeedCollectionLogAsync(steadyHour.AddMinutes(minute), "SUCCESS", null);
+            await SeedCollectionLogAsync(quietHour.AddMinutes(minute), "SUCCESS", null);
+            await SeedWaitAsync(steadyHour.AddMinutes(minute), "LCK_M_X", 500, blockingSessionId: 99, database: "SteadyDb");
+        }
+
+        /* The sporadic series: one collection of the first hour and one of the second. */
+        await SeedWaitAsync(steadyHour.AddMinutes(7), "PAGEIOLATCH_SH", 600, blockingSessionId: 98, database: "SporadicDb");
+        await SeedWaitAsync(quietHour.AddMinutes(30), "PAGEIOLATCH_SH", 600, blockingSessionId: 98, database: "SporadicDb");
+
+        var root = JsonDocument.Parse(await McpHealthTools.GetCurrentWaitsTrend(service, _serverManager, ServerName, 6, null, null, 60)).RootElement;
+        Assert.Equal(60, root.GetProperty("bucket_minutes").GetInt32());
+
+        var steadyStamp = steadyHour.ToString("yyyy-MM-ddTHH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+        var quietStamp = quietHour.ToString("yyyy-MM-ddTHH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+        JsonElement Point(string series, string key, string name, string stamp) => root.GetProperty(series).EnumerateArray()
+            .Single(p => p.GetProperty(key).GetString() == name && p.GetProperty("collection_time").GetString()!.StartsWith(stamp, StringComparison.Ordinal));
+
+        var steadyBlocked = Point("blocked_sessions", "database_name", "SteadyDb", steadyStamp);
+        Assert.Equal(1.0, steadyBlocked.GetProperty("blocked_count").GetDouble());
+        Assert.Equal(60, steadyBlocked.GetProperty("collection_count").GetInt64());
+        Assert.Equal(500, Point("waiting_tasks", "wait_type", "LCK_M_X", steadyStamp).GetProperty("total_wait_ms").GetInt64());
+
+        var sporadicBlocked = Point("blocked_sessions", "database_name", "SporadicDb", steadyStamp);
+        Assert.Equal(1.0 / 60, sporadicBlocked.GetProperty("blocked_count").GetDouble(), 3);
+        Assert.True(sporadicBlocked.GetProperty("blocked_count").GetDouble() > 0, "a database blocked in 1 of 60 collections must not round to 0");
+        Assert.Equal(1, sporadicBlocked.GetProperty("peak_blocked_count").GetInt64());
+        Assert.Equal(60, sporadicBlocked.GetProperty("collection_count").GetInt64());
+        var sporadicWait = Point("waiting_tasks", "wait_type", "PAGEIOLATCH_SH", steadyStamp);
+        Assert.Equal(10, sporadicWait.GetProperty("total_wait_ms").GetInt64());
+        Assert.Equal(600, sporadicWait.GetProperty("peak_wait_ms").GetInt64());
+        Assert.Equal(60, sporadicWait.GetProperty("collection_count").GetInt64());
+
+        /* The hour in which the other 59 collections ran and wrote no row: still 60 runs, still 1/60. */
+        var quietBlocked = Point("blocked_sessions", "database_name", "SporadicDb", quietStamp);
+        Assert.Equal(1.0 / 60, quietBlocked.GetProperty("blocked_count").GetDouble(), 3);
+        Assert.Equal(60, quietBlocked.GetProperty("collection_count").GetInt64());
+        var quietWait = Point("waiting_tasks", "wait_type", "PAGEIOLATCH_SH", quietStamp);
+        Assert.Equal(10, quietWait.GetProperty("total_wait_ms").GetInt64());
+        Assert.Equal(60, quietWait.GetProperty("collection_count").GetInt64());
+    }
+
+    /// <summary>
     /// #7877 review, Darling's twin: no hours_back ceiling here either, and the ladder gives up at one day. 9 series x 31 day-buckets = 279 points
     /// misses the 200 target but fits the 1,500 cap, so the widest width is served with a note that says so. 51 series is 1,581, over the cap at
     /// every width, so the automatic path and an explicit width are both refused, and the refusal names the window, not a width.

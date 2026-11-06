@@ -73,26 +73,29 @@ public class PlanFeatureExtractorTests
     }
 
     [Fact]
-    public void FeatureVersion_is_3_and_every_row_carries_it()
+    public void FeatureVersion_is_4_and_every_row_carries_it()
     {
-        Assert.Equal(3, PlanFeatureExtractor.FeatureVersion);
+        Assert.Equal(4, PlanFeatureExtractor.FeatureVersion);
 
         var result = PlanFeatureExtractor.Extract("digest-version", ReadFixture("missing_index.sqlplan"));
 
-        Assert.All(result.Features, f => Assert.Equal(3, f.FeatureVersion));
-        Assert.All(result.Warnings, w => Assert.Equal(3, w.FeatureVersion));
-        Assert.All(result.MissingIndexes, i => Assert.Equal(3, i.FeatureVersion));
+        Assert.All(result.Features, f => Assert.Equal(4, f.FeatureVersion));
+        Assert.All(result.Warnings, w => Assert.Equal(4, w.FeatureVersion));
+        Assert.All(result.MissingIndexes, i => Assert.Equal(4, i.FeatureVersion));
     }
 
     [Fact]
-    public void ModulePlan_second_statement_gains_a_Bare_Scan_warning()
+    public void ModulePlan_second_statement_has_no_Bare_Scan_warning_on_its_one_row_table_variable()
     {
         var result = PlanFeatureExtractor.Extract("digest-module-warnings", ReadFixture("module_plan.sqlplan"));
 
         var second = result.Features.Single(f => f.StatementOrdinal == 2);
         // #7899: the table variable in this plan is one finding, no longer a statement warning plus an operator warning.
-        Assert.Equal(2, second.WarningCount);
-        Assert.Contains(result.Warnings, w => w.StatementOrdinal == 2 && w.WarningType == "Bare Scan");
+        // #7891: the statement's only scan reads a table variable with a cardinality of 1, far under the 10,000 row floor
+        // Bare Scan needs on an estimated plan, so the table variable finding is the statement's only warning.
+        Assert.Equal(1, second.WarningCount);
+        Assert.Contains(result.Warnings, w => w.StatementOrdinal == 2 && w.WarningType == "Table Variable");
+        Assert.DoesNotContain(result.Warnings, w => w.StatementOrdinal == 2 && w.WarningType == "Bare Scan");
     }
 
     [Fact]
@@ -105,9 +108,12 @@ public class PlanFeatureExtractorTests
         Assert.Equal("ok", result.Features[0].ExtractionStatus);
         Assert.Equal("DECLARE CURSOR", result.Features[0].StatementType);
         // #7899: the table variable in this plan is one finding, no longer a statement warning plus an operator warning.
-        Assert.Equal(3, result.Features[0].WarningCount);
+        // #7891: the cursor's one scan reads a table variable with a cardinality of 0, under the 10,000 row floor Bare
+        // Scan needs on an estimated plan, so the warnings are the cursor's missing LOCAL and the table variable.
+        Assert.Equal(2, result.Features[0].WarningCount);
         Assert.Contains(result.Warnings, w => w.WarningType == "Cursor Missing LOCAL");
-        Assert.Contains(result.Warnings, w => w.WarningType == "Bare Scan");
+        Assert.Contains(result.Warnings, w => w.WarningType == "Table Variable");
+        Assert.DoesNotContain(result.Warnings, w => w.WarningType == "Bare Scan");
     }
 
     [Fact]

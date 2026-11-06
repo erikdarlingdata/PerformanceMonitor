@@ -245,7 +245,7 @@ public sealed class AnalysisPassTokenThreadingTests
     public async Task AFiredTokenStopsFactCollectionAtTheFirstReadInsteadOfRunningEveryCollector()
     {
         await using var dataSource = NpgsqlDataSource.Create(
-            "Host=127.0.0.1;Port=1;Username=nobody;Password=nobody;Database=nowhere;Timeout=1;Command Timeout=1");
+            "Host=127.0.0.1;Port=1;Username=nobody;Password=nobody;Database=nowhere;Timeout=15;Command Timeout=1");
 
         var collector = new PgFactCollector(dataSource);
         var context = new AnalysisContext

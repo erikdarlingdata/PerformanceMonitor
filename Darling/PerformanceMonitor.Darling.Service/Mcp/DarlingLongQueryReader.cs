@@ -20,7 +20,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// Service-side read for the long-query completion MCP tool (<see cref="DarlingMcpLongQueryTools"/>) — the
 /// SAME collected data the viewer's <c>ViewerDataService.LongQueries.cs</c> reads, adapted here so the MCP
 /// host never references the WPF viewer project (#1496). A STORED read (no live monitored-server hit),
-/// keyed by <c>server_id</c> and windowed on the naive-UTC <c>collection_time</c> prefix, over the BASE
+/// keyed by <c>server_id</c> and windowed on the event's own naive-UTC <c>event_time</c> (#7900), with the
+/// <see cref="EventWindowFloor"/> for the window start as a <c>collection_time</c> bound ($7), over the BASE
 /// <c>long_query_completions</c> table (a post-V14 collector has no <c>v_*</c> passthrough view). Ordered by
 /// duration DESC (NULLS LAST so attentions, whose duration is NULL, follow the ranked completions). The SQL
 /// is a public const so Darling.Tests can pin the dialect + columns without a live Postgres. $1 server_id,
@@ -84,8 +85,12 @@ internal static class DarlingLongQueryReader
             object_name
         FROM long_query_completions
         WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
+        /* #7900: the window is on the event's own time, when it happened, as get_blocking and get_deadlocks window theirs. $7 is
+           the EventWindowFloor for $2, a partition-column bound with no upper limit, so the hypertable excludes its older chunks
+           and an event collected after the window's end, or late after an outage, still lists. */
+        AND   event_time >= $2
+        AND   event_time <= $3
+        AND   collection_time >= $7
         AND   ($5::text[] IS NULL OR database_name = ANY($5))
         AND   ($6::boolean OR client_app_name IS NULL OR client_app_name NOT ILIKE '{{PerformanceMonitor.Common.MonitorApplicationNames.SqlProgramNameLikePattern}}')
         /*TAG:hash:query_hash*/
@@ -128,6 +133,7 @@ internal static class DarlingLongQueryReader
         DarlingMcpReadParameters.AddInt(command, cap);
         command.Parameters.Add(databases.Parameter());
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Boolean, Value = includeMonitor });
+        DarlingMcpReadParameters.AddTimestamp(command, EventWindowFloor.For(startUtc));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
