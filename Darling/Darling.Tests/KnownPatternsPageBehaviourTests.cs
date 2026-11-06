@@ -81,6 +81,23 @@ public sealed class KnownPatternsPageBehaviourTests
         Assert.Equal(new[] { "=Every server", "7=Server A", "9=srv-b" }, r.GetProperty("serverChoices").EnumerateArray().Select(x => x.GetString()).ToArray());
     }
 
+    /// <summary>#7958: two clicks on Save before the service answers send one POST, not two; Save is disabled while the write is out, and
+    /// enabled again on a refusal so the entry can be corrected and saved.</summary>
+    [Fact]
+    public void TwoClicksOnSave_BeforeTheServiceAnswers_SendOnePost_AndTheButtonIsDisabledWhileItIsOut()
+    {
+        var r = Run("doubleSave");
+
+        Assert.Equal(1, r.GetProperty("postsBeforeReply").GetInt32());
+        Assert.True(r.GetProperty("disabledWhileOut").GetBoolean());
+        Assert.Equal(1, r.GetProperty("postsAfterReply").GetInt32());
+        Assert.True(r.GetProperty("formClosed").GetBoolean());
+        Assert.Equal(1, r.GetProperty("rows").GetInt32());
+        Assert.True(r.GetProperty("refusalShown").GetBoolean());
+        Assert.True(r.GetProperty("enabledAfterRefusal").GetBoolean());
+        Assert.Equal(2, r.GetProperty("writesInAll").GetInt32());
+    }
+
     [Fact]
     public void ABlankScope_SendsNulls_AndNoZoneOrWindowWithoutATimeOfDay()
     {

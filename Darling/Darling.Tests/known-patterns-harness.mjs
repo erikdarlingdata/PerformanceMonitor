@@ -56,7 +56,8 @@ globalThis.fetch = async (url, init) => {
   if (init && init.method && init.method !== "GET") {
     const req = init.body ? JSON.parse(init.body) : null;
     writes.push({ method: init.method, url: u, contentType: init.headers["Content-Type"], req });
-    const r = writeReply(req, init.method);
+    /* A reply may be a promise, so a scenario can hold the service's answer back and look at the page in between. */
+    const r = await writeReply(req, init.method);
     return { status: r.status, ok: r.status < 300, text: async () => JSON.stringify(r.body) };
   }
   let body = {};
@@ -111,6 +112,35 @@ try {
       out.formClosed = !field(main, "note");
       out.rows = bodyRows(main).length;
       out.expiresIsUtcIso = /^2030-01-0[12]T\d\d:\d\d:00\.000Z$/.test(writes[0].req.expires_at_utc);
+    },
+    /* #7958: two clicks on Save before the service has answered the first. One POST goes out, the button is disabled while it is
+       out, and the form closes on the answer. Then a save the service refuses: the redrawn form's Save is enabled again. */
+    async doubleSave() {
+      let release;
+      const gate = new Promise((r) => (release = r));
+      writeReply = async () => { await gate; return { status: 200, body: { status: "created", id: 1 } }; };
+      const main = newMain(); await page.renderKnownPatterns(main);
+      button(main, "New known pattern").fire("click");
+      type(main, "note", "Nightly backup runs here.");
+      const save = button(main, "Save");
+      save.fire("click");
+      save.fire("click");
+      await tick();
+      out.postsBeforeReply = writes.length;
+      out.disabledWhileOut = save.disabled === true;
+      entries = [entry({ note: "Nightly backup runs here." })];
+      release();
+      await tick();
+      out.postsAfterReply = writes.length;
+      out.formClosed = !field(main, "note");
+      out.rows = bodyRows(main).length;
+      writeReply = () => ({ status: 400, body: { status: "invalid", error: "A known pattern needs a note: what the operator knows about it." } });
+      button(main, "New known pattern").fire("click");
+      button(main, "Save").fire("click");
+      await tick();
+      out.refusalShown = !!role(main, "refusal");
+      out.enabledAfterRefusal = button(main, "Save").disabled !== true;
+      out.writesInAll = writes.length;
     },
     async anyScope() {
       const main = newMain(); await page.renderKnownPatterns(main);
