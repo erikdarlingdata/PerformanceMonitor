@@ -267,17 +267,18 @@ public class FactScorer
 
         return fact.Key switch
         {
-            // Blocking: concerning >10/hr, critical >50/hr — MEASURED, at the 4-hour grain, and the value
-            // graded here is that grain's: the busiest 4-hour sub-window of the pass, computed by the
-            // collectors (#3871), with the whole-window average kept beside it as events_per_hour context.
-            // Lineage: the primary production fleet's 14-day read (#3653 box (a), 2026-09-22) put non-zero
-            // 4-HOUR windows at p99 = 59 events/h with five windows >= 50, so the pair sits on the storm
-            // mode at the grain it was measured on — which is exactly why the value had to become the peak:
-            // graded as a 24-hour average the same storm read Information, graded at its own grain it reads
-            // CRITICAL on any pass length. (This paragraph supersedes the earlier "inherited, not measured"
-            // note: the #3539 A3 alerting band at 5/20 remains a different instrument — the scorer's story
-            // still reaches CRITICAL through its amplifiers — but the pair itself is now measured, not
-            // inherited.)
+            // Blocking: concerning >10/hr, critical >50/hr, at the 4-hour grain, and the value graded here is
+            // that grain's: the busiest 4-hour bucket of the pass, computed by the collectors (#3871) as waits
+            // per covered hour (#7895), with the whole-window average kept beside it as events_per_hour context.
+            // The value counts WAITS (#5644): a blocked session, its blocker and the wait's derived start, one
+            // row however many blocked-process reports SQL Server wrote while it lasted. Lineage: the pair was
+            // measured on REPORTS, the primary production fleet's 14-day read (#3653 box (a), 2026-09-22), which
+            // put non-zero 4-hour windows at p99 = 59 reports/h with five windows >= 50. On a production fleet
+            // one wait yields about 1.1 reports, so in waits that p99 is about 54/h and the pair still sits on
+            // the storm mode at the grain it was measured on, which is why the value is the peak: graded as a
+            // 24-hour average the same storm read Information, graded at its own grain it reads CRITICAL on any
+            // pass length. The #3539 A3 alerting band at 5/20 is a different instrument; the scorer's story
+            // still reaches CRITICAL through its amplifiers.
             "BLOCKING_EVENTS" => ApplyThresholdFormula(value, 10, 50),
             // Deadlocks: 5/hr concerning, 20/hr critical — the SAME pair the alerting layer derived from
             // 14 days of collect.deadlocks on the 43-server dogfood fleet (2,722 deadlocks over 14,448
@@ -1009,12 +1010,12 @@ public class FactScorer
             if (fact.Metadata.GetValueOrDefault("baseline_low_quality") >= 1.0)
             {
                 var over = Math.Max(0.0, fact.Metadata.GetValueOrDefault("fallback_exceedance") - 1.0);
-                // Floor AFTER the confidence multiply, not before it. confidence is a hardcoded 1.0
-                // everywhere today so the ramp already lands >= 0.5 at the bar, but if confidence ever
-                // drops sub-1.0 the un-floored product would fall below InferenceEngine's 0.5 root
-                // entry-point and silently drop the finding — re-breaking the "fire on the absolute bar,
-                // not silence" guarantee. Math.Max(0.5, ...) keeps a fired low-quality anomaly rootable
-                // regardless of confidence. Behaviorally identical at confidence == 1.0.
+                // Floor AFTER the confidence multiply, not before it. confidence is the baseline bucket's own
+                // trustworthiness (BaselineBucket.Confidence, which both detectors stamp as metadata["confidence"]),
+                // and it sits below 1.0 on exactly the thin baseline this branch grades, so the un-floored product
+                // would fall below InferenceEngine's 0.5 root entry-point and silently drop the finding, breaking
+                // the "fire on the absolute bar, not silence" guarantee. Math.Max(0.5, ...) keeps a fired
+                // low-quality anomaly rootable regardless of confidence.
                 return Math.Max(0.5, (0.5 + 0.5 * Math.Min(over / LowQualityFallbackSpan, 1.0)) * confidence);
             }
 
