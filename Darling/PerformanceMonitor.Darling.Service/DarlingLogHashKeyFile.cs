@@ -115,7 +115,7 @@ public static class DarlingLogHashKeyFile
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogError(
+            logger.LogError(ex, 
                 "PostgreSQL log events will not be collected: the directory for the store's log-hash key could not be resolved ({Message}) (#4004).",
                 ex.Message);
             return new DarlingLogHashKeyLoad(null, string.Empty, Generated: false, Refusal: $"the directory for the store's log-hash key could not be resolved ({ex.Message})");

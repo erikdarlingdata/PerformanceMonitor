@@ -54,6 +54,15 @@ internal sealed record IntervalFloorWarmUpResult(
 /// reference, never a copy, so it walks the index the gate walks. <c>FloorSql</c> is the only place that
 /// chooses between them, and a source pin fails if this file runs anything else against an interval table.</para>
 ///
+/// <para><b>The whole-table floor (#7746).</b> The wide gate also reads <c>MIN(first_execution_time)</c> over every server
+/// (<see cref="QueryStoreIntervalWide.PlainTableFloorAllServersSql"/>) for a newly enrolled server. That statement has no
+/// server predicate, so it walks the btree on <c>first_execution_time</c> alone (<c>idx_query_store_interval_wide_first_exec</c>),
+/// not the <c>(server_id, first_execution_time)</c> index the one-server reads walk, and the one-server walks mark nothing on it:
+/// measured on a 300,000-row table after a 100,013-row drain, the one-server reads for every server left the whole-table read
+/// at 100,142 buffers and 99,988 heap fetches, 155 buffers and 1 fetch on its second run. So the wide warm-up runs that statement
+/// once as well, after the per-server reads, on its own connection with the same lock timeout. It is one statement per pass, not
+/// one per server, and it is reported on its own line, outside the per-server tallies.</para>
+///
 /// <para><b>Cost when nothing is dead.</b> Each read is then one index probe (milliseconds), which is why there
 /// is no size threshold: the caller gates on "the purge deleted any row or failed" (<see cref="LeftDeadEntries"/>),
 /// and a no-op warm-up is cheap.</para>
@@ -234,6 +243,11 @@ internal static class QueryStoreIntervalFloorWarmUp
             }
         }
 
+        if (table == IntervalFloorTable.Wide && !cancelled)
+        {
+            await WarmWholeTableFloorAsync(postgres, tableName, logger, lockTimeoutMilliseconds, commandTimeoutSeconds, cancellationToken);
+        }
+
         var result = new IntervalFloorWarmUpResult(
             table, warmed, skippedOnLock, failed, total.Elapsed, slowestServer, slowest, cancelled);
         logger?.LogInformation(
@@ -241,6 +255,51 @@ internal static class QueryStoreIntervalFloorWarmUp
             tableName, warmed, skippedOnLock, failed, (long)total.Elapsed.TotalMilliseconds,
             slowestServer?.ToString(CultureInfo.InvariantCulture) ?? "none", (long)slowest.TotalMilliseconds);
         return result;
+    }
+
+    /// <summary>
+    /// #7746: the wide gate's whole-table floor read (<see cref="QueryStoreIntervalWide.PlainTableFloorAllServersSql"/>), once, after the
+    /// per-server reads, so the first newly enrolled server's decision after a drain does not walk the dead entries of
+    /// <c>idx_query_store_interval_wide_first_exec</c>. Its own connection and the same <c>lock_timeout</c> as the per-server reads, so a
+    /// queued ACCESS EXCLUSIVE request skips it rather than stalling behind it. Logged on its own line and kept out of the per-server
+    /// tallies. Never throws: a lock timeout, a failure or a cancel is logged.
+    /// </summary>
+    private static async Task WarmWholeTableFloorAsync(
+        NpgsqlDataSource postgres, string tableName, ILogger? logger, int lockTimeoutMilliseconds, int commandTimeoutSeconds,
+        CancellationToken cancellationToken)
+    {
+        var one = Stopwatch.StartNew();
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using (var setLock = new NpgsqlCommand(
+                "SET lock_timeout = " + lockTimeoutMilliseconds.ToString(CultureInfo.InvariantCulture), connection))
+            {
+                await setLock.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await using var read = new NpgsqlCommand(QueryStoreIntervalWide.PlainTableFloorAllServersSql, connection) { CommandTimeout = commandTimeoutSeconds };
+            await read.ExecuteScalarAsync(cancellationToken);
+            logger?.LogInformation(
+                "Interval floor warm-up for {Table}: the floor over every server read in {ElapsedMs} ms",
+                tableName, (long)one.Elapsed.TotalMilliseconds);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            logger?.LogInformation("Interval floor warm-up for {Table} cancelled at the floor over every server", tableName);
+        }
+        catch (PostgresException ex) when (ex.SqlState == LockNotAvailable)
+        {
+            logger?.LogWarning(
+                "Interval floor warm-up for {Table} skipped the floor over every server: the table is locked ({LockMs} ms lock timeout), probably a schema or partition step",
+                tableName, lockTimeoutMilliseconds);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning(
+                "Interval floor warm-up for {Table} failed at the floor over every server: {Failure}",
+                tableName, ex.InnerException?.Message ?? ex.Message);
+        }
     }
 
     private static async Task<List<int>> ReadServerIdsAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)

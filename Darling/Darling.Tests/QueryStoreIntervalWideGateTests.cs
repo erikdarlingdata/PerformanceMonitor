@@ -25,15 +25,17 @@ public sealed class QueryStoreIntervalWideGateTests
     private static readonly TimeSpan MinWindow = QueryStoreIntervalWide.GridWideMinWindow;
 
     /// <summary>Every argument defaults to a value that alone passes its own clause, so a test overrides only
-    /// the one input the clause under test cares about.</summary>
+    /// the one input the clause under test cares about. The clock (#7746) defaults to the window end: the purge's clock
+    /// reads as now, and the window ends now.</summary>
     private static bool Rule(
         DateTime? filledSince = null, bool hasPending = false, DateTime? rawFloor = null,
         DateTime? windowStart = null, DateTime? windowEnd = null, DateTime? literalWindowEnd = null,
-        DateTime? appliedThrough = null, DateTime? tableFloor = null, TimeSpan? minWindow = null) =>
+        DateTime? appliedThrough = null, DateTime? tableFloor = null, TimeSpan? minWindow = null, DateTime? tableFloorAllServers = null,
+        DateTime? utcNow = null) =>
         QueryStoreIntervalWide.UseTable(
             filledSince ?? WindowStart.AddDays(-1), hasPending, rawFloor,
             windowStart ?? WindowStart, windowEnd ?? WindowEnd, literalWindowEnd,
-            appliedThrough ?? WindowEnd, tableFloor ?? WindowStart.AddDays(-2), minWindow ?? MinWindow);
+            appliedThrough ?? WindowEnd, tableFloor ?? WindowStart.AddDays(-2), minWindow ?? MinWindow, tableFloorAllServers, utcNow ?? WindowEnd);
 
     [Fact]
     public void EveryClauseHolding_ReadsTheTable() => Assert.True(Rule());
@@ -81,6 +83,108 @@ public sealed class QueryStoreIntervalWideGateTests
     {
         Assert.True(Rule(tableFloor: WindowStart - QueryStoreIntervalWide.PurgeEdgeMargin));
         Assert.True(Rule(tableFloor: WindowStart - QueryStoreIntervalWide.PurgeEdgeMargin - TimeSpan.FromMinutes(1)));
+    }
+
+    [Fact]
+    public void Clause3_YoungServerFloor_PassesOnTheWholeTableFloor_AtOrBeyondTheMargin()
+    {
+        /* #7746: a server enrolled 30 hours ago has its first intervals as its whole history, so its own floor sits inside the margin.
+           The purge runs over the whole table with one cutoff, so the table's floor over every server bounds what it dropped for this
+           server too, and ten days back it is well past the margin. */
+        var young = WindowStart.AddHours(-6);
+        Assert.False(Rule(tableFloor: young));
+        Assert.True(Rule(tableFloor: young, tableFloorAllServers: WindowStart.AddDays(-10)));
+        Assert.True(Rule(tableFloor: young, tableFloorAllServers: WindowStart - QueryStoreIntervalWide.PurgeEdgeMargin));
+    }
+
+    [Fact]
+    public void Clause3_WholeTableFloorInsideTheMargin_OrUnread_LeavesTheServerOnRaw()
+    {
+        /* Every server young, or the whole-table floor not read: nothing shows the purge dropped nothing, so the answer is raw. */
+        var young = WindowStart.AddHours(-6);
+        Assert.False(Rule(tableFloor: young, tableFloorAllServers: WindowStart - QueryStoreIntervalWide.PurgeEdgeMargin + TimeSpan.FromMinutes(1)));
+        Assert.False(Rule(tableFloor: young, tableFloorAllServers: young));
+        Assert.False(Rule(tableFloor: young, tableFloorAllServers: null));
+        /* The whole-table floor is taken only with the clock that raises it to the purge horizon. */
+        Assert.False(QueryStoreIntervalWide.UseTable(
+            WindowStart.AddDays(-1), false, null, WindowStart, WindowEnd, null, WindowEnd, young, MinWindow, WindowStart.AddDays(-10), utcNow: null));
+        /* A whole-table floor above the server's own (a purge between the two reads) never widens what the server's own floor allows. */
+        Assert.False(Rule(tableFloor: WindowStart.AddHours(-25), tableFloorAllServers: WindowStart.AddHours(-1)));
+    }
+
+    [Fact]
+    public void Clause3_WholeTableFloorBelowTheHorizon_IsRaisedToIt_SoAMatureServerKeepsRaw()
+    {
+        /* #7746: UpsertSql copies first_execution_time from raw with no lower bound, and raw takes it from the monitored server's clock,
+           so one server whose clock runs behind holds rows below the purge's horizon (the purge's clock minus WideHorizonDays) until the
+           next purge. Such a row is no purge edge. A mature server on a plain store (raw keeps 30 days, so 3a cannot pass) with a 14-day
+           window: its own floor, ten days back, refuses 3b, and the whole-table floor is raised to the horizon, so it refuses too, and
+           being mature (its own floor 14 days above its claim) it never takes the whole-table floor at all. Taken as read, the skewed
+           floor would send the window to the table and drop days 10 to 14 of it. The coverage claim starts below the window, so clause 2
+           holds and every refusal here is clause 3's. */
+        var end = WindowEnd;
+        var start = end.AddDays(-14);
+        var mature = end.AddDays(-10);
+        var filled = start.AddDays(-1);
+        Assert.False(Rule(filledSince: filled, windowStart: start, tableFloor: mature, appliedThrough: end, utcNow: end));
+        Assert.False(Rule(filledSince: filled, windowStart: start, tableFloor: mature, appliedThrough: end, tableFloorAllServers: end.AddDays(-20), utcNow: end));
+        /* The skewed floor exactly at S - 26 h is the edge 3b would pass on as read. */
+        Assert.False(Rule(filledSince: filled, windowStart: start, tableFloor: mature, appliedThrough: end, tableFloorAllServers: start - QueryStoreIntervalWide.PurgeEdgeMargin, utcNow: end));
+        /* The clamp only raises: a young server still passes on a whole-table floor at the horizon, which is past the margin. */
+        Assert.True(Rule(tableFloor: WindowStart.AddHours(-6), tableFloorAllServers: WindowEnd.AddDays(-QueryStoreIntervalPartitions.WideHorizonDays), utcNow: WindowEnd));
+    }
+
+    [Fact]
+    public void Clause3_AStaleAppliedThrough_DoesNotLowerThePurgeHorizon_ForAMatureServer()
+    {
+        /* #7746: the purge cuts at the service clock minus WideHorizonDays. A server whose batches stopped keeps its applied_through where
+           they stopped while the purge keeps cutting, so a horizon taken from applied_through sits below the purge's, and a skewed row
+           between the two would be taken as read. The round-2 shape with the batches stopped six days ago: the mature server's own
+           floor, ten days back, refuses the 14-day window, and a skewed row 15 days 6 hours back sits below the window's edge
+           (S - 26 h, 15 days 2 hours back) and above applied_through minus ten days. Taken as read it sends the window to the table,
+           which drops days 10 to 14 that raw holds. */
+        var end = WindowEnd;
+        var start = end.AddDays(-14);
+        var mature = end.AddDays(-10);
+        var filled = start.AddDays(-1);
+        Assert.False(Rule(filledSince: filled, windowStart: start, tableFloor: mature, appliedThrough: end.AddDays(-6), tableFloorAllServers: end.AddDays(-15).AddHours(-6), utcNow: end));
+    }
+
+    [Fact]
+    public void Clause3_AYoungServersWholeTableFloor_IsRaisedToThePurgesClock_NotToItsAppliedThrough()
+    {
+        /* #7746: a server enrolled ten days ago, whose batches stopped six days ago. Its coverage claim and its own floor are ten days
+           back (the floor an hour above the claim, its first interval), and the window is the ten days since the claim, so clause 2
+           holds and the own floor refuses 3b by the margin. The purge has cut at the service clock minus ten days, so intervals of this
+           server that began just below the claim are gone while raw still holds snapshots of them collected inside the window. A
+           skewed row 20 days back, raised only to applied_through minus ten days (16 days back), would pass 3b and lose them. Raised
+           to the purge's own horizon it refuses. A clock as stale as applied_through lets the row through, so the clock is what decides. */
+        var end = WindowEnd;
+        var filled = end.AddDays(-10);
+        Assert.False(Rule(filledSince: filled, windowStart: filled, tableFloor: filled.AddHours(1), appliedThrough: end.AddDays(-6), tableFloorAllServers: end.AddDays(-20), utcNow: end));
+        Assert.True(Rule(filledSince: filled, windowStart: filled, tableFloor: filled.AddHours(1), appliedThrough: end.AddDays(-6), tableFloorAllServers: end.AddDays(-20), utcNow: end.AddDays(-6)));
+    }
+
+    [Fact]
+    public void Clause3_AMatureServer_NeverTakesTheWholeTableFloor()
+    {
+        /* #7746's shape is the newly enrolled server, whose own floor is its first interval and sits within one interval plus the margin
+           of its filled_since. A mature server's own floor is far above its filled_since: the purge's last cutoff, or a gap in its own
+           history, and another server's row tells the two apart no better than its own floor does. So it keeps raw on its own floor
+           and never pays for the whole-table read. Plain store, 7-day window, own floor 8 days back (inside S - 26 h), another server's
+           row 9 days back, above the purge horizon and so untouched by the clamp, that would pass 3b taken as H. The same inputs with
+           the claim an hour below the floor are a server enrolled eight days ago, and it passes on that row. */
+        var end = WindowEnd;
+        var start = end.AddDays(-7);
+        var own = end.AddDays(-8);
+        Assert.False(Rule(filledSince: end.AddDays(-60), windowStart: start, tableFloor: own, appliedThrough: end, tableFloorAllServers: end.AddDays(-9), utcNow: end));
+        Assert.True(Rule(filledSince: own.AddHours(-1), windowStart: start, tableFloor: own, appliedThrough: end, tableFloorAllServers: end.AddDays(-9), utcNow: end));
+        /* The span is one interval plus the margin on either side of the claim. */
+        Assert.True(QueryStoreIntervalWide.IsYoungFloor(end, end + QueryStoreIntervalWide.YoungFloorSpan));
+        Assert.True(QueryStoreIntervalWide.IsYoungFloor(end, end - QueryStoreIntervalWide.YoungFloorSpan));
+        Assert.False(QueryStoreIntervalWide.IsYoungFloor(end, end + QueryStoreIntervalWide.YoungFloorSpan + TimeSpan.FromMinutes(1)));
+        Assert.False(QueryStoreIntervalWide.IsYoungFloor(end, end - QueryStoreIntervalWide.YoungFloorSpan - TimeSpan.FromMinutes(1)));
+        Assert.Equal(TimeSpan.FromHours(50), QueryStoreIntervalWide.YoungFloorSpan);
     }
 
     [Fact]

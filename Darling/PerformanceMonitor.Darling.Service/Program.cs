@@ -245,6 +245,20 @@ if (args.Length > 0 && DarlingCliCommands.IsHardenFilesVerb(args[0]))
         : DarlingCliCommands.HardenFiles(configPath, Console.Out, Console.Error);
 }
 
+/* CLI verb: --grant-cert-key-access (#7718) - give the service account Read on the private key of a certificate in a
+   Windows certificate store, so the store form of web.network.tls / mcp.network.tls can open it. Elevated for
+   LocalMachine; adds one Read entry for one account and keeps the existing entries. Windows-only: keys and ACLs. */
+if (args.Length > 0 && DarlingCliCommands.IsGrantCertKeyAccessVerb(args[0]))
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        Console.Error.WriteLine("--grant-cert-key-access requires Windows (certificate private keys and their ACLs).");
+        return 1;
+    }
+
+    return DarlingCliCommands.GrantCertKeyAccess(args.Skip(1).ToArray(), Console.Out, Console.Error);
+}
+
 /* CLI verbs: enable/disable the embedded MCP + web-dashboard endpoints on a HEADLESS managed deployment. Each
    flips the live switch in config.config_service (mcp_enabled/web_enabled — the store is authoritative after the
    first run; darling.json's enabled is only the seed) via a targeted UPDATE whose self-bump trigger makes the

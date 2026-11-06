@@ -238,7 +238,7 @@ internal static class DarlingStoreLogins
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogError(
+            logger.LogError(ex, 
                 "Provisioning the compose store's least-privilege roles failed this start (the web dashboard and the MCP server each log which login they use instead): {Message}",
                 ex.Message);
             verdict = ComposeStoreVerdict.NotProvisioned(
@@ -551,7 +551,7 @@ internal static class DarlingStoreLogins
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogError(
+            logger.LogError(ex, 
                 "{What} not started this attempt: the store did not accept the {Role} login an earlier start provisioned ({Message}). It stays down rather than connect as the owner, until a start provisions the roles again.",
                 what, role, ex.Message);
             return false;

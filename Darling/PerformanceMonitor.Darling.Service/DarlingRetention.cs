@@ -1497,7 +1497,7 @@ public static class DarlingRetention
                escaped the loop. Record an ERROR run-record for the audit trail and return what we managed to
                purge — PurgeAsync must never throw at the daily caller (it is not wrapped there), so a broken
                purge surfaces as an auditable ERROR row, not a crashed collection loop. */
-            logger?.LogError("Retention purge failed: {Message}", ex.Message);
+            logger?.LogError(ex, "Retention purge failed: {Message}", ex.Message);
             await DarlingObservability.LogRetentionRunAsync(
                 postgres, "ERROR", totalRowsDeleted + totalChunksDropped, sw.ElapsedMilliseconds,
                 runLabel is null ? ex.Message : $"{runLabel}: {ex.Message}", logger, cancellationToken);

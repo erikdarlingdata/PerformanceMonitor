@@ -123,6 +123,30 @@ public static partial class DarlingCliCommands
     public static bool IsHardenFilesVerb(string arg) =>
         string.Equals(arg, "--harden-files", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The verb <see cref="GrantCertKeyAccess"/> handles: give the service account Read on the private key
+    /// of a certificate in a Windows certificate store, from an elevated prompt (#7718).</summary>
+    public static bool IsGrantCertKeyAccessVerb(string arg) =>
+        string.Equals(arg, DarlingTlsKeyAccess.VerbName, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// <c>--grant-cert-key-access &lt;thumbprint&gt; [--account &lt;name&gt;] [--store-location &lt;LocalMachine|CurrentUser&gt;]
+    /// [--store-name &lt;name&gt;]</c> (#7718): adds one Read entry for one account (the service's registered account unless
+    /// <c>--account</c> names another) to the private key of the certificate the thumbprint names, keeping every existing
+    /// entry, and changes nothing without elevation (LocalMachine) or when the account already has Read. The rules and
+    /// the seams are <see cref="DarlingTlsKeyAccess"/>. Returns the process exit code.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public static int GrantCertKeyAccess(string[] rest, TextWriter output, TextWriter error)
+    {
+        if (!DarlingTlsKeyAccess.TryParseArgs(rest, out var parsed, out var problem))
+        {
+            error.WriteLine(problem);
+            return 1;
+        }
+
+        return DarlingTlsKeyAccess.RunForReal(parsed!, output, error);
+    }
+
     /// <summary>The flag that makes <see cref="IsHardenFilesVerb"/>'s verb run only <see cref="HardenTlsKeyFilesOnly(string?, TextWriter, TextWriter)"/>
     /// (#5700); the scripts pass it, and it is not in the help text.</summary>
     public static bool IsTlsKeyFilesOnlyFlag(string arg) =>
@@ -394,6 +418,7 @@ public static partial class DarlingCliCommands
         || IsConfigureNetworkVerb(arg)
         || IsConfigureFirewallVerb(arg)
         || IsHardenFilesVerb(arg)
+        || IsGrantCertKeyAccessVerb(arg)
         || IsEnableMcpVerb(arg)
         || IsDisableMcpVerb(arg)
         || IsEnableWebVerb(arg)
@@ -489,6 +514,7 @@ public static partial class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --configure-network Interactive LAN-exposure wizard." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-firewall  Create/remove the scoped firewall rules to match darling.json (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --harden-files      Re-apply the ACLs on darling.json, the store credentials, the log-hash key and the TLS key files darling.json names (run elevated)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --grant-cert-key-access <thumbprint> [--account <name>] [--store-location LocalMachine|CurrentUser] [--store-name <name>]   Give the service account (or --account) Read on the private key of a certificate in a Windows certificate store, for web.network.tls.store and mcp.network.tls.store. Adds one Read entry and keeps the rest (run elevated for LocalMachine; restart the service after)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-mcp        Enable the MCP endpoint in the store and open its firewall (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-mcp       Disable the MCP endpoint in the store and remove its firewall rule (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-web        Enable the web dashboard in the store and open its firewall (run elevated)." + Environment.NewLine +
@@ -3524,9 +3550,31 @@ public static partial class DarlingCliCommands
             DarlingWebTls.TlsShape.Pem =>
                 $"         TLS: on (PEM pair, {tls!.CertPath})."
                 + (plan.Warning is null ? string.Empty : $" NOTE: {plan.Warning}"),
+            DarlingWebTls.TlsShape.Store =>
+                $"         TLS: on (certificate store, {DescribeStoreCertificate(tls!.Store!)})."
+                + (plan.Warning is null ? string.Empty : $" NOTE: {plan.Warning}"),
             _ => $"         TLS: on (PKCS#12, {tls!.PfxPath})."
                  + (plan.Warning is null ? string.Empty : $" NOTE: {plan.Warning}"),
         };
+    }
+
+    /// <summary>
+    /// Where the <c>store</c> form's certificate lives and how it is picked, for the status line (#7718):
+    /// <c>LocalMachine\My, 0123...</c> for a thumbprint, <c>LocalMachine\My, newest valid for name</c> for a subject.
+    /// A location that does not parse is shown as written, since <see cref="DarlingWebTls.Describe"/> already refuses
+    /// it before this line is chosen. Pure.
+    /// </summary>
+    internal static string DescribeStoreCertificate(WebTlsStoreConfig store)
+    {
+        var location = DarlingWebTls.TryParseStoreLocation(store.Location, out var parsed)
+            ? parsed.ToString()
+            : (string.IsNullOrWhiteSpace(store.Location) ? "LocalMachine" : store.Location.Trim());
+        var name = string.IsNullOrWhiteSpace(store.Name) ? "My" : store.Name.Trim();
+        var pick = !string.IsNullOrWhiteSpace(store.Thumbprint)
+            ? DarlingTlsStore.NormalizeThumbprint(store.Thumbprint)
+            : $"newest valid for {store.Subject?.Trim()}";
+
+        return $"{location}\\{name}, {pick}";
     }
 
     /// <summary>
@@ -3535,7 +3583,7 @@ public static partial class DarlingCliCommands
     ///
     /// <list type="bullet">
     /// <item><b>The scheme follows the certificate (#5288).</b> It is <c>https</c> when <c>web.network.tls</c> names a
-    /// PKCS#12 bundle or a PEM pair, because the network listener then speaks TLS only and an <c>http://</c> URL
+    /// PKCS#12 bundle, a PEM pair or a store entry, because the network listener then speaks TLS only and an <c>http://</c> URL
     /// fails the handshake. Anything else, a MISCONFIGURED block included, keeps <c>http</c>: a refused block
     /// leaves the dashboard loopback-only, so there is no remote URL to get right.</item>
     /// <item><b>A wildcard listen has no single address to print.</b> <c>0.0.0.0</c> and <c>::</c> both print the
@@ -3546,7 +3594,7 @@ public static partial class DarlingCliCommands
     /// </summary>
     internal static IReadOnlyList<string> BuildWebLoginHint(string? listen, int port, WebTlsConfig? tls)
     {
-        var scheme = DarlingWebTls.Describe(tls).Shape is DarlingWebTls.TlsShape.Pfx or DarlingWebTls.TlsShape.Pem
+        var scheme = DarlingWebTls.Describe(tls).Shape is DarlingWebTls.TlsShape.Pfx or DarlingWebTls.TlsShape.Pem or DarlingWebTls.TlsShape.Store
             ? "https"
             : "http";
 
@@ -3676,7 +3724,7 @@ public static partial class DarlingCliCommands
 
     /// <summary>True when the current process is running elevated (Administrators role) — required to control the service.</summary>
     [SupportedOSPlatform("windows")]
-    private static bool IsElevated()
+    internal static bool IsElevated()
     {
         using var identity = WindowsIdentity.GetCurrent();
         return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
@@ -3835,7 +3883,10 @@ public static partial class DarlingCliCommands
             : DarlingWebHostService.ResolveWebBind(config.Web, managed).Mode == DarlingHostBinding.BindMode.NetworkAndLoopback;
         var listen = mcp ? config.Mcp.Network?.Listen : config.Web.Network?.Listen;
         var tls = mcp ? config.Mcp.Network?.Tls : config.Web.Network?.Tls;
-        return exposed && tls is not null
+        /* A block Describe refuses (a store name that is a path, say) is not served: the listener stays on loopback http. */
+        var tlsServed = DarlingWebTls.Describe(tls, mcp ? "mcp" : "web").Shape
+            is DarlingWebTls.TlsShape.Pfx or DarlingWebTls.TlsShape.Pem or DarlingWebTls.TlsShape.Store;
+        return exposed && tlsServed
             && IPAddress.TryParse(listen?.Trim(), out var listenIp)
             && !DarlingHostBinding.ShouldAddLoopbackListeners(listenIp)
             ? "https"
