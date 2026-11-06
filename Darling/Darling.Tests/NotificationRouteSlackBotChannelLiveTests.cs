@@ -97,8 +97,9 @@ public sealed class NotificationRouteSlackBotChannelLiveTests
         var bodySucceeded = false;
         try
         {
-            /* A store one rung behind: V252's column gone, two routes stored (one scoped, one not). */
-            await ExecAsync(connection, "ALTER TABLE config.config_notification_routes DROP COLUMN slack_bot_channel", ct);
+            /* A store one rung behind: V252's objects gone (the ladder's rewind drops the trigger and its function before the channel column it
+               depends on, then the stamp column, the token columns and the thread table), two routes stored (one scoped, one not). */
+            await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 251, ct);
             await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= 252", ct);
             await ExecAsync(connection,
                 "INSERT INTO config.config_notification_routes (metric_match, slack_url) VALUES ('Deadlocks Detected', 'sealed-a')", ct);
@@ -117,12 +118,15 @@ public sealed class NotificationRouteSlackBotChannelLiveTests
                 "UPDATE config.config_notification_routes SET slack_bot_channel = NULL WHERE metric_match = 'Deadlocks Detected'", ct));
             Assert.Equal("23502", nullRefused.SqlState);
 
-            /* The rung applied again changes nothing: the stored id survives. */
+            /* The rung applied again changes nothing: the stored id and the stamp its trigger wrote survive. */
             await ExecAsync(connection, $"UPDATE config.config_notification_routes SET slack_bot_channel = '{Channel}' WHERE metric_match = 'High CPU'", ct);
+            var stampedAt = await ScalarAsync(connection, "SELECT slack_bot_channel_set_at FROM config.config_notification_routes WHERE metric_match = 'High CPU'", ct);
+            Assert.False(string.IsNullOrEmpty(stampedAt), "setting the bot channel on a migrated store stamps slack_bot_channel_set_at");
             await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= 252", ct);
             await PgMigrations.MigrateAsync(connection, ct);
             Assert.Equal("|" + Channel, await ScalarAsync(connection,
                 "SELECT string_agg(slack_bot_channel, '|' ORDER BY route_id) FROM config.config_notification_routes", ct));
+            Assert.Equal(stampedAt, await ScalarAsync(connection, "SELECT slack_bot_channel_set_at FROM config.config_notification_routes WHERE metric_match = 'High CPU'", ct));
             bodySucceeded = true;
         }
         finally
@@ -196,15 +200,17 @@ public sealed class NotificationRouteSlackBotChannelLiveTests
             await NotificationRouteWriter.SaveAsync(owner, typed2, stored2, proxies, null, null, 30, ct, "bob");
             Assert.Equal(OtherChannel, await ScalarAsync(owner, StoredChannel(agentRoute), ct));
             Assert.Equal("2", await ScalarAsync(owner, Journal, ct));
-            /* A different channel moves the stamp; a save that keeps the channel keeps it. */
+            /* A different channel moves the stamp; a save that keeps the channel keeps it. The change here is to the recipients, which the
+               writer does not journal, so the journal count below still reads the two channel changes alone. */
             var movedTo = await ScalarAsync(owner, StoredStamp(agentRoute), ct);
             Assert.False(string.IsNullOrEmpty(movedTo), "changing the bot channel stamps slack_bot_channel_set_at again");
             Assert.NotEqual(stampedAt, movedTo);
             var stored3 = (await NotificationRouteWriter.ReadStoredAsync(owner, agentRoute, 30, ct))!;
             var sameChannel = stored3.Clone();
-            sameChannel.Enabled = !sameChannel.Enabled;
+            sameChannel.SmtpRecipients = "ops@example.com, oncall@example.com";
             await NotificationRouteWriter.SaveAsync(owner, sameChannel, stored3, proxies, null, null, 30, ct, "bob");
             Assert.Equal(movedTo, await ScalarAsync(owner, StoredStamp(agentRoute), ct));
+            Assert.Equal(OtherChannel, await ScalarAsync(owner, StoredChannel(agentRoute), ct));
 
             var plainStored = (await NotificationRouteWriter.ReadStoredAsync(owner, plainRoute, 30, ct))!;
             var plainTyped = plainStored.Clone();
