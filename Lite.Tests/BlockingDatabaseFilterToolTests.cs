@@ -151,7 +151,7 @@ public sealed class BlockingDatabaseFilterToolTests : IClassFixture<SharedDuckDb
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
         Assert.Contains(
-            "No blocked process report XML available in the specified time range for the database NoSuchDb.",
+            "No blocked process report XML available in this window for the database NoSuchDb.",
             root.GetProperty("message").GetString()!, StringComparison.Ordinal);
     }
 

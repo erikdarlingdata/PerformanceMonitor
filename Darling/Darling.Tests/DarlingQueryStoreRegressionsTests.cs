@@ -565,7 +565,7 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
 
     /// <summary>
     /// #5015: a database_name filter that matches nothing in the baseline or the window says the filter matched nothing, not
-    /// "this IS the all-clear" (the server-wide probe saw both sides collected). A filter that matches, and finds nothing
+    /// "this is the all-clear" (the server-wide probe saw both sides collected). A filter that matches, and finds nothing
     /// wrong, is still the all-clear.
     /// </summary>
     [Fact]
@@ -596,7 +596,7 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
             var missText = miss.GetProperty("message").GetString()!;
             Assert.Contains("database_name 'NoSuchDb'", missText, StringComparison.Ordinal);
             Assert.Contains("the filter matched nothing and this is NOT the all-clear", missText, StringComparison.Ordinal);
-            Assert.DoesNotContain("this IS the all-clear", missText, StringComparison.Ordinal);
+            Assert.DoesNotContain("this is the all-clear", missText, StringComparison.Ordinal);
 
             var match = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24, Db));
             /* #4966: this fixture's baseline is cut (40 hours of the seven days), so the matching filter's nothing is the cut sentence. */
@@ -646,7 +646,7 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
             Assert.Contains("database_name 'AppDb'", noRecentText, StringComparison.Ordinal);
             Assert.Contains("nothing of it collected IN the last 24 hour(s)", noRecentText, StringComparison.Ordinal);
             Assert.Contains("NOT the all-clear", noRecentText, StringComparison.Ordinal);
-            Assert.DoesNotContain("this IS the all-clear", noRecentText, StringComparison.Ordinal);
+            Assert.DoesNotContain("this is the all-clear", noRecentText, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }
@@ -691,7 +691,7 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
             Assert.Contains("database_name 'AppDb'", noBaselineText, StringComparison.Ordinal);
             Assert.Contains("no baseline", noBaselineText, StringComparison.Ordinal);
             Assert.Contains("NOT a clean bill of health", noBaselineText, StringComparison.Ordinal);
-            Assert.DoesNotContain("this IS the all-clear", noBaselineText, StringComparison.Ordinal);
+            Assert.DoesNotContain("this is the all-clear", noBaselineText, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }
@@ -704,7 +704,7 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
 
     /// <summary>
     /// #4966: the same all-clear over a baseline the store covers in full (a capture older than the seven-day lookback) keeps
-    /// its "this IS the all-clear" sentence, and its hints say the window is not cut.
+    /// its "this is the all-clear" sentence, and its hints say the window is not cut.
     /// </summary>
     [Fact]
     public async Task TheAllClear_OverACoveredBaseline_KeepsItsSentence_AgainstDevPostgres()
@@ -733,7 +733,7 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
             var clear = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24));
             Assert.Equal("empty", clear.GetProperty("status").GetString());
             Assert.False(clear.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
-            Assert.Contains("this IS the all-clear", clear.GetProperty("message").GetString()!, StringComparison.Ordinal);
+            Assert.Contains("this is the all-clear", clear.GetProperty("message").GetString()!, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }
@@ -756,7 +756,7 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
         /* Every fixture here has a baseline that starts 40 hours back, so the notice names a start: the CutWindowNothingMessage variant. */
         Assert.NotEqual(System.Text.Json.JsonValueKind.Null, answer.GetProperty("hints").GetProperty("effective_start").ValueKind);
         Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage, message, StringComparison.Ordinal);
-        Assert.DoesNotContain("this IS the all-clear", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("this is the all-clear", message, StringComparison.Ordinal);
     }
 
     private static JsonElement Root(string json) => JsonDocument.Parse(json).RootElement;
