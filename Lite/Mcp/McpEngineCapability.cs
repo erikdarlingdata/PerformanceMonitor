@@ -193,6 +193,32 @@ internal static class McpEngineCapability
     }
 
     /// <summary>
+    /// #7699 item 7: the empty sentence of get_pvs_stats, which says whether this server's version has no persistent version store
+    /// (SQL Server before 2019) or has just not completed a cycle. The version is read the way <see cref="AwsRdsKindOf"/> finds the
+    /// server; a server that is not found or was never checked has no version (0, assumed newest) and gets the second sentence.
+    /// </summary>
+    public static string PvsNoRowsMessage(ServerManager serverManager, int storageServerId)
+    {
+        var target = new CollectorTargetInfo();
+        foreach (var server in serverManager.GetEnabledServers())
+        {
+            if (RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server)) == storageServerId)
+            {
+                var status = serverManager.GetConnectionStatus(server.Id);
+                target = new CollectorTargetInfo
+                {
+                    IsAzureSqlDb = status.SqlEngineEdition == 5,
+                    IsAzureManagedInstance = status.SqlEngineEdition == 8,
+                    SqlMajorVersion = status.SqlMajorVersion,
+                };
+                break;
+            }
+        }
+
+        return PvsStatsCollector.NoRowsMessage(target);
+    }
+
+    /// <summary>
     /// #6178: the <c>not_collected</c> envelope for a read that covers every registered server and found nothing, when
     /// <paramref name="collectorName"/> cannot run on ANY of them (a fleet of only Azure SQL Databases). It asks
     /// <see cref="NotCollectedStatusAsync"/> about each server and returns the first envelope, which names the engine and the

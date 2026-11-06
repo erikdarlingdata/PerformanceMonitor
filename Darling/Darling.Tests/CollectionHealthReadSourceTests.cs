@@ -105,6 +105,16 @@ public sealed class CollectionHealthReadSourceTests
         Assert.Equal("boom", CollectorHealthClassifier.RunError("PERMISSIONS", "boom"));
         Assert.Null(CollectorHealthClassifier.RunNote("PERMISSIONS", "boom"));
         Assert.Null(CollectorHealthClassifier.RunNote("SUCCESS", ""));
+
+        // #7690: a finished analysis pass's sentence is a note, not an error. An abandoned or failed pass keeps its text under Error.
+        var analyzed = new CollectionLogRow { Status = "ANALYZED", ErrorMessage = "Scheduled analysis pass ran in 4.3s, 2 finding(s)." };
+        Assert.Equal("", analyzed.ErrorFormatted);
+        Assert.Equal("Scheduled analysis pass ran in 4.3s, 2 finding(s).", analyzed.NoteFormatted);
+        foreach (var status in new[] { "ABANDONED", "ERROR" })
+        {
+            var row = new CollectionLogRow { Status = status, ErrorMessage = "pass text" };
+            Assert.Equal("pass text", row.ErrorFormatted);
+        }
     }
 }
 
