@@ -79,6 +79,29 @@ function Read-ClassListFile([string] $path, [string] $csv, [string] $what) {
     if (-not (Test-Path -LiteralPath $path)) { throw "the $what class list file $path does not exist" }
     return (@(Get-Content -LiteralPath $path | ForEach-Object { $_.Trim() } | Where-Object { $_ }) -join ',')
 }
+# #7743: a CI scripts change. The plan writes these files beside the class lists: self-test.txt (the note) with
+# self-test-darling-classes.txt and self-test-lite-classes.txt, when it added a self-test leg; script-tests.txt, the Python tests leg 1
+# runs. With self-test.txt the LAST leg runs the self-test lists as a leg of its own (one leg, the lists read from files and checked
+# against the listing as any plan's are, #6734), and the other legs cut the class lists over one leg fewer.
+$listDir = ''
+foreach ($f in @($OnlyDarlingClassesFile, $OnlyLiteClassesFile)) { if ($f -and -not $listDir) { $listDir = Split-Path -Parent $f } }
+$scriptTestsFile = if ($listDir) { Join-Path $listDir 'script-tests.txt' } else { '' }
+$selfTestNote = if ($listDir -and -not $AllLegs) { Join-Path $listDir 'self-test.txt' } else { '' }
+$isSelfTestLeg = $false
+if ($selfTestNote -and (Test-Path -LiteralPath $selfTestNote)) {
+    if ($LegCount -lt 2) { throw "$selfTestNote names a self-test leg, so the plan needs at least 2 legs, got $LegCount" }
+    if ($Leg -eq $LegCount) {
+        $isSelfTestLeg = $true
+        $selfDarling = Join-Path $listDir 'self-test-darling-classes.txt'
+        $selfLite = Join-Path $listDir 'self-test-lite-classes.txt'
+        $OnlyDarlingClassesFile = if (Test-Path -LiteralPath $selfDarling) { $selfDarling } else { '' }
+        $OnlyLiteClassesFile = if (Test-Path -LiteralPath $selfLite) { $selfLite } else { '' }
+        $Leg = 1
+        $LegCount = 1
+        Write-Host "self-test leg: $((Get-Content -LiteralPath $selfTestNote) -join ' ')"
+    }
+    else { $LegCount = $LegCount - 1 }
+}
 $OnlyDarlingClasses = Read-ClassListFile $OnlyDarlingClassesFile $OnlyDarlingClasses 'Darling'
 $OnlyLiteClasses = Read-ClassListFile $OnlyLiteClassesFile $OnlyLiteClasses 'Lite'
 if ($OnlyDarlingClassesFile -or $OnlyLiteClassesFile) { Write-Host "class lists read from files: Darling $(@($OnlyDarlingClasses -split ',' | Where-Object { $_ }).Count) classes ($OnlyDarlingClassesFile), Lite $(@($OnlyLiteClasses -split ',' | Where-Object { $_ }).Count) classes ($OnlyLiteClassesFile)" }
@@ -204,6 +227,7 @@ if ($DryRun) {
             foreach ($c in $s.Classes) { $seen["L:$c"] = 1 + [int]$seen["L:$c"] }
         }
         if ($i -eq 1 -and $runDarling -and $Areas -notin 'lite', 'classes' -and -not $NoTreeGuards) { Write-Host 'leg 1 would also run the whole-tree guards (no DARLING_TEST_PG*)' }
+        if ($i -eq 1 -and -not $isSelfTestLeg -and $scriptTestsFile -and (Test-Path -LiteralPath $scriptTestsFile)) { Write-Host "leg 1 would also run the script tests listed in $scriptTestsFile" }
     }
     if ($AllLegs) {
         $expected = $darlingClasses.Count * [int]$runDarling + $liteClasses.Count * [int]$runLite
@@ -250,6 +274,15 @@ function Invoke-Piece([string] $name, [scriptblock] $body) {
         Write-Host "::error title=$name::$($_.Exception.Message)"
     }
     Write-Host '::endgroup::'
+}
+
+# #7743: the Python script tests of a CI scripts change, on leg 1 (not the self-test leg, which is also numbered 1 after the swap
+# above). Each file is its own piece, so one failing test file does not hide the others.
+if ($Leg -eq 1 -and -not $isSelfTestLeg -and $scriptTestsFile -and (Test-Path -LiteralPath $scriptTestsFile)) {
+    foreach ($scriptTest in @(Get-Content -LiteralPath $scriptTestsFile | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+        $scriptTestPath = $scriptTest
+        Invoke-Piece "Script test $scriptTestPath" { python -I $scriptTestPath }
+    }
 }
 
 # The environment the Darling live classes read, from start-test-pg.ps1 (one place for the ports).
