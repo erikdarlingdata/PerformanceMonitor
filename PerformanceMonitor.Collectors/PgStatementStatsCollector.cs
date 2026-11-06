@@ -538,7 +538,7 @@ WHERE calls > 0";
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
-        var rows = new List<Row>();
+        var rows = new DeltaBaselineRollbackRows<Row>(context, DeltaGroups);
         var epochObserved = false;
 
         while (await reader.ReadAsync(cancellationToken))
@@ -616,6 +616,9 @@ WHERE calls > 0";
                only clock a restart may be placed against. */
             var previousTargetNow = context.Deltas.PreviousPass(context.ServerId, "pg_statement_stats_target_clock", targetNow);
 
+            /* Captured before the first delta call of the run for this key, so a store write that fails before the rows are
+               stored can hand the baseline back (DeltaBaselineRollbackRows). */
+            rows.CaptureKey(key);
             var deltaCalls = context.Deltas.CalculateDeltaWithInterval(
                 context.ServerId, "pg_statement_stats_calls", key, calls, out var callsIntervalSeconds,
                 collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);

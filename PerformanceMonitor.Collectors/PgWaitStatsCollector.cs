@@ -240,7 +240,7 @@ WHERE w.wait_time > 0";
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
-        var rows = new List<Row>();
+        var rows = new DeltaBaselineRollbackRows<Row>(context, DeltaGroups);
         var epochObserved = false;
 
         while (await reader.ReadAsync(cancellationToken))
@@ -283,6 +283,10 @@ WHERE w.wait_time > 0";
                is stable, and event_id >> 24 == type_id holds (verified on every event on two clusters),
                so the id also carries the type. */
             var key = eventId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+            /* Captured before the first delta call of the run for this key, so a store write that fails before the rows are
+               stored can hand the baseline back (DeltaBaselineRollbackRows). */
+            rows.CaptureKey(key);
 
             var deltaWaits = context.Deltas.CalculateDeltaWithInterval(
                 context.ServerId, "pg_wait_stats_waits", key, waits, out var waitsIntervalSeconds,

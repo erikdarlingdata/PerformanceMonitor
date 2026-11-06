@@ -102,8 +102,12 @@ OPTION(RECOMPILE);";
                 Backoffs: reader.GetInt64(5)));
         }
 
-        return rows;
+        return DeltaBaselineRollbackRows.Capture(rows, context, BaselineGroups, r => r.SpinlockName);
     }
+
+    /* The delta groups WritePayload advances for each row, captured at the end of the read so a write that fails
+       before the rows are stored can hand them back (DeltaBaselineRollbackRows). */
+    private static readonly string[] BaselineGroups = { "spinlock_stats_collisions", "spinlock_stats_spins", "spinlock_stats_sleep_time", "spinlock_stats_backoffs" };
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
     {
