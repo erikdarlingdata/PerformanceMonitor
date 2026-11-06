@@ -1640,11 +1640,17 @@ public partial class MainWindow : Window
         ApplyOverviewCardFilter();
     }
 
+    /// <summary>The servers the Overview builds cards for: the enabled fleet. A disabled server collects nothing by
+    /// the operator's choice, so a card for it would read Offline and rank at the top of Needs Attention for as long
+    /// as it stays disabled. The MCP fleet reader scopes its fleet the same way.</summary>
+    internal static List<DarlingServer> OverviewServers(IReadOnlyList<DarlingServer> fleet) =>
+        fleet.Where(s => s.IsEnabled).ToList();
+
     /// <summary>
-    /// Loads a summary card for every registered server (Lite's RefreshOverviewAsync), reading each
+    /// Loads a summary card for every enabled server (Lite's RefreshOverviewAsync), reading each
     /// server's latest metrics concurrently over the pooled data source. Status is derived from
     /// collection freshness — the viewer has no live ping — via <see cref="ServerSummaryItem.ApplyFreshness"/>.
-    /// This aggregate ignores the sidebar selection; it always shows all servers.
+    /// This aggregate ignores the sidebar selection; it always shows all enabled servers.
     /// </summary>
     private async Task LoadOverviewAsync()
     {
@@ -1653,7 +1659,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var servers = _fleet.All;
+        var servers = OverviewServers(_fleet.All);
         if (servers.Count == 0)
         {
             ClearOverviewCards();
