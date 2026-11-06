@@ -11,8 +11,10 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Storage.FinOps;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -28,7 +30,7 @@ public sealed partial class DarlingMcpFinOpsTools
         "high_impact reads the query-stats window for the server, keeps the top limit query hashes on each of the six measures (CPU, duration, reads, writes, memory and executions), and ranks the union by impact_score 0-100 (the mean percent-rank across the six measures). impact_band is high at 80 and above, medium at 60 and above, else low. peak_memory_mb is the max_grant_kb reading of the hash's newest plan in the window (that plan's largest memory grant since it was cached, not a total and not necessarily a grant inside the window). The *_share_pct fields are each row's share of the kept set's total, rounded to 0.1. The figures are summed across every database that ran the hash: database_name is the one with the most CPU for it in the window and database_count is how many databases are in the total. sample_query_text is the first 200 characters of the hash's busiest statement; the full text and the plan are not returned, has_plan only says whether a plan was captured. No cost fields.";
 
     private static async Task<string> ReadHighImpactAsync(
-        NpgsqlDataSource postgres, (int ServerId, string ServerName, string DisplayName) resolved, int hoursBack, int limit, CancellationToken ct)
+        NpgsqlDataSource postgres, (int ServerId, string ServerName, string DisplayName) resolved, int hoursBack, int limit, CancellationToken ct, ILogger? logger = null)
     {
         var rows = await DarlingFinOpsHighImpactReader.ReadAsync(
             postgres, resolved.ServerId, hoursBack, McpCommandDeadlines.ReadSeconds, ct, limit);
@@ -51,7 +53,9 @@ public sealed partial class DarlingMcpFinOpsTools
         }
 
         var notice = await NoticeAsync(emptyAnswer: false);
-        return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
+        /* #7725: a row in a database the server no longer lists is marked database_dropped, so the page can say so. */
+        var dropped = await CurrentDatabaseScope.ReadDroppedAsync(postgres, resolved.ServerId, windowStartUtc: start, logger: logger, cancellationToken: ct);
+        var payload = JsonSerializer.SerializeToNode(new
         {
             server = resolved.DisplayName,
             view = HighImpactView,
@@ -60,7 +64,9 @@ public sealed partial class DarlingMcpFinOpsTools
             window_truncated = notice.WindowTruncated,
             truncation_note = notice.TruncationNote,
             rows = rows.Select(HighImpactRow).ToList(),
-        }, McpHelpers.JsonOptions), notice);
+        }, McpHelpers.JsonOptions)!.AsObject();
+        DroppedDatabaseRows.MarkByName(payload, dropped, "rows");
+        return DarlingMcpWindowNotice.Finish(payload.ToJsonString(McpHelpers.JsonOptions), notice);
     }
 
     /// <summary>One high-impact row in the wire shape: snake_case keys, the band decided here, no query text beyond

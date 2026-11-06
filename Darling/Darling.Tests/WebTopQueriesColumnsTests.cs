@@ -119,7 +119,7 @@ public sealed class WebTopQueriesColumnsTests
     public void TheDetailParameterIsAnAppendedOptionalWhoseDefaultIsSummary()
     {
         var src = Tools();
-        Assert.Contains("string detail = \"summary\",\n        CancellationToken cancellationToken = default)", src, StringComparison.Ordinal);
+        Assert.Contains("string detail = \"summary\",\n        ILogger? logger = null,\n        CancellationToken cancellationToken = default)", src, StringComparison.Ordinal);
         var web = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
         Assert.Contains("PTextDefault(\"detail\", \"summary\")", web, StringComparison.Ordinal);
         Assert.Contains("detail: Str(c, \"detail\") ?? \"summary\"", web, StringComparison.Ordinal);
