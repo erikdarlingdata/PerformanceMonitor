@@ -47,6 +47,10 @@ param(
     # $darlingClasses and $liteClasses lists below, and every list assigned to them would collapse into one string (#6734).
     [string] $OnlyDarlingClasses = '',
     [string] $OnlyLiteClasses = '',
+    # #7734: the same two lists as files of one class name a line (the plan writes them, the leg downloads them). A list longer
+    # than about 980 Darling classes does not fit the 32,767 characters of a Windows environment variable; a file has no limit.
+    [string] $OnlyDarlingClassesFile = '',
+    [string] $OnlyLiteClassesFile = '',
     [string] $RunAttempt = '1',
     [string] $ResultPrefix = 'darling-ci',
     [switch] $DryRun,
@@ -69,6 +73,15 @@ $darlingDll = 'Darling/Darling.Tests/bin/Release/net10.0-windows/Darling.Tests.d
 $liteWeights = Join-Path $scripts 'lite-shard-weights.json'
 $darlingWeights = Join-Path $scripts 'darling-shard-weights.json'
 # Every area runs some Darling.Tests classes: all of them, or under 'lite' the Guard and Lite-reads scope.
+function Read-ClassListFile([string] $path, [string] $csv, [string] $what) {
+    if (-not $path) { return $csv }
+    if ($csv) { throw "-Only${what}Classes and -Only${what}ClassesFile both give the $what class list; give one" }
+    if (-not (Test-Path -LiteralPath $path)) { throw "the $what class list file $path does not exist" }
+    return (@(Get-Content -LiteralPath $path | ForEach-Object { $_.Trim() } | Where-Object { $_ }) -join ',')
+}
+$OnlyDarlingClasses = Read-ClassListFile $OnlyDarlingClassesFile $OnlyDarlingClasses 'Darling'
+$OnlyLiteClasses = Read-ClassListFile $OnlyLiteClassesFile $OnlyLiteClasses 'Lite'
+if ($OnlyDarlingClassesFile -or $OnlyLiteClassesFile) { Write-Host "class lists read from files: Darling $(@($OnlyDarlingClasses -split ',' | Where-Object { $_ }).Count) classes ($OnlyDarlingClassesFile), Lite $(@($OnlyLiteClasses -split ',' | Where-Object { $_ }).Count) classes ($OnlyLiteClassesFile)" }
 $runDarling = $Areas -ne 'classes' -or [bool]$OnlyDarlingClasses
 $runLite = $Areas -ne 'classes' -or [bool]$OnlyLiteClasses
 if ($Areas -eq 'classes' -and -not $OnlyDarlingClasses -and -not $OnlyLiteClasses) { throw '-Areas classes needs -OnlyDarlingClasses or -OnlyLiteClasses' }

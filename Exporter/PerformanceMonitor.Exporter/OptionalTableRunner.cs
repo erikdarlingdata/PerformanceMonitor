@@ -64,6 +64,7 @@ public static class OptionalTableRunner
         var skipped = new List<SkippedOptionalTable>(unknown);
         var failed = new List<FailedOptionalTable>();
         var entries = new List<ManifestTableEntry>();
+        var pgTextKeys = new List<(string? ServerName, long QueryId)>();
 
         // Registry order, not request order. This also satisfies ordering rule for pg_statement_text: it is registered
         // after pg_statement_stats in OptionalTables.All, whatever order the caller named them in --also.
@@ -206,7 +207,7 @@ public static class OptionalTableRunner
                 {
                     await RunPgStatementTextAsync(
                         connectionStringBuilder, options, table, requestedNames, pgStatementStatsPartPaths,
-                        entries, skipped, failed, output, ct).ConfigureAwait(false);
+                        entries, skipped, failed, pgTextKeys, output, ct).ConfigureAwait(false);
                     continue;
                 }
 
@@ -323,7 +324,7 @@ public static class OptionalTableRunner
         }
 
         var deniedCount = skipped.Count(s => s.Reason == "denied");
-        return new OptionalRunResult(entries, skipped, failed, deniedCount);
+        return new OptionalRunResult(entries, skipped, failed, deniedCount, pgTextKeys);
     }
 
     /// <summary>
@@ -442,7 +443,9 @@ public static class OptionalTableRunner
     /// Routes `pg_statement_text`: computes the (server_name, queryid) key set in DuckDB from the SAME run's
     /// `pg_statement_stats` Parquet parts (never a second store read of that table), drops keys already recorded in
     /// the StateStore's `pg_text_keys`, fetches the unknown ones from `collect.pg_statement_text` in paced batches,
-    /// writes a Parquet part, and records the new keys.
+    /// writes a Parquet part, and adds the new keys to <paramref name="pgTextKeys"/>. It never records them itself:
+    /// the caller records them once the optional manifest is written and, with `--upload`, uploaded, so a failed
+    /// upload leaves the keys unknown and the next run fetches that text again.
     /// </summary>
     private static async Task RunPgStatementTextAsync(
         NpgsqlConnectionStringBuilder connectionStringBuilder,
@@ -453,6 +456,7 @@ public static class OptionalTableRunner
         List<ManifestTableEntry> entries,
         List<SkippedOptionalTable> skipped,
         List<FailedOptionalTable> failed,
+        List<(string? ServerName, long QueryId)> pgTextKeys,
         TextWriter output,
         CancellationToken ct)
     {
@@ -627,7 +631,7 @@ public static class OptionalTableRunner
 
             if (!options.IgnoreState)
             {
-                stateStore.RecordPgTextKeys(options.Store, idKeys.Select(k => (nameByServerId.GetValueOrDefault(k.ServerId), k.QueryId)));
+                pgTextKeys.AddRange(idKeys.Select(k => (nameByServerId.GetValueOrDefault(k.ServerId), k.QueryId)));
             }
 
             output.WriteLine($"  {textRows.Count} rows across 1 part(s)");
@@ -822,9 +826,12 @@ public static class OptionalTableRunner
 
 /// <summary>The result of one optional-table run: the manifest entries for tables that succeeded, plus skipped/failed.
 /// <see cref="DeniedCount"/> is the number of requested names rejected by the deny-list; the caller exits 3 when it is
-/// greater than zero, even if everything else in the run succeeded.</summary>
+/// greater than zero, even if everything else in the run succeeded. <see cref="PgTextKeys"/> are the
+/// `pg_statement_text` keys fetched this run and not yet recorded in the state store; the caller records them after the
+/// optional manifest is published.</summary>
 public sealed record OptionalRunResult(
     List<ManifestTableEntry> Entries,
     List<SkippedOptionalTable> Skipped,
     List<FailedOptionalTable> Failed,
-    int DeniedCount = 0);
+    int DeniedCount = 0,
+    List<(string? ServerName, long QueryId)>? PgTextKeys = null);

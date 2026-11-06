@@ -106,13 +106,58 @@ public class PlannerTests
     }
 
     [Fact]
-    public void R2_a_30_hour_outage_gives_6_windows_some_of_them_gaps_and_gaps_count_toward_the_cap()
+    public void R2_a_30_hour_outage_is_one_gap_entry_outside_the_cap_then_6_exportable_windows()
     {
+        // last_to 10:00 on the 27th, now 09:20 on the 28th: the hours ending 11:00, 12:00 and 13:00 are older than
+        // now - 20 h (13:20), so they are one gap; 14:00 .. 19:00 are the six exportable windows the cap allows.
         var w = Planner.DueWindows("fresh", Utc(2026, 9, 27, 10, 0), Utc(2026, 9, 28, 9, 20), 6, 20);
-        Assert.Equal(6, w.Count);
-        Assert.Contains(w, x => x.IsGap);
-        Assert.Contains(w, x => !x.IsGap);
-        Assert.True(w.TakeWhile(x => x.IsGap).Count() + w.SkipWhile(x => x.IsGap).Count() == 6, "gaps come first, then exportable windows");
+        Assert.Equal(7, w.Count);
+        Assert.True(w[0].IsGap);
+        Assert.Equal(Utc(2026, 9, 27, 10, 0), w[0].From);
+        Assert.Equal(Utc(2026, 9, 27, 13, 0), w[0].To);
+        Assert.Equal(w[0].To, w[1].From);
+        Assert.DoesNotContain(w.Skip(1), x => x.IsGap);
+        Assert.Equal(Utc(2026, 9, 27, 14, 0), w[1].To);
+        Assert.Equal(Utc(2026, 9, 27, 19, 0), w[6].To);
+    }
+
+    [Fact]
+    public void R2_after_a_48_hour_outage_every_hour_still_inside_the_age_cap_is_exported_not_gapped()
+    {
+        // Hourly runs at :20 after a 48-hour outage, each advancing last_to as the scheduler does. The 20 hours that were
+        // still inside the age cap at the first run (ending 14:00 on the 27th through 09:00 on the 28th) must all be
+        // exported; only the hours already aged out at the first run become a gap, and that gap is one entry.
+        DateTime? lastTo = Utc(2026, 9, 26, 9, 0);
+        var now = Utc(2026, 9, 28, 9, 20);
+        var exported = new List<DateTime>();
+        var gaps = new List<Window>();
+        for (var run = 0; run < 12; run++, now = now.AddHours(1))
+        {
+            foreach (var w in Planner.DueWindows("fresh", lastTo, now, 6, 20))
+            {
+                if (w.IsGap) gaps.Add(w); else exported.Add(w.To);
+                lastTo = w.To;
+            }
+        }
+
+        var recoverable = Enumerable.Range(0, 20).Select(i => Utc(2026, 9, 27, 14, 0).AddHours(i)).ToList();
+        Assert.Equal(recoverable, exported.Where(t => t <= Utc(2026, 9, 28, 9, 0)).ToList());
+        var gap = Assert.Single(gaps);
+        Assert.Equal(Utc(2026, 9, 26, 9, 0), gap.From);
+        Assert.Equal(Utc(2026, 9, 27, 13, 0), gap.To);
+    }
+
+    [Fact]
+    public void R2_the_gap_entry_takes_no_slot_even_with_a_cap_of_1()
+    {
+        // Query Store at 09:20 is due through 06:00 (lag 3 plus the margin); with last_to two days back and a 1-hour cap,
+        // the hours older than 13:20 on the 27th are the gap and the cap still allows one exportable window after it.
+        var w = Planner.DueWindows("query_store", Utc(2026, 9, 26, 9, 0), Utc(2026, 9, 28, 9, 20), 1, 20);
+        Assert.Equal(2, w.Count);
+        Assert.True(w[0].IsGap);
+        Assert.Equal(Utc(2026, 9, 27, 13, 0), w[0].To);
+        Assert.Equal(Utc(2026, 9, 27, 14, 0), w[1].To);
+        Assert.False(w[1].IsGap);
     }
 
     // ---- R3: first run ----

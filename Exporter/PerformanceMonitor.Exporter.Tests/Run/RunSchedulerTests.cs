@@ -1171,6 +1171,8 @@ public class RunSchedulerTests
             ("file detector without a file", x => x with { Restart = x.Restart with { Detector = "file" } }),
             ("post_run without a command", x => x with { PostRun = new PostRunSettings { Name = "alert-check" } }),
             ("store name", x => x with { Store = "1bad" }),
+            ("empty temp prefix", x => x with { Retention = x.Retention with { TempPrefixes = ["darling-export-", ""] } }),
+            ("whitespace temp prefix", x => x with { Retention = x.Retention with { TempPrefixes = ["  "] } }),
         };
         foreach (var (why, tweak) in bad)
         {
@@ -1205,6 +1207,30 @@ public class RunSchedulerTests
         Assert.Equal(2, await RunCommand.MainAsync(["--settings", Path.Combine(r.Root, "missing.json")], o, e, CancellationToken.None));
         Assert.Equal(2, await RunCommand.MainAsync(["--settings", settingsFile, "--now", "yesterday"], o, e, CancellationToken.None));
         Assert.Equal(2, await RunCommand.MainAsync(["--bogus"], o, e, CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task R26_run_settings_with_an_empty_or_whitespace_temp_prefix_are_refused_and_the_temp_folder_is_left_alone(string prefix)
+    {
+        // An empty prefix matches every entry under temp_dir. The refusal names the key, and a stale file that is not
+        // the exporter's survives, because a refused run never reaches the sweep.
+        using var r = new RunRoot(); r.SeedState();
+        var bystander = Path.Combine(r.Temp, "someone-elses-file.txt");
+        File.WriteAllText(bystander, "keep");
+        File.SetLastWriteTimeUtc(bystander, Pin.AddDays(-3));
+        var settingsFile = Path.Combine(r.Root, "settings.json");
+        File.WriteAllText(settingsFile, r.Settings(tweak: x => x with
+        {
+            ChildExe = TestChildPath.Exe, ChildBaseArgs = ["--tc-print", "hi"],
+            Retention = x.Retention with { TempPrefixes = ["darling-export-", prefix] },
+        }).ToJson());
+        var o = new StringWriter(); var e = new StringWriter();
+
+        Assert.Equal(2, await RunCommand.MainAsync(["--settings", settingsFile, "--now", "2026-09-28T16:30:00Z"], o, e, CancellationToken.None));
+        Assert.Contains("retention.temp_prefixes", o.ToString());
+        Assert.True(File.Exists(bystander), "the refused run must not sweep the temp folder");
     }
 }
 
