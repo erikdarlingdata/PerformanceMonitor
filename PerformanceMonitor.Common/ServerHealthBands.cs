@@ -1159,7 +1159,7 @@ namespace PerformanceMonitor.Common
         /// #7616: the PostgreSQL blocking band. The count is how many of the window's per-minute captures saw any blocking
         /// (the capture <c>get_pg_blocking</c> reads), over <paramref name="capturesTaken"/> captures. It bands
         /// <see cref="PostgresBlockingRatePerHour"/> against the store's per-hour tiers (<see cref="BlockingBandThresholds"/>,
-        /// the #6927 bars, 5 and 20 by default), so at the default cadence that is 5 and 20 minutes an hour with a blocked session
+        /// the #6927 bars, 5 and 20 by default, each read as at most 60 so a tier above 60 means every capture), so at the default cadence that is 5 and 20 minutes an hour with a blocked session
         /// in view. No count, no capture, or fewer than <see cref="PostgresBlockingMinimumCaptures"/> captures is Unknown, never a Healthy
         /// zero. There is no longest-wait arm: a capture records who waits behind whom at one instant, not how long the wait has run.
         /// </summary>
@@ -1174,9 +1174,14 @@ namespace PerformanceMonitor.Common
                 return HealthSeverity.Unknown;
             }
 
+            /* The rate cannot pass PostgresBlockingNominalCapturesPerHour, but the stored tiers accept 1 to 10000 for the SQL Server
+               count. Clamped to the ceiling, a tier above 60 means every capture, so a target blocked in every capture still reaches
+               Critical instead of reading Healthy under a Critical tier of 80. The SQL Server arm is not clamped. */
             var tiers = thresholds ?? BlockingBandThresholds.Default;
-            return rate.Value >= tiers.CriticalPerHour ? HealthSeverity.Critical
-                : rate.Value >= tiers.WarnPerHour ? HealthSeverity.Warning
+            var critical = Math.Min(tiers.CriticalPerHour, PostgresBlockingNominalCapturesPerHour);
+            var warn = Math.Min(tiers.WarnPerHour, PostgresBlockingNominalCapturesPerHour);
+            return rate.Value >= critical ? HealthSeverity.Critical
+                : rate.Value >= warn ? HealthSeverity.Warning
                 : HealthSeverity.Healthy;
         }
 

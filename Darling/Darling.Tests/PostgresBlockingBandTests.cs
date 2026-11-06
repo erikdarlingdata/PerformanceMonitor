@@ -80,6 +80,50 @@ public sealed class PostgresBlockingBandTests
     }
 
     [Fact]
+    public void ATierAbove60_ReadsAsEveryCapture_SoAFullyBlockedTargetStillReachesCritical()
+    {
+        /* The rate cannot pass 60 an hour but the stored tiers accept 1 to 10000 (#7616). Unclamped, a Critical tier of 80 or a
+           Warning tier of 70 left a target blocked in every capture of the hour Healthy. */
+        var raised = BlockingBandThresholds.Default with { WarnPerHourRaw = 70, CriticalPerHourRaw = 80 };
+        Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.PostgresBlockingSeverity(12, 12, raised));
+
+        var onlyCriticalRaised = BlockingBandThresholds.Default with { WarnPerHourRaw = 20, CriticalPerHourRaw = 80 };
+        Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.PostgresBlockingSeverity(12, 12, onlyCriticalRaised));
+        Assert.Equal(HealthSeverity.Warning, ServerHealthClassifier.PostgresBlockingSeverity(6, 12, onlyCriticalRaised));
+        Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.PostgresBlockingSeverity(2, 59, onlyCriticalRaised));
+    }
+
+    [Fact]
+    public void ATierAbove60_StillBandsAHalfBlockedTargetByTheTiersBelow60()
+    {
+        var warnRaised = BlockingBandThresholds.Default with { WarnPerHourRaw = 70, CriticalPerHourRaw = 5000 };
+        Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.PostgresBlockingSeverity(6, 12, warnRaised));
+        Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.PostgresBlockingSeverity(11, 11, warnRaised));
+
+        var criticalOnly = BlockingBandThresholds.Default with { WarnPerHourRaw = 10, CriticalPerHourRaw = 70 };
+        Assert.Equal(HealthSeverity.Warning, ServerHealthClassifier.PostgresBlockingSeverity(6, 12, criticalOnly));
+    }
+
+    [Fact]
+    public void TheSameRaisedTiers_BandASqlServerCountAsBefore()
+    {
+        /* SQL Server banding must not change: 80 blocked waits in an hour is a rate of 80, under a Critical tier of 100. */
+        var raised = BlockingBandThresholds.Default with { WarnPerHourRaw = 70, CriticalPerHourRaw = 100 };
+        var hour = System.TimeSpan.FromHours(1);
+        Assert.Equal(HealthSeverity.Warning, ServerHealthClassifier.BlockingSeverity(80, 0, hour, raised, null));
+        Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.BlockingSeverity(100, 0, hour, raised, null));
+        Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.BlockingSeverity(60, 0, hour, raised, null));
+    }
+
+    [Fact]
+    public void TheMetricsBand_AppliesTheSameClampForARaisedTier()
+    {
+        var raised = BlockingBandThresholds.Default with { WarnPerHourRaw = 70, CriticalPerHourRaw = 80 };
+        var m = new ServerHealthMetrics { BlockingCount = 12, BlockingCapturesTaken = 12, BlockingBandThresholds = raised };
+        Assert.Equal(HealthSeverity.Critical, System.Linq.Enumerable.ElementAt(ServerHealthClassifier.MetricSeverities(m), 3));
+    }
+
+    [Fact]
     public void TheReasonNamesTheUnitAndTheRate_AndDropsTheRateBelowThreeCaptures()
     {
         Assert.Equal("Blocking 25 captures (25.0/hr)", ServerHealthClassifier.PostgresBlockingReason(25, 60));

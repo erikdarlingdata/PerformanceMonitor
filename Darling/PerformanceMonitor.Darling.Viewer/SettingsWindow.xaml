@@ -470,7 +470,7 @@
                                     <TextBlock Text="per hour; critical at" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <TextBox AutomationProperties.Name="Blocking critical at, per hour" x:Name="BandBlockingCriticalPerHourBox" Width="45" Text="20.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
-                                    <TextBlock TextWrapping="Wrap" Text="per hour (1.0 or above): blocked waits per hour on SQL Server, the unit the Blocking Count alert uses, and blocked captures per hour at the default 1-minute cadence on PostgreSQL" VerticalAlignment="Center" Margin="2,0,0,0"
+                                    <TextBlock TextWrapping="Wrap" Text="per hour (1.0 or above): blocked waits per hour on SQL Server, the unit the Blocking Count alert uses, and blocked captures per hour at the default 1-minute cadence on PostgreSQL, where a tier above 60 means every capture" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,4,0,0">
