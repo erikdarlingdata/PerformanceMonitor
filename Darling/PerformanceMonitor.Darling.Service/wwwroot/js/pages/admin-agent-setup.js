@@ -65,6 +65,11 @@ export const ROUTES_EDITING_NOTE =
   "Add, edit and delete a route's agent channel, match, scope and destinations here. A webhook URL or key is sealed when saved and never " +
   "shown again: a box left blank keeps the saved one, and Remove deletes it. Email recipients are shown and edited as plain text.";
 
+/** #7949: shown above the scope picker when the server list or the tag list could not be read as the tab painted. */
+export const SCOPES_UNREAD_NOTE =
+  "The list of servers or tags could not be read, so a server or tag may be missing from the scope list. A route or profile that already has " +
+  "a scope keeps it when saved. Reload the tab to read the lists again.";
+
 /** The webhook destinations a route can carry: the body field, the label, the box key and the name configured_channels uses. */
 export const WEBHOOK_DESTINATIONS = [
   { field: "teams_webhook_url", label: "Teams webhook URL", key: "teams", channel: "Teams" },
@@ -238,6 +243,20 @@ async function sendRoute(verb, entries, repaint) {
   await repaint();
 }
 
+/** #7949: a scope picker's choices: the "all" choice, every server and every tag, then one choice for each stored scope ("s<id>" or "t<id>") the
+    lists do not hold (a server whose list could not be read, a tag or server removed since). A select shows and reads back "" for a value it has no
+    option for, so without that choice a stored scope would be saved as All servers. */
+export function scopeChoices(allLabel, servers, tags, stored) {
+  const choices = [{ value: "", label: allLabel }]
+    .concat(servers.map((s) => ({ value: "s" + s.id, label: "Server: " + s.name })))
+    .concat(tags.map((t) => ({ value: "t" + t.id, label: "Tag: " + t.name })));
+  for (const v of stored) {
+    if (!v || choices.some((c) => c.value === v)) continue;
+    choices.push({ value: v, label: (v.startsWith("s") ? "Current scope: server id " : "Current scope: tag id ") + v.slice(1) });
+  }
+  return choices;
+}
+
 function routeForm(options) {
   const entries = routeEntries || entriesFromRoute(null);
   const field = (label, control) => el("label", { class: "tag-field" }, [el("span", { class: "mute-label", text: label }), control]);
@@ -251,12 +270,10 @@ function routeForm(options) {
     c.value = value;
     return c;
   };
-  const scopeChoices = [{ value: "", label: "All servers" }]
-    .concat(options.servers.map((s) => ({ value: "s" + s.id, label: "Server: " + s.name })))
-    .concat(options.tags.map((t) => ({ value: "t" + t.id, label: "Tag: " + t.name })));
+  const scopeOptions = scopeChoices("All servers", options.servers, options.tags, [entries.scope]);
   const controls = {
     match: text("match", entries.match, { placeholder: "family, 'Analysis: <category>', exact metric or *" }),
-    scope: select("scope", scopeChoices, entries.scope),
+    scope: select("scope", scopeOptions, entries.scope),
     severities: select("severities", [{ value: "both", label: "Both (Warning and Critical)" }, { value: "critical", label: "Critical only" }, { value: "warning", label: "Warning only" }], entries.severities || "both"),
     reportNotice: select("reportNotice", REPORT_NOTICE_CHOICES, entries.reportNotice || "off"),
     /* #7109: whether a Level 3 action waits for a person's approval, and whether the person who asked may approve it. An admin seat sets any value. */
@@ -353,6 +370,8 @@ export function routeEditorNodes(options) {
   const status = statusNode(routeStatus);
   if (status) nodes.push(status);
   nodes.push(captionStrip(ROUTES_EDITING_NOTE));
+  /* #7949: said when a list behind the Applies to box could not be read; a route's stored scope is kept either way. */
+  if (options.scopesComplete === false) nodes.push(noticeStrip(SCOPES_UNREAD_NOTE));
   nodes.push(routeForm(options));
   return nodes;
 }
@@ -457,6 +476,7 @@ export async function buildProfiles(body, generation, ctx) {
   const status = statusNode(profileStatus);
   if (status) nodes.push(status);
   nodes.push(captionStrip(canEdit ? PROFILES_NOTE : (typeof d.sign_in_message === "string" && d.sign_in_message) || profilesListOnly(session.managed_store === true, session.admin_writes_off === true)));
+  if (canEdit && fleet.complete === false) nodes.push(noticeStrip(SCOPES_UNREAD_NOTE));
   if (canEdit) nodes.push(profileForm(profiles, fleet, d.max_length || 4000, ctx));
   const rows = profiles.map((p) => ({ ...p, scope: profileScopeText(p, fleet.servers, fleet.tags) }));
   nodes.push(rows.length
@@ -466,9 +486,9 @@ export async function buildProfiles(body, generation, ctx) {
 }
 
 function profileForm(profiles, fleet, maxLength, ctx) {
-  const choices = [{ value: "", label: "Fleet" }]
-    .concat(fleet.servers.map((s) => ({ value: "s" + s.id, label: "Server: " + s.name })))
-    .concat(fleet.tags.map((t) => ({ value: "t" + t.id, label: "Tag: " + t.name })));
+  /* #7949: a profile's own scope is always a choice, so a profile whose server is not in the list can still be opened and removed. */
+  const choices = scopeChoices("Fleet", fleet.servers, fleet.tags,
+    [profileScope].concat(profiles.map((p) => (p.scope_server_id != null ? "s" + p.scope_server_id : p.scope_tag_id != null ? "t" + p.scope_tag_id : ""))));
   const scope = el("select", { class: "tag-input", "data-field": "profile-scope" }, choices.map((o) => el("option", { value: o.value, text: o.label })));
   scope.value = profileScope;
   const textBox = el("textarea", { class: "tag-input", rows: "8", maxlength: String(maxLength), "data-field": "profile-text" });

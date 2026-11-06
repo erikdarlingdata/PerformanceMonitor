@@ -181,7 +181,7 @@ public sealed class ViewerDrillDownTests
            both read 01:30:00. Lite's hover (DisplayZone.Format) is the model. */
         var source = ViewerTypedRangeTests.StripComments(ViewerTypedRangeTests.ViewerSource("ViewerServerTab.QueryHeatmap.cs", ThisFile()));
         var hover = source[source.IndexOf("var cell = _lastHeatmapResult.CellDetails[row, col];", StringComparison.Ordinal)..];
-        hover = hover[..hover.IndexOf("queries\";", StringComparison.Ordinal)];
+        hover = hover[..hover.IndexOf("var tipText =", StringComparison.Ordinal)];
 
         Assert.Contains("DisplayZone.Format(_lastHeatmapResult.TimeBuckets[col], ViewerTimeHelper.CurrentDisplayZone(), \"HH:mm:ss\")", hover);
         Assert.DoesNotContain("ForDisplay", hover);

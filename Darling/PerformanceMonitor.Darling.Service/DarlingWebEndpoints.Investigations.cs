@@ -428,11 +428,13 @@ public static partial class DarlingWebEndpoints
     internal const string InvestigationWriteSignInMessage = "Sign in to the web as an admin to make this change, or use the Viewer.";
 
     /// <summary>The 403 answered to a change that needs a signed-in admin: <see cref="InvestigationWriteSignInMessage"/>, nothing written.</summary>
-    private static IResult SignInRequiredResult() => ErrorResult(InvestigationWriteSignInMessage, StatusCodes.Status403Forbidden);
+    private static IResult SignInRequiredResult() =>
+        ErrorResult(InvestigationWriteSignInMessage, StatusCodes.Status403Forbidden, DarlingWebStoreWrites.RefusalReason.SignInRequired);
 
     /// <summary>The 403 a refused note decision answers: the fixed <see cref="NoteDecisionRefusedMessage"/> sentence in the mute-rule error envelope.</summary>
     private static IResult NoteDecisionRefusedResult(bool managedStore, bool adminWritesOff = false) =>
-        ErrorResult(NoteDecisionRefusedMessage(managedStore, adminWritesOff), StatusCodes.Status403Forbidden);
+        ErrorResult(NoteDecisionRefusedMessage(managedStore, adminWritesOff), StatusCodes.Status403Forbidden,
+            DarlingWebStoreWrites.RefusalReason.ForStore(adminWritesOff));
 
     /// <summary>True when the store refused the statement for privilege (SQLSTATE 42501).</summary>
     internal static bool IsInsufficientPrivilege(Exception ex) => ex is PostgresException { SqlState: "42501" };

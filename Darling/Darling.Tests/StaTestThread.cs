@@ -34,8 +34,8 @@ using Xunit;
 /// <para>
 /// <b>Hang guard.</b> A body that does not return within <see cref="HangGuard"/> fails the calling test, naming it. The shared
 /// thread is then stuck inside that body and cannot be freed, so every later WPF test that asks while the body is still inside
-/// it fails at once with a message naming the stuck test, instead of each waiting out its own 60 s. A body that does return
-/// (it was slow, not blocked for good: #6632, and the two 11-04 hangs of #7600 returned after 68 s and 126 s) frees the thread
+/// it fails at once with a message naming the stuck test, instead of each waiting out its own 180 s. A body that does return
+/// (it was slow, not blocked for good: #6632, and the five stalls seen under #7600 all returned within 126 s, so the guard is 180 s and not 60 s) frees the thread
 /// again once its drain is done, and the tests after that run; only the slow body's own test fails (#7600).
 /// </para>
 /// <para>
@@ -74,13 +74,17 @@ internal static class StaTestThread
     /// </summary>
     internal static void Step(string what) => s_host.Step(what);
 
-    /// <summary>How long <see cref="Settle"/> waits for application idle. Half the hang guard, so a settle that never ends fails its own test before the guard strands the shared thread.</summary>
+    /// <summary>
+    /// How long <see cref="Settle"/> waits for application idle at most. A sixth of the 180 s hang guard, so a settle that never ends fails its own test well before the guard
+    /// strands the shared thread. #7968: the wait is also cut to what the body's hang guard has left (<see cref="StaHost.WithinGuard"/>), because a body that
+    /// spent 34 s before it began waiting (a window's first composition flush on a loaded runner) could not otherwise reach this limit before the guard.
+    /// </summary>
     internal static readonly TimeSpan IdleLimit = TimeSpan.FromSeconds(30);
 
     /// <summary>
     /// #6333: shows the window and lets the dispatcher reach application idle, with the wait bounded. Replaces the unbounded
     /// <c>PushFrame</c> each WPF test class copied: a frame that is never woken left the body, and with it the shared thread, waiting
-    /// until the 60 s hang guard stranded every later WPF test in the process (a Lite shard lost a whole class that way).
+    /// until the hang guard (60 s then, 180 s now) stranded every later WPF test in the process (a Lite shard lost a whole class that way).
     /// </summary>
     internal static void Settle(Window window)
     {
@@ -103,6 +107,8 @@ internal static class StaTestThread
     /// </summary>
     internal static void WaitForIdle(Dispatcher dispatcher, TimeSpan limit, DispatcherPriority idlePriority)
     {
+        var asked = limit;
+        limit = StaHost.WithinGuard(limit, out var cut);
         var frame = new DispatcherFrame();
         var idle = false;
         var operations = 0;
@@ -147,7 +153,8 @@ internal static class StaTestThread
             throw new TimeoutException(
                 $"The dispatcher did not reach {(idlePriority == DispatcherPriority.ApplicationIdle ? "application idle" : idlePriority.ToString())} within {limit.TotalMilliseconds:0} ms: it ran {operations} operations meanwhile"
                 + (operations == 0 ? " (none: the frame was not woken to run what the window queued)" : $", the last at priority {lastPriority}")
-                + ". Work queued ahead of idle without end looks like the second; a pump that never wakes looks like the first (#6216, #6333).");
+                + ". Work queued ahead of idle without end looks like the second; a pump that never wakes looks like the first (#6216, #6333)."
+                + (cut is null ? "" : $" The wait was cut from {asked.TotalMilliseconds:0} ms to {limit.TotalMilliseconds:0} ms: {cut} (#7968)."));
         }
     }
 
@@ -165,7 +172,7 @@ internal static class StaTestThread
 /// </summary>
 internal sealed class StaHost
 {
-    internal TimeSpan HangGuard { get; set; } = TimeSpan.FromSeconds(60);
+    internal TimeSpan HangGuard { get; set; } = TimeSpan.FromSeconds(180);
 
     /* A SemaphoreSlim, not a Monitor: a test may be async, so the releasing thread is not promised to be the taking one. */
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -178,6 +185,14 @@ internal sealed class StaHost
        free again, so FailIfStuck lifts the refusal then. Read and written under _stuckLock together with _stuckTest. */
     private Task? _stuckJob;
     private readonly object _stuckLock = new();
+
+    /* #7968: when the running body's hang guard started (Environment.TickCount64), 0 while no body runs. A bounded wait inside the body
+       reads it to stop before the guard does, whatever the body spent before the wait began. */
+    private long _bodyBegan;
+
+    /* The host whose body is running on this thread. The host thread runs one body at a time, and an async body resumes on it. */
+    [ThreadStatic]
+    private static StaHost? t_running;
 
     /* #6216: what the hang guard reports about a body that did not return. The host thread writes the dispatcher counters (the hooks run
        on it); the body writes the step; the caller reads them all once the guard expires. */
@@ -197,6 +212,35 @@ internal sealed class StaHost
     {
         _step = what;
         Interlocked.Exchange(ref _stepTick, Environment.TickCount64);
+    }
+
+    /// <summary>
+    /// #7968: a wait the body makes with its own limit (<see cref="StaTestThread.WaitForIdle(Dispatcher, TimeSpan)"/>) must end before the hang guard
+    /// does, or the guard fires first and strands the shared thread instead of failing the one test. A body that spends its first half minute building
+    /// a window then waits 30 s more, and the second half of that wait is past the guard. This returns <paramref name="limit"/> cut to what the running
+    /// body's guard has left, less a tenth of the guard so the wait's own failure (and the body's drain) can finish first; never under a quarter second.
+    /// Off the host thread, or outside a body, it returns <paramref name="limit"/> unchanged. <paramref name="cut"/> says why it was cut, or is null.
+    /// </summary>
+    internal static TimeSpan WithinGuard(TimeSpan limit, out string? cut)
+    {
+        cut = null;
+        var host = t_running;
+        var began = host is null ? 0 : Interlocked.Read(ref host._bodyBegan);
+        if (host is null || began == 0)
+        {
+            return limit;
+        }
+
+        var used = TimeSpan.FromMilliseconds(Environment.TickCount64 - began);
+        var room = host.HangGuard - used - host.HangGuard / 10;
+        var bound = room < TimeSpan.FromMilliseconds(250) ? TimeSpan.FromMilliseconds(250) : room;
+        if (bound >= limit)
+        {
+            return limit;
+        }
+
+        cut = $"the body had used {used.TotalMilliseconds:0} ms of its {host.HangGuard.TotalMilliseconds:0} ms hang guard before it began waiting, so the wait ends before the guard does and fails this test alone";
+        return bound;
     }
 
     /// <summary>The dispatcher of the host thread (starting the thread if it is not yet). For the host's own tests.</summary>
@@ -257,6 +301,7 @@ internal sealed class StaHost
             }
 
             var began = Environment.TickCount64;
+            Interlocked.Exchange(ref _bodyBegan, began);
             var opsAtStart = Interlocked.Read(ref _opsStarted);
             _step = "(the body named no step)";
             Interlocked.Exchange(ref _stepTick, began);
@@ -289,6 +334,7 @@ internal sealed class StaHost
         }
         finally
         {
+            Interlocked.Exchange(ref _bodyBegan, 0);
             _gate.Release();
         }
     }
@@ -296,6 +342,7 @@ internal sealed class StaHost
     /// <summary>The body, then the cleanup. Never throws: the body's exception is handed back for the caller to rethrow with its stack.</summary>
     private async Task Job(Func<Task> body, Action<ExceptionDispatchInfo> fail)
     {
+        t_running = this;
         try
         {
             await body();
@@ -316,6 +363,10 @@ internal sealed class StaHost
         catch (Exception ex)
         {
             fail(ExceptionDispatchInfo.Capture(ex));
+        }
+        finally
+        {
+            t_running = null;
         }
     }
 

@@ -96,6 +96,17 @@ VALUES ($1, $2, $3, $4, 5, 500, 'appdb', 'u', 'app', NULL,
     private static Task SeedServerAsync(NpgsqlConnection c, Tool t, string name, DateTime created, DateTime? runsFrom, DateTime end) =>
         WindowFloorLiveHarness.SeedServerAsync(c, name, created, t.Collector, runsFrom, 30, end, [t.Table], TestContext.Current.CancellationToken);
 
+    /// <summary>
+    /// #7878, #7910: stores the row, then makes the run that wrote it the collector's newest, because the four state reads call a row
+    /// current only when it came from the newest successful run. The fixture's synthetic runs reach the window end and store nothing,
+    /// which is a collector that looked later and found the row's state gone.
+    /// </summary>
+    private static async Task SeedRowAsync(Tool t, NpgsqlConnection c, string name, DateTime at)
+    {
+        await t.SeedRow(c, name, at);
+        await WindowFloorLiveHarness.MakeRowCurrentAsync(c, name, t.Collector, at, TestContext.Current.CancellationToken);
+    }
+
     [Theory]
     [MemberData(nameof(ToolNames))]
     public async Task ADataAnswer_ForAServerAddedTwoDaysAgo_NamesWhereCoverageStarts_RightAfterHoursBack_AgainstDevPostgres(string read)
@@ -105,7 +116,7 @@ VALUES ($1, $2, $3, $4, 5, 500, 'appdb', 'u', 'app', NULL,
         {
             var added = end.AddDays(-2);
             await SeedServerAsync(c, t, name, added, added, end);
-            await t.SeedRow(c, name, end.AddDays(-1));
+            await SeedRowAsync(t, c, name, end.AddDays(-1));
 
             var root = WindowFloorLiveHarness.Parse(await t.Call(ds, name, 168, end));
 
@@ -127,7 +138,7 @@ VALUES ($1, $2, $3, $4, 5, 500, 'appdb', 'u', 'app', NULL,
         await RunAsync(t, "quiet", async (c, ds, end, name) =>
         {
             await SeedServerAsync(c, t, name, end.AddDays(-30), end.AddDays(-9), end);
-            await t.SeedRow(c, name, end.AddDays(-1));
+            await SeedRowAsync(t, c, name, end.AddDays(-1));
 
             var root = WindowFloorLiveHarness.Parse(await t.Call(ds, name, 168, end));
 
@@ -144,7 +155,7 @@ VALUES ($1, $2, $3, $4, 5, 500, 'appdb', 'u', 'app', NULL,
         await RunAsync(t, "short", async (c, ds, end, name) =>
         {
             await SeedServerAsync(c, t, name, end.AddDays(-30), end.AddDays(-2), end);
-            await t.SeedRow(c, name, end.AddMinutes(-40));
+            await SeedRowAsync(t, c, name, end.AddMinutes(-40));
             var calls = 0;
             DarlingMcpWindowNotice.TestOnlyProbe = () => { calls++; return Task.FromResult<DateTime?>(null); };
 
@@ -163,7 +174,7 @@ VALUES ($1, $2, $3, $4, 5, 500, 'appdb', 'u', 'app', NULL,
         await RunAsync(t, "probefail", async (c, ds, end, name) =>
         {
             await SeedServerAsync(c, t, name, end.AddDays(-2), end.AddDays(-2), end);
-            await t.SeedRow(c, name, end.AddDays(-1));
+            await SeedRowAsync(t, c, name, end.AddDays(-1));
             DarlingMcpWindowNotice.TestOnlyProbe = () => throw new TimeoutException("the probe's deadline passed");
 
             var root = WindowFloorLiveHarness.Parse(await t.Call(ds, name, 168, end));

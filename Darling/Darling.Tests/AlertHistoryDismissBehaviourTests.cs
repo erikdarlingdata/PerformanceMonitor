@@ -96,6 +96,55 @@ public sealed class AlertHistoryDismissBehaviourTests
         Assert.Equal(0, r.GetProperty("firstHasBox").GetInt32());
     }
 
+    /// <summary>#7919: a column filter hides lines with display:none; Dismiss All asks about and posts only the live rows still shown.</summary>
+    [Fact]
+    public void DismissAll_ActsOnlyOnRowsTheColumnFilterLeavesShowing()
+    {
+        var r = Run("columnFilter");
+        // Three lines pass Severity = info (one of them already dismissed), two are hidden.
+        Assert.Equal(new[] { "High CPU 1", "High CPU 3", "High CPU 5" }, r.GetProperty("shownMetrics").EnumerateArray().Select(e => e.GetString()).ToArray());
+        Assert.False(r.GetProperty("allDisabled").GetBoolean());
+        Assert.True(r.GetProperty("allDisabledWhenNoneShown").GetBoolean());
+        var ask = Assert.Single(r.GetProperty("asks").EnumerateArray()).GetString();
+        Assert.StartsWith("Dismiss 2 alert(s)?", ask);
+        var post = Assert.Single(r.GetProperty("posts").EnumerateArray());
+        Assert.Equal(new[] { "High CPU 1", "High CPU 3" }, post.EnumerateArray().Select(e => e.GetString()).ToArray());
+    }
+
+    /// <summary>#7919: the filter is already on when the page builds and a poll tick adds a live alert it hides: the button state and Dismiss All's count and keys leave the hidden alert out.</summary>
+    [Fact]
+    public void DismissAll_AfterAPollTickBehindASavedColumnFilter_LeavesTheHiddenNewAlertOut()
+    {
+        var r = Run("pollTickBehindSavedFilter");
+        // First draw with the filter on: only a dismissed line shows, so there is nothing to dismiss.
+        Assert.Equal(new[] { "High CPU 3" }, r.GetProperty("shownAtBuild").EnumerateArray().Select(e => e.GetString()).ToArray());
+        Assert.True(r.GetProperty("allDisabledAtBuild").GetBoolean());
+        // The poll adds a live alert the filter shows (CPU 1) and one it hides (CPU 4).
+        Assert.Equal(new[] { "High CPU 1", "High CPU 3" }, r.GetProperty("shownAfterPoll").EnumerateArray().Select(e => e.GetString()).ToArray());
+        Assert.False(r.GetProperty("allDisabledAfterPoll").GetBoolean());
+        Assert.StartsWith("Dismiss 1 alert(s)?", Assert.Single(r.GetProperty("asks").EnumerateArray()).GetString());
+        var post = Assert.Single(r.GetProperty("posts").EnumerateArray());
+        Assert.Equal(new[] { "High CPU 1" }, post.EnumerateArray().Select(e => e.GetString()).ToArray());
+    }
+
+    /// <summary>#7919: three alerts checked, a column filter hides one: Dismiss Selected counts and posts the two still showing, and the hidden one stays checked.</summary>
+    [Fact]
+    public void DismissSelected_ActsOnlyOnCheckedRowsTheColumnFilterLeavesShowing()
+    {
+        var r = Run("selectedBehindColumnFilter");
+        Assert.Equal("Dismiss Selected (3)", r.GetProperty("labelAllChecked").GetString());
+        Assert.Equal("Dismiss Selected (2)", r.GetProperty("labelFiltered").GetString());
+        Assert.False(r.GetProperty("disabledFiltered").GetBoolean());
+        Assert.Equal("Dismiss Selected (3)", r.GetProperty("labelCleared").GetString());
+        var post = Assert.Single(r.GetProperty("posts").EnumerateArray());
+        Assert.Equal(new[] { "High CPU 1", "High CPU 2" }, post.EnumerateArray().Select(e => e.GetString()).ToArray());
+        // The hidden checked row is not counted while hidden, and is back, still checked, once the filter is cleared.
+        Assert.Equal("Dismiss Selected", r.GetProperty("labelAfterPost").GetString());
+        Assert.True(r.GetProperty("disabledAfterPost").GetBoolean());
+        Assert.Equal("Dismiss Selected (1)", r.GetProperty("labelAfterClear").GetString());
+        Assert.Equal(new[] { true }, r.GetProperty("checkedAfterClear").EnumerateArray().Select(e => e.GetBoolean()).ToArray());
+    }
+
     [Fact]
     public void DismissAll_PostsEveryLiveRowTheFiltersShow()
     {
