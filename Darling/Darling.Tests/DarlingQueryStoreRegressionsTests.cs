@@ -113,14 +113,14 @@ public sealed class DarlingQueryStoreRegressionsSurfaceAndSqlTests
     }
 
     /// <summary>
-    /// #5015: the coverage probe takes the read's database filter ($5) in its one scan of the table, so a filter that matched
+    /// #5015: the coverage probe takes the read's database filter ($5) in both of its questions, so a filter that matched
     /// nothing can be told from one that matched and found nothing wrong.
     /// </summary>
     [Fact]
     public void CoverageSql_TakesTheReadsDatabaseFilter()
     {
         var sql = DarlingQueryStoreRegressionReader.RegressionCoverageSql;
-        Assert.Equal(1, CountOf(sql, "$5::text[] IS NULL OR database_name = ANY($5)"));
+        Assert.Equal(2, CountOf(sql, "$5::text[] IS NULL OR"));
     }
 
     [Theory]

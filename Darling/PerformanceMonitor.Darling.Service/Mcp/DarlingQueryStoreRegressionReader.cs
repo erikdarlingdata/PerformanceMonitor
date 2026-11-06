@@ -163,44 +163,58 @@ internal static class DarlingQueryStoreRegressionReader
     /// collected history sits inside the requested window can never show a regression however bad it got.
     /// Reporting that as "no regressions" is the failure this exists to prevent.</para>
     /// <para>Probes the base <c>query_store_stats</c> table, the same source the read itself uses, and splits it the way the read does
-    /// (#7962, <see cref="QueryStoreRegressionBaseline.RawArmsSql"/>): the latest snapshot of each interval collected in
-    /// [baseline start, window end] (#1841) is on the baseline side when its <c>last_execution_time</c> is in [baseline start,
-    /// window start) and on the recent side when it is at or after the window start. Splitting on <c>collection_time</c> instead put an
-    /// interval that last ran before the window start but was snapshotted after it on the recent side, so a short window on a quiet server
-    /// read as "recent activity was checked and nothing regressed". The <c>collection_time</c> bounds stay: they are what the table's
-    /// time index (and chunk exclusion) is read by, and an interval's latest snapshot is never collected before its last run.
+    /// (#7962, <see cref="QueryStoreRegressionBaseline.RawArmsSql"/>): an interval is on the baseline side when the <c>last_execution_time</c>
+    /// of its latest snapshot is in [baseline start, window start) and on the recent side when it is at or after the window start. Splitting on
+    /// <c>collection_time</c> instead put an interval that last ran before the window start but was snapshotted after it on the recent side,
+    /// so a short window on a quiet server read as "recent activity was checked and nothing regressed".</para>
+    /// <para>No ranking: within one interval (database, query, plan, runtime-stats interval, first execution, execution type, replica role)
+    /// the snapshots are cumulative, so <c>last_execution_time</c> only grows and the latest snapshot has the largest one. So an interval is
+    /// recent exactly when ANY of its snapshots ran at or after the window start (<c>has_recent</c> is one EXISTS; that snapshot was collected
+    /// at or after it ran, so the <c>collection_time &gt;= $2</c> bound loses none, and it reads the <c>(server_id, collection_time DESC)</c>
+    /// index). It is on the baseline side exactly when a snapshot ran in [baseline start, window start) and NO snapshot of the same interval ran at or
+    /// after the window start (<c>has_baseline</c>, an EXISTS with a NOT EXISTS that is a key lookup on
+    /// <c>idx_query_store_stats_server_db_query_plan_time</c>, <c>(server_id, database_name, query_id, plan_id, collection_time DESC)</c>;
+    /// the first candidate usually answers it). Both sides keep the <c>collection_time</c> bounds the read has. The NULLable key columns
+    /// compare with IS NOT DISTINCT FROM, the way the read's PARTITION BY groups NULLs together.
     /// $1 server_id, $2 window start, $3 window end, $4 baseline start (#4195), $5 database filter (text[] or
     /// NULL, #5015: the same match the read makes, so a caller that filtered can tell a filter that matched nothing
     /// from one that matched and found nothing wrong).</para>
     /// </summary>
     public const string RegressionCoverageSql = """
-        WITH latest AS (
-            SELECT
-                last_execution_time,
-                ROW_NUMBER() OVER
-                (
-                    PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
-                    ORDER BY collection_time DESC, execution_count DESC
-                ) AS rn
-            FROM query_store_stats
-            WHERE server_id = $1
-            AND   collection_time >= $4
-            AND   collection_time <= $3
-            AND   ($5::text[] IS NULL OR database_name = ANY($5))
-        )
         SELECT
             EXISTS (
                 SELECT 1
-                FROM latest
-                WHERE rn = 1
-                AND   last_execution_time >= $4
-                AND   last_execution_time < $2
+                FROM query_store_stats AS r
+                WHERE r.server_id = $1
+                AND   r.collection_time >= $4
+                AND   r.collection_time <= $3
+                AND   r.last_execution_time >= $4
+                AND   r.last_execution_time < $2
+                AND   ($5::text[] IS NULL OR r.database_name = ANY($5))
+                AND   NOT EXISTS (
+                    SELECT 1
+                    FROM query_store_stats AS s
+                    WHERE s.server_id = r.server_id
+                    AND   s.database_name = r.database_name
+                    AND   s.query_id = r.query_id
+                    AND   s.plan_id = r.plan_id
+                    AND   s.runtime_stats_interval_id IS NOT DISTINCT FROM r.runtime_stats_interval_id
+                    AND   s.first_execution_time IS NOT DISTINCT FROM r.first_execution_time
+                    AND   s.execution_type_desc IS NOT DISTINCT FROM r.execution_type_desc
+                    AND   s.replica_role IS NOT DISTINCT FROM r.replica_role
+                    AND   s.collection_time >= $2
+                    AND   s.collection_time <= $3
+                    AND   s.last_execution_time >= $2
+                )
             ) AS has_baseline,
             EXISTS (
                 SELECT 1
-                FROM latest
-                WHERE rn = 1
+                FROM query_store_stats
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   collection_time <= $3
                 AND   last_execution_time >= $2
+                AND   ($5::text[] IS NULL OR database_name = ANY($5))
             ) AS has_recent
         """;
 

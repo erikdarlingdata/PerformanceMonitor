@@ -42,9 +42,10 @@ public sealed class QueryStoreRegressionsTableCoverageLiveTests
     /// <summary>Seeds one Regular interval that first ran at <c>$4 + firstOffset</c> and last ran at <c>$4 + lastOffset</c>
     /// (<c>$2</c> is <c>$4</c> plus 3 days), or none when both are null. Returns the coverage read from the wide table, then from
     /// latest. <paramref name="collectedAfterLast"/> is how long after the interval's last run its snapshot was collected, and
-    /// <paramref name="includeRaw"/> appends <see cref="DarlingQueryStoreRegressionReader.GetCoverageAsync"/> over raw as a third answer (#7962).</summary>
+    /// <paramref name="laterLastOffset"/> writes a second, later snapshot of the SAME interval that last ran then (collected 10 minutes after),
+    /// and <paramref name="includeRaw"/> appends <see cref="DarlingQueryStoreRegressionReader.GetCoverageAsync"/> over raw as a third answer (#7962).</summary>
     private static async Task<List<(bool HasBaseline, bool HasRecent)>> CoverageAsync(
-        TimeSpan? firstOffset, TimeSpan? lastOffset, CancellationToken ct, TimeSpan? collectedAfterLast = null, bool includeRaw = false)
+        TimeSpan? firstOffset, TimeSpan? lastOffset, CancellationToken ct, TimeSpan? collectedAfterLast = null, bool includeRaw = false, TimeSpan? laterLastOffset = null)
     {
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #6750 live tests.");
@@ -106,6 +107,14 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
             };
             var collected = lastRun + (collectedAfterLast ?? TimeSpan.FromMinutes(10));
             await runner.WriteBackfillBatchAsync(QueryStoreCollector.Instance, rows, server, DateTime.SpecifyKind(collected, DateTimeKind.Unspecified), context, ct);
+
+            if (laterLastOffset is TimeSpan later)
+            {
+                rows[0].LastExecutionTime = costStart + later;
+                rows[0].ExecutionCount = 20;
+                var laterCollected = costStart + later + TimeSpan.FromMinutes(10);
+                await runner.WriteBackfillBatchAsync(QueryStoreCollector.Instance, rows, server, DateTime.SpecifyKind(laterCollected, DateTimeKind.Unspecified), context, ct);
+            }
         }
 
         var results = new List<(bool HasBaseline, bool HasRecent)>();
@@ -189,6 +198,23 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         var results = await CoverageAsync(
             TimeSpan.FromDays(3) - TimeSpan.FromMinutes(40), TimeSpan.FromDays(3) + TimeSpan.FromMinutes(10), ct,
             collectedAfterLast: TimeSpan.FromMinutes(5), includeRaw: true);
+        Assert.Equal(3, results.Count);
+        Assert.All(results, r => Assert.True(r.HasRecent));
+        Assert.All(results, r => Assert.False(r.HasBaseline));
+    }
+
+    /// <summary>
+    /// One interval has a snapshot that last ran before the window start and a later snapshot of the same key that last ran after it. The
+    /// interval's latest snapshot is the recent window's, so the recent side is true and the baseline side is false: the earlier snapshot must
+    /// not make the baseline true on its own (raw, wide and latest all agree).
+    /// </summary>
+    [Fact]
+    public async Task RawProbe_CountsAnIntervalWhoseLaterSnapshotRanAfterTheWindowStartOnTheRecentSideOnly()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var results = await CoverageAsync(
+            TimeSpan.FromDays(3) - TimeSpan.FromMinutes(40), TimeSpan.FromDays(3) - TimeSpan.FromMinutes(30), ct,
+            collectedAfterLast: TimeSpan.FromMinutes(10), includeRaw: true, laterLastOffset: TimeSpan.FromDays(3) + TimeSpan.FromMinutes(10));
         Assert.Equal(3, results.Count);
         Assert.All(results, r => Assert.True(r.HasRecent));
         Assert.All(results, r => Assert.False(r.HasBaseline));
