@@ -41,6 +41,9 @@ public static class McpPlanAnalysisFormatter
     /// outside the cut. <see cref="PlanAnalyzer.GetOperatorOwnElapsedMs"/> takes the children off (per
     /// thread in a parallel plan, nothing in batch mode where showplan's value is already standalone), and
     /// the result rides on every row as <c>self_elapsed_ms</c> beside the cumulative <c>actual_elapsed_ms</c>.
+    /// An exchange has no own time: its elapsed is time spent waiting on the operators that feed and drain
+    /// it (#4690, the reason rule 35 skips exchanges), so its row carries a null <c>self_elapsed_ms</c>, the
+    /// <see cref="ExchangeSelfElapsedNote"/>, and ranks after every operator that has an own time.
     /// An estimated plan has no measurement and ranks by the optimizer's cost SHARE. The switch was silent
     /// before: the same key carried a measurement in one payload and an estimate in the next, and only
     /// <c>has_actual_stats</c> hinted at which — a caller comparing two payloads' top operators was comparing
@@ -50,6 +53,15 @@ public static class McpPlanAnalysisFormatter
 
     /// <inheritdoc cref="RankedBySelfElapsed"/>
     public const string RankedByEstimatedCostPercent = "cost_percent (optimizer estimate)";
+
+    /// <summary>
+    /// What an exchange row's <c>self_elapsed_note</c> says in place of an own-time figure (#7887). A Gather,
+    /// Distribute or Repartition Streams operator's elapsed time is time spent waiting on the operators that
+    /// feed and drain it, not work of its own, so the figure that subtracting its children would leave is
+    /// wait, and ranking on it names the exchange beside a spilling sort as the expensive operator (#4690).
+    /// The row keeps its cumulative <c>actual_elapsed_ms</c>; every other row carries this key as null.
+    /// </summary>
+    public const string ExchangeSelfElapsedNote = "exchange: its elapsed time is time spent waiting on the operators that feed and drain it, not work of its own, so it has no self_elapsed_ms and ranks after every operator that has one";
 
     /// <summary>
     /// What <c>missing_indexes[].impact</c> IS, published as <c>impact_basis</c> beside it (#3653 A15/A16): the
@@ -172,9 +184,15 @@ public static class McpPlanAnalysisFormatter
                    RankedBySelfElapsed. truncated is OBSERVED against the whole population (every node is in
                    hand), never inferred from the page size. #7887: with runtime statistics the rank is each
                    operator's own time, so a deep scan outranks the cheap ancestors whose cumulative elapsed
-                   contains it; operators with equal own time keep cumulative-elapsed order. The synthetic
-                   statement node has no runtime stats and ranks last. */
-                var ranked = allNodes.Select(n => (Node: n, SelfMs: n.HasActualStats ? PlanAnalyzer.GetOperatorOwnElapsedMs(n) : (long?)null));
+                   contains it; operators with equal own time keep cumulative-elapsed order. An exchange's
+                   own time is null (ExchangeSelfElapsedNote), so every operator that has one ranks above it,
+                   exchanges keep cumulative order among themselves, and the synthetic statement node, with
+                   no runtime stats at all, ranks last. */
+                var ranked = allNodes.Select(n =>
+                {
+                    var exchange = n.HasActualStats && IsExchange(n);
+                    return (Node: n, Exchange: exchange, SelfMs: n.HasActualStats && !exchange ? PlanAnalyzer.GetOperatorOwnElapsedMs(n) : (long?)null);
+                });
                 var topOps = (hasActuals
                         ? ranked.OrderByDescending(r => r.SelfMs ?? -1).ThenByDescending(r => r.Node.ActualElapsedMs)
                         : ranked.OrderByDescending(r => r.Node.CostPercent))
@@ -192,6 +210,7 @@ public static class McpPlanAnalysisFormatter
                             actual_rows = n.HasActualStats ? n.ActualRows : (long?)null,
                             actual_elapsed_ms = n.HasActualStats ? n.ActualElapsedMs : (long?)null,
                             self_elapsed_ms = r.SelfMs,
+                            self_elapsed_note = r.Exchange ? ExchangeSelfElapsedNote : null,
                             actual_cpu_ms = n.HasActualStats ? n.ActualCPUMs : (long?)null,
                             logical_reads = n.HasActualStats ? n.ActualLogicalReads : (long?)null,
                             object_name = n.ObjectName,
@@ -315,4 +334,13 @@ public static class McpPlanAnalysisFormatter
         foreach (var child in node.Children)
             CollectNodes(child, nodes);
     }
+
+    /// <summary>
+    /// True for a parallelism exchange (Gather, Distribute or Repartition Streams): the same shape
+    /// <c>PlanAnalyzer.IsExchangeOperator</c> tests when rule 35 skips exchanges (#4690), whose timings are
+    /// time spent waiting on the operators around them rather than work of their own.
+    /// </summary>
+    private static bool IsExchange(PlanNode node) =>
+        node.PhysicalOp == "Parallelism"
+        || node.LogicalOp is "Gather Streams" or "Distribute Streams" or "Repartition Streams";
 }
