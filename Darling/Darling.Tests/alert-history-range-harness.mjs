@@ -50,6 +50,8 @@ if (process.argv[4]) process.env.TZ = process.argv[4];
 
 const urls = [];
 let alertsReply = { alerts: [], truncated: false };
+/* The dismiss route's answer for one row: the shape the dismiss harness uses. */
+const dismissReply = { requested: 1, dismissed: 1, already_dismissed: 0, unknown: 0 };
 const servers = { servers: [{ server_name: "srv-a", display_name: "Server A" }, { server_name: "srv-b" }] };
 globalThis.fetch = async (url) => {
   const u = String(url);
@@ -59,6 +61,7 @@ globalThis.fetch = async (url) => {
   else if (u.includes("/api/catalog")) body = { reads: [{ name: "get_alert_history", params: [{ name: "hours", collector: null, collector_interval_minutes: null, max_hours: 2160 }] }] };
   else if (u.includes("/list_servers")) body = servers;
   else if (u.includes("/get_alert_history")) body = typeof alertsReply === "function" ? alertsReply(u) : alertsReply;
+  else if (u.includes("/api/alert-history/dismiss")) body = dismissReply;
   else if (u.includes("/list_investigation_requests")) body = investigationsReply;
   else if (u.includes("/get_investigation_reports")) body = u.includes("request_id=") ? journalReply : reportsReply;
   return { status: 200, ok: true, text: async () => JSON.stringify(body) };
@@ -117,6 +120,12 @@ try {
   };
   const metrics = (main) => { const i = metricIndex(main); return bodyRows(main).map((tr) => tr.children[i].textContent); };
   const settle = () => new Promise((r) => setTimeout(r, 20));
+  /* What a failed read drew: the refresh notices above the table (noteRefreshError), the red strips in the table's place (errorStrip), and
+     the header's "server · range" line. */
+  const refreshNotices = (m) => m.all("div").filter((d) => (" " + d.className + " ").includes(" refresh-error ")).map((d) => d.textContent);
+  const errorStrips = (m) => m.all("div").filter((d) => d.className === "strip error").map((d) => d.textContent);
+  const metaText = (m) => m.all("div").find((d) => d.className === "meta").textContent;
+  const failedRead = { status: "error", message: "the store did not answer" };
   const out = {};
 
   const scenarios = {
@@ -277,8 +286,6 @@ try {
     /* #7943: a poll whose read failed keeps the table on screen with the failure as a notice above it, and the next good poll reconciles
        the same rows, so an opened Detail line stays open. The error strip takes the table's place only when no table is on screen. */
     async pollFails() {
-      const refreshNotices = (m) => m.all("div").filter((d) => (" " + d.className + " ").includes(" refresh-error ")).map((d) => d.textContent);
-      const errorStrips = (m) => m.all("div").filter((d) => d.className === "strip error").length;
       const good = () => ({ alerts: [row(1, { detail_text: "Blocking chain of 4 sessions." }), row(2)], truncated: false });
       /* the same util.js module instance the page runs on: its red-strip count is what keeps the footer's Updated time from moving */
       const util = await import(pathToFileURL(path.join(scratch, "util.js")).href);
@@ -296,7 +303,7 @@ try {
       out.tableDuringFailure = main.all("table").length === 1 && bodyRows(main)[0] === tr;
       out.rowsDuringFailure = bodyRows(main).length;
       out.noticeDuringFailure = refreshNotices(main);
-      out.errorStripDuringFailure = errorStrips(main);
+      out.errorStripDuringFailure = errorStrips(main).length;
       // the next poll answers
       alertsReply = good();
       await renderAlerts(main);
@@ -306,7 +313,60 @@ try {
       // a first load that fails still draws the error strip in the table's place
       alertsReply = { status: "error", message: "the store did not answer" };
       const fresh = newMain(); await renderAlerts(fresh);
-      out.firstLoadErrorStrip = fresh.all("table").length === 0 && errorStrips(fresh) === 1;
+      out.firstLoadErrorStrip = fresh.all("table").length === 0 && errorStrips(fresh).length === 1;
+    },
+    /* The table is kept through a failed read only when that read asked for what the table on screen was drawn from. A read after a changed
+       Server choice that fails has no such table: the error strip takes the table's place, under the new choice's label, so the previous
+       server's rows are never listed as the new server's. */
+    async serverChangeFails() {
+      alertsReply = (u) => (u.includes("server_name=srv-b") ? failedRead : { alerts: [row(1), row(2)], truncated: false });
+      const main = newMain(); await renderAlerts(main);
+      out.rowsBefore = bodyRows(main).length;
+      await pick(byLabel(main, "Server"), "srv-b");
+      out.table = main.all("table").length;
+      out.rows = bodyRows(main).length;
+      out.errorStrips = errorStrips(main);
+      out.refreshNotices = refreshNotices(main);
+      out.meta = metaText(main);
+    },
+    /* #5562: a range the page cannot read (Today at exactly midnight, zero length) shows that reason in the table's place and never the
+       previous window's rows. Today is chosen at noon and the 60 s poll lands at the next midnight. Run in UTC, so the pinned clock is midnight. */
+    async rangeCannotBeReadOnPoll() {
+      alertsReply = { alerts: [row(1), row(2)], truncated: false };
+      const realNow = Date.now;
+      Date.now = () => Date.UTC(2026, 5, 15, 12, 0, 0);
+      try {
+        const main = newMain(); await renderAlerts(main);
+        pickRange(main, "Time range", "today"); await settle();
+        out.rowsBefore = bodyRows(main).length;
+        out.readBefore = readsOf().pop();
+        Date.now = () => Date.UTC(2026, 5, 16, 0, 0, 0);
+        urls.length = 0;
+        await renderAlerts(main);
+        out.readsAtMidnight = readsOf().length;
+        out.table = main.all("table").length;
+        out.rows = bodyRows(main).length;
+        out.errorStrips = errorStrips(main);
+        out.refreshNotices = refreshNotices(main);
+      } finally {
+        Date.now = realNow;
+      }
+    },
+    /* The re-read after a dismiss the store accepted: the table no longer shows what its request returns, so a re-read that fails replaces it
+       with the error rather than listing the dismissed row as if nothing had changed. */
+    async dismissRereadFails() {
+      alertsReply = { alerts: [row(1), row(2)], truncated: false };
+      const main = newMain(); await renderAlerts(main);
+      const box = bodyRows(main)[0].all("input").find((i) => i.attrs.type === "checkbox");
+      box.checked = true; box.fire("change");
+      alertsReply = failedRead;
+      main.all("button").find((b) => b.textContent.startsWith("Dismiss Selected")).fire("click"); await settle();
+      out.posted = urls.filter((u) => u.includes("/api/alert-history/dismiss")).length;
+      out.status = main.all("span").find((s) => s.className.includes("dismiss-status")).textContent;
+      out.table = main.all("table").length;
+      out.rows = bodyRows(main).length;
+      out.errorStrips = errorStrips(main);
+      out.refreshNotices = refreshNotices(main);
     },
   };
   await scenarios[scenario]();
