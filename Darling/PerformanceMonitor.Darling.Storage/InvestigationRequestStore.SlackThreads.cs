@@ -105,8 +105,10 @@ ON CONFLICT (request_id) DO NOTHING";
     public Task<bool> MarkOnceAsync(Guid requestId, int routeId, int serverId, string postKey, string onceKey, CancellationToken cancellationToken) =>
         MarkOnceAsync(requestId, routeId, serverId, SlackThreadPosted, postKey, onceKey, cancellationToken);
 
-    /* The mark row is the service's own: the journal's owner-row trigger guards inserts, and the service owns the table, so its
-       delete needs no grant. Only a slack_thread_posted row goes, never a row of another kind that shares the once key's shape. */
+    /* Apart from retention's age-out (DarlingRetention), this is the only delete on the journal. It exists because a 429 means the
+       post did not go out, so its mark must go for the next pass to post it. The mark row is the service's own: the journal's
+       owner-row trigger guards inserts, and the service owns the table, so its delete needs no grant. Only a slack_thread_posted
+       row goes, never a row of another kind that shares the once key's shape. */
     internal const string ReleaseSlackMarkSql = @"
 DELETE FROM config.investigation_journal
 WHERE once_key = $1
