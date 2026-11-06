@@ -152,13 +152,15 @@ public partial class LocalDataService
            and the store holds it from the later of the two. Both are numbers computed here, written as invariant literals. A side
            that holds no hour divides by NULL, so its per-hour rate is NULL as Darling's NULLIF gives (a zero literal would depend
            on the engine's division by zero). When the store holds the whole baseline the two equal the old whole windows.
-           Darling's gates count a baseline that holds no hours as empty, because there a baseline row can have runs while it holds
-           none (its rows are filtered on last_execution_time). Here they need no such arm: the baseline rows are filtered on
-           collection_time < $2, and the data start is at or before the first row's collection_time (GetQueryWindowFloorAsync), so
-           a baseline with any row holds a positive number of hours (#6750). */
+           #7875: a baseline that holds no hours counts as empty, as Darling's gates count it (base_hours = 0). The baseline rows are
+           filtered on the interval's last_execution_time now, so the baseline can have rows while it holds no hours: the data start
+           is at or after the window start and the first collection picked up an interval that ran before it. Its timeout and error
+           counts are then not compared (baseEmpty below), a query with enough recent runs is listed as against an empty baseline, and
+           its per-hour rates stay NULL. */
         static string Hours(TimeSpan held) => held > TimeSpan.Zero ? held.TotalHours.ToString("R", CultureInfo.InvariantCulture) : "CAST(NULL AS DOUBLE)";
         var baseHours = Hours(startTime - (dataStart > baselineStartTime ? dataStart : baselineStartTime));
         var recentHours = Hours(endTime - (dataStart > startTime ? dataStart : startTime));
+        var baseEmpty = (startTime - (dataStart > baselineStartTime ? dataStart : baselineStartTime)) > TimeSpan.Zero ? "FALSE" : "TRUE";
         var limit = "CAST($" + limitIndex + " AS INTEGER)";
 
         command.CommandText = @"
@@ -326,10 +328,10 @@ flagged AS (
         (j.recent_cpu_ms - j.base_cpu_ms) * 100.0 / NULLIF(j.base_cpu_ms, 0) AS cpu_regression_percent,
         " + QueryStoreRegressionRules.CostTestSql("j") + @" AS is_cost,
         COALESCE(j.recent_aborted_execs >= " + QueryStoreRegressionRules.FailureMinRecentRuns + @"
-            AND (j.base_aborted_execs = 0
+            AND (j.base_aborted_execs = 0 OR " + baseEmpty + @"
                  OR (j.recent_aborted_execs / " + recentHours + @") >= " + QueryStoreRegressionRules.FailureRateMultiple + @" * (j.base_aborted_execs / " + baseHours + @")), false) AS is_timeouts,
         COALESCE(j.recent_exception_execs >= " + QueryStoreRegressionRules.FailureMinRecentRuns + @"
-            AND (j.base_exception_execs = 0
+            AND (j.base_exception_execs = 0 OR " + baseEmpty + @"
                  OR (j.recent_exception_execs / " + recentHours + @") >= " + QueryStoreRegressionRules.FailureRateMultiple + @" * (j.base_exception_execs / " + baseHours + @")), false) AS is_errors
     FROM joined AS j
 ),
@@ -351,11 +353,11 @@ qualified AS (
         END AS cost_rank,
         GREATEST(
             CASE WHEN NOT f.is_timeouts THEN 0
-                 WHEN f.base_aborted_execs = 0
+                 WHEN f.base_aborted_execs = 0 OR " + baseEmpty + @"
                       OR (f.recent_aborted_execs / " + recentHours + @") >= " + QueryStoreRegressionRules.FailureHighMultiple + @" * (f.base_aborted_execs / " + baseHours + @") THEN 3
                  ELSE 2 END,
             CASE WHEN NOT f.is_errors THEN 0
-                 WHEN f.base_exception_execs = 0
+                 WHEN f.base_exception_execs = 0 OR " + baseEmpty + @"
                       OR (f.recent_exception_execs / " + recentHours + @") >= " + QueryStoreRegressionRules.FailureHighMultiple + @" * (f.base_exception_execs / " + baseHours + @") THEN 3
                  ELSE 2 END) AS failure_rank,
         (f.recent_dur_ms - f.base_dur_ms) * f.recent_execs AS additional_duration_ms
