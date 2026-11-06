@@ -1141,7 +1141,7 @@ public sealed partial class DarlingWorker
                    the analysis read right after connecting, and it runs once per connect, outside any pass. */
                 else
                 {
-                    TrackDetachedRun(RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken, detachedDaily: true, runTimeHandOff: handOff));
+                    TrackDetachedRun(RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken, detachedDaily: true, runTimeHandOff: handOff, dueUtc: due));
                 }
             }
 
@@ -2777,9 +2777,15 @@ LIMIT 1";
     /// finds the slot held records none of it, so the slot stays due and the next tick tries again.
     /// </param>
     /// <param name="runOutcome">#4938: when given, set to whether this run succeeded.</param>
+    /// <param name="dueUtc">
+    /// The slot's due time, when the dispatch knows it. A daily run refused because its previous run has not finished counts
+    /// its lost slot from it, so the server's collection_cycle row starts the gap where the slot was due and not where the run
+    /// was refused, as a run-time collector's lost day does. Null when the caller has no slot, and the refusal is then counted
+    /// from the moment it happens.
+    /// </param>
     private async Task<int> RunOneAsync(
         ServerLoopState server, DarlingCollectorRunner runner, string collectorName, int? peerMaxAtDispatchMs, CancellationToken cancellationToken,
-        bool detachedDaily = false, RunTimeHandOff? runTimeHandOff = null, RunOutcome? runOutcome = null)
+        bool detachedDaily = false, RunTimeHandOff? runTimeHandOff = null, RunOutcome? runOutcome = null, DateTime? dueUtc = null)
     {
         var runtime = server.Runtime;
         if (runtime is null || !s_dispatch.TryGetValue(collectorName, out var run))
@@ -2839,12 +2845,13 @@ LIMIT 1";
                    get_collection_health reads) see it. Only a daily on the interval grid reaches this skip (the pass
                    does not hand off a run-time daily whose slot is held), and the grid counted this slot as run when
                    it dispatched it, so that run is moved to skipped: the slot reads as one skipped slot and no run, as
-                   a run-time collector's lost day does. The line states the permit backlog beside the skip, how many
-                   daily runs are waiting and for how long, without naming it as the cause: the gate cannot tell a
-                   previous run that is waiting for a permit from one that is still executing. */
+                   a run-time collector's lost day does, and it is counted from the slot's due time, so the row's gap
+                   starts where the slot was due. The line states the permit backlog beside the skip, how many daily
+                   runs are waiting and for how long, without naming it as the cause: the gate cannot tell a previous
+                   run that is waiting for a permit from one that is still executing. */
                 var skippedAt = DateTime.UtcNow;
                 _fleetGateStats?.MoveRunToSkipped();
-                server.CycleSkips.AddDailyLost(collectorName, 1, skippedAt);
+                server.CycleSkips.AddDailyLost(collectorName, 1, dueUtc ?? skippedAt);
                 _logger.LogWarning(
                     "  [{Server}] {Collector} skipped this run — its previous daily run has not finished (#4938). " +
                     "It runs again at its next daily interval. {Backlog}.",
@@ -3822,11 +3829,11 @@ LIMIT 1";
     /// </summary>
     private async Task RunDetachedAsync(
         ServerLoopState server, DarlingCollectorRunner runner, string collectorName, int? peerMaxAtDispatchMs, CancellationToken cancellationToken,
-        bool detachedDaily = false, RunTimeHandOff? runTimeHandOff = null)
+        bool detachedDaily = false, RunTimeHandOff? runTimeHandOff = null, DateTime? dueUtc = null)
     {
         try
         {
-            await RunOneAsync(server, runner, collectorName, peerMaxAtDispatchMs, cancellationToken, detachedDaily, runTimeHandOff);
+            await RunOneAsync(server, runner, collectorName, peerMaxAtDispatchMs, cancellationToken, detachedDaily, runTimeHandOff, dueUtc: dueUtc);
         }
         catch (OperationCanceledException)
         {

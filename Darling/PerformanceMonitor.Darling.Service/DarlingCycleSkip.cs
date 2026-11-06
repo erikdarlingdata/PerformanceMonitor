@@ -44,9 +44,10 @@ internal readonly record struct CycleSkipCauses(
     long OldestDailyWaitMs = 0);
 
 /// <summary>
-/// #5735: the slots one server has lost since its last <c>collection_cycle</c> row, summed over its collectors. The three
-/// places that step over a slot add to it (the grid advance and the run-time collector's lost day in
-/// <c>RunDueCollectorsAsync</c>, and <c>CountHeldSlots</c> while the memory launch guard holds bodies off); the server's next
+/// #5735: the slots one server has lost since its last <c>collection_cycle</c> row, summed over its collectors. The places
+/// that step over a slot add to it (the grid advance and the run-time collector's lost day in <c>RunDueCollectorsAsync</c>, the
+/// daily run refused behind its own unfinished run in <c>RunOneAsync</c>, and <c>CountHeldSlots</c> while the memory launch
+/// guard holds bodies off); the server's next
 /// body writes one row from it, at most one in <see cref="DarlingCycleSkip.RowMinInterval"/>, and counts keep adding in
 /// between. Thread-safe: the sweep loop's thread and the body's thread both touch it.
 /// </summary>
@@ -77,7 +78,9 @@ internal sealed class CycleSkipAccumulator
     /// <summary>Slots that came due while the memory launch guard held bodies off.</summary>
     internal void AddHeld(string collector, long slots, DateTime dueUtc) => Add(_held, collector, slots, dueUtc);
 
-    /// <summary>A run-time collector's day that was lost (the pass could not hand it off within the grace).</summary>
+    /// <summary>A daily collector's day that was lost: a run-time collector the pass could not hand off within its grace, or an
+    /// interval daily refused at its single-flight slot because its previous run had not finished. <paramref name="dueUtc"/> is
+    /// the slot that was due, for both kinds.</summary>
     internal void AddDailyLost(string collector, long slots, DateTime dueUtc) => Add(_daily, collector, slots, dueUtc);
 
     private void Add(Dictionary<string, long> map, string collector, long slots, DateTime dueUtc)
@@ -162,7 +165,7 @@ internal sealed class CycleSkipAccumulator
 /// #5735: words the report for the slots a server's loop stepped over. Darling's unit is one scheduled run of one
 /// collector (Lite's is a whole collection cycle), so a row's <c>fanout_item_count</c> is slots summed across the server's
 /// collectors, and the cause is one of: the previous body still running (no relaunch while in flight), the wait for a fleet
-/// slot, the memory launch guard's hold, or a run-time collector that lost its day. A host that slept, a clock that
+/// slot, the memory launch guard's hold, or a daily collector that lost its day. A host that slept, a clock that
 /// stepped and a pause write no row: <see cref="SkipCreditFloor"/> leaves those slots out of every count, which is the
 /// documented difference from Lite (it records a wait overrun for a slept computer). Static and clockless, so a test
 /// drives it with stamps.
@@ -265,7 +268,7 @@ internal static class DarlingCycleSkip
                     $", daily permits: {causes.DailyRunsWaiting} waiting, oldest {DailyRunLimiter.DescribeWait(TimeSpan.FromMilliseconds(causes.OldestDailyWaitMs))}")
                 : string.Empty;
             candidates.Add((
-                string.Create(CultureInfo.InvariantCulture, $"{dailySlots} run-time collector slot(s) lost their day ({lost}){backlog}"),
+                string.Create(CultureInfo.InvariantCulture, $"{dailySlots} daily collector slot(s) lost their day ({lost}){backlog}"),
                 null, snapshot.DailyLostSlots.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).First(), 0));
         }
 
