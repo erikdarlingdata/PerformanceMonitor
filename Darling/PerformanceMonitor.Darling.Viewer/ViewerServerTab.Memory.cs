@@ -521,6 +521,10 @@ public partial class ViewerServerTab
         data
             .Where(d => d.MemoryIndicatorsProcess >= 2 || d.MemoryIndicatorsSystem >= 2)
             .OrderBy(d => d.SampleTime)
+            /* #7691: a server with several memory nodes stores one record per node for the same event, so an event is one
+               (second, notification) whatever the node count; the grid still lists every row. */
+            .GroupBy(d => (d.SampleTime.Ticks / TimeSpan.TicksPerSecond, d.MemoryNotification))
+            .Select(g => g.First())
             .ToList();
 
     /// <summary>

@@ -2639,6 +2639,18 @@ ALTER TABLE config.config_monitored_servers
     /// </summary>
     private const string V249Sql = @"
 ALTER TABLE collect.pg_statement_stats ADD COLUMN IF NOT EXISTS database_name text;";
+    /// V250 (#7691): <c>collect.memory_pressure_events.memory_node_id</c>, the memory node a resource monitor ring buffer record came from. A server
+    /// with several memory nodes writes one record per node for the same event, so the grid listed one event once per node with nothing to tell the
+    /// rows apart. One nullable <c>integer</c>, no DEFAULT, no backfill, no scan of the table (V241's shape): a row stored before this rung never read
+    /// the node, so NULL is the honest value. Catalog-only, accepted on a compressed hypertable. <b>Appended LAST</b> after
+    /// <c>memory_indicators_system</c>, because the writer is a positional binary COPY with an explicit column list: a fresh store (the generated V1
+    /// table carries the column from the collector's payload, and this ALTER no-ops there) and an upgraded one share one physical column order. The
+    /// trailing <c>CREATE OR REPLACE VIEW</c> re-expands <c>v_memory_pressure_events</c>' pinned <c>SELECT *</c>. An older build writes its own column
+    /// list, so the column stays NULL for the rows it writes, and its reads name their columns, so the extra one changes nothing for it.
+    /// </summary>
+    private const string V250Sql = @"
+ALTER TABLE collect.memory_pressure_events ADD COLUMN IF NOT EXISTS memory_node_id integer;
+CREATE OR REPLACE VIEW v_memory_pressure_events AS SELECT * FROM memory_pressure_events;";
 
     /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
@@ -3147,6 +3159,7 @@ $rung$;";
         new Migration(247, "xe-session-databases", V247Sql),
         new Migration(248, "query-store-self-keys-old-statements", V248Sql),
         new Migration(249, "pg-statement-stats-database-name", V249Sql),
+        new Migration(250, "memory-pressure-node", V250Sql),
     };
 
     /// <summary>
