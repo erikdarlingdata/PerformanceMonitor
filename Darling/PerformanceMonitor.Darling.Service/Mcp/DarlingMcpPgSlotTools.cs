@@ -129,7 +129,7 @@ public sealed class DarlingMcpPgSlotTools
                         coveredClaim: ", so it is not itself retaining WAL or pinning vacuum through one."),
                     scope = "Per-instance. Slots live on the writer, so if this target is a replica, check "
                           + "the cluster's writer before concluding the cluster has no abandoned slot.",
-                }, McpHelpers.JsonOptions), emptyNotice), cancellationToken);
+                }, McpHelpers.JsonOptions), emptyNotice), cancellationToken, now.AddHours(-hours_back));
             }
 
             var slots = rows.Select(r =>

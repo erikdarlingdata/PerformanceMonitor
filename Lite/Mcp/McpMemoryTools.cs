@@ -233,7 +233,7 @@ public sealed class McpMemoryTools
                     ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty", "No memory pressure events found in the requested time range.",
                         (await McpQueryTools.WindowNoticeAsync(
                             () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.MemoryPressureEvents, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
-                            windowEnd.AddHours(-hours_back), windowEnd, "memory_pressure_events", emptyAnswer: true)).AsHints()));
+                            windowEnd.AddHours(-hours_back), windowEnd, "memory_pressure_events", emptyAnswer: true)).AsHints()), windowEnd.AddHours(-hours_back));
             }
 
             /* #4966: where this server's memory_pressure_events data starts for the window. The list is windowed on sample_time,

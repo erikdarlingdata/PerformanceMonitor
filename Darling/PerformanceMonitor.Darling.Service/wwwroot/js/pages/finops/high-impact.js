@@ -33,7 +33,8 @@ function withBandSev(data) {
 /* #7695: a query hash's figures are summed across every database that ran it, and database_name is the one with the
    most CPU. When more than one is in the total the cell says so, and the tooltip says what the figures cover. */
 function databaseCell(row) {
-  const name = row.database_name == null ? "" : String(row.database_name);
+  /* #7725: "(dropped)" after a database the server no longer lists, as the shared table cell does for every other grid. */
+  const name = (row.database_name == null ? "" : String(row.database_name)) + (row.database_dropped === true ? " (dropped)" : "");
   const n = Number(row.database_count);
   if (!(n > 1)) return el("span", { text: name });
   return el("span", {

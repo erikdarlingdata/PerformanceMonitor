@@ -62,7 +62,7 @@ public sealed class McpConfigHistoryTools
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "server_config", awsRdsKind: AwsRdsKind.None)
                     ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty",
                         $"No server configuration changes detected in the last {hours_back}h. Config is captured on connect, so at least two snapshots are needed to detect a change.",
-                        (await WindowNoticeAsync(dataService, QueryWindowRelation.ServerConfig, resolved.ServerId, hours_back, windowEnd, "server_config", emptyAnswer: true)).AsHints()));
+                        (await WindowNoticeAsync(dataService, QueryWindowRelation.ServerConfig, resolved.ServerId, hours_back, windowEnd, "server_config", emptyAnswer: true)).AsHints()), windowEnd.AddHours(-hours_back));
 
             var notice = await WindowNoticeAsync(dataService, QueryWindowRelation.ServerConfig, resolved.ServerId, hours_back, windowEnd, "server_config");
 
@@ -130,7 +130,7 @@ public sealed class McpConfigHistoryTools
                     ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.StatusForDatabase("empty",
                         $"No database configuration changes detected in the last {hours_back}h{McpDatabaseSelection.ForChosen(database is null ? null : new[] { database })}. Config is captured on connect, so at least two snapshots are needed to detect a change.",
                         database,
-                        (await WindowNoticeAsync(dataService, QueryWindowRelation.DatabaseConfig, resolved.ServerId, hours_back, windowEnd, "database_config", emptyAnswer: true)).AsHints()));
+                        (await WindowNoticeAsync(dataService, QueryWindowRelation.DatabaseConfig, resolved.ServerId, hours_back, windowEnd, "database_config", emptyAnswer: true)).AsHints()), windowEnd.AddHours(-hours_back));
 
             var notice = await WindowNoticeAsync(dataService, QueryWindowRelation.DatabaseConfig, resolved.ServerId, hours_back, windowEnd, "database_config");
 
@@ -205,7 +205,7 @@ public sealed class McpConfigHistoryTools
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "trace_flags", awsRdsKind: AwsRdsKind.None)
                     ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty",
                         NoTraceFlagChangesMessage(await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "trace_flags", asOfUtc: windowEnd), hours_back),
-                        (await WindowNoticeAsync(dataService, QueryWindowRelation.TraceFlags, resolved.ServerId, hours_back, windowEnd, "trace_flags", emptyAnswer: true)).AsHints()));
+                        (await WindowNoticeAsync(dataService, QueryWindowRelation.TraceFlags, resolved.ServerId, hours_back, windowEnd, "trace_flags", emptyAnswer: true)).AsHints()), windowEnd.AddHours(-hours_back));
 
             var notice = await WindowNoticeAsync(dataService, QueryWindowRelation.TraceFlags, resolved.ServerId, hours_back, windowEnd, "trace_flags");
 
