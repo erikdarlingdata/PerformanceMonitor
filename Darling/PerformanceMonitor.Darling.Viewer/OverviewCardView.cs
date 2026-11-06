@@ -77,9 +77,11 @@ public static class OverviewCardView
         }
 
         var matched = cards.Where(c => ServerOverviewFilter.Matches(term, SearchFields(c))).ToList();
+        /* Each card adds what the fleet-wide read adds for it: BlockingCountForBand is a SQL Server card's blocked
+           waits and a PostgreSQL card's captures that saw blocking, and null (no capture in the window) adds nothing. */
         var matchedTotals = new FleetTotals
         {
-            TotalBlockingEvents = matched.Sum(c => (long)c.BlockingCount),
+            TotalBlockingEvents = matched.Sum(c => (long)(c.BlockingCountForBand ?? 0)),
             TotalDeadlocks = matched.Sum(c => (long)c.DeadlockCount),
         };
         var rollup = FleetRollup.Build(matched, matchedTotals, totalServerCount: matched.Count);
