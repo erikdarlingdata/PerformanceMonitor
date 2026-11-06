@@ -300,12 +300,64 @@ public sealed class WebChartAxisBehaviourTests
     public void AFormatterWithoutAStep_ReadsAsBefore()
     {
         var f = Run().GetProperty("formatters");
-        Assert.Equal(new[] { "0 ms", "2 ms", "999 ms", "1.5 s" }, Strings(f.GetProperty("msNoStep")));
+        Assert.Equal(new[] { "400 µs", "2 ms", "999 ms", "1.5 s" }, Strings(f.GetProperty("msNoStep")));
         Assert.Equal("1%", f.GetProperty("pctNoStep").GetString());
         Assert.Equal(new[] { "5 ms", "7 ms" }, Strings(f.GetProperty("mapIndex")));
         Assert.Equal(new[] { "200 MB", "1,023 MB", "1.0 GB", "2.0 GB" }, Strings(f.GetProperty("mb")));
         Assert.Equal(new[] { "0.0 ms", "0.2 ms", "0.4 ms" }, Strings(f.GetProperty("msStep")));
         Assert.Equal(new[] { "1.00 s", "1.05 s", "1.10 s" }, Strings(f.GetProperty("msSeconds")));
+    }
+
+    /// <summary>#7726: Top Queries printed "0 ms" for an average of 0.03 ms over 1.5 million runs. A positive figure under 1 ms in a
+    /// cell is now whole microseconds, exactly zero stays "0 ms", and a trace flag prints with no thousands separator.</summary>
+    [Fact]
+    public void ASubMillisecondCell_PrintsMicroseconds_AndATraceFlagHasNoSeparator()
+    {
+        var f = Run().GetProperty("formatters");
+        Assert.Equal(new[] { "32 µs", "25 µs", "1 µs", "500 µs", "1 ms", "0 ms" }, Strings(f.GetProperty("msMicro")));
+        Assert.Equal(new[] { "3895", "1117", "12345" }, Strings(f.GetProperty("traceFlag")));
+    }
+
+    /// <summary>#7726: the unreachable-since sentence has no seconds and printed UTC on the page; it is now rewritten to local time like the
+    /// retry time beside it (a stamp with no seconds and no zone is left alone), and a backtick span in advice text is drawn as a code element
+    /// whose content stays text.</summary>
+    [Fact]
+    public void TheUnreachableSentenceIsLocal_AndAdviceBackticksBecomeCode()
+    {
+        var f = Run().GetProperty("formatters");
+        var expected = Strings(f.GetProperty("localExpected"));
+        // Opted in, no instant from the reply: the minute prints as the minute, never with an invented ":00".
+        Assert.Equal($"Server unreachable since {expected[0]}: refused. Next retry at {expected[1]}.", f.GetProperty("localSentence").GetString());
+        // Opted in with the reply's own since in the same minute: the sentence prints the tile's time, seconds included.
+        Assert.Equal($"Server unreachable since {expected[2]}: refused.", f.GetProperty("localWithSince").GetString());
+        // A since in another minute is not the sentence's instant: the sentence keeps its own minute.
+        Assert.Equal($"Server unreachable since {expected[0]}: refused.", f.GetProperty("localOtherMinute").GetString());
+        // Every caller that did not opt in keeps the server's own UTC text for the no-seconds stamp.
+        Assert.Equal($"{f.GetProperty("unreachable").GetString()!.Replace("2026-11-05 17:51:35 UTC", expected[1])}", f.GetProperty("localDefault").GetString());
+        Assert.Equal("saw 2026-11-05 16:52 here and 2026-11-05T16:52 there", f.GetProperty("noZoneKept").GetString());
+        Assert.Equal(
+            new[] { "t:Set ", "code:max server memory", "t: (see ", "code:sp_configure 'max server memory (MB)', 1000", "t:) and a stray ` tick <b>x</b>." },
+            Strings(f.GetProperty("adviceSpans")));
+    }
+
+    /// <summary>#7726: the real Server Connection descriptor (<c>sinceKey</c> and <c>localizeMinutes</c>) and the real server head
+    /// (<c>connect_down_since</c>) print the sentence's instant as the tile's local time, seconds included, and fall back to the local
+    /// minute when the reply carries no instant. A descriptor or head that dropped its wiring prints the bare minute and fails here.</summary>
+    [Fact]
+    public void TheServerConnectionPanelAndTheServerHead_PrintTheLocalTimeOfTheTile()
+    {
+        var all = Run();
+        var expected = Strings(all.GetProperty("formatters").GetProperty("localExpected"));
+        var w = all.GetProperty("wiring");
+        var withSeconds = $"Server unreachable since {expected[2]}: refused.";
+        var minuteOnly = $"Server unreachable since {expected[0]}: refused.";
+
+        Assert.Equal(withSeconds, w.GetProperty("panelSentence").GetString());
+        Assert.Equal(minuteOnly, w.GetProperty("panelSentenceNoSince").GetString());
+        Assert.Equal(withSeconds, w.GetProperty("head").GetProperty("badgeTitle").GetString());
+        Assert.Equal(withSeconds, w.GetProperty("head").GetProperty("reason").GetString());
+        Assert.Equal(minuteOnly, w.GetProperty("headNoSince").GetProperty("badgeTitle").GetString());
+        Assert.Equal(minuteOnly, w.GetProperty("headNoSince").GetProperty("reason").GetString());
     }
 
     private static SystemHealthRecord Snapshot(DateTime at, long system, long sql) =>
