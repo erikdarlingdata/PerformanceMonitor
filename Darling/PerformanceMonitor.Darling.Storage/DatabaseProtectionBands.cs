@@ -252,8 +252,8 @@ public static class DatabaseProtectionBands
         else
         {
             var parts = new List<string>();
-            if (full.Count > 0) parts.Add("full backup: " + string.Join(", ", full));
-            if (log.Count > 0) parts.Add("log backup: " + string.Join(", ", log));
+            if (full.Count > 0) parts.Add("Full backup: " + string.Join(", ", full));
+            if (log.Count > 0) parts.Add("Log backup: " + string.Join(", ", log));
             if (checkDb.Count > 0) parts.Add("CHECKDB: " + string.Join(", ", checkDb));
             text = string.Create(CultureInfo.InvariantCulture, $"{overdueDatabases} of {judged.Count} judged databases overdue. ") +
                    string.Join(". ", parts) + ".";
