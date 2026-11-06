@@ -29,11 +29,11 @@ public sealed class QueryStoreIntervalWideGateTests
     private static bool Rule(
         DateTime? filledSince = null, bool hasPending = false, DateTime? rawFloor = null,
         DateTime? windowStart = null, DateTime? windowEnd = null, DateTime? literalWindowEnd = null,
-        DateTime? appliedThrough = null, DateTime? tableFloor = null, TimeSpan? minWindow = null) =>
+        DateTime? appliedThrough = null, DateTime? tableFloor = null, TimeSpan? minWindow = null, DateTime? tableFloorAllServers = null) =>
         QueryStoreIntervalWide.UseTable(
             filledSince ?? WindowStart.AddDays(-1), hasPending, rawFloor,
             windowStart ?? WindowStart, windowEnd ?? WindowEnd, literalWindowEnd,
-            appliedThrough ?? WindowEnd, tableFloor ?? WindowStart.AddDays(-2), minWindow ?? MinWindow);
+            appliedThrough ?? WindowEnd, tableFloor ?? WindowStart.AddDays(-2), minWindow ?? MinWindow, tableFloorAllServers);
 
     [Fact]
     public void EveryClauseHolding_ReadsTheTable() => Assert.True(Rule());
@@ -81,6 +81,30 @@ public sealed class QueryStoreIntervalWideGateTests
     {
         Assert.True(Rule(tableFloor: WindowStart - QueryStoreIntervalWide.PurgeEdgeMargin));
         Assert.True(Rule(tableFloor: WindowStart - QueryStoreIntervalWide.PurgeEdgeMargin - TimeSpan.FromMinutes(1)));
+    }
+
+    [Fact]
+    public void Clause3_YoungServerFloor_PassesOnTheWholeTableFloor_AtOrBeyondTheMargin()
+    {
+        /* #7746: a server enrolled 30 hours ago has its first intervals as its whole history, so its own floor sits inside the margin.
+           The purge runs over the whole table with one cutoff, so the table's floor over every server bounds what it dropped for this
+           server too, and ten days back it is well past the margin. */
+        var young = WindowStart.AddHours(-6);
+        Assert.False(Rule(tableFloor: young));
+        Assert.True(Rule(tableFloor: young, tableFloorAllServers: WindowStart.AddDays(-10)));
+        Assert.True(Rule(tableFloor: young, tableFloorAllServers: WindowStart - QueryStoreIntervalWide.PurgeEdgeMargin));
+    }
+
+    [Fact]
+    public void Clause3_WholeTableFloorInsideTheMargin_OrUnread_LeavesTheServerOnRaw()
+    {
+        /* Every server young, or the whole-table floor not read: nothing shows the purge dropped nothing, so the answer is raw. */
+        var young = WindowStart.AddHours(-6);
+        Assert.False(Rule(tableFloor: young, tableFloorAllServers: WindowStart - QueryStoreIntervalWide.PurgeEdgeMargin + TimeSpan.FromMinutes(1)));
+        Assert.False(Rule(tableFloor: young, tableFloorAllServers: young));
+        Assert.False(Rule(tableFloor: young, tableFloorAllServers: null));
+        /* A whole-table floor above the server's own (a purge between the two reads) never widens what the server's own floor allows. */
+        Assert.False(Rule(tableFloor: WindowStart.AddHours(-25), tableFloorAllServers: WindowStart.AddHours(-1)));
     }
 
     [Fact]

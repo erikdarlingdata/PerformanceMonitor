@@ -472,6 +472,22 @@ FROM collect.query_store_interval_wide AS t
 WHERE t.server_id = $1;";
 
     /// <summary>
+    /// The table's floor over every server (#7746): the oldest interval any server has left. The purge is one pass over the whole
+    /// table with one cutoff (<c>first_execution_time &lt; now - 10 days</c>), oldest first, for every server at once, so every row it
+    /// has ever deleted, of any server, is below this minimum, exactly as every row it deleted of one server is below that server's own
+    /// floor (<see cref="PlainTableFloorSql"/>). Clause 3 of <see cref="UseTable"/> needs an upper bound on the intervals the table
+    /// dropped for the server it decides, and takes the lower of the two floors: a server whose own floor is young, because it was
+    /// enrolled a day or two ago and its first intervals are all the table has of it, is proved by this floor where its own cannot be.
+    /// Its own floor is not evidence of a purge; it is the age of its history. Read only when a server's own floor refused clause 3, once
+    /// per check through <see cref="StoreWideInputsCache"/>, on the same index the one-server statement uses, so it has that statement's
+    /// cost after a drain (#5581) and no more.
+    /// </summary>
+    public const string PlainTableFloorAllServersSql = @"
+SELECT
+    MIN(t.first_execution_time)
+FROM collect.query_store_interval_wide AS t;";
+
+    /// <summary>
     /// <see cref="PlainTableFloorSql"/> for many servers in ONE statement (#6807), and only for the servers that reach the gate's floor
     /// step: <c>$1</c> is the <c>int[]</c> of server ids, <c>$2</c> the clamp (<see cref="ClampedStart"/>) and <c>$3</c> the literal window
     /// end (NULL when there is none). The materialized <c>reach</c> keeps a server only when <see cref="ResolveReadAsync"/> would get past
@@ -894,7 +910,11 @@ FROM (
     /// <c>first_execution_time</c>, and a snapshot lands in raw up to <see cref="PurgeEdgeMargin"/> after its interval
     /// began. With <c>R</c> only at or above <c>H</c>, raw can still hold a snapshot of an interval that began below
     /// <c>H</c> and that the table dropped. A NULL <paramref name="tableFloor"/> means the table holds nothing
-    /// for the server, and clause 2 already refuses that case.</item>
+    /// for the server, and clause 2 already refuses that case. <c>H</c> is the lower of the server's own floor and
+    /// <paramref name="tableFloorAllServers"/>, the table's floor over every server (#7746, <see cref="PlainTableFloorAllServersSql"/>):
+    /// the purge runs over the whole table with one cutoff, so both floors bound every interval it dropped for this server, and a
+    /// newly enrolled server, whose own floor is the age of its history and not a purge edge, passes on the whole-table floor.
+    /// NULL leaves the server's own floor alone.</item>
     /// <item>A literal <paramref name="literalWindowEnd"/> (a custom range, MCP <c>as_of</c>) must be at or
     /// after <paramref name="appliedThrough"/>. NULL means an open end (a preset), which skips this clause
     /// entirely: the WPF preset's own end is the viewer's clock, not the store's, so comparing it against
@@ -915,7 +935,8 @@ FROM (
         DateTime? literalWindowEnd,
         DateTime appliedThrough,
         DateTime? tableFloor,
-        TimeSpan minWindow)
+        TimeSpan minWindow,
+        DateTime? tableFloorAllServers = null)
     {
         if (filledSince is not DateTime f || hasPending)
         {
@@ -930,6 +951,13 @@ FROM (
 
         if (tableFloor is DateTime h)
         {
+            /* #7746: both floors are at or above the last cutoff the purge applied, so the lower one is the tighter bound on the
+               intervals it dropped for this server. */
+            if (tableFloorAllServers is DateTime all && all < h)
+            {
+                h = all;
+            }
+
             var edgeFloor = windowStart - PurgeEdgeMargin;
             if (!((rawFloor is DateTime floor && floor >= h + PurgeEdgeMargin) || edgeFloor >= h))
             {
@@ -1305,6 +1333,13 @@ FROM (
         /// <summary>The table floors <see cref="PlainTableFloorsSql"/> answered; null until it ran, and after it failed.</summary>
         internal Dictionary<int, DateTime?>? TableFloors;
 
+        /// <summary>#7746: the table's floor over every server (<see cref="PlainTableFloorAllServersSql"/>), read at most once per check and
+        /// only when a server's own floor refused clause 3. <see cref="TableFloorAllServersRead"/> says it was read; a NULL answer is an
+        /// empty table.</summary>
+        internal DateTime? TableFloorAllServers;
+
+        internal bool TableFloorAllServersRead;
+
         /// <summary>A test's replacement for <see cref="PlainTableFloorsSql"/>, one that faults or sleeps, to drive the fallback. Scoped to
         /// the test's own async flow, so no other caller ever sees it.</summary>
         internal static readonly AsyncLocal<string?> TableFloorsSqlForTests = new();
@@ -1507,6 +1542,15 @@ FROM (
             }
 
             var useTable = UseTable(filledSince, hasPending, rawFloor, windowStart, windowEnd, literalWindowEnd, appliedThrough, tableFloor, minWindow);
+            if (!useTable && tableFloor is not null)
+            {
+                /* #7746: clauses 1, 2, 4 and 5 were checked above, so this refusal is clause 3's, on the server's own floor. The table's
+                   floor over every server bounds the purge's cutoff for this server too (PlainTableFloorAllServersSql), so the clause is asked
+                   once more with it. A server it refuses again reads raw, as before. A fault here is the decision's, and reads raw. */
+                var allServersFloor = await ReadTableFloorAllServersAsync(connection, storeWide, commandTimeoutSeconds, cancellationToken);
+                useTable = UseTable(filledSince, hasPending, rawFloor, windowStart, windowEnd, literalWindowEnd, appliedThrough, tableFloor, minWindow, allServersFloor);
+            }
+
             var clampedStart = ClampedStart(rawFloor, windowStart);
 
             /* Clause 6 (2026 field review): only checked once clauses 1-5 already say "table" — a store
@@ -1559,6 +1603,27 @@ FROM (
             logger?.LogWarning(ex, "Query Store wide-table source decision failed for server {ServerId}; reading raw", serverId);
             return new WideReadPlan(false, windowStart, windowStart, null, DecisionFailed: true);
         }
+    }
+
+    /// <summary>#7746: <see cref="PlainTableFloorAllServersSql"/>, through <paramref name="storeWide"/> when the caller passed one, so a
+    /// fleet check reads it once for every server whose own floor refused clause 3.</summary>
+    private static async Task<DateTime?> ReadTableFloorAllServersAsync(
+        NpgsqlConnection connection, StoreWideInputsCache? storeWide, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        if (storeWide is { TableFloorAllServersRead: true })
+        {
+            return storeWide.TableFloorAllServers;
+        }
+
+        await using var command = new NpgsqlCommand(PlainTableFloorAllServersSql, connection) { CommandTimeout = commandTimeoutSeconds };
+        var floor = await command.ExecuteScalarAsync(cancellationToken) as DateTime?;
+        if (storeWide is not null)
+        {
+            storeWide.TableFloorAllServers = floor;
+            storeWide.TableFloorAllServersRead = true;
+        }
+
+        return floor;
     }
 
     private readonly ConcurrentDictionary<int, byte> _coverageEnsured = new();
