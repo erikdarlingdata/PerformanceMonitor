@@ -42,6 +42,13 @@ public sealed class RawPurgeSourceGapLiveTests
     private const int PreGapOldestHours = 28 * 24;
     private const int PostGapOldestHours = 84;
 
+    /// <summary>The hole test's extra raw rows, hours back: the consumer's oldest bucket, and the bucket deleted
+    /// after it. Both are inside the consumer's 7-day horizon (168 hours) and older than raw's 4 days (96 hours),
+    /// and the hole is more than a day inside the horizon floor (about 167 hours), so a scan that starts a day
+    /// late misses it.</summary>
+    private const int HoleSeedOldestHours = 160;
+    private const int HoleHours = 150;
+
     /// <summary>The field case. RED before #7961: the periodic pass re-holds raw, because the consumer's oldest
     /// bucket (the first after the gap) is later than now - 7 days + 1 hour.</summary>
     [Fact]
@@ -111,11 +118,61 @@ public sealed class RawPurgeSourceGapLiveTests
         });
     }
 
+    /// <summary>The narrowed hole scan's negative (#7961 review round 1). The field case, plus raw rows 160 and 150
+    /// hours back, inside the consumer's 7-day horizon and older than raw's 4 days. The consumer's oldest bucket
+    /// is then the 160-hour one, so the gate's leading-edge check still says Covered and the consumer sits in
+    /// <c>HorizonCovered</c>. One bucket after its oldest (150 hours back) is then deleted: a hole the gate cannot
+    /// see, which only the scan finds. The scan must start at the consumer's horizon floor (about 167 hours back),
+    /// so it reads the hole and the raw purge records <c>hole</c>. A scan that starts at the drop range's end or a
+    /// day late (143 hours back) misses it and the purge runs.</summary>
+    [Fact]
+    public async Task ConsumerHoleInsideItsHorizonBelowRaw_RawStaysHeldAtTheHoleScan()
+    {
+        await RunAsync(async connection =>
+        {
+            var now = await SeedAndBackfillAsync(connection, shortConsumerFromHours: null, extraRawHoursBack: new[] { HoleSeedOldestHours, HoleHours });
+
+            await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, new CapturingTestLogger(), TimescaleSupport.RetentionSweepPass.Startup, default);
+            Assert.True(await RawArmedAsync(connection), "raw must arm at startup: the backfill gave both consumers every raw row");
+            Assert.True(await ConsumerArmedAsync(connection), "the consumer's own gate is Covered, so the startup pass must arm it");
+            await RunConsumerRetentionAsync(connection);
+
+            /* The hole sits one bucket after the consumer's oldest, so the leading-edge gate cannot see it. */
+            var holeBucket = now.AddHours(-HoleHours);
+            Assert.Equal(now.AddHours(-HoleSeedOldestHours), await OldestAsync(connection, ShortConsumer, "bucket"));
+            var materialization = await TimescaleSupport.ResolveMaterializationAsync(connection, ShortConsumer, default);
+            Assert.NotNull(materialization);
+            await using (var delete = new NpgsqlCommand(
+                $"DELETE FROM \"{materialization!.Value.Schema}\".\"{materialization.Value.Name}\" WHERE bucket = $1", connection)
+            { CommandTimeout = SetupTimeoutSeconds })
+            {
+                delete.Parameters.AddWithValue(DateTime.SpecifyKind(holeBucket, DateTimeKind.Unspecified));
+                Assert.Equal(1, await delete.ExecuteNonQueryAsync());
+            }
+
+            /* The test reaches the scan, not the gate: the measure says Covered and names the consumer as
+               judged within its own horizon, the only state in which the scan's floor moves. */
+            var measure = await TimescaleSupport.MeasureRawTierCoverageAsync(connection, Raw, DateTime.UtcNow, default);
+            Assert.Equal(TimescaleSupport.RetentionCoverage.Covered, measure.Verdict);
+            Assert.Contains(measure.HorizonCovered, c => c.Consumer == ShortConsumer);
+
+            await StampCurrentEpochAsync(connection);
+            var triggerLog = new CapturingTestLogger();
+            await DarlingWorker.TriggerRawPurgeCoreAsync(connection, triggerLog, default);
+
+            var record = await TimescaleSupport.ReadRawLastPurgeOutcomeAsync(connection, Raw, null, default);
+            Assert.NotNull(record);
+            Assert.True(record!.Outcome == "hole", $"the hole scan must find the missing bucket; outcome {record.Outcome}; log: {triggerLog.Joined}");
+            Assert.True(await OldestAsync(connection, Raw, "collection_time") <= now.AddHours(-PreGapNewestHours),
+                "raw must keep its rows from before the gap");
+        });
+    }
+
     /// <summary>Seeds one raw row an hour on both sides of the gap, then refreshes every rollup built on raw
     /// (dependency order, then the baselines) from before raw's oldest row, the way <c>--backfill-rollups</c>
     /// leaves them. With <paramref name="shortConsumerFromHours"/> set, the short consumer is refreshed only from
-    /// that many hours back. Returns the hour-aligned "now" the rows were placed against.</summary>
-    private static async Task<DateTime> SeedAndBackfillAsync(NpgsqlConnection connection, int? shortConsumerFromHours)
+    /// that many hours back. <paramref name="extraRawHoursBack"/> adds raw rows that many hours back, inside the gap. Returns the hour-aligned "now" the rows were placed against.</summary>
+    private static async Task<DateTime> SeedAndBackfillAsync(NpgsqlConnection connection, int? shortConsumerFromHours, int[]? extraRawHoursBack = null)
     {
         await ExecuteAsync(connection, $"SELECT add_retention_policy('collect.{Raw}', drop_after => interval '{TimescaleSupport.RawRetentionInterval}')");
 
@@ -132,12 +189,13 @@ SELECT
     100000 - n, $1::timestamp - (n * INTERVAL '1 hour'), $1::timestamp - (n * INTERVAL '1 hour'),
     10, 1000, 500, 900, 400
 FROM generate_series(1, $2) AS n
-WHERE n <= $3 OR n >= $4", connection) { CommandTimeout = SetupTimeoutSeconds })
+WHERE n <= $3 OR n >= $4 OR n = ANY($5)", connection) { CommandTimeout = SetupTimeoutSeconds })
         {
             seed.Parameters.AddWithValue(DateTime.SpecifyKind(now, DateTimeKind.Unspecified));
             seed.Parameters.AddWithValue(PreGapOldestHours);
             seed.Parameters.AddWithValue(PostGapOldestHours);
             seed.Parameters.AddWithValue(PreGapNewestHours);
+            seed.Parameters.AddWithValue(extraRawHoursBack ?? Array.Empty<int>());
             await seed.ExecuteNonQueryAsync();
         }
 
