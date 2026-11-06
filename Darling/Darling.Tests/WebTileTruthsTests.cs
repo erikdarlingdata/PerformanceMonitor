@@ -374,7 +374,8 @@ public sealed class WebTileTruthsTests
     public void TheRunnableTile_PrintsZeroForANullShare_AndExplainsTheFigure()
     {
         var runnable = Run().GetProperty("runnable");
-        Assert.Matches("^0[.,]0$", runnable.GetProperty("nullPercent").GetString()!);
+        /* #7729: a whole number prints without the decimal, so the null share reads 0. */
+        Assert.Equal("0", runnable.GetProperty("nullPercent").GetString()!);
         Assert.NotEqual("—", runnable.GetProperty("value").GetString());
         Assert.Contains("no other request was running", Strings(runnable.GetProperty("tooltip")).Single(), StringComparison.Ordinal);
     }

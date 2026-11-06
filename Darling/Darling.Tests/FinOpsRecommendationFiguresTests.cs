@@ -302,6 +302,23 @@ public sealed class FinOpsRecommendationFiguresTests
     }
 
     [Fact]
+    public void StorageTier_ADatabaseWithNoWrites_ReadsNoWrites_AndTheSentenceSaysItWasJudgedOnReads()
+    {
+        InEnUs(() =>
+        {
+            // #7706: no writes is not a 0.0 ms write latency. The database still qualifies on its reads.
+            var row = FinOpsRecommendationFigures.StorageTier(new[] { Io("quiet", 1000, 900, 0, 0), Io("busy", 1000, 900, 100, 100) })!;
+            Assert.Contains("quiet (read 0.9ms, no writes)", row.Detail, StringComparison.Ordinal);
+            Assert.Contains("busy (read 0.9ms, write 1.0ms)", row.Detail, StringComparison.Ordinal);
+            Assert.DoesNotContain("write 0.0ms", row.Detail, StringComparison.Ordinal);
+            Assert.EndsWith("A database with no writes was judged on reads only.", row.Detail, StringComparison.Ordinal);
+
+            var allWrite = FinOpsRecommendationFigures.StorageTier(new[] { Io("busy", 1000, 900, 100, 100) })!;
+            Assert.DoesNotContain("judged on reads only", allWrite.Detail, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
     public void StorageTier_ReadAverageOfExactlyFive_IsOut_JustUnderIsIn()
     {
         InEnUs(() =>

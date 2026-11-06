@@ -216,7 +216,6 @@ export const DASHBOARD_TEMPLATES = [
             columns: [
               { key: "deadlock_time", label: "Deadlock Time", format: "time" },
               { key: "victim_sql_text", label: "Victim SQL", wrap: true },
-              { key: "victim_process_id", label: "Victim" },
               { key: "process_summary", label: "Processes", wrap: true },
             ],
           },

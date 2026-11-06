@@ -312,10 +312,17 @@ public sealed class FleetRankedServer
     /// <summary>A short "why it needs attention" line, e.g. "CPU 97%, Blocking 6" or "Offline — no recent collection".</summary>
     public string Reason { get; init; } = "";
 
-    public string BandLabel => ServerHealthClassifier.BandLabel(Band);
+    /// <summary>#7729: true for a server listed only for a tile no band reads (an Identity capacity warning, an Agent alerts gap, an overdue backup or
+    /// CHECKDB), whose band is Healthy. The row says "Attention" in the Warning colour and not "Healthy" in green. <see cref="Band"/> stays what the
+    /// metrics say, and the fleet's band counts do not read this.</summary>
+    public bool HasAdvisoryTile { get; init; }
+
+    private bool ShowsAttention => HasAdvisoryTile && Band == FleetHealthBand.Healthy;
+
+    public string BandLabel => ShowsAttention ? "Attention" : ServerHealthClassifier.BandLabel(Band);
 
     /// <summary>The band's dot / label brush — the card's severity palette (offline = the Unknown grey).</summary>
-    public SolidColorBrush BandBrush => Band switch
+    public SolidColorBrush BandBrush => ShowsAttention ? s_warningBrush : Band switch
     {
         FleetHealthBand.Critical => s_criticalBrush,
         FleetHealthBand.Warning => s_warningBrush,
@@ -714,6 +721,7 @@ public sealed class FleetRollup
                 ServerId = s.ServerId,
                 DisplayName = s.DisplayName,
                 Band = ClassifyBand(s),
+                HasAdvisoryTile = s.HasAdvisoryTile,
                 Score = FleetHealthScore(s),
                 Reason = BuildReason(s),
             })

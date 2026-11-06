@@ -560,8 +560,11 @@ LIMIT $6";
     private async Task<List<JsonObject>> ReadRegressionTargetsAsync(int serverId, DateTime from, DateTime to, CancellationToken cancellationToken)
     {
         List<JsonObject> targets;
-        await using (var command = _store.CreateCommand(RegressionTargetsSql))
+        await using (var connection = await _store.OpenConnectionAsync(cancellationToken).ConfigureAwait(false))
         {
+            /* #7730: the key table's test in place of the marker-only text test once its backfill has run. */
+            var targetsSql = await QueryStoreSelfKeys.WithStoredTextKeyTestWhenReadyAsync(connection, null, CommandTimeoutSeconds, RegressionTargetsSql, cancellationToken).ConfigureAwait(false);
+            await using var command = new NpgsqlCommand(targetsSql, connection);
             command.CommandTimeout = CommandTimeoutSeconds;
             DarlingMcpReadParameters.AddInt(command, serverId);
             DarlingMcpReadParameters.AddTimestamp(command, to - RegressionLookback);

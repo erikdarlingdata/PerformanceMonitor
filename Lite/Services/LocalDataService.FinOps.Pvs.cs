@@ -8,9 +8,12 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Analysis;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -148,6 +151,32 @@ ORDER BY lower(p.database_name), p.database_name, p.collection_time";
         }
 
         return items;
+    }
+
+    /// <summary>
+    /// #7706: the latest PVS rows plus the one-sentence note for a database this server holds only as an availability group secondary
+    /// copy and that has no row here (<see cref="PvsSecondaryNote"/>, the same sentence Darling's tool and grid use). The note is built
+    /// for an empty row set too: a database filter that picks only secondary copies returns no rows, which is the case it explains. It
+    /// is judged at the time of the snapshot it explains (the rows' collection time, or the server's newest snapshot when the filter
+    /// matched none of it, or now when there is none), so an old snapshot is not judged against today's replica roles. It fails open:
+    /// stale or missing snapshots, a standalone server and Azure SQL Database give no note.
+    /// </summary>
+    public async Task<(List<PvsStatsRow> Rows, string? SecondaryNote)> GetPvsStatsLatestWithNoteAsync(
+        int serverId, IReadOnlyList<string>? databaseNames = null)
+    {
+        var rows = await GetPvsStatsLatestAsync(serverId, databaseNames);
+
+        /* The anchor is the snapshot the rows came from. A filter that matched none of the newest snapshot has no row to read it from, so
+           the unfiltered newest snapshot supplies it (the same read the tool's "other databases" probe makes). */
+        DateTime? snapshot = rows.Count > 0 ? rows[0].CollectionTime : null;
+        if (snapshot is null && databaseNames is { Count: > 0 })
+        {
+            var all = await GetPvsStatsLatestAsync(serverId);
+            if (all.Count > 0) snapshot = all[0].CollectionTime;
+        }
+
+        var secondary = await SecondaryReplicaScope.ReadAsync(_duckDb, serverId, PvsSecondaryNote.ScopeTimeUtc(snapshot), System.Threading.CancellationToken.None);
+        return (rows, PvsSecondaryNote.WithoutRow(secondary, rows.Select(r => r.DatabaseName), databaseNames));
     }
 
     /// <summary>

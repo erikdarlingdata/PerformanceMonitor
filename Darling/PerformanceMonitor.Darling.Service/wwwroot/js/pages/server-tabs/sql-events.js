@@ -194,3 +194,14 @@ export const DEFAULT_TRACE_COLUMNS = [
   { key: "text_data", label: "Details", wrap: true },
 ];
 
+/* #7729: the Default Trace read answers `by_event`, the count of each event over the whole window (not the page), so a window that
+   one noisy event fills (143 Server Memory Change rows) still shows the others, and a page that stops at its row limit says what it
+   left out. The note lists the first twelve by count and counts the rest. */
+export function defaultTraceByEventNote(data) {
+  const by = data && Array.isArray(data.by_event) ? data.by_event.filter((e) => e && e.event_name != null) : [];
+  if (by.length === 0) return null;
+  const top = by.slice(0, 12).map((e) => e.event_name + " " + Number(e.count).toLocaleString());
+  const rest = by.length - top.length;
+  return "Events in this window: " + top.join(", ") + (rest > 0 ? ", and " + rest + " more kinds" : "") + ".";
+}
+
