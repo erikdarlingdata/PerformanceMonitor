@@ -1654,13 +1654,17 @@ function vizLine(data, desc) {
   /* #7850: the reply's `covered` ranges are the time the collector's successful runs read; the fill is 0 only inside them. A reply without the field (an
      older service) fills the whole window, as #7839 did. */
   const covered = fill ? coveredRanges(getPath(data, "covered")) : null;
+  /* #7850: with a `covered` list every covered bucket has a point, so two neighbouring points more than one bucket apart have a stretch nobody
+     observed between them, and the line breaks there (a lone point is drawn as a dot). The chart's own spacing guess cannot see it: three events
+     hours apart are uneven steps, read as events, and were joined into one slope. Without `covered` the chart keeps its own rule, as before. */
+  const fillBucketMs = covered ? zeroFillStepMs(points, desc.xKey, getPath(data, "bucket_minutes")) : null;
   const chart = zoomableLineChart({
     points: fill ? zeroFilledPoints(points, desc.xKey, seriesCfg, getPath(data, "bucket_minutes"), win, covered) : points,
     xKey: desc.xKey,
     series,
     annotations,
     gapSeamMs: seam ? seam.getTime() : null,
-    bucketMs,
+    bucketMs: fillBucketMs != null ? fillBucketMs : bucketMs,
     formatValue,
     clampMax,
     /* A count chart's ticks are whole numbers: on a small domain a fractional step (0.2, 0.5) prints through the
@@ -1702,6 +1706,20 @@ export function coveredRanges(raw) {
 }
 
 /**
+ * The bucket step, in ms, of a zero-filled trend (#7850): the reply's own `bucket_minutes` when it states one, else the smallest step between the
+ * points it returned, and never under a minute. zeroFilledPoints lays its grid at this step and the chart breaks the line at a jump longer than it.
+ */
+export function zeroFillStepMs(points, xKey, bucketMinutes) {
+  let stepMs = Number(bucketMinutes) > 0 ? Number(bucketMinutes) * 60000 : Infinity;
+  if (!Number.isFinite(stepMs)) {
+    const times = [...new Set((Array.isArray(points) ? points : []).map((p) => { const d = p ? parseUtc(p[xKey]) : null; return d instanceof Date ? d.getTime() : NaN; }).filter(Number.isFinite))].sort((a, b) => a - b);
+    for (let i = 1; i < times.length; i++) stepMs = Math.min(stepMs, times[i] - times[i - 1]);
+    if (!Number.isFinite(stepMs)) stepMs = 60000;
+  }
+  return Math.max(60000, stepMs);
+}
+
+/**
  * The points of an event-count trend with every bucket of the window present (`zeroFill`). get_blocking_trend and get_deadlock_trend
  * return only the buckets that have events, so a bucket they leave out is a count of 0 and not a gap in collection: two reports a
  * minute apart must not read as a line floating between 1 and 4. The bucket is the reply's own (`bucket_minutes`) when it states one,
@@ -1724,12 +1742,7 @@ export function zeroFilledPoints(points, xKey, seriesCfg, bucketMinutes, win, co
   }
   const times = [...have.keys()].sort((a, b) => a - b);
   if (!times.length) return points;
-  let stepMs = Number(bucketMinutes) > 0 ? Number(bucketMinutes) * 60000 : Infinity;
-  if (!Number.isFinite(stepMs)) {
-    for (let i = 1; i < times.length; i++) stepMs = Math.min(stepMs, times[i] - times[i - 1]);
-    if (!Number.isFinite(stepMs)) stepMs = 60000;
-  }
-  stepMs = Math.max(60000, stepMs);
+  const stepMs = zeroFillStepMs(points, xKey, bucketMinutes);
   const start = win && Number.isFinite(Number(win.windowStart)) ? Number(win.windowStart) : times[0];
   const end = win && Number.isFinite(Number(win.windowEnd)) ? Number(win.windowEnd) : times[times.length - 1];
   /* The grid is aligned on the first returned point, so every returned point sits on it. At most 20,000 buckets are drawn. */

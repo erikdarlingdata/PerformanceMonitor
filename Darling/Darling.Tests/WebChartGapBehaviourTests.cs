@@ -365,6 +365,36 @@ public sealed class WebChartGapBehaviourTests
     }
 
     /// <summary>
+    /// #7850: a trend that fills the buckets inside its reply's covered ranges with 0 leaves the uncovered ones out, so two neighbouring points more than one
+    /// bucket apart have time nobody observed between them. The chart's own spacing guess reads three events hours apart as events and joined them into one
+    /// slope, so the panel hands the chart the fill's bucket and the line breaks at every such step. A lone point is drawn as a dot. A reply with no
+    /// covered field keeps the whole-window fill (73 points of 5 minute buckets over 6 hours) and the chart's own rule.
+    /// </summary>
+    [Fact]
+    public void ACoveredTrend_BreaksTheLineAtEveryStepOverTimeNobodyObserved()
+    {
+        var r = Run();
+        int[] Runs(string scenario) => r.GetProperty(scenario).GetProperty("runs").EnumerateArray().Select(e => e.GetInt32()).ToArray();
+        int Dots(string scenario) => r.GetProperty(scenario).GetProperty("dots").GetInt32();
+
+        // covered 0 to 120 and 210 to 360 minutes in 5 minute buckets: 24 buckets, then 30, and the hole between draws no point
+        Assert.Equal(new[] { 24, 30 }, Runs("coveredHole"));
+        Assert.Equal(0, Dots("coveredHole"));
+        // no covered field: today's drawing, one line over the whole window
+        Assert.Equal(new[] { 73 }, Runs("coveredAbsent"));
+        Assert.Equal(0, Dots("coveredAbsent"));
+        // three events hours apart and nothing covered: three dots and no line
+        Assert.Empty(Runs("coveredEmptyEvents"));
+        Assert.Equal(3, Dots("coveredEmptyEvents"));
+        // an event in the hole between covered ranges stands alone
+        Assert.Equal(new[] { 2, 2 }, Runs("coveredEventInHole"));
+        Assert.Equal(1, Dots("coveredEventInHole"));
+        // two events a bucket apart are neighbours, one short line
+        Assert.Equal(new[] { 2 }, Runs("coveredEmptyAdjacent"));
+        Assert.Equal(0, Dots("coveredEmptyAdjacent"));
+    }
+
+    /// <summary>
     /// #7692: the same quiet server, but through the page's own wiring instead of a strip object and a bucketKey the test builds. The Queries tab is built from
     /// SERVER_TABS and every read it makes answers with the 256 minute hole, so the three bucketKey descriptors in server-tabs.js, the bucketed flag in
     /// stripOf and the row times rankedSlicer hands stripGap are each in the path. Each chart and each strip breaks at the hole and nowhere else.
