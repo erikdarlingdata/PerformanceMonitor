@@ -203,6 +203,37 @@ public sealed class PlanRegressionDrillDownDailyParityLiveTests
         Assert.Equal(table.Select(r => r.GetRawText()), OnPairs(fallback).Select(r => r.GetRawText()));
     }
 
+    /// <summary>
+    /// #7873: a window floor that is a UTC-kind value (the regression baseline's raw read passes its UTC start's date)
+    /// binds as <c>timestamp</c> like a naive one, so the built days come back and nothing is warned about. Before, Npgsql
+    /// refused the bind, the read logged a warning and answered "none built", and the exact-bounds read ran instead.
+    /// </summary>
+    [Fact]
+    public async Task ReadBuiltDays_WithAUtcKindFloor_ReturnsTheBuiltDaysWithoutWarning()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        await SeedAsync(connection, ct);
+
+        for (var day = WindowStart; day < OpenDay; day = day.AddDays(1))
+        {
+            Assert.NotNull(await PlanRegressionDaily.BuildDayAsync(connection, ServerId, DateOnly.FromDateTime(day), TimeRangeEnd, ct));
+        }
+
+        var naive = await BuiltDaysAsync(connection, ct);
+        Assert.NotEmpty(naive);
+
+        var logger = new ListLogger();
+        var utcFloor = DateTime.SpecifyKind(WindowStart, DateTimeKind.Utc);
+        var built = await QueryStoreIntervalLatest.ReadBuiltDaysAsync(connection, null, ServerId, utcFloor, 60, logger, _ => false, ct);
+
+        Assert.False(logger.HasAtLeast(LogLevel.Warning), logger.Dump());
+        Assert.Equal(naive, built);
+    }
+
     /* ---------------------------------------------------------------------------------------------------------- */
 
     /// <summary>

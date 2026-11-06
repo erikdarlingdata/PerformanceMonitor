@@ -166,6 +166,43 @@ public sealed class McpLatestSnapshotStampTests : IClassFixture<SharedDuckDbFixt
         Assert.Equal(2, window.GetProperty("snapshots_in_window").GetInt64());
     }
 
+    [Fact]
+    public async Task GetMemoryGrants_LongWindow_GrantsIsTheNewestCollection_NotABucketMean()
+    {
+        /* #7879: 29.5 hours of one-minute collections, the last two differing (waiters 0 then 4, granted 100 then 900). Past about
+           25 hours the chart read's buckets are wider than the collection interval, so its last bucket was a mean of the
+           last minutes stamped at the bucket start. grants[] must be the newest collection itself. The 30 second offset keeps
+           the newest collection off every bucket grid line, so a bucket stamp can never equal its own time. */
+        var now = DateTime.UtcNow;
+        var newest = new DateTime(now.Ticks - (now.Ticks % TimeSpan.TicksPerMinute), DateTimeKind.Utc).AddHours(-2).AddSeconds(30);
+        const int collections = 1770;
+        await ExecAsync(@"
+INSERT INTO memory_grant_stats
+    (collection_id, collection_time, server_id, server_name, resource_semaphore_id, pool_id,
+     target_memory_mb, max_target_memory_mb, total_memory_mb, available_memory_mb, granted_memory_mb, used_memory_mb,
+     grantee_count, waiter_count, timeout_error_count, forced_grant_count, timeout_error_count_delta, forced_grant_count_delta)
+SELECT
+    -(1000 + i), $1 - to_minutes(CAST(i AS INTEGER)), $2, $3, 0, 2,
+    8000, 12000, 8000, 8000 - CASE WHEN i = 0 THEN 900 ELSE 100 END,
+    CASE WHEN i = 0 THEN 900 ELSE 100 END, CASE WHEN i = 0 THEN 900 ELSE 100 END,
+    3, CASE WHEN i = 0 THEN 4 ELSE 0 END, 4, 2, 0, 0
+FROM range($4) t(i)",
+            Naive(newest), _serverId, ServerName, collections);
+        var anchor = newest.AddMinutes(5).ToString("o");
+
+        var root = Parse(await McpMemoryTools.GetMemoryGrants(_dataService, _serverManager, ServerName, 30, anchor));
+
+        Assert.Equal(Stamp(newest), root.GetProperty("captured_at").GetString());
+        Assert.Equal(300, root.GetProperty("age_seconds").GetInt64());
+        var latest = Assert.Single(root.GetProperty("grants").EnumerateArray());
+        Assert.Equal(4, latest.GetProperty("waiter_count").GetInt32());
+        Assert.Equal(900d, latest.GetProperty("granted_memory_mb").GetDouble());
+        Assert.Equal(Stamp(newest), latest.GetProperty("collection_time").GetString());
+
+        var window = Assert.Single(root.GetProperty("window").EnumerateArray());
+        Assert.Equal(collections, window.GetProperty("snapshots_in_window").GetInt64());
+    }
+
     /* ───────────────────────── the search-bound pair: a snapshot older than the span is refused ───────────────────────── */
 
     [Fact]

@@ -1738,6 +1738,15 @@ public sealed partial class DarlingWorker
                 TryStartStoreMaintenanceTick(token => RunStoreMaintenanceTickAsync(token), stoppingToken);
             }
 
+            /* #7762: the Query Store compose rollup's own timer, every 15 minutes, on a fixed grid from the first pass. A tracked tick, one at a
+               time; the due stamp advances at the launch, so a tick that outlasts its slot skips the next one and never doubles up.
+               #4732: NextGridStamp writes at most one interval ahead, and s_composeStampInterval is the one it uses. */
+            if (StampIsDue(_nextComposeStampUtc, s_composeStampInterval, DateTime.UtcNow))
+            {
+                _nextComposeStampUtc = NextGridStamp(_nextComposeStampUtc, DateTime.UtcNow, s_composeStampInterval);
+                TryStartComposeStampTick(token => BuildQueryStoreComposeStampAsync(token), stoppingToken);
+            }
+
             /* #2068: the store self-metrics sweep. Capacity forecasting previously required ad-hoc
                archaeology over the TimescaleDB chunk catalog, whose raw window is 4 days — a measured 3x
                daily-ingest jump was only visible because the catalog still held both eras. This persists
@@ -1865,6 +1874,11 @@ public sealed partial class DarlingWorker
         if (_storeMetricsTick is { IsCompleted: false })
         {
             inFlightSweeps.Add(_storeMetricsTick);
+        }
+
+        if (_composeStampTick is { IsCompleted: false })
+        {
+            inFlightSweeps.Add(_composeStampTick);
         }
 
         /* #5479: the self-alert pass is tracked like the ticks above, and ends on the same cancellation. */

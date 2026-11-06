@@ -372,7 +372,7 @@ WHERE day <= $1 - interval '1 day';";
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = reason ?? string.Empty });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = timeoutSeconds });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = storeNow is { } at ? Unspecified(at) : DBNull.Value });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = QueryStoreComposeStamp.FailuresBeforeBackoff });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = QueryStoreComposeStamp.ComposeFailuresBeforeBackoff });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = QueryStoreComposeStamp.ExtendedBuildStatementTimeoutSeconds });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Interval, Value = QueryStoreComposeStamp.BackoffInterval });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = QueryStoreComposeStamp.StatementTimeoutSqlState });
@@ -396,8 +396,9 @@ WHERE day <= $1 - interval '1 day';";
     }
 
     /// <summary>
-    /// The days step of the hourly tick, after the hours: plan, then build each planned day in its own transaction, newest first. A build
-    /// that fails is logged, recorded (<see cref="RecordFailureSql"/>, the hours' back-off and extended timeout) and the loop goes on. No
+    /// The days step of the compose tick (every <see cref="QueryStoreComposeStamp.ComposeTickInterval"/>, #7762), after the hours: plan, then build each planned day in its own transaction, newest first. A build
+    /// that fails is logged, recorded (<see cref="RecordFailureSql"/>, the hours' back-off and extended timeout) and the loop goes on. A day is retried every tick until it has
+    /// failed <see cref="QueryStoreComposeStamp.ComposeFailuresBeforeBackoff"/> times in a row, which is three hours of ticks, then once a day. No
     /// build starts once <paramref name="elapsed"/> reaches <see cref="QueryStoreComposeStamp.MaxTickDuration"/>.
     /// </summary>
     public static async Task<TickResult> RunTickAsync(

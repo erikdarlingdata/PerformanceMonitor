@@ -62,7 +62,7 @@ public sealed class QueryTagRollupHashRouteLiveTests
     /// The shared seed anchored at <see cref="LiveClock.AnchoredEnd"/> (#5608), measures added, tags mapped, hours built, and a table-floor row
     /// 72 hours back per server (a plain store's gate wants the table's own floor a purge margin below the window).
     /// </summary>
-    private static async Task<Arranged> ArrangeAsync(CancellationToken ct, bool collectionTimeOrder = false, Func<DateTime, string>? preBuildSql = null)
+    private static async Task<Arranged> ArrangeAsync(CancellationToken ct, bool collectionTimeOrder = false, Func<DateTime, string>? preBuildSql = null, bool tailOfNewestTwoHours = false)
     {
         var (scratch, connection, source, hourNow) = await ComposeStampLiveSupport.ArrangeAsync(ct, build: false, at: LiveClock.AnchoredEnd());
         await ExecAsync(connection, @"
@@ -92,10 +92,21 @@ JOIN (VALUES (1, 'hash1', 'tag-a'), (1, 'hash2', 'tag-b'), (2, 'hash1', 'tag-a')
             await ExecAsync(connection, preBuildSql(hourNow), ct);
         }
 
-        Assert.Equal(28, await ComposeStampLiveSupport.BuildAllAsync(source, ct, ComposeStampLiveSupport.ClockWithin(hourNow)));
+        Assert.Equal(ComposeStampLiveSupport.BuiltHours, await ComposeStampLiveSupport.BuildAllAsync(source, ct, ComposeStampLiveSupport.ClockWithin(hourNow)));
         foreach (var server in Servers)
         {
             await ComposeStampLiveSupport.InsertRowAsync(connection, server, hourNow.AddHours(-72), 900_000 + server, ct);
+        }
+
+        if (tailOfNewestTwoHours)
+        {
+            /* #7762: the build now reaches the newest seeded hour (the lag is 90 minutes), so there is no tail after the newest built hour. The tests that
+               read the tail put the newest two hours back to never built: no ledger, hours or hash rows, as before the lag moved. */
+            var newestTwo = At(hourNow.AddHours(-2));
+            await ExecAsync(connection, $@"
+DELETE FROM collect.query_store_compose_stamp_hours WHERE hour >= TIMESTAMP '{newestTwo}';
+DELETE FROM collect.query_store_compose_stamp_built WHERE hour >= TIMESTAMP '{newestTwo}';
+DELETE FROM collect.query_store_hash_hourly WHERE hour >= TIMESTAMP '{newestTwo}'", ct);
         }
 
         return new Arranged(scratch, connection, source, hourNow);
@@ -735,7 +746,7 @@ WHERE server_id = 2 AND query_id IN (1, 2) AND collection_time >= TIMESTAMP '{At
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), "Set DARLING_TEST_PG to run this.");
         var ct = TestContext.Current.CancellationToken;
-        var a = await ArrangeAsync(ct, collectionTimeOrder: true);
+        var a = await ArrangeAsync(ct, collectionTimeOrder: true, tailOfNewestTwoHours: true);
         var bodySucceeded = false;
         try
         {
@@ -1245,7 +1256,7 @@ VALUES (TIMESTAMP '{at}', 1, 'dbX', 99, 99, 'Regular', TIMESTAMP '{at}', TIMESTA
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
-        var a = await ArrangeAsync(ct);
+        var a = await ArrangeAsync(ct, tailOfNewestTwoHours: true);
         var bodySucceeded = false;
         try
         {
