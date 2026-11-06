@@ -368,6 +368,22 @@ out.coveredEmptyEvents = coveredDrawn([30, 180, 270], []);
 out.coveredEventInHole = coveredDrawn([60, 150, 250], [spanOf(55, 65), spanOf(245, 255)]);
 /* two events a bucket apart with nothing covered are one short line, not two dots */
 out.coveredEmptyAdjacent = coveredDrawn([30, 35], []);
+/* #7850, the reply as the tools send it: get_blocking_trend and get_deadlock_trend state `bucket_minutes: 1` (DarlingMcpBlockingTools, the reply
+   dictionaries; the SQL buckets by minute), and the panel takes its step from it. The same three cases the guess used to get wrong. */
+const realDrawn = (events, covered, hours = 6) => {
+  const host = panels.VIZ.line({ hours_back: hours, bucket_minutes: 1, trend: events.map((m, i) => ({ time: iso(T0 + m * MIN), count: 3 - (i % 3) })), covered }, { ...trendPanelDesc, params: { server: "srv-a", hours } });
+  const pts = lineXs(host);
+  return { runs: pts.map((xs) => xs.length), dots: marks(host).dots };
+};
+/* nothing covered, events at 30, 180 and 270: three dots, and no line (the old guess of a 90 minute step joined 180 to 270) */
+out.realEmpty = realDrawn([30, 180, 270], []);
+/* a stop between 10:00 and 12:00 (minutes 60 to 180 here): two events, one on each side. Each side is its own 60 minute run of zeros and the event, no line across */
+out.realStop = realDrawn([30, 210], [spanOf(0, 60), spanOf(180, 240)]);
+/* covered all six hours, events 40 minutes apart: a zero in every minute between them, one line of 360 points */
+out.realFull = realDrawn([40, 80, 120], [spanOf(0, 360)]);
+/* the longest window the tools accept, 720 hours, covered end to end in minute buckets with three events: 43,200 points in ONE run, no dot. The fill once
+   stopped at 20,000 buckets and left the rest as dots. */
+out.realLongWindow = realDrawn([-40000, -20000, -100], [spanOf(-43200, 360)], 720);
 Date.now = realNow;
 
 fs.rmSync(scratch, { recursive: true, force: true });

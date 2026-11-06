@@ -836,7 +836,7 @@ public sealed class DarlingMcpBlockingTools
         }
     }
 
-    [McpServerTool(Name = "get_blocking_trend"), Description("Gets a time-series of blocked-process report counts per minute over time (reports, not blocked sessions: one wait can write several reports; when the window holds no reports for the chosen databases the count is the always-on DMV blocking snapshot's rows instead). Useful for identifying patterns (e.g., blocking spikes during batch jobs) or confirming whether blocking is a new, worsening, or resolved issue. The source key names the collector that answered, blocked-process-report or DMV snapshot; the DMV snapshot is used only when the blocked process reports have no rows for the chosen databases, so source can differ between filters. The covered list gives the stretches of the window the blocked-process-report collector's successful runs read, as start and end times: a minute outside them has no row because nobody was looking (the service was stopped, the server unreachable, the collector off), not because there was no blocking, and a minute inside them with no row is a count of 0.")]
+    [McpServerTool(Name = "get_blocking_trend"), Description("Gets a time-series of blocked-process report counts per minute over time (reports, not blocked sessions: one wait can write several reports; when the window holds no reports for the chosen databases the count is the always-on DMV blocking snapshot's rows instead). Useful for identifying patterns (e.g., blocking spikes during batch jobs) or confirming whether blocking is a new, worsening, or resolved issue. The source key names the collector that answered, blocked-process-report or DMV snapshot; the DMV snapshot is used only when the blocked process reports have no rows for the chosen databases, so source can differ between filters. The covered list gives the stretches of the window the blocked-process-report collector's successful runs read, as start and end times: a minute outside them has no row because nobody was looking (the service was stopped, the server unreachable, the collector off), not because there was no blocking, and a minute inside them with no row is a count of 0. The bucket_minutes key is the width of each count's bucket, always 1.")]
     public static Task<string> GetBlockingTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -914,6 +914,9 @@ public sealed class DarlingMcpBlockingTools
             {
                 ["server"] = resolved.DisplayName,
                 ["hours_back"] = hours_back,
+                /* #7850: the trend's SQL buckets by minute (DATE_TRUNC('minute', ...)), so the reply says so. The page lays its zero fill on
+                   this step and breaks the line at a jump longer than it; without the field it guessed the step from the events' spacing. */
+                ["bucket_minutes"] = TrendBucketMinutes,
                 ["effective_start"] = notice.EffectiveStart,
                 ["window_truncated"] = notice.WindowTruncated,
                 ["truncation_note"] = notice.TruncationNote,
@@ -938,10 +941,14 @@ public sealed class DarlingMcpBlockingTools
     }
 
     /// <summary>#7850: the reply's <c>covered</c> list, in the "o" round-trip text every other time in the trend replies uses.</summary>
+    /// <summary>#7850: the width of a bucket of the blocking and deadlock trends, in minutes. <see cref="DarlingBlockingTrendReader"/> groups by
+    /// <c>DATE_TRUNC('minute', ...)</c>; the replies state it so the page's zero fill needs no guess.</summary>
+    internal const int TrendBucketMinutes = 1;
+
     private static IEnumerable<object> CoveredJson(List<DarlingBlockingTrendReader.CoveredRange> covered) =>
         covered.Select(c => new { start = c.Start.ToString("o"), end = c.End.ToString("o") });
 
-    [McpServerTool(Name = "get_deadlock_trend"), Description("Gets a time-series of deadlock event counts per minute over time. Useful for identifying patterns or confirming whether deadlock issues are new, worsening, or resolved. The covered list gives the stretches of the window the deadlock collector's successful runs read, as start and end times: a minute outside them has no row because nobody was looking (the service was stopped, the server unreachable, the collector off), not because there was no deadlock, and a minute inside them with no row is a count of 0.")]
+    [McpServerTool(Name = "get_deadlock_trend"), Description("Gets a time-series of deadlock event counts per minute over time. Useful for identifying patterns or confirming whether deadlock issues are new, worsening, or resolved. The covered list gives the stretches of the window the deadlock collector's successful runs read, as start and end times: a minute outside them has no row because nobody was looking (the service was stopped, the server unreachable, the collector off), not because there was no deadlock, and a minute inside them with no row is a count of 0. The bucket_minutes key is the width of each count's bucket, always 1.")]
     public static async Task<string> GetDeadlockTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -1001,6 +1008,8 @@ public sealed class DarlingMcpBlockingTools
             {
                 ["server"] = resolved.DisplayName,
                 ["hours_back"] = hours_back,
+                /* #7850: the deadlock trend buckets by minute too (see get_blocking_trend). */
+                ["bucket_minutes"] = TrendBucketMinutes,
                 ["effective_start"] = notice.EffectiveStart,
                 ["window_truncated"] = notice.WindowTruncated,
                 ["truncation_note"] = notice.TruncationNote,

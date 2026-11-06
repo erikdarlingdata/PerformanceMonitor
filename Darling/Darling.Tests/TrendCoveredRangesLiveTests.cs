@@ -113,6 +113,8 @@ public sealed class TrendCoveredRangesLiveTests
                 var root = doc.RootElement;
                 Assert.Equal(1, root.GetProperty("trend").GetArrayLength());
                 Assert.Equal(ServerName, root.GetProperty("server").GetString());
+                /* #7850: the SQL buckets by minute and the reply says so; the page takes its zero-fill step from it. */
+                Assert.Equal(1, root.GetProperty("bucket_minutes").GetInt32());
                 var covered = root.GetProperty("covered");
                 var range = Assert.Single(covered.EnumerateArray());
                 Assert.Equal(now.AddMinutes(-50), TimeOf(range, "start"));
@@ -180,6 +182,7 @@ public sealed class TrendCoveredRangesLiveTests
                     Assert.Equal(1, root.GetProperty("trend").GetArrayLength());
                     Assert.Equal(ServerName, root.GetProperty("server").GetString());
                     Assert.Equal(1, root.GetProperty("hours_back").GetInt32());
+                    Assert.Equal(1, root.GetProperty("bucket_minutes").GetInt32());
                     Assert.True(root.TryGetProperty("effective_start", out _));
                     Assert.True(root.TryGetProperty("window_truncated", out _));
                     Assert.False(root.TryGetProperty("covered", out _), reply);
