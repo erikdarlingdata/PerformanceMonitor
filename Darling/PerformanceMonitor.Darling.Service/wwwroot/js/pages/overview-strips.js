@@ -209,7 +209,8 @@ const DATABASE_SCOPED = new Set(["io", "blocking"]);
  * hour with no usable bucket has no band), and a marker on every point above its own hour's band at or above the lane's floor (CPU 10,
  * waits 100, I/O 2) or below it.
  * Markers sit on the SQL CPU line only; blocking gets a band and no markers. A lane with no usable baseline gets NO band and NO
- * markers and a `baselineNote` that says why, never a band at 0. `opts.databaseFiltered` is true when the page's database filter
+ * markers and a `baselineNote` that says why (#7663: "not enough history" for a null lane, or "sat at 0" when the lane's steps are marked
+ * zero_activity), never a band at 0. `opts.databaseFiltered` is true when the page's database filter
  * narrows the I/O and blocking reads: their baseline is server-wide, so it is not drawn against a filtered line.
  */
 export function applyBaselines(strips, res, window, opts) {
@@ -222,8 +223,10 @@ export function applyBaselines(strips, res, window, opts) {
     if (!s.series.some((ser) => ser.points.length)) continue; /* nothing drawn: the strip's own note says so */
     if (opts && opts.databaseFiltered && DATABASE_SCOPED.has(s.key)) { s.baselineNote = "Baseline is server-wide: not drawn for a database filter."; continue; }
     if (!(s.key in ANOMALY_FLOOR) && s.key !== "blocking") continue; /* the buffer pool has no baseline */
-    const band = usableSteps(baselines ? baselines[s.key] : null);
-    if (!band.length) { if (reason) s.baselineNote = reason; continue; }
+    const lane = baselines ? baselines[s.key] : null;
+    const band = usableSteps(lane);
+    /* #7663: a metric that sat at exactly 0 (the reply marks its step zero_activity) is measured quiet, not missing history. */
+    if (!band.length) { if (reason) s.baselineNote = res.kind === "data" && sawZeroActivity(lane) ? ZERO_ACTIVITY_NOTE : reason; continue; }
     s.band = band;
     if (s.key in ANOMALY_FLOOR) {
       const floor = ANOMALY_FLOOR[s.key];
@@ -237,6 +240,14 @@ export function applyBaselines(strips, res, window, opts) {
     }
   }
   return strips;
+}
+
+/** #7663: the sentence for a lane whose every hour with samples read 0. */
+const ZERO_ACTIVITY_NOTE = "No band: this metric sat at 0 in this hour's history.";
+
+/** #7663: true when the reply marks a step of the lane as zero activity (samples held, none above 0). */
+function sawZeroActivity(lane) {
+  return !!lane && Array.isArray(lane.steps) && lane.steps.some((st) => st && st.zero_activity === true && st.sample_count > 0);
 }
 
 /** #7644: a lane's reply as band steps in epoch ms (mean +- 2 effective sigma, lower clamped at 0), in time order. A step without samples or a spread above zero is dropped, so that hour has no band. */
@@ -412,9 +423,29 @@ export function drawStrips(strips, domain, width, onZoom) {
         }
       }
     }
-    for (const m of s.markers || []) {
-      if (m.t < domain.from || m.t > domain.to) continue;
-      g.appendChild(svg("circle", { class: "strip-anomaly", cx: x(m.t), cy: y(Math.min(Math.max(m.v, yMin), yMax)), r: 3 }));
+    /* #7678: a run of neighbouring points above the band is ONE mark, the line's own segment over the run in the marker colour (a little thicker);
+       a point alone is one small dot. A circle per point hid the line on a quiet server (a third of the points marked) and grew with the point count,
+       whatever the plot's width. Neighbours are the strip's own points in order, with no gap between them (the line's gap rule). */
+    if (s.markers && s.markers.length && clipped.length && clipped[0].shown.length) {
+      const c = clipped[0];
+      const marked = new Set(s.markers.map((m) => m.t));
+      const gap = gapThresholdMs(c.points.map((p) => p.t), null, c.bucketMs);
+      let run = [];
+      const flush = () => {
+        if (run.length === 1) {
+          g.appendChild(svg("circle", { class: "strip-anomaly", cx: x(run[0].t), cy: y(Math.min(Math.max(run[0].v, yMin), yMax)), r: 2.5 }));
+        } else if (run.length > 1) {
+          const pts = run.map((p) => Math.max(plotL, Math.min(plotR, x(p.t))).toFixed(1) + "," + y(p.v).toFixed(1)).join(" ");
+          g.appendChild(svg("polyline", { class: "strip-anomaly-run", points: pts }));
+        }
+        run = [];
+      };
+      for (const p of c.shown) {
+        if (!marked.has(p.t) || p.t < domain.from || p.t > domain.to) { flush(); continue; }
+        if (run.length && p.t - run[run.length - 1].t > gap) flush();
+        run.push(p);
+      }
+      flush();
     }
     root.appendChild(g);
   });

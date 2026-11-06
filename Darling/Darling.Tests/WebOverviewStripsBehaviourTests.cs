@@ -263,7 +263,9 @@ public sealed class WebOverviewStripsBehaviourTests
         var drawn = r.GetProperty("drawn");
         Assert.Equal(1, drawn.GetProperty("cpu").GetProperty("band").GetInt32());
         Assert.Equal(1, drawn.GetProperty("cpu").GetProperty("mean").GetInt32());
-        Assert.Equal(26, drawn.GetProperty("cpu").GetProperty("dots").GetInt32());
+        /* #7678: the 26 marked points are two runs of neighbours (minutes 21..30 and 45..60): two segments, no circle per point. */
+        Assert.Equal(0, drawn.GetProperty("cpu").GetProperty("dots").GetInt32());
+        Assert.Equal(2, drawn.GetProperty("cpu").GetProperty("runs").GetInt32());
         Assert.Equal(0, drawn.GetProperty("waits").GetProperty("band").GetInt32());
         Assert.Equal(0, drawn.GetProperty("waits").GetProperty("dots").GetInt32());
         Assert.Equal(new[] { "No baseline yet: not enough history." },
@@ -301,6 +303,69 @@ public sealed class WebOverviewStripsBehaviourTests
 
         Assert.Equal(1, r.GetProperty("droppedStepBands").GetInt32());
         Assert.Equal(new[] { 10d }, r.GetProperty("droppedStepMarked").EnumerateArray().Select(e => e.GetDouble()).ToArray());
+    }
+
+    /// <summary>
+    /// #7663: a metric that sat at exactly 0 for the hour (the reply marks the step <c>zero_activity</c>) says so, and is never called "not enough
+    /// history". A lane with no steps, or a step with no samples, still says not enough history. A lane with a usable step beside the zero one
+    /// draws its band and no sentence.
+    /// </summary>
+    [Fact]
+    public void ALaneWithNoBand_SaysWhy_ZeroActivityIsNotNotEnoughHistory()
+    {
+        var r = Run("baselinereasons");
+        const string notEnough = "No baseline yet: not enough history.";
+        const string zero = "No band: this metric sat at 0 in this hour's history.";
+
+        foreach (var key in new[] { "zero", "mixed" })
+        {
+            Assert.Equal(zero, r.GetProperty(key).GetProperty("note").GetString());
+            Assert.Equal(0, r.GetProperty(key).GetProperty("band").GetInt32());
+            Assert.Equal(0, r.GetProperty(key).GetProperty("markers").GetInt32());
+        }
+        foreach (var key in new[] { "nullLane", "noSamples", "unmarkedZero" })
+            Assert.Equal(notEnough, r.GetProperty(key).GetProperty("note").GetString());
+
+        var both = r.GetProperty("zeroPlusBand");
+        Assert.Equal(JsonValueKind.Null, both.GetProperty("note").ValueKind);
+        Assert.Equal(1, both.GetProperty("band").GetInt32());
+
+        Assert.Equal(new[] { zero }, r.GetProperty("drawnNote").EnumerateArray().Select(e => e.GetString()!).ToArray());
+    }
+
+    /// <summary>
+    /// #7678: on a quiet server a third of the points are above the band. A run of neighbouring points above it is ONE mark (a segment over the
+    /// line), a lone point is one small dot, and no circle is drawn per point, at 1280 and at 2560 px. 600 points: three runs (60, 200 and 130
+    /// points) and two lone points.
+    /// </summary>
+    [Fact]
+    public void AboveBandRuns_AreOneMarkEach_NotACirclePerPoint()
+    {
+        var r = Run("markerruns");
+
+        foreach (var width in new[] { "w1280", "w2560" })
+        {
+            var w = r.GetProperty(width);
+            Assert.Equal(392, w.GetProperty("markedPoints").GetInt32());
+            Assert.Equal(3, w.GetProperty("runs").GetInt32());
+            Assert.Equal(new[] { 60, 200, 130 }, w.GetProperty("runPointCounts").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+            Assert.Equal(2, w.GetProperty("circles").GetInt32());
+            Assert.Equal(2, w.GetProperty("allCircles").GetInt32());
+        }
+    }
+
+    /// <summary>
+    /// #7678: a marked run is split where collection stopped, by the line's own gap rule, so a red polyline never crosses a stretch the service was
+    /// off. Ten marked points sit each side of a 100 minute hole: two runs of ten, not one run of twenty.
+    /// </summary>
+    [Fact]
+    public void AMarkedRun_IsSplitWhereCollectionStopped()
+    {
+        var r = Run("markerrungap");
+
+        Assert.Equal(20, r.GetProperty("markedPoints").GetInt32());
+        Assert.Equal(new[] { 10, 10 }, r.GetProperty("runPointCounts").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+        Assert.Equal(0, r.GetProperty("circles").GetInt32());
     }
 
     [Fact]

@@ -36,9 +36,8 @@ public sealed class OverviewIoReadFloorTests
     private static List<(double Time, double Value)> Slow(int count, double ms = 5) =>
         Enumerable.Range(0, count).Select(i => (T0.AddMinutes(i).ToOADate(), ms)).ToList();
 
-    /// <summary>The marker scatter the lane adds on top of the line: no line, just dots.</summary>
-    private static int RedDots(ScottPlot.WPF.WpfPlot chart) =>
-        chart.Plot.GetPlottables<Scatter>().Where(s => s.LineWidth == 0).Sum(s => s.Data.GetScatterPoints().Count());
+    /// <summary>The points the lane marked above the band: neighbours share one thicker segment and a lone point is a dot, so count them by colour.</summary>
+    private static int RedDots(ScottPlot.WPF.WpfPlot chart) => OverviewLaneMarks.MarkedCount(chart.Plot);
 
     private static int DrawIo(List<(double, double)> data, IReadOnlyList<long>? reads, long minReads, double minAnomalyValue = 2)
     {
