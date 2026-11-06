@@ -250,8 +250,8 @@ AND   collection_time <= $3";
                    use for what their source query selected — and never in Metadata, which is
                    Dictionary<string, double> by contract: every reader (scorer, advice, MCP, the finding
                    stores' JSON) treats a metadata value as a number, so an identifier there is either a
-                   compile error or a NaN. The counts and maxima below keep their existing meaning over
-                   ALL rows in the window; the name alone is scoped to the running-long rows. */
+                   compile error or a NaN. The counts are of distinct job runs (#7883), the maxima are
+                   over ALL rows in the window, and the name alone is scoped to the running-long rows. */
                 ObjectName = worstLongJobName,
                 Metadata = new Dictionary<string, double>
                 {

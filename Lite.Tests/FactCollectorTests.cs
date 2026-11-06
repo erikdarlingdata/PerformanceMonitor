@@ -584,6 +584,30 @@ public class FactCollectorTests : IClassFixture<SharedDuckDbFixture>
         Assert.Equal(3, jobs.Metadata["running_count"]);
     }
 
+    /// <summary>
+    /// #7883: the run key is the job id PLUS the run's start_time. The same job that finished and then ran
+    /// again (same job_id, a later start_time) is two runs, each seen on several ticks, so running_count is 2
+    /// and, with both runs long, so is running_long_count. Counting by job alone reads 1 and hides the second run.
+    /// </summary>
+    [Fact]
+    public async Task CollectFacts_RunningJobs_SameJobRunsTwiceAcrossManyTicks_CountsTwoRuns()
+    {
+        var facts = await SeedAndCollectAsync(async s =>
+        {
+            await s.SeedTestServerAsync();
+            // First run: three ticks that ended well before the second run began.
+            await s.SeedRunningJobTicksAsync("Nightly Index Maintenance", "job-a", ticks: 3, isRunningLong: true,
+                newestMinutesBeforePeriodEnd: 160);
+            // Second run of the same job: a later start_time, five ticks up to the usual newest tick.
+            await s.SeedRunningJobTicksAsync("Nightly Index Maintenance", "job-a", ticks: 5, isRunningLong: true);
+        });
+
+        var jobs = facts["RUNNING_JOBS"];
+        Assert.Equal(2, jobs.Value);
+        Assert.Equal(2, jobs.Metadata["running_long_count"]);
+        Assert.Equal(2, jobs.Metadata["running_count"]);
+    }
+
     [Fact]
     public async Task CollectFacts_SessionStats_ReturnsTotalConnections()
     {

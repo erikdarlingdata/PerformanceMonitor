@@ -2028,16 +2028,19 @@ VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8, $9, 100, $10, $11)";
     /// #7883: seeds ONE Agent job RUN observed across several collection ticks - the shape a job that stays
     /// past its limit leaves behind, since the collector writes one running_jobs row per running job per
     /// tick. Every tick carries the same job_id and the same start_time (the run's identity) with a growing
-    /// current duration; ticks are five minutes apart, newest at the usual seed tick.
+    /// current duration; ticks are five minutes apart, newest at the usual seed tick unless
+    /// <paramref name="newestMinutesBeforePeriodEnd"/> moves it, which is how a test seeds a SECOND run of
+    /// the same job (same job_id, a different start_time).
     /// </summary>
     internal async Task SeedRunningJobTicksAsync(
-        string jobName, string jobId, int ticks, bool isRunningLong, double percentOfAverage = 400)
+        string jobName, string jobId, int ticks, bool isRunningLong, double percentOfAverage = 400,
+        int newestMinutesBeforePeriodEnd = 10)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
         using var batch = new SeedBatch(connection);
 
-        var newest = TestPeriodEnd.AddMinutes(-10);
+        var newest = TestPeriodEnd.AddMinutes(-newestMinutesBeforePeriodEnd);
         var runStart = newest.AddSeconds(-(ticks * 300L + 3_600));
         for (var i = 0; i < ticks; i++)
         {
