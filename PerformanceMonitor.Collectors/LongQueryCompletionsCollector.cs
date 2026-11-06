@@ -279,7 +279,12 @@ SELECT
     logical_reads = evt.value('(data[@name=""logical_reads""]/value/text())[1]', 'bigint'),
     writes = evt.value('(data[@name=""writes""]/value/text())[1]', 'bigint'),
     row_count = evt.value('(data[@name=""row_count""]/value/text())[1]', 'bigint'),
-    result = evt.value('(data[@name=""result""]/value/text())[1]', 'nvarchar(60)'),
+    result =
+        COALESCE
+        (
+            evt.value('(data[@name=""result""]/text/text())[1]', 'nvarchar(60)'),
+            evt.value('(data[@name=""result""]/value/text())[1]', 'nvarchar(60)')
+        ),
     statement_text =
         COALESCE
         (

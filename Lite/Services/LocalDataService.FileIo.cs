@@ -51,7 +51,7 @@ SELECT
 FROM {fileIoRelation}
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM {fileIoRelation} WHERE server_id = $1){dbClause}
-ORDER BY (delta_stall_read_ms + delta_stall_write_ms) DESC";
+ORDER BY (delta_stall_read_ms + delta_stall_write_ms) DESC, database_name, file_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         foreach (var db in dbValues)

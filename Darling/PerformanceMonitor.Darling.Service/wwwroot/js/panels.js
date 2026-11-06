@@ -36,6 +36,7 @@ import {
   readErrorStrip,
   emptyStrip,
   noticeStrip,
+  captionStrip,
   keptWindowStrip,
   windowFloorStrip,
   leftOutStrip,
@@ -1624,7 +1625,12 @@ function vizLine(data, desc) {
     windowStart: win ? win.windowStart : null,
     windowEnd: win ? win.windowEnd : null,
   }, zoomId, chartZoomScope(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours));
-  return typeof footNote === "string" && footNote ? el("div", {}, [chart, noticeStrip(footNote)]) : chart;
+  /* #7699: `seamCaption` turns the seam instant into the sentence that says why the line changes grain there. A caption, not a warning. */
+  const seamCaption = seam && typeof desc.seamCaption === "function" ? desc.seamCaption(seam) : null;
+  const under = [];
+  if (typeof footNote === "string" && footNote) under.push(noticeStrip(footNote));
+  if (typeof seamCaption === "string" && seamCaption) under.push(captionStrip(seamCaption));
+  return under.length ? el("div", {}, [chart, ...under]) : chart;
 }
 
 /* bandlist: desc = { rowsKey, primaryKey, bandKey, bandLabelKey?, reasonKey?, navKey?, emptyText? } */
@@ -1717,16 +1723,19 @@ export function statusToSev(status) {
     case "SUCCESS":
     case "ANALYZED":
     case "ONLINE":
+    case "LOW": /* #7699: the Latch Stats Severity band words */
       return "Healthy";
     case "STALE":
     case "WARNING":
     case "REVIEW":
     case "PERMISSIONS":
     case "SKIPPED":
+    case "MEDIUM":
       return "Warning";
     case "FAILING":
     case "ERROR":
     case "OFFLINE":
+    case "HIGH":
       return "Critical";
     default:
       return "Unknown";

@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, loadingStrip, errorStrip, readErrorStrip, emptyStrip, noticeStrip, chartNote, fmtInt, fmtPlain, windowFromHours } from "../../util.js";
+import { el, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, loadingStrip, errorStrip, readErrorStrip, emptyStrip, noticeStrip, chartNote, fmtInt, fmtPlain, fmtStatusWord, windowFromHours } from "../../util.js";
 import { estimatedPlotPx } from "../../trend-points.js";
 import { getPanelSignal, setPanelSignal, VIZ } from "../../panels.js";
 import { zoomableLineChart, chartZoomScope, CATEGORICAL_COLORS } from "../../charts.js";
@@ -208,10 +208,12 @@ export function waitingTasksPanel(server, ctx) {
 
 export const LATCH_COLUMNS = [
   { key: "latch_class", label: "Latch Class" },
-  { key: "severity", label: "Severity", statusSev: true },
+  /* #7699: the band is judged on the latest interval only (DarlingLatchSpinlockReader), as the ms/s column beside it says, so the header names that window. */
+  { key: "severity", label: "Severity, latest interval", display: (r) => (r.severity == null || r.severity === "" ? "—" : fmtStatusWord(String(r.severity).toLowerCase())), statusSev: true },
   { key: "total_delta_wait_time_ms", label: "Wait", format: "ms" },
   { key: "total_delta_waiting_requests", label: "Requests", format: "int" },
-  { key: "avg_wait_ms_per_request", label: "Avg/req", format: "num2" },
+  /* #7699: the figure is milliseconds, beside a Wait column that prints in minutes. */
+  { key: "avg_wait_ms_per_request", label: "Avg ms/req", format: "num2" },
   /* #5644 W10: the panel reads "last 24 hours" and the totals are, but this rate is the latest interval's only. */
   { key: "wait_ms_per_second", label: "ms/s, latest interval", format: "num2" },
   { key: "description", label: "What it means", wrap: true },

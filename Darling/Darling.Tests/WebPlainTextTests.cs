@@ -339,6 +339,7 @@ public sealed class WebPlainTextTests
             "No active query snapshots on SQL2025 in the last 1 hour(s) matched database_name 'Sales' with blocking_only with wait_type 'LCK_M_X'.",
             "3 sp_server_diagnostics event(s) were captured for SQL2025 in the last 1 hour(s) and none qualified. Events ARE being captured, so this is the healthy answer for this read rather than missing data.",
             "TRUNCATED: 40 groups were in scope; only the top 25 (by name) are returned. Scope by server_name, or raise limit, to see the rest.",
+            "No long-running query completions found in the specified time range. The monitor's own statements are left out. Pass include_monitor=true to include them.",
         ], out _);
 
         Assert.Equal("The width was chosen to keep this answer near 1500 points; narrow the time range for finer points.", o[0]);
@@ -352,12 +353,15 @@ public sealed class WebPlainTextTests
         Assert.Contains("matched database 'Sales' with blocking queries only with wait type 'LCK_M_X'.", o[8]);
         Assert.Contains("so this is a normal result, not missing data.", o[9]);
         Assert.EndsWith("Select a single server to see the rest.", o[10]);
+        /* #7684 item 2: the page names its Monitor statements switch, not the MCP argument. */
+        Assert.EndsWith("The monitor's own statements are left out. Turn on Monitor statements to include them.", o[11]);
         foreach (var line in o)
         {
             Assert.DoesNotContain("raise limit", line);
             Assert.DoesNotContain("bucket_minutes", line);
             Assert.DoesNotContain("blocking_only", line);
             Assert.DoesNotContain("healthy answer for this read", line);
+            Assert.DoesNotContain("include_monitor", line);
         }
     }
 

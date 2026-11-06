@@ -618,6 +618,7 @@ export const SERVER_TABS = [
           format: "ms",
           span: 2,
           seamKey: "routing.raw_from",
+          seamCaption: queryStoreSeamCaption,
           emptyText:
             "No Query Store activity in this window.",
         }
@@ -1741,7 +1742,9 @@ export const POSTGRES_TABS = [
         /* #7409: Amazon Aurora has its own instrument and answers "not collected" here, so the panel is not drawn there. */
         true,
         /* #7428: what Backends Seen counts differs by instrument, and the answer says which instrument fed it. */
-        { noteFrom: pgWaitSamplingBackendsNote, noteQuiet: true }
+        { noteFrom: pgWaitSamplingBackendsNote, noteQuiet: true,
+          /* #7684 item 4: a true negative says one plain sentence; the tool's long text (instrument names, the sampler's floor) is behind "More detail". */
+          emptyLine: true }
       ),
       tablePanel(
         "OS CPU by Query (pg_stat_kcache)",
@@ -2063,6 +2066,17 @@ export function runningJobsEmptyText(ctx) {
   return ctx && ctx.offline === true
     ? "No running jobs can be shown: collection for this server is stale, so the last snapshot is not a current reading. See Collection Health."
     : "No SQL Agent jobs were running at the last collection — the normal state for most servers.";
+}
+
+/** #7699: the sentence under the Query Store Duration Trend. The line is hourly until routing.raw_from, then one point per collection (#7508),
+ *  and nothing on the page said so. The instant is in the browser's zone like the chart's axis, with its day when that is not today. */
+export function queryStoreSeamCaption(seam) {
+  if (!(seam instanceof Date) || isNaN(seam.getTime())) return null;
+  const time = seam.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const today = new Date();
+  const sameDay = seam.getFullYear() === today.getFullYear() && seam.getMonth() === today.getMonth() && seam.getDate() === today.getDate();
+  const at = sameDay ? time : seam.toLocaleDateString([], { month: "short", day: "numeric" }) + ", " + time;
+  return "Hourly averages until " + at + ", then one point per collection.";
 }
 
 /** The tab's note as a rendered strip, or null. Kept here so the shell has no opinion about its wording. A note can be
