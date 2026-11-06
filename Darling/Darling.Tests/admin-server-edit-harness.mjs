@@ -103,6 +103,10 @@ class FakeNode {
   get textContent() { return this._text + this.children.map((c) => c.textContent).join(""); }
   set textContent(v) { for (const c of [...this.children]) detach(c); this._text = String(v); }
   get id() { return this.attrs.id || ""; }
+  get tagName() { return this.tag.toUpperCase(); }
+  /* As a browser reflects it: an input's type attribute in lower case, "text" when it has none; another tag's attribute or "". */
+  get type() { return this.tag === "input" ? String(this.attrs.type || "text").toLowerCase() : this.attrs.type || ""; }
+  set type(v) { this.attrs.type = String(v); }
   contains(n) { for (let x = n; x; x = x.parent) if (x === this) return true; return false; }
   focus() { if (this.isConnected && !this.disabled) activeElement = this; }
   blur() { if (activeElement === this) activeElement = null; }
@@ -246,6 +250,8 @@ globalThis.fetch = async (url, init = {}) => {
   if (state.networkDown) throw new Error("connection refused");
   if (state.gate) await state.gate;
   const r = state.responder(method, u, sent);
+  /* An answer carrying `hold` (a promise) is held back until it resolves, so one read can be kept in flight while others answer. */
+  if (r.hold) await r.hold;
   return reply(r.status, r.body, r.raw);
 };
 
@@ -1215,6 +1221,54 @@ try {
         familyRow: all(main, (n) => n.tag === "td").map((n) => n.textContent),
       };
     },
+    /* #7953: Record feedback with the PUT held, the 60 s poll's render (renderAdmin with { poll: true }) while it is in flight, then the PUT
+       answers "recorded" and from then on the list carries the new line. Returns the list reads and lines after the poll and after the
+       answer, and the status line, so a test can see the new line is on the page without another poll. */
+    feedbackPoll: async () => {
+      state.canEdit = true;
+      const id = "11111111-1111-1111-1111-111111111111";
+      let stored = false;
+      const report = () => ({
+        request_id: id, server_name: "alpha", family: "blocking", first_metric: "Blocking", opened_at_utc: "2026-10-01T00:00:00Z",
+        reported_at_utc: "2026-10-01T00:10:00Z", agent_id: "agent-a", report_verdict: "real", root_cause: "the nightly load blocks", summary: null,
+        feedback: stored ? [{ verdict: "wrong", corrected_verdict: null, missed_step: null, comment: "never a real block", author: "web", recorded_at_utc: "2026-10-01T01:00:00Z" }] : [],
+      });
+      state.responder = (method, url) => {
+        if (method === "GET" && url === "/api/investigation-feedback") {
+          return { status: 200, body: { hours_back: 168, can_record: true, requests_returned: 1, truncated: false,
+            families: [{ family: "blocking", reported: 1, with_feedback: stored ? 1 : 0, marked_wrong: 0, agent_false_positives: 0, false_positives: 0 }], requests: [report()] } };
+        }
+        if (method === "PUT" && url === "/api/investigation-feedback/" + id) { stored = true; return { status: 200, body: { status: "recorded", request_id: id, author: "web" } }; }
+        return { status: 404, body: { error: "no such request " + url } };
+      };
+      const reads = () => requests.filter((r) => r.method === "GET" && r.url === "/api/investigation-feedback").length;
+      const lines = () => byAttr(main, "data-fb-line").map((n) => n.textContent);
+      await mountPage("feedback");
+      const field = (name) => byAttr(main, "data-fb-field", name)[0];
+      field("verdict").value = "wrong";
+      await fire(field("verdict"), "change");
+      await typeInto(field("comment"), "never a real block");
+      /* Pressing the button moves the focus onto it, as a click does in a browser. */
+      const save = byAttr(main, "data-fb-save", id)[0];
+      save.focus();
+      /* The gate is read at fetch time, so set around the click it holds the PUT alone; the poll's list read, made after it is cleared, answers at once. */
+      let release;
+      state.gate = new Promise((r) => { release = r; });
+      const clicked = fire(save, "click");
+      await settle(30);
+      state.gate = null;
+      page.renderAdmin(main, "feedback", { poll: true });
+      await settle(30);
+      const afterPoll = { reads: reads(), lines: lines() };
+      release();
+      await clicked;
+      await settle(30);
+      return {
+        afterPoll,
+        afterAnswer: { reads: reads(), lines: lines(), status: byAttr(main, "data-fb-status").map((n) => n.textContent) },
+        writes: requests.filter((r) => r.method === "PUT").length,
+      };
+    },
     /* #5903: Approve on the Pending Notes tab. The page acts on the answer's reread flag: it reads the list again after an
        approval or a 404 (the list is stale) and does NOT after a 403 refusal or a 500 (the list is right, the person is told why). */
     decide: async (kind) => {
@@ -1252,6 +1306,58 @@ try {
         rowsAfter: approveIds(),
         status: byAttr(main, "data-note-status").map((n) => n.textContent),
       };
+    },
+    /* #7954: the Admin writes that ask before they go. The param is "<target>/<answer>": the target is override (Remove on a threshold
+       override), switchOff or switchOn (the service-wide agent switch), undo (a non-plan agent change) or peopleIdentity, peopleGrant,
+       peopleDisable (the People tab with Ann's details open); the answer, no or yes, is what window.confirm answers, or for switchOn which
+       button of the Turn on panel is pressed. Returns the confirm sentences asked, every PUT sent (url, body), and whether the Turn on panel
+       was on the page after the first press and after the answer. */
+    confirmWrites: async (param) => {
+      const [target, answer] = param.split("/");
+      state.canEdit = true;
+      state.confirmAnswer = answer === "yes";
+      state.responder = (method, url) => {
+        if (method === "GET" && url === "/api/fleet") return { status: 200, body: { cards: [{ server_id: 1, display_name: "Alpha" }], tags: [] } };
+        if (method === "GET" && url === "/api/threshold-overrides") {
+          return { status: 200, body: { can_edit: true, servers: [{ server_name: "alpha" }], tags: [], keys: [{ key: "cpu_percent", min: 1, max: 100 }],
+            overrides: [{ server_id: 1, server_name: "alpha", tag_id: null, key: "cpu_percent", database: null, value: 95, global_value: 90, set_by: "person:ann", request_id: null, updated_at: "2026-10-01T00:00:00Z" }] } };
+        }
+        if (method === "GET" && url === "/api/agent-changes") {
+          return { status: 200, body: { enabled: target !== "switchOn", can_decide: true, refusals: [], changes: [{
+            called_id: "c-1", called_at_utc: "2026-10-01T00:00:00Z", server_name: "alpha", server_id: 1, kind: "module_recompile", tool: "recompile_module", actor: "agent-a",
+            reason: "stale plan", result: "done", result_detail: null, undone_at_utc: null, undone_by: null, muted_alerts: 0, force_review: null, can_undo: true }] } };
+        }
+        if (method === "GET" && url === "/api/people") {
+          return { status: 200, body: { can_decide: true, signed_in_admin: true, sign_in_key: "key-of-this-session", people: [{
+            person_id: 1, display_name: "Ann", enabled: true, updated_by: "person:bob", updated_at_utc: "2026-10-01T00:00:00Z",
+            identities: [{ identity_id: 11, kind: "web", external_id: "abcdefghijklmnop" }],
+            grants: [{ grant_id: 21, capability: "approve", kinds: ["kill_session"], scope: "all" }] }] } };
+        }
+        if (method === "PUT") return { status: 200, body: { status: "updated", message: "Done." } };
+        return { status: 404, body: { error: "no such request " + url } };
+      };
+      const tab = target === "override" ? "overrides" : target.startsWith("people") ? "people" : "agent-changes";
+      await mountPage(tab);
+      if (tab === "people") await clickText(main, "Open");
+      const confirmsBefore = confirms.length;
+      const puts = () => requests.filter((r) => r.method === "PUT").map((r) => ({ url: r.url, body: r.body }));
+      const panels = () => byAttr(main, "role", "alertdialog").length;
+      const press = async (label) => {
+        const b = byAttr(main, "aria-label", label).find((n) => n.tag === "button") || buttons(main, label)[0];
+        if (!b) throw new Error("no button " + label);
+        await fire(b, "click");
+        await settle(30);
+      };
+      const labels = {
+        override: "Remove cpu_percent for alpha", switchOff: "Turn off agent changes", undo: "Undo agent change c-1",
+        peopleIdentity: "Remove Web sign-in abcdefgh...", peopleGrant: "Remove grant Approve server actions (Kill sessions), All servers", peopleDisable: "Disable Ann",
+        switchOn: "Turn on agent changes",
+      };
+      await press(labels[target]);
+      const panelShown = panels();
+      /* With no panel on the page there is nothing to answer; the result then shows the first press alone. */
+      if (target === "switchOn" && panelShown) await press(answer === "yes" ? "Turn them on" : "Cancel");
+      return { confirms: confirms.slice(confirmsBefore), writes: puts(), panelShown, panelAfter: panels() };
     },
     /* #7558: the Feedback tab with no reports in the window (param is the read's hours_back): returns the text the empty family table draws. */
     feedbackEmpty: async (hours) => {
@@ -1324,6 +1430,115 @@ try {
       await settle(30);
       return { reportNoticeShown, noticeAtInherit, noticeAtInvestigate, noticeAtOff, writes: requests.filter((r) => r.method === "PUT").map((r) => ({ method: r.method, url: r.url, body: r.body })) };
     },
+    /* #7952: Edit on route 7, Severity changed, Save: the service answers 409 (the route was changed elsewhere) and from then on the routes
+       read carries the newer modified_at_utc. Returns, after the refusal, the strips and the Save button's label; after the Save on screen is
+       pressed once more, the expected_modified_at of every PUT so far; and after Edit then Save, the PUTs and the strips. A PUT whose
+       expected_modified_at is the newer version answers 200. */
+    routeConflict: async () => {
+      state.canEdit = true;
+      const older = "2026-01-01T00:00:00.1234567Z";
+      const newer = "2026-02-02T00:00:00.7654321Z";
+      let saves = 0;
+      const route = () => ({ route_id: 7, metric_match: "blocking", match_kind: "exact_metric", family: "performance", configured_channels: [], smtp_recipients: [],
+        enabled: true, modified_at_utc: saves === 0 ? older : newer, scope_server_id: null, scope_tag_id: null, agent_level: null, agent_max_per_hour: 10,
+        agent_max_per_day: 50, agent_lease_minutes: 30, agent_expiry_minutes: 120, send_resolutions: null, fallback_route_id: null, severities: "critical", report_notice: "off" });
+      state.responder = (method, url, sent) => {
+        if (method === "GET" && url === "/api/read/get_notification_routes") return { status: 200, body: { routes: [route()] } };
+        if (method === "GET" && url === "/api/agent-setup/access") return { status: 200, body: { can_edit_routes: true, can_edit_profiles: true } };
+        if (method === "PUT" && url === "/api/notification-routes/7") {
+          saves++;
+          if (sent.expected_modified_at !== newer) return { status: 409, body: { error: "This route was changed or removed since you opened it. Reload it and make the change again." } };
+          return { status: 200, body: { status: "updated", route_id: 7 } };
+        }
+        return { status: 404, body: { error: "no such request " + url } };
+      };
+      const strips = () => all(main, (n) => n.classList.contains("strip")).map((n) => n.className + "|" + n.textContent);
+      const saveLabel = () => byAttr(main, "data-action", "save-route").map((n) => n.textContent);
+      const puts = () => requests.filter((r) => r.method === "PUT").map((r) => r.body.expected_modified_at);
+      await mountPage("routes");
+      await fire(byAttr(main, "data-action", "edit-route")[0], "click");
+      await settle(30);
+      await typeInto(field("severities"), "warning");
+      await fire(byAttr(main, "data-action", "save-route")[0], "click");
+      await settle(30);
+      const afterRefusal = { strips: strips(), saveLabel: saveLabel(), puts: puts() };
+      await fire(byAttr(main, "data-action", "save-route")[0], "click");
+      await settle(30);
+      const afterSecondPress = { saveLabel: saveLabel(), puts: puts() };
+      await fire(byAttr(main, "data-action", "edit-route")[0], "click");
+      await settle(30);
+      await typeInto(field("severities"), "warning");
+      await fire(byAttr(main, "data-action", "save-route")[0], "click");
+      await settle(30);
+      return { afterRefusal, afterSecondPress, afterEditAndSave: { strips: strips(), saveLabel: saveLabel(), puts: puts() } };
+    },
+    /* #7952, #7954: a write whose button is disabled while it is in flight. The param is the button pressed: routeSave (Edit on route 7, Severity
+       changed, then Save), routeDelete (Delete on route 7, the confirm answered yes), profileSave (text typed, then Save profile), or on the Agent
+       changes tab agentSwitch (Turn off agent changes, the confirm answered yes) and agentUndo (Undo on change c-1, the confirm answered yes). The
+       write is held at the service; while it is held the button is pressed again, as a click (which a disabled button never receives) and forced
+       past the disabled state; then the answer lands. Returns, during the hold, whether the pressed button is disabled, the writes sent so far and
+       `tracked`, the disabled state of the Agent changes tab's switch and Undo buttons (null off that tab); after the second press, the writes; and
+       after the answer, the writes, whether the pressed button is disabled, and `tracked` again. */
+    inFlight: async (target) => {
+      const agent = target.startsWith("agent");
+      const route = { route_id: 7, metric_match: "blocking", match_kind: "exact_metric", family: "performance", configured_channels: [], smtp_recipients: [],
+        enabled: true, modified_at_utc: "2026-01-01T00:00:00.1234567Z", scope_server_id: null, scope_tag_id: null, agent_level: null, agent_max_per_hour: 10,
+        agent_max_per_day: 50, agent_lease_minutes: 30, agent_expiry_minutes: 120, send_resolutions: null, fallback_route_id: null, severities: "critical", report_notice: "off" };
+      let routes = [route];
+      if (agent) {
+        state.canEdit = true;
+        state.responder = (method, url) => {
+          if (method === "GET" && url === "/api/agent-changes") {
+            return { status: 200, body: { enabled: true, can_decide: true, refusals: [], changes: [{
+              called_id: "c-1", called_at_utc: "2026-10-01T00:00:00Z", server_name: "alpha", server_id: 1, kind: "module_recompile", tool: "recompile_module", actor: "agent-a",
+              reason: "stale plan", result: "done", result_detail: null, undone_at_utc: null, undone_by: null, muted_alerts: 0, force_review: null, can_undo: true }] } };
+          }
+          if (method === "PUT") return { status: 200, body: { status: "updated" } };
+          return { status: 404, body: { error: "no such request " + url } };
+        };
+      } else {
+        scopeSetup("ok", (method, url) => {
+          if (method === "GET" && url === "/api/read/get_notification_routes") return { status: 200, body: { routes } };
+          if (method === "GET" && url === "/api/environment-profiles") return { status: 200, body: { can_edit: true, max_length: 4000, profiles: [] } };
+          if (method === "PUT" && url === "/api/notification-routes/7") return { status: 200, body: { status: "updated", route_id: 7 } };
+          if (method === "DELETE" && url === "/api/notification-routes/7") { routes = []; return { status: 200, body: { status: "deleted", route_id: 7 } }; }
+          if (method === "PUT" && url === "/api/environment-profiles") return { status: 200, body: { status: "updated" } };
+          return null;
+        });
+      }
+      await mountPage(agent ? "agent-changes" : target === "profileSave" ? "profiles" : "routes");
+      const switchButton = () => buttons(main, "Turn off agent changes")[0] || null;
+      const undoButton = () => byAttr(main, "aria-label", "Undo agent change c-1").find((n) => n.tag === "button") || null;
+      let pressed;
+      if (target === "routeSave") {
+        await fire(byAttr(main, "data-action", "edit-route")[0], "click");
+        await settle(30);
+        await typeInto(field("severities"), "warning");
+        pressed = byAttr(main, "data-action", "save-route")[0];
+      } else if (target === "routeDelete") pressed = byAttr(main, "data-action", "delete-route")[0];
+      else if (target === "profileSave") {
+        await typeInto(byAttr(main, "data-field", "profile-text")[0], "Production fleet.");
+        pressed = byAttr(main, "data-action", "save-profile")[0];
+      } else if (target === "agentSwitch") pressed = switchButton();
+      else if (target === "agentUndo") pressed = undoButton();
+      if (!pressed) throw new Error("no button for " + target);
+      const writes = () => requests.filter((r) => r.method !== "GET").map((r) => r.method + " " + r.url);
+      const tracked = () => (agent ? { switch: switchButton() ? switchButton().disabled : null, undo: undoButton() ? undoButton().disabled : null } : null);
+      let release;
+      state.gate = new Promise((r) => { release = r; });
+      const first = fire(pressed, "click");
+      await settle(30);
+      const during = { disabled: pressed.disabled, writes: writes(), tracked: tracked() };
+      /* The second press is not awaited here: a write it wrongly sent would be held at the gate with the first, and lands with it. */
+      const again = Promise.all([fire(pressed, "click"), forceClick(pressed)]);
+      await settle(30);
+      const afterSecondPress = { writes: writes() };
+      state.gate = null;
+      release();
+      await Promise.all([first, again]);
+      await settle(30);
+      return { during, afterSecondPress, after: { disabled: pressed.disabled, writes: writes(), tracked: tracked() } };
+    },
     /* #7611: the Database Protection ages on the Settings tab. The param is "<seat>" or "<seat>/<hours>,<minutes>,<hours>": the seat is
        `editor` or `readonly`, and the boxes are typed over with the values and Save is clicked. The reply says what the rows and boxes
        showed before, what was sent, and what the page said after. A save under the bounds answers 200; the service's own refusal is
@@ -1364,6 +1579,122 @@ try {
         };
       }
       return { rowTexts, form: before !== null, before, labels, after, writes: requests.filter((r) => r.method === "PUT").map((r) => ({ url: r.url, body: r.body })) };
+    },
+    /* #7951: the 60 s poll's render (renderAdmin with { poll: true }) on an Admin tab that holds a form, for a signed-in admin.
+       "focus": the Routes tab, the Match box focused, then the poll's render; returns whether that same box is still on the page and still
+       focused. "draft": Alert Settings, text typed into the report Title, the poll's render with the focus still in the box, then "200"
+       typed into the full-backup age, the focus dropped, and the poll's render again (the tab rebuilds); then Save on the report; returns
+       the boxes' values at each step, whether the Title box is the same node, and the PUT bodies. "preview": Preview pressed with its read
+       held, the poll's render while it is in flight (no box has the focus, so the tab rebuilds), then the read answers; returns the preview
+       box's text while held and after, whether the box is a new node, and what the box taken off the page holds. "switch": text typed into
+       the report Title and the full-backup age without Save, then Routes and back to Alert Settings, and again with Admin left for the
+       fleet page and come back to; returns the two boxes' values after each return. "servers": the Servers tab, Alpha's form open, the Host
+       box typed into and focused, then the poll's render; returns how many list reads the poll made and whether the box kept its node,
+       its focus and its text. "checkbox": Alert Settings, the report's enabled checkbox focused, then the poll's render; returns whether
+       the tab was redrawn (the Title box is a new node) and how many settings reads were made. */
+    adminPoll: async (param) => {
+      state.canEdit = true;
+      state.sessionReply = () => ({ status: 200, body: { can_edit: true, signed_in_admin: true, managed_store: false, admin_writes_off: false } });
+      const settings = {
+        alerts_enabled: true,
+        backup_overdue: { enabled: true, threshold_hours: 168 },
+        log_backup_overdue: { enabled: true, threshold_minutes: 60 },
+        checkdb_overdue: { enabled: true, threshold_hours: 336 },
+        daily_report: { enabled: true, send_at: "07:30", time_zone: "UTC", title: "Daily" },
+      };
+      let hold = null;
+      state.responder = (method, url) => {
+        if (method === "GET" && url === "/api/agent-setup/access") return { status: 200, body: { can_edit_routes: true, can_edit_profiles: true } };
+        if (method === "GET" && url === "/api/fleet") return { status: 200, body: { cards: [{ server_id: 1, display_name: "Alpha" }], tags: [] } };
+        if (method === "GET" && url === "/api/read/get_notification_routes") return { status: 200, body: { routes: [] } };
+        if (method === "GET" && url === "/api/read/get_alert_settings") return { status: 200, body: settings };
+        if (method === "GET" && url === "/api/read/get_daily_health_report") return { status: 200, body: { subject: "Daily Health Report: alpha", text: "PREVIEW BODY 123" }, hold };
+        if (method === "PUT" && url === "/api/alert-settings/daily-report") return { status: 200, body: { status: "updated" } };
+        return { status: 404, body: { error: "no such request " + url } };
+      };
+      const poll = async (tab) => { page.renderAdmin(main, tab, { poll: true }); await settle(30); };
+      const dailyBox = (name) => byAttr(main, "data-field", "daily-report-" + name).find((n) => n.tag === "input") || null;
+      const ageBox = (group) => byAttr(main, "data-field", "database-protection-" + group).find((n) => n.tag === "input") || null;
+      if (param === "focus") {
+        await mountPage("routes");
+        const match = field("match");
+        match.focus();
+        await poll("routes");
+        return { onPage: match.isConnected, focused: activeElement === match, sameNode: field("match") === match };
+      }
+      if (param === "draft") {
+        await mountPage("settings");
+        const first = dailyBox("title");
+        await typeInto(first, "Typed title");
+        await poll("settings");
+        const focusKept = { sameNode: dailyBox("title") === first, title: dailyBox("title").value, focused: activeElement === first };
+        await typeInto(ageBox("backup_overdue"), "200");
+        ageBox("backup_overdue").blur();
+        await poll("settings");
+        const rebuilt = {
+          sameNode: dailyBox("title") === first, title: dailyBox("title").value, sendAt: dailyBox("send-at").value, zone: dailyBox("time-zone").value,
+          backup: ageBox("backup_overdue").value, log: ageBox("log_backup_overdue").value, checkdb: ageBox("checkdb_overdue").value,
+        };
+        await fire(byAttr(main, "data-action", "save-daily-report")[0], "click");
+        await settle(30);
+        return { focusKept, rebuilt, afterSave: dailyBox("title").value, writes: requests.filter((r) => r.method === "PUT").map((r) => r.body) };
+      }
+      if (param === "preview") {
+        await mountPage("settings");
+        let release;
+        hold = new Promise((r) => { release = r; });
+        const before = byAttr(main, "data-field", "daily-report-preview-box")[0];
+        const clicked = fire(byAttr(main, "data-action", "preview-daily-report")[0], "click");
+        await settle(30);
+        await poll("settings");
+        const during = byAttr(main, "data-field", "daily-report-preview-box")[0];
+        const whileHeld = text(during);
+        release();
+        await clicked;
+        await settle(30);
+        const after = byAttr(main, "data-field", "daily-report-preview-box")[0];
+        return { newBox: during !== before, whileHeld, onPage: text(after), offPage: text(before), reads: requests.filter((r) => r.url === "/api/read/get_daily_health_report").length };
+      }
+      if (param === "switch") {
+        const typeBoth = async () => {
+          await typeInto(dailyBox("title"), "Typed title");
+          await typeInto(ageBox("backup_overdue"), "200");
+        };
+        const values = () => ({ title: dailyBox("title").value, backup: ageBox("backup_overdue").value });
+        await mountPage("settings");
+        await typeBoth();
+        await mountPage("routes");
+        await mountPage("settings");
+        const afterTabs = values();
+        await typeBoth();
+        /* Leaving Admin: the hash moves to another page, which is drawn into main in the tab body's place, and then back. */
+        await leaveHash("#/fleet");
+        main.replaceChildren(new FakeNode("div"));
+        await settle();
+        await leaveHash("#/admin/settings");
+        await mountPage("settings");
+        return { afterTabs, afterLeaving: values() };
+      }
+      if (param === "servers") {
+        seed();
+        await mountPage("servers");
+        await clickEdit(1);
+        const host = field("host");
+        await typeInto(host, "sql-prod-01");
+        state.servers = [alpha, charlie];
+        const listBefore = listGets();
+        await poll("servers");
+        return { listReads: listGets() - listBefore, activeIsHost: activeElement === host, sameHost: field("host") === host, hostValue: host.value, rows: tableRows() };
+      }
+      if (param === "checkbox") {
+        await mountPage("settings");
+        const first = dailyBox("title");
+        dailyBox("enabled").focus();
+        const focusedType = activeElement ? activeElement.type : null;
+        await poll("settings");
+        return { focusedType, redrawn: dailyBox("title") !== first, reads: requests.filter((r) => r.url === "/api/read/get_alert_settings").length };
+      }
+      throw new Error("unknown adminPoll case " + param);
     },
     /* #7700: Alert Settings, Practice Scores and Pending Notes on a signed-in admin's seat. The param is "<tab>/<off|on>": "off" is a managed
        store with web.allowAdminWrites off (the session says so), "on" the same seat with the switch on. Returns the forms and buttons the

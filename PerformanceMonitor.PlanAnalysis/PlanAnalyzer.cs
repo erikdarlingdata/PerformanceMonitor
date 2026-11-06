@@ -221,6 +221,51 @@ public static partial class PlanAnalyzer
     }
 
     /// <summary>
+    /// #7889: a Key Lookup's severity follows what the lookup cost, not its presence. In an actual plan that
+    /// recorded statement time, the lookup's own time share of the statement is graded on the bands Rule 7 uses
+    /// for spills: half or more of the statement is Critical, a tenth or more is Warning, less is Info, so a
+    /// lookup that fetched a dozen rows in no measurable time is Info and one that is most of a statement's
+    /// time is Critical. When the plan has runtime data but no statement time (QueryTimeStats is absent from
+    /// actual plans older than SQL Server 2016), the lookup's executions stand in, since a lookup runs once per
+    /// outer row: <see cref="KeyLookupWarningExecutions"/> or more is Warning, fewer is Info, and never Critical,
+    /// because without time nothing shows the lookup dominating. An estimated plan has neither, so the
+    /// operator's share of the plan's estimated cost grades it with the viewer's own expensive-operator bar
+    /// (<see cref="PlanNode.IsExpensive"/>, 25 percent): Warning at or past it, Info below, never Critical,
+    /// because cost is an estimate rather than a measurement. Returns the sentence that states the figure the
+    /// grade rests on, or null for an estimated plan, whose cost percentage is already shown on the operator.
+    /// A severity override from the analyzer config is applied afterwards, as for every rule.
+    /// </summary>
+    internal static (PlanWarningSeverity Severity, string? CostLine) GradeKeyLookup(PlanNode node, PlanStatement stmt)
+    {
+        if (!node.HasActualStats)
+            return (node.IsExpensive ? PlanWarningSeverity.Warning : PlanWarningSeverity.Info, null);
+
+        var stmtMs = stmt.QueryTimeStats?.ElapsedTimeMs ?? 0;
+        if (stmtMs > 0)
+        {
+            var ownMs = GetOperatorOwnElapsedMs(node);
+            var pct = (double)ownMs / stmtMs;
+            var severity = pct >= 0.5 ? PlanWarningSeverity.Critical
+                : pct >= 0.1 ? PlanWarningSeverity.Warning
+                : PlanWarningSeverity.Info;
+            return (severity, $"Operator time: {ownMs:N0}ms ({pct * 100:N0}% of statement) over {node.ActualExecutions:N0} lookups.");
+        }
+
+        return (node.ActualExecutions >= KeyLookupWarningExecutions ? PlanWarningSeverity.Warning : PlanWarningSeverity.Info,
+            $"Lookups performed: {node.ActualExecutions:N0}. The plan recorded no statement time to grade them against.");
+    }
+
+    /// <summary>
+    /// #7889: lookups performed in one execution at or past which a Key Lookup with no statement time to grade
+    /// on is a Warning. Each lookup is one clustered-index seek of a few logical reads, so a thousand of them is
+    /// a few thousand reads: a real cost, but not one that shows the lookup dominating, which is why this path
+    /// stops at Warning. Reasoned, not measured: the fleet figure for this finding counts how often a plan ran in
+    /// a week, a different quantity from how many rows one execution looked up, and only the time share in
+    /// <see cref="GradeKeyLookup"/> measures the lookup itself. The bar only ever lowers a grade below Critical.
+    /// </summary>
+    internal const long KeyLookupWarningExecutions = 1_000;
+
+    /// <summary>
     /// Rule types that predate the benefit-scoring framework and haven't been folded into A/B/C/D
     /// categorization yet. Tagged so reviewers can hold new-framework items to a higher bar vs
     /// known-legacy items that will be reworked later. Ported verbatim from
@@ -512,11 +557,18 @@ public static partial class PlanAnalyzer
             });
         }
 
+        /* #7898: rule 27's test, read once here because rule 20 needs it too. OPTIMIZE FOR UNKNOWN also leaves a
+           parameter without a compiled value, and rule 27 reports the hint, so rule 20 leaves those to it. */
+        var hasOptimizeForUnknown = !string.IsNullOrEmpty(stmt.StatementText) &&
+            PlanRegex.IsMatch(OptimizeForUnknownRegExp(), MaskCommentsAndLiterals(stmt.StatementText), // #4524
+                "OPTIMIZE FOR UNKNOWN hint", // a regex that cannot finish gives way to a text search: the warning names a hint the text must hold
+                t => PlanTextSearch.ContainsWords(t, false, false, "OPTIMIZE", "FOR", "UNKNOWN"));
+
         // Rule 20: Local variables without RECOMPILE
         // Parameters with no CompiledValue are likely local variables — the optimizer
         // cannot sniff their values and uses density-based ("unknown") estimates.
         // Skip statements with cost < 1 (can't go parallel, estimate quality rarely matters).
-        if (!cfg.IsRuleDisabled(20) && stmt.Parameters.Count > 0 && stmt.StatementSubTreeCost >= 1.0)
+        if (!cfg.IsRuleDisabled(20) && stmt.Parameters.Count > 0 && stmt.StatementSubTreeCost >= 1.0 && !hasOptimizeForUnknown)
         {
             var unsnifffedParams = stmt.Parameters
                 .Where(p => string.IsNullOrEmpty(p.CompiledValue))
@@ -545,10 +597,7 @@ public static partial class PlanAnalyzer
         // warning about CTE reuse is guessing.
 
         // Rule 27: OPTIMIZE FOR UNKNOWN in statement text
-        if (!cfg.IsRuleDisabled(27) && !string.IsNullOrEmpty(stmt.StatementText) &&
-            PlanRegex.IsMatch(OptimizeForUnknownRegExp(), MaskCommentsAndLiterals(stmt.StatementText), // #4524
-                "OPTIMIZE FOR UNKNOWN hint", // a regex that cannot finish gives way to a text search: the warning names a hint the text must hold
-                t => PlanTextSearch.ContainsWords(t, false, false, "OPTIMIZE", "FOR", "UNKNOWN")))
+        if (!cfg.IsRuleDisabled(27) && hasOptimizeForUnknown)
         {
             stmt.PlanWarnings.Add(new PlanWarning
             {
@@ -1105,6 +1154,11 @@ public static partial class PlanAnalyzer
                     lookupMsg += $"\nResidual predicate (filtered {node.ActualExecutions - node.ActualRows:N0} rows): {Truncate(node.Predicate, 200)}";
             }
 
+            /* #7889: the grade follows what the lookup cost (GradeKeyLookup), and the message states the figure it was graded on. */
+            var (lookupSeverity, lookupCostLine) = GradeKeyLookup(node, stmt);
+            if (lookupCostLine != null)
+                lookupMsg += "\n" + lookupCostLine;
+
             lookupMsg += "\nTo eliminate the lookup, consider adding the needed columns as INCLUDE columns on the nonclustered index. This widens the index, so weigh the read benefit against write and storage overhead.";
 
             node.Warnings.Add(new PlanWarning
@@ -1112,7 +1166,7 @@ public static partial class PlanAnalyzer
                 RuleNumber = 10,
                 WarningType = "Key Lookup",
                 Message = lookupMsg,
-                Severity = PlanWarningSeverity.Critical
+                Severity = lookupSeverity
             });
         }
 
@@ -1152,19 +1206,26 @@ public static partial class PlanAnalyzer
         // A PROBE() alone is just a bitmap filter — not a real residual predicate.
         // Skip for 0-execution nodes — the operator never ran
         if (!cfg.IsRuleDisabled(11) && nonSargableReason == null && IsRowstoreScan(node) && !string.IsNullOrEmpty(node.Predicate) &&
-            !IsProbeOnly(node.Predicate) && !(node.HasActualStats && node.ActualExecutions == 0))
+            !IsProbeOnly(node.Predicate) && !(node.HasActualStats && node.ActualExecutions == 0) &&
+            ScanPredicateIsWorthReporting(node, stmt, out var scanImpact))
         {
             var displayPredicate = StripProbeExpressions(node.Predicate);
-            var details = BuildScanImpactDetails(node, stmt);
             var severity = PlanWarningSeverity.Warning;
 
+            /* #7891: an actual plan's share is the scan's elapsed time. The cost share is the optimizer's
+               estimate, and the plans worth reading are the ones where that estimate was wrong. An estimated
+               plan, or an actual plan that carries no statement time, has only the cost share. */
+            var sharePct = node.HasActualStats && HasStatementElapsed(stmt) ? scanImpact.ElapsedPct : scanImpact.CostPct;
+
             // Elevate to Critical if the scan dominates the plan
-            if (details.CostPct >= 90 || details.ElapsedPct >= 90)
+            if (sharePct >= 90)
                 severity = PlanWarningSeverity.Critical;
 
-            var message = "Scan with residual predicate — SQL Server is reading every row and filtering after the fact.";
-            if (!string.IsNullOrEmpty(details.Summary))
-                message += $" {details.Summary}";
+            var message = node.HasActualStats && node.ActualRowsRead > 0
+                ? $"Scan with residual predicate — SQL Server read {node.ActualRowsRead:N0} rows to return {node.ActualRows:N0}, filtering after the fact."
+                : "Scan with residual predicate — SQL Server is reading every row and filtering after the fact.";
+            if (!string.IsNullOrEmpty(scanImpact.Summary))
+                message += $" {scanImpact.Summary}";
 
             // If the statement is executing a dynamic cursor, that's usually
             // the reason an index didn't get used. Call it out so the user looks there
@@ -1177,7 +1238,7 @@ public static partial class PlanAnalyzer
                 message += " Check that you have appropriate indexes.";
 
             // I/O waits specifically confirm the scan is hitting disk — elevate
-            if (HasSignificantIoWaits(stmt.WaitStats) && details.CostPct >= 50
+            if (HasSignificantIoWaits(stmt.WaitStats) && sharePct >= 50
                 && severity != PlanWarningSeverity.Critical)
                 severity = PlanWarningSeverity.Critical;
 
@@ -1232,9 +1293,22 @@ public static partial class PlanAnalyzer
         if (!cfg.IsRuleDisabled(34) && isBareScanCandidate)
         {
             var colCount = node.OutputColumns!.Split(',').Length;
-            var isSignificant = node.HasActualStats
-                ? GetOperatorOwnElapsedMs(node) > 0
-                : node.CostPercent >= 20;
+
+            /* #7891: a scan under the rows floor is a few hundred pages at most, and a narrower index cannot
+               make it cheaper. An actual plan is judged on the rows it read and the scan's own share of the
+               statement's time, with any own time at all standing in when the plan carries no statement time.
+               An estimated plan is judged on the table's cardinality and the scan's share of the plan's cost. */
+            bool isSignificant;
+            if (node.HasActualStats)
+            {
+                var ownShare = OwnTimeSharePct(node, stmt);
+                isSignificant = Math.Max(node.ActualRowsRead, node.ActualRows) >= ScanRuleMinRows
+                    && (ownShare.HasValue ? ownShare.Value >= ScanRuleMinOwnTimeSharePct : GetOperatorOwnElapsedMs(node) > 0);
+            }
+            else
+            {
+                isSignificant = node.TableCardinality >= ScanRuleMinRows && node.CostPercent >= 20;
+            }
 
             if (isSignificant)
             {
@@ -1311,9 +1385,12 @@ public static partial class PlanAnalyzer
 
             if (hasMismatch || hasConvert)
             {
+                /* #7898: GetRangeWithMismatchedTypes and GetRangeThroughConvert are the functions the optimizer
+                   uses to build a dynamic seek range through the conversion, so the index is still sought. The
+                   cost of the mismatch is the wider range and the guessed estimate for it. */
                 var reason = hasMismatch
-                    ? "Mismatched data types between the column and the parameter/literal. SQL Server is converting every row to compare, preventing index seeks. Match your data types — don't pass nvarchar to a varchar column, or int to a bigint column."
-                    : "CONVERT/CAST wrapping a column in the predicate. SQL Server is converting every row to compare, preventing index seeks. Match your data types — convert the parameter/literal instead of the column.";
+                    ? "Mismatched data types between the column and the parameter/literal. The optimizer built a dynamic seek range through the conversion, so the index is still sought, but the range is wider than an exact match and the row estimate for it is a guess. Match your data types — don't pass nvarchar to a varchar column, or int to a bigint column."
+                    : "CONVERT/CAST wrapping a column in the predicate. The optimizer built a dynamic seek range through the conversion, so the index is still sought, but the range is wider than an exact match and the row estimate for it is a guess. Match your data types — convert the parameter/literal instead of the column.";
 
                 node.Warnings.Add(new PlanWarning
                 {
@@ -1490,7 +1567,7 @@ public static partial class PlanAnalyzer
             {
                 RuleNumber = 23,
                 WarningType = "Table-Valued Function",
-                Message = $"Table-valued function: {funcName}. Multi-statement TVFs have no statistics — SQL Server guesses 1 row (pre-2017) or 100 rows (2017+) regardless of actual size. Rewrite as an inline table-valued function if possible, or dump the function results into a #temp table and join to that instead.",
+                Message = $"Table-valued function: {funcName}. Multi-statement TVFs have no statistics — SQL Server guesses 1 row (before SQL Server 2014) or 100 rows (SQL Server 2014 and later) regardless of actual size, unless interleaved execution (SQL Server 2017 and later) runs the function first and uses its real row count. Rewrite as an inline table-valued function if possible, or dump the function results into a #temp table and join to that instead.",
                 Severity = PlanWarningSeverity.Warning
             });
         }
@@ -1512,7 +1589,14 @@ public static partial class PlanAnalyzer
                     && scanCandidate.Children.Count > 0)
                     scanCandidate = scanCandidate.Children[0];
 
-                if (IsScanOperator(scanCandidate))
+                /* #7890: a plain Top over an Ordered scan, reached through streaming operators only, is
+                   the shape SELECT TOP (n) ... ORDER BY <index key> compiles to. The Top stops the scan
+                   after n rows, so there is no scan and sort to index away. A Top N Sort reads the whole
+                   scan before it returns a row, and an unordered scan carries no such guarantee, so both
+                   keep the finding. */
+                var topStopsScanEarly = isTop && scanCandidate.Ordered;
+
+                if (IsScanOperator(scanCandidate) && !topStopsScanEarly)
                 {
                     var topLabel = isTopNSort ? "Top N Sort" : "Top";
                     var onInner = node.Parent?.PhysicalOp == "Nested Loops" && node.Parent.Children.Count >= 2
@@ -2870,6 +2954,36 @@ public static partial class PlanAnalyzer
         return new ScanImpact(costPct, elapsedPct, parts.Count > 0 ? string.Join(" ", parts) : null);
     }
 
+    private static bool HasStatementElapsed(PlanStatement stmt) =>
+        stmt.QueryTimeStats != null && stmt.QueryTimeStats.ElapsedTimeMs > 0;
+
+    /* #7891: the operator's own elapsed time as a share of the statement's, or null when the plan carries
+       no statement time and there is no share to measure. */
+    private static double? OwnTimeSharePct(PlanNode node, PlanStatement stmt) =>
+        HasStatementElapsed(stmt)
+            ? (double)GetOperatorOwnElapsedMs(node) / stmt.QueryTimeStats!.ElapsedTimeMs * 100
+            : null;
+
+    /* #7891: rule 11's gate. An estimated plan is always reported. An actual plan must have read at least
+       ScanRuleMinRows rows, returned under ScanPredicateMaxSelectivity of what it read when the plan says
+       how many it read, and spent at least ScanRuleMinOwnTimeSharePct of the statement's time in the scan
+       when the plan carries statement time. The impact details come out either way, so the caller does not
+       build them twice. */
+    private static bool ScanPredicateIsWorthReporting(PlanNode node, PlanStatement stmt, out ScanImpact details)
+    {
+        details = BuildScanImpactDetails(node, stmt);
+        if (!node.HasActualStats)
+            return true;
+
+        if (Math.Max(node.ActualRowsRead, node.ActualRows) < ScanRuleMinRows)
+            return false;
+        if (node.ActualRowsRead > 0 && (double)node.ActualRows / node.ActualRowsRead >= ScanPredicateMaxSelectivity)
+            return false;
+
+        var ownShare = OwnTimeSharePct(node, stmt);
+        return ownShare is null || ownShare.Value >= ScanRuleMinOwnTimeSharePct;
+    }
+
     /// <summary>
     /// Checks whether a function call in a predicate is on the column side of the comparison.
     /// Predicate ScalarStrings look like: [db].[schema].[table].[col]>dateadd(day,(0),[@var])
@@ -3227,6 +3341,22 @@ public static partial class PlanAnalyzer
     // guesses below, and from this size up it stays clear of them (0.3% and 5.6% at this size,
     // falling as the table grows).
     private const double CeGuessMinTableRows = 100_000;
+
+    /* #7891: rules 11 and 34 are about reads a scan does that an index could spare. Under this many rows a
+       table is a few hundred pages, its scan is a buffer pool read of a millisecond or two, and the index
+       either rule proposes costs more on every write than it saves on the read. */
+    private const long ScanRuleMinRows = 10_000;
+
+    /* #7891: an index that removed the scan outright saves at most the scan's own share of the statement's
+       elapsed time. Under a tenth, the saving sits inside a statement's run-to-run variance and the finding
+       points at nothing a person could measure. Rule 35 needs twice this share before it calls an operator
+       expensive with nothing else to say about it. */
+    private const double ScanRuleMinOwnTimeSharePct = 10;
+
+    /* #7891: rule 11 reports rows a scan read and then discarded. When at least half of the rows read were
+       returned, a seek on the predicate columns would touch most of the same pages, so the predicate is not
+       the cost the rule describes. */
+    private const double ScanPredicateMaxSelectivity = 0.5;
 
     /// <summary>
     /// Detects well-known CE default selectivity guesses by comparing EstimateRows to TableCardinality.
