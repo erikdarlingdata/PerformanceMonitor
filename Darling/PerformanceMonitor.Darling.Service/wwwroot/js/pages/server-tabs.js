@@ -578,6 +578,8 @@ export const SERVER_TABS = [
           series: DURATION_SERIES,
           format: "ms",
           span: 2,
+          /* #7692: rows exist only where queries ran, so the gap rule needs the reply's bucket. */
+          bucketKey: "bucket_minutes",
           emptyText: "No query duration samples in this window.",
         },
         {
@@ -588,6 +590,7 @@ export const SERVER_TABS = [
           xKey: "time",
           series: EXECUTION_RATE_SERIES,
           span: 2,
+          bucketKey: "bucket_minutes",
           emptyText: "No query executions recorded in this window.",
         },
       ]),
@@ -602,6 +605,7 @@ export const SERVER_TABS = [
           subtitle: ctx.label,
           format: "ms",
           span: 2,
+          bucketKey: "bucket_minutes",
           emptyText:
             "No stored-procedure activity in this window. A server that runs no stored procedures shows nothing here.",
         }
@@ -1344,7 +1348,7 @@ export const POSTGRES_TABS = [
         },
         {
           title: "Extension Install Census",
-          subtitle: "one row per extension created anywhere on this server; NO row limit touches this",
+          subtitle: "One row per extension on this server",
           viz: "table",
           rowsKey: "install_census",
           columns: PG_EXTENSION_CENSUS_COLUMNS,
@@ -1554,14 +1558,15 @@ export const POSTGRES_TABS = [
          The "check the error log" panel. Newest 50 across every family; the MCP read carries the family and
          severity filters, and total_events on its payload is the window's count, so the panel note says
          which of the two this grid is. */
-      tablePanel(
+      /* #7726: the tool's empty text is written for an MCP client (setting names, locale, facet names). The page says one sentence that names the panel holding the answer, as Deadlocks above does (#7548). */
+      tablePanelPlain(
         "Log Events",
         "get_pg_log_events",
         { server, hours: ctx.hours, limit: 50 },
         "events",
         PG_LOG_EVENT_COLUMNS,
         ctx.label + ", newest 50 across every family, statements never stored",
-        "No classified log event was stored in this window. That is the healthy answer for the error and lock-wait families - and it is also what a target with the relevant log_* setting off looks like (log_connections, log_lock_waits, log_temp_files, log_autovacuum_min_duration), or one whose log cannot be read, is not stamped UTC, or is not written in English: the Plan Capture Readiness panel above reads the same file and reports those three."
+        "No log event in this window. If you expected one, Plan Capture Readiness above shows whether the server log can be read."
       ),
       /* #2663 the regression read: what ONE execution of the busiest statement cost, interval by interval.
          The statement grid above ranks by total time across the window, which hides a step change - a query
@@ -1742,7 +1747,9 @@ export const POSTGRES_TABS = [
         /* #7409: Amazon Aurora has its own instrument and answers "not collected" here, so the panel is not drawn there. */
         true,
         /* #7428: what Backends Seen counts differs by instrument, and the answer says which instrument fed it. */
-        { noteFrom: pgWaitSamplingBackendsNote, noteQuiet: true }
+        { noteFrom: pgWaitSamplingBackendsNote, noteQuiet: true,
+          /* #7684 item 4: a true negative says one plain sentence; the tool's long text (instrument names, the sampler's floor) is behind "More detail". */
+          emptyLine: true }
       ),
       tablePanel(
         "OS CPU by Query (pg_stat_kcache)",

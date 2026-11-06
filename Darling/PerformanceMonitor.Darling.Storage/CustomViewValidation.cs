@@ -581,7 +581,7 @@ public static partial class CustomViewValidation
     /// filters on no counter at all, so every counter is in play. A counter filter bound to a view variable cannot be
     /// read here and stays quiet.
     /// </summary>
-    private static void AddCumulativePerfmonWarnings(List<string> warnings, PanelPlan plan, string where)
+    internal static void AddCumulativePerfmonWarnings(List<string> warnings, PanelPlan plan, string where)
     {
         if (string.Equals(plan.Measure.Key, PerfmonValueKey, StringComparison.Ordinal))
         {

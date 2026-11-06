@@ -109,7 +109,7 @@ export const QS_HEALTH_COLUMNS = [
 ];
 
 export const TRACE_FLAG_COLUMNS = [
-  { key: "trace_flag", label: "Flag", format: "int" },
+  { key: "trace_flag", label: "Flag", format: "id" },
   { key: "enabled", label: "Enabled", format: "bool" },
   { key: "is_global", label: "Global", format: "bool" },
   { key: "is_session", label: "Session", format: "bool" },
@@ -159,7 +159,7 @@ export const IDENTITY_COLUMNS = [
   { key: "values_remaining", label: "Values remaining", align: "right", render: (r) => el("span", { text: identityDigits(r.values_remaining) }), sortValue: (r) => (r.values_remaining == null ? -1 : Number(r.values_remaining)) },
   { key: "rate_per_day", label: "Rate per day", format: "num1" },
   { key: "days_to_exhaustion", label: "Days to exhaustion", format: "num1" },
-  { key: "band", label: "Band", format: "text", small: true },
+  { key: "band", label: "Band", format: "status", small: true },
 ];
 const IDENTITY_SCAN_COLUMNS = [
   { key: "database", label: "Database", name: true },
@@ -168,7 +168,7 @@ const IDENTITY_SCAN_COLUMNS = [
   { key: "scanned_at", label: "Last scanned", format: "time", small: true, render: (r) => el("span", { text: identityLastScanned(r) }), sortValue: (r) => r.scanned_at || r.last_scanned_at || "" },
 ];
 export function identityCapacityPanels(server) {
-  const columnsShell = panelShell("Identity Capacity", "identity_capacity collector, every 6 hours", 2, "get_identity_capacity");
+  const columnsShell = panelShell("Identity Capacity", "Identity columns, every 6 hours", 2, "get_identity_capacity");
   const scanShell = panelShell("Identity Scan State", "per database, newest scan", 2, "get_identity_capacity");
   const signal = getPanelSignal();
   (async () => {
@@ -250,7 +250,7 @@ const AGENT_ALERT_COLUMNS = [
 export const AGENT_ALERT_SPECS = [
   {
     title: "Agent Alerts",
-    subtitle: "msdb.dbo.sysalerts, collected every 15 minutes",
+    subtitle: "SQL Server Agent alerts, every 15 minutes",
     span: 2,
     viz: "stat",
     stats: AGENT_ALERT_STAT_COLUMNS,

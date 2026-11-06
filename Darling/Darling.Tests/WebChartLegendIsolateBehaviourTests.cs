@@ -394,4 +394,49 @@ public sealed class WebChartLegendIsolateBehaviourTests
         Assert.Contains("repeating-linear-gradient", legend[1], StringComparison.Ordinal);
         Assert.Equal(new[] { "", "6 3" }, lines);
     }
+
+    /// <summary>
+    /// #7668: a Custom View panel with a second axis named both its lines wrongly: the first carried the whole panel's title and the second its
+    /// measure key with capitals. Each line is now named from its measure's catalog display name (the key humanized when the catalog gave none), the second
+    /// says it is read on the right axis, and a panel with one line keeps its title.
+    /// </summary>
+    [Fact]
+    public void APanelWithASecondAxis_NamesEachLineFromItsMeasure_AndAOneLinePanelKeepsItsTitle()
+    {
+        var r = Run().GetProperty("overlayLegend");
+        string[] Labels(string key) => r.GetProperty(key).EnumerateArray().Select(e => e.GetString()!).ToArray();
+
+        Assert.Equal(new[] { "TempDB Reserved MB", "TempDB Version Store MB (right axis)" }, Labels("catalog"));
+        Assert.Equal(new[] { "Tempdb Reserved Mb", "Tempdb Version Store Mb (right axis)" }, Labels("noCatalog"));
+        Assert.Equal(new[] { "TempDB: reserved vs version store" }, Labels("oneLine"));
+    }
+
+    /// <summary>
+    /// #7668: the second line's dash (6 on, 3 off) turned into a hatched block over the first line at about three points per pixel. A run whose
+    /// points sit closer together than one dash period is drawn solid; a sparse one keeps its dash.
+    /// </summary>
+    [Fact]
+    public void TheSecondAxisLine_IsSolidWhenItsPointsAreDense_AndDashedWhenSparse()
+    {
+        var r = Run();
+        Assert.True(r.GetProperty("overlayDense").GetProperty("drawn").GetBoolean());
+        Assert.Contains("stroke-dasharray:none", r.GetProperty("overlayDense").GetProperty("style").GetString(), StringComparison.Ordinal);
+        Assert.True(r.GetProperty("overlaySparse").GetProperty("drawn").GetBoolean());
+        Assert.Equal("", r.GetProperty("overlaySparse").GetProperty("style").GetString());
+    }
+
+    /// <summary>
+    /// #7668: a panel saved before #7565 charts a /sec counter as its running total, and the reply that runs it now carries the service's
+    /// warning. The page draws it as a note on the panel; a reply with no warnings, or only blank ones, draws none.
+    /// </summary>
+    [Fact]
+    public void ARunReplyWithWarnings_DrawsThemAsANoteOnThePanel()
+    {
+        var r = Run().GetProperty("runWarnings");
+        var with = r.GetProperty("with").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        Assert.Single(with);
+        Assert.Contains("running total since startup", with[0], StringComparison.Ordinal);
+        Assert.Empty(r.GetProperty("without").EnumerateArray());
+        Assert.Empty(r.GetProperty("blank").EnumerateArray());
+    }
 }

@@ -162,7 +162,11 @@ public sealed class CustomViewFoldersWebTests
         var noIdentity = r.GetProperty("newNoIdentity");
         Assert.True(noIdentity.GetProperty("personalDisabled").GetBoolean());
         Assert.Contains("Personal views need a sign-in that can own them", noIdentity.GetProperty("text").GetString());
-        Assert.Contains("open /auth/logout, then sign in again", noIdentity.GetProperty("text").GetString());
+        /* #7684 item 13: the closing step is a sign-out link (as on the People strip), not a path to type. */
+        Assert.Contains("If you are signed in, sign out and sign in again.", noIdentity.GetProperty("text").GetString());
+        Assert.DoesNotContain("open /auth/logout", noIdentity.GetProperty("text").GetString());
+        Assert.Equal(new[] { "/auth/logout|sign out" }, Strings(noIdentity.GetProperty("links")));
+        Assert.Empty(Strings(r.GetProperty("ownShared").GetProperty("links")));
 
         /* A shared view: only its creator can make it personal; one with no recorded creator can be made personal by nobody. */
         Assert.False(r.GetProperty("ownShared").GetProperty("personalDisabled").GetBoolean());

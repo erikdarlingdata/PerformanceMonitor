@@ -143,6 +143,8 @@ out.restart = {
   full: byClass(strip, "strip-detail")[0].textContent,
   levels: M.shared.discontinuityStrip({ discontinuities: [RESTART] }, { delta: false }),
 };
+/* #7726 item 6: the identity fallback says what could have happened, in words for a person. */
+out.identityNote = M.shared.discontinuityNotes({ discontinuities: [{ at: iso(END - 5 * HOUR), reason: "identity", detail: "d" }] })[0];
 const memory = await draw("memory", "mem");
 out.memoryTab = { drewClerks: /MEMORYCLERK_SQLBUFFERPOOL|Clerk/.test(memory.textContent), restartText: /discontinuity|restarted/i.test(memory.textContent) };
 const io = await draw("io", "io");

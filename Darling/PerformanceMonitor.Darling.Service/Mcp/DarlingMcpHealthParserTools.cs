@@ -952,8 +952,8 @@ public sealed class DarlingMcpHealthParserTools
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice.WindowTruncated, notice.EffectiveStart,
-                    factual: $"No {eventType} events were captured for {c.DisplayName} in the last {hoursBack} hour(s). This server HAS captured them before (the newest was stored at {Stamp(seen)})",
-                    coveredClaim: ", so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events."),
+                    factual: $"No {eventType} events were captured for {c.DisplayName} in the last {hoursBack} hour(s). This server has captured them before (the newest was stored at {Stamp(seen)})",
+                    coveredClaim: ", so nothing happened in this window — widen hours_back to reach the most recent events."),
                 sourceObserved: true, c.LastCapturedAt, lastCapturedOfTypeAt: seen, eventsInWindow: 0,
                 hints: notice.AsHints()), cancellationToken, c.WindowEnd.AddHours(-hoursBack));
         }
@@ -962,7 +962,7 @@ public sealed class DarlingMcpHealthParserTools
         {
             return await DarlingServerOfflineNote.EmptyAsync(postgres, c.ServerId, c.DisplayName, c.WindowEnd, WitnessStatus(
                 "empty",
-                $"No {eventType} events have been captured for {c.DisplayName} at any time, but its system_health session IS being read — the collector last stored an event of another type at {Stamp(alive)} — so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot, and a wider window would not change it.",
+                $"No {eventType} events have been captured for {c.DisplayName} at any time, but its system_health session is being read — the collector last stored an event of another type at {Stamp(alive)} — so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot, and a wider window would not change it.",
                 sourceObserved: true, alive, lastCapturedOfTypeAt: null, eventsInWindow: 0,
                 hints: (await NoticeAsync(postgres, c, hoursBack, null, emptyAnswer: true, logger, cancellationToken)).AsHints()), cancellationToken, c.WindowEnd.AddHours(-hoursBack));
         }
