@@ -2738,6 +2738,7 @@ internal static class DarlingDataReader
             FROM deduped
             WHERE rn = 1
             AND   ($7::text IS NULL OR module_name = $7)
+            /*SELFKEY:deduped*/
             /*TAG:hash:query_hash*/
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             ORDER BY {{QueryStoreWeightedAverage.RankByDuration}} DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
@@ -2838,7 +2839,7 @@ internal static class DarlingDataReader
         """;
 
     /// <summary><see cref="QueryStoreTopRankedHead"/> + <see cref="QueryStoreTopTail"/>: byte-identical to the single
-    /// string it was before the tail was split off for <see cref="QueryStoreTopDailyTableSql"/> (a test pins its hash).</summary>
+    /// string it was before the tail was split off for <see cref="QueryStoreTopDailyTableSql"/>.</summary>
     private const string QueryStoreTopSuffix = QueryStoreTopRankedHead + QueryStoreTopTail;
 
     /// <summary>
@@ -2944,6 +2945,7 @@ internal static class DarlingDataReader
                 MAX(query_plan_hash) AS query_plan_hash
             FROM parts
             WHERE ($7::text IS NULL OR module_name = $7)
+            /*SELFKEY:parts*/
             /*TAG:hash:query_hash*/
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             ORDER BY CAST(SUM(duration_wsum) AS double precision) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
@@ -3132,9 +3134,18 @@ internal static class DarlingDataReader
            re-read the window; the tail looks up text only until the page is full, so the answer and the lookups
            are the rounds' own (TopFill.FinalCandidates). */
         List<QueryStoreRow> rows;
-        await using (var command = postgres.CreateCommand(QueryTagReadJoin.Apply(QueryStoreTopSql, serverId, tags)))
+        /* #7736: the monitor's own statements leave ranked before its candidate limit once the key backfill has run, so the gate and
+           the read are one snapshot: one read-only REPEATABLE READ transaction, as the interval-table read below runs in. */
+        await using (var connection = await postgres.OpenConnectionAsync(cancellationToken))
+        await using (var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken))
         {
-            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            await using (var readOnly = new NpgsqlCommand(SetTransactionReadOnlySql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            {
+                await readOnly.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            var rawSql = await WithSelfKeysBeforeCandidateLimitAsync(connection, transaction, QueryTagReadJoin.Apply(QueryStoreTopSql, serverId, tags), cancellationToken);
+            await using var command = new NpgsqlCommand(rawSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
             AddWindow(command, serverId, startUtc, endUtc);
             AddInt(command, top);
             AddDatabases(command, databases);
@@ -3149,6 +3160,14 @@ internal static class DarlingDataReader
         ReadScope.NoteRows(rows.Count);
         return new QueryStoreTopRead(rows, null);
     }
+
+    /// <summary>#7736: <paramref name="sql"/> with the self-statement test on the key table in <c>ranked</c>, ahead of its candidate limit,
+    /// once its backfill has run (<see cref="QueryStoreSelfKeys.ReadyAsync"/>, read in this read's snapshot), else as it is: the
+    /// tail's text test still removes the monitor's own statements from a store the backfill has not reached.</summary>
+    private static async Task<string> WithSelfKeysBeforeCandidateLimitAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string sql, CancellationToken cancellationToken) =>
+        await QueryStoreSelfKeys.ReadyAsync(connection, transaction, McpCommandDeadlines.ReadSeconds, cancellationToken)
+            ? QueryStoreSelfStatement.WithRankedKeyTest(sql)
+            : sql;
 
     /// <summary>The transaction's own read-only statement (#3953). Named, not inline, so this store-only
     /// construction keeps the receiver shape <c>McpReadCommandTimeoutTests</c>' census recognizes: a
@@ -3245,6 +3264,9 @@ internal static class DarlingDataReader
 
             /* #5984: the query tag filter, ahead of the ranking and the cap. */
             topSql = QueryTagReadJoin.Apply(topSql, serverId, tags);
+
+            /* #7736: the monitor's own statements leave ranked before its candidate limit, once the key backfill has run. */
+            topSql = await WithSelfKeysBeforeCandidateLimitAsync(connection, transaction, topSql, cancellationToken);
 
             /* #5313: the same candidate limit as the raw read, bound LAST ($8 on the interval table read, $10 on the
                daily read, after its two dates). #5815: one run at TopFill's final limit; each fill round used to

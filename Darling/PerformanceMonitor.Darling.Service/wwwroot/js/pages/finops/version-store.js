@@ -12,7 +12,7 @@
 import { VIZ } from "../../panels.js";
 import { gatedEmptyStrip } from "./gate.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../../charts.js";
-import { el, readTool, readErrorStrip, emptyStrip, captionStrip, errorStrip, loadingStrip, mount, fmtNum, tickDecimals, localTime, windowFromHours } from "../../util.js";
+import { el, readTool, readErrorStrip, emptyStrip, captionStrip, noticeStrip, errorStrip, loadingStrip, mount, fmtNum, tickDecimals, localTime, windowFromHours } from "../../util.js";
 
 /* Seven days, the desktop's window, and the read's own ceiling (McpHelpers.MaxHoursBack = 168): a larger value is refused, not clamped. */
 const TREND_HOURS = 168;
@@ -81,7 +81,10 @@ async function load(server, ctx, body) {
     return;
   }
   if (res.kind === "empty") {
-    mount(body, gatedEmptyStrip(res, ctx));
+    /* #7706: a database filter that picks only availability group secondary copies, which have no PVS row, answers empty; the empty reply
+       carries the note too, so the page still says why the copy is missing. */
+    const note = res.data && res.data.secondary_replica_note;
+    mount(body, [gatedEmptyStrip(res, ctx), ...(note ? [noticeStrip(note)] : [])]);
     return;
   }
   try {
@@ -97,6 +100,8 @@ async function load(server, ctx, body) {
       : emptyStrip("No PVS size history in the last " + TREND_HOURS + " hours.");
     mount(body, [
       captionStrip("As of " + localTime(data.as_of) + " (latest snapshot)."),
+      /* #7706: a database this server holds only as an availability group secondary copy has no row here; the service says so (the same kind of strip as Recommendations). */
+      ...(data.secondary_replica_note ? [noticeStrip(data.secondary_replica_note)] : []),
       table,
       el("h4", { text: "PVS off-row size (MB), last " + TREND_HOURS + " hours, top databases by current size" }),
       chart,

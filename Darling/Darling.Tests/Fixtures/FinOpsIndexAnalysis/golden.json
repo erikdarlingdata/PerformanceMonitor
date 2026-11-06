@@ -255,7 +255,7 @@
   ],
   "options": {
     "DedupeOnly": false,
-    "MinSizeGb": 0,
+    "MinSizeGb": 0.01,
     "MinReads": 0,
     "MinWrites": 0,
     "MinRows": 0,
@@ -268,7 +268,7 @@
   },
   "optionsNoProperties": {
     "DedupeOnly": false,
-    "MinSizeGb": 0,
+    "MinSizeGb": 0.01,
     "MinReads": 0,
     "MinWrites": 0,
     "MinRows": 0,
@@ -794,7 +794,7 @@
     ],
     "options": {
       "DedupeOnly": false,
-      "MinSizeGb": 0,
+      "MinSizeGb": 0.01,
       "MinReads": 0,
       "MinWrites": 0,
       "MinRows": 0,

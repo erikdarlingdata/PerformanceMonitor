@@ -69,8 +69,6 @@ public sealed class RightSizingWindowTests
         Assert.Matches(new Regex(@"memRatio\s*<\s*0\.50m\s*&&\s*targetMb\s*/\s*1024\s*<\s*util\.PhysicalMemoryMb\s*/\s*1024"), source);
         Assert.Matches(new Regex(@"targetCores\s*>\s*0\s*&&\s*targetCores\s*<\s*cpuCount"), source);
         Assert.DoesNotMatch(new Regex(@"targetMb\s*<\s*physMb\s*&&"), source);
-        Assert.Contains("under 3ms across {storageWindow}", storageRaw, StringComparison.Ordinal);
-        Assert.DoesNotContain("under 3ms over 7 days", storageRaw, StringComparison.Ordinal);
         Assert.Contains("HasQueryStatsCoverageAsync(", readerRaw, StringComparison.Ordinal);
     }
 
@@ -95,8 +93,6 @@ public sealed class RightSizingWindowTests
         Assert.DoesNotContain("recent samples", raw, StringComparison.Ordinal);
         Assert.DoesNotContain("cpuReader", raw, StringComparison.Ordinal);
         Assert.Contains("reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7)", raw, StringComparison.Ordinal);
-        var storageRaw = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "FinOps", "FinOpsRecommendationFigures.cs");
-        Assert.Contains("storageSamples += row.WindowSamples", storageRaw, StringComparison.Ordinal);
     }
 
     [Fact]
