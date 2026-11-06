@@ -598,8 +598,11 @@ internal static class DarlingTlsKeyAccess
     {
         private const string SecurityDescriptorProperty = "Security Descr";
 
-        /* The DACL part of the descriptor (DACL_SECURITY_INFORMATION, 4), persisted with the key. */
-        private const CngPropertyOptions DaclPersisted = CngPropertyOptions.Persist | (CngPropertyOptions)4;
+        /* The DACL part of the descriptor (DACL_SECURITY_INFORMATION, 4). A read takes only this:
+           NCryptGetProperty rejects the persist flag ("Invalid flags specified"). A write adds Persist
+           so the descriptor is stored with the key. */
+        private const CngPropertyOptions DaclOnly = (CngPropertyOptions)4;
+        private const CngPropertyOptions DaclPersisted = CngPropertyOptions.Persist | DaclOnly;
 
         private readonly CngKey _key;
         private readonly IDisposable _owner;
@@ -613,7 +616,7 @@ internal static class DarlingTlsKeyAccess
         public string Kind => "CNG key";
 
         public byte[] ReadDescriptor()
-            => _key.GetProperty(SecurityDescriptorProperty, DaclPersisted).GetValue()
+            => _key.GetProperty(SecurityDescriptorProperty, DaclOnly).GetValue()
                 ?? throw new InvalidOperationException("the key reports no security descriptor");
 
         public void WriteDescriptor(byte[] descriptor)
