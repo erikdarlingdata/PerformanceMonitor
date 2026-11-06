@@ -1129,7 +1129,27 @@ export function fmtPct(v, o) {
   const n = Number(v);
   if (!isFinite(n)) return "—";
   const places = placesFor(o);
-  return places > 0 ? fixed(n, places) + "%" : Math.round(n) + "%";
+  if (places > 0) return fixed(n, places) + "%";
+  /* #7945: a cell or tooltip percent under 1 keeps one significant digit (0.46 reads 0.5%, 0.04 reads 0.04%), so a small share never reads 0%. */
+  if (stepOf(o) == null && n !== 0 && Math.abs(n) < 1) return n.toLocaleString(undefined, { maximumSignificantDigits: 1 }) + "%";
+  return Math.round(n) + "%";
+}
+/* #7945: the value a cell or tooltip (no axis top, no step) picks its unit by. A value that rounds, at the decimals its unit prints (none in the
+   base unit, one above it), up to the next unit's base would read as that base (999.6 ms as "1,000 ms", 59.96 s as "60.0 s", 1,023.6 MB as
+   "1,024 MB"), so it is treated as the next unit and reads 1.0 s, 1.0 min or 1.0 GB. `bases` are the unit edges in the base unit, ascending.
+   A call with a step keeps its own value: an axis label takes its unit from the axis's top tick. */
+const MS_BASES = [1000, 60000, 3600000];
+const BYTE_BASES = [1024, 1024 * 1024, 1024 * 1024 * 1024];
+function cellBasis(n, o, bases) {
+  const abs = Math.abs(n);
+  if (stepOf(o) != null) return abs;
+  let basis = abs;
+  let per = 1;
+  for (const base of bases) {
+    if (basis < base && Number((abs / per).toFixed(per === 1 ? 0 : 1)) * per >= base) basis = base;
+    per = base;
+  }
+  return basis;
 }
 export function fmtMs(v, o) {
   if (v == null) return "—";
@@ -1138,7 +1158,7 @@ export function fmtMs(v, o) {
   /* #7586: an axis tick is printed in the unit of the axis's largest tick (o.axisMax), so one axis never reads "500 ms, 1.0 s, 1.5 s"; a
      tooltip or grid cell (no axisMax) picks the unit from its own value. */
   const top = axisTopOf(o);
-  const basis = top == null ? Math.abs(n) : top;
+  const basis = top == null ? cellBasis(n, o, MS_BASES) : top;
   /* #7726: a positive figure under 1 ms in a cell or tooltip (no axis step, no axis top) is printed in whole microseconds, so a query that
      ran a million times at 0.03 ms reads "32 µs" and not "0 ms". Exactly 0 stays "0 ms". An axis tick keeps its decimals of ms. */
   if (top == null && stepOf(o) == null && n > 0 && n < 1) {
@@ -1166,7 +1186,8 @@ export function fmtMb(v, o) {
   if (!isFinite(n)) return "—";
   /* #7555: an axis tick is printed in the unit of the axis's largest tick (o.axisMax), so one axis never reads "512 MB, 1.0 GB". */
   const top = axisTopOf(o);
-  if ((top == null ? n : top) < 1024) return fmtInt(n, stepArg(o)) + " MB";
+  const basis = top != null ? top : n < 0 ? n : cellBasis(n, o, [1024]);
+  if (basis < 1024) return fmtInt(n, stepArg(o)) + " MB";
   return top != null && n === 0 ? "0 GB" : fmtNum(n / 1024, placesFor(o, wholeStepMin(o, 1024), 1024)) + " GB";
 }
 /* #7555: the largest tick of the axis a label belongs to, which axisTickLabels hands each formatter as o.axisMax. Null for a tooltip or a
@@ -1241,7 +1262,7 @@ export function fmtBytes(v, o) {
   /* #7555: an axis tick (o.axisMax, the largest tick) prints in the axis's one unit, with the decimals its step needs. A cell or tooltip,
      called without options, keeps one decimal in the unit that fits its own value. */
   const top = axisTopOf(o);
-  const basis = top == null ? Math.abs(n) : top;
+  const basis = top == null ? cellBasis(n, o, BYTE_BASES) : top;
   if (basis < 1024) return fmtInt(n, stepArg(o)) + " B";
   const at = basis < 1024 * 1024 ? 1 : basis < 1024 * 1024 * 1024 ? 2 : 3;
   const per = Math.pow(1024, at);
@@ -1570,7 +1591,8 @@ export async function apiGetJoined(path, signal) {
     const shared = await Promise.race([entry.body, cancelled]);
     if (!shared || shared.aborted) return { kind: "aborted" };
     if (shared.transportError) return { kind: "error", message: shared.transportError };
-    return await classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw, retryAfter: shared.retryAfter });
+    /* #7945: the answer's url rides along so a failure with no message of its own can name the path (noMessageText). */
+    return await classifyResponse({ ok: shared.ok, status: shared.status, url: shared.url, text: async () => shared.raw, retryAfter: shared.retryAfter });
   } finally {
     if (signal && onAbort) signal.removeEventListener("abort", onAbort);
     if (entry) {
@@ -1617,7 +1639,7 @@ export async function apiGetFleet(store) {
 
     const shared = await request;
     if (shared.transportError) return { kind: "error", message: shared.transportError };
-    const res = await classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });
+    const res = await classifyResponse({ ok: shared.ok, status: shared.status, url: shared.url, text: async () => shared.raw });
     if (res.kind === "data") stampFleetWindow(res.data);
     return res;
   } finally {
@@ -1651,7 +1673,7 @@ export function windowPhrase(hours) {
 async function fetchBody(path, signal, store) {
   try {
     const resp = await fetch(path, { headers: storeHeaders({ Accept: "application/json" }, store), signal });
-    return { ok: resp.ok, status: resp.status, raw: await resp.text(), retryAfter: retryAfterOf(resp) };
+    return { ok: resp.ok, status: resp.status, url: resp.url, raw: await resp.text(), retryAfter: retryAfterOf(resp) };
   } catch (e) {
     if (e && e.name === "AbortError") return { aborted: true };
     return { transportError: networkErrorText(e) };
@@ -2078,9 +2100,11 @@ function trimToRange(node, startMs, endMs, depth) {
       const first = value.find((r) => r && typeof r === "object");
       const field = first ? INSTANT_FIELDS.find((f) => f in first) : null;
       if (field) {
+        /* #7945: a time_bucket stamp is the bucket's start, so a bucket that starts at the range's end lies outside it; an instant at the end is inside. */
+        const endInside = field !== "time_bucket";
         next = value.filter((r) => {
           const at = r && parseUtc(r[field]);
-          return !at || (at.getTime() >= startMs && at.getTime() <= endMs);
+          return !at || (at.getTime() >= startMs && (endInside ? at.getTime() <= endMs : at.getTime() < endMs));
         });
         if (next.length === value.length) next = value;
       }

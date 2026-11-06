@@ -933,7 +933,9 @@ async function refreshAlerts(state) {
   const req = readRequest();
   const res = req.error ? { kind: "error", message: "This range cannot be read yet: " + req.error } : await readTool("get_alert_history", req.params);
   if (seq !== state.seq) return;
-  state.meta.textContent = (choices.server ? choices.server : "fleet-wide") + " · " + windowLabel();
+  /* #7945: the picked server is named as the Server picker names it (its display name), not by the raw value. */
+  const pickedServer = choices.server ? (serverNames.find((r) => r.name === choices.server) || { label: choices.server }).label : "fleet-wide";
+  state.meta.textContent = pickedServer + " · " + windowLabel();
   mount(state.noticeBox, []);
   if (res.kind === "error" || res.kind === "empty") {
     state.alerts = [];

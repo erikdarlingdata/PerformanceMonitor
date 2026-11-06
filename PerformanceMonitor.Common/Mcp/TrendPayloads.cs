@@ -391,16 +391,22 @@ internal static class TrendPayloads
             ["bucket_minutes"] = bucketMinutes,
             ["aggregate_note"] = TrendBuckets.LevelNote(bucketMinutes, requested, autoBudget, firstAtWindowStart: false),
             ["note"] = CpuCadenceNote,
-            ["samples"] = points.Select(p => new
+            ["samples"] = points.Select(p =>
             {
-                sample_time = Stamp(p.BucketStart),
-                sql_server_cpu = (int)Math.Round(p.SqlServerCpu),
-                other_process_cpu = p.OtherProcessCpu is { } other ? (int)Math.Round(other) : (int?)null,
-                total_cpu = p.TotalCpu is { } total ? (int)Math.Round(total) : (int?)null,
-                idle_cpu = p.IdleCpu is { } idle ? (int)Math.Round(idle) : (int?)null,
-                peak_sql_server_cpu = p.PeakSqlServerCpu,
-                peak_total_cpu = p.PeakTotalCpu,
-                samples_in_bucket = p.Samples,
+                /* #7945: the shown total is the sum of the shown parts, so 10.4 and 20.4 read 10 and 20 beside 30, never beside 31 (30.8 rounded on its own). */
+                var sqlServerCpu = (int)Math.Round(p.SqlServerCpu);
+                var otherProcessCpu = p.OtherProcessCpu is { } other ? (int)Math.Round(other) : (int?)null;
+                return new
+                {
+                    sample_time = Stamp(p.BucketStart),
+                    sql_server_cpu = sqlServerCpu,
+                    other_process_cpu = otherProcessCpu,
+                    total_cpu = p.TotalCpu is { } total ? (otherProcessCpu is { } otherShown ? sqlServerCpu + otherShown : (int)Math.Round(total)) : (int?)null,
+                    idle_cpu = p.IdleCpu is { } idle ? (int)Math.Round(idle) : (int?)null,
+                    peak_sql_server_cpu = p.PeakSqlServerCpu,
+                    peak_total_cpu = p.PeakTotalCpu,
+                    samples_in_bucket = p.Samples,
+                };
             }),
         };
         if (points.Any(p => p.OtherProcessCpu is null))
