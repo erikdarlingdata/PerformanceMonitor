@@ -65,17 +65,27 @@ public sealed class ViewerInvestigationsValidationTests
         Assert.Null(ViewerDataService.ValidateInvestigationProfile(null, 1, "text"));
     }
 
-    /* #6400: the same for the server scope, which shares the coalesce(scope_server_id, 0) match. */
+    /* #6400: the same for the server scope, which shares the coalesce(scope_server_id, 0) match. Only 0 stands for the fleet: server ids are a hash and are often negative (#7975). */
     [Theory]
     [InlineData(0)]
-    [InlineData(-1)]
-    public void AProfile_ForAServerThatIs0OrBelow_IsRefused_NamingTheId(int serverId)
+    public void AProfile_ForServer0_IsRefused_NamingTheId(int serverId)
     {
         var refusal = ViewerDataService.ValidateInvestigationProfile(serverId, null, "text");
         Assert.NotNull(refusal);
         Assert.Contains($"Server id {serverId} ", refusal, StringComparison.Ordinal);
         Assert.Equal(refusal, ViewerDataService.ValidateInvestigationProfile(serverId, null, ""));
         Assert.Null(ViewerDataService.ValidateInvestigationProfile(1, null, "text"));
+    }
+
+    /* #7975: a negative server id is a real server, not the fleet. */
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(-1714925380)]
+    [InlineData(int.MinValue)]
+    public void AProfile_ForANegativeServerId_IsAccepted(int serverId)
+    {
+        Assert.Null(ViewerDataService.ValidateInvestigationProfile(serverId, null, "text"));
+        Assert.Null(ViewerDataService.ValidateInvestigationProfile(serverId, null, ""));
     }
 
     [Fact]

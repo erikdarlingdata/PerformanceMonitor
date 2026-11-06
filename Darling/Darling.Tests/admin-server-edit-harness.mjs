@@ -103,6 +103,10 @@ class FakeNode {
   get textContent() { return this._text + this.children.map((c) => c.textContent).join(""); }
   set textContent(v) { for (const c of [...this.children]) detach(c); this._text = String(v); }
   get id() { return this.attrs.id || ""; }
+  get tagName() { return this.tag.toUpperCase(); }
+  /* As a browser reflects it: an input's type attribute in lower case, "text" when it has none; another tag's attribute or "". */
+  get type() { return this.tag === "input" ? String(this.attrs.type || "text").toLowerCase() : this.attrs.type || ""; }
+  set type(v) { this.attrs.type = String(v); }
   contains(n) { for (let x = n; x; x = x.parent) if (x === this) return true; return false; }
   focus() { if (this.isConnected && !this.disabled) activeElement = this; }
   blur() { if (activeElement === this) activeElement = null; }
@@ -246,6 +250,8 @@ globalThis.fetch = async (url, init = {}) => {
   if (state.networkDown) throw new Error("connection refused");
   if (state.gate) await state.gate;
   const r = state.responder(method, u, sent);
+  /* An answer carrying `hold` (a promise) is held back until it resolves, so one read can be kept in flight while others answer. */
+  if (r.hold) await r.hold;
   return reply(r.status, r.body, r.raw);
 };
 
@@ -1364,6 +1370,122 @@ try {
         };
       }
       return { rowTexts, form: before !== null, before, labels, after, writes: requests.filter((r) => r.method === "PUT").map((r) => ({ url: r.url, body: r.body })) };
+    },
+    /* #7951: the 60 s poll's render (renderAdmin with { poll: true }) on an Admin tab that holds a form, for a signed-in admin.
+       "focus": the Routes tab, the Match box focused, then the poll's render; returns whether that same box is still on the page and still
+       focused. "draft": Alert Settings, text typed into the report Title, the poll's render with the focus still in the box, then "200"
+       typed into the full-backup age, the focus dropped, and the poll's render again (the tab rebuilds); then Save on the report; returns
+       the boxes' values at each step, whether the Title box is the same node, and the PUT bodies. "preview": Preview pressed with its read
+       held, the poll's render while it is in flight (no box has the focus, so the tab rebuilds), then the read answers; returns the preview
+       box's text while held and after, whether the box is a new node, and what the box taken off the page holds. "switch": text typed into
+       the report Title and the full-backup age without Save, then Routes and back to Alert Settings, and again with Admin left for the
+       fleet page and come back to; returns the two boxes' values after each return. "servers": the Servers tab, Alpha's form open, the Host
+       box typed into and focused, then the poll's render; returns how many list reads the poll made and whether the box kept its node,
+       its focus and its text. "checkbox": Alert Settings, the report's enabled checkbox focused, then the poll's render; returns whether
+       the tab was redrawn (the Title box is a new node) and how many settings reads were made. */
+    adminPoll: async (param) => {
+      state.canEdit = true;
+      state.sessionReply = () => ({ status: 200, body: { can_edit: true, signed_in_admin: true, managed_store: false, admin_writes_off: false } });
+      const settings = {
+        alerts_enabled: true,
+        backup_overdue: { enabled: true, threshold_hours: 168 },
+        log_backup_overdue: { enabled: true, threshold_minutes: 60 },
+        checkdb_overdue: { enabled: true, threshold_hours: 336 },
+        daily_report: { enabled: true, send_at: "07:30", time_zone: "UTC", title: "Daily" },
+      };
+      let hold = null;
+      state.responder = (method, url) => {
+        if (method === "GET" && url === "/api/agent-setup/access") return { status: 200, body: { can_edit_routes: true, can_edit_profiles: true } };
+        if (method === "GET" && url === "/api/fleet") return { status: 200, body: { cards: [{ server_id: 1, display_name: "Alpha" }], tags: [] } };
+        if (method === "GET" && url === "/api/read/get_notification_routes") return { status: 200, body: { routes: [] } };
+        if (method === "GET" && url === "/api/read/get_alert_settings") return { status: 200, body: settings };
+        if (method === "GET" && url === "/api/read/get_daily_health_report") return { status: 200, body: { subject: "Daily Health Report: alpha", text: "PREVIEW BODY 123" }, hold };
+        if (method === "PUT" && url === "/api/alert-settings/daily-report") return { status: 200, body: { status: "updated" } };
+        return { status: 404, body: { error: "no such request " + url } };
+      };
+      const poll = async (tab) => { page.renderAdmin(main, tab, { poll: true }); await settle(30); };
+      const dailyBox = (name) => byAttr(main, "data-field", "daily-report-" + name).find((n) => n.tag === "input") || null;
+      const ageBox = (group) => byAttr(main, "data-field", "database-protection-" + group).find((n) => n.tag === "input") || null;
+      if (param === "focus") {
+        await mountPage("routes");
+        const match = field("match");
+        match.focus();
+        await poll("routes");
+        return { onPage: match.isConnected, focused: activeElement === match, sameNode: field("match") === match };
+      }
+      if (param === "draft") {
+        await mountPage("settings");
+        const first = dailyBox("title");
+        await typeInto(first, "Typed title");
+        await poll("settings");
+        const focusKept = { sameNode: dailyBox("title") === first, title: dailyBox("title").value, focused: activeElement === first };
+        await typeInto(ageBox("backup_overdue"), "200");
+        ageBox("backup_overdue").blur();
+        await poll("settings");
+        const rebuilt = {
+          sameNode: dailyBox("title") === first, title: dailyBox("title").value, sendAt: dailyBox("send-at").value, zone: dailyBox("time-zone").value,
+          backup: ageBox("backup_overdue").value, log: ageBox("log_backup_overdue").value, checkdb: ageBox("checkdb_overdue").value,
+        };
+        await fire(byAttr(main, "data-action", "save-daily-report")[0], "click");
+        await settle(30);
+        return { focusKept, rebuilt, afterSave: dailyBox("title").value, writes: requests.filter((r) => r.method === "PUT").map((r) => r.body) };
+      }
+      if (param === "preview") {
+        await mountPage("settings");
+        let release;
+        hold = new Promise((r) => { release = r; });
+        const before = byAttr(main, "data-field", "daily-report-preview-box")[0];
+        const clicked = fire(byAttr(main, "data-action", "preview-daily-report")[0], "click");
+        await settle(30);
+        await poll("settings");
+        const during = byAttr(main, "data-field", "daily-report-preview-box")[0];
+        const whileHeld = text(during);
+        release();
+        await clicked;
+        await settle(30);
+        const after = byAttr(main, "data-field", "daily-report-preview-box")[0];
+        return { newBox: during !== before, whileHeld, onPage: text(after), offPage: text(before), reads: requests.filter((r) => r.url === "/api/read/get_daily_health_report").length };
+      }
+      if (param === "switch") {
+        const typeBoth = async () => {
+          await typeInto(dailyBox("title"), "Typed title");
+          await typeInto(ageBox("backup_overdue"), "200");
+        };
+        const values = () => ({ title: dailyBox("title").value, backup: ageBox("backup_overdue").value });
+        await mountPage("settings");
+        await typeBoth();
+        await mountPage("routes");
+        await mountPage("settings");
+        const afterTabs = values();
+        await typeBoth();
+        /* Leaving Admin: the hash moves to another page, which is drawn into main in the tab body's place, and then back. */
+        await leaveHash("#/fleet");
+        main.replaceChildren(new FakeNode("div"));
+        await settle();
+        await leaveHash("#/admin/settings");
+        await mountPage("settings");
+        return { afterTabs, afterLeaving: values() };
+      }
+      if (param === "servers") {
+        seed();
+        await mountPage("servers");
+        await clickEdit(1);
+        const host = field("host");
+        await typeInto(host, "sql-prod-01");
+        state.servers = [alpha, charlie];
+        const listBefore = listGets();
+        await poll("servers");
+        return { listReads: listGets() - listBefore, activeIsHost: activeElement === host, sameHost: field("host") === host, hostValue: host.value, rows: tableRows() };
+      }
+      if (param === "checkbox") {
+        await mountPage("settings");
+        const first = dailyBox("title");
+        dailyBox("enabled").focus();
+        const focusedType = activeElement ? activeElement.type : null;
+        await poll("settings");
+        return { focusedType, redrawn: dailyBox("title") !== first, reads: requests.filter((r) => r.url === "/api/read/get_alert_settings").length };
+      }
+      throw new Error("unknown adminPoll case " + param);
     },
     /* #7700: Alert Settings, Practice Scores and Pending Notes on a signed-in admin's seat. The param is "<tab>/<off|on>": "off" is a managed
        store with web.allowAdminWrites off (the session says so), "on" the same seat with the switch on. Returns the forms and buttons the
