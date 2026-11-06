@@ -73,6 +73,10 @@ public static class QueryStoreComposeStamp
     /// planner cannot drift.</summary>
     public const int BuildLagMinutes = 90;
 
+    /// <summary>The same lag as SQL text, for <see cref="PlanSql"/> (a constant cannot be built from the int). A live test builds an hour at the lag and one
+    /// minute before it, so a change to one and not the other fails.</summary>
+    internal const string BuildLagSql = "interval '90 minutes'";
+
     /// <summary>How old an hour must be before the builder does it: build hour H once now is at least H + this (#7762: 90 minutes, from 3 hours, so
     /// the newest hours leave the panel's tail sooner).
     /// <para><b>Why 90 minutes is safe.</b> The row trigger (V250, <see cref="WhenOffset"/> zero) marks every row of hour H written from H + 1 h on. A row
@@ -960,7 +964,7 @@ missing AS
     FROM bounds
     CROSS JOIN cutoff
     CROSS JOIN clock
-    CROSS JOIN LATERAL generate_series(bounds.floor_hour, date_trunc('hour', clock.at - interval '" + BuildLagMinutes + @" minutes'), interval '1 hour') AS g
+    CROSS JOIN LATERAL generate_series(bounds.floor_hour, date_trunc('hour', clock.at - " + BuildLagSql + @"), interval '1 hour') AS g
     WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_compose_stamp_hours AS h WHERE h.hour = g)
 )
 SELECT p.hour, p.stale, p.blocked, p.failures, p.extended, p.backlog, p.fleet_only
