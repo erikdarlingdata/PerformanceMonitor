@@ -407,6 +407,9 @@ public sealed class DarlingWebNamedTokenTests
 
         Assert.Equal(StatusCodes.Status403Forbidden, ctx.Response.StatusCode);
         Assert.Contains(DarlingWebEndpoints.ReadOnlyAccountText, body, StringComparison.Ordinal);
+        // #7955: the page tells the kinds of refusal apart on this code, so the gate itself must carry it.
+        Assert.Equal(DarlingWebStoreWrites.RefusalReason.ReadOnlySeat,
+            System.Text.Json.JsonDocument.Parse(body).RootElement.GetProperty("reason").GetString());
     }
 
     [Fact]

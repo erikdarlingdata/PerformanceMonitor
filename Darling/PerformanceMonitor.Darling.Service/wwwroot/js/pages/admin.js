@@ -1715,6 +1715,15 @@ export function pendingNotesTruncatedNotice(data) {
   return "This list shows the oldest " + shown + " pending notes and more are waiting. Approve or reject some and the next ones appear.";
 }
 
+/** The service's own sentence for a refused change, or null. A refusal the service made is a 403 whose body carries a `reason`
+    code beside its `error` sentence (store_refused, admin_writes_off, read_only_seat, reads_only_dashboard, sign_in_required: #7955),
+    and the sentence says what to do about that reason. The page shows it as sent and never matches its words. A 403 with no reason or
+    no sentence did not come from the service's refusal (a proxy, say), so the caller says its own read-only line. */
+function refusalSentence(res, body) {
+  if (!res || res.status !== 403 || !body) return null;
+  return typeof body.reason === "string" && body.reason !== "" && typeof body.error === "string" && body.error !== "" ? body.error : null;
+}
+
 /** What a decision's answer says, in plain words: { message, isError, reread }. `verb` is "approve" or "reject". An expired
     session says nothing here (the shell has already told the person). A note that was already decided, or is gone, is a 404:
     the list is stale, so it is read again. */
@@ -1725,9 +1734,9 @@ export function noteDecisionOutcome(verb, noteId, res) {
   const body = res.body && typeof res.body === "object" ? res.body : null;
   if (res.status === 200 && body && body.status === past) return { message: "Note " + noteId + " " + past + ".", isError: false, reread: true };
   if (res.status === 404) return { message: "Note " + noteId + " was not changed. " + ((body && body.error) || NOTE_NOT_PENDING), isError: true, reread: true };
-  /* The store refused the write for privilege: the web host's login is not the admin role. Its sentence says how to decide; the list stays. */
-  if (res.status === 403 && body && typeof body.error === "string" && body.error.indexOf("Deciding a note needs") === 0) return { message: body.error, isError: true, reread: false };
-  if (res.status === 403 && body && body.error === SIGN_IN_SENTENCE) return { message: body.error, isError: true, reread: false };
+  /* A refusal the service made (the store login's privilege, the admin-writes switch, a read-only seat, no sign-in): its own sentence says what to do; the list stays. */
+  const refused = refusalSentence(res, body);
+  if (refused) return { message: refused, isError: true, reread: false };
   if (res.status === 403) return { message: "This sign-in is read-only, so it cannot " + verb + " notes.", isError: true, reread: false };
   const said = body && typeof body.error === "string" && body.error ? " " + body.error : "";
   return { message: "Note " + noteId + " was not " + past + ". The service answered " + res.status + "." + said, isError: true, reread: false };
@@ -1910,7 +1919,6 @@ const overridesNoteReadOnly = (managed, adminWritesOff) =>
   "This list shows each threshold that differs from the global value, for one server, one database or a server tag. " +
   adminListOnlyNote(managed, "this page lists them only", "To change an override", adminWritesOff);
 const OVERRIDES_NOTE_UNCONFIRMED = "This list shows each threshold that differs from the global value, for one server, one database or a server tag. Could not check whether this sign-in can change them. Reload the page to try again.";
-const OVERRIDE_DENIED = "Changing a threshold override needs";
 
 /** The rows of the overrides grid from the list read's body. `database` and `server_id` stay on the row for Edit and Remove. */
 export function overrideRows(data) {
@@ -1966,9 +1974,8 @@ export function overrideOutcome(verb, res) {
   if (res.status === 200 && body && (body.status === "ok" || body.status === "cleared")) {
     return { message: body.status === "cleared" ? "Override removed. The global value applies again." : "Override saved.", isError: false, reread: true };
   }
-  if (res.status === 403 && body && typeof body.error === "string" && body.error.indexOf(OVERRIDE_DENIED) === 0) {
-    return { message: body.error, isError: true, reread: false };
-  }
+  const refused = refusalSentence(res, body);
+  if (refused) return { message: refused, isError: true, reread: false };
   if (res.status === 403) return { message: "This sign-in is read-only, so it cannot change overrides.", isError: true, reread: false };
   const said = body && typeof body.error === "string" && body.error ? " " + body.error : "";
   return {

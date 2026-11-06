@@ -106,8 +106,8 @@ export function listParams(choices) {
 
 const choices = { state: "", family: "", requestId: null };
 /* #7956: the Close reason as typed for ONE request, with whether its box has the focus and where the caret is. The poll's rebuild draws
-   the form from it, as Job History does for its job box. A successful close, the pane's Close button, a filter change and picking
-   another request drop it. */
+   the form from it, as Job History does for its job box. A successful close of its own request, the pane's Close button, a filter
+   change and picking another request drop it. */
 let closeDraft = null;
 /* #7956: the requests whose close PUT is out. A form the poll draws while one is out has its button disabled, and a press on it sends
    nothing (the pressing set of proposals.js). */
@@ -118,10 +118,12 @@ let pageSeq = 0;
 let detailSeq = 0;
 let pageAbort = null;
 let detailAbort = null;
-/* #6793: leaving the page (route() calls beginPageScope) aborts its reads. */
+/* #6793: leaving the page (route() calls beginPageScope) aborts its reads. #7987: the reason box leaves with the page, so its draft is
+   marked unfocused: the form drawn on return keeps the reason and does not take the focus. */
 onPageLeave(() => {
   if (pageAbort) pageAbort.abort();
   if (detailAbort) detailAbort.abort();
+  if (closeDraft) closeDraft.focused = false;
 });
 
 function select(label, options, value, onPick) {
@@ -169,7 +171,8 @@ function closeForm(row, access, offNote) {
     if (out.message === null) return;
     now.status.textContent = out.message;
     if (out.ok) {
-      closeDraft = null;
+      /* #7987: only the closed request's own draft is dropped; a reason being typed for another request is kept for the re-read's form. */
+      if (closeDraft && String(closeDraft.requestId) === String(row.request_id)) closeDraft = null;
       if (reloadList) await reloadList();
     }
   });
@@ -367,10 +370,16 @@ export function renderInvestigations(main, requestId) {
   const body = el("div", {}, [loadingStrip("Loading investigation requests…")]);
   slot = el("div", { class: "jh-detail" });
 
-  const reload = () => {
+  /* #7957: the open request is dropped and its pane emptied when a filter changes and when a re-read's list no longer holds it, as after a
+     Close under a State filter: the closed request no longer matches, so a pane still offering its Close form would be for a request
+     that is already closed. */
+  const dropRequest = () => {
     choices.requestId = null;
     closeDraft = null;
     mount(slot, []);
+  };
+  const reload = () => {
+    dropRequest();
     load();
   };
   const state = select("State", STATES, choices.state, (v) => { choices.state = v; reload(); });
@@ -388,10 +397,16 @@ export function renderInvestigations(main, requestId) {
     const res = await readTool("list_investigation_requests", listParams(choices), signal);
     if (mine !== pageSeq || res.kind === "aborted" || res.kind === "auth") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-    if (res.kind === "empty") return mount(body, emptyStrip(res.message || "No investigation requests."));
+    if (res.kind === "empty") {
+      dropRequest();
+      return mount(body, emptyStrip(res.message || "No investigation requests."));
+    }
     const data = res.data || {};
     const rows = rowsUnder(data, "requests");
-    if (!rows.length) return mount(body, emptyStrip("No investigation requests."));
+    if (!rows.length) {
+      dropRequest();
+      return mount(body, emptyStrip("No investigation requests."));
+    }
     const onRow = (r, tr) => {
       if (!r) return;
       tr.style.cursor = "pointer";
@@ -409,10 +424,7 @@ export function renderInvestigations(main, requestId) {
     mount(body, parts);
     const keep = choices.requestId ? rows.find((r) => String(r.request_id) === String(choices.requestId)) : null;
     if (keep) loadDetail(keep);
-    else {
-      choices.requestId = null;
-      closeDraft = null;
-    }
+    else dropRequest();
   }
 
   reloadList = load;

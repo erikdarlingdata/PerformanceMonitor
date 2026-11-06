@@ -957,6 +957,11 @@ function renderAlertHeaderCell(cell, opts) {
   }
   const body = a
     ? [
+        /* #7918: a dismissed firing is still the firing the link names. The card says it was dismissed, so the reader
+           knows the alert was acknowledged and why Alert History does not list it. */
+        a.dismissed === true
+          ? noticeStrip("This alert was dismissed. It still fired; dismissal only hides it from Alert History unless Show dismissed is on.")
+          : null,
         el("div", { class: "detail-fields" }, rows.map(([k, v]) =>
           el("div", { class: "detail-field" }, [el("span", { class: "fk", text: k }), el("span", { class: "fv", text: v })])
         )),
