@@ -25,32 +25,13 @@ namespace Lite.Tests;
 /// <para>Both Darling surfaces carry a dedicated pin for this (<c>DarlingTrendReader</c> and the Viewer's
 /// <c>PerfmonTrendsSql</c>). Lite's side is a live multi-instance DuckDB case: the Transactions/sec case of
 /// <c>LitePerfmonTotalInstanceLiveTests</c> seeds three instance rows per collection and asserts the interval
-/// reads 60 on each read (#7843), so a summed interval fails there. The tests below keep the rest of the
+/// reads 60 on each read (#7843), and its mixed-object case (two objects under one counter name) pins the per-collection
+/// layer the same way (#7771), so a summed interval fails there at either layer. The tests below keep the rest of the
 /// interval's contract.</para>
 /// </summary>
 public sealed class PerfmonIntervalAggregationTests
 {
     private const string ReadPath = "Lite/Services/LocalDataService.Perfmon.cs";
-
-    /// <summary>The failure mode itself: a summed interval across a collection's INSTANCE rows is the
-    /// 12-17x denominator inflation, and it is silent — the column is populated, the query succeeds, and
-    /// only the derived rate is wrong.
-    /// <para>#4234: the batched trend's bucketing legitimately adds a SECOND, different SUM over
-    /// <c>sample_interval_seconds</c> — the outer GROUP BY <c>counter_name, bucket_start</c> summing each
-    /// COLLECTION's own already-<c>MAX</c>'d interval across the collections a bucket holds (the ruling's
-    /// summed-intervals rate), never raw instance rows. That SUM always carries this exact
-    /// <c>FILTER (WHERE sample_interval_seconds &gt; 0)</c> right after it, so stripping just that
-    /// substring isolates exactly the original bug shape: a bare, unfiltered
-    /// <c>SUM(sample_interval_seconds)</c> grouped over instance rows.</para></summary>
-    [Fact]
-    public void NoPerfmonTrendRead_SumsTheIntervalAcrossInstanceRows()
-    {
-        var source = ParitySource.ReadFile(ReadPath);
-
-        var withoutTheBucketedSum = source.Replace(
-            "SUM(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0)", string.Empty);
-        Assert.DoesNotContain("SUM(sample_interval_seconds)", withoutTheBucketedSum, StringComparison.Ordinal);
-    }
 
     /// <summary>Guards the fix from being over-applied: the two columns that ARE additive are never taken as
     /// MAX, in either read. A well-meant "make it consistent" edit that turned these into MAX would silently
