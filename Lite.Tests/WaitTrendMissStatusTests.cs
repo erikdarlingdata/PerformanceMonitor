@@ -23,7 +23,8 @@ namespace PerformanceMonitorLite.Tests;
 /// <summary>
 /// #6446: <c>get_wait_trend</c> on a wait type with no rows in the window. The status word tells a caller whether the gap
 /// is permanent, so it has to follow the server's own rules: <c>empty</c> when the collector would store the wait type
-/// and nothing waited, <c>not_collected</c> only for a wait type the collector never stores (the ignored list),
+/// and nothing waited, <c>not_collected</c> only for a wait type on the ignored list (the collector skips it, and rows
+/// stored before it was ignored are hidden, #7880),
 /// <c>unavailable</c> when no wait stats exist at all. Run through the real tool over a real DuckDB.
 /// </summary>
 public sealed class WaitTrendMissStatusTests : IClassFixture<SharedDuckDbFixture>, IDisposable
@@ -76,7 +77,7 @@ public sealed class WaitTrendMissStatusTests : IClassFixture<SharedDuckDbFixture
     }
 
     [Fact]
-    public async Task AnIgnoredWaitType_IsNotCollected_AndSaysTheCollectorNeverStoresIt()
+    public async Task AnIgnoredWaitType_IsNotCollected_AndSaysItIsOnTheIgnoredList()
     {
         await SeedWaitAsync(DateTime.UtcNow.AddMinutes(-30), CollectedWait);
         Assert.Contains("SLEEP_TASK", IgnoredWaitTypes.Load());
@@ -84,7 +85,43 @@ public sealed class WaitTrendMissStatusTests : IClassFixture<SharedDuckDbFixture
         using var doc = JsonDocument.Parse(await McpWaitTools.GetWaitTrend(_dataService, _serverManager, "SLEEP_TASK", "TestServer"));
 
         Assert.Equal("not_collected", doc.RootElement.GetProperty("status").GetString());
-        Assert.Contains("never stores", doc.RootElement.GetProperty("message").GetString());
+        var message = doc.RootElement.GetProperty("message").GetString()!;
+        Assert.Contains("ignored (benign) wait list", message, StringComparison.Ordinal);
+        /* Rows stored before a type was ignored stay in the file until retention removes them (#7880), so the
+           answer must not claim the collector never stores the type. */
+        Assert.DoesNotContain("never stores", message, StringComparison.Ordinal);
+        Assert.Contains("not shown", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #7880: rows the store already holds for an ignored wait type are hidden by get_wait_stats and get_wait_types at read
+    /// time, and get_wait_trend hides them the same way, so the same server and window never show a wait in one read and
+    /// not the other.
+    /// </summary>
+    [Fact]
+    public async Task AnIgnoredWaitTypeWithStoredRows_IsNotCollected_AsGetWaitStatsAlsoHidesIt()
+    {
+        var t0 = DateTime.UtcNow.AddMinutes(-30);
+        Assert.Contains("SLEEP_TASK", IgnoredWaitTypes.Load());
+        for (var i = 0; i < 3; i++)
+        {
+            await SeedWaitAsync(t0.AddMinutes(i), "SLEEP_TASK");
+            await SeedWaitAsync(t0.AddMinutes(i), CollectedWait);
+        }
+
+        var stats = await _dataService.GetWaitStatsAsync(_serverId, hoursBack: 3);
+        Assert.DoesNotContain(stats, r => r.WaitType == "SLEEP_TASK");
+        Assert.Contains(stats, r => r.WaitType == CollectedWait);
+
+        using var doc = JsonDocument.Parse(await McpWaitTools.GetWaitTrend(_dataService, _serverManager, "SLEEP_TASK", "TestServer", hours_back: 3));
+        Assert.True(doc.RootElement.TryGetProperty("status", out var status),
+            "get_wait_trend served points for an ignored wait type that get_wait_stats hides: " + doc.RootElement.GetRawText());
+        Assert.Equal("not_collected", status.GetString());
+
+        /* The wait type the collector stores still answers with points over the same rows. */
+        using var kept = JsonDocument.Parse(await McpWaitTools.GetWaitTrend(_dataService, _serverManager, CollectedWait, "TestServer", hours_back: 3));
+        Assert.False(kept.RootElement.TryGetProperty("status", out _));
+        Assert.NotEmpty(kept.RootElement.GetProperty("trend").EnumerateArray());
     }
 
     [Fact]
