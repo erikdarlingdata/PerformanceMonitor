@@ -39,10 +39,18 @@ public sealed class QueryStatsAbandonedRunBaselineTests
     };
 
     /// <summary>One result set the way the candidate query returns it: a row per (handle, counter) pair.</summary>
-    private static async Task<List<QueryStatsCollector.Row>> ReadAsync(
+    internal static async Task<List<QueryStatsCollector.Row>> ReadAsync(
         CollectorDeltaCalculator deltas, DateTime at, params (int Handle, long Work)[] statements)
     {
-        using var table = new DataTable();
+        using var table = Table(at, statements);
+        await using var reader = table.CreateDataReader();
+        return await QueryStatsCollector.Instance.ReadAsync(reader, Context(deltas, at), TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>The candidate query's result, a row per statement, as a table a data reader can be made from.</summary>
+    internal static DataTable Table(DateTime at, params (int Handle, long Work)[] statements)
+    {
+        var table = new DataTable();
         var types = new Type[44];
         for (var i = 0; i < types.Length; i++)
         {
@@ -88,8 +96,7 @@ public sealed class QueryStatsAbandonedRunBaselineTests
             table.Rows.Add(values);
         }
 
-        await using var reader = table.CreateDataReader();
-        return await QueryStatsCollector.Instance.ReadAsync(reader, Context(deltas, at), TestContext.Current.CancellationToken);
+        return table;
     }
 
     /// <summary>

@@ -159,6 +159,21 @@ public sealed class FinOpsIndexAnalysisLimitBehaviourTests
         Assert.Equal("1.5 MB", At("Over1Half"));
     }
 
+    /* #7538, #7651: the empty sentence no longer carries the count, so the page names the left-out databases itself, above the empty
+       sentence and above the count line of a page with rows. A read that left none out draws no such sentence. */
+    [Fact]
+    public void AReadThatLeftDatabasesOut_NamesThemOnTheEmptyPage_AndOnThePageWithRows()
+    {
+        const string Sentence = "2 databases were left out because the server no longer lists them. They were dropped or detached: a_old, b_old.";
+        var run = Run();
+        string[] At(string step) => run.GetProperty(step).EnumerateArray().Select(e => e.GetString()!).ToArray();
+        Assert.Equal(new[] { Sentence, "No index statistics for a database this server still has in the latest snapshots." }, At("leftOutEmpty"));
+        var data = At("leftOutData");
+        Assert.Equal(Sentence, data[0]);
+        Assert.Equal("3 recommendations." + Tail, data[1]);
+        Assert.DoesNotContain(At("leftOutNone"), s => s.Contains("left out", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void ALiveDatabaseSharingANameWithALeftOverOne_KeepsItsCollectedTimeOnItsRecommendations()
     {

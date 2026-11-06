@@ -213,6 +213,26 @@ try {
     const cells = findAll(r, byTag("td")).map((n) => n.textContent);
     if (cells.length && edges[cells[edgeHeader.indexOf("Database")]] !== undefined) out.edges[cells[edgeHeader.indexOf("Database")]] = cells[edgeHeader.indexOf("Size")];
   }
+  // #7538, #7651: a read that left databases out names them on the empty page and on the page with rows. The empty page's own sentence no
+  // longer repeats the count, so the page must draw the left-out strip itself. Each step is every strip under the tab, in the order drawn.
+  const leftOutFields = {
+    databases_left_out: ["a_old", "b_old"],
+    databases_left_out_count: 2,
+    databases_left_out_note: "These databases were left out of this read because the server's newest database snapshot no longer lists them. Name one in database_name to read its history.",
+  };
+  const stripsOf = (node) => findAll(node, (n) => String(n.className).split(" ").some((c) => c === "notice" || c === "source" || c === "empty")).map((n) => n.textContent);
+  body = JSON.stringify({ status: "empty", message: "No index statistics for a database this server still has in the latest snapshots.", ...leftOutFields });
+  root = tab.build("srv-h", {});
+  await settle();
+  out.leftOutEmpty = stripsOf(root);
+  body = JSON.stringify({ ...payload(3, 3, 500), ...leftOutFields });
+  root = tab.build("srv-i", {});
+  await settle();
+  out.leftOutData = stripsOf(root);
+  body = JSON.stringify(payload(3, 3, 500));
+  root = tab.build("srv-j", {});
+  await settle();
+  out.leftOutNone = stripsOf(root);
   console.log(JSON.stringify(out));
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });

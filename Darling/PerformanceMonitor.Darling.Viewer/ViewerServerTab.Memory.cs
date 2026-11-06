@@ -720,9 +720,12 @@ public partial class ViewerServerTab
                 MemoryClerksTopText.Text = "--";
             }
         }
-        catch
+        catch (Exception ex)
         {
-            /* Ignore chart update errors */
+            /* The chart was cleared above, so a failed read reaches the status line, as a slicer's does; a superseded run says nothing. */
+            var status = PickerChartReadFailure.StatusText("memory-clerks", ex, gen, _memoryClerksPickerGen);
+            if (status is not null)
+                StatusChanged?.Invoke(status);
         }
     }
 

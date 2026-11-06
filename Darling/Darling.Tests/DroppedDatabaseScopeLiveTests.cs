@@ -226,8 +226,9 @@ VALUES ($1, $2, $3, 'procedure_stats', $4, 100, 'SUCCESS', NULL, 1, 80, 20)",
         Assert.DoesNotContain("recorded nothing for it", message, StringComparison.Ordinal);
         Assert.DoesNotContain("matches this request", message, StringComparison.Ordinal);
         Assert.Contains("a database this server still has", message, StringComparison.Ordinal);
-        Assert.Contains("1 database(s) the server no longer lists", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("left out", message, StringComparison.Ordinal);
         Assert.Equal(new[] { "GoneDb" }, LeftOut(empty.RootElement));
+        Assert.Equal(1, empty.RootElement.GetProperty("databases_left_out_count").GetInt32());
         Assert.Contains("no longer lists them", empty.RootElement.GetProperty("databases_left_out_note").GetString(), StringComparison.Ordinal);
 
         /* The Query Store clutter read leaves GoneDb out the same way, and its empty page must not say Query Store is off everywhere. */
@@ -238,6 +239,9 @@ VALUES ($1, $2, $3, 'procedure_stats', $4, 100, 'SUCCESS', NULL, 1, 80, 20)",
         using var clutter = JsonDocument.Parse(await DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(dataSource, serverName, 24, 20, false, null, null, cancellationToken: ct));
         Assert.Equal("empty", clutter.RootElement.GetProperty("status").GetString());
         Assert.DoesNotContain("OFF everywhere", clutter.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        /* #7538: the count is the reply's databases_left_out_count, and the empty sentence does not say it again. */
+        Assert.DoesNotContain("left out", clutter.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        Assert.Equal(1, clutter.RootElement.GetProperty("databases_left_out_count").GetInt32());
         Assert.Equal(new[] { "GoneDb" }, LeftOut(clutter.RootElement));
 
         /* #7725: GoneDb ran a procedure in the window. The page used to be empty (the dropped database was only named); it now carries the row,
