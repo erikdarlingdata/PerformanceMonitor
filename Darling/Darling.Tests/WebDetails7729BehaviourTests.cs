@@ -75,6 +75,16 @@ public sealed class WebDetails7729BehaviourTests
     }
 
     [Fact]
+    public void NoDeadlockGrid_PrintsTheGraphsProcessId()
+    {
+        var g = Run().GetProperty("deadlockGrids");
+        var page = Strings(g.GetProperty("page"));
+        var template = Strings(g.GetProperty("template"));
+        Assert.Equal(new[] { "deadlock_time", "victim_sql_text", "process_summary", "has_deadlock_xml" }, page);
+        Assert.Equal(new[] { "deadlock_time", "victim_sql_text", "process_summary" }, template);
+    }
+
+    [Fact]
     public void TheOverheadWaits_LeaveOutAWaitWithNoDelta_SoTheEmptySentencePrints()
     {
         var r = Run();

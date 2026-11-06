@@ -35,6 +35,8 @@ const util = await imp("util.js");
 const panels = await imp("panels.js");
 const dt = await imp("pages/server-tabs/sql-events.js");
 const qs = await imp("pages/server-tabs/sql-queries.js");
+const blocking = await imp("pages/server-tabs/sql-blocking.js");
+const templates = await imp("view-templates.js");
 
 const all = (n, out = []) => { out.push(n); for (const c of n.children) all(c, out); return out; };
 const norm = (t) => t.replace(/[▲▼▾ ]/g, "");
@@ -133,5 +135,11 @@ const pinGrid = (scrollWidth) => {
 out.pinOverflow = pinGrid(2000);
 out.pinFits = pinGrid(1000);
 delete globalThis.ResizeObserver;
+
+/* Item 7: no deadlock grid prints the graph's own process id. The Blocking page's summary grid and the saved-view template. */
+const templateDeadlockKeys = [];
+const walk = (v) => { if (Array.isArray(v)) v.forEach(walk); else if (v && typeof v === "object") { if (v.read === "get_deadlocks" && Array.isArray(v.columns)) templateDeadlockKeys.push(...v.columns.map((c) => c.key)); Object.values(v).forEach(walk); } };
+walk(templates.DASHBOARD_TEMPLATES.map((t) => t.make("srv")));
+out.deadlockGrids = { page: blocking.DEADLOCK_COLUMNS.map((c) => c.key), template: templateDeadlockKeys };
 
 console.log(JSON.stringify(out));
