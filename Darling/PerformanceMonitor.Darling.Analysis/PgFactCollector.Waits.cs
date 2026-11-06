@@ -397,11 +397,11 @@ FROM reports";
         });
     }
 
-    /// <summary>The window's deadlocks by when they HAPPENED (<c>deadlock_time</c>), as the deadlock grids read
-    /// them. $4 is the <see cref="EventWindowFloor"/> for $2 — the partition-column bound the event
-    /// window cannot supply, with no upper bound so a late-collected deadlock still counts.</summary>
-    /// <summary>The window's deadlock count beside its busiest one-hour bucket's count (#7893). date_bin's origin is
-    /// the window start ($2, reused), the grain the DEADLOCKS fact grades; the sum of the buckets is the count.</summary>
+    /// <summary>The window's deadlock count beside its busiest one-hour bucket's count (#7893), by when the deadlocks
+    /// HAPPENED (<c>deadlock_time</c>), as the deadlock grids read them. date_bin's origin is the window start ($2,
+    /// reused), the grain the DEADLOCKS fact grades; the sum of the buckets is the count. $4 is the
+    /// <see cref="EventWindowFloor"/> for $2 — the partition-column bound the event window cannot supply, with no
+    /// upper bound so a late-collected deadlock still counts.</summary>
     public const string DeadlocksSql = @"
 WITH hours AS (
     SELECT date_bin('1 hour', deadlock_time, $2) AS bucket_start, COUNT(*) AS n
