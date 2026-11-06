@@ -197,6 +197,17 @@ card = compose.renderComposedPanelCard(panel("Preview"), SCOPE, null, null);
 await settle();
 out.previewRebuilt = report(card);
 
+// 6. a view variable edit drops the hold, the same values (in any key order) keep it
+const withValues = (values) => ({ server: "A", hours: 4, values });
+card = await draw("Waits vars", 5, withValues({ a: "1", b: "2" }));
+await brush(card);
+await drillOn(card, "AAA");
+out.varsDrilled = report(card);
+out.varsSame = report(await draw("Waits vars", 5, withValues({ a: "1", b: "2" })));
+out.varsReordered = report(await draw("Waits vars", 5, withValues({ b: "2", a: "1" })));
+out.varsChanged = report(await draw("Waits vars", 5, withValues({ a: "1", b: "3" })));
+out.varsChangedBack = report(await draw("Waits vars", 5, withValues({ a: "1", b: "2" })));
+
 fs.rmSync(scratch, { recursive: true, force: true });
 console.log(JSON.stringify(out));
 process.exit(0);

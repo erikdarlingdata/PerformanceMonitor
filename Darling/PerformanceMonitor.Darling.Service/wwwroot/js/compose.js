@@ -194,10 +194,18 @@ function pinHoursLabel(hours) {
 }
 
 /* The drill and zoom each composed panel holds (#7923), at MODULE scope so the poll's rebuild of the grid draws them again.
-   Keyed by composedPanelId (slot, title or id, server); each entry remembers the scope (page address + preset range) it was
-   made under, and a lookup under any other scope drops it, so another server or range starts every panel unzoomed and
-   undrilled. The reader's own clear (the chip's ×) sets null and removes the entry. */
+   Keyed by composedPanelId (slot, title or id, server), so each server's panel has its own entry. Each entry remembers the
+   scope (page address + preset range + the view's variable values) it was made under, and a lookup under any other scope
+   drops it. So the first visit to another server starts unzoomed and undrilled, a return to an earlier server under the same
+   range and variables brings back what was held there, and a range or variable change drops it. The reader's own clear
+   (the chip's ×) sets null and removes the entry. */
 const composedViews = new Map();
+
+/** The view's variable values as one stable string: the same values in another key order are the same scope. */
+function variableScope(values) {
+  if (!values || typeof values !== "object") return "";
+  return JSON.stringify(Object.keys(values).sort().map((k) => [k, values[k]]));
+}
 
 /** The { drill, zoom } held for composed panel `id` under `scope`, or null. A different scope drops the entry. */
 export function getComposedView(id, scope) {
@@ -227,7 +235,9 @@ function driveComposedPanel(body, panelSpec, scope, onSettled, slot = null, gate
      legend's hidden series, so the poll's staged rebuild of this panel draws what the reader set instead of a full-window
      chart. A panel with no slot (the editor preview) has no stable identity, so it holds nothing. */
   const holdId = slot != null ? composedPanelId(panelSpec, scope, slot) : null;
-  const holdScope = chartZoomScope(scope ? scope.hours : null);
+  /* The view's variable values are part of the hold scope: a variable edit rebuilds every panel and must drop a drill that
+     the variable may filter on, as it did before the hold (legend hiding keeps its own scope below). */
+  const holdScope = chartZoomScope(scope ? scope.hours : null) + "|" + variableScope(scope ? scope.values : null);
   const held = holdId != null ? getComposedView(holdId, holdScope) : null;
   let drill = held ? held.drill : null; // { keys: [{dimension, value}] } or null
   let zoom = held ? held.zoom : null; // { startIso, endIso } or null (#1606 brush-zoom — view-state only, like the drill)

@@ -124,4 +124,33 @@ public sealed class WebComposedViewHoldBehaviourTests
         Assert.Null(Str(rebuilt, "windowStart"));
         Assert.Equal(0, ZoomChips(rebuilt));
     }
+
+    [Theory]
+    [InlineData("varsSame")]
+    [InlineData("varsReordered")]
+    public void TheSameViewVariables_InAnyKeyOrder_KeepTheHeldDrillAndZoom(string scenario)
+    {
+        var r = Run();
+        var rebuilt = S(r, scenario);
+        var drilled = S(r, "varsDrilled");
+        Assert.NotNull(Str(drilled, "windowStart"));
+        Assert.Equal(Str(drilled, "windowStart"), Str(rebuilt, "windowStart"));
+        Assert.Equal(Str(drilled, "windowEnd"), Str(rebuilt, "windowEnd"));
+        Assert.Equal(new[] { "wait=AAA" }, Filters(rebuilt));
+        Assert.Equal(1, ZoomChips(rebuilt));
+        Assert.Equal(1, DrillChips(rebuilt));
+    }
+
+    [Theory]
+    [InlineData("varsChanged")]
+    [InlineData("varsChangedBack")]
+    public void AChangedViewVariable_DropsTheHeldDrillAndZoom_AndTheEntryIsGone(string scenario)
+    {
+        // varsChangedBack builds again under the ORIGINAL values: it draws neither only if the changed build removed the entry.
+        var other = S(Run(), scenario);
+        Assert.Null(Str(other, "windowStart"));
+        Assert.Empty(Filters(other));
+        Assert.Equal(0, ZoomChips(other));
+        Assert.Equal(0, DrillChips(other));
+    }
 }
