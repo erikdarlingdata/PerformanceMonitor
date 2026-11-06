@@ -182,7 +182,7 @@ const all = (node, pred, found = []) => {
 };
 const settle = async () => { for (let i = 0; i < 100; i++) await new Promise((r) => setTimeout(r, 0)); };
 const ctx = { hours: 24, label: "last 24 hours", signal: new AbortController().signal };
-const kinds = { fileio: () => modules.tabs.fileIoPanel("SRV1", ctx),  cpu: () => modules.tabs.serverTrendPanel("SRV1", ctx, "cpu_scheduler"), plan: (s) => modules.tabs.serverTrendPanel(s || "SRV1", ctx, "plan_cache"), clerks: (s) => modules.tabs.memoryClerksTrendPanel(s || "SRV1", ctx) };
+const kinds = { fileio: () => modules.tabs.fileIoPanel("SRV1", ctx),  cpu: () => modules.tabs.serverTrendPanel("SRV1", ctx, "cpu_scheduler"), plan: (s) => modules.tabs.serverTrendPanel(s || "SRV1", ctx, "plan_cache"), clerks: (s) => modules.tabs.memoryClerksTrendPanel(s || "SRV1", ctx), queriesTab: (s) => modules.tabs.SERVER_TABS.find((t) => t.id === "queries").build(s || "SRV1", ctx) };
 async function build(kind, server) {
   const root = new FakeNode("main");
   modules.util.mount(root, kinds[kind](server));
@@ -281,6 +281,15 @@ const scenarios = {
     mode = "noclerks";
     const root = await build("clerks");
     return { reads: trendReads(), empties: texts(root, "strip empty") };
+  },
+  /* #7941: one paint of the Queries tab, with a window the way a browser has one, so a line chart's read is plot-sized (trend-points.js). The
+     requests each duration trend tool received are listed by path: the chart's fan-out and the Top card's slicer strip both read the tool. */
+  queriesTabReads: async () => {
+    globalThis.window = { innerWidth: 1280 };
+    globalThis.location = { hash: "#/server/SRV1/queries" };
+    await build("queriesTab");
+    const paths = (tool) => fetches.filter((f) => f.includes("/api/read/" + tool + "?")).map((f) => new URL(f, "http://x").pathname + new URL(f, "http://x").search);
+    return { queryDurationReads: paths("get_query_duration_trend"), procedureDurationReads: paths("get_procedure_duration_trend") };
   },
 };
 

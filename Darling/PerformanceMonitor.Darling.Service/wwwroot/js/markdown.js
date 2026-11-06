@@ -46,7 +46,7 @@ export function renderMarkdown(text) {
 
     /* Fenced code block: ``` or ~~~ (>=3), closed by a fence of the same char (>= the opening length). The body is
        verbatim text (no inline parsing), so anything inside — including markup — is literal by definition. */
-    const fence = line.match(/^\s*(`{3,}|~{3,})(.*)$/);
+    const fence = fenceOpen(line);
     if (fence) {
       const fenceChar = fence[1][0];
       const fenceLen = fence[1].length;
@@ -115,10 +115,19 @@ function normalize(text) {
   return String(text == null ? "" : text).replace(/\r\n?/g, "\n").replace(/\t/g, "    ");
 }
 
+/**
+ * The fence a line opens, as [whole, fence, info string], or null. #7944: a backtick fence's info string holds no backtick
+ * (CommonMark), so a line that opens and closes inline code with three backticks ("```code``` and more") is a paragraph line, not a
+ * fence that runs to the end of the cell. A tilde fence's info string may hold anything.
+ */
+function fenceOpen(line) {
+  return line.match(/^\s*(`{3,})([^`]*)$/) || line.match(/^\s*(~{3,})(.*)$/);
+}
+
 /** Whether a line opens a non-paragraph block (so a paragraph run stops before it). Mirrors the block detectors. */
 function isBlockStart(line) {
   return (
-    /^\s*(`{3,}|~{3,})/.test(line) ||
+    fenceOpen(line) !== null ||
     /^\s{0,3}#{1,6}\s+/.test(line) ||
     /^\s*[-*+]\s+/.test(line) ||
     /^\s*\d+[.)]\s+/.test(line)
@@ -153,17 +162,19 @@ function parseInlineImpl(text, allowLinks) {
   while (i < n) {
     const c = text[i];
 
-    /* `inline code` — verbatim content, no nested formatting. */
+    /* `inline code` — verbatim content, no nested formatting. #7944: a run of backticks opens a span that the next run of exactly
+       the same length closes (CommonMark), so "```code```" is one span and not three; a run with no match is literal text. */
     if (c === "`") {
-      const close = text.indexOf("`", i + 1);
+      const open = backtickRun(text, i);
+      const close = closingRun(text, i + open, open);
       if (close > i) {
         flush();
-        nodes.push(el("code", { class: "md-code", text: text.slice(i + 1, close) }));
-        i = close + 1;
+        nodes.push(el("code", { class: "md-code", text: text.slice(i + open, close) }));
+        i = close + open;
         continue;
       }
-      buf += c;
-      i++;
+      buf += text.slice(i, i + open);
+      i += open;
       continue;
     }
 
@@ -229,6 +240,24 @@ function parseInlineImpl(text, allowLinks) {
 
   flush();
   return nodes;
+}
+
+/** The length of the run of backticks starting at `at`. */
+function backtickRun(text, at) {
+  let j = at;
+  while (text[j] === "`") j++;
+  return j - at;
+}
+
+/** The start of the next run of exactly `len` backticks at or after `from`, or -1. A longer or shorter run is skipped whole. */
+function closingRun(text, from, len) {
+  for (let j = from; j < text.length; j++) {
+    if (text[j] !== "`") continue;
+    const run = backtickRun(text, j);
+    if (run === len) return j;
+    j += run - 1;
+  }
+  return -1;
 }
 
 /** True for a letter or digit: an underscore touching one on the wrong side is part of a word, not emphasis (#7172). */

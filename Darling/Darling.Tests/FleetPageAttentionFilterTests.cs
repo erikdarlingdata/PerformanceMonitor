@@ -209,7 +209,7 @@ public sealed class FleetPageAttentionFilterTests
     [Fact]
     public void TheGrid_IsFilteredOnce_AndBothViewsShowTheActiveState()
     {
-        Assert.Contains("const searched = lastCards.filter((c) => cardMatches(c, fleetFilter));", FleetJs, StringComparison.Ordinal);
+        Assert.Contains("const searched = lastCards.filter((c) => cardMatches(c, fleetFilter, ancestors));", FleetJs, StringComparison.Ordinal);
         Assert.Contains("attentionOnly ? searched.filter(cardNeedsAttention) : searched", FleetJs, StringComparison.Ordinal);
 
         /* One call site: the grouped view and the flat view are projected from the SAME filtered list, so a

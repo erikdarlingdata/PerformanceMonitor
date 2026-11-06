@@ -171,13 +171,15 @@ prv AS (SELECT database_name, object_id, SUM(reserved_mb) mb
         FROM v_index_object_stats WHERE server_id = $1 AND collection_time = (SELECT t FROM prior) GROUP BY database_name, object_id)
 SELECT cur.database_name, cur.schema_name, cur.table_name, prv.mb AS prior_mb, cur.mb AS current_mb,
        cur.mb - prv.mb AS growth_mb,
-       CASE WHEN prv.mb > 0 THEN (cur.mb - prv.mb) * 100.0 / prv.mb ELSE 0 END AS growth_pct
+       (cur.mb - prv.mb) * 100.0 / NULLIF(prv.mb, 0) AS growth_pct
 FROM cur JOIN prv ON cur.database_name = prv.database_name AND cur.object_id = prv.object_id
 WHERE (SELECT t FROM latest) <> (SELECT t FROM prior)
 AND   cur.mb - prv.mb >= $2
-AND   (CASE WHEN prv.mb > 0 THEN (cur.mb - prv.mb) * 100.0 / prv.mb ELSE 0 END) >= $3
+AND   (prv.mb <= 0 OR (cur.mb - prv.mb) * 100.0 / NULLIF(prv.mb, 0) >= $3)
 /*SEC*/
 ORDER BY growth_mb DESC LIMIT 1";
+                /* #7897: a table that held no pages in the earlier snapshot has no percent to clear (growth_pct is NULL), so
+                   it passes the percent test and is held to the MB floor alone. */
                 cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
                 cmd.Parameters.Add(new DuckDBParameter { Value = ObjectGrowthMbThreshold });
                 cmd.Parameters.Add(new DuckDBParameter { Value = ObjectGrowthPctThreshold });
@@ -192,7 +194,24 @@ ORDER BY growth_mb DESC LIMIT 1";
                     var gSchema = reader.IsDBNull(1) ? null : reader.GetValue(1)?.ToString();
                     var gTable = reader.IsDBNull(2) ? null : reader.GetValue(2)?.ToString();
                     var growthMb = Convert.ToDouble(reader.GetValue(5));
-                    var growthPct = Convert.ToDouble(reader.GetValue(6));
+                    var metadata = new Dictionary<string, double>
+                    {
+                        ["prior_mb"] = Convert.ToDouble(reader.GetValue(3)),
+                        ["current_mb"] = Convert.ToDouble(reader.GetValue(4)),
+                        ["growth_mb"] = growthMb
+                    };
+                    /* #7897: growth from empty carries no growth_pct, and its ratio against the trip threshold is the growth
+                       against the MB floor; the card reads the missing percent as "from empty". */
+                    if (reader.IsDBNull(6))
+                    {
+                        metadata["growth_ratio"] = growthMb / (double)ObjectGrowthMbThreshold;
+                    }
+                    else
+                    {
+                        var growthPct = Convert.ToDouble(reader.GetValue(6));
+                        metadata["growth_pct"] = growthPct;
+                        metadata["growth_ratio"] = growthPct / ObjectGrowthPctThreshold;
+                    }
                     anomalies.Add(new Fact
                     {
                         Source = "anomaly",
@@ -201,14 +220,7 @@ ORDER BY growth_mb DESC LIMIT 1";
                         ServerId = context.ServerId,
                         DatabaseName = db,
                         ObjectName = string.IsNullOrEmpty(gTable) ? null : string.IsNullOrEmpty(gSchema) ? gTable : $"{gSchema}.{gTable}",
-                        Metadata = new Dictionary<string, double>
-                        {
-                            ["prior_mb"] = Convert.ToDouble(reader.GetValue(3)),
-                            ["current_mb"] = Convert.ToDouble(reader.GetValue(4)),
-                            ["growth_mb"] = growthMb,
-                            ["growth_pct"] = growthPct,
-                            ["growth_ratio"] = growthPct / ObjectGrowthPctThreshold
-                        }
+                        Metadata = metadata
                     });
                 }
             }
@@ -573,6 +585,8 @@ ORDER BY local_hour";
 
             var peakRate = whole.Peak;
             var avgRate = whole.Mean;
+            /* total_wait_ms and the fact's Value are the WHOLE window's wait total, summed over every tile; the peak and mean
+               beside them are the scored tile's on the tiled path. The PostgreSQL-target twin reports the scored tile's total. */
             var totalWaitMs = windowTotalWaitMs;
 
             /* #1743: the modified z-score replaces the ratio as the trusted-baseline trigger —
@@ -708,7 +722,7 @@ ORDER BY local_hour";
                 ["current_ms_per_sec"] = reportPeak,
                 ["avg_ms_per_sec"] = reportAvg,
                 ["baseline_mean"] = bucketUsed.Mean,
-                ["total_wait_ms"] = totalWaitMs,
+                ["total_wait_ms"] = totalWaitMs, // the whole window's total, not the scored tile's
                 ["ratio"] = ratio,
                 ["modified_z"] = modifiedZ,
                 ["mean_modified_z"] = meanModifiedZ,
@@ -758,7 +772,7 @@ LIMIT 6";
             {
                 Source = "anomaly",
                 Key = "ANOMALY_WAIT_PROFILE",
-                Value = totalWaitMs,
+                Value = totalWaitMs, // the whole window's wait total
                 ServerId = context.ServerId,
                 Metadata = metadata
             });
@@ -859,9 +873,11 @@ FROM (SELECT (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("
             var baselineBlockingRate = blockingBaseline.SampleCount > 0 ? blockingBaseline.Mean : 0;
             var baselineDeadlockRate = deadlockBaseline.SampleCount > 0 ? deadlockBaseline.Mean : 0;
 
-            // Blocking spike: at least 5 events in the window AND (trustworthy → per-hour rate >= 3x
-            // baseline; untrustworthy → fire on the count alone).
-            if (currentBlocking >= 5 && (!blockingTrust || currentBlockingPerHour / Math.Max(baselineBlockingRate, 1) >= DefaultEventRatioThreshold))
+            // Blocking spike: at least BlockingSpikeMinEvents in the window AND (trustworthy → per-hour rate
+            // >= 3x the bucket's real mean; untrustworthy → fire on the count alone). #7885: the divisor is the
+            // mean itself, floored only at EventBaselineRateEpsilon against a zero; the count gate bounds the
+            // numerator, so a small mean cannot turn a handful of events into an unbounded ratio.
+            if (currentBlocking >= BlockingSpikeMinEvents && (!blockingTrust || currentBlockingPerHour / Math.Max(baselineBlockingRate, EventBaselineRateEpsilon) >= DefaultEventRatioThreshold))
             {
                 var metadata = CountFamilyMetadata.Build(currentBlocking, currentBlockingPerHour, baselineBlockingRate, blockingBaseline, blockingFromDmv);
                 AddBaselineContext(metadata, blockingBaseline);
@@ -876,9 +892,10 @@ FROM (SELECT (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("
                 });
             }
 
-            // Deadlock spike: at least 3 events in the window AND (trustworthy → per-hour rate >= 3x
-            // baseline; untrustworthy → fire on the count alone).
-            if (currentDeadlocks >= 3 && (!deadlockTrust || currentDeadlocksPerHour / Math.Max(baselineDeadlockRate, 1) >= DefaultEventRatioThreshold))
+            // Deadlock spike: at least DeadlockSpikeMinEvents in the window AND (trustworthy → per-hour rate
+            // >= 3x the bucket's real mean; untrustworthy → fire on the count alone). Same divisor rule as the
+            // blocking arm (#7885).
+            if (currentDeadlocks >= DeadlockSpikeMinEvents && (!deadlockTrust || currentDeadlocksPerHour / Math.Max(baselineDeadlockRate, EventBaselineRateEpsilon) >= DefaultEventRatioThreshold))
             {
                 var metadata = CountFamilyMetadata.Build(currentDeadlocks, currentDeadlocksPerHour, baselineDeadlockRate, deadlockBaseline);
                 AddBaselineContext(metadata, deadlockBaseline);

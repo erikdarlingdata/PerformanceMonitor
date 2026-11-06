@@ -73,6 +73,10 @@ LIMIT {LongQueryGridCap}";
     /// the window is a candidate, so a page cut here still holds the window's slowest; the grid read above
     /// cannot promise that. Callers detecting truncation pass <c>limit + 1</c> and read the extra row as the
     /// signal. Windowed on the UTC helper (offset 0) because the caller is the MCP tool, whose window is UTC.
+    /// <para>#7900: the window is on the event's own <c>event_time</c>, when it happened, as the blocked-process and deadlock event
+    /// reads and Darling's twin window theirs, with no collection-time bound: the copies a later batch stored again share the event
+    /// time, so the first copy is found without a look-back. The grid read above stays on <c>collection_time</c>, the data-start
+    /// probe's own column.</para>
     /// <para>#5244: the optional <paramref name="databaseNames"/> narrows the raw rows in the WHERE, before the duration ranking
     /// and the <c>LIMIT</c>, so the page is the slowest N of the chosen databases and a cap never counts another database's
     /// rows (Darling's <c>DarlingLongQueryReader</c> predicate sits in the same place). Null or empty reads every database.</para>
@@ -90,7 +94,7 @@ LIMIT {LongQueryGridCap}";
         if (tags is not null) { dbClause += QueryTagReadScope.HashToken("query_hash"); tagValues.AddRange(tags.ParameterValues); }
 
         command.CommandText = LongQueryCompletionsSelect + @"
-FROM " + StoredEventCopies.LongQueryCompletions("server_id = $1 AND collection_time <= $3" + dbClause, collectedFrom: "$2") + @" AS ev
+FROM " + StoredEventCopies.LongQueryCompletions("server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause) + @" AS ev
 ORDER BY duration_microseconds DESC NULLS LAST, event_time DESC
 LIMIT $4";
         if (tags is not null) command.CommandText = tags.Apply(command.CommandText, 5 + dbValues.Count);

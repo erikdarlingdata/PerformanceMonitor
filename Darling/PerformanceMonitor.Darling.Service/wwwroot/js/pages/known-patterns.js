@@ -54,7 +54,7 @@ export function formToBody(values, zoneFallback) {
   const server = text("server_id");
   const windowText = text("window_minutes");
   return {
-    server_id: /^\d+$/.test(server) ? Number(server) : null,
+    server_id: /^-?\d+$/.test(server) ? Number(server) : null,
     metric_name: text("metric_name") || null,
     time_of_day: time || null,
     time_zone: time ? zone || zoneFallback || null : null,
@@ -198,6 +198,9 @@ export async function renderKnownPatterns(main) {
 
 async function refreshList(state) {
   const res = await readTool("get_known_patterns", { include_expired: true });
+  /* #7959: a 401 has put the shell's sign-in strip up, and an aborted read is a route change. The list is left as it is rather than drawn
+     as empty, which would say no pattern is recorded. */
+  if (res.kind === "aborted" || res.kind === "auth") return;
   if (res.kind === "error") return mount(state.listBox, errorStrip(res.message));
   if (res.kind === "empty") {
     state.entries = [];
@@ -332,10 +335,13 @@ async function submit() {
     busy = false;
     if (saveButton) saveButton.disabled = false;
   }
+  /* #7989: the answer belongs to the form it was sent from. When that form was cancelled while the save was out, the form open now, if
+     any, is left as it is: a success still re-reads the list, and a refusal is dropped with the form it was for. */
   if (res.kind === "ok") {
-    closeForm();
+    if (form === f) closeForm();
     return refreshList(live);
   }
+  if (form !== f) return;
   f.banner = res.message;
   drawForm();
 }
