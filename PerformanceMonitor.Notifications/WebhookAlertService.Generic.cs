@@ -32,7 +32,6 @@ public partial class WebhookAlertService
     private async Task<string?> TrySendGenericAlertAsync(
         IAlertSettings settings,
         string webhookUrl,
-        HealthTarget healthTarget,
         string metricName,
         string serverName,
         string currentValue,
@@ -48,6 +47,7 @@ public partial class WebhookAlertService
         string? dedupKeyOverride = null,
         CancellationToken cancellationToken = default)
     {
+        var entries = EntriesNaming(settings, NotificationRouter.GenericChannel, webhookUrl);
         try
         {
             /* A malformed headers JSON / body template is an operator config error, not a transport
@@ -55,7 +55,7 @@ public partial class WebhookAlertService
                report a channel that is delivering nothing, and it must never throw into the alert loop. */
             if (!TryParseHeaders(settings.GenericWebhookHeadersJson, out var headers, out var headerError))
             {
-                RecordGenericFailure(healthTarget, headerError!);
+                RecordGenericFailure(entries, headerError!);
                 return headerError;
             }
 
@@ -75,7 +75,7 @@ public partial class WebhookAlertService
 
             if (!IsWellFormedJson(payload, out var bodyError))
             {
-                RecordGenericFailure(healthTarget, bodyError!);
+                RecordGenericFailure(entries, bodyError!);
                 return bodyError;
             }
 
@@ -97,11 +97,11 @@ public partial class WebhookAlertService
 
             if (error != null)
             {
-                RecordGenericFailure(healthTarget, error);
+                RecordGenericFailure(entries, error);
                 return error;
             }
 
-            RecordChannelRecovered(settings, NotificationRouter.GenericChannel, webhookUrl, healthTarget);
+            RecordChannelRecovered(NotificationRouter.GenericChannel, entries);
             _logger.LogInformation($"Generic webhook sent for {metricName} on {serverName}");
             return null;
         }
@@ -112,7 +112,7 @@ public partial class WebhookAlertService
         }
         catch (Exception ex)
         {
-            RecordChannelException(NotificationRouter.GenericChannel, healthTarget, ex);
+            RecordChannelException(NotificationRouter.GenericChannel, entries, ex);
             return ex.Message;
         }
     }
@@ -209,8 +209,8 @@ public partial class WebhookAlertService
     }
 
     /* The generic channel fails from three places (headers, body, transport); each records through the shared helper. */
-    private void RecordGenericFailure(HealthTarget healthTarget, string error) =>
-        RecordChannelFailure(NotificationRouter.GenericChannel, healthTarget, error);
+    private void RecordGenericFailure(List<int?> entries, string error) =>
+        RecordChannelFailure(NotificationRouter.GenericChannel, entries, error);
 
     /// <summary>
     /// Substitutes the alert's values into the operator's JSON body template. Every placeholder expands to

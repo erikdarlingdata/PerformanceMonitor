@@ -8613,16 +8613,19 @@ WHERE c.is_enabled";
     /// weeks while another channel delivers every alert, and until this the only trace was an Error log line
     /// for each of its first three failures and every fiftieth after.
     ///
-    /// <para>Each channel is judged on its own by the shared <see cref="WebhookChannelFailurePolicy"/>: ONE
-    /// alert when the count first reaches the threshold, nothing while it stays there or climbs, and ONE
-    /// <see cref="NotificationChannelRecoveredMetric"/> resolution row when it is back at 0 or when the channel
-    /// has no destination left. An edge, not a standing condition, so there is no cooldown re-fire: the alert
-    /// is delivered through the OTHER channels, and the channel that broke cannot carry its own notice.</para>
+    /// <para>Each destination (a channel's settings-row destination, and each route's own) is judged on its own by
+    /// the shared <see cref="WebhookChannelFailurePolicy"/>: ONE alert when its count first reaches the threshold,
+    /// nothing while it stays there or climbs, and ONE <see cref="NotificationChannelRecoveredMetric"/> resolution
+    /// row when it is back at 0 or when the destination is gone. An edge, not a standing condition, so there is no
+    /// cooldown re-fire: the alert is delivered through the OTHER channels, and the channel that broke cannot carry
+    /// its own notice.</para>
     ///
-    /// <para><b>Turning the channel off closes the alert.</b> Turning a failing channel off is the expected
-    /// response to it, so a channel that is no longer configured (disabled, or its URL or key removed, with no
-    /// enabled route carrying one) resolves as turned off, in words that say so: the channel did not deliver
-    /// again. A channel with no destination is never raised. The two resolutions share the metric names.</para>
+    /// <para><b>Turning the destination off closes the alert.</b> Turning a failing destination off is the expected
+    /// response to it, so a destination that is no longer configured resolves as turned off, in words that say so:
+    /// the channel did not deliver again. The settings row's destination is gone when the channel is disabled or its
+    /// URL or key removed. A route's is gone when the route is deleted, disabled, cannot match, no longer names the
+    /// channel, or has the channel off on it (<see cref="NotificationRouter.RouteConfiguresWebhookChannel"/>). A
+    /// destination with nothing to send to is never raised. The two resolutions share the metric names.</para>
     ///
     /// <para><b>The text carries no error.</b> It names the channel and the count and points at the service
     /// log for the reason. A webhook error can carry the endpoint's URL, and a Slack or Teams webhook URL is

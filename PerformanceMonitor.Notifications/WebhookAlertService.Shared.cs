@@ -92,50 +92,40 @@ public partial class WebhookAlertService
         ConnectCallback = WebhookConnectGuard.ConnectAsync,
     };
 
-    /// <summary>The health entry a send's outcome is counted against. A destination the fan-out resolved has one
-    /// (<see cref="Of"/>): the settings row's own when <see cref="RouteId"/> is null, else the route's. A destination
-    /// that neither the settings row nor any route names has <see cref="None"/>: its outcome is logged and counted
-    /// nowhere, because no entry a host could announce belongs to it.</summary>
-    private readonly record struct HealthTarget(bool Counted, int? RouteId)
-    {
-        public static HealthTarget Of(int? routeId) => new(Counted: true, routeId);
-
-        public static HealthTarget None => default;
-    }
-
     /// <summary>The health entry of one destination: a channel, and the route that supplies the destination (null for
     /// the settings row's own). Created on first use.</summary>
     private DestinationHealth HealthOf(string channel, int? routeId) =>
         _destinationHealth.GetOrAdd((channel, routeId), _ => new DestinationHealth());
 
     /// <summary>
-    /// Where a send that is handed its destination and not its route (a resolution, a notice, a PagerDuty resolve)
-    /// counts a failure. First the entry of the route, enabled or disabled, whose own destination
-    /// <paramref name="destination"/> is: an alert that fired through a route is resolved after the operator turns the
-    /// route off, and its failure belongs to the route. Else the settings row's own entry, when the destination is its
-    /// URL or key for <paramref name="channel"/>. Else <see cref="HealthTarget.None"/>: a destination that no configured
-    /// channel names (a route's URL that was edited away) belongs to no entry.
-    /// <para>The fan-out counts its own sends against the route the metric matched, or the settings row when none did,
-    /// so a destination that two of them share can carry a failure under either entry, and this picks only where a
-    /// failure lands. A delivery clears every entry that names the destination (<see cref="ClearDestination"/>),
-    /// whichever one the failure landed on.</para>
+    /// The health entries a send to <paramref name="destination"/> is counted against, on every send path (the fan-out's
+    /// four channels, a resolution, a notice, a report notice, a PagerDuty resolve): every entry that names the
+    /// destination. The settings row's own (null) when the destination is its URL or key for <paramref name="channel"/>,
+    /// and each route's, enabled or disabled, whose destination it is: an alert that fired through a route is resolved
+    /// after the operator turns the route off, and its outcome is still the route's. A send to one place is a send from
+    /// every configured place that names it, so a failure raises each of these counts and a delivery clears each
+    /// (<see cref="ClearDestination"/>), and each reaches <see cref="FailingChannelThreshold"/> at the cadence of the
+    /// sends to the place, not a share of it. Empty for a destination that no configured channel names (a route's URL
+    /// that was edited away): its outcome is logged and counted nowhere, because no entry a host could announce belongs
+    /// to it.
     /// </summary>
-    private static HealthTarget HealthTargetOfDestination(IAlertSettings delivery, string channel, string destination)
+    private static List<int?> EntriesNaming(IAlertSettings delivery, string channel, string destination)
     {
+        var entries = new List<int?>();
+        if (IsDestination(SettingsRowDestination(delivery, channel), destination))
+        {
+            entries.Add(null);
+        }
+
         foreach (var route in delivery.NotificationRoutes)
         {
             if (route is not null && IsDestination(RouteDestination(route, channel), destination))
             {
-                return HealthTarget.Of(route.RouteId);
+                entries.Add(route.RouteId);
             }
         }
 
-        if (IsDestination(SettingsRowDestination(delivery, channel), destination))
-        {
-            return HealthTarget.Of(null);
-        }
-
-        return HealthTarget.None;
+        return entries;
     }
 
     private static string? SettingsRowDestination(IAlertSettings settings, string channel) => channel switch
@@ -164,105 +154,78 @@ public partial class WebhookAlertService
         && (string.Equals(configured, destination, StringComparison.Ordinal)
             || string.Equals(configured.Trim(), destination, StringComparison.Ordinal));
 
-    /// <summary>The destination as a log line names it: a counted destination's
-    /// <see cref="WebhookChannelFailureCount.Label"/>, never the URL.</summary>
-    private static string LabelOf(string channel, HealthTarget healthTarget) =>
-        healthTarget.Counted
-            ? WebhookChannelFailureCount.LabelOf(channel, healthTarget.RouteId)
-            : $"{channel} (a destination no channel names)";
-
     /// <summary>
-    /// A send that came back with an error text: count it against its destination, keep it as that destination's last
-    /// error, and log it loudly for the first <see cref="FailingChannelThreshold"/> failures in a row, then on every
-    /// 50th (#7225: one copy for the four webhook channels). The log line names the route, never the URL.
+    /// A send that came back with an error text: count it against every entry that names its destination
+    /// (<paramref name="entries"/>, from <see cref="EntriesNaming"/>), keep it as each one's last error, and log each
+    /// entry loudly for its first <see cref="FailingChannelThreshold"/> failures in a row, then on every 50th (#7225: one
+    /// copy for the four webhook channels). The log line names the route, never the URL. A destination no entry names
+    /// is logged once and counted nowhere.
     /// </summary>
-    private void RecordChannelFailure(string channel, HealthTarget healthTarget, string error)
+    private void RecordChannelFailure(string channel, List<int?> entries, string error)
     {
-        if (!healthTarget.Counted)
+        if (entries.Count == 0)
         {
             _logger.LogError($"{channel.ToUpperInvariant()} WEBHOOK FAILED (a destination no channel names, not counted): {error}");
             return;
         }
 
-        var health = HealthOf(channel, healthTarget.RouteId);
-        var failures = Interlocked.Increment(ref health.Failures);
-        health.LastError = error;
-        var where = healthTarget.RouteId is { } id ? $", route {id}" : "";
+        foreach (var routeId in entries)
+        {
+            var health = HealthOf(channel, routeId);
+            var failures = Interlocked.Increment(ref health.Failures);
+            health.LastError = error;
+            var where = routeId is { } id ? $", route {id}" : "";
 
-        if (failures <= FailingChannelThreshold)
-            _logger.LogError($"{channel.ToUpperInvariant()} WEBHOOK FAILED ({failures}x{where}): {error}");
-        else if (failures % 50 == 0)
-            _logger.LogError($"{channel.ToUpperInvariant()} WEBHOOK STILL FAILING: {failures} failures{where}. Last: {error}");
+            if (failures <= FailingChannelThreshold)
+                _logger.LogError($"{channel.ToUpperInvariant()} WEBHOOK FAILED ({failures}x{where}): {error}");
+            else if (failures % 50 == 0)
+                _logger.LogError($"{channel.ToUpperInvariant()} WEBHOOK STILL FAILING: {failures} failures{where}. Last: {error}");
+        }
     }
 
-    /// <summary>A send that threw: count it against its destination, when it has one, and keep the message, logging
-    /// every one (no throttle).</summary>
-    private void RecordChannelException(string channel, HealthTarget healthTarget, Exception ex)
+    /// <summary>A send that threw: count it against every entry that names its destination and keep the message as each
+    /// one's last error, logging every one (no throttle). A destination no entry names is logged and counted nowhere.</summary>
+    private void RecordChannelException(string channel, List<int?> entries, Exception ex)
     {
-        if (healthTarget.Counted)
+        if (entries.Count == 0)
         {
-            var health = HealthOf(channel, healthTarget.RouteId);
-            Interlocked.Increment(ref health.Failures);
-            health.LastError = ex.Message;
+            _logger.LogError($"{channel} (a destination no channel names) webhook error: {ex.Message}");
+            return;
         }
 
-        _logger.LogError($"{LabelOf(channel, healthTarget)} webhook error: {ex.Message}");
+        foreach (var routeId in entries)
+        {
+            var health = HealthOf(channel, routeId);
+            Interlocked.Increment(ref health.Failures);
+            health.LastError = ex.Message;
+            _logger.LogError($"{WebhookChannelFailureCount.LabelOf(channel, routeId)} webhook error: {ex.Message}");
+        }
     }
 
     /// <summary>A send that succeeded: clear every entry that names its destination (<see cref="ClearDestination"/>),
     /// and say so for each one that ends a run of failures. Other destinations of the channel are not touched, and a
     /// destination with no entry has nothing to clear. The log line names the route, never the URL.</summary>
-    private void RecordChannelRecovered(IAlertSettings delivery, string channel, string destination, HealthTarget healthTarget)
+    private void RecordChannelRecovered(string channel, List<int?> entries)
     {
-        foreach (var (label, failures) in ClearDestination(delivery, channel, destination, healthTarget))
+        foreach (var (label, failures) in ClearDestination(channel, entries))
         {
             _logger.LogInformation($"{label} webhook recovered after {failures} failure(s)");
         }
     }
 
     /// <summary>
-    /// A send to <paramref name="destination"/> was delivered: clear the count and last error of every entry that names
-    /// the destination. The entry the send was counted under (<paramref name="healthTarget"/>, created here so a
-    /// destination a send has gone to is listed), the settings row's own when the destination is its URL or key for
-    /// <paramref name="channel"/>, and each route's, enabled or disabled, whose destination it is. A failure to one
-    /// place can land on any of these (the fan-out's on the route the metric matched, or the settings row when none
-    /// did, and a destination-only send's on the first route that names it), and a delivery to that place is a recovery
-    /// of all of them: a count that survived a working delivery would raise the failing signal across it. Returns the
-    /// label and the count of each cleared entry that was failing. A destination with no entry
-    /// (<see cref="HealthTarget.None"/>) is named by nothing, so nothing is cleared.
+    /// A send was delivered: clear the count and last error of every entry that names its destination
+    /// (<paramref name="entries"/>, from <see cref="EntriesNaming"/>), creating each so a destination a send has gone to
+    /// is listed. They are the entries a failure to the destination is counted against, so no count survives a working
+    /// delivery to its place, which would raise the failing signal across it. Returns the label and the count of each
+    /// cleared entry that was failing. A destination with no entry is named by nothing, so nothing is cleared.
     /// </summary>
-    private List<(string Label, int Failures)> ClearDestination(IAlertSettings delivery, string channel, string destination, HealthTarget healthTarget)
+    private List<(string Label, int Failures)> ClearDestination(string channel, List<int?> entries)
     {
         var cleared = new List<(string Label, int Failures)>();
-        if (!healthTarget.Counted)
+        foreach (var routeId in entries)
         {
-            return cleared;
-        }
-
-        Clear(healthTarget.RouteId, HealthOf(channel, healthTarget.RouteId));
-
-        if (healthTarget.RouteId is not null
-            && IsDestination(SettingsRowDestination(delivery, channel), destination)
-            && _destinationHealth.TryGetValue((channel, null), out var settingsRow))
-        {
-            Clear(null, settingsRow);
-        }
-
-        foreach (var route in delivery.NotificationRoutes)
-        {
-            if (route is not null
-                && route.RouteId != healthTarget.RouteId
-                && IsDestination(RouteDestination(route, channel), destination)
-                && _destinationHealth.TryGetValue((channel, route.RouteId), out var routeHealth))
-            {
-                Clear(route.RouteId, routeHealth);
-            }
-        }
-
-        return cleared;
-
-        void Clear(int? routeId, DestinationHealth health)
-        {
+            var health = HealthOf(channel, routeId);
             var failures = Interlocked.Exchange(ref health.Failures, 0);
             health.LastError = null;
             if (failures > 0)
@@ -270,6 +233,8 @@ public partial class WebhookAlertService
                 cleared.Add((WebhookChannelFailureCount.LabelOf(channel, routeId), failures));
             }
         }
+
+        return cleared;
     }
 
     /// <summary>

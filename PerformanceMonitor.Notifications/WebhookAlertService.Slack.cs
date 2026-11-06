@@ -26,12 +26,11 @@ namespace PerformanceMonitor.Notifications;
 public partial class WebhookAlertService
 {
     /// <summary>Posts to Slack. Null when the post succeeded, the error text when it did not — see
-    /// <see cref="TrySendTeamsAlertAsync"/>, including for the routed <paramref name="webhookUrl"/> and the
-    /// <paramref name="healthTarget"/> its outcome is counted under.</summary>
+    /// <see cref="TrySendTeamsAlertAsync"/>, including for the routed <paramref name="webhookUrl"/> and the entries its
+    /// outcome is counted under.</summary>
     private async Task<string?> TrySendSlackAlertAsync(
         IAlertSettings settings,
         string webhookUrl,
-        HealthTarget healthTarget,
         string metricName,
         string serverName,
         string currentValue,
@@ -43,6 +42,7 @@ public partial class WebhookAlertService
         string? displayName = null,
         CancellationToken cancellationToken = default)
     {
+        var entries = EntriesNaming(settings, NotificationRouter.SlackChannel, webhookUrl);
         try
         {
             var payload = BuildSlackPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl,
@@ -51,11 +51,11 @@ public partial class WebhookAlertService
 
             if (error != null)
             {
-                RecordChannelFailure(NotificationRouter.SlackChannel, healthTarget, error);
+                RecordChannelFailure(NotificationRouter.SlackChannel, entries, error);
                 return error;
             }
 
-            RecordChannelRecovered(settings, NotificationRouter.SlackChannel, webhookUrl, healthTarget);
+            RecordChannelRecovered(NotificationRouter.SlackChannel, entries);
             _logger.LogInformation($"Slack webhook sent for {metricName} on {serverName}");
             return null;
         }
@@ -66,7 +66,7 @@ public partial class WebhookAlertService
         }
         catch (Exception ex)
         {
-            RecordChannelException(NotificationRouter.SlackChannel, healthTarget, ex);
+            RecordChannelException(NotificationRouter.SlackChannel, entries, ex);
             return ex.Message;
         }
     }

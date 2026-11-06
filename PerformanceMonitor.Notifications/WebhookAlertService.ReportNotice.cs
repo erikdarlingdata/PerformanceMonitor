@@ -48,11 +48,11 @@ public partial class WebhookAlertService : IReportNoticeSends
             return $"{channel} does not carry a report notice";
         }
 
-        var healthTarget = HealthTarget.None;
+        var entries = new List<int?>();
         try
         {
             var settings = _settings.SnapshotForDelivery();
-            healthTarget = HealthTargetOfDestination(settings, channel, destination);
+            entries = EntriesNaming(settings, channel, destination);
             var slack = channel == NotificationRouter.SlackChannel;
             var payload = slack ? BuildReportNoticeSlackPayload(content, _branding) : BuildReportNoticeTeamsPayload(content);
             var error = await PostWebhookAsync(
@@ -62,11 +62,11 @@ public partial class WebhookAlertService : IReportNoticeSends
             {
                 /* A delivered notice clears every entry that names the destination, as a delivered alert does. Not logged:
                    a notice's health is silent either way, see RecordReportNoticeFailure. */
-                ClearDestination(settings, channel, destination, healthTarget);
+                ClearDestination(channel, entries);
             }
             else
             {
-                RecordReportNoticeFailure(channel, healthTarget, error);
+                RecordReportNoticeFailure(channel, entries, error);
             }
 
             return error;
@@ -77,27 +77,25 @@ public partial class WebhookAlertService : IReportNoticeSends
         }
         catch (Exception ex)
         {
-            RecordReportNoticeFailure(channel, healthTarget, ex.Message);
+            RecordReportNoticeFailure(channel, entries, ex.Message);
             return ex.Message;
         }
     }
 
     /// <summary>
     /// #6979: a failed notice counts toward its destination's health as a failed alert send does (the consecutive-failure count
-    /// and the last error that <see cref="GetChannelFailureCounts"/> serves, which the "Notification Channel Failing" self-alert
-    /// reads). A destination that no channel names has no entry, so nothing is counted for it. It logs nothing: the caller logs
-    /// a failed notice once, with the request id, the channel and the error.
+    /// and the last error of every entry that names the destination, which <see cref="GetChannelFailureCounts"/> serves and the
+    /// "Notification Channel Failing" self-alert reads). A destination that no channel names has no entry, so nothing is counted
+    /// for it. It logs nothing: the caller logs a failed notice once, with the request id, the channel and the error.
     /// </summary>
-    private void RecordReportNoticeFailure(string channel, HealthTarget healthTarget, string error)
+    private void RecordReportNoticeFailure(string channel, List<int?> entries, string error)
     {
-        if (!healthTarget.Counted)
+        foreach (var routeId in entries)
         {
-            return;
+            var health = HealthOf(channel, routeId);
+            Interlocked.Increment(ref health.Failures);
+            health.LastError = error;
         }
-
-        var health = HealthOf(channel, healthTarget.RouteId);
-        Interlocked.Increment(ref health.Failures);
-        health.LastError = error;
     }
 
     /// <summary>
