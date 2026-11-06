@@ -36,6 +36,7 @@ public sealed class LitePerfmonTotalInstanceLiveTests : IClassFixture<SharedDuck
     private const string TransactionsPerSec = "Transactions/sec";
     private const string PageLifeExpectancy = "Page life expectancy";
     private const string TransactionDelay = "Transaction Delay";
+    private const string LockWaits = "Lock waits";
 
     private readonly DuckDbInitializer _duckDb;
     private readonly LocalDataService _dataService;
@@ -156,6 +157,50 @@ public sealed class LitePerfmonTotalInstanceLiveTests : IClassFixture<SharedDuck
         var buckets = await _dataService.GetPerfmonBucketsAsync(ServerId, TransactionDelay, hoursBack: 1, asOfUtc: endUtc, bucketMinutes: 1);
         Assert.Equal(3, buckets.Points.Count);
         Assert.All(buckets.Points, p => Assert.Equal(150, p.MaxValue));
+    }
+
+    /// <summary>One counter name on two objects, where one object's instances carry different types and the other's
+    /// agree on one: the point has no type. The type is decided across every instance row summed into the point, so
+    /// one object's agreement cannot type a sum that another object's mixed rows are part of. The Wait Statistics
+    /// object is the real mixed family (a rate, a gauge and an average under one counter name). The second object
+    /// stands for any object that shares the name (#7416): the shape is what is pinned, not the catalogue.</summary>
+    [Fact]
+    public async Task AMixedTypeObjectBesideAUniformOne_LeavesThePointUntyped()
+    {
+        var t0 = new DateTime(2026, 3, 15, 9, 0, 0);
+        var times = Enumerable.Range(0, 3).Select(i => t0.AddMinutes(i)).ToArray();
+
+        foreach (var at in times)
+        {
+            /* Lock waits on the Wait Statistics object: a rate, a gauge and an average, 10 + 20 + 30 = 60, no _Total.
+               The second object agrees on the rate type, 5 + 7 = 12, no _Total. The point is 72 and has no type:
+               typing it by the one object that agrees would call the whole sum a rate. */
+            await PlantAsync(at, "SQLServer:Wait Statistics", LockWaits, "Waits started per second", 10, 10, 60, PerfmonCounterTypes.PerfCounterBulkCount);
+            await PlantAsync(at, "SQLServer:Wait Statistics", LockWaits, "Waits in progress", 20, null, null, PerfmonCounterTypes.PerfCounterLargeRawCount);
+            await PlantAsync(at, "SQLServer:Wait Statistics", LockWaits, "Average wait time (ms)", 30, null, null, PerfmonCounterTypes.PerfAverageBulk);
+            await PlantAsync(at, "SQLServer:Locks", LockWaits, "tenant_a", 5, 5, 60, PerfmonCounterTypes.PerfCounterBulkCount);
+            await PlantAsync(at, "SQLServer:Locks", LockWaits, "tenant_b", 7, 7, 60, PerfmonCounterTypes.PerfCounterBulkCount);
+        }
+
+        var startUtc = times[0].AddMinutes(-1);
+        var endUtc = times[^1].AddMinutes(1);
+
+        var single = await _dataService.GetPerfmonTrendAsync(ServerId, LockWaits, fromDate: startUtc, toDate: endUtc);
+        Assert.Equal(3, single.Count);
+        Assert.All(single, p => Assert.Equal(72, p.Value));
+        Assert.All(single, p => Assert.Null(p.CntrType));
+
+        var trends = await _dataService.GetPerfmonTrendsByCountersAsync(
+            ServerId, new List<string> { LockWaits }, fromDate: startUtc, toDate: endUtc);
+        Assert.True(trends.TryGetValue(LockWaits, out var waits), "Lock waits did not plot at all");
+        Assert.Equal(3, waits!.Count);
+        Assert.All(waits, p => Assert.Equal(72, p.Value));
+        Assert.All(waits, p => Assert.Null(p.CntrType));
+
+        var buckets = await _dataService.GetPerfmonBucketsAsync(ServerId, LockWaits, hoursBack: 1, asOfUtc: endUtc, bucketMinutes: 1);
+        Assert.Equal(3, buckets.Points.Count);
+        Assert.All(buckets.Points, p => Assert.Equal(72, p.MaxValue));
+        Assert.All(buckets.Points, p => Assert.Null(p.CntrType));
     }
 
     /* ---- seeding ---------------------------------------------------------------------------------------- */

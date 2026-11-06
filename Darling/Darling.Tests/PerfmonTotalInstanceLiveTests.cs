@@ -39,6 +39,7 @@ public sealed class PerfmonTotalInstanceLiveTests
     private const string TransactionsPerSec = "Transactions/sec";
     private const string PageLifeExpectancy = "Page life expectancy";
     private const string TransactionDelay = "Transaction Delay";
+    private const string LockWaits = "Lock waits";
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -178,6 +179,79 @@ public sealed class PerfmonTotalInstanceLiveTests
                 var delay = await DarlingTrendReader.GetPerfmonBucketsAsync(postgres, ServerId, TransactionDelay, startUtc, endUtc, bucketMinutes: 1, ct);
                 Assert.Equal(3, delay.Points.Count);
                 Assert.All(delay.Points, p => Assert.Equal(150, p.MaxValue));
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteRowsAsync(cleanup, cleanupCt);
+                using var servers = new NpgsqlCommand("DELETE FROM servers WHERE server_id = $1", cleanup);
+                servers.Parameters.AddWithValue(ServerId);
+                await servers.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>One counter name on two objects, where one object's instances carry different types and the other's
+    /// agree on one: the point has no type. The type is decided across every instance row summed into the point, so
+    /// one object's agreement cannot type a sum that another object's mixed rows are part of. The Wait Statistics
+    /// object is the real mixed family (a rate, a gauge and an average under one counter name). The second object
+    /// stands for any object that shares the name (#7416): the shape is what is pinned, not the catalogue.</summary>
+    [Fact]
+    public async Task AMixedTypeObjectBesideAUniformOne_LeavesThePointUntyped_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the perfmon _Total round trip.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            var t0 = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-10);
+            var times = Enumerable.Range(0, 3).Select(i => t0.AddMinutes(i)).ToArray();
+
+            foreach (var at in times)
+            {
+                /* Lock waits on the Wait Statistics object: a rate, a gauge and an average, 10 + 20 + 30 = 60, no
+                   _Total. The second object agrees on the rate type, 5 + 7 = 12, no _Total. The point is 72 and has
+                   no type: typing it by the one object that agrees would call the whole sum a rate. */
+                await PlantAsync(connection, ct, at, "SQLServer:Wait Statistics", LockWaits, "Waits started per second", 10, 10, 60, PerfmonCounterTypes.PerfCounterBulkCount);
+                await PlantAsync(connection, ct, at, "SQLServer:Wait Statistics", LockWaits, "Waits in progress", 20, null, null, PerfmonCounterTypes.PerfCounterLargeRawCount);
+                await PlantAsync(connection, ct, at, "SQLServer:Wait Statistics", LockWaits, "Average wait time (ms)", 30, null, null, PerfmonCounterTypes.PerfAverageBulk);
+                await PlantAsync(connection, ct, at, "SQLServer:Locks", LockWaits, "tenant_a", 5, 5, 60, PerfmonCounterTypes.PerfCounterBulkCount);
+                await PlantAsync(connection, ct, at, "SQLServer:Locks", LockWaits, "tenant_b", 7, 7, 60, PerfmonCounterTypes.PerfCounterBulkCount);
+            }
+
+            var startUtc = times[0].AddMinutes(-1);
+            var endUtc = times[^1].AddMinutes(1);
+
+            await using (var viewer = new ViewerDataService(cs!))
+            {
+                var trends = await viewer.GetPerfmonTrendsByCountersAsync(
+                    ServerId, new List<string> { LockWaits }, startUtc, endUtc, ct);
+
+                Assert.True(trends.TryGetValue(LockWaits, out var waits), "Lock waits did not plot at all");
+                Assert.Equal(3, waits!.Count);
+                Assert.All(waits, p => Assert.Equal(72, p.Value));
+                Assert.All(waits, p => Assert.Null(p.CntrType));
+            }
+
+            await using (var postgres = NpgsqlDataSource.Create(cs!))
+            {
+                var waits = await DarlingTrendReader.GetPerfmonBucketsAsync(postgres, ServerId, LockWaits, startUtc, endUtc, bucketMinutes: 1, ct);
+                Assert.Equal(3, waits.Points.Count);
+                Assert.All(waits.Points, p => Assert.Equal(72, p.MaxValue));
+                Assert.All(waits.Points, p => Assert.Null(p.CntrType));
             }
 
             bodySucceeded = true;
