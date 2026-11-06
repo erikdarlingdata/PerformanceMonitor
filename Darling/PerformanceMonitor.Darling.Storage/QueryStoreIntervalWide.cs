@@ -1344,6 +1344,10 @@ FROM (
         /// the test's own async flow, so no other caller ever sees it.</summary>
         internal static readonly AsyncLocal<string?> TableFloorsSqlForTests = new();
 
+        /// <summary>A test's replacement for <see cref="PlainTableFloorAllServersSql"/>, one that faults, to drive the fault path (#7746).
+        /// Scoped to the test's own async flow, so no other caller ever sees it.</summary>
+        internal static readonly AsyncLocal<string?> TableFloorAllServersSqlForTests = new();
+
         private int[]? _floorServers;
         private bool _inTransaction;
         private bool _floorsTried;
@@ -1615,7 +1619,7 @@ FROM (
             return storeWide.TableFloorAllServers;
         }
 
-        await using var command = new NpgsqlCommand(PlainTableFloorAllServersSql, connection) { CommandTimeout = commandTimeoutSeconds };
+        await using var command = new NpgsqlCommand(StoreWideInputsCache.TableFloorAllServersSqlForTests.Value ?? PlainTableFloorAllServersSql, connection) { CommandTimeout = commandTimeoutSeconds };
         var floor = await command.ExecuteScalarAsync(cancellationToken) as DateTime?;
         if (storeWide is not null)
         {

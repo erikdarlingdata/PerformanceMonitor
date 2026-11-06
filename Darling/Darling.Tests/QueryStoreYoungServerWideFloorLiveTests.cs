@@ -220,4 +220,97 @@ FROM generate_series(1, 4) AS s", ct);
 
         Assert.Contains(rows, r => r.Contains("hashDropped", StringComparison.Ordinal));
     }
+
+    /// <summary>Plants a stand-in for the whole-table floor statement that counts its runs on a sequence, which no rollback undoes, and then
+    /// raises 57014, the code a <c>statement_timeout</c> cancel carries. The count is kept only on an autocommit connection: the tag rollup's
+    /// transaction is read-only, where <c>nextval</c> is refused, so there the function skips the count and raises all the same. Returns the
+    /// statement to inject.</summary>
+    private static async Task<string> PlantFaultingWholeTableFloorAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await ExecAsync(connection, @"
+CREATE SEQUENCE public.whole_table_floor_runs_7746;
+CREATE FUNCTION public.whole_table_floor_fault_7746() RETURNS timestamp LANGUAGE plpgsql AS $$
+BEGIN
+    BEGIN
+        PERFORM nextval('public.whole_table_floor_runs_7746');
+    EXCEPTION WHEN read_only_sql_transaction THEN
+        NULL;
+    END;
+    RAISE EXCEPTION 'planted whole-table floor failure 7746' USING ERRCODE = '57014';
+END $$;", ct);
+        return "SELECT public.whole_table_floor_fault_7746()";
+    }
+
+    private static async Task<long> WholeTableFloorRunsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM public.whole_table_floor_runs_7746", connection);
+        return (long)(await command.ExecuteScalarAsync(ct))!;
+    }
+
+    /// <summary>
+    /// The tag rollup decides every server and then reads them all inside ONE REPEATABLE READ transaction. A fault in the whole-table floor
+    /// read, which only a young server reaches, must undo that statement alone: the old servers decided after it are still read, and the
+    /// young one is refused. Without a savepoint the fault aborts the transaction, every later server is refused on 25P02, and the read itself
+    /// throws.
+    /// </summary>
+    [Fact]
+    public async Task AFaultInTheWholeTableFloorRead_InsideTheTagRollupsTransaction_RefusesOnlyTheYoungServer()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_PG")), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(Environment.GetEnvironmentVariable("DARLING_TEST_PG")!, ct);
+        var (connection, source, start, end, _, _, _) = await OpenSeededAsync(scratch, ct);
+        await using var connectionScope = connection;
+        await using var sourceScope = source;
+
+        QueryStoreIntervalWide.StoreWideInputsCache.TableFloorAllServersSqlForTests.Value = await PlantFaultingWholeTableFloorAsync(connection, ct);
+        try
+        {
+            /* Server 1 is decided before the fault and server 2 after it, so both the later decisions and the read depend on the transaction
+               surviving the faulted statement. */
+            var read = await DarlingQueryTagRollupReader.ReadQueryStoreAsync(source, new[] { 1, 4, 2 }, start, end, null, ct);
+            Assert.False(read.TableMissing);
+            Assert.Equal(new[] { 1, 2 }, read.Allowed.Keys.OrderBy(id => id).ToArray());
+            Assert.True(read.Refused.ContainsKey(4), "the young server's decision faulted, so it is refused");
+            Assert.Contains(read.Facts, f => f.ServerId == 1);
+            Assert.Contains(read.Facts, f => f.ServerId == 2);
+            Assert.DoesNotContain(read.Facts, f => f.ServerId == 4);
+        }
+        finally
+        {
+            QueryStoreIntervalWide.StoreWideInputsCache.TableFloorAllServersSqlForTests.Value = null;
+        }
+    }
+
+    /// <summary>
+    /// The compose gate decides each server on an autocommit connection, so a fault there takes nothing else with it, but the gate must not pay
+    /// the whole-table floor statement again for every later young server: each attempt can wait the composed read deadline. The read is marked
+    /// tried before it runs, so after one fault the second young server takes the missing answer and reads raw without re-running it.
+    /// </summary>
+    [Fact]
+    public async Task AFaultInTheWholeTableFloorRead_InTheComposeGate_IsNotRetriedForTheNextYoungServer()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_PG")), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(Environment.GetEnvironmentVariable("DARLING_TEST_PG")!, ct);
+        var (connection, source, start, end, plan, _, _) = await OpenSeededAsync(scratch, ct);
+        await using var connectionScope = connection;
+        await using var sourceScope = source;
+
+        /* Server 3 loses its ten-day-old interval, so servers 3 and 4 are both young and both reach the whole-table floor read. */
+        await ExecAsync(connection, "DELETE FROM collect.query_store_interval_wide WHERE query_id = 900 AND server_id = 3", ct);
+        QueryStoreIntervalWide.StoreWideInputsCache.TableFloorAllServersSqlForTests.Value = await PlantFaultingWholeTableFloorAsync(connection, ct);
+        try
+        {
+            var resolution = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(source, null, start, end, null, ct, plan);
+            Assert.True(resolution.Eligible, "servers 1 and 2 pass on their own floors, so the panel reads the interval table for them");
+            Assert.Equal(new[] { 3, 4 }, (resolution.RawServerIds ?? Array.Empty<int>()).OrderBy(id => id).ToArray());
+        }
+        finally
+        {
+            QueryStoreIntervalWide.StoreWideInputsCache.TableFloorAllServersSqlForTests.Value = null;
+        }
+
+        Assert.Equal(1, await WholeTableFloorRunsAsync(connection, ct));
+    }
 }
