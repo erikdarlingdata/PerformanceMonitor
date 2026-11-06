@@ -9,27 +9,25 @@
 using System;
 using System.ComponentModel;
 using System.Diagnostics;
-using System.Linq;
 using System.Text.Json;
 using PerformanceMonitor.Collectors;
 using Xunit;
 using static Darling.Tests.RepoFile;
-using static PerformanceMonitor.Collectors.CollectorRuntimePrecondition;
 
 namespace Darling.Tests;
 
 /// <summary>
-/// #7813: the Automatic Tuning panel prints the whole sentence the tool chose for an empty reply, so a person on the page reads which case
-/// applies. The shipped page scripts run under Node (<c>automatic-tuning-empty-harness.mjs</c>) with the three real sentences; Node is
-/// skipped when it is not installed.
+/// #7813: on the Queries tab, Plan Corrections and Automatic Tuning come from one fan-out over get_plan_corrections, so for an empty
+/// reply Plan Corrections prints the whole sentence the tool chose and Automatic Tuning points at it. The shipped page scripts run
+/// under Node (<c>automatic-tuning-empty-harness.mjs</c>) through the real Queries tab with the two real sentences; Node is skipped
+/// when it is not installed.
 /// </summary>
 public sealed class AutomaticTuningEmptyHarnessTests
 {
     private static readonly string[] Sentences =
     {
-        PlanCorrectionCollector.NoRowsMessage(new CollectorTargetInfo { SqlMajorVersion = 13 }, null),
-        PlanCorrectionCollector.NoRowsMessage(new CollectorTargetInfo { SqlMajorVersion = 15 }, new[] { new QueryStoreDatabaseState("DbA", "OFF") }),
-        PlanCorrectionCollector.NoRowsMessage(new CollectorTargetInfo { SqlMajorVersion = 15 }, new[] { new QueryStoreDatabaseState("DbA", "READ_WRITE") }),
+        PlanCorrectionCollector.NoRowsMessage(new CollectorTargetInfo { SqlMajorVersion = 13 }),
+        PlanCorrectionCollector.NoRowsMessage(new CollectorTargetInfo { SqlMajorVersion = 15 }),
     };
 
     private static readonly Lazy<JsonElement> Result = new(Run);
@@ -69,19 +67,29 @@ public sealed class AutomaticTuningEmptyHarnessTests
     }
 
     [Fact]
-    public void ThePanelPrintsEachSentenceWhole_WithNothingBehindMoreDetail()
+    public void PlanCorrectionsPrintsEachSentenceWhole_AndAutomaticTuningPointsAtIt()
     {
-        var shown = Result.Value.EnumerateArray().Select(s => (s.GetProperty("text").GetString(), s.GetProperty("detail").GetBoolean())).ToArray();
+        var shown = Result.Value;
+        Assert.Equal(Sentences.Length, shown.GetArrayLength());
 
-        Assert.Equal(Sentences.Select(s => ((string?)s, false)).ToArray(), shown);
+        for (var i = 0; i < Sentences.Length; i++)
+        {
+            var planCorrections = shown[i].GetProperty("planCorrections");
+            Assert.Equal(Sentences[i], planCorrections.GetProperty("text").GetString());
+            Assert.Equal(0, planCorrections.GetProperty("details").GetInt32());
+
+            var automaticTuning = shown[i].GetProperty("automaticTuning");
+            Assert.Equal("Empty for the same reason as Plan Corrections.", automaticTuning.GetProperty("text").GetString());
+            Assert.Equal(0, automaticTuning.GetProperty("details").GetInt32());
+        }
     }
 
     [Fact]
-    public void TheThreeSentencesDiffer_SoThePageNamesTheCase()
+    public void TheTwoSentencesDiffer_SoThePageNamesTheCase()
     {
-        Assert.Equal(3, Sentences.Distinct(StringComparer.Ordinal).Count());
+        Assert.NotEqual(Sentences[0], Sentences[1]);
         Assert.Contains("has no automatic tuning", Sentences[0], StringComparison.Ordinal);
-        Assert.Contains("no database has Query Store on", Sentences[1], StringComparison.Ordinal);
-        Assert.Contains("nothing has been recommended", Sentences[2], StringComparison.Ordinal);
+        Assert.Contains("has not stored a cycle", Sentences[1], StringComparison.Ordinal);
+        Assert.Contains("ollection health", Sentences[1], StringComparison.Ordinal);
     }
 }
