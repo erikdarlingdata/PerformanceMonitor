@@ -379,7 +379,7 @@ public static class DarlingPasswordKeyFile
 
     /// <summary>Null when <paramref name="pkcs8"/> is exactly one RSA private key of <see cref="KeyBits"/> bits; the
     /// reason otherwise.</summary>
-    private static string? CheckPkcs8(byte[] pkcs8)
+    internal static string? CheckPkcs8(byte[] pkcs8)
     {
         try
         {
