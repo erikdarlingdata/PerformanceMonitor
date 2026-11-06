@@ -217,9 +217,12 @@ public partial class ServerTab : UserControl
             ShowChartLegend(WaitStatsChart);
             WaitStatsChart.Refresh();
         }
-        catch
+        catch (Exception ex)
         {
-            /* Ignore chart update errors */
+            /* The chart was cleared above, so a failed read reaches the status line; a superseded run says nothing. */
+            var status = PickerChartReadFailure.StatusText("wait-stats", ex, gen, _waitStatsPickerGen);
+            if (status is not null)
+                ConnectionStatusText.Text = status;
         }
     }
 
@@ -400,9 +403,12 @@ public partial class ServerTab : UserControl
                 MemoryClerksTopText.Text = "--";
             }
         }
-        catch
+        catch (Exception ex)
         {
-            /* Ignore chart update errors */
+            /* The chart was cleared above, so a failed read reaches the status line; a superseded run says nothing. */
+            var status = PickerChartReadFailure.StatusText("memory-clerks", ex, gen, _memoryClerksPickerGen);
+            if (status is not null)
+                ConnectionStatusText.Text = status;
         }
     }
 
@@ -648,9 +654,12 @@ public partial class ServerTab : UserControl
 
             PerfmonChart.Refresh();
         }
-        catch
+        catch (Exception ex)
         {
-            /* Ignore chart update errors */
+            /* The chart was cleared above, so a failed read reaches the status line; a superseded run says nothing. */
+            var status = PickerChartReadFailure.StatusText("perfmon", ex, gen, _perfmonPickerGen);
+            if (status is not null)
+                ConnectionStatusText.Text = status;
         }
     }
 }
