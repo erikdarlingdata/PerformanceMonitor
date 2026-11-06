@@ -1095,11 +1095,15 @@ public sealed class DarlingWebHostService : BackgroundService
                 _logger.LogWarning("{Message}", DarlingAgentDispatchChecks.WebTokenSameAsMcpMessage);
             }
 
+            /* #7735: the named web tokens, each with its role, served beside the shared token by the sign-in leg. An entry that cannot be
+               served is left out with one Critical line naming it; the shared token's own handling above is unchanged. */
+            var webTokens = DarlingWebTokenSet.Resolve(config.Web.Network, accessToken, mcpTokens, _logger);
+
             /* #5288: the Host guard admits the listen address only while the server is exposed on it. networkListenIp
                was parsed before any degrade and still holds it afterwards, so it goes through the MCP host's
                ResolveHostGuardListenIp (the one rule both hosts share) with the final mode: a start that fell back to
                loopback-only admits loopback names only, whatever it parsed. */
-            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false, dataDetail: McpDataDetailModes.Resolve(config.Mcp.DataDetail), mcpTokens: mcpTokens, sharedTokenReadsOnlyProblem: writeTokenProblem, adminArm: _adminArm, allowWindowsAuthOverUnverifiedTls: web.AllowWindowsAuthOverUnverifiedTls, frontDoorProxy: frontDoorProxy, composeReadPostgres: _composeReadDataSource);
+            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false, dataDetail: McpDataDetailModes.Resolve(config.Mcp.DataDetail), mcpTokens: mcpTokens, sharedTokenReadsOnlyProblem: writeTokenProblem, adminArm: _adminArm, allowWindowsAuthOverUnverifiedTls: web.AllowWindowsAuthOverUnverifiedTls, frontDoorProxy: frontDoorProxy, composeReadPostgres: _composeReadDataSource, webTokens: webTokens);
 
             /* #2389: name the authority for each half of what is being started — enabled/port from whichever
                plane the supervisor resolved, listen/allowFrom/token always from darling.json. */
@@ -1331,6 +1335,8 @@ public sealed class DarlingWebHostService : BackgroundService
     /// <param name="sharedTokenReadsOnlyProblem">Why the access token is under the length floor
     /// (<see cref="DarlingHostBinding.DescribeTokenProblem"/>), or null. When set, a session signed in with the shared token
     /// serves reads only and a write is answered with <see cref="ShortTokenWriteRefusedMessage"/>; OIDC seats are unchanged.</param>
+    /// <param name="webTokens">The named web tokens the sign-in leg serves beside the shared token (#7735), and the set a named token's
+    /// session cookie is looked up in on every request. Null serves none.</param>
     internal void ConfigurePipeline(
         WebApplication app,
         NpgsqlDataSource? postgres,
@@ -1353,7 +1359,8 @@ public sealed class DarlingWebHostService : BackgroundService
         WebAdminArm? adminArm = null,
         bool allowWindowsAuthOverUnverifiedTls = false,
         DarlingFrontDoorWebProxy? frontDoorProxy = null,
-        NpgsqlDataSource? composeReadPostgres = null)
+        NpgsqlDataSource? composeReadPostgres = null,
+        DarlingWebTokenSet? webTokens = null)
     {
         /* A caller that does not say whether the token is under the length floor gets the same answer the start path
            computes: a short shared token serves reads only. Without this a forgotten argument meant writes. */
@@ -1508,6 +1515,22 @@ public sealed class DarlingWebHostService : BackgroundService
                     seat = DarlingWebSeat.SharedToken;
                 }
 
+                /* #7735: a named web token's cookie carries the token's name and no role. The seat is sat from the live set on
+                   every request, so the entry's current role decides, and a cookie naming a token no longer configured is
+                   treated as NO cookie, the same way an unrecognized seat is: the session ends, the holder sees the sign-in page. */
+                if (hasValidCookie && seat.TokenName is not null)
+                {
+                    if (webTokens?.Find(seat.TokenName) is { } namedEntry)
+                    {
+                        seat = seat with { CanEdit = namedEntry.CanEdit };
+                    }
+                    else
+                    {
+                        hasValidCookie = false;
+                        seat = DarlingWebSeat.SharedToken;
+                    }
+                }
+
                 /* The token is accepted from the sign-in form's POST body only (HandleTokenSignInAsync, on
                    LoginPath). One riding the URL is never compared, whatever its value: a token in the URL lands in
                    browser history, bookmarks, proxy logs and the Referer of every asset the page loads, so
@@ -1557,7 +1580,9 @@ public sealed class DarlingWebHostService : BackgroundService
                             refusals.Report(
                                 _logger, "Web dashboard", DarlingRefusalGate.ReadOnlySeat, StatusCodes.Status403Forbidden,
                                 remote,
-                                $"the signed-in seat is read-only (viewer role) and {context.Request.Method} is a mutation",
+                                seat.TokenName is null
+                                    ? $"the signed-in seat is read-only (viewer role) and {context.Request.Method} is a mutation"
+                                    : $"the signed-in seat is read-only (web token {seat.TokenName}, reader role) and {context.Request.Method} is a mutation",
                                 DateTime.UtcNow);
                             context.Response.StatusCode = StatusCodes.Status403Forbidden;
                             context.Response.ContentType = "application/json; charset=utf-8";
@@ -1579,7 +1604,7 @@ public sealed class DarlingWebHostService : BackgroundService
                            abort still propagates — that is not a failure to report. */
                         try
                         {
-                            await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals, token, signInThrottle, admittedHostName, clock, mcpTokens);
+                            await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals, token, signInThrottle, admittedHostName, clock, mcpTokens, webTokens);
                         }
                         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
                         {
@@ -2113,14 +2138,15 @@ public sealed class DarlingWebHostService : BackgroundService
         DarlingSignInThrottle signInThrottle,
         string? publicHostName,
         Func<DateTime> clock,
-        IReadOnlyList<string>? mcpTokens)
+        IReadOnlyList<string>? mcpTokens,
+        DarlingWebTokenSet? webTokens)
     {
         var path = context.Request.Path.Value ?? "/";
         var remote = context.Connection.RemoteIpAddress;
 
         if (string.Equals(path, LoginPath, StringComparison.OrdinalIgnoreCase))
         {
-            await HandleTokenSignInAsync(context, accessToken, signingKey, signInThrottle, refusals, oidcClient is not null, publicHostName, clock, mcpTokens);
+            await HandleTokenSignInAsync(context, accessToken, signingKey, signInThrottle, refusals, oidcClient is not null, publicHostName, clock, mcpTokens, webTokens);
             return;
         }
 
@@ -2378,6 +2404,10 @@ public sealed class DarlingWebHostService : BackgroundService
     /// included, or the wait would tell the caller which attempt was right. A success gives back only its own
     /// reservation and answers with the session cookie and a 302 to
     /// the page the form was covering (its <c>return</c> field, through the open-redirect guard).
+    /// <para>#7735: the posted token is compared with the shared token and then with every named token of <paramref name="webTokens"/>,
+    /// every compare always, so the time taken says nothing about which matched. A named match mints a cookie carrying the entry's
+    /// name (<see cref="DarlingWebSeat.EncodeTokenCookieSubject"/>) and logs the name and the role; the shared token's cookie is
+    /// unchanged. One POST is one throttle attempt whatever the number of tokens.</para>
     /// </summary>
     private async Task HandleTokenSignInAsync(
         HttpContext context,
@@ -2388,7 +2418,8 @@ public sealed class DarlingWebHostService : BackgroundService
         bool oidcEnabled,
         string? publicHostName,
         Func<DateTime> clock,
-        IReadOnlyList<string>? mcpTokens)
+        IReadOnlyList<string>? mcpTokens,
+        DarlingWebTokenSet? webTokens = null)
     {
         var remote = context.Connection.RemoteIpAddress;
         var now = clock();
@@ -2475,12 +2506,18 @@ public sealed class DarlingWebHostService : BackgroundService
         }
 
         var returnPath = SignInLandingPath(form.GetValueOrDefault("return", string.Empty));
-        if (!DarlingHostBinding.FixedTimeTokenEquals(form.GetValueOrDefault("token", string.Empty), accessToken))
+        var posted = form.GetValueOrDefault("token", string.Empty);
+        /* The shared token's compare runs first and always, then every named token's (DarlingWebTokenSet.Match never stops early). */
+        var sharedMatch = DarlingHostBinding.FixedTimeTokenEquals(posted, accessToken);
+        var namedMatch = webTokens?.Match(posted);
+        if (!sharedMatch && namedMatch is null)
         {
             signInThrottle.Missed(attempt);
             refusals.Report(
                 _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status200OK, remote,
-                "the posted token does not match web.network.encryptedToken, so the login page was served instead",
+                webTokens is { HasNamed: true }
+                    ? "the posted token matches neither web.network.encryptedToken nor a web.network.tokens entry, so the login page was served instead"
+                    : "the posted token does not match web.network.encryptedToken, so the login page was served instead",
                 now);
             /* The form is served again as the answer to this POST, so its address is /auth/login: the page names
                the target it was covering in the form itself, or the retry would post the form's own address. */
@@ -2489,7 +2526,20 @@ public sealed class DarlingWebHostService : BackgroundService
         }
 
         signInThrottle.Accepted(attempt);
-        AppendSessionCookie(context, signingKey);
+        if (sharedMatch)
+        {
+            AppendSessionCookie(context, signingKey);
+        }
+        else
+        {
+            /* #7735: the cookie carries the entry's name; its role is read from the live set on every request. The line below is the
+               audit trail of which named token signed in, the counterpart of the OIDC sign-in line. */
+            AppendSessionCookie(context, signingKey, DarlingWebSeat.EncodeTokenCookieSubject(namedMatch!.Name));
+            _logger.LogInformation(
+                "Web dashboard sign-in: token {Name} as {Role} from {Remote}",
+                namedMatch.Name, namedMatch.CanEdit ? "operator (edit)" : "reader (read-only)", remote);
+        }
+
         context.Response.Redirect(returnPath);
     }
 
