@@ -121,10 +121,16 @@ public sealed class DarlingMcpStoreMetricsTools
             var latest = await DarlingStoreMetricsReader.GetLatestAsync(postgres, cancellationToken);
             if (latest.Count == 0)
             {
-                return McpHelpers.Status(
-                    "empty",
-                    "No store self-metrics recorded yet. The service records a snapshot hourly (the first lands " +
-                    "within an hour of starting on a store at schema V53 or later).");
+                /* #7674: the trigram index state does not depend on the self-metrics (it is read from the catalog and this process's tracker), so the
+                   no-snapshot reply carries it too: a store that has just been set up, which is when an operator turns the option on, is the one that
+                   would otherwise have no way to see the build. */
+                return JsonSerializer.Serialize(new
+                {
+                    status = "empty",
+                    message = "No store self-metrics recorded yet. The service records a snapshot hourly (the first lands " +
+                        "within an hour of starting on a store at schema V53 or later).",
+                    query_text_index = BuildQueryTextIndexBlock(await ReadTrigramHealthAsync(postgres, cancellationToken)),
+                }, McpHelpers.JsonOptions);
             }
 
             /* #3903: resolved BEFORE the remaining reads, so a filter that matches nothing answers without
@@ -187,16 +193,7 @@ public sealed class DarlingMcpStoreMetricsTools
 
             /* #7674: the opt-in trigram index on the plan-cache text. Its own checkout, failure-isolated to null ("Unreadable"), so a catalog
                read that fails never reads as "the index is off". */
-            TrigramIndexHealth? trigramHealth;
-            try
-            {
-                await using var trigramConnection = await postgres.OpenConnectionAsync(cancellationToken);
-                trigramHealth = await QueryTextTrigramIndex.ReadHealthAsync(trigramConnection, QueryTextTrigramIndexTracker.Shared, cancellationToken);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                trigramHealth = null;
-            }
+            var trigramHealth = await ReadTrigramHealthAsync(postgres, cancellationToken);
 
             var heldPolicies = holds
                 .Where(h => !h.Armed)
@@ -431,31 +428,11 @@ public sealed class DarlingMcpStoreMetricsTools
                         retry_at = f.NextAttemptAt.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
                     }),
                 },
-                /* #7674. Present on EVERY response, like the blocks around it: an absent block must not read as "no index". status is one of
-                   Off, DropPending, Dropping, Pending, Building, Ready, Failed or WaitingOnExtension; Unreadable when the catalog read failed. */
-                query_text_index = trigramHealth is null
-                    ? (object)new { status = "Unreadable", note = "The trigram index state on the plan-cache text could not be read." }
-                    : new
-                    {
-                        status = trigramHealth.Status.ToString(),
-                        enabled = trigramHealth.Enabled,
-                        table = QueryTextTrigramIndex.TableName,
-                        index_name = QueryTextTrigramIndex.IndexName,
-                        exists = trigramHealth.Exists,
-                        valid = trigramHealth.Valid,
-                        size_bytes = trigramHealth.SizeBytes,
-                        build_running = trigramHealth.BuildRunning,
-                        build_started_at = trigramHealth.BuildStartedUtc?.ToString("o", CultureInfo.InvariantCulture),
-                        extension_installed = trigramHealth.ExtensionInstalled,
-                        extension_available = trigramHealth.ExtensionAvailable,
-                        failed_attempts = trigramHealth.FailedAttempts,
-                        last_error = trigramHealth.LastError,
-                        last_sqlstate = trigramHealth.LastSqlState,
-                        last_failed_at = trigramHealth.LastFailedUtc?.ToString("o", CultureInfo.InvariantCulture),
-                        next_attempt_at = trigramHealth.NextAttemptUtc?.ToString("o", CultureInfo.InvariantCulture),
-                        operator_statement = trigramHealth.OperatorStatement,
-                        note = QueryTextTrigramIndex.Note(trigramHealth),
-                    },
+                /* #7674. Present on every reply that carries the store's blocks, and on the empty reply of a store with no self-metrics yet (above):
+                   an absent block must not read as "no index". It is not on the `empty` reply of an object filter that matched nothing, which names
+                   its filters and carries no block at all. status is one of Off, DropPending, Dropping, Pending, Building, Ready, Failed or
+                   WaitingOnExtension; Unreadable when the catalog read failed. */
+                query_text_index = BuildQueryTextIndexBlock(trigramHealth),
                 /* #3175. Present on EVERY response, for the #2813 reason one line up and one step further:
                    here the absence being guarded is the absence of ROWS in the instrument this description
                    sends a maximum question to, so an absent block would leave the redirect unqualified
@@ -810,6 +787,47 @@ public sealed class DarlingMcpStoreMetricsTools
                     + cut;
         }
     }
+
+    /// <summary>#7674: the opt-in trigram index's health on its own checkout, failure-isolated to null ("Unreadable"), so a catalog read that fails never reads
+    /// as "the index is off".</summary>
+    private static async Task<TrigramIndexHealth?> ReadTrigramHealthAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var trigramConnection = await postgres.OpenConnectionAsync(cancellationToken);
+            return await QueryTextTrigramIndex.ReadHealthAsync(trigramConnection, QueryTextTrigramIndexTracker.Shared, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>#7674: the <c>query_text_index</c> block of the reply, from one health read (null is the failed read).</summary>
+    private static object BuildQueryTextIndexBlock(TrigramIndexHealth? trigramHealth) =>
+        trigramHealth is null
+            ? (object)new { status = "Unreadable", note = "The trigram index state on the plan-cache text could not be read." }
+            : new
+            {
+                status = trigramHealth.Status.ToString(),
+                enabled = trigramHealth.Enabled,
+                table = QueryTextTrigramIndex.TableName,
+                index_name = QueryTextTrigramIndex.IndexName,
+                exists = trigramHealth.Exists,
+                valid = trigramHealth.Valid,
+                size_bytes = trigramHealth.SizeBytes,
+                build_running = trigramHealth.BuildRunning,
+                build_started_at = trigramHealth.BuildStartedUtc?.ToString("o", CultureInfo.InvariantCulture),
+                extension_installed = trigramHealth.ExtensionInstalled,
+                extension_available = trigramHealth.ExtensionAvailable,
+                failed_attempts = trigramHealth.FailedAttempts,
+                last_error = trigramHealth.LastError,
+                last_sqlstate = trigramHealth.LastSqlState,
+                last_failed_at = trigramHealth.LastFailedUtc?.ToString("o", CultureInfo.InvariantCulture),
+                next_attempt_at = trigramHealth.NextAttemptUtc?.ToString("o", CultureInfo.InvariantCulture),
+                operator_statement = trigramHealth.OperatorStatement,
+                note = QueryTextTrigramIndex.Note(trigramHealth),
+            };
 
     /// <summary>The <c>empty</c> answer for a filter that matched nothing (#3903): the filters, and where the
     /// names come from, because a name that matched nothing is a caller's question to fix and not a store

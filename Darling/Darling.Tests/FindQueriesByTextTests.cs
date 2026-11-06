@@ -56,8 +56,6 @@ public sealed class FindQueriesByTextTests
     [Theory]
     [InlineData("ab", "srv", "pattern")]
     [InlineData("   ", "srv", "pattern")]
-    [InlineData("dbo.Orders", "", "server_name")]
-    [InlineData("dbo.Orders", null, "server_name")]
     public async Task ShortPatternOrMissingServer_IsRefused(string pattern, string? server, string parameter)
     {
         var reply = JsonDocument.Parse(await Run(null, pattern, server)).RootElement;

@@ -30,6 +30,8 @@ Off by default. When `true`, the service builds a trigram index on the plan-cach
 - A build that fails or is cut short leaves its index half built. The service drops it and tries again after 30 minutes, then 1 hour, then twice as long each time, up to 12 hours.
 - Setting the key back to `false` and restarting the service drops the index.
 - `get_store_metrics` has a `query_text_index` block with the state (`Off`, `DropPending`, `Dropping`, `Pending`, `Building`, `Ready`, `Failed` or `WaitingOnExtension`), the index size, and the last error.
+- The index is what lets `find_queries_by_text` search every server at once. Leave `server_name` out and the tool searches the plan-cache text of all enabled servers, but only while the state is `Ready`. In any other state the tool refuses that search with a sentence that names this key and the state. Query Store text has no index and is still searched one server at a time. Searching one server, with or without a database, never uses the index and is not slower for having it.
+- `get_store_metrics` shows the `query_text_index` block even before the first self-metrics snapshot, so the build can be watched on a new store.
 - An edit takes effect when the service restarts.
 
 ## postgres

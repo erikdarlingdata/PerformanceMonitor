@@ -105,8 +105,12 @@ public sealed class FindQueriesByTextIndexScopeLiveTests
             await set.ExecuteNonQueryAsync(ct);
         }
 
-        await using var analyze = new NpgsqlCommand("ANALYZE collect.query_text_dim", c);
-        await analyze.ExecuteNonQueryAsync(ct);
+        /* Both tables, so the planner knows server ix-a has about three thousand samples: without that it assumes a handful and reads the text by key. */
+        foreach (var table in new[] { "collect.query_text_dim", "query_stats" })
+        {
+            await using var analyze = new NpgsqlCommand("ANALYZE " + table, c);
+            await analyze.ExecuteNonQueryAsync(ct);
+        }
 
         await using var explain = new NpgsqlCommand("EXPLAIN (FORMAT JSON) " + sql, c);
         var floor = LiveClock.Now() - TimescaleSupport.RawRetentionSpan;

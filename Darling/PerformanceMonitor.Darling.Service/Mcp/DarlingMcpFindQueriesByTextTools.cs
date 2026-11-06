@@ -38,8 +38,14 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <para><b>No index, so a time budget.</b> The text has no index and a rare pattern reads every row in scope. On the largest server of
 /// a 6.1 million row store (238,395 rows) that took 24.9 s cold and 1.9 s warm, and one server plus one database took 0.69 s. Each
 /// source's statement runs in its own transaction under <c>SET LOCAL statement_timeout</c> (<see cref="BudgetMilliseconds"/>), so the
-/// read stays under about ten seconds; a source that runs out is reported <c>stopped</c> and the other source is unaffected. A
-/// trigram index is a later, opt-in change, so the search stays scoped to one server.</para>
+/// read stays under about ten seconds; a source that runs out is reported <c>stopped</c> and the other source is unaffected.</para>
+///
+/// <para><b>#7674: the all-servers scope, only on an index.</b> A search that names no server reads the plan-cache text of every enabled server, through
+/// the opt-in trigram index on <c>query_text_dim.query_text</c> (<see cref="QueryTextTrigramIndex"/>, option <c>queryTextTrigramIndexEnabled</c>).
+/// It is offered only when the index is <c>Ready</c> (it exists and is valid): in every other state the search is refused with a sentence that names the option
+/// and the state, because without the index it would read every row of every server and run out its budget. Query Store text has no index and is still searched
+/// one server at a time. The one-server scope keeps the plain path whether or not the index exists: <see cref="PlanCacheSql"/> writes its match so the index
+/// cannot serve it, which the issue measured to be faster than the index for that scope.</para>
 ///
 /// <para><b>The judge runs on the whole text, then the excerpt is cut (#5320).</b> The SQL hands back the whole stored text of the at most
 /// <c>limit + 1</c> matched rows, and the C# side judges it with <see cref="SensitiveStatements.Text"/> before it cuts anything, the same
@@ -97,7 +103,12 @@ LIMIT $4";
     /// $5 the raw-tier floor (naive UTC). The server's distinct (hash, database, digest) in the window come first, so the pattern is tested
     /// once per distinct text instead of once per sample; one row per query_hash, the newest sighting. The match and the page carry the digest
     /// only: the whole text (<c>query_text_dim.query_text</c> has no size cap) is read by primary key for the at most $4 rows of the page, so a
-    /// common pattern never sorts every matching text.</summary>
+    /// common pattern never sorts every matching text.
+    /// <para>#7674: the match is <c>(d.query_text || '') ILIKE</c>, not <c>d.query_text ILIKE</c>, on purpose. With the opt-in trigram index on
+    /// <c>query_text_dim.query_text</c> the planner would otherwise run a bitmap scan of that index over the whole table and join it to this server's
+    /// digests, which the issue measured at 1.7 to 2.0 s cold for one server and one database against 0.2 to 0.7 s without the index. The concatenation is
+    /// not the indexed column, so no index can serve it and this scope keeps the plain path whether or not the index exists. The all-servers scope is
+    /// <see cref="PlanCacheAllServersSql"/>, which keeps the bare column so the index serves it.</para></summary>
     internal const string PlanCacheSql = @"
 WITH seen AS MATERIALIZED (
     SELECT query_hash, database_name, query_text_digest, MAX(collection_time) AS last_collected
@@ -113,7 +124,7 @@ hits AS (
            s.query_hash, s.database_name, s.last_collected, s.query_text_digest
     FROM seen AS s
     JOIN query_text_dim AS d ON d.digest = s.query_text_digest
-    WHERE d.query_text ILIKE '%' || $3 || '%' ESCAPE '\'
+    WHERE (d.query_text || '') ILIKE '%' || $3 || '%' ESCAPE '\'
     ORDER BY s.query_hash, s.last_collected DESC
 ),
 page AS (
@@ -126,6 +137,37 @@ SELECT p.query_hash, p.database_name, p.last_collected, d.query_text
 FROM page AS p
 JOIN query_text_dim AS d ON d.digest = p.query_text_digest
 ORDER BY p.last_collected DESC, p.query_hash";
+
+    /// <summary>#7674: the plan-cache text of every enabled server, served by the trigram index on <c>query_text_dim.query_text</c>. Only offered when
+    /// <see cref="QueryTextTrigramIndex"/> reports <c>Ready</c>. $1 the escaped pattern, $2 row cap + 1, $3 the raw-tier floor (naive UTC). The match is
+    /// the bare column, so the planner may use the index: the matching digests come first (a rare pattern is a handful), then the samples of those digests
+    /// in the window; one row per (server, query_hash), the newest sighting. The page carries the digest and the whole text is read by primary key for the
+    /// at most $2 rows of it, as in <see cref="PlanCacheSql"/>.</summary>
+    internal const string PlanCacheAllServersSql = @"
+WITH matched AS MATERIALIZED (
+    SELECT digest
+    FROM query_text_dim
+    WHERE query_text ILIKE '%' || $1 || '%' ESCAPE '\'
+),
+hits AS (
+    SELECT DISTINCT ON (s.server_id, s.query_hash)
+           s.server_id, s.query_hash, s.database_name, s.collection_time AS last_collected, s.query_text_digest
+    FROM query_stats AS s
+    JOIN matched AS m ON m.digest = s.query_text_digest
+    JOIN servers AS v ON v.server_id = s.server_id AND v.is_enabled
+    WHERE s.collection_time >= $3
+    ORDER BY s.server_id, s.query_hash, s.collection_time DESC
+),
+page AS (
+    SELECT server_id, query_hash, database_name, last_collected, query_text_digest
+    FROM hits
+    ORDER BY last_collected DESC, server_id, query_hash
+    LIMIT $2
+)
+SELECT p.server_id, p.query_hash, p.database_name, p.last_collected, d.query_text
+FROM page AS p
+JOIN query_text_dim AS d ON d.digest = p.query_text_digest
+ORDER BY p.last_collected DESC, p.server_id, p.query_hash";
 
     /// <summary>Escapes the LIKE metacharacters (<c>\</c>, <c>%</c>, <c>_</c>) so the pattern matches the text as typed.</summary>
     internal static string EscapeLike(string pattern) =>
@@ -166,17 +208,22 @@ ORDER BY p.last_collected DESC, p.query_hash";
         + ((int)TimescaleSupport.RawRetentionSpan.TotalDays).ToString(CultureInfo.InvariantCulture)
         + " days, one row per query_hash. A statement that left the plan cache before that, or ran only before the server was monitored, is not here.";
 
+    internal static string PlanCacheAllServersHorizon { get; } =
+        "Plan-cache text of the raw tier (query_stats) for every enabled server, through the trigram index: the last "
+        + ((int)TimescaleSupport.RawRetentionSpan.TotalDays).ToString(CultureInfo.InvariantCulture)
+        + " days, one row per server and query_hash. A statement that left the plan cache before that, or ran only before the server was monitored, is not here.";
+
     [McpServerTool(Name = "find_queries_by_text"), Description(
-        "Finds statements on ONE server whose text contains a piece of text (a table name, a fragment of SQL), and returns the keys the other query reads take: query_id and database for get_query_store_query_history, query_hash for get_query_trend. pattern is a literal substring, case-insensitive (% and _ match themselves), at least 3 characters. server_name is required; database_name narrows it and makes the search much faster. Two sources, each reported separately with its own horizon: Query Store text and the plan-cache text of the raw tier. There is no index on the text, so each source has a 4 second budget; a source that runs out is reported stopped (name a database to narrow it). Refused when mcp.dataDetail hides statement text, because a search on hidden text would reveal it. Rows carry a ~300 character excerpt around the first match, never the whole text; a statement the sensitive-statement filter withholds is listed with the withheld marker in place of the excerpt.")]
+        "Finds statements whose text contains a piece of text (a table name, a fragment of SQL), and returns the keys the other query reads take: query_id and database for get_query_store_query_history, query_hash for get_query_trend. pattern is a literal substring, case-insensitive (% and _ match themselves), at least 3 characters. Name a server with server_name: database_name narrows it and makes the search much faster. Two sources, each reported separately with its own horizon: Query Store text and the plan-cache text of the raw tier. There is no index on the text unless the operator turned one on, so each source has a 4 second budget; a source that runs out is reported stopped (name a database to narrow it). Leave server_name out to search the plan-cache text of every server: that is served only when the opt-in trigram index is ready (darling.json queryTextTrigramIndexEnabled; get_store_metrics query_text_index says its state), is refused with the state otherwise, and does not search Query Store text, which is searched one server at a time. Refused when mcp.dataDetail hides statement text, because a search on hidden text would reveal it. Rows carry a ~300 character excerpt around the first match, never the whole text; a statement the sensitive-statement filter withholds is listed with the withheld marker in place of the excerpt.")]
     public static Task<string> FindQueriesByText(
         NpgsqlDataSource postgres,
         [Description("Text to find in the statement. A literal substring, matched ignoring case; % and _ match themselves. At least 3 characters.")] string pattern,
-        [Description("Server name or display name. Required.")] string server_name,
-        [Description("Limit to one database. Omit for all databases on the server; naming one is much faster.")] string? database_name = null,
+        [Description("Server name or display name. Omit to search the plan-cache text of every server, which needs the trigram index to be ready.")] string? server_name = null,
+        [Description("Limit to one database of the named server. Omit for all databases on the server; naming one is much faster. Needs server_name.")] string? database_name = null,
         [Description("Maximum rows per source. Default 20, maximum 50.")] int limit = DefaultLimit,
         McpDataDetailSetting? maskSetting = null,
         CancellationToken cancellationToken = default)
-        => FindQueriesByText(postgres, pattern, server_name, database_name, limit, maskSetting?.Mode ?? McpDataDetail.Full, SourceBudget.Default, SourceBudget.Default, cancellationToken);
+        => FindQueriesByText(postgres, pattern, server_name, database_name, limit, maskSetting?.Mode ?? McpDataDetail.Full, SourceBudget.Default, SourceBudget.Default, cancellationToken, null);
 
     internal static async Task<string> FindQueriesByText(
         NpgsqlDataSource postgres,
@@ -187,7 +234,8 @@ ORDER BY p.last_collected DESC, p.query_hash";
         McpDataDetail detail,
         SourceBudget queryStoreBudget,
         SourceBudget planCacheBudget,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        QueryTextTrigramIndexTracker? tracker = null)
     {
         if (detail != McpDataDetail.Full)
         {
@@ -203,13 +251,20 @@ ORDER BY p.last_collected DESC, p.query_hash";
             return McpHelpers.Refusal("pattern", $"pattern must be at least {MinPatternLength} characters: a shorter one matches most statements.");
         }
 
-        if (string.IsNullOrWhiteSpace(server_name))
-        {
-            return McpHelpers.Refusal("server_name", "server_name is required: the search is scoped to one server. Use list_servers for the names.");
-        }
-
         var limitError = McpHelpers.ValidateTop(limit, MaxLimit);
         if (limitError != null) return limitError;
+
+        if (string.IsNullOrWhiteSpace(server_name))
+        {
+            if (!string.IsNullOrWhiteSpace(database_name))
+            {
+                return McpHelpers.Refusal(
+                    "server_name",
+                    "database_name narrows one server's search, so it needs server_name. Use list_servers for the names, or leave both out to search the plan-cache text of every server once the trigram index is ready (queryTextTrigramIndexEnabled in darling.json).");
+            }
+
+            return await FindInAllServersAsync(postgres, text, limit, planCacheBudget, tracker ?? QueryTextTrigramIndexTracker.Shared, cancellationToken);
+        }
 
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -221,7 +276,7 @@ ORDER BY p.last_collected DESC, p.query_hash";
             var floor = DateTime.SpecifyKind(DateTime.UtcNow - TimescaleSupport.RawRetentionSpan, DateTimeKind.Unspecified);
 
             var queryStore = await RunSourceAsync(
-                postgres, QueryStoreSql, queryStoreBudget, resolved.ServerId, database, escaped, limit, null, QueryStoreHorizon, database,
+                postgres, QueryStoreSql, queryStoreBudget, p => BindOneServer(p, resolved.ServerId, database, escaped, limit, null), QueryStoreHorizon, StoppedAdvice(database),
                 r => (Database: r.GetString(0), QueryId: r.GetInt64(1), Hash: r.IsDBNull(2) ? null : r.GetString(2), LastSeen: r.GetDateTime(3),
                     Stored: r.IsDBNull(4) ? null : r.GetString(4)),
                 raw =>
@@ -239,7 +294,7 @@ ORDER BY p.last_collected DESC, p.query_hash";
                 }, cancellationToken);
 
             var planCache = await RunSourceAsync(
-                postgres, PlanCacheSql, planCacheBudget, resolved.ServerId, database, escaped, limit, floor, PlanCacheHorizon, database,
+                postgres, PlanCacheSql, planCacheBudget, p => BindOneServer(p, resolved.ServerId, database, escaped, limit, floor), PlanCacheHorizon, StoppedAdvice(database),
                 r => (Hash: r.IsDBNull(0) ? null : r.GetString(0), Database: r.IsDBNull(1) ? null : r.GetString(1), LastCollected: r.GetDateTime(2),
                     Stored: r.IsDBNull(3) ? null : r.GetString(3)),
                 raw =>
@@ -262,12 +317,146 @@ ORDER BY p.last_collected DESC, p.query_hash";
                 database_name = database,
                 limit,
                 match = "literal substring, case-insensitive",
+                scope = "one_server",
                 sources = new { query_store = queryStore, plan_cache = planCache },
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError(ToolName, ex);
+        }
+    }
+
+    /// <summary>#7674: the all-servers scope. Offered only when the trigram index is <c>Ready</c>; otherwise <see cref="AllServersRefusal"/>. The plan-cache text
+    /// is searched through the index across every enabled server, and the Query Store text is reported as not searched, because it has no index.</summary>
+    private static async Task<string> FindInAllServersAsync(
+        NpgsqlDataSource postgres, string text, int limit, SourceBudget planCacheBudget, QueryTextTrigramIndexTracker tracker, CancellationToken cancellationToken)
+    {
+        TrigramIndexHealth? health;
+        try
+        {
+            await using var healthConnection = await postgres.OpenConnectionAsync(cancellationToken);
+            health = await QueryTextTrigramIndex.ReadHealthAsync(healthConnection, tracker, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            health = null;
+        }
+
+        if (health?.Status != TrigramIndexStatus.Ready)
+        {
+            return McpHelpers.Refusal("server_name", AllServersRefusal(health));
+        }
+
+        try
+        {
+            var (servers, fault) = await DarlingServerResolver.LoadEnabledOrFaultAsync(postgres, cancellationToken);
+            if (fault != null) return fault;
+
+            var escaped = EscapeLike(text);
+            var floor = DateTime.SpecifyKind(DateTime.UtcNow - TimescaleSupport.RawRetentionSpan, DateTimeKind.Unspecified);
+            var planCache = await RunSourceAsync(
+                postgres, PlanCacheAllServersSql, planCacheBudget,
+                p =>
+                {
+                    p.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = escaped });
+                    p.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = limit + 1 });
+                    p.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = floor });
+                },
+                PlanCacheAllServersHorizon,
+                "Use a longer, more specific pattern, or name a server with server_name (and database_name) to search it directly.",
+                r => (ServerId: r.GetInt32(0), Hash: r.IsDBNull(1) ? null : r.GetString(1), Database: r.IsDBNull(2) ? null : r.GetString(2), LastCollected: r.GetDateTime(3),
+                    Stored: r.IsDBNull(4) ? null : r.GetString(4)),
+                raw =>
+                {
+                    var (textLength, excerpt) = Shape(raw.Stored, text);
+                    return new
+                    {
+                        server = DarlingServerResolver.AnswerNameOf(servers, servers.Find(x => x.ServerId == raw.ServerId)),
+                        query_hash = raw.Hash,
+                        database_name = raw.Database,
+                        last_collected_at = Utc(raw.LastCollected),
+                        text_length = textLength,
+                        excerpt,
+                    };
+                }, cancellationToken);
+
+            return JsonSerializer.Serialize(new
+            {
+                server = (string?)null,
+                pattern = text,
+                database_name = (string?)null,
+                limit,
+                match = "literal substring, case-insensitive",
+                scope = "all_servers",
+                sources = new
+                {
+                    query_store = new
+                    {
+                        status = "not_searched",
+                        message = "Query Store text has no index, so an all-servers search does not read it. Name a server with server_name (and database_name to make it faster) to search its Query Store text.",
+                        horizon = QueryStoreHorizon,
+                        returned = 0,
+                        truncated = false,
+                        rows = Array.Empty<object>(),
+                    },
+                    plan_cache = planCache,
+                },
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError(ToolName, ex);
+        }
+    }
+
+    /// <summary>#7674: the refusal of the all-servers scope when the trigram index is not <c>Ready</c>. One sentence plus the way forward, naming the option and the
+    /// state. Null <paramref name="health"/> is a catalog read that failed. Pure, so each state is tested without a store.</summary>
+    internal static string AllServersRefusal(TrigramIndexHealth? health)
+    {
+        var lead = "Searching every server at once needs the opt-in trigram index on the plan-cache text (queryTextTrigramIndexEnabled in darling.json), and ";
+        var tail = " Until then, name one server with server_name (database_name makes it faster).";
+        if (health is null)
+        {
+            return lead + "its state could not be read (the store's catalog read failed)." + tail;
+        }
+
+        var minutes = ((int)QueryTextTrigramIndex.StartDelay.TotalMinutes).ToString(CultureInfo.InvariantCulture);
+        var state = health.Status switch
+        {
+            TrigramIndexStatus.Off =>
+                "the option is off (state: off). Set queryTextTrigramIndexEnabled to true in darling.json and restart the service: the index is built in the background about "
+                + minutes + " minutes after start and can take many minutes on a large store.",
+            TrigramIndexStatus.DropPending or TrigramIndexStatus.Dropping =>
+                "the option is off and the service is dropping the index (state: being dropped). Set queryTextTrigramIndexEnabled to true in darling.json and restart the service to keep it.",
+            TrigramIndexStatus.Pending =>
+                "the option is on but the index is not built yet (state: pending). The service builds it in the background about " + minutes + " minutes after start.",
+            TrigramIndexStatus.Building =>
+                "the index is building (state: building). Try again when get_store_metrics reports query_text_index.status Ready.",
+            TrigramIndexStatus.Failed =>
+                "the last build failed (state: failed). The service tries again after a wait: get_store_metrics query_text_index says why and when.",
+            TrigramIndexStatus.WaitingOnExtension =>
+                "it is waiting on the pg_trgm extension (state: waiting on the pg_trgm extension). An operator runs "
+                + (health.OperatorStatement ?? QueryTextTrigramIndex.OperatorStatement) + " in the store database as a role that may create it.",
+            _ => "it is not ready (state: " + health.Status + ").",
+        };
+        return lead + state + tail;
+    }
+
+    private static string StoppedAdvice(string? database) =>
+        database is null
+            ? "Name a database with database_name to narrow the search; one server and one database is much faster."
+            : "The database named is large; use a longer, more specific pattern.";
+
+    private static void BindOneServer(NpgsqlParameterCollection parameters, int serverId, string? database, string escaped, int limit, DateTime? floor)
+    {
+        parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+        parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)database ?? DBNull.Value });
+        parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = escaped });
+        parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = limit + 1 });
+        if (floor is not null)
+        {
+            parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = floor.Value });
         }
     }
 
@@ -279,8 +468,8 @@ ORDER BY p.last_collected DESC, p.query_hash";
     /// text included) while the statement runs; <paramref name="shape"/> judges and cuts it after the connection is back in the pool, for
     /// the rows kept (the row past the cap is dropped unjudged).</summary>
     private static async Task<object> RunSourceAsync<TRaw, TRow>(
-        NpgsqlDataSource postgres, string sql, SourceBudget budget, int serverId, string? database, string escaped, int limit, DateTime? floor,
-        string horizon, string? databaseScope, Func<NpgsqlDataReader, TRaw> read, Func<TRaw, TRow> shape, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, string sql, SourceBudget budget, Action<NpgsqlParameterCollection> bind,
+        string horizon, string stoppedAdvice, Func<NpgsqlDataReader, TRaw> read, Func<TRaw, TRow> shape, CancellationToken cancellationToken)
     {
         var rows = new List<TRaw>();
         var started = DateTime.UtcNow;
@@ -304,14 +493,7 @@ ORDER BY p.last_collected DESC, p.query_hash";
             await using (var command = new NpgsqlCommand(sql, connection, transaction))
             {
                 command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
-                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)database ?? DBNull.Value });
-                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = escaped });
-                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = limit + 1 });
-                if (floor is not null)
-                {
-                    command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = floor.Value });
-                }
+                bind(command.Parameters);
 
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                 while (await reader.ReadAsync(cancellationToken))
@@ -328,9 +510,7 @@ ORDER BY p.last_collected DESC, p.query_hash";
                 status = "stopped",
                 message = $"Stopped after {seconds.ToString("0.0", CultureInfo.InvariantCulture)} s: the {budget.Milliseconds / 1000.0:0.#} s budget for this source ran out before the search finished, "
                     + "so the rows below (none) are not a complete answer. "
-                    + (databaseScope is null
-                        ? "Name a database with database_name to narrow the search; one server and one database is much faster."
-                        : "The database named is large; use a longer, more specific pattern."),
+                    + stoppedAdvice,
                 horizon,
                 returned = 0,
                 truncated = false,
