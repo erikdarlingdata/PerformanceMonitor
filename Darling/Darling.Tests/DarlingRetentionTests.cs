@@ -1193,7 +1193,7 @@ WHERE hypertable_name = 'wait_stats'
         Assert.Contains("livenessTouchedTablePruneRowCap", mapBody, StringComparison.Ordinal);
         Assert.DoesNotContain("adaptiveRowCapTimeColumn", mapBody, StringComparison.Ordinal);
 
-        var textAt = source.IndexOf("var queryTextCutoff = utcNow.AddDays(", StringComparison.Ordinal);
+        var textAt = source.IndexOf("var queryTextDeleted = await PurgeOneAsync(", StringComparison.Ordinal);
         Assert.True(textAt >= 0, "the query text purge call moved");
         var textBody = source[textAt..Math.Min(source.Length, textAt + 500)];
         Assert.Contains("UnorderedRowCappedDeleteSql(", textBody, StringComparison.Ordinal);
