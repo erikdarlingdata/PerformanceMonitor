@@ -209,6 +209,25 @@ public sealed class WebQueryHeatmapBehaviourTests
     }
 
     /// <summary>
+    /// #7653: the last label sits over whatever columns are left after the 12-column ticks, and its text ran past the table's right edge,
+    /// so the panel grew a sideways scrollbar for a label alone. A label over fewer columns than a tick is blank whatever its span: 7 columns
+    /// on a cut read and 11 on a day that ends at 22:45. The label before it keeps its time, and the columns still count in the row.
+    /// </summary>
+    [Theory]
+    [InlineData("cut", 7, 19)]
+    [InlineData("eleven", 11, 143)]
+    public void ALastTickLabelOverAPartialTick_IsBlank_WhateverItsSpan(string draw, int span, int columns)
+    {
+        var d = Run("window").GetProperty(draw);
+
+        Assert.Equal(columns, d.GetProperty("columns").GetInt32());
+        Assert.Equal(columns, d.GetProperty("cellsInRow").GetInt32());
+        Assert.Equal(span, d.GetProperty("lastTickSpan").GetInt32());
+        Assert.Equal("", d.GetProperty("lastTickText").GetString());
+        Assert.NotEqual("", d.GetProperty("tickBeforeLastText").GetString());
+    }
+
+    /// <summary>
     /// #7683: a 7 day window whose oldest 4 days are past retention (window_truncated, effective_start 4 days in) starts its grid at
     /// effective_start's bin, so no column before the data is drawn as "no query". The same reply without window_truncated still starts at
     /// window_start.
