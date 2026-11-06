@@ -728,7 +728,7 @@ export function redactPassword(text, ...secrets) {
   return out;
 }
 
-const TABS = [
+export const TABS = [
   { id: "servers", label: "Servers" },
   { id: "routes", label: "Notification Routes" },
   { id: "settings", label: "Alert Settings" },

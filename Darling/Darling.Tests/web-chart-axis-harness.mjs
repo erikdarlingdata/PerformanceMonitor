@@ -429,6 +429,8 @@ const captionEdges = (host) => {
   const width = Number(find(host, (n) => n.tag === "svg")[0].attrs.width);
   return {
     width,
+    /* The x of the right axis's tick labels: they start at plotRight + 8, where a right-axis caption that fits starts too (#7863). */
+    rightTickX: find(host, (n) => n.tag === "text" && !cls(n).includes("axis-unit") && n.attrs["text-anchor"] === "start").map((n) => Number(n.attrs.x)).reduce((a, b) => Math.max(a, b), 0),
     caps: find(host, (n) => n.tag === "text" && cls(n).includes("axis-unit")).map((n) => {
       const x = Number(n.attrs.x);
       const px = n.text.length * 6;
@@ -445,8 +447,14 @@ out.captionEdges = {
   lineShort: captionEdges(charts.renderLineChart({ xKey: "t", series: [{ key: "a", label: "A", color: "#f00" }], points: rows([100, 200, 300]), formatValue: bareFmt, unit: "ms" })),
   lineRightLong: captionEdges(charts.renderLineChart({ xKey: "t", series: [{ key: "a", label: "A", color: "#f00" }], points: pairRows, formatValue: bareFmt, unit: "n", series2: { key: "b", label: "B", color: "#00f", formatValue: bareFmt, unit: "collisions/s" } })),
   lineRightShort: captionEdges(charts.renderLineChart({ xKey: "t", series: [{ key: "a", label: "A", color: "#f00" }], points: pairRows, formatValue: bareFmt, unit: "n", series2: { key: "b", label: "B", color: "#00f", formatValue: bareFmt, unit: "ms" } })),
+  lineRightMenuLong: captionEdges(charts.renderLineChart({ xKey: "t", series: [{ key: "a", label: "A", color: "#f00" }], points: pairRows, formatValue: bareFmt, unit: "n", series2: { key: "b", label: "B", color: "#00f", formatValue: bareFmt, unit: "reports or snapshot rows" } })),
   scatterLong: captionEdges(charts.renderScatterChart({ items: scatterItems, unitY: "reports or snapshot rows", unitX: "snapshot rows" })),
   scatterShort: captionEdges(charts.renderScatterChart({ items: scatterItems, unitY: "ms", unitX: "MB" })),
 };
+
+/* #7863: a chart with no menu button keeps the room the caption always had: a long right-axis caption still ends 2 px inside the chart edge.
+   unitCaption's default is that case. */
+const noMenuCap = charts.unitCaption?.("reports or snapshot rows", 900, "start", 1000, {});
+out.noMenuCaption = noMenuCap ? { x: Number(noMenuCap.attrs.x), anchor: noMenuCap.attrs["text-anchor"] } : null;
 
 console.log(JSON.stringify(out));

@@ -190,4 +190,53 @@ public sealed class WebDetails7702BehaviourTests
         Assert.Equal("2026-11-05T10:00:00.000Z", snapshot.GetProperty("first").GetString());
         Assert.Equal("2026-11-05T10:05:00.000Z", snapshot.GetProperty("last").GetString());
     }
+
+    /// <summary>
+    /// #7850, through the line viz. A one hour window in minute buckets with an event at 09:10 and one at 09:50. The reply's
+    /// <c>covered</c> list holds two ranges with a hole between them (09:30 to 09:40, time no run read): the chart is handed no point in the
+    /// hole, a 0 in every covered minute, and the two reported buckets as they came. The bucket the last run was still inside (10:05) is not filled.
+    /// </summary>
+    [Fact]
+    public void AnEventCountPanel_DrawsNoZeroInAHoleOfCoverage_AndZeroInEveryCoveredMinute()
+    {
+        var gap = Run().GetProperty("coveredGap");
+        Assert.Equal(50, gap.GetProperty("count").GetInt32());
+        Assert.Equal(48, gap.GetProperty("zeros").GetInt32());
+        Assert.Equal(0, gap.GetProperty("inGap").GetInt32());
+        Assert.Equal(2, gap.GetProperty("kept").GetInt32());
+        Assert.Equal("2026-11-05T10:04:00.000Z", gap.GetProperty("last").GetString());
+    }
+
+    /// <summary>
+    /// #7850: a window one range covers all of still draws 0 where nothing happened, ten minutes of it between the two events included.
+    /// </summary>
+    [Fact]
+    public void AnEventCountPanel_StillDrawsZero_WhereTheWholeWindowIsCovered()
+    {
+        var whole = Run().GetProperty("coveredWhole");
+        Assert.Equal(60, whole.GetProperty("count").GetInt32());
+        Assert.Equal(58, whole.GetProperty("zeros").GetInt32());
+        Assert.Equal(10, whole.GetProperty("inGap").GetInt32());
+        Assert.Equal(2, whole.GetProperty("kept").GetInt32());
+    }
+
+    /// <summary>
+    /// #7850: a reply with no <c>covered</c> field (an older service) keeps #7839's whole-window fill, 61 buckets to the window's end. An empty
+    /// list is a window no run read, so only the two reported points are drawn. A range with an unreadable time is dropped and the rest is used.
+    /// </summary>
+    [Fact]
+    public void AnEventCountPanel_KeepsTheWholeWindowFill_WithNoCoveredField_AndFillsNothingForAnEmptyList()
+    {
+        var run = Run();
+        var absent = run.GetProperty("coveredAbsent");
+        Assert.Equal(61, absent.GetProperty("count").GetInt32());
+        Assert.Equal(59, absent.GetProperty("zeros").GetInt32());
+        Assert.Equal("2026-11-05T10:05:00.000Z", absent.GetProperty("last").GetString());
+        var empty = run.GetProperty("coveredEmpty");
+        Assert.Equal(2, empty.GetProperty("count").GetInt32());
+        Assert.Equal(0, empty.GetProperty("zeros").GetInt32());
+        var unreadable = run.GetProperty("coveredUnreadable");
+        Assert.Equal(60, unreadable.GetProperty("count").GetInt32());
+        Assert.Equal(58, unreadable.GetProperty("zeros").GetInt32());
+    }
 }
