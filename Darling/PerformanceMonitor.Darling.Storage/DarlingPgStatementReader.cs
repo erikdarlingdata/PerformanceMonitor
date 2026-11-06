@@ -98,6 +98,16 @@ public static class DarlingPgStatementReader
         "CASE WHEN COUNT(raw_wal_bytes) = 0 THEN NULL ELSE CAST(coalesce(SUM(d_wal_bytes), 0) AS bigint) END";
 
     /// <summary>
+    /// #7909: how far before a window's start the per-series seed lookup reaches for the series' latest stored row, the
+    /// baseline the first in-window sample's block and WAL increments are taken against. One chunk interval (one day),
+    /// so the lookup is one pass over at most two chunks beside the window's own, never a series' whole history; a
+    /// series idle for longer reads as one with no earlier row. <see cref="PgTopQueriesSql"/> and the PG_BAD_ACTOR
+    /// drill-down (<c>PgTargetDrillDownCollector.PgTargetBadActorDetailSql</c>) both splice this text, so the bound
+    /// lives once and the two reads difference a statement against the same row.
+    /// </summary>
+    public const string SeedLookbackSql = "INTERVAL '1 day'";
+
+    /// <summary>
     /// #7567: whether a (queryid, database_id) group is the monitoring service's own statement, as one aggregate over the
     /// differenced entries that carried time: every one's <c>(user_id, database_id)</c> must be in the <c>own_entries</c>
     /// list the text fetch stored for the queryid. Per entry, so the application's statement under another login is false.
@@ -183,9 +193,10 @@ public static class DarlingPgStatementReader
            figures every pass between it and the first in-window sample also saw, and the difference is exactly the
            interval that sample's stored delta_calls covers. Without it a statement that ran in one collection interval
            of the window, one stored row with its previous row hours earlier, would read 0 on every block and WAL figure.
-           Bounded to the day before the window start, the chunk interval: one pass over at most two chunks beside the
-           window's own, filtered to the series the window holds, never the series' whole history. A series idle for
-           longer than that reads as one with no earlier row and starts its block figures at its second in-window sample. */
+           Bounded to SeedLookbackSql (one day, the chunk interval) before the window start: one pass over at most two
+           chunks beside the window's own, filtered to the series the window holds, never the series' whole history. A
+           series idle for longer than that reads as one with no earlier row and starts its block figures at its second
+           in-window sample. */
         seed AS (
             SELECT DISTINCT ON (p.queryid, p.database_id, p.user_id, p.toplevel)
                 p.queryid,
@@ -210,7 +221,7 @@ public static class DarlingPgStatementReader
             FROM pg_statement_stats AS p
             WHERE p.server_id = $1
             AND   p.collection_time < $2
-            AND   p.collection_time >= $2 - INTERVAL '1 day'
+            AND   p.collection_time >= $2 - {SeedLookbackSql}
             AND   EXISTS (SELECT 1
                           FROM in_window AS w
                           WHERE w.queryid = p.queryid
