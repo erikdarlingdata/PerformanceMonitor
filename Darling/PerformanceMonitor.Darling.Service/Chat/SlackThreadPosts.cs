@@ -44,26 +44,11 @@ public static class SlackThreadPosts
     /// <summary>The post key of the thread parent. One per request.</summary>
     public const string RequestKey = "request";
 
-    /// <summary>The post key of the report. One per request: a request reports once.</summary>
-    public const string ReportKey = "report";
-
-    /// <summary>The post key of the resolution. One per request.</summary>
-    public const string ResolvedKey = "resolved";
-
     /// <summary>The post key of one journal row: its event and its journal id, so a mark reads in the journal as the row it posted.</summary>
     public static string EventKey(string eventKind, long journalId) => eventKind + ":" + journalId.ToString(CultureInfo.InvariantCulture);
 
     /// <summary>The post key of a change whose result never came: the <c>action_called</c> journal id, posted once as result unknown.</summary>
     public static string UnknownKey(long calledId) => "action_unknown:" + calledId.ToString(CultureInfo.InvariantCulture);
-
-    /// <summary>The post key of one claim, by claim number.</summary>
-    public static string ClaimKey(int claimNo) => "claim:" + claimNo.ToString(CultureInfo.InvariantCulture);
-
-    /// <summary>The post key of one agent change, by its <c>action_called</c> journal id.</summary>
-    public static string ChangeKey(long calledId) => "change:" + calledId.ToString(CultureInfo.InvariantCulture);
-
-    /// <summary>The post key of one proposal state: a proposal posts when it is made and again at each decision.</summary>
-    public static string ProposalKey(Guid proposalId, string state) => "proposal:" + proposalId.ToString("D") + ":" + state;
 
     /// <summary>The once key of one post of one request (journal <c>once_key</c>): written before the send, so a replayed pass and a
     /// second service on the same store post it once between them.</summary>

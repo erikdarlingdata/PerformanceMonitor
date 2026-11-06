@@ -389,8 +389,8 @@ public sealed class SlackThreadPostsTests
         var other = Guid.NewGuid();
         Assert.Equal("slack_thread:" + RequestId.ToString("D") + ":request", SlackThreadPosts.OnceKey(RequestId, SlackThreadPosts.RequestKey));
         Assert.NotEqual(SlackThreadPosts.OnceKey(RequestId, SlackThreadPosts.RequestKey), SlackThreadPosts.OnceKey(other, SlackThreadPosts.RequestKey));
-        Assert.NotEqual(SlackThreadPosts.OnceKey(RequestId, SlackThreadPosts.ClaimKey(1)), SlackThreadPosts.OnceKey(RequestId, SlackThreadPosts.ClaimKey(2)));
-        Assert.NotEqual(SlackThreadPosts.OnceKey(RequestId, SlackThreadPosts.ChangeKey(10)), SlackThreadPosts.OnceKey(RequestId, SlackThreadPosts.ProposalKey(Guid.Empty, "pending")));
+        Assert.NotEqual(SlackThreadPosts.OnceKey(RequestId, SlackThreadPosts.EventKey("claimed", 1)), SlackThreadPosts.OnceKey(RequestId, SlackThreadPosts.EventKey("claimed", 2)));
+        Assert.NotEqual(SlackThreadPosts.OnceKey(RequestId, SlackThreadPosts.EventKey("action_done", 10)), SlackThreadPosts.OnceKey(RequestId, SlackThreadPosts.EventKey("proposal_created", 11)));
     }
 }
 
@@ -494,8 +494,8 @@ public sealed class SlackThreadPosterTests
         var poster = new SlackThreadPoster(threads, posts, NullLogger<SlackThreadPoster>.Instance);
 
         var opened = await poster.PostAsync(Target(), SlackThreadPosts.RequestKey, Content("opened"), CancellationToken.None);
-        var claimed = await poster.PostAsync(Target(), SlackThreadPosts.ClaimKey(1), Content("claimed"), CancellationToken.None);
-        var reported = await poster.PostAsync(Target(), SlackThreadPosts.ReportKey, Content("reported"), CancellationToken.None);
+        var claimed = await poster.PostAsync(Target(), SlackThreadPosts.EventKey("claimed", 1), Content("claimed"), CancellationToken.None);
+        var reported = await poster.PostAsync(Target(), SlackThreadPosts.EventKey("reported", 3), Content("reported"), CancellationToken.None);
 
         Assert.Equal(SlackThreadPostOutcome.Posted, opened);
         Assert.Equal(SlackThreadPostOutcome.Posted, claimed);
@@ -553,7 +553,7 @@ public sealed class SlackThreadPosterTests
         var posts = new RecordingPosts();
         var poster = new SlackThreadPoster(threads, posts, NullLogger<SlackThreadPoster>.Instance);
 
-        var outcome = await poster.PostAsync(Target(), SlackThreadPosts.ReportKey, Content("reported"), CancellationToken.None);
+        var outcome = await poster.PostAsync(Target(), SlackThreadPosts.EventKey("reported", 3), Content("reported"), CancellationToken.None);
 
         Assert.Equal(SlackThreadPostOutcome.NoThread, outcome);
         Assert.Empty(posts.Posts);
