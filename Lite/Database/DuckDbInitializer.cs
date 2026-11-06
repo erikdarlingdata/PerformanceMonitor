@@ -1490,7 +1490,7 @@ public partial class DuckDbInitializer : IDisposable
     /// must NOT match, or the destructive Parquet rebuild fires on a database
     /// that is merely locked or recovering a WAL from an unclean shutdown.
     /// </summary>
-    private static bool IsStorageVersionError(Exception ex)
+    internal static bool IsStorageVersionError(Exception ex)
     {
         /* DuckDB reports a genuine version mismatch as one of:
            - "Serialization Error: Failed to deserialize: ..." (incompatible storage format)
@@ -1509,7 +1509,7 @@ public partial class DuckDbInitializer : IDisposable
     /// another process (a just-killed prior instance, antivirus) is holding it.
     /// These are safe to retry and must never trigger the Parquet rebuild.
     /// </summary>
-    private static bool IsTransientLockError(Exception ex)
+    internal static bool IsTransientLockError(Exception ex)
     {
         var message = ex.ToString().ToLowerInvariant();
         return message.Contains("conflicting lock")
