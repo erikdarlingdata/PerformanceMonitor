@@ -237,16 +237,22 @@ public sealed class DarlingMcpObjectStatsTools
         {
             var scope = DescribeScope(databases);
 
-            var rows = await DarlingObjectStatsReader.GetIndexUsageAsync(postgres, resolved.ServerId, limit, databases, cancellationToken);
+            /* The server's newest capture, resolved once: the rows, the server-wide probe below and the match count all
+               bind this instant, so a capture landing between the reads changes none of them and the count is the count
+               of the rows' own capture. Null is a server with no index history at all. */
+            var snapshotTime = await DarlingObjectStatsReader.GetLatestIndexObjectStatsSnapshotTimeAsync(postgres, resolved.ServerId, cancellationToken);
+            var rows = snapshotTime is null
+                ? []
+                : await DarlingObjectStatsReader.GetIndexUsageAsync(postgres, resolved.ServerId, limit, databases, snapshotTime.Value, cancellationToken);
             if (rows.Count == 0)
             {
                 /* #2636: a database filter that matches nothing is a DIFFERENT answer from a server that
                    collects no index stats, and the reporter hit the first while being told the second. The
                    capability check still runs first — a wrong-engine target has no index_object_stats at all
                    — and only then does the filter get blamed for its own empty result. */
-                if (scope is not null)
+                if (scope is not null && snapshotTime is not null)
                 {
-                    var anyOnServer = await DarlingObjectStatsReader.GetIndexUsageMatchCountAsync(postgres, resolved.ServerId, DatabaseFilter.All, cancellationToken);
+                    var anyOnServer = await DarlingObjectStatsReader.GetIndexUsageMatchCountAsync(postgres, resolved.ServerId, DatabaseFilter.All, snapshotTime.Value, cancellationToken);
 
                     if (anyOnServer > 0)
                     {
@@ -267,7 +273,7 @@ public sealed class DarlingMcpObjectStatsTools
 
             /* Counted BEFORE the cap, by a second query. A count taken over the returned rows is a count of
                the page, which is the whole defect this answers. */
-            var matching = await DarlingObjectStatsReader.GetIndexUsageMatchCountAsync(postgres, resolved.ServerId, databases, cancellationToken);
+            var matching = await DarlingObjectStatsReader.GetIndexUsageMatchCountAsync(postgres, resolved.ServerId, databases, snapshotTime!.Value, cancellationToken);
             var truncated = matching > rows.Count;
 
             var result = rows.Select(r => new
