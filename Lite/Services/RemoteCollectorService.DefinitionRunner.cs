@@ -1357,6 +1357,17 @@ public partial class RemoteCollectorService
                         definition.Name, context.ServerName, budgetSeconds);
                     return 0;
                 }
+                catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException
+                                           && cancellationToken.IsCancellationRequested)
+                {
+                    /* Collection is stopping, and the read's cancellation arrived as the PROVIDER's exception rather
+                       than an OperationCanceledException (SqlClient reports a cancelled command as a SqlException).
+                       Surfaced as the cancellation it is, so RunCollectorAsync's cancellation arm records CANCELLED:
+                       left as the provider's exception, it reaches the SQL error arm first and is recorded as ERROR.
+                       The same arm the Azure per-database loop has. Stores nothing, like the arm below. */
+                    baselineRollback?.RollBackBaselines();
+                    throw new OperationCanceledException(ex.Message, ex, cancellationToken);
+                }
                 catch
                 {
                     /* #7419: any other end of the read before the store (a stop, a fault in the probe read) stores nothing.
