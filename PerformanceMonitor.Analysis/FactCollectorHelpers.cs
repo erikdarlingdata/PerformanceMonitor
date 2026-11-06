@@ -263,14 +263,15 @@ public static class FactCollectorHelpers
     public const double PeakBucketHours = 4.0;
 
     /// <summary>
-    /// #7895: the hours the collector covered inside a span of the window, under the window's coverage fraction
-    /// (<see cref="WindowCoverage.Fraction"/>, the same basis every per-hour fact divides by), floored at one hour
-    /// so a sliver of a tail bucket cannot turn one event into a storm. The coverage witness carries one fraction
-    /// for the whole window, so a collector gap is spread evenly over the window's buckets rather than placed in
-    /// the one it fell in.
+    /// #7895: the hours a bucket divides its events by: its own span, clipped to the window end, never more than the
+    /// hours the collector observed in the window (<see cref="AnalysisContext.ObservedDurationMs"/>, the divisor
+    /// every per-hour fact shares), and never under one hour, so a sliver of a tail bucket cannot turn one event
+    /// into a storm. The coverage witness carries one observed figure for the whole window, so a collector gap caps
+    /// a bucket's hours at what the window observed but never shrinks a bucket the collector saw end to end. A gap
+    /// inside the peak bucket itself needs observed time per bucket, which the witness does not carry (#8001).
     /// </summary>
     public static double CoveredHours(double spanHours, AnalysisContext context) =>
-        Math.Max(1.0, spanHours * (context.Coverage is { Fraction: > 0 } coverage ? coverage.Fraction : 1.0));
+        Math.Max(1.0, Math.Min(spanHours, context.ObservedDurationMs / 3_600_000.0));
 
     /// <summary>
     /// #7895: the busiest blocking bucket by RATE, from the two bucket shapes a window-start origin produces: full

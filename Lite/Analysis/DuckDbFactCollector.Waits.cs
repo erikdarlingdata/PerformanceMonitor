@@ -237,8 +237,9 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
     /// exactly — see <c>PgFactCollector.CollectBlockingFactsAsync</c> for the grain argument (the same
     /// storm must not grade CRITICAL on a 4-hour pass and Information on a 24-hour one). Each bucket
     /// divides by its OWN covered hours (#7895, <see cref="FactCollectorHelpers.PeakBucketRate"/>): its
-    /// span clipped to the window end, under the window's coverage fraction (#3538 A2's observed-time
-    /// rule), never under one hour, and the peak is the highest rate rather than the biggest count.
+    /// span clipped to the window end, never more than the window's observed hours (#3538 A2's
+    /// observed-time rule), never under one hour, and the peak is the highest rate rather than the
+    /// biggest count.
     /// DuckDB's 3-arg <c>time_bucket</c> takes the same window-start origin PG's <c>date_bin</c> does.
     /// <c>events_per_hour</c> stays published as whole-window context.
     /// </summary>

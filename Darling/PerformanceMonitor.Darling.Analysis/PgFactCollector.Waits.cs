@@ -332,8 +332,8 @@ FROM reports";
     /// one-hour storm by however much quiet surrounds it, so the graded value is the peak 4-hour bucket
     /// — the grain the (10, 50) pair was measured on — while <c>events_per_hour</c> stays published as
     /// the whole-window context. Each bucket divides by its OWN covered hours (#7895,
-    /// <see cref="FactCollectorHelpers.PeakBucketRate"/>): its span clipped to the window end, under the
-    /// window's coverage fraction (#3538 A2's observed-time rule: forty events in the one hour the
+    /// <see cref="FactCollectorHelpers.PeakBucketRate"/>): its span clipped to the window end, never more
+    /// than the window's observed hours (#3538 A2's observed-time rule: forty events in the one hour the
     /// collector saw is a 40/hr storm, not a 10/hr murmur), never under one hour, and the peak is the
     /// highest rate rather than the biggest count. With the window-start bucket origin a ≤4-hour window
     /// is one bucket, so it divides by its own covered hours. <c>period_hours</c> stays the nominal
