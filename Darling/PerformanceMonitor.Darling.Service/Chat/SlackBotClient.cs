@@ -20,8 +20,9 @@ namespace PerformanceMonitor.Darling.Service.Chat;
 
 /// <summary>#7656: how one Slack post ended. <see cref="Ts"/> and <see cref="Channel"/> are Slack's for a delivered post, the
 /// thread's handle for every reply that follows. <see cref="Error"/> is Slack's error word, an HTTP status or an exception's text,
-/// and never carries the bot token.</summary>
-public sealed record SlackPostResult(bool Ok, string? Ts, string? Channel, string? Error);
+/// and never carries the bot token. <see cref="RateLimited"/> is a 429, the one answer that says the post definitely did not go out,
+/// with Slack's <c>Retry-After</c> in <see cref="RetryAfter"/> when the header was there.</summary>
+public sealed record SlackPostResult(bool Ok, string? Ts, string? Channel, string? Error, bool RateLimited = false, TimeSpan? RetryAfter = null);
 
 /// <summary>#7656: posts one message to a Slack channel or thread as the bot. The one seam the thread poster sends through, so a
 /// test drives it with a recorder and the product with <see cref="SlackBotClient"/>.</summary>
@@ -84,7 +85,7 @@ public sealed class SlackBotClient : ISlackBotPosts
             request.Content = new StringContent(BuildBody(channel, text, blocks, threadTs), Encoding.UTF8, "application/json");
             using var response = await _http.SendAsync(request, cancellationToken);
             var body = await response.Content.ReadAsStringAsync(cancellationToken);
-            return ParseResponse((int)response.StatusCode, body, _token);
+            return ParseResponse((int)response.StatusCode, body, _token, RetryAfterOf(response));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -120,11 +121,40 @@ public sealed class SlackBotClient : ISlackBotPosts
         return JsonSerializer.Serialize(body, s_jsonOptions);
     }
 
-    /// <summary>PURE: Slack's answer. A 200 with <c>ok:true</c> delivers and carries <c>ts</c> and <c>channel</c>; <c>ok:false</c> names
-    /// the error; any other status is an HTTP error. A body that is not JSON is reported by its status alone, never quoted, and every
-    /// error text is redacted of <paramref name="token"/>.</summary>
-    internal static SlackPostResult ParseResponse(int statusCode, string body, string token)
+    /// <summary>Slack's <c>Retry-After</c> on a 429: a delay, or the gap to a date; null when the header is absent.</summary>
+    private static TimeSpan? RetryAfterOf(HttpResponseMessage response)
     {
+        var header = response.Headers.RetryAfter;
+        if (header is null)
+        {
+            return null;
+        }
+
+        if (header.Delta is TimeSpan delta)
+        {
+            return delta < TimeSpan.Zero ? TimeSpan.Zero : delta;
+        }
+
+        if (header.Date is DateTimeOffset date)
+        {
+            var gap = date - DateTimeOffset.UtcNow;
+            return gap < TimeSpan.Zero ? TimeSpan.Zero : gap;
+        }
+
+        return null;
+    }
+
+    /// <summary>PURE: Slack's answer. A 200 with <c>ok:true</c> delivers and carries <c>ts</c> and <c>channel</c>; <c>ok:false</c> names
+    /// the error; a 429 is <see cref="SlackPostResult.RateLimited"/> with <paramref name="retryAfter"/>; any other status is an HTTP
+    /// error. A body that is not JSON is reported by its status alone, never quoted, and every error text is redacted of
+    /// <paramref name="token"/>.</summary>
+    internal static SlackPostResult ParseResponse(int statusCode, string body, string token, TimeSpan? retryAfter = null)
+    {
+        if (statusCode == 429)
+        {
+            return new SlackPostResult(false, null, null, "HTTP 429", RateLimited: true, RetryAfter: retryAfter);
+        }
+
         if (statusCode != 200)
         {
             return new SlackPostResult(false, null, null, "HTTP " + statusCode.ToString(CultureInfo.InvariantCulture));

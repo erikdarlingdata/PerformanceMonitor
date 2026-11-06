@@ -81,6 +81,10 @@ internal sealed class ServiceInvestigationEventSends(
 /// the settings' own channel when the route has none); a disabled route sends nothing. The root cause and each change's object are
 /// masked at <c>mcp.dataDetail</c>.</para>
 ///
+/// <para><b>Slack threads (#7656).</b> Last, the <see cref="Chat.SlackThreadPass"/> posts each request's new journal rows into its
+/// Slack thread on a route with a bot channel. It runs after every other send and its failure is logged, never thrown, so the agent
+/// deliveries do not wait on Slack.</para>
+///
 /// <para><b>Wake.</b> A pass that found an undelivered event wakes every long-poll waiter, so a <c>resolved</c>,
 /// <c>expired</c>, <c>claims_exhausted</c> or <c>evidence_ready</c> event reaches a waiting agent within one pass; the
 /// dispatcher wakes the route at once for <c>opened</c> and an evented <c>joined</c>.</para>
@@ -109,16 +113,19 @@ public sealed class InvestigationEventDelivery
     private readonly IAlertSettings? _defaults;
     private readonly McpDataDetail _dataDetail;
     private readonly Func<string> _baseUrl;
+    private readonly Chat.SlackThreadPass? _slackThreads;
 
     /// <param name="reportNotices">#6979: sends a report notice to one Slack or Teams destination; null sends none.</param>
     /// <param name="defaults">#6979: the settings' channels, the parent default a route with no channel of its own falls to.</param>
     /// <param name="dataDetail">#6979: the <c>mcp.dataDetail</c> level the notice's text is masked at; the strictest unless told.</param>
     /// <param name="baseUrl">#6979: the web dashboard's public base URL (empty for no links), read per notice.</param>
+    /// <param name="slackThreads">#7656: posts each request's journal rows into its Slack thread; null posts none.</param>
     public InvestigationEventDelivery(InvestigationRequestStore store, Func<IReadOnlyList<NotificationRoute>> routes,
         IInvestigationEventSends sends, InvestigationOpenSignal? signal, ILogger logger, Func<DateTime>? utcNow = null,
         IReportNoticeSends? reportNotices = null, IAlertSettings? defaults = null,
-        McpDataDetail dataDetail = McpDataDetail.MetadataOnly, Func<string>? baseUrl = null)
+        McpDataDetail dataDetail = McpDataDetail.MetadataOnly, Func<string>? baseUrl = null, Chat.SlackThreadPass? slackThreads = null)
     {
+        _slackThreads = slackThreads;
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _routes = routes ?? throw new ArgumentNullException(nameof(routes));
         _sends = sends ?? throw new ArgumentNullException(nameof(sends));
@@ -163,7 +170,31 @@ public sealed class InvestigationEventDelivery
         }
 
         var notices = await NoticePassAsync(routes, cancellationToken);
-        return (fallbacks, posted, notices + await ProposalNoticePassAsync(routes, cancellationToken));
+        var proposals = await ProposalNoticePassAsync(routes, cancellationToken);
+        await SlackThreadPassAsync(cancellationToken);
+        return (fallbacks, posted, notices + proposals);
+    }
+
+    /// <summary>#7656: the Slack thread pass, after every other send. Its store or Slack failure is logged and tried again next pass.</summary>
+    private async Task SlackThreadPassAsync(CancellationToken cancellationToken)
+    {
+        if (_slackThreads is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _slackThreads.RunOnceAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Slack thread pass failed; it is tried again next pass");
+        }
     }
 
     /// <summary>#7109: how far back a pass reads proposal creations for a notice. A proposal expires after an hour, so a service that was down

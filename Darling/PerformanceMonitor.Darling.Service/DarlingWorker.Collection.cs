@@ -1069,6 +1069,17 @@ public sealed partial class DarlingWorker
            claims, to expired. It never reopens a lease; a claim's own WHERE takes a lapsed lease over. */
         /* #6003: after each sweep, the request events go out: the D8 fallback of a request that expired unclaimed, and the
            signed POST of every new event to its agent route; the pass wakes the MCP long-poll for what it found. */
+        /* #7656: the Slack bot posts each request's journal rows into one thread per request on a route with a bot channel. The bot
+           token is read from the opened settings on every post, so a token saved later is used without a restart; a blank token posts
+           nothing and leaves every row unmarked for when one is set. The throttle holds a 429's Retry-After across passes. */
+        var slackThrottle = new PerformanceMonitor.Darling.Service.Chat.SlackPostThrottle();
+        var slackBotPosts = new PerformanceMonitor.Darling.Service.Chat.SettingsSlackBotPosts(() => alertSettings.SlackBotToken);
+        var slackThreads = new PerformanceMonitor.Darling.Service.Chat.SlackThreadPass(
+            investigationStore, investigationStore,
+            new PerformanceMonitor.Darling.Service.Chat.SlackThreadPoster(
+                investigationStore, slackBotPosts, _loggerFactory.CreateLogger<PerformanceMonitor.Darling.Service.Chat.SlackThreadPoster>(), slackThrottle),
+            slackThrottle, () => alertSettings.NotificationRoutes, _logger, dataDetail, () => alertSettings.TriageBaseUrl,
+            ready: slackBotPosts.HasToken);
         var investigationEvents = new PerformanceMonitor.Darling.Service.Investigations.InvestigationEventDelivery(
             investigationStore, () => alertSettings.NotificationRoutes,
             new PerformanceMonitor.Darling.Service.Investigations.ServiceInvestigationEventSends(
@@ -1077,7 +1088,7 @@ public sealed partial class DarlingWorker
             /* #6979: the report notice goes to the route's Slack and Teams destinations (the settings' channel when the route has none),
                masked at the level the MCP tools serve, with links only while the web dashboard serves (TriageBaseUrl is empty otherwise). */
             reportNotices: webhookAlertService, defaults: alertSettings, dataDetail: dataDetail,
-            baseUrl: () => alertSettings.TriageBaseUrl);
+            baseUrl: () => alertSettings.TriageBaseUrl, slackThreads: slackThreads);
         /* #6234: the change watch rides the sweep's tick; its first pass runs at start, so a watch whose window ended while the service was down is evaluated then. */
         var changeWatchPass = new PerformanceMonitor.Darling.Service.ChangeWatch.ChangeWatchPass(
             postgres,

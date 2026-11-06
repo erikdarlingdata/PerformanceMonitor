@@ -7,9 +7,11 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using NpgsqlTypes;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -30,9 +32,35 @@ public interface ISlackRequestThreadStore
 
     /// <summary>Writes the once mark of one post and answers whether THIS call wrote it. The poster sends only on true.</summary>
     Task<bool> MarkOnceAsync(Guid requestId, int routeId, int serverId, string postKey, string onceKey, CancellationToken cancellationToken);
+
+    /// <summary>Takes back the once mark of one post after Slack answered 429: the post did not go out, so the next pass sends it.</summary>
+    Task ReleaseMarkAsync(string onceKey, CancellationToken cancellationToken);
 }
 
-public sealed partial class InvestigationRequestStore : ISlackRequestThreadStore
+/// <summary>
+/// #7656: one journal row the thread pass posts, with the request it belongs to. <see cref="PostKey"/> is <c>request</c> for the
+/// <c>opened</c> row, <c>action_unknown:&lt;called_id&gt;</c> for a change with no result, else <c>&lt;event&gt;:&lt;journal_id&gt;</c>.
+/// <see cref="CalledDetailJson"/> is the <c>action_called</c> row's detail for a change's result row, <see cref="ClaimNo"/> the claim's
+/// number among the request's claims, and <see cref="Verdict"/> and <see cref="RootCause"/> the report's for the <c>reported</c> row.
+/// </summary>
+public sealed record SlackThreadJournalRow(
+    long JournalId, string Event, DateTime EventTimeUtc, string Actor, string? Reason, string? DetailJson, string PostKey,
+    Guid RequestId, int RouteId, int ServerId, string ServerName, string Metric, string Severity, string Trigger, Guid? FollowUpOf,
+    string? CalledDetailJson, int ClaimNo, string? Verdict, string? RootCause);
+
+/// <summary>#7656: where the thread pass reads the rows to post. The store implements it; a test stands its own in.</summary>
+public interface ISlackThreadRowSource
+{
+    /// <summary>Up to <paramref name="limit"/> journal rows of the kinds in <paramref name="events"/> with no post mark yet, on a live
+    /// request of an enabled route with a bot channel, in journal order, plus each <c>action_called</c> row from before
+    /// <paramref name="unknownBeforeUtc"/> whose result never came.</summary>
+    Task<IReadOnlyList<SlackThreadJournalRow>> PendingSlackThreadRowsAsync(IReadOnlyList<string> events, DateTime unknownBeforeUtc, int limit, CancellationToken cancellationToken);
+
+    /// <summary>The agent changes of one request, oldest first, for the report post.</summary>
+    Task<IReadOnlyList<RequestChangeRow>> ChangesForRequestAsync(Guid requestId, CancellationToken cancellationToken = default);
+}
+
+public sealed partial class InvestigationRequestStore : ISlackRequestThreadStore, ISlackThreadRowSource
 {
     /// <summary>#7656: the journal row that marks one Slack thread post as sent (once key <c>slack_thread:&lt;request&gt;:&lt;post&gt;</c>). Owner-only,
     /// as the notice marks are: another login that wrote it first would silence the post.</summary>
@@ -76,4 +104,95 @@ ON CONFLICT (request_id) DO NOTHING";
     /// <inheritdoc />
     public Task<bool> MarkOnceAsync(Guid requestId, int routeId, int serverId, string postKey, string onceKey, CancellationToken cancellationToken) =>
         MarkOnceAsync(requestId, routeId, serverId, SlackThreadPosted, postKey, onceKey, cancellationToken);
+
+    /* The mark row is the service's own: the journal's owner-row trigger guards inserts, and the service owns the table, so its
+       delete needs no grant. Only a slack_thread_posted row goes, never a row of another kind that shares the once key's shape. */
+    internal const string ReleaseSlackMarkSql = @"
+DELETE FROM config.investigation_journal
+WHERE once_key = $1
+  AND event = 'slack_thread_posted'";
+
+    /// <inheritdoc />
+    public async Task ReleaseMarkAsync(string onceKey, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(onceKey);
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = new NpgsqlCommand(ReleaseSlackMarkSql, connection) { CommandTimeout = _commandTimeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = onceKey });
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /* The rows to post, whatever their age: a mark, not a window, says what was posted. The first arm is every journal row of a post
+       kind; the second is each action_called row older than $2 with no done, failed or undone row naming it, posted once as result
+       unknown under its own key. A request is left out while it is a drill, while its route is disabled or has no bot channel, and a
+       row once its mark exists. The called row's detail rides along for a change's result row, the claim's number for a claim, and
+       the report's verdict and root cause for the reported row. */
+    internal const string PendingSlackThreadRowsSql = @"
+WITH posts AS (
+    SELECT j.journal_id, j.event, j.event_time, j.actor, j.reason, j.detail, j.request_id,
+           CASE WHEN j.event = 'opened' THEN 'request' ELSE j.event || ':' || j.journal_id::text END AS post_key,
+           CASE WHEN j.event IN ('action_done', 'action_failed', 'action_undone') THEN j.detail ->> 'called_id' END AS called_id
+    FROM config.investigation_journal AS j
+    WHERE j.event = ANY ($1)
+      AND j.request_id IS NOT NULL
+    UNION ALL
+    SELECT c.journal_id, 'action_unknown', c.event_time, c.actor, c.reason, c.detail, c.request_id,
+           'action_unknown:' || c.journal_id::text, c.journal_id::text
+    FROM config.investigation_journal AS c
+    WHERE c.event = 'action_called'
+      AND c.request_id IS NOT NULL
+      AND c.event_time <= $2
+      AND NOT EXISTS (SELECT 1 FROM config.investigation_journal AS x
+                      WHERE x.request_id = c.request_id
+                        AND x.event IN ('action_done', 'action_failed', 'action_undone')
+                        AND x.detail ->> 'called_id' = c.journal_id::text)
+)
+SELECT p.journal_id, p.event, p.event_time, p.actor, p.reason, p.detail::text, p.post_key,
+       r.request_id, r.route_id, r.server_id, COALESCE(sv.display_name, sv.server_name, r.server_name), r.first_metric,
+       COALESCE(r.max_severity, ''), COALESCE(r.trigger_kind, ''), r.follow_up_of,
+       c.detail::text,
+       CASE WHEN p.event = 'claimed'
+            THEN (SELECT count(*) FROM config.investigation_journal AS k
+                  WHERE k.request_id = p.request_id AND k.event = 'claimed' AND k.journal_id <= p.journal_id)
+            ELSE 0 END,
+       rp.verdict, rp.root_cause
+FROM posts AS p
+JOIN config.investigation_requests AS r ON r.request_id = p.request_id
+JOIN config.config_notification_routes AS rt ON rt.route_id = r.route_id
+LEFT JOIN collect.servers AS sv ON sv.server_id = r.server_id
+LEFT JOIN config.investigation_journal AS c ON p.called_id IS NOT NULL AND c.journal_id::text = p.called_id
+LEFT JOIN config.investigation_reports AS rp ON p.event = 'reported' AND rp.request_id = r.request_id
+WHERE r.practice_of IS NULL
+  AND rt.enabled
+  AND rt.slack_bot_channel <> ''
+  AND NOT EXISTS (SELECT 1 FROM config.investigation_journal AS m
+                  WHERE m.once_key = 'slack_thread:' || r.request_id::text || ':' || p.post_key)
+ORDER BY p.journal_id
+LIMIT $3";
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<SlackThreadJournalRow>> PendingSlackThreadRowsAsync(IReadOnlyList<string> events, DateTime unknownBeforeUtc, int limit, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(events);
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null, PendingSlackThreadRowsSql,
+            new NpgsqlParameter<string[]> { TypedValue = [.. events], NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text },
+            P(DateTime.SpecifyKind(unknownBeforeUtc, DateTimeKind.Utc)),
+            P(limit));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var rows = new List<SlackThreadJournalRow>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new SlackThreadJournalRow(
+                reader.GetInt64(0), reader.GetString(1), reader.GetFieldValue<DateTime>(2), reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.GetString(6),
+                reader.GetGuid(7), reader.GetInt32(8), reader.GetInt32(9), reader.GetString(10), reader.GetString(11),
+                reader.GetString(12), reader.GetString(13), reader.IsDBNull(14) ? null : reader.GetGuid(14),
+                reader.IsDBNull(15) ? null : reader.GetString(15), (int)reader.GetInt64(16),
+                reader.IsDBNull(17) ? null : reader.GetString(17), reader.IsDBNull(18) ? null : reader.GetString(18)));
+        }
+
+        return rows;
+    }
 }

@@ -50,6 +50,12 @@ public static class SlackThreadPosts
     /// <summary>The post key of the resolution. One per request.</summary>
     public const string ResolvedKey = "resolved";
 
+    /// <summary>The post key of one journal row: its event and its journal id, so a mark reads in the journal as the row it posted.</summary>
+    public static string EventKey(string eventKind, long journalId) => eventKind + ":" + journalId.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>The post key of a change whose result never came: the <c>action_called</c> journal id, posted once as result unknown.</summary>
+    public static string UnknownKey(long calledId) => "action_unknown:" + calledId.ToString(CultureInfo.InvariantCulture);
+
     /// <summary>The post key of one claim, by claim number.</summary>
     public static string ClaimKey(int claimNo) => "claim:" + claimNo.ToString(CultureInfo.InvariantCulture);
 
@@ -145,6 +151,25 @@ public static class SlackThreadPosts
         var blocks = new List<object> { Section(string.Join("\n", lines)) };
         AddLink(blocks, proposalUrl, "Open the proposal");
         return new SlackThreadPostContent($"Proposed action: {kind} on {server} ({stateText})", blocks);
+    }
+
+    /// <summary>How a request ended without a resolution: closed by a person, expired, or out of claims. <paramref name="actor"/> is the
+    /// person when one acted, and <paramref name="reason"/> what they or the service said.</summary>
+    public static SlackThreadPostContent EndPost(string state, string? actor, string? reason)
+    {
+        var stateText = Escape(Clip(state, 50));
+        var text = stateText;
+        if (!string.IsNullOrWhiteSpace(actor) && !string.Equals(actor, "service", StringComparison.Ordinal))
+        {
+            text += " by " + Escape(Clip(actor, TextLimit));
+        }
+
+        if (!string.IsNullOrWhiteSpace(reason))
+        {
+            text += ": " + Escape(Clip(reason, TextLimit));
+        }
+
+        return new SlackThreadPostContent(text, [Section("*" + stateText + "*" + text[stateText.Length..])]);
     }
 
     /// <summary>The resolution: every metric of the request cleared.</summary>
