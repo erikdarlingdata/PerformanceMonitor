@@ -645,6 +645,34 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     }
 
     /// <summary>
+    /// #7616 / #3631: the tool that REPORTS the blocking tiers names the unit each engine bands them in. A PostgreSQL
+    /// card with at least 3 captures bands blocked captures per hour through the same tiers, so the read must not say the
+    /// tiers are waits only, nor that a PostgreSQL server has no blocking band, and the payload carries the PostgreSQL unit
+    /// beside the SQL Server one (which a round-tripped write accepts and ignores).
+    /// </summary>
+    [Fact]
+    public void BlockingBandUnit_IsNamedForBothEngines_ByTheReadDescriptionAndThePayload()
+    {
+        var read = ToolDescription("get_alert_settings");
+        Assert.Contains("blocking_band_unit: waits_per_hour", read, StringComparison.Ordinal);
+        Assert.Contains("blocking_band_unit_postgres: captures_per_hour_at_1_minute_cadence", read, StringComparison.Ordinal);
+        Assert.Contains("blocked CAPTURES per hour", read, StringComparison.Ordinal);
+        Assert.DoesNotContain("no blocking band", read, StringComparison.Ordinal);
+
+        var write = ToolDescription("update_alert_settings");
+        Assert.Contains("blocking_band_unit_postgres: captures_per_hour_at_1_minute_cadence", write, StringComparison.Ordinal);
+
+        var payload = SerializedSettingsPayload(SampleSettingsRow());
+        Assert.Equal("waits_per_hour", payload["health_bands"]!["blocking_band_unit"]!.GetValue<string>());
+        Assert.Equal("captures_per_hour_at_1_minute_cadence", payload["health_bands"]!["blocking_band_unit_postgres"]!.GetValue<string>());
+
+        var (targets, error) = ParseAsPartialUpdate((JsonObject)JsonNode.Parse(
+            "{\"health_bands\":{\"blocking_band_unit\":\"waits_per_hour\",\"blocking_band_unit_postgres\":\"captures_per_hour_at_1_minute_cadence\"}}")!);
+        Assert.Null(error);
+        Assert.Empty(targets);
+    }
+
+    /// <summary>
     /// The SELECT's column count and the positional read must agree. Every field on
     /// <c>AlertSettingsReadRow</c> is read by ORDINAL, so a column inserted anywhere but the end re-maps
     /// every field after it — silently, since the types mostly line up. Derived rather than hand-counted so

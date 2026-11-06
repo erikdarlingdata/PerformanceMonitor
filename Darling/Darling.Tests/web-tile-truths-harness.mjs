@@ -190,6 +190,23 @@ try {
   const engineChips = {
     postgres: unmeasuredChips({ server_name: "pg", display_name: "pg", is_online: true, is_postgres: true, has_memory_pressure: null, memory_severity: "Unknown", blocking_count: 0, blocking_severity: "Unknown" }),
     sqlServer: unmeasuredChips({ server_name: "sq", display_name: "sq", is_online: true, is_postgres: false, has_memory_pressure: false, memory_severity: "Healthy", blocking_count: 0, blocking_severity: "Healthy" }),
+    /* #7616 / #7654: a PostgreSQL card with captures prints the count of captures that saw blocking, a measured 0 prints 0, and only a target
+       with no capture in the window prints n/a with a plain sentence. */
+    postgresBlocking: unmeasuredChips({ server_name: "pgb", display_name: "pgb", is_online: true, is_postgres: true, has_memory_pressure: null, memory_severity: "Unknown", blocking_count: 2, blocking_captures: 60, blocking_measured: true, blocking_severity: "Healthy" }),
+    postgresQuiet: unmeasuredChips({ server_name: "pgq", display_name: "pgq", is_online: true, is_postgres: true, has_memory_pressure: null, memory_severity: "Unknown", blocking_count: 0, blocking_captures: 60, blocking_measured: true, blocking_severity: "Healthy" }),
+    postgresNoCapture: unmeasuredChips({ server_name: "pgn", display_name: "pgn", is_online: true, is_postgres: true, has_memory_pressure: null, memory_severity: "Unknown", blocking_count: 0, blocking_captures: 0, blocking_measured: false, blocking_severity: "Unknown" }),
+    /* #7616: 2 captures is too few to band, so the card reads Unknown and the chip says why in the service's own sentence (blocking_detail). */
+    postgresYoung: unmeasuredChips({ server_name: "pgy", display_name: "pgy", is_online: true, is_postgres: true, has_memory_pressure: null, memory_severity: "Unknown", blocking_count: 2, blocking_captures: 2, blocking_measured: true, blocking_severity: "Unknown", blocking_detail: "fewer than 3 captures in this window" }),
+  };
+  /* #7616 / #3631: the Blocking (recent) tile adds waits and captures into one number, so its hover names the units the service sent. */
+  const blockingTileTitle = (detail) => {
+    const tile = findAll(fleet.rollup({ total_servers: 2, total_blocking_events: 31, total_blocking_detail: detail, total_deadlocks: 0 }), (n) => hasClass(n, "tile"))
+      .find((n) => n.children[1] && n.children[1].textContent === "Blocking (recent)");
+    return tile ? tile.getAttribute("title") : "no tile";
+  };
+  const blockingTile = {
+    both: blockingTileTitle("SQL Server blocked waits plus PostgreSQL blocking captures, in one number"),
+    none: blockingTileTitle(null),
   };
   const quietChips = Object.fromEntries(findAll(quietCard, (n) => hasClass(n, "metric-chip")).map((n) => [n.textContent, true]));
   /* #7507: the Blocking and Deadlocks tiles name the window the reply covered. The reply is read through the shipped apiGetFleet, so the
@@ -310,7 +327,7 @@ try {
   };
 
   console.log(JSON.stringify({
-    alertSetup, quietChips, engineChips, windowChips, sweepTiles, skippedCycles, recommendations, pools, semaphoreWords, windowCellClasses, windowHeaderClasses, windowHeaderClassesAfterSort, sortedState, fileIoHeaders, runnable, platform, unrateable,
+    alertSetup, quietChips, engineChips, blockingTile, windowChips, sweepTiles, skippedCycles, recommendations, pools, semaphoreWords, windowCellClasses, windowHeaderClasses, windowHeaderClassesAfterSort, sortedState, fileIoHeaders, runnable, platform, unrateable,
     protectionChip: chipText("Protection"),
     identityChip: chipText("Identity capacity"),
     bigIdentityChip: bigChip ? bigChip.textContent : null,

@@ -289,6 +289,21 @@ public partial class ManageServersWindow : Window
         }
     }
 
+    private async void XeSessionDatabases_Click(object sender, RoutedEventArgs e)
+    {
+        if (_dataService is null || ServersGrid.SelectedItem is not ManagedServerListItem selected)
+        {
+            return;
+        }
+
+        var dialog = new ExcludedDatabasesDialog(_dataService, selected.Row, selected.DisplayNameWithIntent, xeSessionsMode: true) { Owner = this };
+        if (dialog.ShowDialog() == true && dialog.ExclusionsModified)
+        {
+            ServersChanged = true;
+            await RefreshGridAsync();
+        }
+    }
+
     private async void DeleteButton_Click(object sender, RoutedEventArgs e)
     {
         if (_dataService is null || ServersGrid.SelectedItem is not ManagedServerListItem selected)

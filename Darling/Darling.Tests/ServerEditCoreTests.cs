@@ -176,6 +176,7 @@ public sealed class ServerEditCoreTests : IDisposable
     [InlineData("engine")]
     [InlineData("is_enabled")]
     [InlineData("excluded_databases")]
+    [InlineData("xe_session_databases")]
     [InlineData("server_id")]
     [InlineData("capture_plans")]
     [InlineData("alert_delivery_mode_override")]

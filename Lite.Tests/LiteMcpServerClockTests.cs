@@ -318,7 +318,9 @@ public sealed class LiteMcpServerClockTests : IClassFixture<SharedDuckDbFixture>
     /// <summary>
     /// #5633 review (finding D), the bot's store on Lite: GoneDb has procedure_stats rows, LiveDb has none, and the newest database_states
     /// snapshot (at or before the as_of anchor) names only LiveDb. With no database_name the ranking leaves GoneDb out; the empty page must
-    /// not say the collector "recorded nothing" and must name GoneDb. A page with rows carries the same names. Naming GoneDb reads it.
+    /// not say the collector "recorded nothing" and must name GoneDb. #7725: once GoneDb has work on record, the ranking fills from it after the
+    /// listed databases, marks the row database_dropped, and names GoneDb in databases_left_out only while it has no row in the reply.
+    /// Naming GoneDb reads it.
     /// </summary>
     [Fact]
     public async Task TopProcedures_SaysWhichDatabasesItLeftOut_AndDoesNotClaimTheCollectorRecordedNothing()
@@ -330,7 +332,6 @@ public sealed class LiteMcpServerClockTests : IClassFixture<SharedDuckDbFixture>
              delta_execution_count, delta_worker_time, delta_elapsed_time)
             VALUES ($1, $2, $3, $4, $5, 'dbo', $6, 'SQL_STORED_PROCEDURE', $7, 10, 200000, 200000)",
             -_nextId++, SummerCollected, _easternId, EasternName, database, objectName, At(2026, 7, 15, 9, 0));
-        await ProcAsync("GoneDb", "ProcGone");
 
         /* Two successful runs of the collector inside the window, so the empty page takes the "ran, found nothing" branch. */
         var anchor = new DateTime(2026, 7, 15, 16, 0, 0, DateTimeKind.Unspecified);
@@ -358,18 +359,28 @@ public sealed class LiteMcpServerClockTests : IClassFixture<SharedDuckDbFixture>
         Assert.Equal(new[] { "GoneDb" }, empty.RootElement.GetProperty("databases_left_out").EnumerateArray().Select(n => n.GetString()!).ToArray());
         Assert.Contains("no longer lists them", empty.RootElement.GetProperty("databases_left_out_note").GetString(), StringComparison.Ordinal);
 
+        await ProcAsync("GoneDb", "ProcGone");
         var namedJson = await McpQueryTools.GetTopProceduresByCpu(_dataService, _serverManager, EasternName, hours_back: 4, database_name: "GoneDb", as_of: SummerAsOf);
         Assert.Contains("dbo.ProcGone", ValuesOf(namedJson, "procedures", "full_name"));
         using var named = System.Text.Json.JsonDocument.Parse(namedJson);
         Assert.Equal(System.Text.Json.JsonValueKind.Null, named.RootElement.GetProperty("databases_left_out").ValueKind);
 
+        /* #7725: only GoneDb has work. The unnamed page is no longer empty: it fills from GoneDb, marks the row, and left nothing out. */
+        var goneOnlyJson = await McpQueryTools.GetTopProceduresByCpu(_dataService, _serverManager, EasternName, hours_back: 4, as_of: SummerAsOf);
+        Assert.Equal(new[] { "dbo.ProcGone" }, ValuesOf(goneOnlyJson, "procedures", "full_name"));
+        using var goneOnly = System.Text.Json.JsonDocument.Parse(goneOnlyJson);
+        Assert.True(goneOnly.RootElement.GetProperty("procedures")[0].GetProperty("database_dropped").GetBoolean());
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, goneOnly.RootElement.GetProperty("databases_left_out").ValueKind);
+
+        /* A listed database's work ranks first and is unmarked; GoneDb fills after it, marked. */
         await ProcAsync("LiveDb", "ProcLive");
         var pageJson = await McpQueryTools.GetTopProceduresByCpu(_dataService, _serverManager, EasternName, hours_back: 4, as_of: SummerAsOf);
-        var names = ValuesOf(pageJson, "procedures", "full_name");
-        Assert.Contains("dbo.ProcLive", names);
-        Assert.DoesNotContain("dbo.ProcGone", names);
+        Assert.Equal(new[] { "dbo.ProcLive", "dbo.ProcGone" }, ValuesOf(pageJson, "procedures", "full_name"));
         using var page = System.Text.Json.JsonDocument.Parse(pageJson);
-        Assert.Equal(new[] { "GoneDb" }, page.RootElement.GetProperty("databases_left_out").EnumerateArray().Select(n => n.GetString()!).ToArray());
+        var pageRows = page.RootElement.GetProperty("procedures");
+        Assert.False(pageRows[0].TryGetProperty("database_dropped", out _));
+        Assert.True(pageRows[1].GetProperty("database_dropped").GetBoolean());
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, page.RootElement.GetProperty("databases_left_out").ValueKind);
     }
 
     // ── reading the tool's answer ──
