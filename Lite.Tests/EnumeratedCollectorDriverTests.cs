@@ -329,7 +329,7 @@ public sealed class EnumeratedCollectorDriverTests
                 cts.Token));
 
         Assert.Empty(errors);
-        /* The provider's exception travels as the cause, so a log line can still say what the provider said. */
+        /* The provider's exception travels as the cause, so the cancellation carries the provider's message. */
         Assert.IsType<InvalidOperationException>(thrown.InnerException);
     }
 

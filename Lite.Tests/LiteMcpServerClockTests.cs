@@ -355,7 +355,8 @@ public sealed class LiteMcpServerClockTests : IClassFixture<SharedDuckDbFixture>
         var message = empty.RootElement.GetProperty("message").GetString()!;
         Assert.DoesNotContain("recorded nothing for it", message, StringComparison.Ordinal);
         Assert.Contains("a database this server still has", message, StringComparison.Ordinal);
-        Assert.Contains("1 database(s) the server no longer lists", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("left out", message, StringComparison.Ordinal);
+        Assert.Equal(1, empty.RootElement.GetProperty("databases_left_out_count").GetInt32());
         Assert.Equal(new[] { "GoneDb" }, empty.RootElement.GetProperty("databases_left_out").EnumerateArray().Select(n => n.GetString()!).ToArray());
         Assert.Contains("no longer lists them", empty.RootElement.GetProperty("databases_left_out_note").GetString(), StringComparison.Ordinal);
 

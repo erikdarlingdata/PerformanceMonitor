@@ -382,6 +382,19 @@ const scenarios = {
     answer = (url) => (tool(url) === "get_top_queries_by_cpu" ? data(INPUT) : data({}));
     return [modules.tabs.topQueriesPanel("SRV1", RANGE)];
   },
+  // #7538, #7651: the Top Queries composite draws the left-out sentence from the reply's own fields, after the window note and before the grid.
+  // `found.order` is every notice and grid under the card in the order the page drew them.
+  topQueriesLeftOutOrder: async () => {
+    answer = (url) => (tool(url) === "get_top_queries_by_cpu" ? data(INPUT) : data({}));
+    const card = modules.tabs.topQueriesPanel("SRV1", RANGE);
+    await settleFast();
+    found = {
+      order: card
+        .all((n) => n.tag === "table" || n.className === "strip notice")
+        .map((n) => (n.tag === "table" ? "table" : "notice: " + n.textContent)),
+    };
+    return [card];
+  },
   // The Wait Stats composite draws the note above its grid.
   floorWaitStats: () => {
     answer = (url) =>

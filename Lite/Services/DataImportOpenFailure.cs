@@ -42,7 +42,7 @@ public enum DataImportOpenFailure
 /// <see cref="Win32Exception"/>.</para>
 /// <para>A storage mismatch reports "Trying to read a database file with version number", "Failed to deserialize" or
 /// the bare words "storage version". Corruption reports "not a valid DuckDB database file" or "Corrupt database file".
-/// The phrases are matched over the exception's full text, inner exceptions included. Anything else is
+/// The phrases are matched over the exception messages, inner exceptions included, with quoted file paths blanked (#7824). Anything else is
 /// <see cref="DataImportOpenFailure.Unknown"/>. Pure, so a test drives it with the exception shapes alone.</para>
 /// </summary>
 public static class DataImportOpenFailureClassifier
@@ -65,7 +65,7 @@ public static class DataImportOpenFailureClassifier
             }
         }
 
-        var text = ex.ToString().ToLowerInvariant();
+        var text = DuckDbFailureText.Of(ex);
         if (text.Contains("conflicting lock") || text.Contains("could not set lock")
             || text.Contains("being used by another process") || text.Contains("already open in"))
         {

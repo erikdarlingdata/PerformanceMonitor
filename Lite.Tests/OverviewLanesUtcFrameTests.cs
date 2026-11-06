@@ -80,7 +80,7 @@ public sealed class OverviewLanesUtcFrameTests
     public void EveryLaneX_IsTheSamplesOwnInstant_AndEveryGhostSeriesGoesThroughGhostX()
     {
         var code = CodeOnly(ReadControl("CorrelatedTimelineLanesControl.xaml.cs"));
-        var refresh = MethodBody(code, "public async Task RefreshAsync(");
+        var refresh = MethodBody(code, "public async Task<string?> RefreshAsync(");
 
         Assert.Contains("(d.CollectionTime.ToOADate(), d.WaitTimeMsPerSecond)", refresh, StringComparison.Ordinal);
         Assert.Equal(2, Regex.Matches(refresh, Regex.Escape("(d.Time.ToOADate(), (double)d.Count)")).Count);
