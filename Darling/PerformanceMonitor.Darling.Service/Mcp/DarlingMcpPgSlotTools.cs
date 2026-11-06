@@ -74,7 +74,7 @@ public sealed class DarlingMcpPgSlotTools
         _ => 0,
     };
 
-    [McpServerTool(Name = "get_pg_replication_slots"), Description("Replication slot health: whether retained WAL is unbounded and GROWING (fills disk, pins vacuum). Window ends at as_of. not_collected: engine is not PostgreSQL. empty: none sampled in hours_back, none exist or none collected; per-instance, a replica's empty doesn't clear the writer. slots_present: slots in window; read worst_severity. retained_wal_bytes/_gb, safe_wal_size_bytes, xmin ages: null on the collector's -1 sentinel; no ceiling by default isn't a gap. retained_wal_growth_bytes is 0 when flat (measured), null when unmeasurable. worst_slot ranks by severity, not size.<<GUIDE>>Gets PostgreSQL replication slot health, including whether any slot is retaining WAL without bound. An abandoned slot is one of the few PostgreSQL conditions that can take a server down by itself, and it does so two independent ways: it retains every WAL segment its consumer has not confirmed - unbounded by default, so it will fill the volume and stop the server - and it simultaneously pins the vacuum horizon so nothing gets reclaimed cluster-wide. Reports whether retained WAL is still GROWING across the window, which is the difference between a consumer that is merely behind and a volume filling in front of you. Common orphan sources are a removed CDC task, a finished blue/green deployment, a decommissioned Debezium consumer, or a failed major-version upgrade. Works on any PostgreSQL target.")]
+    [McpServerTool(Name = "get_pg_replication_slots"), Description("Replication slot health: whether retained WAL is unbounded and GROWING (fills disk, pins vacuum). Window ends at as_of. not_collected: engine is not PostgreSQL. empty: none sampled in hours_back, none exist or none collected; per-instance, a replica's empty doesn't clear the writer. slots_present: slots in window; read worst_severity. retained_wal_bytes/_gb, safe_wal_size_bytes, xmin ages: null on the collector's -1 sentinel; no ceiling by default isn't a gap. retained_wal_growth_bytes is 0 when flat (measured), null when unmeasurable. total_retained_wal_gb is the WAL the disk holds because of slots: the furthest slot's figure, since slots hold overlapping stretches of the same log, not the sum; null when no slot was measured. worst_slot ranks by severity, not size.<<GUIDE>>Gets PostgreSQL replication slot health, including whether any slot is retaining WAL without bound. An abandoned slot is one of the few PostgreSQL conditions that can take a server down by itself, and it does so two independent ways: it retains every WAL segment its consumer has not confirmed - unbounded by default, so it will fill the volume and stop the server - and it simultaneously pins the vacuum horizon so nothing gets reclaimed cluster-wide. Reports whether retained WAL is still GROWING across the window, which is the difference between a consumer that is merely behind and a volume filling in front of you. Common orphan sources are a removed CDC task, a finished blue/green deployment, a decommissioned Debezium consumer, or a failed major-version upgrade. Works on any PostgreSQL target.")]
     public static async Task<string> GetPgReplicationSlots(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -209,6 +209,15 @@ public sealed class DarlingMcpPgSlotTools
                answer names where the store's coverage of the window starts. */
             var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_replication_slots", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: false, logger, cancellationToken);
+
+            /* #7939: the WAL the disk holds because of slots. Each slot's figure is the current WAL position minus its own
+               restart_lsn, so slots behind on one cluster retain overlapping stretches of the same log and the server keeps
+               WAL back to the oldest restart_lsn only. That is the largest measured figure, not the sum: three slots holding
+               45, 8 and 1 GB of the same log hold 45 GB on disk. Unmeasured slots (the -1 sentinel, null here) are left out,
+               and when no slot was measured the total is null: a 0 there would claim nothing is retained when nothing was
+               read. A measured 0 reads 0. */
+            var walHeldBySlots = slots.Max(s => s.retained_wal_bytes);
+
             return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
@@ -224,12 +233,9 @@ public sealed class DarlingMcpPgSlotTools
                 worst_severity = worst.severity,
                 omitted_slots = omittedSlots,
                 omitted_slots_note = omittedNote,
-                /* #7939: the WAL the disk holds because of slots. Each slot's figure is the current WAL position minus its own
-                   restart_lsn, so slots behind on one cluster retain overlapping stretches of the same log and the server keeps
-                   WAL back to the oldest restart_lsn only. That is the largest measured figure, not the sum: three slots holding
-                   45, 8 and 1 GB of the same log hold 45 GB on disk. Unmeasured slots (the -1 sentinel, null here) are left out. */
-                total_retained_wal_gb = Math.Round(
-                    slots.Where(s => s.retained_wal_bytes > 0).Select(s => s.retained_wal_bytes ?? 0).DefaultIfEmpty(0L).Max() / 1024.0 / 1024.0 / 1024.0, 2),
+                total_retained_wal_gb = walHeldBySlots is null
+                    ? (double?)null
+                    : Math.Round(walHeldBySlots.Value / 1024.0 / 1024.0 / 1024.0, 2),
                 slots,
             }, McpHelpers.JsonOptions), notice);
         }

@@ -189,6 +189,118 @@ public sealed class DarlingPgSlotVerdictLiveTests
         }
     }
 
+    /// <summary>
+    /// #7939: when no slot has a measured size (every reading is the collector's -1 sentinel, NULL in the store), the
+    /// total is null. A 0 there would claim the disk holds nothing because of slots when nothing was read, which is
+    /// the same fabrication the per-slot fields already refuse. The answer is still <c>slots_present</c>: the slots
+    /// exist, only their size is unknown.
+    /// </summary>
+    [Fact]
+    public async Task TotalRetainedWal_IsNullWhenNoSlotWasMeasured()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live slot total test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            var t0 = MinutesAgo(30);
+            var t1 = t0.AddMinutes(10);
+
+            /* Two slots, neither with a measured size in any reading. */
+            await SeedAsync(connection, ct, t0, "unmeasured_a", isActive: false, walStatus: "extended", retainedWalBytes: null);
+            await SeedAsync(connection, ct, t1, "unmeasured_a", isActive: false, walStatus: "extended", retainedWalBytes: null);
+            await SeedAsync(connection, ct, t1, "unmeasured_b", isActive: true, walStatus: "reserved", retainedWalBytes: null);
+
+            var payload = JsonDocument.Parse(
+                await DarlingMcpPgSlotTools.GetPgReplicationSlots(dataSource, ServerName, 4)).RootElement;
+
+            Assert.Equal("slots_present", payload.GetProperty("status").GetString());
+            Assert.Equal(2, payload.GetProperty("slot_count").GetInt32());
+
+            var slots = payload.GetProperty("slots").EnumerateArray().ToArray();
+            Assert.Equal(JsonValueKind.Null, Row(slots, "unmeasured_a").GetProperty("retained_wal_gb").ValueKind);
+            Assert.Equal(JsonValueKind.Null, Row(slots, "unmeasured_b").GetProperty("retained_wal_gb").ValueKind);
+
+            /* THE assertion: nothing was measured, so the total is null, not 0. */
+            Assert.Equal(JsonValueKind.Null, payload.GetProperty("total_retained_wal_gb").ValueKind);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #7939: a measured 0 is a measurement. A slot that has caught up holds no WAL, and its 0 beside an unmeasured
+    /// slot totals 0, not null: the disk holds nothing because of the slots whose size is known.
+    /// </summary>
+    [Fact]
+    public async Task TotalRetainedWal_IsZeroWhenTheOnlyMeasuredSlotHoldsNothing()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live slot total test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            var t0 = MinutesAgo(30);
+            var t1 = t0.AddMinutes(10);
+
+            /* caught_up is measured at 0 in both readings; unmeasured has no size in either. */
+            await SeedAsync(connection, ct, t0, "caught_up", isActive: true, walStatus: "reserved", retainedWalBytes: 0);
+            await SeedAsync(connection, ct, t1, "caught_up", isActive: true, walStatus: "reserved", retainedWalBytes: 0);
+            await SeedAsync(connection, ct, t0, "unmeasured", isActive: false, walStatus: "extended", retainedWalBytes: null);
+            await SeedAsync(connection, ct, t1, "unmeasured", isActive: false, walStatus: "extended", retainedWalBytes: null);
+
+            var payload = JsonDocument.Parse(
+                await DarlingMcpPgSlotTools.GetPgReplicationSlots(dataSource, ServerName, 4)).RootElement;
+
+            Assert.Equal("slots_present", payload.GetProperty("status").GetString());
+            Assert.Equal(2, payload.GetProperty("slot_count").GetInt32());
+
+            var slots = payload.GetProperty("slots").EnumerateArray().ToArray();
+            Assert.Equal(0.0, Row(slots, "caught_up").GetProperty("retained_wal_gb").GetDouble(), 2);
+            Assert.Equal(JsonValueKind.Null, Row(slots, "unmeasured").GetProperty("retained_wal_gb").ValueKind);
+
+            /* THE assertion: a measured 0 totals 0. */
+            Assert.Equal(JsonValueKind.Number, payload.GetProperty("total_retained_wal_gb").ValueKind);
+            Assert.Equal(0.0, payload.GetProperty("total_retained_wal_gb").GetDouble(), 2);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     /// <summary>The row for one slot, asserted present with a message naming what DID come back.</summary>
     private static JsonElement Row(JsonElement[] rows, string slotName)
     {
