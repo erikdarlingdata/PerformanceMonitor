@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, ticksCarryUnit, noteStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, applyDataSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, captionStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceSpan, applySourceSubtitle, setQueryWaitFilter, waitIsLinked, fmtPlain } from "../../util.js";
+import { el, ticksCarryUnit, noteStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, applyDataSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, captionStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceSpan, applySourceSubtitle, setQueryWaitFilter, waitIsLinked, fmtPlain, fmtMs } from "../../util.js";
 import { renderPanel, panelEmptyStrip, emptyHeadline, setPanelSignal, getPanelSignal, VIZ } from "../../panels.js";
 import { estimatedPlotPx } from "../../trend-points.js";
 import { SNAPSHOT_LIST_CAP, snapshotTruncatedNote } from "../active-snapshots.js";
@@ -560,7 +560,7 @@ function stripOf(kind, server, ctx) {
     return { title: "Query Store duration", tool: "get_query_store_duration_trend", params: { server, hours: ctx.hours }, rows: (d) => d.trend, time: "time", value: "value", seam: (d) => d && d.routing && d.routing.raw_from };
   }
   const queries = kind === "queries";
-  return { title: queries ? "Query duration" : "Procedure duration", tool: queries ? "get_query_duration_trend" : "get_procedure_duration_trend", params: { server, hours: ctx.hours }, rows: (d) => d.trend, time: "time", value: "value" };
+  return { title: queries ? "Query duration" : "Procedure duration", tool: queries ? "get_query_duration_trend" : "get_procedure_duration_trend", params: { server, hours: ctx.hours }, rows: (d) => d.trend, time: "time", value: "value", bucketed: true };
 }
 
 const timeOf = (v) => (parseUtc(v) || { getTime: () => NaN }).getTime();
@@ -646,7 +646,7 @@ function rankedSlicer(kind, cmp) {
     const rows = strip.rows(res.data);
     const samples = (Array.isArray(rows) ? rows : []).map((r) => ({ t: timeOf(r[strip.time]), v: stripValue(r[strip.value]) }));
     if (!samples.some((p) => Number.isFinite(p.t) && Number.isFinite(p.v))) return hideEmpty();
-    slicer.setPoints(samples, stripGap(strip, res.data));
+    slicer.setPoints(samples, stripGap(strip, res.data, samples.map((p) => p.t)));
     /* The Active strip reads the newest snapshots only: say so when the list was cut, so a blank stretch of a long range is not read as quiet. */
     if (strip.note) slicer.setNote(strip.note(res.data));
   });
@@ -845,6 +845,8 @@ export function linePanel(title, read, params, rowsKey, xKey, series, opts = {})
     sourceKey: opts.sourceKey,
     /* #7508: the answer's field holding the instant a series changes grain (get_query_store_duration_trend's routing.raw_from); absent on every other line. */
     seamKey: opts.seamKey,
+    /* #7692: the answer's field stating the bucket width (bucket_minutes), for a read with rows only where something ran; absent on every other line. */
+    bucketKey: opts.bucketKey,
     /* #7699: a function of the seam instant that returns the sentence drawn under the chart. */
     seamCaption: opts.seamCaption,
     /* #5644 W16: wording that follows the collector that answered (see BLOCKING_BY_SOURCE); absent on every other line. */
@@ -1300,7 +1302,8 @@ export function seriesTrendPanel(server, ctx, kind) {
         .filter((d) => d.rows.length >= (spec.minPoints || 1))
         .map((d) => ({ ...d, key: "s" + d.index, color: SERIES_COLORS[d.index % SERIES_COLORS.length] }));
       /* #7578: a unit prints once. These axes print it on every tick ("0.3 MB/s"), so the heading drops its "(MB/s)": the same rule as the caption over an axis (`ticksCarryUnit`). A chart with nothing drawn has no ticks and keeps the unit in its heading. */
-      const tick = (v, o) => fmtPlain(v, o) + " " + chart.unit;
+      /* #7670: a duration in ms reads in the unit its axis tops out in (80 s, not 80,000 ms), as every other ms axis on the web does (fmtMs). */
+      const tick = chart.unit === "ms" ? fmtMs : (v, o) => fmtPlain(v, o) + " " + chart.unit;
       const unitSuffix = " (" + chart.unit + ")";
       const heading = ticksCarryUnit([tick(1)]) && chart.title.endsWith(unitSuffix) ? chart.title.slice(0, -unitSuffix.length) : chart.title;
       return drawn.length
@@ -1313,6 +1316,8 @@ export function seriesTrendPanel(server, ctx, kind) {
               series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
               formatValue: tick,
               unit: chart.unit,
+              /* #7670: the ticks are picked in the unit the labels print in, so a 78 s top reads 0, 0.5, 1.0, 1.5 min and not 20 s steps rounded to 0.3, 0.7 min. */
+              sizeUnit: chart.unit === "ms" ? "ms" : null,
               ...windowFromHours(res.keptHours || ctx.hours),
             }, "series-trend|" + server + "|" + kind + "|" + chart.unit, chartZoomScope(ctx.hours)),
           ]

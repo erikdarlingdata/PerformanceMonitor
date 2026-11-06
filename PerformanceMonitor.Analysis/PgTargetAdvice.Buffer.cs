@@ -373,7 +373,7 @@ public static partial class PgTargetAdvice
         {
             sb.Append("shared_buffers is ").Append(current)
               .Append(". Raise it toward a quarter of the host's RAM — the community starting point, and a judgment: this product " +
-                      "does not collect host memory, so the number is yours — then re-check the composite on the next pass. " +
+                      "does not collect host memory, so the number is yours — then re-check the buffer cache pressure finding on the next pass. " +
                       "It is a postmaster setting: the change takes a restart, and on Linux a large value may need huge_pages " +
                       "and kernel shared-memory limits set with it; on a managed service it is a parameter-group change. ");
         }
@@ -385,10 +385,10 @@ public static partial class PgTargetAdvice
                 : ". ");
         }
 
-        sb.Append("Counter-objectives: every byte given to shared_buffers is taken from the operating system's page cache " +
+        sb.Append("Counter-objectives: every byte given to shared_buffers comes out of the operating system's page cache " +
                   "(past roughly 40 % of RAM the two cache the same pages twice) and from the memory available to work_mem × " +
                   "connections; a larger cache also holds more dirty pages, so checkpoints write more and take longer — " +
-                  "raise checkpoint_completion_target's headroom and watch the checkpoint-pressure card with it.");
+                  "raise checkpoint_completion_target's headroom and watch the checkpoint pressure finding with it.");
 
         return sb.ToString();
     }

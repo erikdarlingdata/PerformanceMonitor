@@ -167,7 +167,7 @@ public sealed class ViewerDatabaseProtectionTextTests : IDisposable
         var read = Read(Fact("zeta", fullAgo: 9 * Day, logAgo: TimeSpan.FromMinutes(5), checkDbAgo: Day));
         var local = Captured.ToLocalTime().ToString("g", System.Globalization.CultureInfo.CurrentCulture);
 
-        Assert.Equal($"1 of 1 judged databases overdue. full backup: zeta.   Captured: {local}", ViewerDatabaseProtectionText.StatusLine(read, ServerClock.Utc));
+        Assert.Equal($"1 of 1 judged databases overdue. Full backup: zeta.   Captured: {local}", ViewerDatabaseProtectionText.StatusLine(read, ServerClock.Utc));
         Assert.StartsWith("No database is overdue (1 judged).", ViewerDatabaseProtectionText.StatusLine(Read(Fact("a", fullAgo: Day, logAgo: TimeSpan.FromMinutes(5), checkDbAgo: Day)), ServerClock.Utc), StringComparison.Ordinal);
     }
 
