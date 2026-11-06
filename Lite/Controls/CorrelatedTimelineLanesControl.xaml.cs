@@ -174,11 +174,15 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     /// Refreshes all lane data for the given time range. <paramref name="serverClock"/> is the clock of the server this
     /// tab monitors (the tab's own, whichever tab is selected): it defines "the same hours" the ghost lines are
     /// moved by (<see cref="TimeWindows.GhostX"/>).
+    ///
+    /// <para>A read that fails costs its lane, which is drawn as failed (<see cref="ShowFailed"/>), and the other lanes draw as
+    /// usual. The return value names the reads that failed (<see cref="OverviewLaneReadFailures.Summary"/>), so the host does not
+    /// call the tab refreshed; null when all ten completed.</para>
     /// </summary>
-    public async Task RefreshAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, ServerClock serverClock,
+    public async Task<string?> RefreshAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, ServerClock serverClock,
         (DateTime FromUtc, DateTime ToUtc, int Days)? comparisonRange = null)
     {
-        if (_dataService == null || _isRefreshing) return;
+        if (_dataService == null || _isRefreshing) return null;
         _isRefreshing = true;
 
         try
@@ -243,14 +247,14 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 UpdateCpuLane(sqlSeries, totalSeries, cpuBaseline);
             }
             else
-                ShowEmpty(CpuChart, "CPU %");
+                ShowFailed(CpuChart, "CPU %");
 
             if (waitTask.IsCompletedSuccessfully)
                 UpdateLane(WaitStatsChart, "Wait ms/sec",
                     waitTask.Result.Select(d => (d.CollectionTime.ToOADate(), d.WaitTimeMsPerSecond)).ToList(),
                     "#FFB74D", bands: waitBaseline, minAnomalyValue: 100);
             else
-                ShowEmpty(WaitStatsChart, "Wait ms/sec");
+                ShowFailed(WaitStatsChart, "Wait ms/sec");
 
             {
                 var blockingData = blockingTask.IsCompletedSuccessfully
@@ -263,6 +267,9 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                     ? PerformanceMonitor.Ui.BlockingTrendLabels.UnitFor(blockingTask.Result.Select(d => d.Source))
                     : PerformanceMonitor.Ui.BlockingTrendLabels.ReportsUnit;
                 UpdateBlockingLane(blockingData, deadlockData, blockingBaseline, (windowEndUtc - windowStartUtc).TotalDays, blockingUnit);
+                /* The lane draws the series that read; a series that did not is not "no events", so the lane says so. */
+                if (!blockingTask.IsCompletedSuccessfully || !deadlockTask.IsCompletedSuccessfully)
+                    MarkFailed(BlockingChart);
             }
 
             if (memoryTask.IsCompletedSuccessfully)
@@ -270,7 +277,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                     memoryTask.Result.Select(d => (d.CollectionTime.ToOADate(), d.BufferPoolMb)).ToList(),
                     "#CE93D8");
             else
-                ShowEmpty(MemoryChart, "Memory MB");
+                ShowFailed(MemoryChart, "Memory MB");
 
             if (fileIoTask.IsCompletedSuccessfully)
             {
@@ -287,7 +294,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                     pointReads: ioReads, minPointReads: ioMinReads);
             }
             else
-                ShowEmpty(FileIoChart, "I/O ms");
+                ShowFailed(FileIoChart, "I/O ms");
 
             // Comparison overlay — fetch reference period data and render as ghost lines
             if (comparisonRange.HasValue)
@@ -373,6 +380,22 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 windowStartUtc, windowEndUtc,
                 blockingTask.IsCompletedSuccessfully ? blockingTask.Result : [],
                 deadlockTask.IsCompletedSuccessfully ? deadlockTask.Result : []);
+
+            /* The reads that failed, named in lane order for the host's status line; null when every lane read. A failed baseline
+               read alone is logged and is not a failed refresh: its lane drew, and only the band is missing. */
+            (string Read, Task Task)[] laneReads =
+            [
+                ("CPU %", cpuTask), ("Wait ms/sec", waitTask), ("Blocking", blockingTask), ("Deadlocks", deadlockTask),
+                ("Buffer Pool MB", memoryTask), ("I/O ms", fileIoTask),
+            ];
+            (string Read, Task Task)[] baselineReads =
+            [
+                ("CPU baseline", cpuBaselineTask), ("Wait baseline", waitBaselineTask), ("I/O baseline", ioBaselineTask),
+                ("Blocking baseline", blockingBaselineTask),
+            ];
+            if (OverviewLaneReadFailures.Summary(baselineReads) is { } failedBaselines)
+                AppLogger.Info("CorrelatedLanes", failedBaselines);
+            return OverviewLaneReadFailures.Status(laneReads, baselineReads);
         }
         finally
         {
@@ -746,6 +769,25 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         chart.Reset();
         PerformanceMonitor.Ui.ChartDisplayScale.Apply(chart); // #6678: Reset swaps in a plot at scale 1
         chart.Plot.Clear();
+    }
+
+    /* A lane whose read failed is drawn as the empty lane is, then says so over it, so it cannot pass for a quiet healthy lane. */
+    private void ShowFailed(ScottPlot.WPF.WpfPlot chart, string title)
+    {
+        ShowEmpty(chart, title);
+        MarkFailed(chart);
+    }
+
+    /* The note is anchored to the lane's pixels, not its axes, so SyncXAxes leaves it where it is. */
+    private static void MarkFailed(ScottPlot.WPF.WpfPlot chart)
+    {
+        var note = chart.Plot.Add.Annotation("read failed", ScottPlot.Alignment.MiddleCenter);
+        note.LabelFontColor = ChartStyle.GetThemeColors().Text;
+        note.LabelFontSize = 11;
+        note.LabelBackgroundColor = ScottPlot.Colors.Transparent;
+        note.LabelBorderColor = ScottPlot.Colors.Transparent;
+        note.LabelShadowColor = ScottPlot.Colors.Transparent;
+        chart.Refresh();
     }
 
     /* Render an empty lane as a live, gridded chart instead of a dead black box. This is most often
