@@ -718,6 +718,9 @@ CREATE OR REPLACE VIEW collect.v_blocked_process_reports AS SELECT * FROM collec
             @"DROP VIEW IF EXISTS collect.v_memory_pressure_events;
 ALTER TABLE IF EXISTS collect.memory_pressure_events DROP COLUMN IF EXISTS memory_node_id;
 CREATE OR REPLACE VIEW collect.v_memory_pressure_events AS SELECT * FROM collect.memory_pressure_events;"),
+        // V251 (#7762): the compose rollup's row trigger marks from the hour of the writer's clock. The rewind puts V173's function and triggers back (the
+        // probe's sentinel is the one-hour subtraction in the function's source), so a re-run of V251 replaces them again. V173's text is idempotent.
+        new(251, "hasComposeStampLateMarkOffsetZero", PerformanceMonitor.Darling.Storage.QueryStoreComposeStamp.CreateSql),
     ];
 
     /// <summary>
