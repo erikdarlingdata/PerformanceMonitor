@@ -563,7 +563,9 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.Equal(before.Count + 1, after.Count);
         var added = Assert.Single(after, e => e.Sid.Value == account);
         Assert.Equal(AceQualifier.AccessAllowed, added.Qualifier);
-        Assert.Equal(DarlingTlsKeyAccess.ReadMask, added.Mask);
+        /* The key store reads the entry back with GENERIC_READ (0x80000000) added to the FILE_GENERIC_READ bits written
+           (CI saw 0x80120089 for 0x120089). It is the same Read grant, so compare the file rights alone. */
+        Assert.Equal(DarlingTlsKeyAccess.ReadMask, added.Mask & ~unchecked((int)0x80000000));
         var kept = after.Where(e => e.Sid.Value != account).ToList();
         Assert.Equal(before.Count, kept.Count);
         Assert.All(before, e => Assert.Contains(e, kept));
