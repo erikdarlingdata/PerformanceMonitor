@@ -23,7 +23,7 @@ All sections except `postgres` and `servers` are optional — omit a section (or
 
 ## queryTextTrigramIndexEnabled
 
-Off by default. When `true`, the service builds a trigram index on the plan-cache text (`collect.query_text_dim.query_text`). A search across a busy server's whole text can then answer in seconds. On the largest store measured, the index took 3.1 GB, which is 52% of the table. It took about 17 minutes to build and added about 0.5 ms to each row written. That is why it is off until you ask for it.
+Off by default. When `true`, the service builds a trigram index on the plan-cache text (`collect.query_text_dim.query_text`). The index finds the matching texts, so a search with no `server_name` can match the whole text table. It does not index where those texts ran: the samples of every enabled server in the raw window are still read to find that, so on a large store the search can reach its 4 second budget and report `stopped`. On the largest store measured, the index took 3.1 GB, which is 52% of the table. It took about 17 minutes to build and added about 0.5 ms to each row written. That is why it is off until you ask for it.
 
 - The service builds it in the background about 20 minutes after it starts, with `CREATE INDEX CONCURRENTLY`. Collection keeps running and an upgrade never waits for it. It is never part of a migration.
 - It needs the `pg_trgm` extension, and the service tries `CREATE EXTENSION IF NOT EXISTS pg_trgm`. If the store login is refused, the service stops asking. `get_store_metrics` then shows the state `WaitingOnExtension` and the statement to run as a role that can create it. Once the extension exists, the next pass builds the index.

@@ -810,7 +810,7 @@ public sealed class DarlingMcpStoreMetricsTools
             : new
             {
                 status = trigramHealth.Status.ToString(),
-                enabled = trigramHealth.Enabled,
+                enabled = trigramHealth.Status == TrigramIndexStatus.Unconfigured ? (bool?)null : trigramHealth.Enabled,
                 table = QueryTextTrigramIndex.TableName,
                 index_name = QueryTextTrigramIndex.IndexName,
                 exists = trigramHealth.Exists,

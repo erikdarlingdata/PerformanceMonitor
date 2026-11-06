@@ -41,6 +41,12 @@ public enum TrigramIndexStatus
 
     /// <summary>The store login cannot create <c>pg_trgm</c>. An operator runs the statement the health read names.</summary>
     WaitingOnExtension,
+
+    /// <summary>
+    /// This process has not read the option yet (the worker is still loading <c>darling.json</c>), so it says nothing about the index.
+    /// It is never reported as Off or DropPending: the option may well be on.
+    /// </summary>
+    Unconfigured,
 }
 
 /// <summary>What one catalog read found about the table, the index and the extension.</summary>
@@ -87,10 +93,11 @@ public sealed class QueryTextTrigramIndexTracker
 
     /// <summary>A consistent copy of the tracker's fields.</summary>
     public sealed record Snapshot(
-        bool Enabled, PhaseKind Phase, DateTime? BuildStartedUtc, int Failures, string? LastError, string? LastSqlState,
+        bool Configured, bool Enabled, PhaseKind Phase, DateTime? BuildStartedUtc, int Failures, string? LastError, string? LastSqlState,
         DateTime? LastFailedUtc, DateTime? NextAttemptUtc, bool ExtensionBlocked, string? ExtensionError);
 
     private readonly object _gate = new();
+    private bool _configured;
     private bool _enabled;
     private PhaseKind _phase;
     private DateTime? _buildStartedUtc;
@@ -106,10 +113,15 @@ public sealed class QueryTextTrigramIndexTracker
     /// <summary>How many builds this instance started. A test reads it to prove a pass built once and the next did not.</summary>
     public int BuildsStarted { get { lock (_gate) { return _buildsStarted; } } }
 
-    /// <summary>Sets whether the option is on. Called once, before the first pass, so the health read never sees a half-set tracker.</summary>
+    /// <summary>
+    /// Sets whether the option is on. The worker calls it the moment <c>darling.json</c> loads, before it migrates the store, so the
+    /// MCP host (which answers from process start) reads the real option. Until it is called the tracker is unconfigured and
+    /// <see cref="QueryTextTrigramIndex.Classify"/> reports <see cref="TrigramIndexStatus.Unconfigured"/>, never Off or DropPending.
+    /// The pass entry point calls it again with the same value.
+    /// </summary>
     public void Configure(bool enabled)
     {
-        lock (_gate) { _enabled = enabled; }
+        lock (_gate) { _configured = true; _enabled = enabled; }
     }
 
     /// <summary>A copy of the fields.</summary>
@@ -117,7 +129,7 @@ public sealed class QueryTextTrigramIndexTracker
     {
         lock (_gate)
         {
-            return new Snapshot(_enabled, _phase, _buildStartedUtc, _failures, _lastError, _lastSqlState, _lastFailedUtc,
+            return new Snapshot(_configured, _enabled, _phase, _buildStartedUtc, _failures, _lastError, _lastSqlState, _lastFailedUtc,
                 _nextAttemptUtc, _extensionBlocked, _extensionError);
         }
     }
@@ -240,26 +252,27 @@ public static class QueryTextTrigramIndex
     }
 
     /// <summary>One catalog read: the table, the index, the extension and any build in progress. No parameters.</summary>
-    internal const string StateSql = @"
-SELECT to_regclass('collect.query_text_dim') IS NOT NULL AS table_exists,
+    internal const string StateSql = $@"
+SELECT to_regclass('{TableName}') IS NOT NULL AS table_exists,
        i.indisvalid,
        CASE WHEN i.indexrelid IS NULL THEN NULL ELSE pg_relation_size(i.indexrelid) END AS index_size_bytes,
        ext.nspname AS extension_schema,
        EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'pg_trgm') AS extension_available,
        EXISTS (SELECT 1 FROM pg_stat_progress_create_index AS p
-               WHERE p.relid = to_regclass('collect.query_text_dim')
+               WHERE p.relid = to_regclass('{TableName}')
                AND   p.datid = (SELECT oid FROM pg_database WHERE datname = current_database())) AS build_running
 FROM (SELECT 1) AS one
-LEFT JOIN pg_index AS i ON i.indexrelid = to_regclass('collect.ix_query_text_dim_trgm')
+LEFT JOIN pg_index AS i ON i.indexrelid = to_regclass('{IndexName}')
 LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.oid = e.extnamespace WHERE e.extname = 'pg_trgm') AS ext ON true";
 
     internal const string CreateExtensionSql = "CREATE EXTENSION IF NOT EXISTS pg_trgm";
 
-    internal const string DropSql = "DROP INDEX CONCURRENTLY IF EXISTS collect.ix_query_text_dim_trgm";
+    internal const string DropSql = "DROP INDEX CONCURRENTLY IF EXISTS " + IndexName;
 
     /// <summary>The build, with the operator class named in the schema the extension lives in (it is not always on the search path).</summary>
     internal static string CreateIndexSql(string extensionSchema) =>
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_query_text_dim_trgm ON collect.query_text_dim USING gin (query_text "
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS " + IndexName[(IndexName.IndexOf('.', StringComparison.Ordinal) + 1)..]
+        + " ON " + TableName + " USING gin (query_text "
         + QuoteIdentifier(extensionSchema) + ".gin_trgm_ops)";
 
     internal static string QuoteIdentifier(string name) => "\"" + name.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
@@ -486,6 +499,11 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     /// <summary>The status word for a catalog reading and the tracker's memory. Pure.</summary>
     public static TrigramIndexStatus Classify(TrigramCatalogState state, QueryTextTrigramIndexTracker.Snapshot snapshot)
     {
+        if (!snapshot.Configured)
+        {
+            return TrigramIndexStatus.Unconfigured;
+        }
+
         var exists = state.IndexValid is not null;
         if (!snapshot.Enabled)
         {
@@ -553,6 +571,7 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
             TrigramIndexStatus.Pending => "The option is on and the index does not exist yet. The service builds it in the background after startup, and an INVALID leftover is dropped first.",
             TrigramIndexStatus.Building => "A build is running. Collection is not waiting for it. The size is what has been written so far (" + size + ").",
             TrigramIndexStatus.Ready => "The trigram index exists and is valid (" + size + ").",
+            TrigramIndexStatus.Unconfigured => "The service has not read darling.json yet, so the option queryTextTrigramIndexEnabled is not known. Try again in a moment.",
             TrigramIndexStatus.Failed => "The last build failed. Its leftover was dropped and the service tries again at next_attempt_at, after a wait that doubles to a cap of "
                 + ((int)BackoffCap.TotalHours).ToString(CultureInfo.InvariantCulture) + " hours.",
             _ => health.ExtensionAvailable

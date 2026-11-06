@@ -43,8 +43,11 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <para><b>#7674: the all-servers scope, only on an index.</b> A search that names no server reads the plan-cache text of every enabled server, through
 /// the opt-in trigram index on <c>query_text_dim.query_text</c> (<see cref="QueryTextTrigramIndex"/>, option <c>queryTextTrigramIndexEnabled</c>).
 /// It is offered only when the index is <c>Ready</c> (it exists and is valid): in every other state the search is refused with a sentence that names the option
-/// and the state, because without the index it would read every row of every server and run out its budget. Query Store text has no index and is still searched
-/// one server at a time. The one-server scope keeps the plain path whether or not the index exists: <see cref="PlanCacheSql"/> writes its match so the index
+/// and the state, because without the index the text match would read the whole text table and run out its budget. The index serves the text match only.
+/// Once the matching texts are known, the samples of every enabled server in the raw window are read to find where those texts ran, and
+/// <c>query_stats</c> has no index on <c>query_text_digest</c>, so on a large store this scope can still reach the budget and the reply says <c>stopped</c>
+/// (no timing of it has been taken). Query Store text has no index and is still searched one server at a time. With no <c>server_name</c> the front door
+/// routes this tool as a fan-out (the default for a tool it does not list), so each store answers with its own index state. The one-server scope keeps the plain path whether or not the index exists: <see cref="PlanCacheSql"/> writes its match so the index
 /// cannot serve it, which the issue measured to be faster than the index for that scope.</para>
 ///
 /// <para><b>The judge runs on the whole text, then the excerpt is cut (#5320).</b> The SQL hands back the whole stored text of the at most
@@ -140,8 +143,9 @@ ORDER BY p.last_collected DESC, p.query_hash";
 
     /// <summary>#7674: the plan-cache text of every enabled server, served by the trigram index on <c>query_text_dim.query_text</c>. Only offered when
     /// <see cref="QueryTextTrigramIndex"/> reports <c>Ready</c>. $1 the escaped pattern, $2 row cap + 1, $3 the raw-tier floor (naive UTC). The match is
-    /// the bare column, so the planner may use the index: the matching digests come first (a rare pattern is a handful), then the samples of those digests
-    /// in the window; one row per (server, query_hash), the newest sighting. The page carries the digest and the whole text is read by primary key for the
+    /// the bare column, so the planner may use the index for the text match. The index does not reach the sample side: <c>query_stats</c> has no index on
+    /// <c>query_text_digest</c>, so the samples of every enabled server in the raw window are read and joined to the matched digests, and on a large store
+    /// this can reach the budget (the reply then says <c>stopped</c>); one row per (server, query_hash), the newest sighting. The page carries the digest and the whole text is read by primary key for the
     /// at most $2 rows of it, as in <see cref="PlanCacheSql"/>.</summary>
     internal const string PlanCacheAllServersSql = @"
 WITH matched AS MATERIALIZED (
@@ -209,12 +213,12 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash";
         + " days, one row per query_hash. A statement that left the plan cache before that, or ran only before the server was monitored, is not here.";
 
     internal static string PlanCacheAllServersHorizon { get; } =
-        "Plan-cache text of the raw tier (query_stats) for every enabled server, through the trigram index: the last "
+        "Plan-cache text of the raw tier (query_stats) for every enabled server (the text is matched through the trigram index, then the samples in the raw window are read): the last "
         + ((int)TimescaleSupport.RawRetentionSpan.TotalDays).ToString(CultureInfo.InvariantCulture)
         + " days, one row per server and query_hash. A statement that left the plan cache before that, or ran only before the server was monitored, is not here.";
 
     [McpServerTool(Name = "find_queries_by_text"), Description(
-        "Finds statements whose text contains a piece of text (a table name, a fragment of SQL), and returns the keys the other query reads take: query_id and database for get_query_store_query_history, query_hash for get_query_trend. pattern is a literal substring, case-insensitive (% and _ match themselves), at least 3 characters. Name a server with server_name: database_name narrows it and makes the search much faster. Two sources, each reported separately with its own horizon: Query Store text and the plan-cache text of the raw tier. There is no index on the text unless the operator turned one on, so each source has a 4 second budget; a source that runs out is reported stopped (name a database to narrow it). Leave server_name out to search the plan-cache text of every server: that is served only when the opt-in trigram index is ready (darling.json queryTextTrigramIndexEnabled; get_store_metrics query_text_index says its state), is refused with the state otherwise, and does not search Query Store text, which is searched one server at a time. Refused when mcp.dataDetail hides statement text, because a search on hidden text would reveal it. Rows carry a ~300 character excerpt around the first match, never the whole text; a statement the sensitive-statement filter withholds is listed with the withheld marker in place of the excerpt.")]
+        "Finds statements whose text contains a piece of text (a table name, a fragment of SQL), and returns the keys the other query reads take: query_id and database for get_query_store_query_history, query_hash for get_query_trend. pattern is a literal substring, case-insensitive (% and _ match themselves), at least 3 characters. Name a server with server_name: database_name narrows it and makes the search much faster. Two sources, each reported separately with its own horizon: Query Store text and the plan-cache text of the raw tier. There is no index on the text unless the operator turned one on, so each source has a 4 second budget; a source that runs out is reported stopped (name a database to narrow it). Leave server_name out to search the plan-cache text of every server: that is served only when the opt-in trigram index is ready (darling.json queryTextTrigramIndexEnabled; get_store_metrics query_text_index says its state), is refused with the state otherwise, and does not search Query Store text, which is searched one server at a time. The index finds the matching texts only; the samples of every enabled server in the raw window are then read to find where they ran, so on a large store the all-servers search can reach the 4 second budget and report stopped. Each source in the reply carries a status: ok (rows found), empty (searched, nothing matched), stopped (the budget ran out, so the rows listed may be incomplete) or not_searched (the all-servers scope does not search that source, Query Store text). Refused when mcp.dataDetail hides statement text, because a search on hidden text would reveal it. Rows carry a ~300 character excerpt around the first match, never the whole text; a statement the sensitive-statement filter withholds is listed with the withheld marker in place of the excerpt.")]
     public static Task<string> FindQueriesByText(
         NpgsqlDataSource postgres,
         [Description("Text to find in the statement. A literal substring, matched ignoring case; % and _ match themselves. At least 3 characters.")] string pattern,
@@ -424,6 +428,8 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash";
         var minutes = ((int)QueryTextTrigramIndex.StartDelay.TotalMinutes).ToString(CultureInfo.InvariantCulture);
         var state = health.Status switch
         {
+            TrigramIndexStatus.Unconfigured =>
+                "the service has not read darling.json yet, so the option is not known (state: not configured yet). Try again in a moment.",
             TrigramIndexStatus.Off =>
                 "the option is off (state: off). Set queryTextTrigramIndexEnabled to true in darling.json and restart the service: the index is built in the background about "
                 + minutes + " minutes after start and can take many minutes on a large store.",

@@ -22,7 +22,9 @@ using Xunit;
 namespace Darling.Tests;
 
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test creates its own scratch database through ScratchPostgres and
-   works entirely inside it, so it cannot race live collection. */
+   works entirely inside it, so it cannot race live collection. It IS in "darling-config-env", because two tests read the process-wide
+   QueryTextTrigramIndexTracker.Shared through the tools and QueryTextTrigramIndexTrackerTests starts the real worker, which sets it. */
+[Collection("darling-config-env")]
 /// <summary>
 /// #7674 part B on a real store: the one-server scope keeps the plain path when the trigram index exists (the planner cannot use the index for
 /// it), and a search that names no server is refused unless the index is ready, in a sentence that names the option.
@@ -152,6 +154,7 @@ public sealed class FindQueriesByTextIndexScopeLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await OpenScratchAsync(ct);
         await using var data = NpgsqlDataSource.Create(scratch.ConnectionString);
+        QueryTextTrigramIndexTracker.Shared.Configure(false);
 
         var reply = JsonDocument.Parse(await DarlingMcpFindQueriesByTextTools.FindQueriesByText(
             data, "orders_77 where", null, null, 20, McpDataDetail.Full,
@@ -173,6 +176,7 @@ public sealed class FindQueriesByTextIndexScopeLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
         await using var data = NpgsqlDataSource.Create(scratch.ConnectionString);
+        QueryTextTrigramIndexTracker.Shared.Configure(false);
 
         using (var empty = JsonDocument.Parse(await DarlingMcpStoreMetricsTools.GetStoreMetrics(data, cancellationToken: ct)))
         {
