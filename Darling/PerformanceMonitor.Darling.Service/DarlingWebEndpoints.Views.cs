@@ -1821,6 +1821,10 @@ public static partial class DarlingWebEndpoints
     private static IResult ErrorResult(string message, int statusCode) =>
         JsonNodeResult(new JsonObject { ["error"] = message }, statusCode);
 
+    /// <summary>The error envelope with a machine-readable <c>reason</c> beside the sentence (#7955): see <see cref="DarlingWebStoreWrites.RefusalReason"/>.</summary>
+    private static IResult ErrorResult(string message, int statusCode, string reason) =>
+        JsonNodeResult(new JsonObject { ["error"] = message, ["reason"] = reason }, statusCode);
+
     private static IResult NotFoundResult() =>
         ErrorResult("View not found.", StatusCodes.Status404NotFound);
 

@@ -18,6 +18,30 @@ namespace PerformanceMonitor.Darling.Service;
 /// </summary>
 internal static class DarlingWebStoreWrites
 {
+    /// <summary>The <c>reason</c> a 403 refusal body carries beside its <c>error</c> sentence (#7955), so the page tells the kinds apart on this
+    /// code and shows the sentence as the service wrote it, never by matching the sentence's words. The sentence is the one text; the code is the one
+    /// machine-readable rule.</summary>
+    internal static class RefusalReason
+    {
+        /// <summary>The managed store's dashboard has no admin pool: <c>web.allowAdminWrites</c> is off.</summary>
+        internal const string AdminWritesOff = "admin_writes_off";
+
+        /// <summary>The store refused the write for privilege (SQLSTATE 42501, or no write grant): the web or admin login cannot make it.</summary>
+        internal const string StoreRefused = "store_refused";
+
+        /// <summary>The signed-in seat is read-only (the viewer role): the host's write gate refuses every change.</summary>
+        internal const string ReadOnlySeat = "read_only_seat";
+
+        /// <summary>The dashboard serves reads only (a tokenless loopback or a token under the length floor), so it makes no change for anyone.</summary>
+        internal const string ReadsOnlyDashboard = "reads_only_dashboard";
+
+        /// <summary>The change needs a signed-in admin and the request holds no such seat.</summary>
+        internal const string SignInRequired = "sign_in_required";
+
+        /// <summary>The reason for a store refusal: the switch when the managed store's dashboard has no admin pool, else the privilege.</summary>
+        internal static string ForStore(bool adminWritesOff) => adminWritesOff ? AdminWritesOff : StoreRefused;
+    }
+
     /// <summary>Whether this config describes the managed store. A host with no config (a test that maps the routes directly) is not managed.</summary>
     internal static bool IsManaged(PostgresConfig? postgres) => postgres?.Managed == true;
 
