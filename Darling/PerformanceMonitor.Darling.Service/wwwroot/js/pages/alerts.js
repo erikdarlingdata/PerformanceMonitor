@@ -32,6 +32,7 @@ import { relativeSpec, specName } from "../time-range.js";
 import { mutePrefillParams } from "../mute-context.js";
 import { orderServers } from "../server-order.js";
 import { getSession } from "../views-api.js";
+import { noteRefreshError } from "../refresh-in-place.js";
 
 /* #3169: the state-carrying notification_type values, derived from the one shared map rather than listed a
    second time. The status label already carries each of them, so the channel chip beside it must not repeat
@@ -686,7 +687,7 @@ async function dismissRows(state, rows) {
     d.status.textContent = totals.requested ? failure + " (" + dismissOutcomeText(totals) + " before it failed)" : failure;
     d.status.setAttribute("class", "dismiss-status dismiss-error");
     updateDismissBar(state);
-    if (totals.requested) await refreshAlerts(state);
+    if (totals.requested) await rereadAfterDismiss(state);
     return;
   }
   /* Unselect only what was sent; a box ticked while the request was in flight stays checked. */
@@ -694,7 +695,15 @@ async function dismissRows(state, rows) {
   uncheckBoxes(state);
   d.status.setAttribute("class", "dismiss-status");
   d.status.textContent = dismissOutcomeText(totals);
-  await refreshAlerts(state);
+  await rereadAfterDismiss(state);
+}
+
+/* The re-read after a dismiss the store accepted. The table no longer shows what its request returns, so a re-read that fails replaces it with
+ * the error (refreshAlerts keeps a table through a failed read only when the table was drawn from that same request) rather than listing the
+ * dismissed rows as if nothing had changed. */
+function rereadAfterDismiss(state) {
+  state.drawnParams = null;
+  return refreshAlerts(state);
 }
 
 export async function renderAlerts(main) {
@@ -742,7 +751,7 @@ export async function renderAlerts(main) {
     filter,
   ]);
   const investigations = buildInvestigationsPanel();
-  live = { main, headEl, meta, noticeBox, tableBox, filter, alerts: [], tbody: null, rowMap: null, seq: 0, dismiss: null, investigations };
+  live = { main, headEl, meta, noticeBox, tableBox, filter, alerts: [], tbody: null, rowMap: null, drawnParams: null, seq: 0, dismiss: null, investigations };
   mount(main, canMute
     ? [headEl, buildDismissBar(live), noticeBox, tableBox, investigations.panel]
     : [headEl, noticeBox, tableBox, investigations.panel]);
@@ -933,12 +942,22 @@ async function refreshAlerts(state) {
   const req = readRequest();
   const res = req.error ? { kind: "error", message: "This range cannot be read yet: " + req.error } : await readTool("get_alert_history", req.params);
   if (seq !== state.seq) return;
+  /* #7943: a read that failed keeps the table on screen, its rows and their opened Detail lines, and says so above it (noteRefreshError, as a
+     panel does) only when it asked for exactly what that table was drawn from (state.drawnParams): the poll of an unchanged page. The next
+     poll that answers reconciles the same rows and clears the notice. A read after a changed choice, a range that cannot be read (#5562: the
+     page shows that reason, never a different window) or the re-read after a dismiss shows the error strip in the table's place, as a first
+     load does, so the previous choice's rows are never listed under the new one's label. An empty answer is a real answer and replaces the table. */
+  if (res.kind === "error" && state.tbody && !req.error && JSON.stringify(req.params) === state.drawnParams) {
+    noteRefreshError(state.noticeBox, res.message);
+    return;
+  }
   state.meta.textContent = (choices.server ? choices.server : "fleet-wide") + " · " + windowLabel();
   mount(state.noticeBox, []);
   if (res.kind === "error" || res.kind === "empty") {
     state.alerts = [];
     state.tbody = null;
     state.rowMap = null;
+    state.drawnParams = null;
     state.truncated = false;
     /* The checked set survives a failed read; it is pruned only against a successful one. */
     updateDismissBar(state);
@@ -946,6 +965,7 @@ async function refreshAlerts(state) {
     return;
   }
   state.alerts = trimAlertsToStart(res.data.alerts || [], req.startMs);
+  state.drawnParams = JSON.stringify(req.params);
   state.truncated = res.data.truncated === true;
   /* A checked row that is no longer listed (dismissed elsewhere, aged out) is no longer selected. */
   const listed = new Set(state.alerts.filter(dismissable).map(alertKey));
