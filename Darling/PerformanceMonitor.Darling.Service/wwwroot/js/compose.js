@@ -193,6 +193,29 @@ function pinHoursLabel(hours) {
   return hours + (hours === 1 ? " hour" : " hours");
 }
 
+/* The drill and zoom each composed panel holds (#7923), at MODULE scope so the poll's rebuild of the grid draws them again.
+   Keyed by composedPanelId (slot, title or id, server); each entry remembers the scope (page address + preset range) it was
+   made under, and a lookup under any other scope drops it, so another server or range starts every panel unzoomed and
+   undrilled. The reader's own clear (the chip's ×) sets null and removes the entry. */
+const composedViews = new Map();
+
+/** The { drill, zoom } held for composed panel `id` under `scope`, or null. A different scope drops the entry. */
+export function getComposedView(id, scope) {
+  const h = composedViews.get(id);
+  if (!h) return null;
+  if (h.scope !== scope) {
+    composedViews.delete(id);
+    return null;
+  }
+  return h;
+}
+
+/** Hold the drill and zoom for composed panel `id` under `scope`; both null removes the entry. */
+export function setComposedView(id, scope, drill, zoom) {
+  if (!drill && !zoom) composedViews.delete(id);
+  else composedViews.set(id, { scope, drill, zoom });
+}
+
 /**
  * The per-card drill controller (design D6): runs the panel, and — when the viewer clicks a categorical mark —
  * re-runs it with a TRANSIENT drill filter pinning that mark's group value(s). The drill is view-state only: it is
@@ -200,16 +223,27 @@ function pinHoursLabel(hours) {
  * selection REPLACES the drill (a simple "you are viewing X" model), so drilling never stacks into a dead end.
  */
 function driveComposedPanel(body, panelSpec, scope, onSettled, slot = null, gate = null) {
-  let drill = null; // { keys: [{dimension, value}] } or null
-  let zoom = null; // { startIso, endIso } or null (#1606 brush-zoom — view-state only, like the drill)
+  /* #7923: the drill and the brush-zoom are held at module scope under the panel's identity and the page's scope, like the
+     legend's hidden series, so the poll's staged rebuild of this panel draws what the reader set instead of a full-window
+     chart. A panel with no slot (the editor preview) has no stable identity, so it holds nothing. */
+  const holdId = slot != null ? composedPanelId(panelSpec, scope, slot) : null;
+  const holdScope = chartZoomScope(scope ? scope.hours : null);
+  const held = holdId != null ? getComposedView(holdId, holdScope) : null;
+  let drill = held ? held.drill : null; // { keys: [{dimension, value}] } or null
+  let zoom = held ? held.zoom : null; // { startIso, endIso } or null (#1606 brush-zoom — view-state only, like the drill)
   let firstRun = true; // onSettled (#4222) fires once, for the initial load only — a later drill/zoom re-run is
                         // user-driven and already past whatever concurrency budget gated the first load.
+  function hold() {
+    if (holdId != null) setComposedView(holdId, holdScope, drill, zoom);
+  }
   function onDrill(next) {
     drill = next && Array.isArray(next.keys) && next.keys.length ? next : null;
+    hold();
     run();
   }
   function onZoomChange(next) {
     zoom = next && next.startIso && next.endIso ? next : null;
+    hold();
     run();
   }
   function run() {
