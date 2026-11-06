@@ -546,10 +546,12 @@ public class BaselineSupplyTests
            line is 950 s. The light band is re-laid (the unbounded-cardinality members sit a guard's width apart in
            it, and the band now has 14 positions), which moves the baseline pair from minutes 3 and 5 to 5 and 6; the minute map stays
            injective (TimescaleSupportTests pins that and carries the derivation). */
+        /* #8053: the corrected Query Store hourly is on the hour's tail, so the light band has 13 positions and the
+           unbounded members start at position 3; the baseline pair takes 4 and 5, and the heaviest starts at :16. */
         Assert.Equal(15, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
-        Assert.Equal(5, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.PerfmonIntervalBaselineView));
-        Assert.Equal(6, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.WaitStatsIntervalBaselineView));
-        Assert.Equal(17, TimescaleSupport.HeaviestRefreshStartMinute);
+        Assert.Equal(4, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.PerfmonIntervalBaselineView));
+        Assert.Equal(5, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.WaitStatsIntervalBaselineView));
+        Assert.Equal(16, TimescaleSupport.HeaviestRefreshStartMinute);
         Assert.Equal(950, TimescaleSupport.RefreshSlotWarningSeconds);
     }
 

@@ -247,7 +247,8 @@ public sealed class CompressionPhaseAssignmentTests
            window re-derives 21 -> 19; TimescaleSupportTests pins the derivation). The band, its 24 minutes and
            the 3-per-minute cap below are unchanged, so the assignment is still a permutation of the same minutes. */
         Assert.Equal(19, TimescaleSupport.HeaviestRefreshWindowMinutes);
-        Assert.Equal(35, TimescaleSupport.AggregateCompressionBandMinute);
+        /* #8053: the heaviest refresh starts at :16, so the last minute of its window is :34. */
+        Assert.Equal(34, TimescaleSupport.AggregateCompressionBandMinute);
         Assert.Equal(3, TimescaleSupport.CompressionPhaseMaxPerMinute);
 
         Assert.Equal(

@@ -101,8 +101,9 @@ public sealed class IoHourlyRollupRegistrationTests
         Assert.True(TimescaleSupport.IsUnboundedCardinalityRefresh(TimescaleSupport.QueryStatsIoHourlyView));
         Assert.False(TimescaleSupport.IsUnboundedCardinalityRefresh(TimescaleSupport.ProcedureStatsIoHourlyView));
 
-        /* band index 12 of 0-13: the 4th unbounded member takes 3 * 4 */
-        Assert.Equal(12, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.QueryStatsIoHourlyView));
+        /* band index 11 of 0-12: the third unbounded LIGHT member (the corrected Query Store hourly is unbounded
+           but on the hour's tail, #8053) takes 3 + 2 * 4 */
+        Assert.Equal(11, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.QueryStatsIoHourlyView));
         Assert.Equal(
             4,
             TimescaleSupport.HourlyRefreshPhaseOrder.Count(v =>

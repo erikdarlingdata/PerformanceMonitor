@@ -228,7 +228,7 @@ public sealed class TimescaleAggregateCompressionTests
         Assert.Equal(
             TimescaleSupport.HeaviestRefreshStartMinute + TimescaleSupport.HeaviestRefreshWindowMinutes - 1,
             minute);
-        Assert.Equal(35, minute);
+        Assert.Equal(34, minute);
 
         /* No hourly refresh starts on it, no raw compression policy starts on it, and it is the minute
            immediately before the raw compression band opens — the tiling identity from the daily band's side. */

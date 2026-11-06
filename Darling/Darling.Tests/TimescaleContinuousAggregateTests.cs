@@ -203,8 +203,11 @@ public sealed class TimescaleContinuousAggregateTests
            of them light. */
         Assert.Equal(8, TimescaleSupport.HourlyAggregates.Length);
         Assert.Equal(7, TimescaleSupport.BaselineAggregates.Length);
+        /* #8053: one of the fifteen is built from another hourly (the corrected Query Store hourly, from the
+           interval hourly) and takes the hour's tail rather than a light position, so thirteen are light. */
         Assert.Equal(15, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
-        Assert.Equal(14, TimescaleSupport.LightHourlyRefreshCount);
+        Assert.Single(HourlyRefreshLineage.HierarchicalPairs());
+        Assert.Equal(13, TimescaleSupport.LightHourlyRefreshCount);
 
         var phases = TimescaleSupport.HourlyRefreshPhaseOrder
             .Select(TimescaleSupport.RefreshPhaseMinutesFor)
@@ -227,6 +230,14 @@ public sealed class TimescaleContinuousAggregateTests
             if (string.Equals(view, TimescaleSupport.HeaviestHourlyRefreshView, StringComparison.Ordinal))
             {
                 Assert.Equal(TimescaleSupport.HeaviestRefreshStartMinute, phase);
+            }
+            else if (HourlyRefreshLineage.IsHierarchical(view))
+            {
+                /* #8053: an hourly built from another hourly is on the hour's tail, after the compression band. */
+                Assert.InRange(
+                    phase,
+                    TimescaleSupport.HeaviestRefreshStartMinute + TimescaleSupport.HeaviestRefreshWindowMinutes + TimescaleSupport.CompressionPhaseBandMinutes,
+                    TimescaleSupport.MinutesInHourlyCadence - 1);
             }
             else
             {
@@ -290,12 +301,15 @@ public sealed class TimescaleContinuousAggregateTests
     [Fact]
     public void TheRefreshGrid_TilesTheHourlyCadence_AndTheCadenceKnobFiresNoLaterThanOneSlot()
     {
-        /* THE TILING IDENTITY: the three bands partition the hour. */
+        /* THE TILING IDENTITY: the bands partition the hour — the light band and its guard, the heaviest
+           refresh's window, the compression band, and the tail that holds every hourly built from another
+           hourly, one minute each (#8053). */
         Assert.Equal(
             TimescaleSupport.MinutesInHourlyCadence,
             TimescaleSupport.HeaviestRefreshStartMinute
             + TimescaleSupport.HeaviestRefreshWindowMinutes
-            + TimescaleSupport.CompressionPhaseBandMinutes);
+            + TimescaleSupport.CompressionPhaseBandMinutes
+            + HourlyRefreshLineage.HierarchicalPairs().Count);
 
         Assert.Equal(
             TimescaleSupport.HourlyRefreshScheduleSpan,
@@ -528,9 +542,11 @@ public sealed class TimescaleContinuousAggregateTests
     [Fact]
     public void TheLightBand_SeparatesEveryUnboundedCardinalityRefresh_WithoutWidening()
     {
+        /* #8053: an hourly built from another hourly is on the hour's tail, not in the light band. */
         var lightViews = TimescaleSupport.HourlyRefreshPhaseOrder
             .Where(view => !string.Equals(
                 view, TimescaleSupport.HeaviestHourlyRefreshView, StringComparison.Ordinal))
+            .Where(view => !HourlyRefreshLineage.IsHierarchical(view))
             .ToArray();
 
         /* THE BAND DID NOT WIDEN: the light minutes are exactly the band's own positions, so nothing was
@@ -587,11 +603,12 @@ public sealed class TimescaleContinuousAggregateTests
         /* THE MEASURED CASE, named because it is the pair #3185's readings were taken from. Kept beside the
            general sweep for the reason the query_store_stats family is kept above: the sweep says the
            property holds, this says the property covers the thing that was measured. */
+        /* Measured FORWARD round the hour (#8053): the corrected hourly is on the hour's tail, so the distance
+           that matters is from its minute across the hour boundary to the Query Store hourly's. */
+        var corrected = TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.QueryStoreStatsCorrectedHourlyView);
+        var queryStoreHourly = TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.QueryStoreStatsHourlyView);
         Assert.True(
-            Math.Abs(
-                TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.QueryStoreStatsHourlyView)
-                - TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.QueryStoreStatsCorrectedHourlyView))
-                * 60
+            ((queryStoreHourly - corrected + TimescaleSupport.MinutesInHourlyCadence) % TimescaleSupport.MinutesInHourlyCadence) * 60
             >= TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds,
             "the two views #3185 measured at 5.4x per-group cost are back inside one light-refresh ceiling "
             + "of each other");
@@ -618,6 +635,7 @@ public sealed class TimescaleContinuousAggregateTests
         var allUnbounded = TimescaleSupport.HourlyRefreshPhaseOrder
             .Where(view => !string.Equals(
                 view, TimescaleSupport.HeaviestHourlyRefreshView, StringComparison.Ordinal))
+            .Where(view => !HourlyRefreshLineage.IsHierarchical(view))
             .Where(TimescaleSupport.IsUnboundedCardinalityRefresh)
             .ToArray();
 

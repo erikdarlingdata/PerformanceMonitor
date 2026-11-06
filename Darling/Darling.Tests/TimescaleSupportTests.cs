@@ -2581,9 +2581,16 @@ LIMIT 1", connection))
            procedure_stats_io_hourly): fifteen hourly policies, fourteen of them light, so the light band spans
            (14 - 1) * 1 = 13 minutes (was 11), the heaviest refresh starts at 13 + the 4-minute guard = :17 (was
            :15), and its window is 60 - 17 - 24 = 19 minutes (was 21). */
-        Assert.Equal(14, TimescaleSupport.LightHourlyRefreshCount);
-        Assert.Equal(13, TimescaleSupport.LightBandSpanMinutes);
-        Assert.Equal(17, TimescaleSupport.HeaviestRefreshStartMinute);
+        /* #8053: the one hourly built from another hourly (the corrected Query Store hourly, from the interval
+           hourly) is on the hour's TAIL, after the compression band, so it runs after its source's slot and
+           window. It leaves the light band: thirteen light members span (13 - 1) * 1 = 12 minutes, the heaviest
+           refresh starts at 12 + the 4-minute guard = :16, and its window is 60 - 16 - 24 - 1 = 19 minutes — the
+           tail's minute is the light band's minute, so the window does not move. */
+        var tail = HourlyRefreshLineage.HierarchicalPairs().Count;
+        Assert.Equal(1, tail);
+        Assert.Equal(13, TimescaleSupport.LightHourlyRefreshCount);
+        Assert.Equal(12, TimescaleSupport.LightBandSpanMinutes);
+        Assert.Equal(16, TimescaleSupport.HeaviestRefreshStartMinute);
         Assert.Equal(
             TimescaleSupport.LightBandSpanMinutes + TimescaleSupport.CompressionPhaseGuardMinutes,
             TimescaleSupport.HeaviestRefreshStartMinute);
@@ -2591,7 +2598,8 @@ LIMIT 1", connection))
         Assert.Equal(
             TimescaleSupport.MinutesInHourlyCadence
             - TimescaleSupport.HeaviestRefreshStartMinute
-            - TimescaleSupport.CompressionPhaseBandMinutes,
+            - TimescaleSupport.CompressionPhaseBandMinutes
+            - tail,
             TimescaleSupport.HeaviestRefreshWindowMinutes);
 
         /* THE OPERATING ENVELOPE, as assertions rather than as prose. The whole grid rests on the heaviest
@@ -2635,13 +2643,17 @@ LIMIT 1", connection))
            what the light band shrank, so :36-:59 stays where #3174 left it. */
         /* #5329: fourteen light minutes :00-:13 and the heaviest at :17 (the two io hourlies); the compression
            band still does NOT move, :36-:59, because the window is the hour's remainder (17 + 19 = :36). */
-        Assert.Equal(new[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17 }, refreshMinutes);
+        /* #8053: thirteen light minutes :00-:12, the heaviest at :16, and the corrected Query Store hourly on the
+           hour's tail at :59, after the compression band. The band keeps its 24 minutes and moves back by the
+           light band's lost minute, :35-:58, so :59 is clear of it; the tail member's guard wraps onto :00-:02,
+           which the light band's own guard already excludes. */
+        Assert.Equal(new[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 59 }, refreshMinutes);
         Assert.Equal(TimescaleSupport.HourlyRefreshPhaseOrder.Count, refreshMinutes.Length);
 
         var heaviestMinute = TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.HeaviestHourlyRefreshView);
 
         Assert.Equal(
-            new[] { 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59 },
+            new[] { 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58 },
             TimescaleSupport.CompressionPhaseMinutes.ToArray());
         Assert.Equal(TimescaleSupport.CompressionPhaseBandMinutes, TimescaleSupport.CompressionPhaseMinutes.Count);
 
@@ -3688,24 +3700,28 @@ LIMIT 1", connection))
             /* #3653 (LC): the Query Store family leads (unchanged since before Q12), then the three
                successors in the three positions their legacies held — not appended behind the family, which
                is what keeps the grid at thirteen policies instead of sixteen. */
-            (TimescaleSupport.QueryStoreStatsHourlyView, 0),
-            (TimescaleSupport.QueryStoreStatsIntervalHourlyView, 17),
-            (TimescaleSupport.QueryStoreStatsCorrectedHourlyView, 4),
-            (TimescaleSupport.QueryStatsIntervalHourlyView, 8),
-            (TimescaleSupport.ProcedureStatsIntervalHourlyView, 1),
-            (TimescaleSupport.QueryStatsDbIntervalHourlyView, 2),
-            /* #5329: the two io hourlies, appended. The query one groups by statement, so it is the FOURTH
-               unbounded member and takes position 3 * 4 = 12; the procedure one is deployment-bounded and
-               takes the next free position, 3. The baseline members shift up past it. */
-            (TimescaleSupport.QueryStatsIoHourlyView, 12),
-            (TimescaleSupport.ProcedureStatsIoHourlyView, 3),
-            (TimescaleSupport.PerfmonIntervalBaselineView, 5),
-            (TimescaleSupport.WaitStatsIntervalBaselineView, 6),
-            (TimescaleSupport.SessionStatsBaselineView, 7),
-            (TimescaleSupport.QueryStatsBaselineView, 9),
-            (TimescaleSupport.BlockedProcessBaselineView, 10),
-            (TimescaleSupport.DeadlockBaselineView, 11),
-            (TimescaleSupport.MemoryBaselineView, 13),
+            /* #8053: the corrected Query Store hourly is built FROM the interval hourly, so it is answered by
+               identity with the hour's tail minute, :59, after its source's :16 slot and 19-minute window and
+               after the compression band. It leaves the light band, which holds positions 0-12. Because the tail
+               member's guard wraps onto the band's first three positions, the unbounded members start at position
+               3 and take every fourth from there: query_store_stats_hourly 3, query_stats_interval_hourly 7,
+               query_stats_io_hourly 11. The deployment-bounded members fill 0, 1, 2, 4, 5, 6, 8, 9, 10, 12 in
+               registry order. */
+            (TimescaleSupport.QueryStoreStatsHourlyView, 3),
+            (TimescaleSupport.QueryStoreStatsIntervalHourlyView, 16),
+            (TimescaleSupport.QueryStoreStatsCorrectedHourlyView, 59),
+            (TimescaleSupport.QueryStatsIntervalHourlyView, 7),
+            (TimescaleSupport.ProcedureStatsIntervalHourlyView, 0),
+            (TimescaleSupport.QueryStatsDbIntervalHourlyView, 1),
+            (TimescaleSupport.QueryStatsIoHourlyView, 11),
+            (TimescaleSupport.ProcedureStatsIoHourlyView, 2),
+            (TimescaleSupport.PerfmonIntervalBaselineView, 4),
+            (TimescaleSupport.WaitStatsIntervalBaselineView, 5),
+            (TimescaleSupport.SessionStatsBaselineView, 6),
+            (TimescaleSupport.QueryStatsBaselineView, 8),
+            (TimescaleSupport.BlockedProcessBaselineView, 9),
+            (TimescaleSupport.DeadlockBaselineView, 10),
+            (TimescaleSupport.MemoryBaselineView, 12),
         };
 
         Assert.Equal(expected.Length, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
