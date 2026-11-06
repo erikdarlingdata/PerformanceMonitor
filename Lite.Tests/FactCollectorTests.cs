@@ -542,6 +542,48 @@ public class FactCollectorTests : IClassFixture<SharedDuckDbFixture>
         Assert.DoesNotContain(jobs.Metadata.Keys, k => k.Contains("name", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// #7883: running_jobs holds one row per running job per collection tick, so one Agent job that stays
+    /// past its limit across five ticks wrote five rows. The counts are jobs, not rows (the advice reads
+    /// "N Agent jobs" and the severity ramp saturates at three), so that one run must read as 1 in the
+    /// fact's value, running_long_count and running_count.
+    /// </summary>
+    [Fact]
+    public async Task CollectFacts_RunningJobs_OneLongJobAcrossManyTicks_CountsOnce()
+    {
+        var facts = await SeedAndCollectAsync(async s =>
+        {
+            await s.SeedTestServerAsync();
+            await s.SeedRunningJobTicksAsync("Nightly Index Maintenance", "job-a", ticks: 5, isRunningLong: true);
+        });
+
+        var jobs = facts["RUNNING_JOBS"];
+        Assert.Equal(1, jobs.Value);
+        Assert.Equal(1, jobs.Metadata["running_long_count"]);
+        Assert.Equal(1, jobs.Metadata["running_count"]);
+        Assert.Equal("Nightly Index Maintenance", jobs.ObjectName);
+    }
+
+    /// <summary>
+    /// #7883: two long jobs and one not-long job, each seen on several ticks, read as 2 long of 3 running.
+    /// </summary>
+    [Fact]
+    public async Task CollectFacts_RunningJobs_TwoLongJobsAcrossManyTicks_CountTwo()
+    {
+        var facts = await SeedAndCollectAsync(async s =>
+        {
+            await s.SeedTestServerAsync();
+            await s.SeedRunningJobTicksAsync("Nightly Index Maintenance", "job-a", ticks: 5, isRunningLong: true);
+            await s.SeedRunningJobTicksAsync("Weekly CHECKDB", "job-b", ticks: 3, isRunningLong: true, percentOfAverage: 250);
+            await s.SeedRunningJobTicksAsync("Log Backup", "job-c", ticks: 4, isRunningLong: false, percentOfAverage: 100);
+        });
+
+        var jobs = facts["RUNNING_JOBS"];
+        Assert.Equal(2, jobs.Value);
+        Assert.Equal(2, jobs.Metadata["running_long_count"]);
+        Assert.Equal(3, jobs.Metadata["running_count"]);
+    }
+
     [Fact]
     public async Task CollectFacts_SessionStats_ReturnsTotalConnections()
     {
