@@ -29,7 +29,8 @@ public sealed class McpLongQueryTools
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(QueryTagReadScope.ParameterDescription)] string? tag = null,
         [Description(IncludeMonitorDescription)] bool include_monitor = false,
-        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
+        McpCollectorRunTimes? runTimes = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -84,7 +85,10 @@ public sealed class McpLongQueryTools
                 /* #5244 round 2 (L3): the twin of Darling's. The floor probe is not database-filtered, so a null floor (no effective_start)
                    means the store holds no long-query row for this server in the window, and only then does the answer send the reader to
                    the opt-in switch; with rows for other databases the collector is on. */
-                var collectorMayBeOff = (database == null && !tagScope.Active) || emptyNotice.EffectiveStart is null;
+                /* #7684 item 1: and only when the schedule says it is off; a collector that is on, with nothing captured in the window,
+                   is not told to switch itself on. Null (no schedules, or the collector is not in them) leaves the rule above alone. */
+                var collectorMayBeOff = runTimes?.IsCollectorEnabled(resolved.ServerId, "long_query_completions") != true
+                    && ((database == null && !tagScope.Active) || emptyNotice.EffectiveStart is null);
                 return await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.StatusForDatabase("empty",
                     "No long-running query completions found in the specified time range" + McpBlockingTools.ForChosenDatabase(database)
                         + (tagScope.Active ? $" for query tag '{tagScope.Requested}'" : "")

@@ -24,6 +24,7 @@ import { el, mount, loadingStrip, waitingStrip, retryButton, retryOnceWhenBusy, 
 import { renderLineChart, zoomChip, getChartHidden, setChartHidden, nextHiddenKeys, chartZoomScope, renderBarChart, renderPieChart, renderScatterChart, CATEGORICAL_COLORS } from "./charts.js";
 import { navigateServer, gridTable } from "./panels.js";
 import { getCatalog } from "./views-api.js";
+import { savedViewWarnings } from "./view-save-warnings.js";
 
 /** The most series a time chart draws before pooling the rest into a "+N more" note (readability + palette size). */
 const MAX_SERIES = 8;
@@ -284,16 +285,24 @@ export async function renderComposedInto(body, panelSpec, scope, opts = {}) {
   if (isTimeSeriesViz(panelSpec.viz) && Array.isArray(data.annotations) && data.annotations.length) {
     annotationMeta = await annotationMetaMap().catch(() => null);
   }
+  /* #7668: a panel with a second line names each line from its measure's catalog display name, so it needs the catalog's names. */
+  let measureNames = null;
+  if (isTimeSeriesViz(panelSpec.viz) && panelSpec.overlay) {
+    measureNames = await measureNameMap().catch(() => null);
+  }
   try {
     /* #2802: resolve the panel's x-axis DOMAIN window from the SAME inputs buildRunBody used (zoom → pin →
        scope), so the drawn axis matches the window the rows were fetched over. renderComposedResult has no
        `scope`, so it is resolved here (where scope + zoom both live) and threaded through opts. */
     const chartWindow = resolveChartWindow(panelSpec, scope, opts.zoom);
-    const nodes = [renderComposedResult(data, panelSpec, { ...opts, annotationMeta, chartWindow, scope })];
+    const nodes = [renderComposedResult(data, panelSpec, { ...opts, annotationMeta, measureNames, chartWindow, scope })];
     /* The run endpoint's partial-window notice (#1665, #4953): a caveat that the panel did not cover the whole
        requested window. The chosen tier's retention could not cover it, OR the panel's own data starts after
        the window does, OR the row cap truncated the result. Good data, honestly caveated, above the chart.
        No notice means the window was served whole. */
+    /* #7668: the validator's warnings for this panel (a /sec perfmon counter charted as its running total), the same sentences a save shows (#7565). They
+       are advice about the definition, drawn as a note on the panel; the stored definition is never changed. A panel with none draws nothing extra. */
+    for (const warning of savedViewWarnings(data).reverse()) nodes.unshift(noticeStrip(warning));
     if (typeof data.notice === "string" && data.notice) nodes.unshift(noticeStrip(composedNoticeText(data)));
     mount(body, nodes);
   } catch (e) {
@@ -415,7 +424,8 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
     panelSpec.overlay && !groupDims.length && (panelSpec.viz === "line" || panelSpec.viz === "area")
       ? {
           key: "value2",
-          label: humanize(panelSpec.overlay.measure || "overlay"),
+          /* #7668: the measure's display name, and which axis it is read on (the right axis carries the line's colour). */
+          label: measureName(panelSpec.overlay.measure || "overlay", opts.measureNames) + " (right axis)",
           color: OVERLAY_COLOR,
           formatValue: (v, o) => formatComposedValue(v, panelSpec.overlay.unit || "", o),
           unit: axisUnit(panelSpec.overlay.unit || ""),
@@ -434,7 +444,7 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
          host_name), so a plain grouped panel may legitimately hold a row whose value IS "(other)" — sniffing the
          string alone would strip that real member's drill and hold it out of the series cap. */
       const hasResidual = isRankedTimeSeries(panelSpec) && panelSpec.includeOther === true;
-      const { points, series, hidden } = pivotTimeSeries(rows, groupDims, measureLabel(panelSpec), hasResidual);
+      const { points, series, hidden } = pivotTimeSeries(rows, groupDims, overlaySeries ? measureName(panelSpec.ratio || panelSpec.measure, opts.measureNames) : measureLabel(panelSpec), hasResidual);
       /* #5247: the legend hide/isolate state is held under the panel's identity and the page address + range, like the
          zoom of a built-in chart, so it survives the poll's rebuild. A panel with no slot (the editor preview) has no
          stable identity, so it gets no switch rather than a key that might collide. */
@@ -775,6 +785,12 @@ function measureLabel(panelSpec) {
   return panelSpec.title || panelSpec.measure || panelSpec.ratio || "Metric";
 }
 
+/** #7668: a measure's display name from the catalog map (key -> name), else its key humanized. A panel with ONE line keeps the panel's title (measureLabel);
+ *  a panel with a second line names each line, since the title belongs to neither. */
+function measureName(key, names) {
+  return (names && names.get(key)) || humanize(key);
+}
+
 /** snake_case -> Title Case, mirroring derive.js's humanizeKey (kept local so this module imports nothing DOM-y). */
 function humanize(key) {
   return String(key == null ? "" : key)
@@ -842,6 +858,21 @@ function annotationMetaMap() {
     });
   }
   return _annotationMetaPromise;
+}
+
+/** A cached key -> display name map of the catalog's measures and ratios (#7668), for the legend of a panel with a second line. */
+let _measureNamesPromise = null;
+function measureNameMap() {
+  if (!_measureNamesPromise) {
+    _measureNamesPromise = getCatalog().then((cat) => {
+      const map = new Map();
+      for (const m of ((cat && cat.compose) || {}).measures || []) {
+        if (m && m.key && m.displayName) map.set(m.key, m.displayName);
+      }
+      return map;
+    });
+  }
+  return _measureNamesPromise;
 }
 
 /**

@@ -1061,9 +1061,14 @@ public static class FactAdvice
         if (cap is null)
             return string.Empty;
         var total = FactValue(facts, "MEMORY_TOTAL_PHYSICAL_MB");
-        var sb = new StringBuilder(cap.Value >= 2147483647L
-            ? "This server's max server memory is at its unlimited default"
-            : $"This server's max server memory is set to {cap.Value:N0} MB");
+        /* #7699 item 6: " of N MB physical RAM" read correctly after "is set to 51,200 MB" and wrongly after "unlimited default", as if the
+           default were the size of the server. The unlimited branch states the RAM as a fact about the server instead. */
+        if (cap.Value >= 2147483647L)
+            return total is > 0
+                ? $"This server's max server memory is at its unlimited default, on a server with {total.Value:N0} MB of physical RAM."
+                : "This server's max server memory is at its unlimited default.";
+
+        var sb = new StringBuilder($"This server's max server memory is set to {cap.Value:N0} MB");
         if (total is > 0)
             sb.Append($" of {total.Value:N0} MB physical RAM");
         sb.Append('.');
@@ -2080,7 +2085,7 @@ public static class FactAdvice
         var windowMean = windowMeanKey is null ? null : FactMeta(facts, key, windowMeanKey);
         var meanSigma = FactMeta(facts, key, "mean_deviation_sigma");
         if (windowMean is not null && meanSigma is not null)
-            inv.Append($"; the window's mean of {fmt(windowMean.Value)} sat {SigmaText(meanSigma.Value)} above it (the detector fires only when the mean clears its bar as well, so this is the window running high, not one hot sample)");
+            inv.Append($"; the window's mean of {fmt(windowMean.Value)} sat {SigmaText(meanSigma.Value)} above it (the average was high across the window, so this is not one hot sample)");
         inv.Append($". {meaning} This is a deviation from normal for this time of day and week, not necessarily a sustained problem — check whether it lines up with a workload change, a deploy, or a one-off job before treating it as chronic.");
 
         var rem =
@@ -2327,10 +2332,10 @@ public static class FactAdvice
                 ? ""
                 : meanModifiedZ > 0
                     ? $"; the window's mean of {windowMean.Value:0.#} ms/sec sat {SigmaText(meanModifiedZ)} above its normal level " +
-                      "(the detector fires only when the mean clears its bar as well, so this is the profile running heavy across the window, not one hot collection)"
+                      "(the average was high across the window, so this is not one hot collection)"
                     : mean > 0
                         ? $"; the window's mean of {windowMean.Value:0.#} ms/sec was roughly {windowMean.Value / mean:0.#}× that baseline " +
-                          "(the detector fires only when the mean clears its bar as well, so this is the profile running heavy across the window, not one hot collection)"
+                          "(the average was high across the window, so this is not one hot collection)"
                         : "";
             inv =
                 $"The all-types wait rate peaked at about {current:0.#} ms/sec this window — roughly {ratio:0.#}× the " +

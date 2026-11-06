@@ -75,8 +75,7 @@ public sealed class McpPvsTools
                            await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "pvs_stats", awsRdsKind: AwsRdsKind.None),
                            McpDatabaseSelection.Describe(names))
                     ?? McpHelpers.StatusForDatabase("empty",
-                        "No PVS data collected for this server. The collector reads sys.dm_tran_persistent_version_store_stats " +
-                        "(SQL Server 2019+); a server with no rows either predates ADR or has not completed a pvs_stats cycle yet.",
+                        McpEngineCapability.PvsNoRowsMessage(serverManager, resolved.ServerId),
                         McpDatabaseSelection.Describe(names));
             }
 

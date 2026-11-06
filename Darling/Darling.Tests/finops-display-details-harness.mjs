@@ -131,7 +131,7 @@ try {
     status: "ok", server: "srv-a", view: "high_impact", hours_back: 24,
     rows: ["high", "medium", "low"].map((b, i) => ({ impact_score: 90 - i * 30, impact_band: b, database_name: "Sales", query_hash: "0x0" + i, total_executions: 1 })),
   });
-  out.band = { high: sevOf(impact, "high"), medium: sevOf(impact, "medium"), low: sevOf(impact, "low") };
+  out.band = { high: sevOf(impact, "High"), medium: sevOf(impact, "Medium"), low: sevOf(impact, "Low") };
 
   const osOf = async (text) => {
     const root = await build(inventory, "get_finops_inventory", { status: "ok", total_servers: 1, truncated: false, servers: [{ server: "srv-a", host_os_version: text, health_band: "good" }] });
@@ -140,6 +140,8 @@ try {
   out.hostOsFallback = (await osOf("Windows Server 2016 Datacenter 10.0 <X64> (Build 14393: ) (Hypervisor)")).includes("Windows Server 2016 Datacenter 10.0") ? "raw" : "short";
   out.hostOsFallbackText = (await osOf("Windows Server 2016 Datacenter 10.0 <X64> (Build 14393: ) (Hypervisor)")).includes("Windows Server 2016 Datacenter") ? "named" : "missing";
   out.hostOsLinux = (await osOf("Ubuntu 20.04.6 LTS")).includes("Ubuntu 20.04.6 LTS");
+  /* #7699: a Windows NT value keeps its number (HostOsText.Clean does), so the page copy of the cut must agree with the read. */
+  out.hostOsNt = (await osOf("Windows NT 6.3 <X64> (Build 9600: ) (Hypervisor)")).includes("Windows NT 6.3");
 
   out.ram = sweeps.ramText({ effective_bytes: 4 * 1024 ** 3, total_bytes: 4 * 1024 ** 3, source: "GlobalMemoryStatusEx" });
   const rowText = (rows) => rows.map((r) => r[0] + ": " + r[1]).join(" | ");

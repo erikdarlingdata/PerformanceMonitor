@@ -341,7 +341,51 @@ public sealed class WebChartGapBehaviourTests
     }
 
     /// <summary>
-    /// #7544: <c>Number(null)</c> is 0, which made a row with no figure a sample at zero (one dot, and "Whole range" over grids with no rows).
+    /// #7692: a read with rows only where queries ran (Query Duration Trend on a quiet server: steps of 12, 1, 23, 1, 1, 256 and 9 minutes) has uneven
+    /// steps, so the chart read it as events and drew one diagonal across the 256 minute step. A panel that names the reply's bucket (bucketKey) and the
+    /// range strip above Top Queries (bucketed) break at that step, and a busy server's line breaks only at its one hole.
+    /// </summary>
+    [Fact]
+    public void AQuietServersQueryDurationTrend_BreaksAtTheHole_OnTheChartAndTheStrip()
+    {
+        var r = Run();
+        int[] Runs(string scenario) => r.GetProperty(scenario).GetProperty("runs").EnumerateArray().Select(e => e.GetInt32()).ToArray();
+
+        /* rows at minutes 0, 12, 13 | 36, 37, 38 | 294, 303: no polyline holds a point from each side of the 256 minute step */
+        Assert.Equal(new[] { 3, 3, 2 }, Runs("quietPanel"));
+        Assert.Equal(0, r.GetProperty("quietPanel").GetProperty("dots").GetInt32());
+        Assert.Equal(new[] { 8 }, Runs("quietPanelNoKey"));
+        Assert.Equal(new[] { 61, 61 }, Runs("busyPanel"));
+        Assert.Equal(3, N(r, "quietStrip", "lineRuns"));
+        Assert.Equal(1, N(r, "quietStripNoBucketed", "lineRuns"));
+        var g = r.GetProperty("quietStripGaps");
+        Assert.Equal("null", g.GetProperty("noBucketInReply").GetString());
+        /* the harness prints this one through String() (the sibling above is "null" when no step applies), so the step is its text */
+        Assert.Equal("60000", g.GetProperty("stepWins").GetString());
+    }
+
+    /// <summary>
+    /// #7692: the same quiet server, but through the page's own wiring instead of a strip object and a bucketKey the test builds. The Queries tab is built from
+    /// SERVER_TABS and every read it makes answers with the 256 minute hole, so the three bucketKey descriptors in server-tabs.js, the bucketed flag in
+    /// stripOf and the row times rankedSlicer hands stripGap are each in the path. Each chart and each strip breaks at the hole and nowhere else.
+    /// </summary>
+    [Fact]
+    public void TheQueriesTab_OnAQuietServer_BreaksEveryDurationChartAndStripAtTheHole()
+    {
+        var r = Run().GetProperty("pageWiring");
+        int[]? Runs(string name) => r.GetProperty(name).ValueKind == JsonValueKind.Null ? null : r.GetProperty(name).EnumerateArray().Select(e => e.GetInt32()).ToArray();
+
+        /* rows at minutes 0, 12, 13 | 36, 37, 38 | 294, 303: no polyline holds a point from each side of the 256 minute step */
+        Assert.Equal(new[] { 3, 3, 2 }, Runs("queryDuration"));
+        Assert.Equal(new[] { 3, 3, 2 }, Runs("executionsPerSecond"));
+        Assert.Equal(new[] { 3, 3, 2 }, Runs("procedureDuration"));
+        /* the strips draw one run per stretch of the same rows */
+        Assert.Equal(3, r.GetProperty("queryStrip").GetInt32());
+        Assert.Equal(3, r.GetProperty("procedureStrip").GetInt32());
+    }
+
+    /// <summary>
+    /// #7544: <c>Number(null)</c> is 0,which made a row with no figure a sample at zero (one dot, and "Whole range" over grids with no rows).
     /// A strip row with no figure is no sample. The step a strip is judged by is its own, else the reply's bucket, else the series' own cadence.
     /// </summary>
     [Fact]

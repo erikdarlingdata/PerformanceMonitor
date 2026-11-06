@@ -409,9 +409,9 @@ public static partial class PgTargetAdvice
         var meanSentence = windowMean is not { } meanValue
             ? string.Empty
             : meanModifiedZ > 0
-                ? $" The window's mean rate was {meanValue.ToString("0.#", CultureInfo.InvariantCulture)} ms/sec against a routine of {mean.ToString("0.#", CultureInfo.InvariantCulture)} — {Sigma(meanModifiedZ)} times its usual variation above it — so the whole window sat high, not one delta; the detector fires only when the mean clears its bar as well as the peak."
+                ? $" The window's mean rate was {meanValue.ToString("0.#", CultureInfo.InvariantCulture)} ms/sec against a routine of {mean.ToString("0.#", CultureInfo.InvariantCulture)} — {Sigma(meanModifiedZ)} times its usual variation above it — so the whole window sat high, not one delta."
                 : meanRatio > 0 || mean > 0
-                    ? $" The window's mean rate was {meanValue.ToString("0.#", CultureInfo.InvariantCulture)} ms/sec against a routine of {mean.ToString("0.#", CultureInfo.InvariantCulture)} — about {(meanRatio > 0 ? meanRatio : meanValue / mean).ToString("0.#", CultureInfo.InvariantCulture)}× it — so the whole window sat high, not one delta; the detector fires only when the mean clears its bar as well as the peak."
+                    ? $" The window's mean rate was {meanValue.ToString("0.#", CultureInfo.InvariantCulture)} ms/sec against a routine of {mean.ToString("0.#", CultureInfo.InvariantCulture)} — about {(meanRatio > 0 ? meanRatio : meanValue / mean).ToString("0.#", CultureInfo.InvariantCulture)}× it — so the whole window sat high, not one delta."
                     : string.Empty;
         var deviation = modifiedZ > 0
             ? $"{Sigma(modifiedZ)} times its usual variation above its {mean.ToString("0.#", CultureInfo.InvariantCulture)} ms/sec baseline"

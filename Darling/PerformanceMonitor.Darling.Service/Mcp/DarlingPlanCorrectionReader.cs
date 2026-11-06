@@ -189,6 +189,10 @@ WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM plan_correction WHERE server_id = $1)
 AND   ($2::text[] IS NULL OR database_name = ANY($2))
 ) AS d
+/* #7699 item 2: tempdb is on the collector's list but sys.database_automatic_tuning_options has no row for it, so it
+   came back as a name over empty states. A row with no state at all is left out. */
+WHERE d.force_last_good_plan_desired_state IS NOT NULL
+OR    d.force_last_good_plan_actual_state IS NOT NULL
 ORDER BY lower(database_name), database_name";
 
     /// <summary>One recommendation row the engine produced (or acted on) in the window.</summary>
