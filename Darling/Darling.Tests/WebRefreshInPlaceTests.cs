@@ -129,6 +129,17 @@ public sealed class WebRefreshInPlaceTests
     }
 
     [Fact]
+    public void WholeGridSwap_WhoseLastPanelToAnswerHidesItself_StillLands()
+    {
+        // #7934: hiding a panel changes its attributes only, so the swap's watcher must see attribute changes as well as children.
+        if (!TryRun("hiddenLastPanelSwap", out var r)) return;
+        Assert.False(r.GetProperty("swappedBeforeHide").GetBoolean());
+        Assert.Equal(1, r.GetProperty("doneRuns").GetInt32());
+        Assert.True(r.GetProperty("swapped").GetBoolean(), "the grid was not swapped in after the last panel hid itself");
+        Assert.Contains("new", r.GetProperty("textAfter").GetString());
+    }
+
+    [Fact]
     public void ServerPoll_OfAGridWithALoneHalfWidthPanel_RefreshesPanelsInPlace_AndKeepsTheSoloMark()
     {
         // #7534: span-solo sits on the live panel only, so it must not make the poll fall back to a whole-grid swap or be dropped by it.

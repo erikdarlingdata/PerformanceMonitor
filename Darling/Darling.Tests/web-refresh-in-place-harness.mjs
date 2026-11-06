@@ -9,21 +9,27 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+/* As in a browser, an observer is told only about the kinds of change it asked for: a child added or removed reaches one that asked for
+   `childList`, and `hidden` or `style` set on a node reaches one that asked for `attributes` (with that name in its `attributeFilter`, when
+   it gave one). An observer that watches children only never hears of a panel that hides itself. */
 const observers = [];
-const notify = () => queueMicrotask(() => observers.slice().forEach((o) => o.cb()));
+const wants = (init, kind, name) => !!init[kind] && (kind !== "attributes" || !init.attributeFilter || init.attributeFilter.includes(name));
+const notify = (kind = "childList", name = null) => queueMicrotask(() => observers.slice().forEach((o) => { if (o.inits.some((i) => wants(i, kind, name))) o.cb(); }));
 globalThis.MutationObserver = class {
-  constructor(cb) { this.cb = cb; }
-  observe() { observers.push(this); }
-  disconnect() { const i = observers.indexOf(this); if (i >= 0) observers.splice(i, 1); }
+  constructor(cb) { this.cb = cb; this.inits = []; }
+  observe(target, init) { this.inits.push(init || {}); if (!observers.includes(this)) observers.push(this); }
+  disconnect() { const i = observers.indexOf(this); if (i >= 0) observers.splice(i, 1); this.inits = []; }
 };
 
 class FakeNode {
   constructor(tag) {
     this.tag = tag; this.children = []; this.attrs = {}; this.listeners = {}; this.parent = null; this._text = "";
-    this.className = ""; this.dataset = {}; this.value = ""; this.checked = false; this.disabled = false; this.hidden = false; this.isRoot = false;
-    this.style = {};
+    this.className = ""; this.dataset = {}; this.value = ""; this.checked = false; this.disabled = false; this._hidden = false; this.isRoot = false;
+    this.style = { _display: "", get display() { return this._display; }, set display(v) { this._display = String(v); notify("attributes", "style"); } };
     this.classList = { add() {}, remove() {}, toggle() {}, contains: () => false };
   }
+  get hidden() { return this._hidden; }
+  set hidden(v) { this._hidden = v; notify("attributes", "hidden"); }
   get firstChild() { return this.children[0] || null; }
   get nextSibling() { const i = this.parent ? this.parent.children.indexOf(this) : -1; return i >= 0 ? this.parent.children[i + 1] || null : null; }
   get isConnected() { let n = this; while (n.parent) n = n.parent; return n.isRoot; }
@@ -299,6 +305,36 @@ try {
       out.sameShown = live.children[1] === shownLive;
       out.sameHidden = live.children[0] === hiddenLive;
       out.textAfter = text(shownLive);
+    },
+    /* #7934: the whole-grid swap (a different set of panels) waits for every staged panel to draw. A panel that hides itself
+       (hideWhenNotCollected) sets `hidden` and `style.display` and leaves its loading strip, so when it is the last to answer the
+       only change is to its attributes. The swap must still land. */
+    async hiddenLastPanelSwap() {
+      const rip = await load("refresh-in-place.js");
+      const panel = (title, body, loading) => {
+        const p = new FakeNode("div"); p.className = "panel"; p.setAttribute("data-panel", title); p.setAttribute("data-title", title);
+        const b = new FakeNode("div"); b.className = "panel-body"; p.appendChild(b);
+        const c = new FakeNode("div"); c.className = loading ? "strip loading" : "stub-result"; c.textContent = body; b.appendChild(c);
+        return p;
+      };
+      const live = new FakeNode("div"); live.className = "panel-grid"; live.isRoot = true;
+      live.appendChild(panel("Stats", "old", false));
+      const stats = panel("Stats", "Loading", true);
+      const cpu = panel("Instance CPU", "Loading", true);
+      let doneRuns = 0;
+      rip.whenSettled([stats, cpu], () => { doneRuns++; });
+      rip.refreshGridInPlace(live, [stats, cpu]);
+      /* the Stats panel answers first and draws */
+      const strip = stats.byClass("loading")[0]; strip.className = "stub-result"; strip.textContent = "new";
+      await settle();
+      out.swappedBeforeHide = live.children[0] === stats;
+      /* the Instance CPU panel answers last, as not collected: it hides itself the way panels.js does, and nothing else changes */
+      cpu.style.display = "none";
+      cpu.hidden = true;
+      await settle();
+      out.doneRuns = doneRuns;
+      out.swapped = live.children.length === 2 && live.children[0] === stats && live.children[1] === cpu;
+      out.textAfter = text(live);
     },
     /* #7534: a lone half-width panel carries `span-solo` on the live grid. A poll must still take the per-panel path (the same elements
        stay) and the panel must keep the mark. */
