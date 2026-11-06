@@ -326,7 +326,7 @@ out.formatters = {
   traceFlag: [3895, 1117, 12345].map((v) => util.applyFormat("id", v)),
   /* #7726: the unreachable-since sentence has no seconds ("2026-11-05 16:52 UTC"); the page prints it in local time, as the retry time beside it. */
   localSentence: util.localizeIsoText("Server unreachable since 2026-11-05 16:52 UTC: refused. Next retry at 2026-11-05 17:51:35 UTC."),
-  localExpected: [new Date("2026-11-05T16:52:00Z").toLocaleString(), new Date("2026-11-05T17:51:35Z").toLocaleString()],
+  localExpected: [new Date("2026-11-05T16:52:00Z").toLocaleString(undefined, { year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" }),new Date("2026-11-05T17:51:35Z").toLocaleString()],
   noZoneKept: util.localizeIsoText("saw 2026-11-05 16:52 here and 2026-11-05T16:52 there"),
   /* #7726: backtick spans in advice text become code elements whose text is the span as text (never markup). */
   adviceSpans: findings.adviceNodes("Set `max server memory` (see `sp_configure 'max server memory (MB)', 1000`) and a stray ` tick <b>x</b>.").map((n) => (typeof n === "string" ? "t:" + n : n.tag + ":" + n.text)),

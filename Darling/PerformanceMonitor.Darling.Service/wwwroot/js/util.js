@@ -455,7 +455,8 @@ export function localizeIsoText(text) {
     const time = hm.length === 5 ? hm + ":00" : hm;
     const iso = date + "T" + time + (frac ? "." + frac.slice(0, 3).padEnd(3, "0") : "") + (zone === " UTC" ? "Z" : zone || "");
     const d = parseUtc(iso);
-    return d ? d.toLocaleString() : m;
+    /* A stamp written without seconds is shown without them, so it does not claim ":00" beside a tile that holds the real seconds. */
+    return d ? (hm.length === 5 ? d.toLocaleString(undefined, { year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" }) : d.toLocaleString()) : m;
   });
 }
 
