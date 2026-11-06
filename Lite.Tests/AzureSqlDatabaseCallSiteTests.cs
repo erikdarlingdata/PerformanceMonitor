@@ -125,7 +125,7 @@ public sealed class AzureSqlDatabaseCallSiteTests
         var mainWindow = Code("Lite/MainWindow.xaml.cs");
         Assert.Contains("status.HasMsdbAccess, status.SqlEngineEdition,", mainWindow, StringComparison.Ordinal);
 
-        var load = MethodBody("Lite/Controls/ServerTab.Refresh.cs", "Task RefreshVisibleTabAsync(");
+        var load = MethodBody("Lite/Controls/ServerTab.Refresh.cs", "Task<string?> RefreshVisibleTabAsync(");
         var fallback = load.IndexOf("await RefreshEngineEditionAsync();", StringComparison.Ordinal);
         Assert.True(fallback >= 0 && fallback < load.IndexOf("switch (MainTabControl.SelectedIndex)", StringComparison.Ordinal),
             "RefreshVisibleTabAsync must fill the edition in before it dispatches to any loader");

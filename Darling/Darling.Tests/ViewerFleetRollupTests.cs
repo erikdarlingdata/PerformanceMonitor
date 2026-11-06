@@ -1200,7 +1200,7 @@ public sealed class ViewerFleetDeadlockCoverageTests
         var row = xaml[start..end];
 
         /* The total is still there, and the coverage is in the same row. */
-        Assert.Contains("{Binding TotalDeadlocks, StringFormat='Deadlocks: {0}'}", row, StringComparison.Ordinal);
+        Assert.Contains("{Binding TotalDeadlocksText}", row, StringComparison.Ordinal);
         Assert.Contains("{Binding DeadlockCoverageText}", row, StringComparison.Ordinal);
 
         /* Visible without hovering: the text is bound to Text, and the detail hangs off BOTH the count and

@@ -63,11 +63,14 @@ public static class OverviewCardView
     /// <see cref="FleetRollup.FilteredOfTotal"/> carries the enabled fleet size, so the subtitle reads "Monitoring 2 of
     /// 9 enabled servers". The blocking and deadlock totals follow the search too: the fleet-wide <paramref name="totals"/>
     /// read counts every server, so a narrowed panel sums the matching cards' own counts instead, and the totals
-    /// describe the same servers as the band counts beside them. The needs-attention toggle does not narrow it: the
-    /// panel is the shortlist that toggle opens.
+    /// describe the same servers as the band counts beside them. A null <paramref name="totals"/> is a failed
+    /// fleet-wide read: with no search the roll-up says the totals are unavailable, and with one the matched cards'
+    /// counts stand on their own, since each came from that card's own summary read and a card whose read failed is
+    /// not in <paramref name="cards"/>. The needs-attention toggle does not narrow it: the panel is the shortlist that
+    /// toggle opens.
     /// </summary>
     public static FleetRollup BuildRollup(
-        IReadOnlyList<ServerSummaryItem> cards, FleetTotals totals, int registeredCount, string? search)
+        IReadOnlyList<ServerSummaryItem> cards, FleetTotals? totals, int registeredCount, string? search)
     {
         ArgumentNullException.ThrowIfNull(cards);
 

@@ -37,7 +37,7 @@ public sealed class ViewerOverviewBlockingLaneDataStartPinTests
     [Fact]
     public void RefreshAsync_RunsTheNoteAfterTheLanesAreDrawn_AndKeepsTheProbesOutOfTheMainWhenAll()
     {
-        var refresh = Between(Code(), "public async Task RefreshAsync(", "private async Task ShowBlockingLaneDataStartAsync(");
+        var refresh = Between(Code(), "public async Task<string?> RefreshAsync(", "private async Task ShowBlockingLaneDataStartAsync(");
 
         var whenAll = Between(refresh, "await Task.WhenAll(", ");");
         Assert.DoesNotContain("DataStart", whenAll, StringComparison.Ordinal);
