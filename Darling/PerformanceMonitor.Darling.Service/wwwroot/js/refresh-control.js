@@ -25,9 +25,10 @@ export function buildRefreshControl(current, onChange) {
  * @param {string} current  the effective page choice key ("30s" | "1m" | "5m" | "off")
  * @param {(choice: string) => void} onChange  called with the new key when the operator picks one
  * @param {() => void} onRefresh  called once per Refresh click
- * @returns {{ root: HTMLElement, select: HTMLElement, setBusy: (busy: boolean) => void, setChoice: (choice: string) => void }}
+ * @returns {{ root: HTMLElement, select: HTMLElement, setBusy: (busy: boolean) => void, setChoice: (choice: string) => void, setIntervalShown: (shown: boolean) => void }}
  *   `setBusy` disables the Refresh button (aria-busy, "Refreshing…" title) while reads run; `setChoice` shows a choice
- *   another tab saved.
+ *   another tab saved; `setIntervalShown(false)` blanks the interval label and select (#7690) on a page the interval does not
+ *   apply to, and leaves the Refresh button where it was, so the row keeps its height and place from page to page.
  */
 export function buildPageRefreshControl(current, onChange, onRefresh) {
   const select = el("select", { class: "refresh-select", id: "page-refresh-select", "aria-label": "Auto-refresh interval",
@@ -47,8 +48,14 @@ export function buildPageRefreshControl(current, onChange, onRefresh) {
     button.setAttribute("title", busy ? "Refreshing…" : idleTitle);
   };
   const setChoice = (choice) => { select.value = choice; };
+  const intervalLabel = el("span", { text: "Auto-refresh:" });
+  const setIntervalShown = (shown) => {
+    const visibility = shown ? "" : "hidden";
+    intervalLabel.style.visibility = visibility;
+    select.style.visibility = visibility;
+  };
   const root = el("div", { class: "refresh-control page-refresh-control", id: "page-refresh-control" }, [
-    el("span", { text: "Auto-refresh:" }), select, button,
+    intervalLabel, select, button,
   ]);
-  return { root, select, setBusy, setChoice };
+  return { root, select, setBusy, setChoice, setIntervalShown };
 }

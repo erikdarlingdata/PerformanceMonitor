@@ -149,7 +149,7 @@ internal static class DarlingLongQueryReader
                 LogicalReads = reader.IsDBNull(13) ? null : reader.GetInt64(13),
                 Writes = reader.IsDBNull(14) ? null : reader.GetInt64(14),
                 RowCount = reader.IsDBNull(15) ? null : reader.GetInt64(15),
-                Result = reader.IsDBNull(16) ? null : reader.GetString(16),
+                Result = reader.IsDBNull(16) ? null : PerformanceMonitor.Common.LongQueryResultText.Word(reader.GetString(16)),
                 StatementText = reader.IsDBNull(17) ? null : reader.GetString(17),
                 ObjectName = reader.IsDBNull(18) ? null : reader.GetString(18),
             });
