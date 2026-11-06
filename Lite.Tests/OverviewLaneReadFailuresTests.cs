@@ -20,7 +20,7 @@ namespace Lite.Tests;
 /// What Lite's Overview says when one of its ten lane reads fails, through the shared <see cref="OverviewLaneReadFailures"/>.
 /// Each lane is drawn from its own read, so one failure costs one lane, and the tab's status line names the reads that failed
 /// instead of saying "Last refresh". A failed baseline read alone is not a failed refresh: the lane drew and only its band is
-/// missing. The last three tests pin the tab's refresh pass itself (<see cref="ServerTab.RefreshStagesAsync"/>): a failed lane
+/// missing. The next three tests pin the tab's refresh pass itself (<see cref="ServerTab.RefreshStagesAsync"/>): a failed lane
 /// read still lets the alert and permission badges refresh, and the status line is written after them.
 /// </summary>
 public sealed class OverviewLaneReadFailuresTests
@@ -108,5 +108,42 @@ public sealed class OverviewLaneReadFailuresTests
 
         Assert.Equal(new[] { "tab" }, order);
         Assert.Null(status);
+    }
+
+    [Fact]
+    public async Task AnExceptionOutsideTheLaneReads_IsTheFailure_NotLastRefresh()
+    {
+        var logged = new List<Exception>();
+
+        var failed = await ServerTab.ReadOverviewAsync(
+            () => throw new InvalidOperationException("axis sync broke"), logged.Add);
+
+        Assert.Equal("Overview lanes did not refresh: axis sync broke", failed);
+        Assert.Single(logged);
+
+        var status = await ServerTab.RefreshStagesAsync(
+            refreshVisibleTab: () => Task.FromResult(failed),
+            refreshBadges: () => Task.CompletedTask,
+            lastRefreshText: () => "Last refresh: 12:00:00 (UTC)",
+            CancellationToken.None);
+
+        Assert.Equal("Error: Overview lanes did not refresh: axis sync broke", status);
+    }
+
+    [Fact]
+    public async Task ACancelledRefresh_IsNotAFailure()
+    {
+        var failed = await ServerTab.ReadOverviewAsync(
+            () => Task.FromException<string?>(new OperationCanceledException()), _ => { });
+
+        Assert.Null(failed);
+    }
+
+    [Fact]
+    public async Task LanesThatReadFine_PassThroughUnchanged()
+    {
+        Assert.Null(await ServerTab.ReadOverviewAsync(() => Task.FromResult<string?>(null), _ => { }));
+        Assert.Equal("Overview lanes did not read CPU %",
+            await ServerTab.ReadOverviewAsync(() => Task.FromResult<string?>("Overview lanes did not read CPU %"), _ => { }));
     }
 }

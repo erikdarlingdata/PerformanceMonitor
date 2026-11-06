@@ -23,7 +23,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <para><b>Same source and window logic as <c>get_query_store_top</c>.</b> The raw read dedupes the open interval's repeated
 /// snapshots exactly as <c>DarlingDataReader.QueryStoreTopSql</c> does (same partition, newest snapshot wins), and the table read
 /// takes <c>query_store_interval_wide</c> under the same gate, the same read-only REPEATABLE READ snapshot, the same
-/// <c>first_execution_time</c> floor and ceiling (#4605, #5523) and the same narrowed edge margin (#5882), so the two reads count
+/// <c>first_execution_time</c> floor and ceiling (#4605, #5523, the start-placed margin of #7814) and the same narrowed edge margin (#5882), so the two reads count
 /// one query's runs the same way. It does NOT read the daily summary: it always counts the interval rows, so its totals are never
 /// the daily summary's approximate ones.</para>
 ///
@@ -40,7 +40,7 @@ internal static class DarlingQueryStoreAbortsReader
     internal readonly record struct AbortsRead(List<AbortRow> Rows, QueryStoreIntervalWide.WideReadPlan? Table);
 
     /// <summary>The raw dedupe: <c>DarlingDataReader.QueryStoreTopSql</c>'s own, with no outcome filter (the denominator needs the Regular rows).</summary>
-    private const string RawPrefix = """
+    private const string RawPrefix = $$"""
         WITH deduped AS (
             SELECT
                 database_name, query_id, query_hash, execution_type_desc, execution_count, avg_duration_us, last_execution_time,
@@ -51,8 +51,12 @@ internal static class DarlingQueryStoreAbortsReader
                 ) AS rn
             FROM query_store_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
+            /* #7814: placed by the interval's start and bounded by collection_time for chunk exclusion only, as the top read's raw dedupe is
+               (DarlingDataReader.QueryStoreTopSql), so this read and get_query_store_top list the same intervals for one window. */
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} >= $2
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} <= $3
+            AND   collection_time >= $2 - {{QueryStoreIntervalWide.CollectionFloorSlackSql}}
+            AND   collection_time <= $3 + {{QueryStoreIntervalWide.CollectionCeilingSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
         ),
         """;
@@ -65,10 +69,11 @@ internal static class DarlingQueryStoreAbortsReader
                 1 AS rn
             FROM query_store_interval_wide
             WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
+            /* #7814: placed by the interval's start, as the top read's table head is (DarlingDataReader.QueryStoreTopTablePrefix). */
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} >= $2
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} <= $3
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
-            AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
+            AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
         ),
         """;
