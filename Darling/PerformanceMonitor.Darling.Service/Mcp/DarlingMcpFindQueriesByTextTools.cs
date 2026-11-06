@@ -276,7 +276,7 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash";
             var floor = DateTime.SpecifyKind(DateTime.UtcNow - TimescaleSupport.RawRetentionSpan, DateTimeKind.Unspecified);
 
             var queryStore = await RunSourceAsync(
-                postgres, QueryStoreSql, queryStoreBudget, p => BindOneServer(p, resolved.ServerId, database, escaped, limit, null), QueryStoreHorizon, StoppedAdvice(database),
+                postgres, QueryStoreSql, queryStoreBudget, limit, p => BindOneServer(p, resolved.ServerId, database, escaped, limit, null), QueryStoreHorizon, StoppedAdvice(database),
                 r => (Database: r.GetString(0), QueryId: r.GetInt64(1), Hash: r.IsDBNull(2) ? null : r.GetString(2), LastSeen: r.GetDateTime(3),
                     Stored: r.IsDBNull(4) ? null : r.GetString(4)),
                 raw =>
@@ -294,7 +294,7 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash";
                 }, cancellationToken);
 
             var planCache = await RunSourceAsync(
-                postgres, PlanCacheSql, planCacheBudget, p => BindOneServer(p, resolved.ServerId, database, escaped, limit, floor), PlanCacheHorizon, StoppedAdvice(database),
+                postgres, PlanCacheSql, planCacheBudget, limit, p => BindOneServer(p, resolved.ServerId, database, escaped, limit, floor), PlanCacheHorizon, StoppedAdvice(database),
                 r => (Hash: r.IsDBNull(0) ? null : r.GetString(0), Database: r.IsDBNull(1) ? null : r.GetString(1), LastCollected: r.GetDateTime(2),
                     Stored: r.IsDBNull(3) ? null : r.GetString(3)),
                 raw =>
@@ -356,7 +356,7 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash";
             var escaped = EscapeLike(text);
             var floor = DateTime.SpecifyKind(DateTime.UtcNow - TimescaleSupport.RawRetentionSpan, DateTimeKind.Unspecified);
             var planCache = await RunSourceAsync(
-                postgres, PlanCacheAllServersSql, planCacheBudget,
+                postgres, PlanCacheAllServersSql, planCacheBudget, limit,
                 p =>
                 {
                     p.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = escaped });
@@ -468,7 +468,7 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash";
     /// text included) while the statement runs; <paramref name="shape"/> judges and cuts it after the connection is back in the pool, for
     /// the rows kept (the row past the cap is dropped unjudged).</summary>
     private static async Task<object> RunSourceAsync<TRaw, TRow>(
-        NpgsqlDataSource postgres, string sql, SourceBudget budget, Action<NpgsqlParameterCollection> bind,
+        NpgsqlDataSource postgres, string sql, SourceBudget budget, int limit, Action<NpgsqlParameterCollection> bind,
         string horizon, string stoppedAdvice, Func<NpgsqlDataReader, TRaw> read, Func<TRaw, TRow> shape, CancellationToken cancellationToken)
     {
         var rows = new List<TRaw>();
