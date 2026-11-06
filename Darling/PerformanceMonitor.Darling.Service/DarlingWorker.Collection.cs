@@ -318,7 +318,7 @@ public sealed partial class DarlingWorker
             {
                 /* The hourly store-maintenance tick retries it (RetryRoleProvisioningAsync), and every start does. */
                 _roleProvisioningRetryDirectory = provisioningDirectory;
-                _logger.LogError(
+                _logger.LogError(ex, 
                     "Least-privilege role provisioning failed — the Viewer's admin/viewer roles may be stale, and " +
                     "a role credential file the web and MCP hosts wait for is not written until an attempt " +
                     "succeeds; it is retried on the hourly store-maintenance tick and on the next start: {Message}",

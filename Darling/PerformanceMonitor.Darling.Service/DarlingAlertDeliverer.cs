@@ -192,7 +192,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
         }
         catch (Exception ex)
         {
-            _logger.LogError("Alert delivery failed for {Metric} on {Server}: {Message}",
+            _logger.LogError(ex, "Alert delivery failed for {Metric} on {Server}: {Message}",
                 outcome.MetricName, outcome.ServerName, ex.Message);
             return null;
         }
@@ -496,7 +496,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
         }
         catch (Exception ex)
         {
-            _logger.LogError("Alert resolution send failed for {Metric} on {Server}: {Message}",
+            _logger.LogError(ex, "Alert resolution send failed for {Metric} on {Server}: {Message}",
                 resolution.MetricName, resolution.ServerName, ex.Message);
         }
 

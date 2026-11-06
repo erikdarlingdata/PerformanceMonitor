@@ -507,7 +507,7 @@ public sealed partial class DarlingWorker
                 $"icacls \"{path}\" /inheritance:d   then   icacls \"{path}\" {DarlingFileSecurity.RemoveOrdinaryUserGrantsArgument}   " +
                 $"then   icacls \"{path}\" /grant \"{DarlingFileSecurity.ServiceAccountDisplayName}:(F)\"";
 
-            _logger.LogError(
+            _logger.LogError(ex, 
                 "Could not restrict the ACL on {Path}{Detail} ({Message}). If the owner is not this service, the " +
                 "re-ACL can never succeed — it needs ownership or FullControl — so restarting will not clear this, " +
                 "and the service cannot fix it alone: taking ownership needs a privilege a virtual service account " +
@@ -593,7 +593,7 @@ public sealed partial class DarlingWorker
                     $"icacls \"{backup}\" /inheritance:d   then   icacls \"{backup}\" {DarlingFileSecurity.RemoveOrdinaryUserGrantsArgument}   " +
                     $"then   icacls \"{backup}\" /grant \"{DarlingFileSecurity.ServiceAccountDisplayName}:(F)\"";
 
-                logger.LogError(
+                logger.LogError(ex, 
                     "Could not restrict the ACL on config backup {Path}{Detail} ({Message}). It carries the same " +
                     "DPAPI-protected credentials as the live config. From an ELEVATED prompt: {Remediation}",
                     backup, DarlingFileSecurity.DescribeOwnerAndExposure(backup), ex.Message, remediation);
