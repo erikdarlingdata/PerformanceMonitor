@@ -191,16 +191,18 @@ AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramN
        so two rows equal on both still yield the same answer on every pass — the composed advice is
        frozen into the finding's StoryText, and a pick that flipped between passes would rewrite the
        finding's text over an unchanged window. A job running long across several collection ticks
-       appears in several rows; that is harmless here (the same name sorts first each time) and is
-       deliberately not de-duplicated for the counts, which keep their existing per-row semantics.
+       appears in several rows; that is harmless for the name (the same name sorts first each time).
+       The counts are #7883: distinct job RUNS (job id plus the run's start time), not rows, because one
+       row lands per job per collection tick and the advice and the severity ramp both read the count as
+       a number of jobs.
        ARRAY_AGG … FILTER … [1] rather than a second scan or a subquery: one round trip, one row, and
        the same clause runs unchanged on DuckDB (1-based lists, FILTER, ordered aggregates), so the Lite
        twin carries it verbatim over v_running_jobs. NULL when nothing ran long — the fact still emits (running_count > 0)
        and the advice keeps its unnamed sentence. */
     public const string RunningJobsSql = @"
 SELECT
-    COUNT(*) AS running_count,
-    COUNT(CASE WHEN is_running_long THEN 1 END) AS running_long_count,
+    COUNT(DISTINCT COALESCE(job_id, job_name, '') || '|' || COALESCE(start_time::text, '')) AS running_count,
+    COUNT(DISTINCT COALESCE(job_id, job_name, '') || '|' || COALESCE(start_time::text, '')) FILTER (WHERE is_running_long) AS running_long_count,
     MAX(percent_of_average) AS max_percent_of_avg,
     MAX(current_duration_seconds) AS max_duration_seconds,
     (ARRAY_AGG(job_name ORDER BY percent_of_average DESC NULLS LAST, current_duration_seconds DESC, job_name)
