@@ -97,9 +97,17 @@ const nameBlocked = [
   { collection_time: ago(1), database_name: "Sales", blocked_count: 4 },
 ];
 
+/* #7877: the read now serves a bucket MEAN, so a database blocked in 2 of 5 collections of a bucket is 0.4, not 0. The first time has
+   two means, one whole and one fractional. */
+const meanBlocked = [
+  { collection_time: ago(3), database_name: "Sales", blocked_count: 0.4 },
+  { collection_time: ago(3), database_name: "Orders", blocked_count: 1.5 },
+  { collection_time: ago(1), database_name: "Sales", blocked_count: 2 },
+];
+
 const answerFor = (name) => {
   if (name === "get_current_waits_trend") {
-    return { server: "a", waiting_tasks: scenario === "many" ? manyWaits : scenario === "close" ? closeWaits : scenario === "lone" ? loneWaits : WAITS, blocked_sessions: scenario === "names" ? nameBlocked : BLOCKED };
+    return { server: "a", waiting_tasks: scenario === "many" ? manyWaits : scenario === "close" ? closeWaits : scenario === "lone" ? loneWaits : WAITS, blocked_sessions: scenario === "names" ? nameBlocked : scenario === "mean" ? meanBlocked : BLOCKED };
   }
   if (name === "get_waiting_tasks") return { server: "a", tasks: TASKS };
   return {};
@@ -150,11 +158,11 @@ const chartReport = (panel) => {
 };
 
 const out = {};
-if (scenario === "default" || scenario === "many" || scenario === "close" || scenario === "lone" || scenario === "names") {
+if (scenario === "default" || scenario === "many" || scenario === "close" || scenario === "lone" || scenario === "names" || scenario === "mean") {
   const root = await draw("blocking");
   out.waiting = chartReport(panelOf(root, "Waiting Tasks"));
   out.blocked = chartReport(panelOf(root, "Blocked Sessions"));
-  if (scenario === "names") {
+  if (scenario === "names" || scenario === "mean") {
     /* Point at the first bar (the one at 01:11) and read what the hover tooltip names: its time and a row per segment. */
     const panel = panelOf(root, "Blocked Sessions");
     const bars = all(panel).filter((n) => /\bseries-bar\b/.test(n.attrs.class || ""));
@@ -165,7 +173,7 @@ if (scenario === "default" || scenario === "many" || scenario === "close" || sce
     overlay.fire("mousemove", { clientX: firstX + Number(first[0].attrs.width) / 2 });
     const tip = all(panel).find((n) => /\bchart-tooltip\b/.test(n.className));
     out.tooltipTime = all(tip).find((n) => /\bt-time\b/.test(n.className)).textContent;
-    out.expectedTime = new Date(Date.parse(nameBlocked[0].collection_time + "Z")).toLocaleString();
+    out.expectedTime = new Date(Date.parse((scenario === "mean" ? meanBlocked : nameBlocked)[0].collection_time + "Z")).toLocaleString();
     out.tooltipRows = all(tip).filter((n) => /\bt-row\b/.test(n.className)).map((r) => r.children.slice(1).map((c) => c.textContent));
   }
 } else if (scenario === "grid") {
