@@ -46,7 +46,6 @@ import {
   getPath,
   parseUtc,
   applyFormat,
-  tickDecimals,
   bandClass,
   sevClass,
   windowFromHours,
