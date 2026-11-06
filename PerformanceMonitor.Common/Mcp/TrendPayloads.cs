@@ -302,8 +302,9 @@ internal static class TrendPayloads
     /// <summary>
     /// <c>get_wait_trend</c>'s answer when the asked wait type has no rows in the window (#6446), both SKUs. The caller has
     /// already ruled out an engine that does not collect wait stats, and passes what the window did collect. A wait type
-    /// the collector never stores (<paramref name="ignoredWaitTypes"/>, the benign list it skips; matched the way the
-    /// collector matches it, trailing space trimmed and case ignored) is <c>not_collected</c>: that gap is permanent. Any
+    /// on the ignored list (<paramref name="ignoredWaitTypes"/>, the benign list the collector skips; matched the way the
+    /// collector matches it, trailing space trimmed and case ignored) is <c>not_collected</c>: the collector skips it, and
+    /// rows stored for it before it was ignored are hidden at read time, so the gap is permanent (#7880). Any
     /// other wait type is one the collector WOULD store, so no rows means we looked and nothing waited: <c>empty</c>
     /// (a misspelled name reads the same, which is what the <c>collected_wait_types</c> hint is for). Nothing collected
     /// at all stays <c>unavailable</c>.
@@ -323,7 +324,8 @@ internal static class TrendPayloads
         {
             return McpHelpers.Status(
                 "not_collected",
-                $"No trend data for wait type '{waitType}'. It is on the ignored (benign) wait list, so the collector never stores it. " +
+                $"No trend data for wait type '{waitType}'. It is on the ignored (benign) wait list, so it is not shown: the collector skips it, " +
+                "and rows stored for it before it was ignored are left out of this answer. " +
                 $"See hints.collected_wait_types for the {collectedWaitTypes.Count} that have data.",
                 new { collected_wait_types = collectedWaitTypes });
         }

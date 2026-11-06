@@ -490,6 +490,9 @@ ORDER BY 1";
     /// read drops), and a bucket holding none is left out; a bucket's rate is its summed wait over the seconds its
     /// rated collections covered, and its peak the busiest single collection. Darling's twin is
     /// <c>DarlingDataReader.WaitTrendBucketedSql</c>.
+    /// <para>#7880: the user's ignored (benign) wait list is applied here as <see cref="GetWaitStatsAsync"/> and
+    /// <see cref="GetDistinctWaitTypesAsync"/> apply it, keyed on <c>rtrim(wait_type)</c>, so rows stored for a type
+    /// before it was ignored are hidden from this read the same way they are hidden from those.</para>
     /// </summary>
     internal async Task<List<WaitBucketPoint>> GetWaitBucketsAsync(int serverId, string waitType, int hoursBack, DateTime asOfUtc, int bucketMinutes)
     {
@@ -498,6 +501,7 @@ ORDER BY 1";
 
         var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
+        var exclude = IgnoredWaitTypes.BuildExclusionClause(_ignoredWaitTypes.Value);
         command.CommandText = $@"
 WITH raw AS
 (
@@ -514,6 +518,7 @@ WITH raw AS
     AND   rtrim(wait_type) = rtrim($2)
     AND   collection_time >= $3
     AND   collection_time <= $4
+    {exclude}
 ),
 rated AS
 (
