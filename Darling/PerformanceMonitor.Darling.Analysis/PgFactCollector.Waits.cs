@@ -395,13 +395,21 @@ FROM reports";
     /// <summary>The window's deadlocks by when they HAPPENED (<c>deadlock_time</c>), as the deadlock grids read
     /// them. $4 is the <see cref="EventWindowFloor"/> for $2 — the partition-column bound the event
     /// window cannot supply, with no upper bound so a late-collected deadlock still counts.</summary>
+    /// <summary>The window's deadlock count beside its busiest one-hour bucket's count (#7893). date_bin's origin is
+    /// the window start ($2, reused), the grain the DEADLOCKS fact grades; the sum of the buckets is the count.</summary>
     public const string DeadlocksSql = @"
-SELECT COUNT(*) AS deadlock_count
-FROM deadlocks
-WHERE server_id = $1
-AND   deadlock_time >= $2
-AND   deadlock_time <= $3
-AND   collection_time >= $4";
+WITH hours AS (
+    SELECT date_bin('1 hour', deadlock_time, $2) AS bucket_start, COUNT(*) AS n
+    FROM deadlocks
+    WHERE server_id = $1
+    AND   deadlock_time >= $2
+    AND   deadlock_time <= $3
+    AND   collection_time >= $4
+    GROUP BY 1
+)
+SELECT COALESCE(SUM(n), 0)::bigint AS deadlock_count,
+       COALESCE(MAX(n), 0) AS peak_1h_deadlock_count
+FROM hours";
 
     /// <summary>Deadlocks whose row names a database that is not a separately monitored one (the event's database on the
     /// telemetry arm; a master stamp may be the connection's fallback, so it goes to the graph check): they cannot
@@ -423,6 +431,31 @@ AND   NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)
     /// the arms count the same events.</summary>
     public const string DeadlockGraphsSql = @"
 SELECT deadlock_graph_xml
+FROM deadlocks
+WHERE server_id = $1
+AND   deadlock_time >= $2
+AND   deadlock_time <= $3
+AND   collection_time >= $5
+AND   (database_name IS NULL OR lower(database_name) = 'master' OR lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))";
+
+    /// <summary>#7893: <see cref="DeadlockOutsideCountSql"/>'s rows grouped into one-hour buckets with the window start
+    /// ($2) as the origin, so the scoped DEADLOCKS fact can find its busiest hour without reading the rows.</summary>
+    public const string DeadlockOutsideByHourSql = @"
+SELECT date_bin('1 hour', deadlock_time, $2) AS bucket_start, COUNT(*)
+FROM deadlocks
+WHERE server_id = $1
+AND   deadlock_time >= $2
+AND   deadlock_time <= $3
+AND   collection_time >= $5
+AND   database_name IS NOT NULL
+AND   lower(database_name) <> 'master'
+AND   NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))
+GROUP BY 1";
+
+    /// <summary>#7893: the graphs <see cref="DeadlockGraphsSql"/> selects, each with its event time, so a graph that
+    /// counts can be placed in its hour.</summary>
+    public const string DeadlockGraphTimesSql = @"
+SELECT deadlock_time, deadlock_graph_xml
 FROM deadlocks
 WHERE server_id = $1
 AND   deadlock_time >= $2
@@ -552,12 +585,65 @@ AND   (database_name IS NULL OR lower(database_name) = 'master' OR lower(databas
         return count;
     }
 
+    /// <summary>#7893: <see cref="CountDeadlocksSkippingSeparateAsync"/>'s count beside the busiest one-hour bucket's
+    /// count, the buckets taking <paramref name="start"/> as their origin. The outside rows arrive already grouped by
+    /// hour (<see cref="DeadlockOutsideByHourSql"/>); each remaining graph is read once with its time
+    /// (<see cref="DeadlockGraphTimesSql"/>) and, when it counts, placed in its hour.</summary>
+    internal static async Task<(long Count, long PeakHourCount)> CountDeadlocksAndPeakHourSkippingSeparateAsync(
+        NpgsqlConnection connection, int serverId, DateTime start, DateTime end,
+        IReadOnlyList<string> separate, System.Threading.CancellationToken ct, int commandTimeoutSeconds = FactCommandTimeoutSeconds)
+    {
+        var bound = separate.ToArray();
+        var floor = PerformanceMonitor.Darling.Storage.EventWindowFloor.For(start);
+        var perHour = new Dictionary<long, long>();
+        long count = 0;
+        using (var outsideCommand = new NpgsqlCommand(DeadlockOutsideByHourSql, connection) { CommandTimeout = commandTimeoutSeconds })
+        {
+            outsideCommand.Parameters.AddWithValue(serverId);
+            outsideCommand.Parameters.AddWithValue(AsNaive(start));
+            outsideCommand.Parameters.AddWithValue(AsNaive(end));
+            outsideCommand.Parameters.AddWithValue(bound);
+            outsideCommand.Parameters.AddWithValue(floor);
+            using var outsideReader = await outsideCommand.ExecuteReaderAsync(ct);
+            while (await outsideReader.ReadAsync(ct))
+            {
+                var hour = (long)Math.Floor((outsideReader.GetDateTime(0) - AsNaive(start)).TotalHours);
+                var n = Convert.ToInt64(outsideReader.GetValue(1));
+                count += n;
+                perHour[hour] = perHour.TryGetValue(hour, out var have) ? have + n : n;
+            }
+        }
+
+        using var command = new NpgsqlCommand(DeadlockGraphTimesSql, connection) { CommandTimeout = commandTimeoutSeconds };
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(AsNaive(start));
+        command.Parameters.AddWithValue(AsNaive(end));
+        command.Parameters.AddWithValue(bound);
+        command.Parameters.AddWithValue(floor);
+        using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var xml = reader.IsDBNull(1) ? null : reader.GetString(1);
+            if (PerformanceMonitor.Common.DeadlockGraphDatabases.AllIn(xml, separate)) continue;
+            count++;
+            if (reader.IsDBNull(0)) continue;
+            var hour = (long)Math.Floor((reader.GetDateTime(0) - AsNaive(start)).TotalHours);
+            perHour[hour] = perHour.TryGetValue(hour, out var have) ? have + 1 : 1;
+        }
+        return (count, perHour.Count == 0 ? 0 : perHour.Values.Max());
+    }
+
     /// <summary>
     /// Collects deadlock facts from the deadlocks table.
     /// Produces a single DEADLOCKS fact with count and rate.
-    /// Value is deadlocks per OBSERVED hour (see <see cref="CollectBlockingFactsAsync"/> — same divisor,
-    /// same reason, #3538 A2). <c>period_hours</c> nominal, <c>observed_hours</c> the divisor; an
-    /// unobserved window emits no fact.
+    /// Value is the busiest ONE-HOUR bucket's deadlocks (#7893), the server-hour grain the scorer's (5, 20) pair
+    /// was measured on, so the same storm grades the same on a 4-hour pass and a 24-hour read; the whole-window
+    /// average dilutes a one-hour burst by however much quiet surrounds it. Buckets take the window-start origin
+    /// (<c>date_bin</c>, as the blocking peak does), and a one-hour bucket's rate per hour is its count: one hour
+    /// is also the floor the blocking peak's covered hours never drop under, so no coverage scaling applies at
+    /// this grain. <c>deadlocks_per_hour</c> stays published as the whole-window context, per OBSERVED hour
+    /// (#3538 A2). <c>period_hours</c> nominal, <c>observed_hours</c> its divisor; an unobserved window emits no
+    /// fact.
     /// </summary>
     private async Task CollectDeadlockFactsAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -566,10 +652,11 @@ AND   (database_name IS NULL OR lower(database_name) = 'master' OR lower(databas
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
         long deadlockCount;
+        long peakHourCount;
         if (context.SeparatelyMonitoredDatabases is { Count: > 0 } separate)
         {
-            deadlockCount = await CountDeadlocksSkippingSeparateAsync(
-                connection, DeadlockOutsideCountSql, DeadlockGraphsSql, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
+            (deadlockCount, peakHourCount) = await CountDeadlocksAndPeakHourSkippingSeparateAsync(
+                connection, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
                 separate, context.CancellationToken);
         }
         else
@@ -583,23 +670,27 @@ AND   (database_name IS NULL OR lower(database_name) = 'master' OR lower(databas
             using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
             deadlockCount = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
+            peakHourCount = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
         }
         if (deadlockCount <= 0) return;
 
         var periodHours = context.PeriodDurationMs / 3_600_000.0;
         var observedHours = context.ObservedDurationMs / 3_600_000.0;
         var deadlocksPerHour = deadlockCount / observedHours;
+        var peakDeadlocksPerHour = (double)peakHourCount;
 
         facts.Add(new Fact
         {
             Source = "blocking",
             Key = "DEADLOCKS",
-            Value = deadlocksPerHour,
+            Value = peakDeadlocksPerHour,
             ServerId = context.ServerId,
             Metadata = new Dictionary<string, double>
             {
                 ["deadlock_count"] = deadlockCount,
                 ["deadlocks_per_hour"] = deadlocksPerHour,
+                ["deadlocks_per_hour_peak_1h"] = peakDeadlocksPerHour,
+                ["peak_1h_deadlock_count"] = peakHourCount,
                 ["period_hours"] = periodHours,
                 ["observed_hours"] = observedHours
             }

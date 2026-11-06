@@ -261,7 +261,7 @@ public class FactScorer
     /// </summary>
     private static double ScoreBlockingFact(Fact fact)
     {
-        var value = fact.Value; // events per hour, over the busiest 4-hour sub-window since #3871
+        var value = fact.Value; // events per hour over the busiest sub-window: 4 hours for blocking (#3871), 1 hour for deadlocks (#7893)
         if (value <= 0) return 0.0;
 
         return fact.Key switch
@@ -278,7 +278,9 @@ public class FactScorer
             // still reaches CRITICAL through its amplifiers — but the pair itself is now measured, not
             // inherited.)
             "BLOCKING_EVENTS" => ApplyThresholdFormula(value, 10, 50),
-            // Deadlocks: 5/hr concerning, 20/hr critical — the SAME pair the alerting layer derived from
+            // Deadlocks: 5/hr concerning, 20/hr critical, graded on the busiest ONE-HOUR bucket of the pass
+            // (#7893), the server-hour grain the pair was measured on, with the whole-window average kept
+            // beside it as deadlocks_per_hour context — the SAME pair the alerting layer derived from
             // 14 days of collect.deadlocks on the 43-server dogfood fleet (2,722 deadlocks over 14,448
             // server-hours; ServerHealthThresholds.DeadlockWarnPerHourDefault /
             // DeadlockCriticalPerHourDefault in PerformanceMonitor.Common/ServerHealthBands.cs, #3368):
