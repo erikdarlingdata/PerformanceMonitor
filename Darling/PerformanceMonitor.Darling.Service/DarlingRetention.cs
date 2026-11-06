@@ -745,8 +745,12 @@ public static class DarlingRetention
                    fact row points AT, so it must OUTLIVE the statistics that reference it: text kept past its
                    facts is a few dead bytes, whereas facts kept past their text is a top-queries answer that
                    reads as a list of integers — the exact failure this table was added to fix. Hence a margin
-                   ADDED to the fact horizon rather than subtracted from it. */
-                var textCutoff = ComputeStatementTextCutoff(utcNow, widestFactRetentionDays);
+                   ADDED to the fact horizon rather than subtracted from it. The horizon is the widest effective
+                   retention of the collectors whose facts carry a queryid this table resolves
+                   (PgStatementText.ReferencingCollectors): the dimension-feeding pair above holds no such facts, so its
+                   widest figure says nothing about how long these rows are pointed at. */
+                var textCutoff = ComputeStatementTextCutoff(
+                    utcNow, WidestEffectiveRetentionDays(PgStatementText.ReferencingCollectors, retentionDaysFor));
                 var textDeleted = await PurgeOneAsync(
                     postgres, PgStatementText.TableName,
                     PgStatementText.PruneSql(TimescaleSupport.ChunkIntervalDays),
@@ -793,7 +797,8 @@ public static class DarlingRetention
                 var tablesLeftBefore = walPacer?.Yield?.TablesLeft ?? 0;
                 if (queryTextPruneGate is null || queryTextPruneGate.IsDue())
                 {
-                    var queryTextCutoff = utcNow.AddDays(-(widestFactRetentionDays + QueryStoreTextStore.PruneMarginDays));
+                    var queryTextCutoff = utcNow.AddDays(
+                        -(WidestEffectiveRetentionDays(QueryStoreTextStore.ReferencingCollectors, retentionDaysFor) + QueryStoreTextStore.PruneMarginDays));
                     var queryTextDeleted = await PurgeOneAsync(
                         postgres, QueryStoreTextStore.TableName,
                         UnorderedRowCappedDeleteSql(
@@ -1906,13 +1911,36 @@ public static class DarlingRetention
     /// by <see cref="PgStatementText.PruneMarginDays"/>, and since #7567 it also feeds the baseline: the own-statement
     /// exclusion (<c>PgOwnStatement.NotOwnOnStats</c>) reads it for every <c>pg_statement_stats</c> row in the 30-day
     /// baseline window, and <c>pg_statement_stats</c> itself is floored at that window in
-    /// <see cref="EffectivePurgeRetentionDays"/>. The widest-fact figure is the schedule's, unfloored, so with every
-    /// retention shortened to 7 days the text would go at 9 while its statistics rows stay for 30, and the service's own
-    /// rows between day 9 and day 30 would come back into the baseline. The table is not a collector (no schedule row,
-    /// so it cannot join <see cref="BaselineServingRawCollectors"/>); this is its floor.
+    /// <see cref="EffectivePurgeRetentionDays"/>. With every retention shortened to 7 days an unfloored widest-fact figure
+    /// would send the text at 9 while its statistics rows stay for 30, and the service's own rows between day 9 and day 30
+    /// would come back into the baseline. The table is not a collector (no schedule row, so it cannot join
+    /// <see cref="BaselineServingRawCollectors"/>); this is its floor.
     /// </summary>
     internal static DateTime ComputeStatementTextCutoff(DateTime utcNow, int widestFactRetentionDays) =>
         utcNow.AddDays(-(Math.Max(widestFactRetentionDays, BaselineMath.BaselineWindowDays) + PgStatementText.PruneMarginDays));
+
+    /// <summary>
+    /// The widest horizon the purge applies to any of <paramref name="collectorNames"/>: each one's resolved retention,
+    /// through <see cref="EffectivePurgeRetentionDays"/>, so a text store whose facts belong to these collectors is pruned no
+    /// sooner than the last of those facts (<see cref="PgStatementText.ReferencingCollectors"/>,
+    /// <see cref="QueryStoreTextStore.ReferencingCollectors"/>). A name with no schedule row contributes nothing. Pure, so
+    /// a test can drive a raised override through it.
+    /// </summary>
+    internal static int WidestEffectiveRetentionDays(IEnumerable<string> collectorNames, Func<string, int>? retentionDaysFor)
+    {
+        var widest = 1;
+        foreach (var name in collectorNames)
+        {
+            if (!CollectorScheduleDefaults.All.TryGetValue(name, out var schedule))
+            {
+                continue;
+            }
+
+            widest = Math.Max(widest, EffectivePurgeRetentionDays(name, retentionDaysFor?.Invoke(name) ?? schedule.RetentionDays));
+        }
+
+        return widest;
+    }
 
     /// <summary>
     /// The dimension GC's cutoff (#1795): the ASSUMED horizon (widest dim-feeding fact retention +
