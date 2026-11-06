@@ -1,4 +1,4 @@
-/* Runs the shipped Optimization and High Impact tabs (wwwroot/js/pages/finops) against a
+/* Runs the shipped Optimization, High Impact and Database Resources tabs (wwwroot/js/pages/finops) against a
    recording fetch and a node-tree DOM, and prints as one line of JSON what each tab asked for: the first build, a change
    of the Window picker, a rebuild for the same server (the 60 s poll) and a build for another server.
        node finops-window-picker-harness.mjs <path to wwwroot/js> */
@@ -84,7 +84,8 @@ try {
       'export function zoomableLineChart() { return el("div", {}); }\nexport function chartZoomScope() { return ""; }\n'
   );
   const out = {};
-  for (const name of ["optimization", "high-impact"]) {
+  /* #7922: Database Resources is in the same loop, so its rebuild for the same server is held to the same pick. */
+  for (const name of ["optimization", "high-impact", "database-resources"]) {
     const { tab } = await import(pathToFileURL(path.join(scratch, "pages", "finops", name + ".js")).href);
     const run = async (server, pick) => {
       fetches.length = 0;
