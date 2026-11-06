@@ -194,6 +194,44 @@ public sealed class InvestigationsPageTests
         Assert.Equal("", closed.GetProperty("pane").GetString());
     }
 
+    /// <summary>#7987: request A's close is out when request B is picked and its reason typed. A's answer re-reads the list, and B's form
+    /// comes back with the reason as typed: only the closed request's own draft is dropped.</summary>
+    [Fact]
+    public void AnotherRequestsCloseSucceeding_KeepsTheReasonBeingTyped()
+    {
+        var other = Run().GetProperty("otherClose");
+        Assert.Equal("/api/investigation-requests/11111111-1111-1111-1111-111111111111/close", other.GetProperty("closedUrl").GetString());
+        Assert.Equal(1, other.GetProperty("puts").GetInt32());
+        Assert.Equal("22222222-2222-2222-2222-222222222222", other.GetProperty("paneRequest").GetString());
+        Assert.Equal("The CPU spike was one report run by hand", other.GetProperty("reasonKept").GetString());
+    }
+
+    /// <summary>#7987: a close the service refuses (409 with its sentence) after the poll redrew the form: the rebuilt button is enabled
+    /// again with the sentence under it, the reason stays in the box, and the list is not re-read.</summary>
+    [Fact]
+    public void ACloseRefused_EnablesTheRebuiltButton_ShowsTheRefusal_AndKeepsTheReason()
+    {
+        var refused = Run().GetProperty("refused");
+        Assert.True(refused.GetProperty("rebuiltDisabled").GetBoolean());
+        Assert.Equal("The CPU spike was one report run by hand", refused.GetProperty("reasonSent").GetString());
+        Assert.Equal(1, refused.GetProperty("puts").GetInt32());
+        Assert.True(refused.GetProperty("buttonEnabledAfter").GetBoolean());
+        Assert.Contains("This request was closed by someone else a moment ago.", refused.GetProperty("status").GetString(), StringComparison.Ordinal);
+        Assert.Equal("The CPU spike was one report run by hand", refused.GetProperty("reasonKept").GetString());
+        Assert.Equal(1, refused.GetProperty("listReads").GetInt32());
+    }
+
+    /// <summary>#7987: leaving the page while the reason box has the focus, then opening it again, keeps the reason and does not move
+    /// the focus into the box. The poll's rebuild on the page still gives the box its focus back (#7956).</summary>
+    [Fact]
+    public void LeavingThePageWithTheReasonBoxFocused_DoesNotMoveTheFocusIntoTheBoxOnReturn()
+    {
+        var left = Run().GetProperty("leftFocused");
+        Assert.Equal(1, left.GetProperty("pollRefocused").GetInt32());
+        Assert.Equal(0, left.GetProperty("returnRefocused").GetInt32());
+        Assert.Equal("The CPU spike was one report run by hand", left.GetProperty("reasonKept").GetString());
+    }
+
     [Fact]
     public void AStateAndFamilyPick_AreSentToTheRead_AndDropTheOpenRequest()
     {
