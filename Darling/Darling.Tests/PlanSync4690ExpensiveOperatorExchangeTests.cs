@@ -19,9 +19,11 @@ namespace Darling.Tests;
 /// #4690 (erikdarlingdata/PerformanceStudio#608) - Rule 35 (Expensive Operator) used to rank exchanges
 /// by their self-time. An exchange's elapsed time is mostly spent waiting on the operators that feed it
 /// and drain it, so it could be named the expensive operator when the operator next to it was the real
-/// problem. <c>serially-parallel.sqlplan</c> shows it plainly: the Sort took 17,111 ms and the
-/// Repartition Streams below it, which feeds the Sort, was given the same 17,111 ms as if it had done
-/// the same work. The three fixtures are copied verbatim from PerformanceStudio's public repo.
+/// problem. <c>serially-parallel.sqlplan</c> showed it plainly: the Repartition Streams below the Sort
+/// was given the same 17,111 ms as the Sort. #7979 found that both figures came from pairing threads by
+/// number across the exchange: the branch below it ran on thread 1 only, so the Sort and the exchange
+/// each did about 1 ms of work of their own. The three fixtures are copied verbatim from
+/// PerformanceStudio's public repo.
 /// </summary>
 public sealed class PlanSync4690ExpensiveOperatorExchangeTests
 {
@@ -66,14 +68,15 @@ public sealed class PlanSync4690ExpensiveOperatorExchangeTests
     }
 
     [Fact]
-    public void SeriallyParallelPlan_StillNamesTheSort()
+    public void SeriallyParallelPlan_DoesNotNameTheSort()
     {
-        // The Sort is the operator that did the work, and it keeps its Rule 35 warning. Only the
-        // exchange that mirrored its time drops out.
+        // #7979: the Sort above the skewed Repartition Streams did about 1 ms of work. Its 17,111 ms per
+        // thread is the wait for the one producer thread below the exchange, so Rule 35 no longer names it.
         var plan = LoadAndAnalyze("serially-parallel.sqlplan");
 
-        var warning = Assert.Single(AllNodes(plan).SelectMany(n => n.Warnings), w => w.WarningType == "Expensive Operator");
-        Assert.StartsWith("Sort took", warning.Message);
+        var sort = Assert.Single(AllNodes(plan), n => n.NodeId == 2);
+        Assert.Equal("Sort", sort.PhysicalOp);
+        Assert.DoesNotContain(sort.Warnings, w => w.WarningType == "Expensive Operator");
     }
 
     // ---- built in code: the same timing on an exchange and on an ordinary operator ---------------
