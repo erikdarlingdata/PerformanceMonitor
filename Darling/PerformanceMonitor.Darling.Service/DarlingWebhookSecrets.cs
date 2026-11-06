@@ -366,6 +366,9 @@ internal static class DarlingWebhookSecrets
                proposal notice read them from the cached route, so an edit of only one of these must reopen the cache. */
             Add(r.ActionApproval);
             Add(r.ApprovalSinglePerson ? "1" : "0");
+
+            /* #7656: the bot channel. The thread poster reads it from the cached route, so an edit of only this member must reopen the cache. */
+            Add(r.SlackBotChannel);
         }
 
         return text.ToString();

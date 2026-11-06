@@ -64,6 +64,10 @@ public sealed partial class ViewerDataService
     /// A store below it has neither column, so the list reads the statements without them and every route shows the defaults.</summary>
     internal const int RouteActionApprovalStoreSchemaVersion = 238;
 
+    /// <summary>The store version that added <c>config_notification_routes.slack_bot_channel</c> (V252, #7656). A store below it has no column,
+    /// so the list reads the statements without it and every route shows no bot channel.</summary>
+    internal const int RouteSlackBotChannelStoreSchemaVersion = 252;
+
     /// <summary>The full row, for an <c>admin</c> seat, with the two scope columns (V181, #5750), for a store below V229 (no
     /// <c>severities</c> column). Ordered by <c>route_id</c>; the window re-sorts the grid newest first. The resolver's order is the
     /// scope tier, then the metric level, then the route id, so the id order is no longer the order routes are consulted in.</summary>
@@ -100,6 +104,14 @@ public sealed partial class ViewerDataService
     public const string NotificationRoutesSelectNoSecretWithActionApprovalSql =
         "SELECT " + NotificationRoutesNoSecretColumns + ", severities, report_notice, action_approval, approval_single_person FROM config_notification_routes ORDER BY route_id";
 
+    /// <summary>The full row with the bot channel id last (V252, #7656).</summary>
+    public const string NotificationRoutesSelectWithSlackBotChannelSql =
+        "SELECT " + NotificationRoutesAdminColumns + ", severities, report_notice, action_approval, approval_single_person, slack_bot_channel FROM config_notification_routes ORDER BY route_id";
+
+    /// <summary>The secret-free projection with the bot channel id last (V252, #7656). A channel id is not a secret.</summary>
+    public const string NotificationRoutesSelectNoSecretWithSlackBotChannelSql =
+        "SELECT " + NotificationRoutesNoSecretColumns + ", severities, report_notice, action_approval, approval_single_person, slack_bot_channel FROM config_notification_routes ORDER BY route_id";
+
     /// <summary>Inserts one route (#6231: the one copy is <see cref="NotificationRouteWriter.InsertSql"/>, which the MCP tools share).</summary>
     public const string NotificationRouteInsertSql = NotificationRouteWriter.InsertSql;
 
@@ -112,14 +124,16 @@ public sealed partial class ViewerDataService
 
     public const string NotificationRouteDeleteSql = NotificationRouteWriter.DeleteSql;
 
-    /// <summary>Which of the newer route columns the list reads (V229 severities, V233 report notice, V238 approval, #6928, #6979, #7109). A probe that
-    /// cannot tell (null: timed out, or a network blip) reads as "all present", as the People and Proposals reads do (#7208). The connect gate already
-    /// refuses a store below V238, so a null probe is a current store, and a failed read of it throws. Reading the older statement instead would show
-    /// every stored severity filter, report notice and approval setting as its default, and the next save would write those defaults over the real ones.</summary>
-    internal static (bool Severities, bool ReportNotice, bool Approval) RouteColumnsPresent(int? version) =>
+    /// <summary>Which of the newer route columns the list reads (V229 severities, V233 report notice, V238 approval, V252 bot channel; #6928, #6979,
+    /// #7109, #7656). A probe that cannot tell (null: timed out, or a network blip) reads as "all present", as the People and Proposals reads do (#7208).
+    /// The connect gate already refuses a store below V238, so a null probe is a current store, and a failed read of it throws. Reading the older
+    /// statement instead would show every stored severity filter, report notice, approval setting and bot channel as its default, and the next save
+    /// would write those defaults over the real ones.</summary>
+    internal static (bool Severities, bool ReportNotice, bool Approval, bool SlackBotChannel) RouteColumnsPresent(int? version) =>
         version is not int known
-            ? (true, true, true)
-            : (known >= RouteSeveritiesStoreSchemaVersion, known >= RouteReportNoticeStoreSchemaVersion, known >= RouteActionApprovalStoreSchemaVersion);
+            ? (true, true, true, true)
+            : (known >= RouteSeveritiesStoreSchemaVersion, known >= RouteReportNoticeStoreSchemaVersion, known >= RouteActionApprovalStoreSchemaVersion,
+               known >= RouteSlackBotChannelStoreSchemaVersion);
 
     /// <summary>Every route, in resolution order. A read-only seat gets the secret-free projection.</summary>
     public async Task<IReadOnlyList<NotificationRouteRow>> GetNotificationRoutesAsync(CancellationToken cancellationToken = default)
@@ -127,16 +141,18 @@ public sealed partial class ViewerDataService
         var rows = new List<NotificationRouteRow>();
         /* V229 (#6928): a store below it has no severities column, so the list reads the older statements and every route shows as Both. */
         var version = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
-        var (hasSeverities, hasReportNotice, hasApproval) = RouteColumnsPresent(version);
+        var (hasSeverities, hasReportNotice, hasApproval, hasSlackBotChannel) = RouteColumnsPresent(version);
         var sql = IsReadOnly
-            ? (hasApproval ? NotificationRoutesSelectNoSecretWithActionApprovalSql : hasReportNotice ? NotificationRoutesSelectNoSecretWithReportNoticeSql : hasSeverities ? NotificationRoutesSelectNoSecretWithSeveritiesSql : NotificationRoutesSelectNoSecretSql)
-            : (hasApproval ? NotificationRoutesSelectWithActionApprovalSql : hasReportNotice ? NotificationRoutesSelectWithReportNoticeSql : hasSeverities ? NotificationRoutesSelectWithSeveritiesSql : NotificationRoutesSelectSql);
+            ? (hasSlackBotChannel ? NotificationRoutesSelectNoSecretWithSlackBotChannelSql : hasApproval ? NotificationRoutesSelectNoSecretWithActionApprovalSql : hasReportNotice ? NotificationRoutesSelectNoSecretWithReportNoticeSql : hasSeverities ? NotificationRoutesSelectNoSecretWithSeveritiesSql : NotificationRoutesSelectNoSecretSql)
+            : (hasSlackBotChannel ? NotificationRoutesSelectWithSlackBotChannelSql : hasApproval ? NotificationRoutesSelectWithActionApprovalSql : hasReportNotice ? NotificationRoutesSelectWithReportNoticeSql : hasSeverities ? NotificationRoutesSelectWithSeveritiesSql : NotificationRoutesSelectSql);
         await using var command = _dataSource.CreateCommand(sql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(IsReadOnly ? ReadRouteRowNoSecret(reader, hasSeverities, hasReportNotice, hasApproval) : ReadRouteRow(reader, hasSeverities, hasReportNotice, hasApproval));
+            rows.Add(IsReadOnly
+                ? ReadRouteRowNoSecret(reader, hasSeverities, hasReportNotice, hasApproval, hasSlackBotChannel)
+                : ReadRouteRow(reader, hasSeverities, hasReportNotice, hasApproval, hasSlackBotChannel));
         }
 
         foreach (var row in rows.Where(r => r.FallbackRouteId.HasValue))
@@ -357,7 +373,7 @@ public sealed partial class ViewerDataService
         }
     }
 
-    private static NotificationRouteRow ReadRouteRow(NpgsqlDataReader reader, bool hasSeverities, bool hasReportNotice, bool hasApproval = false) => new()
+    private static NotificationRouteRow ReadRouteRow(NpgsqlDataReader reader, bool hasSeverities, bool hasReportNotice, bool hasApproval = false, bool hasSlackBotChannel = false) => new()
     {
         RouteId = reader.GetInt32(0),
         MetricMatch = reader.GetString(1),
@@ -382,11 +398,12 @@ public sealed partial class ViewerDataService
         ReportNotice = hasReportNotice ? NotificationRouteKinds.NormalizeReportNotice(reader.GetString(20)) : NotificationRouteKinds.ReportNoticeOff,
         ActionApproval = hasApproval ? NotificationRouteKinds.NormalizeActionApproval(reader.GetString(21)) : NotificationRouteKinds.ActionApprovalRequired,
         ApprovalSinglePerson = hasApproval && reader.GetBoolean(22),
+        SlackBotChannel = hasSlackBotChannel ? reader.GetString(23) : "",
     };
 
     /// <summary>The secret-free reader: the four carved destinations stay empty (the seat cannot author them
     /// anyway) and every later column shifts ordinal, the <c>ReadNotificationRowNoSecret</c> idiom.</summary>
-    private static NotificationRouteRow ReadRouteRowNoSecret(NpgsqlDataReader reader, bool hasSeverities, bool hasReportNotice, bool hasApproval = false) => new()
+    private static NotificationRouteRow ReadRouteRowNoSecret(NpgsqlDataReader reader, bool hasSeverities, bool hasReportNotice, bool hasApproval = false, bool hasSlackBotChannel = false) => new()
     {
         RouteId = reader.GetInt32(0),
         MetricMatch = reader.GetString(1),
@@ -411,6 +428,7 @@ public sealed partial class ViewerDataService
         ReportNotice = hasReportNotice ? NotificationRouteKinds.NormalizeReportNotice(reader.GetString(16)) : NotificationRouteKinds.ReportNoticeOff,
         ActionApproval = hasApproval ? NotificationRouteKinds.NormalizeActionApproval(reader.GetString(17)) : NotificationRouteKinds.ActionApprovalRequired,
         ApprovalSinglePerson = hasApproval && reader.GetBoolean(18),
+        SlackBotChannel = hasSlackBotChannel ? reader.GetString(19) : "",
     };
 }
 
@@ -481,6 +499,10 @@ public sealed class NotificationRouteRow
 
     /// <summary>Whether a person who asked for an action may approve it on this route (V238, #7109).</summary>
     public bool ApprovalSinglePerson { get; set; }
+
+    /// <summary>The Slack channel id the bot posts this route's investigation request threads into (V252, #7656), or blank for none. The id,
+    /// never the channel's name; the grid's Bot channel column shows it as stored.</summary>
+    public string SlackBotChannel { get; set; } = "";
 
     /// <summary>The Report notice column: Off, Needs a person or made a change, or All reports (#6979).</summary>
     public string ReportNoticeDisplay => NotificationRouteKinds.NormalizeReportNotice(ReportNotice) switch
@@ -585,6 +607,7 @@ public sealed class NotificationRouteRow
         ReportNotice = ReportNotice,
         ActionApproval = ActionApproval,
         ApprovalSinglePerson = ApprovalSinglePerson,
+        SlackBotChannel = SlackBotChannel,
         ModifiedAtUtc = ModifiedAtUtc == default ? null : ModifiedAtUtc,
     };
 
@@ -614,6 +637,7 @@ public sealed class NotificationRouteRow
         ReportNotice = ReportNotice,
         ActionApproval = ActionApproval,
         ApprovalSinglePerson = ApprovalSinglePerson,
+        SlackBotChannel = SlackBotChannel,
         ScopeDisplay = ScopeDisplay,
         StatusDisplay = StatusDisplay,
     };

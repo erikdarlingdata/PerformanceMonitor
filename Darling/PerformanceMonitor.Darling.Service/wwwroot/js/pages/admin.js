@@ -101,6 +101,7 @@ export const ROUTE_COLUMNS = [
   { key: "applies_to", label: "Applies to" },
   { key: "severities", label: "Severity" },
   { key: "report_notice", label: "Report notice" },
+  { key: "slack_bot_channel", label: "Bot channel" },
   { key: "status", label: "Status" },
   { key: "channels", label: "Channels set", wrap: true },
   { key: "agent", label: "Agent" },
@@ -362,6 +363,8 @@ export function routeRows(data) {
     applies_to: routeScopeText(r),
     severities: routeSeveritiesText(r),
     report_notice: routeReportNoticeText(r),
+    /* #7656: the Slack channel id the bot posts the route's request threads into; blank when the route has none. */
+    slack_bot_channel: typeof r.slack_bot_channel === "string" ? r.slack_bot_channel : "",
     status: routeStatusText(r),
     channels: Array.isArray(r.configured_channels) ? r.configured_channels.filter((c) => !isSecretKey(c)).join(", ") : null,
     agent: routeAgentText(r),

@@ -183,6 +183,11 @@ public sealed record NotificationRoute(
     /// <summary>Whether a person who asked for the action may also approve it on this route (<c>approval_single_person</c>, #7109). False by default.</summary>
     public bool ApprovalSinglePerson { get; init; }
 
+    /// <summary>The Slack channel id the bot posts this route's investigation request threads into (<c>slack_bot_channel</c>, V252, #7656):
+    /// the id (<c>C</c> or <c>G</c>, then capital letters and digits), never the channel's name. Blank, the default, means no bot channel and
+    /// no thread. Darling only: Lite has no routes with a Slack bot.</summary>
+    public string SlackBotChannel { get; init; } = "";
+
     /// <summary>Whether this route's severity filter takes an alert of <paramref name="severity"/> (#6928). Null takes every route.</summary>
     public bool AcceptsSeverity(AlertSeverityLevel? severity) => NotificationRouteKinds.SeveritiesAccept(Severities, severity);
 

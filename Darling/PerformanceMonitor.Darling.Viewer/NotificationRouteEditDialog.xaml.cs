@@ -209,6 +209,7 @@ public partial class NotificationRouteEditDialog : Window
         MarkSaved(GenericUrlBox, Route.GenericUrl);
         MarkSaved(PagerDutyKeyBox, Route.PagerDutyRoutingKey);
         SmtpRecipientsBox.Text = Route.SmtpRecipients;
+        SlackBotChannelBox.Text = Route.SlackBotChannel;
         EnabledCheckBox.IsChecked = Route.Enabled;
         Loaded += async (_, _) => await RefreshSigningKeyAsync();
     }
@@ -285,6 +286,8 @@ public partial class NotificationRouteEditDialog : Window
         Route.GenericUrl = ViewerWebhookSealing.CarryKept(GenericUrlBox.Text, _stored?.GenericUrl);
         Route.PagerDutyRoutingKey = ViewerWebhookSealing.CarryKept(PagerDutyKeyBox.Text, _stored?.PagerDutyRoutingKey);
         Route.SmtpRecipients = SmtpRecipientsBox.Text.Trim();
+        /* #7656: the bot channel id, trimmed. The shape is the writer's rule (SlackChannelId), said below with the other refusals. */
+        Route.SlackBotChannel = SlackBotChannelBox.Text.Trim();
         Route.Enabled = EnabledCheckBox.IsChecked == true;
         Route.Severities = NotificationRouteKinds.NormalizeSeverities((SeveritiesCombo.SelectedItem as ComboBoxItem)?.Tag as string);
         Route.ReportNotice = NotificationRouteKinds.NormalizeReportNotice((ReportNoticeCombo.SelectedItem as ComboBoxItem)?.Tag as string);

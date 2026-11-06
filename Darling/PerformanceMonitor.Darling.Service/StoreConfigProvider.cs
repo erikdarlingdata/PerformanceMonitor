@@ -2858,7 +2858,7 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     public const string NotificationRoutesSelectSql =
         "SELECT route_id, metric_match, teams_url, slack_url, generic_url, pagerduty_routing_key, smtp_recipients, enabled, scope_server_id, scope_tag_id, "
         + "agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, send_resolutions, "
-        + NotificationRouteSigningColumns + ", fallback_route_id, severities, report_notice, action_approval, approval_single_person "
+        + NotificationRouteSigningColumns + ", fallback_route_id, severities, report_notice, action_approval, approval_single_person, slack_bot_channel "
         + "FROM config_notification_routes ORDER BY route_id";
 
     /// <summary>A route's signing key columns (V193, #5998), last in both the service's and the viewer's route SELECT.</summary>
@@ -2988,6 +2988,8 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
                     /* V238 (#7109): the approval setting; a word this build does not know reads as required. */
                     ActionApproval = NotificationRouteKinds.NormalizeActionApproval(reader.GetString(22)),
                     ApprovalSinglePerson = reader.GetBoolean(23),
+                    /* V252 (#7656): the bot channel id the route's request threads go to; blank is none. */
+                    SlackBotChannel = reader.GetString(24),
                 });
             }
         }

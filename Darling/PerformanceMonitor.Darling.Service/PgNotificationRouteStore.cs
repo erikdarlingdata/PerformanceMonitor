@@ -101,6 +101,9 @@ public sealed class PgNotificationRouteStore
         /// <summary>Whether a person who asked for an action may approve it on this route (V238, #7109).</summary>
         public bool ApprovalSinglePerson { get; init; }
 
+        /// <summary>The Slack channel id the bot posts the route's request threads into (V252, #7656), or blank for none. Not a secret.</summary>
+        public string SlackBotChannel { get; init; } = "";
+
         /// <summary>The fallback route's name (its <c>metric_match</c>), or null when there is no fallback.</summary>
         public string? FallbackRouteName { get; init; }
 
@@ -116,7 +119,7 @@ public sealed class PgNotificationRouteStore
     public const string SelectSummariesSql = @"
 SELECT route_id, metric_match, configured_channels, smtp_recipients, enabled, modified_at, scope_server_id, scope_tag_id,
        agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, send_resolutions, fallback_route_id, severities, report_notice,
-       action_approval, approval_single_person
+       action_approval, approval_single_person, slack_bot_channel
 FROM config_notification_routes
 ORDER BY route_id";
 
@@ -191,6 +194,7 @@ UPDATE config_notification_routes
                 ReportNotice = NotificationRouteKinds.NormalizeReportNotice(reader.GetString(16)),
                 ActionApproval = NotificationRouteKinds.NormalizeActionApproval(reader.GetString(17)),
                 ApprovalSinglePerson = reader.GetBoolean(18),
+                SlackBotChannel = reader.GetString(19),
             });
         }
 
