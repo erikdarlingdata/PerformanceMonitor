@@ -84,6 +84,9 @@ public static class DarlingXeSessions
 
         public string? BlockedProcessPartialNote { get; set; }
 
+        /// <summary>#7639: the same for the client-timeout (attention) session, the counterpart of Lite's client-timeout run note.</summary>
+        public string? AttentionPartialNote { get; set; }
+
         /// <summary>
         /// True when the deadlock ensure of an on-premises, Managed Instance or RDS server failed with a transient error (a timeout, a
         /// dropped connection). That is not a fault for the run: the session may well be running, so the run reads it as it did before
@@ -388,6 +391,10 @@ public static class DarlingXeSessions
         var deadlockTally = new CaptureTally();
         var blockedTally = new CaptureTally();
 
+        /* #7639: the client-timeout create per database too, for the run note Lite's client-timeout run carries. Its PERMISSIONS fault
+           below keeps its own rule (every database denied). */
+        var attentionTally = new CaptureTally();
+
         /* #5640 (H2): the databases where the client-timeout create was refused for permission, against the databases it was tried
            in. The run records PERMISSIONS only when EVERY database refused it; a refusal in some leaves the survivors' read real. */
         var attentionTried = 0;
@@ -463,6 +470,7 @@ public static class DarlingXeSessions
                     attentionTried++;
                     var denied = await DarlingAlwaysOnXeSessions.EnsureAsync(
                         database, runner, server, databaseName, AlwaysOnXeSessionKind.Attention, "client timeout", logger, cancellationToken);
+                    attentionTally.Record(databaseName, denied);
                     if (denied is { IsPermission: true })
                     {
                         attentionDenied ??= new AttentionEnsureFault(denied.Message);
@@ -479,6 +487,10 @@ public static class DarlingXeSessions
                 var unreached = new XeEnsureFailure($"The database could not be reached to create its XE sessions: {ex.Message}", IsPermission: false);
                 deadlockTally.Record(databaseName, unreached);
                 blockedTally.Record(databaseName, unreached);
+                if (attentionEnabled)
+                {
+                    attentionTally.Record(databaseName, unreached);
+                }
             }
             finally
             {
@@ -492,12 +504,16 @@ public static class DarlingXeSessions
             (outcome.Deadlock, outcome.DeadlockPartialNote) = deadlockTally.Result();
             (outcome.BlockedProcess, outcome.BlockedProcessPartialNote) = blockedTally.Result();
 
+            /* Only the note is kept: a client-timeout create refused everywhere is the PERMISSIONS fault returned below, or no fault at all. */
+            outcome.AttentionPartialNote = attentionTally.Result().PartialNote;
+
             /* A list that names no database the server has attempts nothing and refuses nothing, so the tallies are empty. The two
                runs say so in their note instead of recording SUCCESS with no rows and no reason. */
             if (listMatchesNone)
             {
                 outcome.DeadlockPartialNote = XeSessionDatabaseList.MatchesNoDatabaseNote;
                 outcome.BlockedProcessPartialNote = XeSessionDatabaseList.MatchesNoDatabaseNote;
+                outcome.AttentionPartialNote = attentionEnabled ? XeSessionDatabaseList.MatchesNoDatabaseNote : null;
             }
         }
 

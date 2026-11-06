@@ -170,6 +170,25 @@ ORDER BY d.name;", connection);
         }
     }
 
+    /// <summary>
+    /// Writes the checked databases to the server (the XE session list in XE-sessions mode, the excluded databases otherwise)
+    /// and saves servers.json. This touches no credential, so it goes through <see cref="ServerManager.UpdateServerSettings"/>:
+    /// <see cref="ServerManager.UpdateServer"/> with no username would delete an Entra MFA server's stored username (#7639).
+    /// </summary>
+    internal static void PersistSelection(ServerManager serverManager, ServerConnection server, List<string> checkedNames, bool xeSessionsMode)
+    {
+        if (xeSessionsMode)
+        {
+            server.XeSessionDatabases = checkedNames;
+        }
+        else
+        {
+            server.ExcludedDatabases = checkedNames;
+        }
+
+        serverManager.UpdateServerSettings(server);
+    }
+
     private void Save_Click(object sender, RoutedEventArgs e)
     {
         try
@@ -178,16 +197,7 @@ ORDER BY d.name;", connection);
                 .Where(i => i.IsExcluded)
                 .Select(i => i.Name)
                 .ToList();
-            if (_xeSessionsMode)
-            {
-                _server.XeSessionDatabases = checkedNames;
-            }
-            else
-            {
-                _server.ExcludedDatabases = checkedNames;
-            }
-
-            _serverManager.UpdateServer(_server);
+            PersistSelection(_serverManager, _server, checkedNames, _xeSessionsMode);
             ExclusionsModified = true;
             DialogResult = true;
         }

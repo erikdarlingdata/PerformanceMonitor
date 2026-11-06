@@ -215,12 +215,12 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
 
     /* #7639: a list that names no database the server has attempts nothing and refuses nothing. The deadlock and blocked process runs used
        to record SUCCESS with no rows and no reason, so each now carries a note that the list matches no database. An empty list (every
-       database) and a list that names a live database carry no such note. */
+       database) and a list that names a live database carry no such note. The client timeout run (Lite's carries it too) is one of the three. */
     [Theory]
     [InlineData("dropped_last_week", true)]
     [InlineData("", false)]
     [InlineData("alpha", false)]
-    public async Task AnXeSessionDatabaseList_MatchingNoDatabase_PutsANoteOnTheDeadlockAndBlockedProcessRuns(string list, bool expectNote)
+    public async Task AnXeSessionDatabaseList_MatchingNoDatabase_PutsANoteOnTheDeadlockBlockedProcessAndClientTimeoutRuns(string list, bool expectNote)
     {
         var rig = BuildRig();
         rig.Runner.XeEnsureOverrideForTests = null;
@@ -229,10 +229,46 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
 
         await DarlingXeSessions.EnsureAllAsync(rig.Runtime, rig.Runner, NullLogger.Instance, CancellationToken.None, outcome: outcome);
 
-        foreach (var note in new[] { outcome.DeadlockPartialNote, outcome.BlockedProcessPartialNote })
+        foreach (var note in new[] { outcome.DeadlockPartialNote, outcome.BlockedProcessPartialNote, outcome.AttentionPartialNote })
         {
             Assert.Equal(expectNote, note?.Contains("matches no database on this server", StringComparison.Ordinal) ?? false);
         }
+    }
+
+    /* #7639: the client timeout collector is switched off, so its session is not ensured and its run has nothing to say about the list. */
+    [Fact]
+    public async Task AnXeSessionDatabaseList_MatchingNoDatabase_PutsNoNoteOnTheClientTimeoutRun_WhenItsCollectorIsOff()
+    {
+        var rig = BuildRig();
+        rig.Runner.XeEnsureOverrideForTests = null;
+        rig.Runtime.Config.XeSessionDatabases = new List<string> { "dropped_last_week" };
+        var outcome = new DarlingXeSessions.CaptureEnsureOutcome();
+
+        await DarlingXeSessions.EnsureAllAsync(rig.Runtime, rig.Runner, NullLogger.Instance, CancellationToken.None, attentionEnabled: false, outcome: outcome);
+
+        Assert.NotNull(outcome.DeadlockPartialNote);
+        Assert.Null(outcome.AttentionPartialNote);
+    }
+
+    /* #7639: the worker merges the note onto a client timeout run through the same accessor the deadlock and blocked process runs use. */
+    [Fact]
+    public async Task TheClientTimeoutRun_CarriesTheListNote_AndAPartialRefusalNote_ThroughTheWorkersAccessor()
+    {
+        var rig = BuildRig();
+        rig.Runner.XeEnsureOverrideForTests = null;
+        rig.Runtime.Config.XeSessionDatabases = new List<string> { "dropped_last_week" };
+        await DarlingWorker.EnsureAlwaysOnXeSessionsAsync(rig.State, rig.Runner, DateTime.UtcNow, NullLogger.Instance, CancellationToken.None);
+        Assert.Contains("matches no database on this server", DarlingWorker.CaptureEnsurePartialNoteFor("attention", rig.State), StringComparison.Ordinal);
+
+        var partial = BuildRig();
+        partial.Runner.XeEnsureOverrideForTests = null;
+        partial.Alpha.CreateFailure = new InvalidOperationException("The create was refused.");
+        await DarlingWorker.EnsureAlwaysOnXeSessionsAsync(partial.State, partial.Runner, DateTime.UtcNow, NullLogger.Instance, CancellationToken.None);
+        var note = DarlingWorker.CaptureEnsurePartialNoteFor("attention", partial.State);
+        Assert.NotNull(note);
+        Assert.Contains("alpha", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("beta", note, StringComparison.Ordinal);
+        Assert.Null(DarlingWorker.CaptureEnsurePartialNoteFor("wait_stats", partial.State));
     }
 
     /* #7639: an empty list is how it worked before the setting: every database gets its sessions. */

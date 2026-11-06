@@ -790,10 +790,11 @@ public sealed partial class DarlingWorker
         : string.Equals(collectorName, BlockedProcessReportCollector.Instance.Name, StringComparison.OrdinalIgnoreCase) ? server.CaptureEnsure.BlockedProcess
         : null;
 
-    /// <summary>#6893: the partial note (Azure SQL Database, the create failed in some databases) merged onto a successful deadlock or blocked-process run, or null.</summary>
+    /// <summary>#6893, #7639: the partial note (Azure SQL Database, the create failed in some databases, or the XE session database list matches none) merged onto a successful deadlock, blocked-process or client-timeout run, or null.</summary>
     internal static string? CaptureEnsurePartialNoteFor(string collectorName, ServerLoopState server) =>
         string.Equals(collectorName, DeadlocksCollector.Instance.Name, StringComparison.OrdinalIgnoreCase) ? server.CaptureEnsure.DeadlockPartialNote
         : string.Equals(collectorName, BlockedProcessReportCollector.Instance.Name, StringComparison.OrdinalIgnoreCase) ? server.CaptureEnsure.BlockedProcessPartialNote
+        : IsAttentionCollector(collectorName) ? server.CaptureEnsure.AttentionPartialNote
         : null;
 
     internal static bool IsDeadlocksCollector(string collectorName) =>

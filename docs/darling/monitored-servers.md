@@ -54,6 +54,8 @@ Microsoft Learn lists these caps under "Resource governance" on [Extended Events
 
 Each install uses one long-query session per database while the trace is on. It adds up to two fallbacks while a shared session is unusable. A failed create or start on Azure SQL Database carries a sentence that names these caps.
 
+To keep a pool under its cap, use Databases for XE Sessions in the Viewer's Manage Servers window to check the databases that should get sessions. The list only limits new sessions. Sessions that already exist in the other databases stay, so on a pool that is already full, drop them with `--drop-xe-sessions <server-name>` (see the collector settings page). That verb drops the sessions in every monitored database, and the service then creates them again in the listed ones. A database that Azure refused stays refused until those slots are free.
+
 ### Known limits
 
 - An older Darling with the trace on loses capture once for each upgraded install, until it reconnects.
