@@ -437,7 +437,7 @@ WITH file_totals AS (
         var tab = Source("Lite", "Controls", "FinOpsTab.xaml.cs");
         Assert.Contains("GetDatabaseSizeLatestWithCostShareAsync(serverId, sizesFilter, monthlyCost)", tab, StringComparison.Ordinal);
         Assert.Contains("GetDatabaseSizeSummaryAsync(serverId, 10, sizeChartFilter)", tab, StringComparison.Ordinal);
-        Assert.Contains("GetPvsStatsLatestWithNoteAsync(serverId, pvsFilter)", tab, StringComparison.Ordinal);
+        Assert.Contains("GetPvsStatsLatestWithNoteAsync(serverId, serverManager, pvsFilter)", tab, StringComparison.Ordinal);
         Assert.Contains("GetPvsTrendAsync(serverId, DateTime.UtcNow.AddDays(-7), pvsFilter)", tab, StringComparison.Ordinal);
 
         var locking = Source("Lite", "Controls", "FinOpsTab.Locking.cs");

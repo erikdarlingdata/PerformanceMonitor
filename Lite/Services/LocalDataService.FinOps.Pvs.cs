@@ -162,9 +162,9 @@ ORDER BY lower(p.database_name), p.database_name, p.collection_time";
     /// stale or missing snapshots, a standalone server and Azure SQL Database give no note.
     /// </summary>
     public async Task<(List<PvsStatsRow> Rows, string? SecondaryNote)> GetPvsStatsLatestWithNoteAsync(
-        int serverId, IReadOnlyList<string>? databaseNames = null)
+        int serverId, ServerManager serverManager, IReadOnlyList<string>? databaseNames = null)
     {
-        var read = await ReadPvsStatsLatestAsync(serverId, databaseNames);
+        var read = await ReadPvsStatsLatestAsync(serverId, serverManager, databaseNames);
         return (read.Rows, read.SecondaryNote);
     }
 
@@ -177,7 +177,7 @@ ORDER BY lower(p.database_name), p.database_name, p.collection_time";
     /// <returns><c>UnfilteredRows</c> is the server's newest snapshot with every database, and is read only when a filter matched nothing in
     /// it (null otherwise).</returns>
     public async Task<PvsLatestRead> ReadPvsStatsLatestAsync(
-        int serverId, IReadOnlyList<string>? databaseNames = null, bool secondaryNoteApplies = true)
+        int serverId, ServerManager serverManager, IReadOnlyList<string>? databaseNames = null)
     {
         var rows = await GetPvsStatsLatestAsync(serverId, databaseNames);
 

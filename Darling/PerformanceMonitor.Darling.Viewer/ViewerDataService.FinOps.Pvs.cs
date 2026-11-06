@@ -131,8 +131,9 @@ ORDER BY lower(p.database_name), p.database_name, p.collection_time";
     /// today's replica roles. It fails open: stale or missing snapshots, a standalone server and Azure SQL Database give no note.
     /// </summary>
     public async Task<(List<PvsStatsRow> Rows, string? SecondaryNote)> GetPvsStatsLatestWithNoteAsync(
-        int serverId, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+        DarlingServer server, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
+        var serverId = server.ServerId;
         var rows = await GetPvsStatsLatestAsync(serverId, databaseNames, cancellationToken);
 
         /* The anchor is the snapshot the rows came from. A filter that matched none of the newest snapshot has no row to read it from, so
