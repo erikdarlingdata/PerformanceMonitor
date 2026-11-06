@@ -10,11 +10,23 @@ import { pathToFileURL } from "node:url";
 const [jsDir, scenario] = process.argv.slice(-2);
 
 const noop = () => {};
-const domNode = () => ({
-  style: {}, classList: { add: noop, remove: noop, toggle: noop, contains: () => false }, appendChild: noop, append: noop,
-  setAttribute: noop, removeAttribute: noop, addEventListener: noop, removeEventListener: noop, querySelector: () => null,
-  querySelectorAll: () => [], children: [], dataset: {},
-});
+/* Just enough of a DOM for util.js's el() and mount(): nodes that hold children, so a drawn picker can be counted. */
+globalThis.Node = class Node {
+  constructor() {
+    Object.assign(this, {
+      style: {}, classList: { add: noop, remove: noop, toggle: noop, contains: () => false }, dataset: {}, childNodes: [], firstChild: null,
+    });
+  }
+  appendChild(c) { this.childNodes.push(c); this.firstChild = this.childNodes[0]; return c; }
+  removeChild(c) { this.childNodes.splice(this.childNodes.indexOf(c), 1); this.firstChild = this.childNodes[0] || null; return c; }
+  setAttribute() {}
+  removeAttribute() {}
+  addEventListener() {}
+  removeEventListener() {}
+  querySelector() { return null; }
+  querySelectorAll() { return []; }
+};
+const domNode = () => new Node();
 globalThis.document = {
   createElement: domNode, createTextNode: domNode, getElementById: domNode, querySelector: () => null, querySelectorAll: () => [],
   addEventListener: noop, removeEventListener: noop, body: domNode(), documentElement: domNode(), cookie: "", hidden: false,
@@ -27,11 +39,19 @@ globalThis.sessionStorage = store;
 globalThis.addEventListener = noop;
 globalThis.removeEventListener = noop;
 
+/* What /api/front-door answers: the store list a front door reports, each store with its own flags. */
+let frontDoorCalls = 0;
+const storeList = { stores: [{ name: "alpha", health: "ok", server_count: 3, admin_writes_off: true, managed_store: true }] };
+
 /* What /api/session answers, in order (the last one repeats); an Error is a transport failure, a number is an HTTP status with no body. */
 let answers = [];
 let calls = 0;
 let release = null;
 globalThis.fetch = async (url) => {
+  if (url === "/api/front-door") {
+    frontDoorCalls++;
+    return { ok: true, status: 200, text: async () => JSON.stringify(storeList) };
+  }
   if (url !== "/api/session") throw new Error("unexpected request " + url);
   calls++;
   if (release) await release;
@@ -92,6 +112,35 @@ try {
     await api.getSession();
     await api.getSession();
     out.callsAfterWait = calls;
+  } else if (scenario === "front-door-late" || scenario === "front-door-late-not-a-front-door" || scenario === "front-door-first-good") {
+    /* startFrontDoor (store-picker.js) is what app.js runs at start. The first read fails (the front door restarting while the page
+       loads); the retried answer is the front door's own, with its fixed false flags. */
+    const util = await import(pathToFileURL(path.join(scratch, "util.js")).href);
+    const picker = await import(pathToFileURL(path.join(scratch, "store-picker.js")).href);
+    const frontDoorAnswer = { can_edit: true, front_door: true, managed_store: false, admin_writes_off: false };
+    answers = scenario === "front-door-late" ? [new Error("connection refused"), frontDoorAnswer]
+      : scenario === "front-door-first-good" ? [frontDoorAnswer]
+      : [new Error("connection refused"), { can_edit: true }];
+    const started = [];
+    const host = domNode();
+    const state = () => ({
+      frontDoor: util.frontDoor(), store: util.currentStore(), storeListReads: frontDoorCalls, started: started.slice(),
+      pickerParts: host.childNodes.length,
+    });
+    await picker.startFrontDoor(host, (late) => started.push(late));
+    out.afterStart = state();
+    out.peekAtStart = api.peekSession();
+    if (scenario !== "front-door-first-good") {
+      clock += waitPastRetry;
+      out.retried = await api.getSession();
+      /* The start finishes after the answer, on its own promise chain: let it run. */
+      await new Promise((r) => setTimeout(r, 50));
+      /* Asking again after a good answer must not start it twice. */
+      await api.getSession();
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    out.afterRecovery = state();
+    out.sessionAfter = api.peekSession();
   } else {
     throw new Error("unknown scenario " + scenario);
   }

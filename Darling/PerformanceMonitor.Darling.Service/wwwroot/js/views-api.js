@@ -31,6 +31,8 @@ let _sessionFailedAt = 0;
 /* The resolved session, for a synchronous reader that must not start the fetch itself (peekSession). */
 let _sessionValue = null;
 let _catalogPromise = null;
+/* Callbacks waiting for the first good session answer (onFirstGoodSession). */
+let _goodSessionWaiters = [];
 
 /**
  * The session capability probe — resolves to the server's {can_edit} for this request's seat, or to
@@ -56,10 +58,30 @@ export function getSession() {
     ).catch(() => ({ can_edit: false, probe_failed: true })).then((session) => {
       _sessionValue = session;
       _sessionFailedAt = session.probe_failed ? Date.now() : 0;
+      if (!session.probe_failed && _goodSessionWaiters.length) {
+        const waiting = _goodSessionWaiters;
+        _goodSessionWaiters = [];
+        for (const cb of waiting) {
+          try { cb(session); } catch { /* one waiter's failure must not stop the others or the caller's answer */ }
+        }
+      }
       return session;
     });
   }
   return _sessionPromise;
+}
+
+/**
+ * Runs `cb(session)` once, with the first good session answer: at once when one is already kept, else when a later
+ * getSession() gets one (#7928). It never starts a read itself, so it fires when the page next asks (the 60 s status poll
+ * at the latest). Startup uses it to finish the front-door start that a failed first answer skipped.
+ */
+export function onFirstGoodSession(cb) {
+  if (_sessionValue && !_sessionValue.probe_failed) {
+    cb(_sessionValue);
+    return;
+  }
+  _goodSessionWaiters.push(cb);
 }
 
 /**

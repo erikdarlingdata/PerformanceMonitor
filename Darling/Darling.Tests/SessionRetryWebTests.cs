@@ -101,4 +101,61 @@ public sealed class SessionRetryWebTests
         Assert.Equal(1, r.GetProperty("callsInsideWait").GetInt32());
         Assert.Equal(2, r.GetProperty("callsAfterWait").GetInt32());
     }
+
+    [Fact]
+    public void WhenTheFirstSessionReadFailedBehindAFrontDoor_TheFrontDoorStartRunsOnceOnTheFirstGoodAnswer()
+    {
+        if (!TryRun("front-door-late", out var r)) return;
+
+        // Until a good answer arrives nothing is started and edit controls stay hidden (a failed answer says can_edit: false).
+        var start = r.GetProperty("afterStart");
+        Assert.False(start.GetProperty("frontDoor").GetBoolean());
+        Assert.Equal(0, start.GetProperty("storeListReads").GetInt32());
+        Assert.Equal(0, start.GetProperty("pickerParts").GetInt32());
+        Assert.Equal(0, start.GetProperty("started").GetArrayLength());
+        Assert.False(r.GetProperty("peekAtStart").GetProperty("can_edit").GetBoolean());
+
+        // The retried answer is the front door's: the store list is read, the store in use is set, and the start is reported once.
+        var after = r.GetProperty("afterRecovery");
+        Assert.True(r.GetProperty("retried").GetProperty("front_door").GetBoolean());
+        Assert.True(after.GetProperty("frontDoor").GetBoolean());
+        Assert.Equal("alpha", after.GetProperty("store").GetString());
+        Assert.Equal(1, after.GetProperty("storeListReads").GetInt32());
+        Assert.True(after.GetProperty("pickerParts").GetInt32() > 0);
+        Assert.Equal(1, after.GetProperty("started").GetArrayLength());
+        Assert.True(after.GetProperty("started")[0].GetBoolean());
+
+        // The store's own flags replace the front door's fixed false ones on the session the pages read.
+        var session = r.GetProperty("sessionAfter");
+        Assert.True(session.GetProperty("admin_writes_off").GetBoolean());
+        Assert.True(session.GetProperty("managed_store").GetBoolean());
+    }
+
+    [Fact]
+    public void WhenTheRetriedSessionAnswerIsNotAFrontDoor_NothingIsStarted()
+    {
+        if (!TryRun("front-door-late-not-a-front-door", out var r)) return;
+
+        var after = r.GetProperty("afterRecovery");
+        Assert.True(r.GetProperty("retried").GetProperty("can_edit").GetBoolean());
+        Assert.False(after.GetProperty("frontDoor").GetBoolean());
+        Assert.Equal(0, after.GetProperty("storeListReads").GetInt32());
+        Assert.Equal(0, after.GetProperty("pickerParts").GetInt32());
+        Assert.Equal(0, after.GetProperty("started").GetArrayLength());
+    }
+
+    [Fact]
+    public void WhenTheFirstSessionReadIsGoodBehindAFrontDoor_TheFrontDoorStartRunsAtOnce()
+    {
+        if (!TryRun("front-door-first-good", out var r)) return;
+
+        var after = r.GetProperty("afterRecovery");
+        Assert.True(after.GetProperty("frontDoor").GetBoolean());
+        Assert.Equal("alpha", after.GetProperty("store").GetString());
+        Assert.Equal(1, after.GetProperty("storeListReads").GetInt32());
+        Assert.True(after.GetProperty("pickerParts").GetInt32() > 0);
+        Assert.Equal(1, after.GetProperty("started").GetArrayLength());
+        Assert.False(after.GetProperty("started")[0].GetBoolean());
+        Assert.True(r.GetProperty("sessionAfter").GetProperty("admin_writes_off").GetBoolean());
+    }
 }
