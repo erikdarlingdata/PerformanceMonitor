@@ -201,7 +201,12 @@ async function sendRoute(verb, entries, repaint) {
         out = { message: built.error, isError: true };
       } else {
         const path = entries.id == null ? "/api/notification-routes" : "/api/notification-routes/" + entries.id;
-        out = routeOutcome(verb, await apiWrite(entries.id == null ? "POST" : "PUT", path, built.payload));
+        const res = await apiWrite(entries.id == null ? "POST" : "PUT", path, built.payload);
+        out = routeOutcome(verb, res);
+        /* #7952: a 409 means the route was changed elsewhere since Edit was pressed, so the entries hold a stale version and every Save
+           sent from them is refused again. Dropping the entries makes the next draw read the current route and its version, as the profile
+           save does; the service's sentence stays in the status line, so the person sees the change and makes theirs again. */
+        if (res && res.status === 409) routeEntries = null;
       }
     }
   } catch (e) {
