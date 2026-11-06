@@ -25,7 +25,7 @@
 
 import { el, mount, readTool, apiSend, buildQuery, loadingStrip, errorStrip, emptyStrip, plainEmptyStrip, noticeStrip, disclosure,
          ALERT_STATE_LABELS, applyFormat, alertDeliveryState, parseUtc, localizeAlertDetail, rowsUnder, storeHash, NO_MESSAGE_TEXT_PREFIX } from "../util.js";
-import { VIZ, reapplyGridSort, gridRowOf } from "../panels.js";
+import { VIZ, reapplyGridSort, gridRowOf, gridRowShown } from "../panels.js";
 import { copyText } from "../grid-tools.js";
 import { pageRangePicker, windowResultOfSpec } from "../page-range.js";
 import { relativeSpec, specName } from "../time-range.js";
@@ -599,7 +599,7 @@ function buildDismissBar(state) {
   const status = el("span", { class: "dismiss-status", text: "" });
   const bar = el("div", { class: "dismiss-bar" }, [selBtn, allBtn, status]);
   state.dismiss = { bar, selBtn, allBtn, status, busy: false };
-  selBtn.addEventListener("click", () => dismissRows(state, [...selected.values()]));
+  selBtn.addEventListener("click", () => dismissRows(state, selectedShown(state)));
   allBtn.addEventListener("click", () => {
     const rows = visibleRows(state).filter(dismissable);
     if (!rows.length) return;
@@ -617,15 +617,40 @@ function buildDismissBar(state) {
 function updateDismissBar(state) {
   const d = state.dismiss;
   if (!d) return;
-  d.selBtn.textContent = selected.size ? "Dismiss Selected (" + selected.size + ")" : "Dismiss Selected";
-  d.selBtn.disabled = d.busy || selected.size === 0;
+  const picked = selectedShown(state).length;
+  d.selBtn.textContent = picked ? "Dismiss Selected (" + picked + ")" : "Dismiss Selected";
+  d.selBtn.disabled = d.busy || picked === 0;
   d.allBtn.disabled = d.busy || !visibleRows(state).some(dismissable);
 }
 
-/* The rows the current filter box lets through - what the table shows and what Dismiss All acts on. */
+/* The rows the table shows, which Dismiss All acts on: the server filter box, then every column filter. A column
+ * filter hides a line with display:none and the grid records it (panels.js gridRowShown), so this asks the grid
+ * instead of keeping a second copy of the filter rule (#7919). */
 function visibleRows(state) {
   const q = state.filter.value.trim().toLowerCase();
-  return q ? state.alerts.filter((a) => String(a.server_name || "").toLowerCase().includes(q)) : state.alerts;
+  const rows = q ? state.alerts.filter((a) => String(a.server_name || "").toLowerCase().includes(q)) : state.alerts;
+  if (!state.tbody) return rows;
+  const shown = new Set();
+  for (const tr of state.tbody.children) {
+    const row = gridRowOf(tr);
+    if (row && gridRowShown(tr)) shown.add(alertKey(row));
+  }
+  return rows.filter((a) => shown.has(alertKey(a)));
+}
+
+/* The checked rows Dismiss Selected acts on: only those the column filters leave showing, the same test Dismiss All uses.
+ * A checked row a filter hides stays checked (it is back, checked, when the filter is cleared) but is neither counted
+ * nor sent while hidden, so a click never dismisses a row the grid is not showing (#7919). The button text and its
+ * enabled state read this same list. */
+function selectedShown(state) {
+  const picked = [...selected.values()];
+  if (!picked.length || !state.tbody) return picked;
+  const hidden = new Set();
+  for (const tr of state.tbody.children) {
+    const row = gridRowOf(tr);
+    if (row && !gridRowShown(tr)) hidden.add(alertKey(row));
+  }
+  return picked.filter((a) => !hidden.has(alertKey(a)));
 }
 
 function dismissOutcomeText(t) {
@@ -961,7 +986,7 @@ function drawAlerts(state) {
     return;
   }
 
-  const table = VIZ.table({ alerts: rows }, { rowsKey: "alerts", columns: alertColumns() });
+  const table = VIZ.table({ alerts: rows }, { rowsKey: "alerts", columns: alertColumns(), onFilter: () => updateDismissBar(state) });
   mount(state.tableBox, table);
   const tbody = table.querySelector("tbody");
   const rowMap = new Map();
