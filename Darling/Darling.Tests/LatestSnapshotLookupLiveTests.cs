@@ -7,8 +7,10 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -186,6 +188,217 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
             /* No database_states rows at all: nothing can be judged dropped, so the key stays. */
             Assert.Equal(["Unjudged"], await StateKeysAsync(connection, ct, EmptyId, Owner, Prefix));
         });
+
+    /// <summary>
+    /// The plan half of #8013, on a store with one chunk per retained day: every row statement, with the probed snapshot
+    /// bound, is planned against the ONE chunk holding it, and each windowed probe against the few chunks inside its
+    /// window, a number set by the window and not by retention. The correlated form the statements replaced
+    /// (<c>collection_time = (SELECT MAX(collection_time) ...)</c>) is run as the control on the same store: the planner
+    /// cannot see through the subquery at plan time, so it keeps every retained chunk in the plan. The control is what
+    /// makes the one-chunk assertion a statement about the fix rather than about the store; if a planner ever excludes
+    /// the chunks for the correlated form too, the control fails and says so.
+    /// <para>Mints its own scratch database, as the other plan-shape tests do: another class's leftover chunks would change
+    /// the chunk list the plan is read against. <c>EXPLAIN</c> without <c>ANALYZE</c>: the statement is not run, only
+    /// planned, and the chunks are read off the plan's relation names.</para>
+    /// </summary>
+    [Fact]
+    public async Task EveryRowStatement_PlansAgainstTheOneChunkHoldingTheSnapshot_NotEveryRetainedChunk()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live latest-snapshot plan test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var connectionString = scratch.ConnectionString;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(connectionString, ct);
+        Assert.SkipUnless(timescaleEnabled, "TimescaleDB is not available on this cluster; chunk exclusion needs it.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        /* No background policy job reshapes the chunks under the plan assertion. */
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString);
+        await DarlingMcpTestData.RegisterServerAsync(connection, FreshId, FreshName, ct);
+
+        /* One snapshot a day for RetainedDays days, the newest one now, so each of the four tables holds about one chunk per
+           day (the product's chunk interval is one day). The newest snapshot is the one every read below must plan for. */
+        const int RetainedDays = 30;
+        var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+        for (var day = RetainedDays - 1; day >= 0; day--)
+        {
+            var stamp = now.AddDays(-day);
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO session_stats (collection_id, collection_time, server_id, server_name, program_name, connection_count, running_count, sleeping_count, dormant_count, total_cpu_time_ms, total_logical_reads)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+                CollectionIdGenerator.Next(), Naive(stamp), FreshId, FreshName, Tag(stamp), 12L, 3, 9, 0, 4200L, 99999L);
+            await SeedIndexAsync(connection, ct, FreshId, FreshName, stamp);
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO running_jobs (collection_time, server_id, server_name, job_name, job_id, start_time, current_duration_seconds, avg_duration_seconds, p95_duration_seconds, percent_of_average)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+                Naive(stamp), FreshId, FreshName, Tag(stamp), "job-" + Tag(stamp), Naive(stamp.AddHours(-1)), 3661L, 90L, 120L, 350.0m);
+            await SeedDatabaseStatesAsync(connection, ct, FreshId, FreshName, stamp, "Kept");
+        }
+
+        var chunks = await ChunksByHypertableAsync(connection, ct);
+        foreach (var table in new[] { "session_stats", "index_object_stats", "running_jobs", "database_states" })
+        {
+            Assert.True(chunks.TryGetValue(table, out var set) && set.Count >= RetainedDays - 1,
+                $"{table} has {(chunks.TryGetValue(table, out var s) ? s.Count : 0)} chunk(s); the seed did not produce one per day, so the plan would prove nothing");
+        }
+
+        var windowTwoDays = Naive(DateTime.UtcNow.AddDays(-2));
+        var windowThreeDays = Naive(DateTime.UtcNow.AddDays(-3));
+
+        /* The snapshots as the readers resolve them: every probe lands on the newest row. */
+        var sessionSnapshot = await DarlingSessionStatsReader.GetLatestSnapshotTimeAsync(postgres, FreshId, 30, ct);
+        var indexSnapshot = await DarlingObjectStatsReader.GetLatestIndexObjectStatsSnapshotTimeAsync(postgres, FreshId, ct);
+        var objectSnapshot = await DarlingFinOpsStorageGrowthReader.GetLatestObjectIndexSnapshotAsync(postgres, FreshId, Db, 30, ct);
+        var jobsSnapshot = await ScalarAsync(connection, ct, DarlingAlertReadAdapter.RunningJobsLatestSnapshotWindowedProbeSql, Int(FreshId), Stamp(windowTwoDays));
+        var statesSnapshot = await ScalarAsync(connection, ct, DarlingCollectorRunner.NewestDatabaseStateWindowedProbeSql, Int(FreshId), Stamp(windowTwoDays));
+        foreach (var snapshot in new object?[] { sessionSnapshot, indexSnapshot, objectSnapshot, jobsSnapshot, statesSnapshot })
+        {
+            Assert.Equal(Naive(now), Assert.IsType<DateTime>(snapshot));
+        }
+
+        var filterAll = DatabaseFilter.All;
+        var filterOne = DatabaseFilter.One(Db);
+
+        /* Each row statement with the parameters its reader binds (a fresh parameter per statement, since a parameter
+           belongs to one command): one chunk, the one holding the snapshot. */
+        var rowStatements = new (string Table, string Name, string Sql, Func<NpgsqlParameter[]> Parameters)[]
+        {
+            ("session_stats", "DarlingSessionStatsReader.LatestSql", DarlingSessionStatsReader.LatestSql,
+                () => [Int(FreshId), Stamp(now)]),
+            ("index_object_stats", "DarlingObjectStatsReader.IndexUsageSql", DarlingObjectStatsReader.IndexUsageSql,
+                () => [Int(FreshId), filterAll.Parameter(), Int(50), Stamp(now)]),
+            ("index_object_stats", "DarlingObjectStatsReader.IndexUsageMatchCountSql", DarlingObjectStatsReader.IndexUsageMatchCountSql,
+                () => [Int(FreshId), filterAll.Parameter(), Stamp(now)]),
+            ("index_object_stats", "DarlingObjectStatsReader.IndexLockingSql", DarlingObjectStatsReader.IndexLockingSql,
+                () => [Int(FreshId), filterAll.Parameter(), Int(50), Stamp(now)]),
+            ("index_object_stats", "DarlingObjectStatsReader.IndexLockingDetailSql", DarlingObjectStatsReader.IndexLockingDetailSql,
+                () => [Int(FreshId), filterOne.Parameter(), Text("dbo"), Text("Orders"), Text(Tag(now)), Stamp(now)]),
+            ("index_object_stats", "DarlingFinOpsStorageGrowthReader.ObjectIndexDetailSql", DarlingFinOpsStorageGrowthReader.ObjectIndexDetailSql,
+                () => [Int(FreshId), Text(Db), Text("dbo"), Text("Orders"), Stamp(now)]),
+            ("running_jobs", "DarlingAlertReadAdapter.AnomalousJobsSql", DarlingAlertReadAdapter.AnomalousJobsSql,
+                () => [Int(FreshId), new NpgsqlParameter<decimal> { TypedValue = 200m }, Stamp(now)]),
+            ("database_states", "DarlingCollectorRunner.PruneOrphanedDatabaseStateKeysSql", DarlingCollectorRunner.PruneOrphanedDatabaseStateKeysSql,
+                () => [Int(FreshId), Text(QueryStoreOpenIntervalState.StateCollectorName), Text(QueryStoreOpenIntervalState.WatermarkKeyPrefix), Stamp(now)]),
+        };
+
+        foreach (var (table, name, sql, parameters) in rowStatements)
+        {
+            var planned = await PlannedChunksAsync(connection, ct, sql, chunks[table], parameters());
+            Assert.True(planned.Count == 1,
+                $"{name} is planned against {planned.Count} of {chunks[table].Count} {table} chunks; with the snapshot bound as a literal the planner should keep only the chunk holding it:\n{string.Join(", ", planned)}");
+        }
+
+        /* Each windowed probe: bounded below, so the chunks in the plan are the window's, a count that does not grow with
+           retention. A window of N days over one-day chunks touches at most N + 1 chunks, plus one for the boundary. */
+        var probes = new (string Table, string Name, string Sql, int WindowDays, Func<NpgsqlParameter[]> Parameters)[]
+        {
+            ("session_stats", "DarlingSessionStatsReader.LatestSnapshotWindowedProbeSql", DarlingSessionStatsReader.LatestSnapshotWindowedProbeSql, 2,
+                () => [Int(FreshId), Stamp(windowTwoDays)]),
+            ("index_object_stats", "DarlingObjectStatsReader.IndexObjectStatsLatestSnapshotWindowedProbeSql", DarlingObjectStatsReader.IndexObjectStatsLatestSnapshotWindowedProbeSql, 3,
+                () => [Int(FreshId), Stamp(windowThreeDays)]),
+            ("index_object_stats", "DarlingFinOpsStorageGrowthReader.ObjectIndexSnapshotWindowedProbeSql", DarlingFinOpsStorageGrowthReader.ObjectIndexSnapshotWindowedProbeSql, 3,
+                () => [Int(FreshId), Text(Db), Stamp(windowThreeDays)]),
+            ("running_jobs", "DarlingAlertReadAdapter.RunningJobsLatestSnapshotWindowedProbeSql", DarlingAlertReadAdapter.RunningJobsLatestSnapshotWindowedProbeSql, 2,
+                () => [Int(FreshId), Stamp(windowTwoDays)]),
+            ("database_states", "DarlingCollectorRunner.NewestDatabaseStateWindowedProbeSql", DarlingCollectorRunner.NewestDatabaseStateWindowedProbeSql, 2,
+                () => [Int(FreshId), Stamp(windowTwoDays)]),
+        };
+
+        foreach (var (table, name, sql, windowDays, parameters) in probes)
+        {
+            var planned = await PlannedChunksAsync(connection, ct, sql, chunks[table], parameters());
+            Assert.True(planned.Count >= 1 && planned.Count <= windowDays + 2,
+                $"{name} is planned against {planned.Count} of {chunks[table].Count} {table} chunks; a {windowDays}-day window should keep at most {windowDays + 2}:\n{string.Join(", ", planned)}");
+        }
+
+        /* The control: the correlated form, on the same store, keeps every retained chunk in the plan. */
+        var correlated = DarlingSessionStatsReader.LatestSql.Replace(
+            "collection_time = $2",
+            "collection_time = (SELECT MAX(collection_time) FROM v_session_stats WHERE server_id = $1)",
+            StringComparison.Ordinal);
+        Assert.NotEqual(DarlingSessionStatsReader.LatestSql, correlated);
+        var control = await PlannedChunksAsync(connection, ct, correlated, chunks["session_stats"], Int(FreshId));
+        Assert.True(control.Count == chunks["session_stats"].Count,
+            $"the correlated control is planned against {control.Count} of {chunks["session_stats"].Count} session_stats chunks; the planner now excludes chunks for that form too, so the one-chunk assertion above no longer tells the two shapes apart");
+    }
+
+    private static NpgsqlParameter Int(int value) => new NpgsqlParameter<int> { TypedValue = value };
+    private static NpgsqlParameter Text(string value) => new NpgsqlParameter<string> { TypedValue = value };
+    private static NpgsqlParameter Stamp(DateTime value) => new NpgsqlParameter<DateTime> { TypedValue = Naive(value) };
+
+    private static async Task<object?> ScalarAsync(NpgsqlConnection connection, CancellationToken ct, string sql, params NpgsqlParameter[] parameters)
+    {
+        using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddRange(parameters);
+        return await command.ExecuteScalarAsync(ct);
+    }
+
+    /// <summary>Every chunk of every hypertable in the store, by hypertable name.</summary>
+    private static async Task<Dictionary<string, HashSet<string>>> ChunksByHypertableAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var chunks = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        using var command = new NpgsqlCommand("SELECT hypertable_name, chunk_name FROM timescaledb_information.chunks", connection);
+        using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            if (!chunks.TryGetValue(reader.GetString(0), out var set))
+            {
+                chunks[reader.GetString(0)] = set = new HashSet<string>(StringComparer.Ordinal);
+            }
+
+            set.Add(reader.GetString(1));
+        }
+
+        return chunks;
+    }
+
+    /// <summary>The distinct chunks of <paramref name="tableChunks"/> that <c>EXPLAIN</c> (planned, not run) keeps in the
+    /// statement's plan, read off every node's relation name. The parameters are bound the way the reader binds them, which
+    /// is what lets the planner see the snapshot as a literal.</summary>
+    private static async Task<SortedSet<string>> PlannedChunksAsync(
+        NpgsqlConnection connection, CancellationToken ct, string sql, HashSet<string> tableChunks, params NpgsqlParameter[] parameters)
+    {
+        using var command = new NpgsqlCommand("EXPLAIN (COSTS OFF, FORMAT JSON) " + sql, connection);
+        command.Parameters.AddRange(parameters);
+        var json = (string)(await command.ExecuteScalarAsync(ct))!;
+        using var document = JsonDocument.Parse(json);
+
+        var planned = new SortedSet<string>(StringComparer.Ordinal);
+        void Visit(JsonElement node)
+        {
+            if (node.TryGetProperty("Relation Name", out var relation) && relation.GetString() is string name && tableChunks.Contains(name))
+            {
+                planned.Add(name);
+            }
+
+            if (node.TryGetProperty("Plans", out var children))
+            {
+                foreach (var child in children.EnumerateArray())
+                {
+                    Visit(child);
+                }
+            }
+        }
+
+        foreach (var statement in document.RootElement.EnumerateArray())
+        {
+            Visit(statement.GetProperty("Plan"));
+        }
+
+        return planned;
+    }
 
     private static async Task SeedDatabaseStatesAsync(NpgsqlConnection connection, CancellationToken ct, int serverId, string serverName, DateTime stamp, params string[] databases)
     {
