@@ -443,16 +443,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                     anomalyIndices.Add(i);
             }
 
-            if (anomalyIndices.Count > 0)
-            {
-                var anomalyTimes = anomalyIndices.Select(i => sqlTimes[i]).ToArray();
-                var anomalyVals = anomalyIndices.Select(i => sqlValues[i]).ToArray();
-                var anomalyScatter = CpuChart.Plot.Add.TimeSeries(anomalyTimes, anomalyVals);
-                anomalyScatter.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Anomaly"));
-                anomalyScatter.MarkerSize = 6;
-                anomalyScatter.MarkerShape = ScottPlot.MarkerShape.FilledCircle;
-                anomalyScatter.LineWidth = 0;
-            }
+            AddAnomalyMarks(CpuChart.Plot, sqlTimes, sqlValues, anomalyIndices);
         }
 
         if (totalValues.Length > 0)
@@ -488,6 +479,41 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         CpuChart.Plot.Axes.SetLimitsY(0, 105);
 
         CpuChart.Refresh();
+    }
+
+    /// <summary>
+    /// #7678: a run of neighbouring points above the band is ONE mark, the line's own stretch redrawn thicker in the anomaly colour; a point alone
+    /// is one small dot. A 6 px circle per point turned a quiet server's lane (a third of its points marked) into a solid row of dots that hid the line.
+    /// <paramref name="indices"/> ascend, and neighbours are points one index apart.
+    /// </summary>
+    internal static void AddAnomalyMarks(ScottPlot.Plot plot, double[] times, double[] values, IReadOnlyList<int> indices)
+    {
+        var color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Anomaly"));
+        var start = 0;
+        while (start < indices.Count)
+        {
+            var end = start;
+            while (end + 1 < indices.Count && indices[end + 1] == indices[end] + 1) end++;
+            var count = end - start + 1;
+            var runTimes = new double[count];
+            var runValues = new double[count];
+            Array.Copy(times, indices[start], runTimes, 0, count);
+            Array.Copy(values, indices[start], runValues, 0, count);
+            var mark = plot.Add.TimeSeries(runTimes, runValues);
+            mark.Color = color;
+            if (count == 1)
+            {
+                mark.MarkerSize = 4;
+                mark.MarkerShape = ScottPlot.MarkerShape.FilledCircle;
+                mark.LineWidth = 0;
+            }
+            else
+            {
+                mark.MarkerSize = 0;
+                mark.LineWidth = 3.5f;
+            }
+            start = end + 1;
+        }
     }
 
     internal void UpdateLane(ScottPlot.WPF.WpfPlot chart, string title,
@@ -528,16 +554,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                     anomalyIndices.Add(i);
             }
 
-            if (anomalyIndices.Count > 0)
-            {
-                var anomalyTimes = anomalyIndices.Select(i => times[i]).ToArray();
-                var anomalyValues = anomalyIndices.Select(i => values[i]).ToArray();
-                var anomalyScatter = chart.Plot.Add.TimeSeries(anomalyTimes, anomalyValues);
-                anomalyScatter.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Anomaly"));
-                anomalyScatter.MarkerSize = 6;
-                anomalyScatter.MarkerShape = ScottPlot.MarkerShape.FilledCircle;
-                anomalyScatter.LineWidth = 0;
-            }
+            AddAnomalyMarks(chart.Plot, times, values, anomalyIndices);
         }
 
         var scatter = chart.Plot.Add.TimeSeries(times, values);

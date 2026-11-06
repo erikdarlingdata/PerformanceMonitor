@@ -192,7 +192,7 @@ if (scenario === "crosshair") {
   const g = (key) => find(drawn.node, (n) => n.attrs["data-strip"] === key)[0];
   const count = (key, cls) => find(g(key), (n) => n.attrs.class === cls).length;
   out.drawn = {
-    cpu: { band: count("cpu", "strip-band"), mean: count("cpu", "strip-band-mean"), dots: count("cpu", "strip-anomaly") },
+    cpu: { band: count("cpu", "strip-band"), mean: count("cpu", "strip-band-mean"), dots: count("cpu", "strip-anomaly"), runs: count("cpu", "strip-anomaly-run") },
     waits: { band: count("waits", "strip-band"), dots: count("waits", "strip-anomaly"), note: find(g("waits"), (n) => n.attrs.class === "strip-baseline-note").map((n) => n.textContent) },
     blocking: { band: count("blocking", "strip-band"), dots: count("blocking", "strip-anomaly") },
     memory: { band: count("memory", "strip-band") },

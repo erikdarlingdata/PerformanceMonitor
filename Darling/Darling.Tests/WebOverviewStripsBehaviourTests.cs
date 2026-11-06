@@ -261,7 +261,9 @@ public sealed class WebOverviewStripsBehaviourTests
         var drawn = r.GetProperty("drawn");
         Assert.Equal(1, drawn.GetProperty("cpu").GetProperty("band").GetInt32());
         Assert.Equal(1, drawn.GetProperty("cpu").GetProperty("mean").GetInt32());
-        Assert.Equal(26, drawn.GetProperty("cpu").GetProperty("dots").GetInt32());
+        /* #7678: the 26 marked points are two runs of neighbours (minutes 21..30 and 45..60): two segments, no circle per point. */
+        Assert.Equal(0, drawn.GetProperty("cpu").GetProperty("dots").GetInt32());
+        Assert.Equal(2, drawn.GetProperty("cpu").GetProperty("runs").GetInt32());
         Assert.Equal(0, drawn.GetProperty("waits").GetProperty("band").GetInt32());
         Assert.Equal(0, drawn.GetProperty("waits").GetProperty("dots").GetInt32());
         Assert.Equal(new[] { "No baseline yet: not enough history." },
