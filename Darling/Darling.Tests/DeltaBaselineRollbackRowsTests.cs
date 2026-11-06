@@ -124,9 +124,9 @@ public sealed class DeltaBaselineRollbackRowsTests
         Assert.Equal(60, next.Interval);
     }
 
-    /// <summary>A key first seen in the abandoned run goes back to unseen, so its next sighting is a first sighting, not a delta.</summary>
+    /// <summary>A key first seen in the abandoned run keeps the baseline the run gave it, so its next delta is one interval, as it is when nothing fails.</summary>
     [Fact]
-    public void AKeyNewInTheAbandonedRun_IsBackToUnseen()
+    public void AKeyNewInTheAbandonedRun_KeepsTheBaselineTheRunGaveIt()
     {
         var deltas = new CollectorDeltaCalculator();
         Run(deltas, T0, 100, Key);
@@ -134,8 +134,8 @@ public sealed class DeltaBaselineRollbackRowsTests
         ((IBaselineRollback)abandoned.Rows).RollBackBaselines();
 
         var next = Run(deltas, T0.AddMinutes(2), 160, "LCK_M_X", Key);
-        Assert.Equal(0, next.Delta);
-        Assert.Equal(0, next.Interval);
+        Assert.Equal(30, next.Delta);
+        Assert.Equal(60, next.Interval);
     }
 
     /// <summary>A second rollback does nothing: the snapshot is spent, and a later run's baselines are not disturbed.</summary>
@@ -157,11 +157,11 @@ public sealed class DeltaBaselineRollbackRowsTests
 
     /// <summary>
     /// The drain-loop shape: a key captured mid-drain, after an earlier key's delta calls already advanced the run's pass
-    /// window, is restored to its pre-run baseline, and a key with no baseline before the run goes back to unseen. The
-    /// next run's delta spans both intervals for the first key and is a first sighting for the second.
+    /// window, is restored to its pre-run baseline, and a key with no baseline before the run keeps the baseline it gave it. The
+    /// next run's delta spans both intervals for the first key and one interval for the new one.
     /// </summary>
     [Fact]
-    public void AKeyCapturedMidDrain_IsRestored_AndANewOneGoesBackToUnseen()
+    public void AKeyCapturedMidDrain_IsRestored_AndANewOneKeepsItsBaseline()
     {
         var deltas = new CollectorDeltaCalculator();
         LazyRun(deltas, T0, ("LCK_M_X", 10), (Key, 100));
@@ -173,6 +173,6 @@ public sealed class DeltaBaselineRollbackRowsTests
         var next = LazyRun(deltas, T0.AddMinutes(2), ("LCK_M_X", 30), (Key, 160), ("SOS_SCHEDULER_YIELD", 90));
         Assert.Equal((20L, 120), next.Deltas["LCK_M_X"]);
         Assert.Equal((60L, 120), next.Deltas[Key]);
-        Assert.Equal((0L, 0), next.Deltas["SOS_SCHEDULER_YIELD"]);
+        Assert.Equal((40L, 60), next.Deltas["SOS_SCHEDULER_YIELD"]);
     }
 }
