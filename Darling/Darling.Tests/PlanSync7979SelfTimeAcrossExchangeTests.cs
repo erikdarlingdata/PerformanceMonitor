@@ -142,4 +142,87 @@ public sealed class PlanSync7979SelfTimeAcrossExchangeTests
 
         Assert.Equal(20, PlanAnalyzer.GetOperatorOwnElapsedMs(sort));
     }
+
+    private static PlanNode Producer(PerThreadRuntimeInfo[] threads) => new()
+    {
+        PhysicalOp = "Nested Loops",
+        HasActualStats = true,
+        ActualElapsedMs = threads.Max(t => t.ActualElapsedMs),
+        PerThreadStats = [.. threads],
+    };
+
+    private static PlanNode Repartition(PerThreadRuntimeInfo[] threads, PlanNode child) => new()
+    {
+        PhysicalOp = "Parallelism",
+        LogicalOp = "Repartition Streams",
+        HasActualStats = true,
+        ActualElapsedMs = threads.Max(t => t.ActualElapsedMs),
+        PerThreadStats = [.. threads],
+        Children = [child],
+    };
+
+    /// <summary>A pass-through (Compute Scalar, no runtime stats) between two exchanges. The Sort is 100 ms on both
+    /// threads. The slowest producer under the second exchange is thread 1 of the Nested Loops, 90 ms, and it comes off
+    /// every Sort thread: 100 - 90 = 10 ms. Dropping the every-thread time that the pass-through carries up gave the
+    /// Sort 100 ms.</summary>
+    [Fact]
+    public void ExchangeBehindAPassThrough_TakesItsSlowestProducerOffEveryThread()
+    {
+        PerThreadRuntimeInfo[] sortThreads = [Thread(0, 0), Thread(1, 100), Thread(2, 100)];
+        var inner = Repartition(sortThreads, Producer([Thread(0, 0), Thread(1, 90), Thread(2, 0)]));
+        var passThrough = new PlanNode { PhysicalOp = "Compute Scalar", HasActualStats = false, Children = [inner] };
+        var sort = new PlanNode
+        {
+            PhysicalOp = "Sort",
+            HasActualStats = true,
+            ActualElapsedMs = 100,
+            PerThreadStats = [.. sortThreads],
+            Children = [Repartition(sortThreads, passThrough)],
+        };
+
+        Assert.Equal(10, PlanAnalyzer.GetOperatorOwnElapsedMs(sort));
+    }
+
+    /// <summary>A batch-mode zone between two exchanges. The Sort (row mode) is 100 ms on both threads. Below the outer
+    /// exchange the batch Hash Match is 30 ms on each thread (a batch operator's time is its own) and, through a row-mode
+    /// Compute Scalar with no runtime stats, a second exchange's slowest producer is 50 ms. The slowest thread below
+    /// the outer exchange is 30 + 50 = 80 ms, so the Sort owns 100 - 80 = 20 ms. Losing the zone's every-thread time
+    /// gave the Sort 70 ms.</summary>
+    [Fact]
+    public void ExchangeUnderABatchZone_TakesItsSlowestProducerOffEveryThread()
+    {
+        PerThreadRuntimeInfo[] sortThreads = [Thread(0, 0), Thread(1, 100), Thread(2, 100)];
+        PerThreadRuntimeInfo[] batchThreads = [Thread(0, 0), Thread(1, 30), Thread(2, 30)];
+        var inner = Repartition(sortThreads, Producer([Thread(0, 0), Thread(1, 50), Thread(2, 0)]));
+        var passThrough = new PlanNode
+        {
+            PhysicalOp = "Compute Scalar",
+            ExecutionMode = "Row",
+            ActualExecutionMode = "Row",
+            HasActualStats = false,
+            Children = [inner],
+        };
+        var hashMatch = new PlanNode
+        {
+            PhysicalOp = "Hash Match",
+            ExecutionMode = "Batch",
+            ActualExecutionMode = "Batch",
+            HasActualStats = true,
+            ActualElapsedMs = 30,
+            PerThreadStats = [.. batchThreads],
+            Children = [passThrough],
+        };
+        var sort = new PlanNode
+        {
+            PhysicalOp = "Sort",
+            ExecutionMode = "Row",
+            ActualExecutionMode = "Row",
+            HasActualStats = true,
+            ActualElapsedMs = 100,
+            PerThreadStats = [.. sortThreads],
+            Children = [Repartition(sortThreads, hashMatch)],
+        };
+
+        Assert.Equal(20, PlanAnalyzer.GetOperatorOwnElapsedMs(sort));
+    }
 }
