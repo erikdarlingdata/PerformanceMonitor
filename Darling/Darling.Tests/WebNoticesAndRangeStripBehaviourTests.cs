@@ -86,6 +86,9 @@ public sealed class WebNoticesAndRangeStripBehaviourTests
         Assert.Contains("wait_stats", restart.GetProperty("full").GetString());
         Assert.Equal(JsonValueKind.Null, restart.GetProperty("levels").ValueKind);
 
+        // #7726 item 6: an identity change whose old and new values are gone says what it could have been.
+        Assert.StartsWith("SQL Server restarted, was renamed, or the connection reached another server at ", Result.Value.GetProperty("identityNote").GetString());
+
         // The Memory tab's clerks, plan cache and tempdb size are levels: the page read carries the restart entry and none is drawn.
         var memory = Result.Value.GetProperty("memoryTab");
         Assert.True(memory.GetProperty("drewClerks").GetBoolean(), "the Memory tab drew no clerk chart, so the check below proves nothing");

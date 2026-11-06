@@ -1566,6 +1566,8 @@ table.data td.rec-text { min-width: 16rem; }
 .reco-group { margin-bottom: 0.6rem; }
 .reco-card { margin: 0.5rem 0; }
 .reco-fix { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg-dark); padding: 0.6rem; border-radius: 4px; }
+/* #7726: a backtick span in the advice text is drawn as code. */
+.reco-advice code { font-family: var(--mono); font-size: 0.9em; background: var(--bg-dark); padding: 0.05rem 0.3rem; border-radius: 3px; overflow-wrap: anywhere; }
 .reco-actions { display: flex; gap: 0.5rem; margin-top: 0.4rem; }
 
 /* #5235: a wait cell that links to Active Queries filtered to that wait, and the strip that clears the filter. */

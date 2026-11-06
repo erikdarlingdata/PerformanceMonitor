@@ -39,7 +39,7 @@ export const DB_CHANGE_COLUMNS = [
 
 export const TRACE_FLAG_CHANGE_COLUMNS = [
   { key: "change_time", label: "Changed", format: "time" },
-  { key: "trace_flag", label: "Flag", format: "int" },
+  { key: "trace_flag", label: "Flag", format: "id" },
   { key: "change_type", label: "Change" },
   { key: "previous_status", label: "Previous" },
   { key: "new_status", label: "New" },

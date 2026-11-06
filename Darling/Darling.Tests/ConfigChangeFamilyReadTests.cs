@@ -155,7 +155,7 @@ public sealed class ConfigChangeFamilyReadTests
         Assert.Equal("Sales", fact.DatabaseName);
         Assert.Equal(2, fact.Metadata[ConfigChangeAttribution.MetaChangeFamily]);
         Assert.Equal("db|recovery_model|FULL|SIMPLE|Sales", fact.ObjectName);
-        Assert.StartsWith("Database configuration changed: `Sales` recovery_model FULL → SIMPLE", FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { fact }.ToFactLookup())!.Headline, StringComparison.Ordinal);
+        Assert.StartsWith("Database configuration changed: the recovery model of `Sales` changed from FULL to SIMPLE", FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { fact }.ToFactLookup())!.Headline, StringComparison.Ordinal);
     }
 
     /// <summary>

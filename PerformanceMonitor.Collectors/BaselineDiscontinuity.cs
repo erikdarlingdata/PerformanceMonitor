@@ -205,7 +205,7 @@ public static class BaselineDiscontinuities
         PostmasterRestartReason => "PostgreSQL restarted",
         FailoverReason => "The connection reached a different server",
         RenameReason => "SQL Server was renamed",
-        IdentityReason => "The server's identity changed",
+        IdentityReason => "SQL Server restarted, was renamed, or the connection reached another server",
         StatsResetReason => "Statistics were reset",
         _ => "Collection started again",
     };
