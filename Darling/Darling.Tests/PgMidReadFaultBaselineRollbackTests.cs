@@ -82,12 +82,16 @@ public sealed class PgMidReadFaultBaselineRollbackTests
         Assert.Equal(120, next.SampleIntervalSeconds);
     }
 
+    /// <summary>Rows with no stats_since, as below PostgreSQL 17.</summary>
+    internal static DataTable StatementStatsTable(DateTime targetNow, params (long QueryId, long Calls)[] rows)
+        => StatementStatsTable(targetNow, rows.Select(r => (r.QueryId, r.Calls, (DateTime?)null)).ToArray());
+
     /// <summary>
     /// pg_statement_stats rows in the ordinals the read uses: the identity, calls and the timings, the block and WAL counters
-    /// (the Aurora-only and WAL ones NULL, as the stock view returns them), then stats_reset (NULL), stats_since (NULL, as below
-    /// PostgreSQL 17), target_now at <paramref name="targetNow"/> and the dealloc count (NULL).
+    /// (the Aurora-only and WAL ones NULL, as the stock view returns them), then stats_reset (NULL), each row's stats_since (NULL
+    /// when absent, as below PostgreSQL 17), target_now at <paramref name="targetNow"/> and the dealloc count (NULL).
     /// </summary>
-    private static DataTable StatementStatsTable(DateTime targetNow, params (long QueryId, long Calls)[] rows)
+    internal static DataTable StatementStatsTable(DateTime targetNow, params (long QueryId, long Calls, DateTime? StatsSince)[] rows)
     {
         var table = new DataTable();
         table.Columns.Add("queryid", typeof(long));
@@ -121,12 +125,12 @@ public sealed class PgMidReadFaultBaselineRollbackTests
         table.Columns.Add("stats_since", typeof(DateTime));
         table.Columns.Add("target_now", typeof(DateTime));
         table.Columns.Add("dealloc", typeof(long));
-        foreach (var (queryId, calls) in rows)
+        foreach (var (queryId, calls, statsSince) in rows)
         {
             table.Rows.Add(queryId, 16384L, 10L, true, calls, calls * 2.5, 1.0, 5.0, 2.5, calls * 3,
                 calls * 20, 0L, 0L, 0L, 0L, 0L, 0.0, 0.0,
                 DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
-                DBNull.Value, DBNull.Value, targetNow, DBNull.Value);
+                DBNull.Value, (object?)statsSince ?? DBNull.Value, targetNow, DBNull.Value);
         }
 
         return table;
