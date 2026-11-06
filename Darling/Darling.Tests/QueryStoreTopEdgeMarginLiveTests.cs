@@ -64,6 +64,12 @@ public sealed class QueryStoreTopEdgeMarginLiveTests
         await PgMigrations.MigrateAsync(connection, ct);
         await SeedAsync(connection, ct);
 
+        /* #7814: the read places a window by the interval's start, and an interval that started before the window is no longer a
+           row of it however late it was collected. The straddlers exist to test the first_execution_time floor against a row
+           collected inside the window whose first execution is far before it; that is now a legacy row (no interval start,
+           placed by collection_time), the only shape that reaches the floor from outside a start-placed window. */
+        await ExecAsync(connection, $"UPDATE collect.query_store_interval_wide SET interval_start_time_utc = NULL WHERE plan_id IN ({StraddlerPlan}, {UnreportedStraddlerPlan})", ct);
+
         var wide = DarlingDataReader.QueryStoreTopTableSql;
 
         /* The resolved floors: three hours at 60-minute intervals, four at 120, the full 26 wherever the length is unknown. */
