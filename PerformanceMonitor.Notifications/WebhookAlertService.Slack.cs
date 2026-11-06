@@ -27,11 +27,11 @@ public partial class WebhookAlertService
 {
     /// <summary>Posts to Slack. Null when the post succeeded, the error text when it did not — see
     /// <see cref="TrySendTeamsAlertAsync"/>, including for the routed <paramref name="webhookUrl"/> and the
-    /// <paramref name="routeId"/> its health is counted under.</summary>
+    /// <paramref name="healthTarget"/> its outcome is counted under.</summary>
     private async Task<string?> TrySendSlackAlertAsync(
         IAlertSettings settings,
         string webhookUrl,
-        int? routeId,
+        HealthTarget healthTarget,
         string metricName,
         string serverName,
         string currentValue,
@@ -51,11 +51,11 @@ public partial class WebhookAlertService
 
             if (error != null)
             {
-                RecordChannelFailure(NotificationRouter.SlackChannel, routeId, error);
+                RecordChannelFailure(NotificationRouter.SlackChannel, healthTarget, error);
                 return error;
             }
 
-            RecordChannelRecovered(NotificationRouter.SlackChannel, routeId);
+            RecordChannelRecovered(NotificationRouter.SlackChannel, healthTarget);
             _logger.LogInformation($"Slack webhook sent for {metricName} on {serverName}");
             return null;
         }
@@ -66,7 +66,7 @@ public partial class WebhookAlertService
         }
         catch (Exception ex)
         {
-            RecordChannelException(NotificationRouter.SlackChannel, routeId, ex);
+            RecordChannelException(NotificationRouter.SlackChannel, healthTarget, ex);
             return ex.Message;
         }
     }

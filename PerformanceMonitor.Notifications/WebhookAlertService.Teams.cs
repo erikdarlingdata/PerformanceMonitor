@@ -33,7 +33,7 @@ public partial class WebhookAlertService
     private async Task<string?> TrySendTeamsAlertAsync(
         IAlertSettings settings,
         string webhookUrl,
-        int? routeId,
+        HealthTarget healthTarget,
         string metricName,
         string serverName,
         string currentValue,
@@ -53,11 +53,11 @@ public partial class WebhookAlertService
 
             if (error != null)
             {
-                RecordChannelFailure(NotificationRouter.TeamsChannel, routeId, error);
+                RecordChannelFailure(NotificationRouter.TeamsChannel, healthTarget, error);
                 return error;
             }
 
-            RecordChannelRecovered(NotificationRouter.TeamsChannel, routeId);
+            RecordChannelRecovered(NotificationRouter.TeamsChannel, healthTarget);
             _logger.LogInformation($"Teams webhook sent for {metricName} on {serverName}");
             return null;
         }
@@ -70,7 +70,7 @@ public partial class WebhookAlertService
         }
         catch (Exception ex)
         {
-            RecordChannelException(NotificationRouter.TeamsChannel, routeId, ex);
+            RecordChannelException(NotificationRouter.TeamsChannel, healthTarget, ex);
             return ex.Message;
         }
     }

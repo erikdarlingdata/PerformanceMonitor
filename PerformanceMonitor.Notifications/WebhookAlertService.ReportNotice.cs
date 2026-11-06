@@ -48,17 +48,17 @@ public partial class WebhookAlertService : IReportNoticeSends
             return $"{channel} does not carry a report notice";
         }
 
-        int? routeId = null;
+        var healthTarget = HealthTarget.None;
         try
         {
             var settings = _settings.SnapshotForDelivery();
-            routeId = RouteIdOfDestination(settings, channel, destination);
+            healthTarget = HealthTargetOfDestination(settings, channel, destination);
             var slack = channel == NotificationRouter.SlackChannel;
             var payload = slack ? BuildReportNoticeSlackPayload(content, _branding) : BuildReportNoticeTeamsPayload(content);
             var error = await PostWebhookAsync(
                 destination, payload, slack ? settings.SlackProxyAddress : settings.TeamsProxyAddress,
                 cancellationToken: cancellationToken, bodyLog: _logger);
-            RecordReportNoticeHealth(channel, routeId, error);
+            RecordReportNoticeHealth(channel, healthTarget, error);
             return error;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -67,7 +67,7 @@ public partial class WebhookAlertService : IReportNoticeSends
         }
         catch (Exception ex)
         {
-            RecordReportNoticeHealth(channel, routeId, ex.Message);
+            RecordReportNoticeHealth(channel, healthTarget, ex.Message);
             return ex.Message;
         }
     }
@@ -75,11 +75,17 @@ public partial class WebhookAlertService : IReportNoticeSends
     /// <summary>
     /// #6979: a notice send counts toward its destination's health as an alert send does (the consecutive-failure count and the
     /// last error that <see cref="GetChannelFailureCounts"/> serves, which the "Notification Channel Failing" self-alert reads).
-    /// It logs nothing: the caller logs a failed notice once, with the request id, the channel and the error.
+    /// A destination that no channel names has no entry, so nothing is counted for it. It logs nothing: the caller logs a
+    /// failed notice once, with the request id, the channel and the error.
     /// </summary>
-    private void RecordReportNoticeHealth(string channel, int? routeId, string? error)
+    private void RecordReportNoticeHealth(string channel, HealthTarget healthTarget, string? error)
     {
-        var health = HealthOf(channel, routeId);
+        if (!healthTarget.Counted)
+        {
+            return;
+        }
+
+        var health = HealthOf(channel, healthTarget.RouteId);
         if (error is null)
         {
             Interlocked.Exchange(ref health.Failures, 0);

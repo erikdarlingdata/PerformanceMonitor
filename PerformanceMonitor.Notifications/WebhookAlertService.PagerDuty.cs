@@ -77,7 +77,7 @@ public partial class WebhookAlertService
             foreach (var (pagerDutyKey, routeId) in keys)
             {
                 var error = await TrySendPagerDutyAlertAsync(
-                    delivery, autoResolve: true, pagerDutyKey, routeId, firingMetric, serverName, "resolved", "", serverId,
+                    delivery, autoResolve: true, pagerDutyKey, HealthTarget.Of(routeId), firingMetric, serverName, "resolved", "", serverId,
                     context: null, triageUrl: null, detailText, _utcNow(), displayName: null,
                     resolveIncident: true, cancellationToken: cancellationToken);
                 if (error is null)
@@ -129,15 +129,16 @@ public partial class WebhookAlertService
         var serverName = facts.ServerName;
         var triageUrl = facts.TriageUrl;
         var now = facts.ClearedAtUtc;
-        /* The destination's health entry is the route that sets it, found by destination as the signing keys below are. */
-        var routeId = RouteIdOfDestination(delivery, channel, destination);
+        /* Where the outcome is counted is found by destination, as the signing keys below are: the settings row's own
+           entry, the route that names it (enabled or not), or none. */
+        var healthTarget = HealthTargetOfDestination(delivery, channel, destination);
         return channel switch
         {
             NotificationRouter.TeamsChannel => await TrySendTeamsAlertAsync(
-                delivery, destination, routeId, title, serverName, "resolved", "", context: null, triageUrl, detailText, now,
+                delivery, destination, healthTarget, title, serverName, "resolved", "", context: null, triageUrl, detailText, now,
                 displayName: null, cancellationToken),
             NotificationRouter.SlackChannel => await TrySendSlackAlertAsync(
-                delivery, destination, routeId, title, serverName, "resolved", "", context: null, triageUrl, detailText, now,
+                delivery, destination, healthTarget, title, serverName, "resolved", "", context: null, triageUrl, detailText, now,
                 displayName: null, cancellationToken),
             /* #5998: a resolution names its destination, not its route, so its keys are found by URL. A destination that
                matches no configured generic URL while a signing key would not open may be the one whose key failed: it is
@@ -150,7 +151,7 @@ public partial class WebhookAlertService
             NotificationRouter.GenericChannel when genericDedupKey is null =>
                 GenericResolutionWithoutKeyText,
             NotificationRouter.GenericChannel => await TrySendGenericAlertAsync(
-                delivery, destination, routeId, title, serverName, "resolved", "", serverId, context: null, triageUrl, detailText, now,
+                delivery, destination, healthTarget, title, serverName, "resolved", "", serverId, context: null, triageUrl, detailText, now,
                 cancellationToken: cancellationToken, signing: GenericSigningFor(delivery, routeId: null, destination),
                 status: GenericStatusResolved,
                 dedupKeyOverride: genericDedupKey),
@@ -168,14 +169,14 @@ public partial class WebhookAlertService
     {
         var delivery = _settings.SnapshotForDelivery();
         var now = _utcNow();
-        var routeId = RouteIdOfDestination(delivery, channel, destination);
+        var healthTarget = HealthTargetOfDestination(delivery, channel, destination);
         return channel switch
         {
             NotificationRouter.TeamsChannel => await TrySendTeamsAlertAsync(
-                delivery, destination, routeId, title, serverName, currentValue, "", context: null, triageUrl: null, detailText, now,
+                delivery, destination, healthTarget, title, serverName, currentValue, "", context: null, triageUrl: null, detailText, now,
                 displayName: null, cancellationToken),
             NotificationRouter.SlackChannel => await TrySendSlackAlertAsync(
-                delivery, destination, routeId, title, serverName, currentValue, "", context: null, triageUrl: null, detailText, now,
+                delivery, destination, healthTarget, title, serverName, currentValue, "", context: null, triageUrl: null, detailText, now,
                 displayName: null, cancellationToken),
             _ => $"{channel} does not carry a notice",
         };
@@ -231,7 +232,7 @@ public partial class WebhookAlertService
     {
         var delivery = _settings.SnapshotForDelivery();
         var error = await TrySendPagerDutyAlertAsync(
-            delivery, autoResolve: true, routingKey, RouteIdOfDestination(delivery, NotificationRouter.PagerDutyChannel, routingKey),
+            delivery, autoResolve: true, routingKey, HealthTargetOfDestination(delivery, NotificationRouter.PagerDutyChannel, routingKey),
             firingMetric, serverName, "resolved", "", serverId,
             context: null, triageUrl: null, detailText, _utcNow(), displayName: null,
             resolveIncident: true, dedupKeyOverride: dedupKey, cancellationToken: cancellationToken);
@@ -251,7 +252,7 @@ public partial class WebhookAlertService
         IAlertSettings settings,
         bool autoResolve,
         string routingKey,
-        int? routeId,
+        HealthTarget healthTarget,
         string metricName,
         string serverName,
         string currentValue,
@@ -295,11 +296,11 @@ public partial class WebhookAlertService
 
             if (error != null)
             {
-                RecordChannelFailure(NotificationRouter.PagerDutyChannel, routeId, error);
+                RecordChannelFailure(NotificationRouter.PagerDutyChannel, healthTarget, error);
                 return error;
             }
 
-            RecordChannelRecovered(NotificationRouter.PagerDutyChannel, routeId);
+            RecordChannelRecovered(NotificationRouter.PagerDutyChannel, healthTarget);
             _logger.LogInformation($"PagerDuty webhook sent for {metricName} on {serverName}");
             return null;
         }
@@ -310,7 +311,7 @@ public partial class WebhookAlertService
         }
         catch (Exception ex)
         {
-            RecordChannelException(NotificationRouter.PagerDutyChannel, routeId, ex);
+            RecordChannelException(NotificationRouter.PagerDutyChannel, healthTarget, ex);
             return ex.Message;
         }
     }
