@@ -139,6 +139,23 @@ public sealed class WebPlainEmptyMessageBehaviourTests
         Assert.DoesNotContain("above", bodies[1], StringComparison.Ordinal);
     }
 
+    /// <summary>#7724: an offline server's panels over one read each print the collected-through sentence in the viewer's local time, with no pointer to another panel.</summary>
+    [Fact]
+    public void AnOfflineReadWithCollectedThrough_PrintsOneSentenceInLocalTime_OnEveryPanel()
+    {
+        var r = Run();
+        var local = r.GetProperty("throughLocal").GetString()!;
+        var expected = "Nothing was recorded through the last collection at " + local + ". Nothing after that is known.";
+        foreach (var body in Bodies(r, "fanoutCollectedThrough"))
+        {
+            Assert.Equal(expected, body);
+        }
+
+        var panel = r.GetProperty("panelCollectedThrough");
+        Assert.Equal(expected, panel.GetProperty("text").GetString());
+        Assert.Equal(0, panel.GetProperty("hasDetails").GetInt32());
+    }
+
     [Fact]
     public void AnEmptyWinsPanel_NeitherSaysTheMessage_NorTakesThePointer()
     {

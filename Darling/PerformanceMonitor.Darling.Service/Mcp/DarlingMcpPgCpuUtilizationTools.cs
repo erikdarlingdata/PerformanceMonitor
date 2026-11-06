@@ -97,7 +97,7 @@ public sealed class DarlingMcpPgCpuUtilizationTools
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status(
                     "empty",
                     $"No CPU utilization data for {resolved.DisplayName} in the last {hours_back} hour(s).",
-                    emptyNotice.AsHints()), cancellationToken);
+                    emptyNotice.AsHints()), cancellationToken, windowEnd.AddHours(-hours_back));
             }
 
             var notice = await DarlingMcpWindowNotice.ReadForToolAsync(

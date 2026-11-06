@@ -143,7 +143,7 @@ public sealed class DarlingMcpPlanCorrectionTools
                         "(sys.dm_db_tuning_recommendations); a server that has never produced a row here either predates " +
                         "that or has no databases with Query Store on.",
                         databaseFilter.Describe(), /* #5244 review L2: the echo rides on an empty answer too */
-                        notice.AsHints()), cancellationToken);
+                        notice.AsHints()), cancellationToken, windowStart);
             }
 
             var recommendations = page.Select(r => new
