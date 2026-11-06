@@ -4816,7 +4816,7 @@
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId}" SortMemberPath="QueryIdSort" Width="170"/>
-                                    <DataGridTextColumn Header="DB OID" Binding="{Binding DatabaseId}" SortMemberPath="DatabaseIdSort" ElementStyle="{StaticResource NumericCell}" Width="90"/>
+                                    <DataGridTextColumn Header="Database" Binding="{Binding DatabaseId}" Width="140"/>
                                     <DataGridTextColumn Header="Calls" Binding="{Binding Calls}" SortMemberPath="CallsSort" ElementStyle="{StaticResource NumericCell}" Width="90"/>
                                     <DataGridTextColumn Header="Total (ms)" Binding="{Binding TotalExecTimeMs}" SortMemberPath="TotalExecTimeMsSort" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                                     <DataGridTextColumn Header="Avg (ms)" Binding="{Binding AvgExecTimeMs}" SortMemberPath="AvgExecTimeMsSort" ElementStyle="{StaticResource NumericCell}" Width="100"/>

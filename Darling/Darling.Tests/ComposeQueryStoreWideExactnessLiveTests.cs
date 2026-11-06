@@ -292,7 +292,11 @@ public sealed class ComposeQueryStoreWideExactnessLiveTests
             IsForcedPlan = false,
             ForceFailureCount = 0,
             RuntimeStatsIntervalId = 7700,
-            IntervalStartTimeUtc = first,
+            /* #7814: the MCP top read places a row by its interval start, and an interval that began before the window is not a row of
+               it however late its snapshot landed. The oldest producible row for a window is therefore a row with no interval start
+               (stored before the column existed), which the read places by collection_time: the one shape that reaches the first
+               execution floor from outside a start-placed window. */
+            IntervalStartTimeUtc = null,
         };
         await runner.WriteBackfillBatchAsync(QueryStoreCollector.Instance, new List<QueryStoreCollector.Row> { row }, server, collectionTime, context, ct);
     }

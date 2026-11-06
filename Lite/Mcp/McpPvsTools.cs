@@ -60,7 +60,7 @@ public sealed class McpPvsTools
                row and the primary has none either), and never on a not_collected reply. The read hands back the unfiltered newest snapshot it
                had to read for a filter that matched nothing, so the probe below does not read it again. */
             var (rows, secondaryNote, serverRows) = await dataService.ReadPvsStatsLatestAsync(
-                resolved.ServerId, names, McpEngineCapability.PvsVersionHasStore(serverManager, resolved.ServerId));
+                resolved.ServerId, serverManager, names);
             if (rows.Count == 0)
             {
                 /* A filter that matches no database at the newest snapshot is an answer about the chosen database, not about the

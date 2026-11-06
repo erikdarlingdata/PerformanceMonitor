@@ -219,7 +219,8 @@ public sealed class QueryStoreIntervalBoundedReadPruningLiveTests
             new ReadCase(
                 "MCP top-queries table read", DarlingDataReader.QueryStoreTopTableSql, "integer, timestamp, timestamp, integer, text[], text, text, integer",
                 $"1, {f}, {t}, 10, NULL::text[], NULL::text, NULL::text, 50",
-                new[] { new Bounds(from - purge, to + slack) }),
+                /* #7814: placed by interval start like the grid, so the same day-plus-hour upper margin. */
+                new[] { new Bounds(from - purge, to + QueryStoreIntervalWide.IntervalStartFirstExecMargin) }),
             /* The daily read: the wide table serves the two edges, [$2, $8) and [$9, $3], and the summary serves the days between. */
             new ReadCase(
                 "MCP top-queries daily read", DarlingDataReader.QueryStoreTopDailyTableSql,
