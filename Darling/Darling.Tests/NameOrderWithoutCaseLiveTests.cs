@@ -235,6 +235,40 @@ VALUES ($1,$2,$3,$4,$5,'Enabled','Enabled',$6,'Active',1000,'SELECT 1')", Collec
         Assert.Equal(MixedCaseNamesInOrder, await viewer.GetIndexLockingDatabasesAsync(ServerId, null, ct));
     }
 
+    /// <summary>
+    /// #7699 item 2: tempdb is on the plan correction collector's list but the automatic tuning options view has no row for it, so its
+    /// capture row has no state at all. The Automatic Tuning list (Service and Viewer) leaves it out and keeps a database with a state.
+    /// </summary>
+    [Fact]
+    public async Task AutomaticTuning_LeavesOutADatabaseWithNoState_AgainstLivePostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live automatic tuning test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct, cCollation: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await using var viewer = new ViewerDataService(scratch.ConnectionString);
+
+        var at = DarlingMcpTestData.Naive(DateTime.UtcNow.AddMinutes(-5));
+        at = new DateTime(at.Ticks - (at.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Unspecified);
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO plan_correction (collection_id, collection_time, server_id, server_name, database_name, force_last_good_plan_desired_state, force_last_good_plan_actual_state, recommendation_name, recommendation_state, query_id, query_text)
+VALUES ($1,$2,$3,$4,'Sales','Enabled','Enabled','Rec_Sales','Active',1000,'SELECT 1')", CollectionIdGenerator.Next(), at, ServerId, ServerName);
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO plan_correction (collection_id, collection_time, server_id, server_name, database_name, recommendation_name, recommendation_state, query_id, query_text)
+VALUES ($1,$2,$3,$4,'tempdb','Rec_tempdb','Active',1001,'SELECT 1')", CollectionIdGenerator.Next(), at, ServerId, ServerName);
+
+        var service = await DarlingPlanCorrectionReader.GetLatestAutomaticTuningAsync(postgres, ServerId, cancellationToken: ct);
+        var desktop = await viewer.GetLatestAutomaticTuningAsync(ServerId, null, ct);
+
+        Assert.Equal(new[] { "Sales" }, service.Select(r => r.DatabaseName));
+        Assert.Equal(new[] { "Sales" }, desktop.Select(r => r.DatabaseName));
+    }
+
     [Fact]
     public async Task PerfmonCounterPicker_ListsNamesWithoutCase_AgainstLivePostgres()
     {
