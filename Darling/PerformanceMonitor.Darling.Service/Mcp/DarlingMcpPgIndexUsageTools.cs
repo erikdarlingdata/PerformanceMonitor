@@ -493,7 +493,7 @@ public sealed class DarlingMcpPgIndexUsageTools
                         + "under the collector's 64 KB size floor, which is the state of a schema whose indexes are "
                         + "all trivially small",
                     coveredClaim: ". That is a genuine all-clear rather than missing data."),
-                hints), cancellationToken);
+                hints), cancellationToken, start);
         }
 
         if (probe.SnapshotsInWindow == 1)

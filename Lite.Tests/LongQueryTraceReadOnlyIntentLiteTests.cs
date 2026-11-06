@@ -479,17 +479,23 @@ public sealed class LongQueryTraceReadOnlyIntentLiteTests : IDisposable
     }
 
     [Fact]
-    public async Task Azure_ARefusalThatIsNotReadOnly_StillRetriesOnEveryCycle()
+    public async Task Azure_ARefusalThatIsNotReadOnly_IsHeldForAnHour_ThenTriedAgain()
     {
         var rig = await BuildRigAsync("beta", readOnlyIntent: false);
         /* Not a permission denial: 262 is one now (#5378), and a denial is no longer retried on every cycle. */
         rig.Refusal = _ => SqlExceptionFactory.Create(1105, errorClass: 17, message: "Could not allocate space for the event session.");
 
+        /* #7639: a create refused in a way that will refuse again (no permission denial, not transient: the Azure limits give no error number)
+           is held for LongQueryTraceDatabases.RetryInterval, so a cycle inside the hour sends nothing. After the hour it is tried once more. */
         await rig.ReconcileAsync();
         await rig.ReconcileAsync();
         await rig.ReconcileAsync();
 
-        Assert.Equal(3, rig.Steps.Count);
+        Assert.Single(rig.Steps);
+
+        rig.Clock += LongQueryTraceDatabases.RetryInterval + TimeSpan.FromMinutes(1);
+        await rig.ReconcileAsync();
+        Assert.Equal(2, rig.Steps.Count);
     }
 
     /* ── A failed create or start on Azure SQL Database carries the caps sentence (#4961, plan test 27) ── */

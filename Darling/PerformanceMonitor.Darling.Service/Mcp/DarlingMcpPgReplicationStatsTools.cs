@@ -92,7 +92,7 @@ public sealed class DarlingMcpPgReplicationStatsTools
                                 + "replica is supposed to be attached, check get_pg_replication_slots — a slot "
                                 + "that persists with nothing connected to it retains WAL indefinitely, which is "
                                 + "the case worth acting on."),
-                        emptyNotice.AsHints()), emptyNotice), cancellationToken);
+                        emptyNotice.AsHints()), emptyNotice), cancellationToken, windowStart);
             }
 
             var notice = await DarlingMcpWindowNotice.ReadForToolAsync(

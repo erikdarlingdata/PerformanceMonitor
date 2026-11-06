@@ -182,6 +182,187 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
     private static Task EnsureAsync(Rig rig) =>
         DarlingXeSessions.EnsureAllAsync(rig.Runtime, rig.Runner, NullLogger.Instance, CancellationToken.None);
 
+    /* #7639: with "Databases that get Extended Events sessions" set to one of the two databases, the ensure creates the deadlock and
+       blocked process sessions there and sends nothing to the other. */
+    [Fact]
+    public async Task TheXeSessionDatabaseList_NarrowsTheEnsure_ToTheListedDatabases()
+    {
+        var rig = BuildRig();
+        rig.Runner.XeEnsureOverrideForTests = null;
+        rig.Runtime.Config.XeSessionDatabases = new List<string> { "ALPHA" };
+
+        await EnsureAsync(rig);
+
+        Assert.True(rig.Alpha.Started[AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.Deadlock)]);
+        Assert.True(rig.Alpha.Started[AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.BlockedProcess)]);
+        Assert.Empty(rig.Beta.Statements);
+    }
+
+    /* #7639: a list that names only a database that is gone or renamed leaves nothing to create: no database is attempted, nothing is sent,
+       and the ensure does not fail. */
+    [Fact]
+    public async Task AnXeSessionDatabaseList_NamingNoLiveDatabase_SendsNothingAndDoesNotFail()
+    {
+        var rig = BuildRig();
+        rig.Runner.XeEnsureOverrideForTests = null;
+        rig.Runtime.Config.XeSessionDatabases = new List<string> { "dropped_last_week" };
+
+        await EnsureAsync(rig);
+
+        Assert.Empty(rig.Alpha.Statements);
+        Assert.Empty(rig.Beta.Statements);
+    }
+
+    /* #7639: a list that names no database the server has attempts nothing and refuses nothing. The deadlock and blocked process runs used
+       to record SUCCESS with no rows and no reason, so each now carries a note that the list matches no database. An empty list (every
+       database) and a list that names a live database carry no such note. The client timeout run (Lite's carries it too) is one of the three. */
+    [Theory]
+    [InlineData("dropped_last_week", true)]
+    [InlineData("", false)]
+    [InlineData("alpha", false)]
+    public async Task AnXeSessionDatabaseList_MatchingNoDatabase_PutsANoteOnTheDeadlockBlockedProcessAndClientTimeoutRuns(string list, bool expectNote)
+    {
+        var rig = BuildRig();
+        rig.Runner.XeEnsureOverrideForTests = null;
+        rig.Runtime.Config.XeSessionDatabases = list.Length == 0 ? new List<string>() : new List<string> { list };
+        var outcome = new DarlingXeSessions.CaptureEnsureOutcome();
+
+        await DarlingXeSessions.EnsureAllAsync(rig.Runtime, rig.Runner, NullLogger.Instance, CancellationToken.None, outcome: outcome);
+
+        foreach (var note in new[] { outcome.DeadlockPartialNote, outcome.BlockedProcessPartialNote, outcome.AttentionPartialNote })
+        {
+            Assert.Equal(expectNote, note?.Contains("matches no database on this server", StringComparison.Ordinal) ?? false);
+        }
+    }
+
+    /* #7639: the client timeout collector is switched off, so its session is not ensured and its run has nothing to say about the list. */
+    [Fact]
+    public async Task AnXeSessionDatabaseList_MatchingNoDatabase_PutsNoNoteOnTheClientTimeoutRun_WhenItsCollectorIsOff()
+    {
+        var rig = BuildRig();
+        rig.Runner.XeEnsureOverrideForTests = null;
+        rig.Runtime.Config.XeSessionDatabases = new List<string> { "dropped_last_week" };
+        var outcome = new DarlingXeSessions.CaptureEnsureOutcome();
+
+        await DarlingXeSessions.EnsureAllAsync(rig.Runtime, rig.Runner, NullLogger.Instance, CancellationToken.None, attentionEnabled: false, outcome: outcome);
+
+        Assert.NotNull(outcome.DeadlockPartialNote);
+        Assert.Null(outcome.AttentionPartialNote);
+    }
+
+    /* #7639: the worker merges the note onto a client timeout run through the same accessor the deadlock and blocked process runs use. */
+    [Fact]
+    public async Task TheClientTimeoutRun_CarriesTheListNote_AndAPartialRefusalNote_ThroughTheWorkersAccessor()
+    {
+        var rig = BuildRig();
+        rig.Runner.XeEnsureOverrideForTests = null;
+        rig.Runtime.Config.XeSessionDatabases = new List<string> { "dropped_last_week" };
+        await DarlingWorker.EnsureAlwaysOnXeSessionsAsync(rig.State, rig.Runner, DateTime.UtcNow, NullLogger.Instance, CancellationToken.None);
+        Assert.Contains("matches no database on this server", DarlingWorker.CaptureEnsurePartialNoteFor("attention", rig.State), StringComparison.Ordinal);
+
+        var partial = BuildRig();
+        partial.Runner.XeEnsureOverrideForTests = null;
+        partial.Alpha.CreateFailure = new InvalidOperationException("The create was refused.");
+        await DarlingWorker.EnsureAlwaysOnXeSessionsAsync(partial.State, partial.Runner, DateTime.UtcNow, NullLogger.Instance, CancellationToken.None);
+        var note = DarlingWorker.CaptureEnsurePartialNoteFor("attention", partial.State);
+        Assert.NotNull(note);
+        Assert.Contains("alpha", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("beta", note, StringComparison.Ordinal);
+        Assert.Null(DarlingWorker.CaptureEnsurePartialNoteFor("wait_stats", partial.State));
+    }
+
+    /* #7639: an empty list is how it worked before the setting: every database gets its sessions. */
+    [Fact]
+    public async Task AnEmptyXeSessionDatabaseList_EnsuresEveryDatabase()
+    {
+        var rig = BuildRig();
+        rig.Runner.XeEnsureOverrideForTests = null;
+
+        await EnsureAsync(rig);
+
+        var deadlock = AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.Deadlock);
+        Assert.True(rig.Alpha.Started[deadlock]);
+        Assert.True(rig.Beta.Started[deadlock]);
+    }
+
+    /* #7639: a database on both the excluded list and the XE list gets none. The test's listing stands in for the real one, which leaves the
+       excluded databases out before the XE list narrows what is left. */
+    [Fact]
+    public async Task ADatabaseOnBothTheExcludedAndTheXeSessionList_GetsNoSession()
+    {
+        var rig = BuildRig();
+        rig.Runner.XeEnsureOverrideForTests = null;
+        rig.Runtime.Config.ExcludedDatabases = new List<string> { "beta" };
+        rig.Runtime.Config.XeSessionDatabases = new List<string> { "alpha", "beta" };
+        rig.Runner.AzureDatabaseListOverrideForTests = (server, _) => Task.FromResult(
+            new List<string> { "master", "alpha", "beta" }
+                .Where(name => !server.Config.ExcludedDatabases.Contains(name, StringComparer.OrdinalIgnoreCase)).ToList());
+
+        await EnsureAsync(rig);
+
+        Assert.True(rig.Alpha.Started[AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.Deadlock)]);
+        Assert.Empty(rig.Beta.Statements);
+    }
+
+    private static DarlingWorker CreateReloadWorker()
+    {
+        var worker = (DarlingWorker)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(DarlingWorker));
+        typeof(DarlingWorker).GetField("_logger", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .SetValue(worker, NullLogger<DarlingWorker>.Instance);
+        return worker;
+    }
+
+    private static void Reload(DarlingWorker worker, DarlingWorker.ServerLoopState state, MonitoredServer desired) =>
+        typeof(DarlingWorker).GetMethod("ReconcileServers", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .Invoke(worker, new object[] { new List<DarlingWorker.ServerLoopState> { state }, new List<MonitoredServer> { desired } });
+
+    /* #7639: the ensure reads the list off the runtime's connect-time Config, which is init-only, so an edit made only to the list has to drop
+       the runtime on the reload. The reconnect builds the new runtime from the reloaded definition, and its next ensure narrows to the new list. */
+    [Fact]
+    public async Task AnEditedXeSessionDatabaseList_DropsTheRuntimeOnReload_AndTheNextEnsureNarrows()
+    {
+        var rig = BuildRig();
+        rig.Runner.XeEnsureOverrideForTests = null;
+        await EnsureAsync(rig);
+        var deadlock = AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.Deadlock);
+        Assert.True(rig.Alpha.Started[deadlock]);
+        Assert.True(rig.Beta.Started[deadlock]);
+
+        var edited = new MonitoredServer { Name = "alwayson", Host = Host, XeSessionDatabases = new List<string> { "Alpha" } };
+        Reload(CreateReloadWorker(), rig.State, edited);
+
+        Assert.Null(rig.State.Runtime);
+        Assert.Same(edited, rig.State.Config);
+
+        var reconnected = new ServerRuntime
+        {
+            Config = rig.State.Config,
+            ConnectionString = rig.Runtime.ConnectionString,
+            Target = rig.Runtime.Target,
+            StorageName = rig.Runtime.StorageName,
+            ServerId = rig.Runtime.ServerId,
+        };
+        var fresh = BuildRig();
+        fresh.Runner.XeEnsureOverrideForTests = null;
+        await DarlingXeSessions.EnsureAllAsync(reconnected, fresh.Runner, NullLogger.Instance, CancellationToken.None);
+
+        Assert.True(fresh.Alpha.Started[deadlock]);
+        Assert.Empty(fresh.Beta.Statements);
+    }
+
+    /* #7639: a reload that leaves the list as it was (any casing) keeps the runtime, so no server reconnects without cause. */
+    [Fact]
+    public void AnUnchangedXeSessionDatabaseList_KeepsTheRuntimeOnReload()
+    {
+        var rig = BuildRig();
+        rig.State.Config.XeSessionDatabases = new List<string> { "alpha", "beta" };
+
+        var same = new MonitoredServer { Name = "alwayson", Host = Host, XeSessionDatabases = new List<string> { "ALPHA", "Beta" } };
+        Reload(CreateReloadWorker(), rig.State, same);
+
+        Assert.Same(rig.Runtime, rig.State.Runtime);
+    }
+
     /* Test 16: a stopped shared session gets a START by name and no fallback. */
     [Fact]
     public async Task AStoppedSharedSession_GetsAStartByName_AndNoFallback()
@@ -645,6 +826,57 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
         Assert.Contains("sqlserver.client_hostname", creates[1], StringComparison.Ordinal);
         Assert.Contains(logger.Lines, l => l.Contains("without statement text", StringComparison.Ordinal));
         Assert.True(rig.Alpha.Started[AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.Attention)]);
+    }
+
+    /// <summary>
+    /// #7639: the deadlock create was refused in every database of an Azure SQL Database server. The deadlock run still reads
+    /// (the master item's durable telemetry arm needs no session), and only then records the failure the ensure carried, as
+    /// PERMISSIONS or SESSION_MISSING. It used to throw before the read, so the telemetry deadlocks never reached the store.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ACarriedEnsureFailure_OnAzureSqlDatabase_DoesNotStopTheDeadlockRead_AndTheRunRecordsTheFailureAfterIt(bool permission)
+    {
+        var order = new List<string>();
+        var fault = new DarlingXeSessions.XeEnsureFailure("The create was refused.", permission);
+
+        var raised = await Assert.ThrowsAnyAsync<Exception>(() => DarlingWorker.RaiseCaptureEnsureFaultAsync(
+            "deadlocks", isAzureSqlDb: true, fault, () => { order.Add("read"); return Task.CompletedTask; }, NullLogger.Instance, "azure"));
+
+        Assert.Equal(new[] { "read" }, order);
+        Assert.Equal(permission ? "DarlingXeSessionDeniedException" : "DarlingXeSessionMissingException", raised.GetType().Name);
+        Assert.Contains("The create was refused.", raised.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>A read that fails after a failed ensure is dropped: the ensure's failure is the cause, and the one the run records.</summary>
+    [Fact]
+    public async Task ACarriedEnsureFailure_IsRecordedEvenWhenTheReadAfterItFails()
+    {
+        var fault = new DarlingXeSessions.XeEnsureFailure("The create was refused.", IsPermission: false);
+
+        var raised = await Assert.ThrowsAnyAsync<Exception>(() => DarlingWorker.RaiseCaptureEnsureFaultAsync(
+            "deadlocks", isAzureSqlDb: true, fault, () => throw new InvalidOperationException("The read failed."), NullLogger.Instance, "azure"));
+
+        Assert.Equal("DarlingXeSessionMissingException", raised.GetType().Name);
+        Assert.Contains("The create was refused.", raised.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("The read failed.", raised.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>Everywhere else the read of a session that does not exist would return zero rows, so it does not run: the blocked-process collector, and any other engine.</summary>
+    [Theory]
+    [InlineData("blocked_process_report", true)]
+    [InlineData("deadlocks", false)]
+    public async Task ACarriedEnsureFailure_ElsewhereThanTheAzureDeadlockRun_DoesNotRead(string collector, bool isAzureSqlDb)
+    {
+        var read = false;
+        var fault = new DarlingXeSessions.XeEnsureFailure("The create was refused.", IsPermission: false);
+
+        var raised = await Assert.ThrowsAnyAsync<Exception>(() => DarlingWorker.RaiseCaptureEnsureFaultAsync(
+            collector, isAzureSqlDb, fault, () => { read = true; return Task.CompletedTask; }, NullLogger.Instance, "azure"));
+
+        Assert.Equal("DarlingXeSessionMissingException", raised.GetType().Name);
+        Assert.False(read);
     }
 
     [Fact]

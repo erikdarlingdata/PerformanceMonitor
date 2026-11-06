@@ -130,6 +130,8 @@ internal static class DiagnosticsBundle
         /* #6254: the Query Store replica is a host (or listener name); the bundle seeds it into the host names. */
         "MonitoredServer.QueryStoreReplica",
         "MonitoredServer.ExcludedDatabases",
+        /* #7639: database names, like the excluded list beside it. */
+        "MonitoredServer.XeSessionDatabases",
         "MonitoredServer.MonthlyCostUsd",
         "MonitoredServer.StoredServerId",
         "MonitoredServer.PlanForceBotEnabled",
@@ -457,6 +459,11 @@ internal static class DiagnosticsBundle
             aliaser.AddName(AliasKind.Login, server.Username);
             aliaser.AddName(AliasKind.Login, server.RemediationUsername);
             aliaser.AddName(AliasKind.Login, server.HypotheticalIndexUsername);
+            foreach (var listed in server.XeSessionDatabases ?? new List<string>())
+            {
+                aliaser.AddName(AliasKind.Database, listed);
+            }
+
             foreach (var excluded in server.ExcludedDatabases ?? new List<string>())
             {
                 aliaser.AddName(AliasKind.Database, excluded);

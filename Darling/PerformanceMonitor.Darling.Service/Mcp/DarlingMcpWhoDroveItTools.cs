@@ -107,7 +107,7 @@ public sealed class DarlingMcpWhoDroveItTools
                             ["effective_start"] = emptyNotice.EffectiveStart,
                             ["window_truncated"] = emptyNotice.WindowTruncated,
                             ["truncation_note"] = emptyNotice.TruncationNote,
-                        }), cancellationToken);
+                        }), cancellationToken, start);
             }
 
             var notice = await CpuNoticeAsync(postgres, resolved.ServerName, planRoute.Hourly, start, windowEnd, emptyAnswer: false, cancellationToken);
@@ -228,7 +228,7 @@ public sealed class DarlingMcpWhoDroveItTools
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_snapshots", cancellationToken)
                     ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status("empty",
                         $"No active-query snapshots for {resolved.DisplayName} in the last {hours_back} hour(s): nothing was running at a capture, or the collector did not run in the window.",
-                        notice.AsHints()), cancellationToken);
+                        notice.AsHints()), cancellationToken, start);
             }
 
             static double? Share(double part, double whole) => whole > 0 ? Math.Round(part / whole, 4) : null;
@@ -348,7 +348,7 @@ public sealed class DarlingMcpWhoDroveItTools
                     ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status("empty",
                         $"No capture in the last {hours_back} hour(s) on {resolved.DisplayName} had {min_sessions} or more sessions running the same query_hash. "
                         + "A pile-up between two captures is not seen; a lower min_sessions or a longer window may find one.",
-                        notice.AsHints()), cancellationToken);
+                        notice.AsHints()), cancellationToken, start);
             }
 
             /* The head blocker of each pile-up, from the DMV blocking snapshot nearest its time. */

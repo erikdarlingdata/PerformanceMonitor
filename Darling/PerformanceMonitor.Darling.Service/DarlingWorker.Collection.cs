@@ -2511,7 +2511,8 @@ public sealed partial class DarlingWorker
                     server.Runtime.ServerId.ToString(CultureInfo.InvariantCulture),
                     server.Runtime.Config.Host,
                     registrations,
-                    serverSeparatelyMonitored))
+                    serverSeparatelyMonitored),
+                server.Runtime.Config.XeSessionDatabases)
             : null;
 
         /* Latched, the reconcile runs again only on the hour. The whole pass runs when the cleanup's attempt after the

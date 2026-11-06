@@ -868,6 +868,9 @@ export function rowsUnder(data, key) {
  * `effective_start` the same answer carries under `hints`. With no readable instant the clause says the data starts partway into the window.
  */
 export function emptyMessageText(body) {
+  /* #7724: an offline server's read that holds collection answers with the offline lead and then the collected-through sentence in `message`;
+     `collected_through_note` is that sentence alone. The page prints it alone, because the red strip above already says the server is offline and why. */
+  if (typeof body.collected_through_note === "string" && body.collected_through_note) return plainText(body.collected_through_note);
   const said = String(body.message);
   const at = body.hints && typeof body.hints.effective_start === "string" ? body.hints.effective_start : null;
   if (!(at && parseUtc(at))) return plainText(said);

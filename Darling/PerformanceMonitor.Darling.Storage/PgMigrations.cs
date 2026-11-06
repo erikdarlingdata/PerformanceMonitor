@@ -2606,7 +2606,17 @@ ALTER TABLE config.config_alert_settings
     private static readonly string V246Sql = TimescaleSupport.CreateQueryStoreCorrectedHourlyHashIndexSql;
 
     /// <summary>
-    /// V247 (#7731): <c>collect.pg_statement_stats.database_name</c>, the name of the database the row's <c>dbid</c> belongs to, from the same
+    /// V247 (#7639): <c>config.config_monitored_servers.xe_session_databases</c>, the per-server list of databases that get Extended Events
+    /// sessions on Azure SQL Database, <c>excluded_databases</c>'s shape (<c>text[] NOT NULL DEFAULT '{}'</c>). Empty means every database, so
+    /// an existing store keeps its behavior. Catalog-only add, idempotent, no backfill. The column is the probe's sentinel. An older build never
+    /// reads the column and gives every database a session, as it always did.
+    /// </summary>
+    private const string V247Sql = @"
+ALTER TABLE config.config_monitored_servers
+    ADD COLUMN IF NOT EXISTS xe_session_databases text[] NOT NULL DEFAULT '{}'::text[];";
+
+    /// <summary>
+    /// V248 (#7731): <c>collect.pg_statement_stats.database_name</c>, the name of the database the row's <c>dbid</c> belongs to, from the same
     /// <c>pg_database</c> join the kernel stats collector uses. The Top Query Shapes read groups by <c>(queryid, database_id)</c>, so one statement in two
     /// databases is two rows, and with a number alone nothing said why. One nullable <c>text</c>, no DEFAULT, no backfill, no scan of the table (V243's
     /// shape): a row stored before this rung never knew the name, so NULL is the honest value and the reply says <c>database &lt;id&gt;</c> for it.
@@ -2615,7 +2625,7 @@ ALTER TABLE config.config_alert_settings
     /// upgraded one share one physical order. <c>pg_statement_stats</c> has no <c>v_</c> view, and no rollup or hourly tier reads it. An older build
     /// writes its own column list, so the column stays NULL for the rows it writes.
     /// </summary>
-    private const string V247Sql = @"
+    private const string V248Sql = @"
 ALTER TABLE collect.pg_statement_stats ADD COLUMN IF NOT EXISTS database_name text;";
 
     /// <summary>
@@ -3122,7 +3132,8 @@ $rung$;";
         new Migration(244, "server-connect-down-state", V244Sql),
         new Migration(245, "database-protection-thresholds", V245Sql),
         new Migration(246, "query-store-corrected-hourly-hash-index", V246Sql),
-        new Migration(247, "pg-statement-stats-database-name", V247Sql),
+        new Migration(247, "xe-session-databases", V247Sql),
+        new Migration(248, "pg-statement-stats-database-name", V248Sql),
     };
 
     /// <summary>

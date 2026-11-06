@@ -54,7 +54,7 @@ public sealed class DarlingMcpFleetTools
         "those tiles and the band stays Healthy). database_states on the card lists the databases not in their expected state (the Database State alert's " +
         "own two-sample read): one in SUSPECT, RECOVERY_PENDING or EMERGENCY bands the server Critical, and collected false means database state is not collected, not that it is healthy. Use this first to decide which server to drill into, then call the per-server tools. " +
         "This cross-server view is unique to the central store. " +
-        "Blocking counts are blocked waits, chosen hour by hour between blocked-process reports and DMV snapshots; " +
+        "Blocking counts are blocked waits on SQL Server, chosen hour by hour between blocked-process reports and DMV snapshots, and blocking captures on PostgreSQL (blocking_unit says which: waits or captures); " +
         "max_snapshot_wait_ms is the largest total blocked wait of one DMV snapshot after the Blocking Wait Time " +
         "alert's consecutive-snapshot gate (null when the window holds no snapshot), banded only when the snapshot " +
         "tiers in get_alert_settings are above 0. " +
@@ -75,11 +75,14 @@ public sealed class DarlingMcpFleetTools
         "summed, banded through the same deadlock_warn_per_hour / deadlock_critical_per_hour tiers as SQL " +
         "Server's graph count; deadlock_source reads PostgresTarget for it, which means COUNTED " +
         "from that counter (deadlock_coverage.postgres_servers is a sub-count of servers_read, not a gap), " +
-        "and get_pg_deadlocks has the parsed deadlock reports themselves. Its blocking_severity stays " +
-        "Unknown on purpose: PostgreSQL blocking is a once-a-minute SAMPLE of pg_stat_activity, and the " +
-        "blocking band's count tiers count engine-recorded blocked waits per hour (the unit blocking.count_threshold uses), so a sighting count " +
-        "through them would band on a denominator they were never measured against — the PostgreSQL " +
-        "Blocking alert speaks for that condition until a sampled-shape band is measured. " +
+        "and get_pg_deadlocks has the parsed deadlock reports themselves. A PostgreSQL card's blocking is " +
+        "read from its pg_blocking captures: blocking_captures is how many ran in the window, blocking_count is how many of " +
+        "those saw any blocking, and blocking_measured is false (blocking_severity Unknown, blocking_count left out of " +
+        "the fleet total) when none ran. blocking_severity bands the share of the captures actually taken, scaled to " +
+        "the default one-a-minute cadence (blocking_count / blocking_captures * 60, shown as blocking_rate_per_hour), " +
+        "against the same per-hour tiers as SQL Server's, so a slower schedule or a young target does not read quieter. " +
+        "Fewer than 3 captures in the window is Unknown, and blocking_detail says so. total_blocking_events adds SQL Server " +
+        "blocked waits and PostgreSQL blocking captures into one number. " +
         "collection_health_age_seconds says how old the COLLECTOR-HEALTH half of the payload is: the per-card " +
         "healthy/failed/collector_count, collector_severity, deadlock_collector_band and deadlock_source, and the " +
         "fleet's servers_with_collection_failures and deadlock_coverage, come from one 7-day scan of the collection " +

@@ -427,7 +427,7 @@ public sealed class DarlingMcpServerTrendTools
                 metric == "tempdb_file_io"
                     ? $"No {what} have EVER been recorded for {resolved.DisplayName}. This is not an empty window - the {collector} collector has stored no rows for the tempdb files of this server (it may have stored other databases' files). Check that collection is running and that the server is enabled."
                     : $"No {what} have EVER been recorded for {resolved.DisplayName}. This is not an empty window - the {collector} collector has stored nothing at all for this server. Check that collection is running and that the server is enabled.");
-        return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, end, answer, cancellationToken);
+        return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, end, answer, cancellationToken, start);
     }
 
     private static async Task<List<string>> ReadTopNamesAsync(

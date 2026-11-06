@@ -699,9 +699,13 @@ CREATE OR REPLACE VIEW collect.v_blocked_process_reports AS SELECT * FROM collec
         // found by catalog (it lives in the materialization's schema), and a no-op without it; the re-run of V246 builds it again.
         new(246, "hasQueryStoreHashIndex",
             @"DO $$ DECLARE v regclass; BEGIN SELECT c.oid::regclass INTO v FROM pg_class c WHERE c.relkind = 'i' AND c.relname = 'ix_qs_corrected_hourly_hash_bucket'; IF v IS NOT NULL THEN EXECUTE format('DROP INDEX %s', v); END IF; END $$;"),
-        // V247 (#7731): the database name on the statement stats. A plain nullable column with no view over it, so the rewind is the drop alone, and the
-        // re-run of V247 adds it back. Safe on a store that never had it.
-        new(247, "hasStatementStatsDatabaseName",
+        // V247 (#7639): the per-server list of databases that get Extended Events sessions on the server registry. The column is the probe's newest
+        // sentinel, so the rewind drops it and the re-run of V247 adds it back empty. Safe on a store that never had it.
+        new(247, "hasXeSessionDatabases",
+            @"ALTER TABLE IF EXISTS config.config_monitored_servers DROP COLUMN IF EXISTS xe_session_databases;"),
+        // V248 (#7731): the database name on the statement stats. A plain nullable column with no view over it, so the rewind is the drop alone, and the
+        // re-run of V248 adds it back. Safe on a store that never had it.
+        new(248, "hasStatementStatsDatabaseName",
             @"ALTER TABLE IF EXISTS collect.pg_statement_stats DROP COLUMN IF EXISTS database_name;"),
     ];
 

@@ -293,6 +293,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `set_quiet_window` | `config.config_mute_rules` (insert) |
 | `set_server_action` | `config.config_server_actions` (insert/update)<br>`config.config_monitored_servers`<br>`collect.servers` |
 | `set_server_excluded_databases` | `config.config_monitored_servers` |
+| `set_server_xe_session_databases` | `config.config_monitored_servers` |
 | `start_practice_request` | `config.investigation_requests` (insert)<br>`config.investigation_request_alerts` (copy/insert)<br>`config.investigation_reports` (read source verdicts)<br>`config.investigation_feedback` (read) |
 | `submit_investigation_report` | `config.investigation_reports` (insert)<br>`config.investigation_requests` (update state)<br>`config.investigation_journal` (insert)<br>`config.investigation_notes` (insert)<br>`config.investigation_requests` (family check) |
 | `test_connection` | `config.config_command`<br>`config.request_mcp_command` |

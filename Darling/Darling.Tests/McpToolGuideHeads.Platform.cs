@@ -198,7 +198,9 @@ public sealed class McpToolGuideHeadsPlatformTests
         Assert.DoesNotContain("PerformanceInsights (an Aurora PostgreSQL", served.Served, StringComparison.Ordinal);
         Assert.Contains("RingBuffer (SQL Server", served.Tail!, StringComparison.Ordinal);
         Assert.Contains("PerformanceInsights (an Aurora PostgreSQL", served.Tail!, StringComparison.Ordinal);
-        Assert.Contains("blocking_severity stays", served.Tail!, StringComparison.Ordinal);
+        /* #7616: the PostgreSQL blocking sentence the tail carried ("stays Unknown on purpose") now says how the card bands. */
+        Assert.Contains("blocking_rate_per_hour", served.Tail!, StringComparison.Ordinal);
+        Assert.DoesNotContain("blocking_rate_per_hour", served.Served, StringComparison.Ordinal);
     }
 
     /// <summary>

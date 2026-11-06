@@ -269,7 +269,7 @@ public static partial class DarlingWebEndpoints
                 ? DarlingMcpDataTools.GetTopProceduresRanked(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), databases, as_of: AsOf(c), detail: Str(c, "detail") ?? "summary", order_by: Str(c, "order_by"), cancellationToken: c.RequestAborted, logger: logger, tag: Str(c, "tag"))
                 : DatabaseNamesRefusal(c),
             ["get_top_queries_by_cpu"] = (c, pg, an) => DatabaseNames(c) is { } databases
-                ? DarlingMcpDataTools.GetTopQueriesRanked(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), databases, QueryBool(c, "parallel_only", false), QueryInt(c, "min_dop", null, 0), group_by: "query_hash", as_of: AsOf(c), detail: Str(c, "detail") ?? "summary", order_by: Str(c, "order_by"), cancellationToken: c.RequestAborted, tag: Str(c, "tag"))
+                ? DarlingMcpDataTools.GetTopQueriesRanked(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), databases, QueryBool(c, "parallel_only", false), QueryInt(c, "min_dop", null, 0), group_by: "query_hash", as_of: AsOf(c), detail: Str(c, "detail") ?? "summary", order_by: Str(c, "order_by"), cancellationToken: c.RequestAborted, tag: Str(c, "tag"), logger: logger)
                 : DatabaseNamesRefusal(c),
             ["get_pg_top_queries"] = (c, pg, an) => DarlingMcpPgStatementTools.GetPgTopQueries(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), full_text: QueryBool(c, "full_text", true), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             /* query_id arrives as TEXT and is passed through as text (#2548): a queryid that made a

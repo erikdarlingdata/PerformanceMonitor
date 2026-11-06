@@ -208,7 +208,7 @@ public sealed class DarlingMcpPgBlockingTools
                         + "window. Note the limit of that statement: captures are periodic, so blocking that "
                         + "started and cleared between two of them left no trace. PostgreSQL has no "
                         + "engine-side blocked-process recorder to fall back on.",
-                }, McpHelpers.JsonOptions), emptyNotice), cancellationToken);
+                }, McpHelpers.JsonOptions), emptyNotice), cancellationToken, startUtc);
             }
 
             var chainsNotice = await DarlingMcpWindowNotice.ReadForToolAsync(

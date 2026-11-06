@@ -94,6 +94,10 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
         public HashSet<string> Refuse { get; } = new(StringComparer.OrdinalIgnoreCase);
         public Exception? ListFailure { get; set; }
 
+        /* #7639: the databases the deadlock READ can open, each with the reader it returns. Any other database fails the read,
+           as a database with no session or a refused connection does. */
+        public Dictionary<string, Func<System.Data.Common.DbDataReader>> Readable { get; } = new(StringComparer.OrdinalIgnoreCase);
+
         /* The SQL error number a refusing database says. 262 is a permission refusal, which the collector's run records as
            PERMISSIONS and then skips for the rest of the session; any other number is recorded as ERROR on every cycle. */
         public int RefusalNumber { get; set; } = 262;
@@ -156,6 +160,13 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
                 ? Task.FromException(SqlExceptionFactory.Create(rig.RefusalNumber, errorClass: 14, message: $"The create was refused in {database}."))
                 : Task.CompletedTask;
         };
+
+        /* The deadlock read follows the ensure in a collector run, so it reads the same databases through fake readers. */
+        rig.Service.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(rig.Listed.ToList());
+        rig.Service.AzureDatabaseReaderOverrideForTests = (database, _) =>
+            rig.Readable.TryGetValue(database, out var open)
+                ? open()
+                : throw SqlExceptionFactory.Create(4060, errorClass: 11, message: $"Cannot open database \"{database}\".");
 
         rig.Service.XeSessionServerEnsureOverrideForTests = (_, session, _) =>
         {
@@ -434,7 +445,8 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
         Assert.Same(rig.ServerFailure, raised.InnerException);
     }
 
-    private static string CollectorName(string session) => session == Deadlock ? "deadlocks" : "blocked_process_report";
+    private static string CollectorName(string session) =>
+        session == Deadlock ? "deadlocks" : session == Attention ? "attention" : "blocked_process_report";
 
     /// <summary>The collector's own line for a failed ensure, as <c>RunCollectorAsync</c> writes it.</summary>
     private static string CollectorLine(string session) => $"{CollectorName(session)} Failed to ensure {session} XE session";
@@ -694,5 +706,187 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
             Assert.Equal(2, runs.Count);
             Assert.All(runs, run => Assert.Equal("PERMISSIONS", run.Status));
         });
+    }
+
+    private static System.Data.Common.DbDataReader DeadlockReader(DateTime time, string? sourceDatabase, string graph) =>
+        new FakeDeadlockReader(
+            new[] { new object[] { time, "process1", graph, (object?)sourceDatabase ?? DBNull.Value } },
+            new[] { new object[] { 100L, false } });
+
+    private static async Task<List<string>> ReadStoredDeadlockGraphsAsync(Rig rig)
+    {
+        using var connection = rig.DuckDb.CreateConnection();
+        await connection.OpenAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT deadlock_graph_xml FROM deadlocks WHERE server_id = {rig.ServerId} ORDER BY deadlock_graph_xml";
+        using var reader = await command.ExecuteReaderAsync();
+        var graphs = new List<string>();
+        while (await reader.ReadAsync())
+        {
+            graphs.Add(reader.GetString(0));
+        }
+
+        return graphs;
+    }
+
+    /// <summary>
+    /// #7639: the deadlock session could not be created in any database of an Azure SQL Database server (a login without
+    /// ALTER ANY DATABASE EVENT SESSION). The run used to end at the ensure, so the master item's telemetry arm, which needs no
+    /// session, never ran and the grid stayed empty. The read now goes ahead and stores what it finds, and the run still records
+    /// the ensure's PERMISSIONS and its message.
+    /// </summary>
+    [Fact]
+    public async Task AnEnsureRefusedInEveryDatabase_StillStoresTheTelemetryDeadlocks_AndRecordsThePermissionRun()
+    {
+        var rig = await BuildRigAsync();
+        rig.RefuseEveryDatabase();
+        rig.Readable["master"] = () => DeadlockReader(DateTime.UtcNow.AddMinutes(-1), "alpha", "<deadlock id=\"telemetry\"/>");
+
+        await RunCollectorAsync(rig, Deadlock);
+
+        Assert.Equal(new[] { "<deadlock id=\"telemetry\"/>" }, await ReadStoredDeadlockGraphsAsync(rig));
+
+        var run = Assert.Single(await ReadRunsAsync(rig, Deadlock));
+        Assert.Equal("PERMISSIONS", run.Status);
+        Assert.Contains("Failed to ensure deadlock XE session", run.Error, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #7639: the session was refused in one database and made in the others. The others are read and stored, and the run's
+    /// note names the database that is missing, with the server's reason and the grant that fixes it, so a short grid is not
+    /// read as a quiet server.
+    /// </summary>
+    [Fact]
+    public async Task AnEnsureRefusedInOneDatabase_StoresTheOthers_AndTheNoteNamesTheRefusedOne()
+    {
+        var rig = await BuildRigAsync();
+        rig.Refuse.Add("beta");
+        rig.Readable["master"] = () => new FakeDeadlockReader(Array.Empty<object[]>(), new[] { new object[] { 100L, false } });
+        rig.Readable["alpha"] = () => DeadlockReader(DateTime.UtcNow.AddMinutes(-2), null, "<deadlock id=\"alpha\"/>");
+        rig.Readable["gamma"] = () => DeadlockReader(DateTime.UtcNow.AddMinutes(-1), null, "<deadlock id=\"gamma\"/>");
+
+        await RunCollectorAsync(rig, Deadlock);
+
+        Assert.Equal(new[] { "<deadlock id=\"alpha\"/>", "<deadlock id=\"gamma\"/>" }, await ReadStoredDeadlockGraphsAsync(rig));
+
+        var run = Assert.Single(await ReadRunsAsync(rig, Deadlock));
+        Assert.Equal("SUCCESS", run.Status);
+        Assert.Contains("beta", run.Error, StringComparison.Ordinal);
+        Assert.Contains("The create was refused in beta.", run.Error, StringComparison.Ordinal);
+        Assert.Contains("ALTER ANY DATABASE EVENT SESSION", run.Error, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #7639: the same partial refusal on the blocked process and client timeout runs. Their sessions were made in the other
+    /// databases and refused in one, and the run succeeded without saying so, so a short grid read as a quiet server. Their run
+    /// notes now name the refused database, the server's reason and the grant, as the deadlock run's does. The refused
+    /// database cannot be opened, which the Azure loop skips, and the other two read no rows, so the run succeeds.
+    /// </summary>
+    [Theory]
+    [InlineData(BlockedProcess)]
+    [InlineData(Attention)]
+    public async Task AnEnsureRefusedInOneDatabase_PutsTheSameNoteOnTheBlockedProcessAndClientTimeoutRuns(string session)
+    {
+        var rig = await BuildRigAsync();
+        rig.Refuse.Add("beta");
+        rig.Readable["alpha"] = () => new FakeDeadlockReader(Array.Empty<object[]>(), Array.Empty<object[]>());
+        rig.Readable["gamma"] = () => new FakeDeadlockReader(Array.Empty<object[]>(), Array.Empty<object[]>());
+
+        await RunCollectorAsync(rig, session);
+
+        var run = Assert.Single(await ReadRunsAsync(rig, session));
+        Assert.True(run.Status == "SUCCESS", run.Status + ": " + run.Error);
+        Assert.Contains("beta", run.Error, StringComparison.Ordinal);
+        Assert.Contains("The create was refused in beta.", run.Error, StringComparison.Ordinal);
+        Assert.Contains("ALTER ANY DATABASE EVENT SESSION", run.Error, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #7639: a list that is set but names no database the server has attempts nothing and refuses nothing. The run used to record
+    /// SUCCESS with no rows and no reason, which reads as a quiet server. Its note now says the list matches no database. An empty
+    /// list (every database) and a list that names a live database carry no such note.
+    /// </summary>
+    [Theory]
+    [InlineData(Deadlock, "dropped_last_week", true)]
+    [InlineData(BlockedProcess, "dropped_last_week", true)]
+    [InlineData(Attention, "dropped_last_week", true)]
+    [InlineData(BlockedProcess, "", false)]
+    [InlineData(BlockedProcess, "alpha", false)]
+    public async Task AnXeSessionDatabaseList_MatchingNoDatabase_PutsANoteOnTheRun_AndAnEmptyOrMatchingListDoesNot(string session, string list, bool expectNote)
+    {
+        var rig = await BuildRigAsync();
+        rig.Server.XeSessionDatabases = list.Length == 0 ? new List<string>() : new List<string> { list };
+        foreach (var database in new[] { "master", "alpha", "beta", "gamma" })
+        {
+            rig.Readable[database] = () => new FakeDeadlockReader(Array.Empty<object[]>(), session == Deadlock ? new[] { new object[] { 100L, false } } : Array.Empty<object[]>());
+        }
+
+        await RunCollectorAsync(rig, session);
+
+        var run = Assert.Single(await ReadRunsAsync(rig, session));
+        Assert.True(run.Status == "SUCCESS", run.Status + ": " + run.Error);
+        Assert.Equal(expectNote, run.Error?.Contains("matches no database on this server", StringComparison.Ordinal) ?? false);
+    }
+
+    /// <summary>
+    /// #7639: every database failed its ensure with an exception that is not a SQL error (a token or connection-open fault). The
+    /// shared driver raises it raw, and the deadlock run used to end before the read. Darling records it as an ensure failure and reads
+    /// first, so Lite does too: the master item's telemetry arm still stores its deadlock, and the run then records the failure.
+    /// </summary>
+    [Fact]
+    public async Task AnEnsureFailedInEveryDatabaseWithANonSqlFault_StillStoresTheTelemetryDeadlocks_AndRecordsTheFailureAfterIt()
+    {
+        var rig = await BuildRigAsync();
+        rig.Service.XeSessionDatabaseEnsureOverrideForTests = (_, _, _, _) =>
+            Task.FromException(new InvalidOperationException("The access token could not be acquired."));
+        rig.Readable["master"] = () => DeadlockReader(DateTime.UtcNow.AddMinutes(-1), "alpha", "<deadlock id=\"telemetry\"/>");
+
+        await RunCollectorAsync(rig, Deadlock);
+
+        Assert.Equal(new[] { "<deadlock id=\"telemetry\"/>" }, await ReadStoredDeadlockGraphsAsync(rig));
+
+        var run = Assert.Single(await ReadRunsAsync(rig, Deadlock));
+        Assert.Equal("ERROR", run.Status);
+        Assert.Contains("The access token could not be acquired.", run.Error, StringComparison.Ordinal);
+    }
+
+    private sealed class FakeDeadlockReader(object[][] rows, object[][] gate) : System.Data.Common.DbDataReader
+    {
+        private readonly object[][][] _sets = { rows, gate };
+        private int _set;
+        private int _row = -1;
+        private object[] Cur => _sets[_set][_row];
+
+        public override bool Read() => ++_row < _sets[_set].Length;
+        public override bool NextResult() { if (_set + 1 >= _sets.Length) { return false; } _set++; _row = -1; return true; }
+        public override string GetString(int o) => (string)Cur[o];
+        public override long GetInt64(int o) => (long)Cur[o];
+        public override DateTime GetDateTime(int o) => (DateTime)Cur[o];
+        public override bool GetBoolean(int o) => (bool)Cur[o];
+        public override bool IsDBNull(int o) => Cur[o] is DBNull;
+        public override object GetValue(int o) => Cur[o];
+        public override int FieldCount => _sets[_set].Length == 0 ? 0 : _sets[_set][0].Length;
+        public override bool HasRows => _sets[_set].Length > 0;
+        public override bool IsClosed => false;
+        public override int Depth => 0;
+        public override int RecordsAffected => -1;
+        public override object this[int o] => Cur[o];
+        public override object this[string n] => throw new NotSupportedException();
+        public override byte GetByte(int o) => throw new NotSupportedException();
+        public override long GetBytes(int o, long d, byte[]? b, int bo, int l) => throw new NotSupportedException();
+        public override char GetChar(int o) => throw new NotSupportedException();
+        public override long GetChars(int o, long d, char[]? b, int bo, int l) => throw new NotSupportedException();
+        public override string GetDataTypeName(int o) => throw new NotSupportedException();
+        public override decimal GetDecimal(int o) => throw new NotSupportedException();
+        public override double GetDouble(int o) => throw new NotSupportedException();
+        public override System.Collections.IEnumerator GetEnumerator() => throw new NotSupportedException();
+        public override Type GetFieldType(int o) => throw new NotSupportedException();
+        public override float GetFloat(int o) => throw new NotSupportedException();
+        public override Guid GetGuid(int o) => throw new NotSupportedException();
+        public override short GetInt16(int o) => throw new NotSupportedException();
+        public override int GetInt32(int o) => throw new NotSupportedException();
+        public override string GetName(int o) => throw new NotSupportedException();
+        public override int GetOrdinal(string n) => throw new NotSupportedException();
+        public override int GetValues(object[] v) => throw new NotSupportedException();
     }
 }
