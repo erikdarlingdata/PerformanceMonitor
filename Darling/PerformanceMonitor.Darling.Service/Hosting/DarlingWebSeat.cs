@@ -123,6 +123,18 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
     /// <c>web</c> constant the shared-token seat has always written.</summary>
     internal string EditorPrincipal => Subject ?? DarlingWebEndpoints.WebEditorPrincipal;
 
+    /// <summary>The names a built-in writer stamps on <c>updated_by</c>, <c>requested_by</c> and the <c>person:</c> journal actor as itself:
+    /// the shared token's <c>web</c>, the MCP surface's <c>mcp</c>, the command line's <c>cli</c> and the Viewer's <c>viewer</c>. A named web
+    /// token's name is its <see cref="EditorPrincipal"/>, so no token may take one of these (#7735): a person's edits would read as a surface's.</summary>
+    internal static readonly string[] BuiltInStamps =
+    {
+        DarlingWebEndpoints.WebEditorPrincipal, DarlingWebEndpoints.McpEditorPrincipal, DarlingServiceConnectionTest.RequestedBy, "viewer",
+    };
+
+    /// <summary>True when <paramref name="name"/> is one of <see cref="BuiltInStamps"/>, compared ignoring case.</summary>
+    internal static bool IsBuiltInStamp(string? name) =>
+        name is not null && Array.Exists(BuiltInStamps, stamp => string.Equals(stamp, name, StringComparison.OrdinalIgnoreCase));
+
     /// <summary>The request's resolved seat. Every pipeline the host builds stores one before routing (the auth gate,
     /// or the reads-only gate of a tokenless dashboard); an absent item (routes mapped without the
     /// host's pipeline, as some tests map them) reads as <see cref="ReadsOnly"/>, so a request nobody sat a seat for cannot write.</summary>
