@@ -82,6 +82,61 @@ public sealed class DarlingCliSealKeyTests
         }
     }
 
+    /// <summary>#8006, the spec's CLI sealing test, without a store: what <see cref="DarlingCliSealKey.ResolveAsync"/>
+    /// hands <see cref="DarlingCliSealKey.Decide"/>. With <c>passwordKey</c> naming the published key, <c>--add-server</c>
+    /// seals with that key and prints no notice. With a setting that cannot be read it seals to the published key, as with
+    /// no key file, even though a key file that is NOT the published key sits in the credentials directory: reading it
+    /// would have refused with <see cref="DarlingCliSealKey.FileMismatchReason"/>.</summary>
+    [Fact]
+    public void Decide_WithPasswordKey_SealsWithTheExternalKey_AndARefusedSettingUsesThePublishedKey_NeverTheFile()
+    {
+        var dir = Directory.CreateTempSubdirectory("cli-seal-key-test-").FullName;
+        var external = Directory.CreateTempSubdirectory("cli-seal-key-external-").FullName;
+        using var fileKey = PasswordPrivateKey.Generate();
+        using var externalKey = PasswordPrivateKey.Generate();
+        var filePkcs8 = fileKey.ExportPkcs8();
+        var externalPkcs8 = externalKey.ExportPkcs8();
+        try
+        {
+            var configPath = Path.Combine(dir, "darling.json");
+            var keys = DarlingLogHashKeyFile.DirectoryFor(DarlingConfig.Parse("{\"postgres\":{\"connectionString\":\"Host=h\"}}"), configPath);
+            Assert.Null(DarlingPasswordKeyFile.Generate(keys, () => (byte[])filePkcs8.Clone(), NullLogger.Instance).Refusal);
+            var externalPath = Path.Combine(external, "password-key");
+            File.WriteAllText(externalPath, Convert.ToBase64String(externalPkcs8));
+            var published = Published(externalKey);
+            var ok = new PasswordKeyServiceState("host-example", externalKey.PublicKey.KeyId, "ok", null, DateTime.UtcNow);
+
+            foreach (var path in new[] { configPath, null })
+            {
+                var pkcs8 = DarlingPasswordKeySource.LoadConfigured(WithPasswordKey("file:" + externalPath), path, NullLogger.Instance).Pkcs8;
+                Assert.NotNull(pkcs8);
+                var decision = DarlingCliSealKey.Decide(published, ok, pkcs8);
+                CryptographicOperations.ZeroMemory(pkcs8);
+
+                Assert.True(decision.Ring.Status.CanSeal);
+                Assert.Null(decision.Notice);
+                Assert.IsNotType<DarlingCliSealKey.PublishedKeyRing>(decision.Ring);
+                Assert.Equal(externalKey.PublicKey.KeyId, decision.Ring.Status.KeyId);
+                Assert.Equal("p@ss-not-real", decision.Ring.Open(decision.Ring.Seal("p@ss-not-real", Binding), Binding));
+            }
+
+            var refused = DarlingPasswordKeySource.LoadConfigured(WithPasswordKey("file:" + Path.Combine(external, "missing")), configPath, NullLogger.Instance);
+            Assert.NotNull(refused.Refusal);
+            Assert.Null(refused.Pkcs8);
+            var fallback = DarlingCliSealKey.Decide(published, ok, refused.Pkcs8);
+
+            Assert.IsType<DarlingCliSealKey.PublishedKeyRing>(fallback.Ring);
+            Assert.Equal(DarlingCliSealKey.NoticeFor(externalKey.PublicKey.KeyId), fallback.Notice);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(filePkcs8);
+            CryptographicOperations.ZeroMemory(externalPkcs8);
+            Directory.Delete(dir, recursive: true);
+            Directory.Delete(external, recursive: true);
+        }
+    }
+
     private static DarlingConfig WithPasswordKey(string reference) =>
         DarlingConfig.Parse("{\"postgres\":{\"connectionString\":\"Host=h\"},\"passwordKey\":\"" + reference.Replace("\\", "\\\\", StringComparison.Ordinal) + "\"}");
 
