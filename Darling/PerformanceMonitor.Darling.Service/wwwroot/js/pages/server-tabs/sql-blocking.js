@@ -140,11 +140,12 @@ export const BLOCKING_COLUMNS = [
 ];
 
 /* Stays local: this page renders the deadlock text through a codeDisclosure and orders the columns differently from the catalog.
-   The Victim plan button is added where the grid is built (deadlockPlanColumn, #5236), so the five columns here stay the summary. */
+   The Victim plan button is added where the grid is built (deadlockPlanColumn, #5236), so the columns here stay the summary.
+   #7729: there is no Victim column. The graph's own process id (process followed by hex digits) names nothing a person can use, and the Processes
+   column already says which session is the victim. The reply keeps victim_process_id, which the plan lookup reads. */
 export const DEADLOCK_COLUMNS = [
   { key: "deadlock_time", label: "Deadlock Time", format: "time" },
   { key: "victim_sql_text", label: "Victim SQL", valueList: false, render: (r) => codeDisclosure(r.victim_sql_text) },
-  { key: "victim_process_id", label: "Victim" },
   { key: "process_summary", label: "Processes", wrap: true },
   { key: "has_deadlock_xml", label: "Graph", format: "bool" },
 ];
@@ -272,7 +273,6 @@ export function deadlockGraphsPanel(server, ctx) {
 function deadlockXmlColumns(server, scope = null) {
   return [
     { key: "deadlock_time", label: "Deadlock Time", format: "time" },
-    { key: "victim_process_id", label: "Victim" },
     {
       key: "deadlock_graph_xml_save",
       label: "XML",

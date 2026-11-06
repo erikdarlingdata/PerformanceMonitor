@@ -139,6 +139,26 @@ public sealed class McpDatabaseNameFilterToolTests : IClassFixture<SharedDuckDbF
         Assert.Contains("for the database NoSuchDb", none);
     }
 
+    /// <summary>#7729: by_event counts every significant event of the window by name, from the whole set the reader filtered in SQL and not from the page the limit cuts.</summary>
+    [Fact]
+    public async Task DefaultTraceEvents_ByEvent_CountsTheWholeWindow_NotThePage()
+    {
+        var eventTime = Truncate(DateTime.UtcNow.AddHours(-1));
+        /* One minute apart, because the read drops the stored copies of one event (same time, name and fields). */
+        var names = new[] { "Object:Altered", "Object:Altered", "Object:Altered", "Object:Created", "Object:Created", "Object:Deleted" };
+        for (var i = 0; i < names.Length; i++)
+            await SeedDefaultTraceAsync(eventTime.AddMinutes(-i), names[i], "SalesDB");
+
+        var answer = await McpDefaultTraceTools.GetDefaultTraceEvents(_dataService, _serverManager, ServerName, limit: 2);
+        Assert.False(McpHelpers.IsErrorEnvelope(answer), $"tool returned an error: {answer}");
+        using var doc = JsonDocument.Parse(answer);
+        Assert.Equal(6, doc.RootElement.GetProperty("total_events").GetInt32());
+        Assert.Equal(2, doc.RootElement.GetProperty("shown").GetInt32());
+        var byEvent = doc.RootElement.GetProperty("by_event").EnumerateArray()
+            .Select(e => e.GetProperty("event_name").GetString() + "=" + e.GetProperty("count").GetInt32()).ToArray();
+        Assert.Equal(new[] { "Object:Altered=3", "Object:Created=2", "Object:Deleted=1" }, byEvent);
+    }
+
     [Fact]
     public async Task SevereErrors_DatabaseName_FiltersOnTheResolvedName_BeforeTheCountsAndTheCap()
     {
