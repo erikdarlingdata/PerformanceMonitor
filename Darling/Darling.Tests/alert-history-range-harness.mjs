@@ -274,6 +274,40 @@ try {
       const main = newMain(); await renderAlerts(main);
       out.links = main.all("a").map((a) => a.textContent + " " + a.attrs.href);
     },
+    /* #7943: a poll whose read failed keeps the table on screen with the failure as a notice above it, and the next good poll reconciles
+       the same rows, so an opened Detail line stays open. The error strip takes the table's place only when no table is on screen. */
+    async pollFails() {
+      const refreshNotices = (m) => m.all("div").filter((d) => (" " + d.className + " ").includes(" refresh-error ")).map((d) => d.textContent);
+      const errorStrips = (m) => m.all("div").filter((d) => d.className === "strip error").length;
+      const good = () => ({ alerts: [row(1, { detail_text: "Blocking chain of 4 sessions." }), row(2)], truncated: false });
+      /* the same util.js module instance the page runs on: its red-strip count is what keeps the footer's Updated time from moving */
+      const util = await import(pathToFileURL(path.join(scratch, "util.js")).href);
+      alertsReply = good();
+      const main = newMain(); await renderAlerts(main);
+      const tr = bodyRows(main)[0];
+      const detail = tr.all("details")[0];
+      detail.open = true; detail.fire("toggle"); await settle();
+      out.openBefore = detail.open;
+      // one poll fails: the tool's error envelope
+      alertsReply = { status: "error", message: "the store did not answer" };
+      const errorsBefore = util.readErrorCount();
+      await renderAlerts(main);
+      out.errorCounted = util.readErrorCount() > errorsBefore;
+      out.tableDuringFailure = main.all("table").length === 1 && bodyRows(main)[0] === tr;
+      out.rowsDuringFailure = bodyRows(main).length;
+      out.noticeDuringFailure = refreshNotices(main);
+      out.errorStripDuringFailure = errorStrips(main);
+      // the next poll answers
+      alertsReply = good();
+      await renderAlerts(main);
+      out.sameRowAfter = bodyRows(main)[0] === tr;
+      out.openAfter = bodyRows(main).length > 0 && (bodyRows(main)[0].all("details")[0] || {}).open === true;
+      out.noticeAfter = refreshNotices(main).length;
+      // a first load that fails still draws the error strip in the table's place
+      alertsReply = { status: "error", message: "the store did not answer" };
+      const fresh = newMain(); await renderAlerts(fresh);
+      out.firstLoadErrorStrip = fresh.all("table").length === 0 && errorStrips(fresh) === 1;
+    },
   };
   await scenarios[scenario]();
   console.log(JSON.stringify(out));

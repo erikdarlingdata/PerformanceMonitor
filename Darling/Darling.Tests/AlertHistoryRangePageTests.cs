@@ -297,4 +297,24 @@ public sealed class AlertHistoryRangePageTests
         Assert.Contains(links, l => l.StartsWith("Mute this alert #/mute-rules?server_id=1&server_name=srv-a&metric_name=", StringComparison.Ordinal));
         Assert.Contains(links, l => l.StartsWith("Mute similar #/mute-rules?metric_name=", StringComparison.Ordinal));
     }
+
+    /// <summary>#7943: a poll whose read failed keeps the table and says so above it, and the next good poll reconciles the same rows, so
+    /// an opened Detail line stays open. Only a first load that fails draws the error strip in the table's place.</summary>
+    [Fact]
+    public void AFailedPoll_KeepsTheTableAndItsOpenDetail_UntilTheNextGoodPoll()
+    {
+        var r = Run("pollFails");
+        Assert.True(r.GetProperty("openBefore").GetBoolean());
+        Assert.True(r.GetProperty("tableDuringFailure").GetBoolean(), "the failed poll replaced the table");
+        Assert.Equal(2, r.GetProperty("rowsDuringFailure").GetInt32());
+        var notice = Assert.Single(r.GetProperty("noticeDuringFailure").EnumerateArray().Select(e => e.GetString()!));
+        Assert.Contains("the store did not answer", notice);
+        Assert.Equal(0, r.GetProperty("errorStripDuringFailure").GetInt32());
+        // The notice is a red strip for the footer too, so the failed poll does not move the page's Updated time.
+        Assert.True(r.GetProperty("errorCounted").GetBoolean());
+        Assert.True(r.GetProperty("sameRowAfter").GetBoolean());
+        Assert.True(r.GetProperty("openAfter").GetBoolean(), "the poll after the failure closed the opened Detail line");
+        Assert.Equal(0, r.GetProperty("noticeAfter").GetInt32());
+        Assert.True(r.GetProperty("firstLoadErrorStrip").GetBoolean());
+    }
 }
