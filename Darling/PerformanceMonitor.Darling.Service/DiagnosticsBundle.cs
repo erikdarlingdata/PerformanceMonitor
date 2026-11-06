@@ -105,6 +105,8 @@ internal static class DiagnosticsBundle
         "DarlingConfig.Heartbeat",
         /* #6840: the front door's block holds every store's address and access token. */
         "DarlingConfig.FrontDoor",
+        /* #8006: only a file: path or env: name, but it says where the password key lives, and the bundle never needs it. */
+        "DarlingConfig.PasswordKey",
         "PostgresConfig.WebConnectionString",
         "PostgresConfig.McpConnectionString",
         "PostgresConfig.Port",
