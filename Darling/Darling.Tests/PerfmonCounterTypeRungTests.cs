@@ -57,22 +57,6 @@ public sealed class PerfmonCounterTypeRungTests
     private const string Table = "perfmon_stats";
     private const string Column = "cntr_type";
 
-    /// <summary>The one expression every bucket layer spells for the bucket's type over its per-collection types: a
-    /// type only where the collections agree on one, so a mixed-type family (the wait-statistics object's instances
-    /// are a rate, a gauge and an average under one counter name) reads NULL and falls to the proxy rather than
-    /// being classified by whichever instance's id sorts first.</summary>
-    private const string AgreedTypeExpression = "CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type";
-
-    /// <summary>The per-object layer's bounds on the type (#7771): the smallest and largest <c>cntr_type</c> among the
-    /// object's instance rows, carried up rather than collapsed, so a mixed object cannot read as NULL and be skipped
-    /// by the per-collection comparison.</summary>
-    private const string MinTypeExpression = "MIN(cntr_type) AS min_type";
-    private const string MaxTypeExpression = "MAX(cntr_type) AS max_type";
-
-    /// <summary>The per-collection layer's type over the objects' bounds: a type only where every instance row under
-    /// the counter name agrees on one, whichever object it belongs to.</summary>
-    private const string CollectionTypeExpression = "CASE WHEN MIN(min_type) = MAX(max_type) THEN MAX(max_type) END AS cntr_type";
-
     private static PgMigrations.Migration V132 => PgMigrations.Scripts.Single(m => m.Version == RungVersion);
 
     /* ---- the rung ------------------------------------------------------------------------------------ */
@@ -220,37 +204,18 @@ public sealed class PerfmonCounterTypeRungTests
     /* ---- the readers ----------------------------------------------------------------------------------- */
 
     /// <summary>
-    /// Every Darling perfmon read selects the type: the two trend reads (MCP and viewer) with the one agreed-type
-    /// form, byte-identical to each other and to every copy in Lite's trend reads, and the latest-snapshot read with
-    /// the row's own, and after it the interval a rate row's per-second figure divides by, in the same order in
-    /// Lite's twin. The per-object layer carries the smallest and largest type its rows hold, the per-collection
-    /// layer compares those across the objects, and a bucket layer compares the per-collection types (#7771). The
-    /// row types keep NULL as null — a gauge row stores no delta and no interval, and a 0 manufactured in their
-    /// place would be #3642's fabricated zero on a level that has no delta.
+    /// The latest-snapshot read selects the row's own type and, after it, the interval a rate row's per-second
+    /// figure divides by, in the same order in Lite's twin. Which type a trend point carries is pinned against a
+    /// live store (<see cref="PerfmonTotalInstanceLiveTests"/> and the live case below), not against the statement
+    /// text (#5833). The row types keep NULL as null — a gauge row stores no delta and no interval, and a 0
+    /// manufactured in their place would be #3642's fabricated zero on a level that has no delta.
     /// </summary>
     [Fact]
     public void EveryDarlingPerfmonRead_SelectsTheType_AndTheRowsKeepNullAsNull()
     {
         var mcpTrend = DarlingTrendReader.PerfmonTrendSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         var viewerTrend = ViewerDataService.PerfmonTrendsSql(1).Replace("\r\n", "\n", StringComparison.Ordinal);
-        foreach (var trend in new[] { mcpTrend, viewerTrend })
-        {
-            Assert.Contains(MinTypeExpression, trend, StringComparison.Ordinal);
-            Assert.Contains(MaxTypeExpression, trend, StringComparison.Ordinal);
-            Assert.Contains(CollectionTypeExpression, trend, StringComparison.Ordinal);
-        }
-        /* The viewer's statement buckets its own per-collection layer; the MCP's bucket layer is PerfmonTrendBucketedSql. */
-        Assert.Contains(AgreedTypeExpression, viewerTrend, StringComparison.Ordinal);
-        Assert.Contains(AgreedTypeExpression, DarlingTrendReader.PerfmonTrendBucketedSql, StringComparison.Ordinal);
-
         var lite = RepoFile.ReadRepoFile("Lite", "Services", "LocalDataService.Perfmon.cs");
-        /* Lite's single-counter read and its bucketed batched read (#4234) each carry the per-object bounds and the
-           per-collection comparison once; only the batched read has a bucket layer, which compares the per-collection
-           types as both Darling twins do at their own bucket layers. */
-        Assert.Equal(2, Regex.Matches(lite, Regex.Escape(MinTypeExpression)).Count);
-        Assert.Equal(2, Regex.Matches(lite, Regex.Escape(MaxTypeExpression)).Count);
-        Assert.Equal(2, Regex.Matches(lite, Regex.Escape(CollectionTypeExpression)).Count);
-        Assert.Single(Regex.Matches(lite, Regex.Escape(AgreedTypeExpression)));
 
         var latest = DarlingDataReader.LatestPerfmonStatsSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         Assert.Contains("collection_time,\n    cntr_type,\n    sample_interval_seconds,\n    object_name\nFROM v_perfmon_stats", latest, StringComparison.Ordinal);

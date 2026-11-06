@@ -86,6 +86,8 @@ public sealed class LitePerfmonTotalInstanceLiveTests : IClassFixture<SharedDuck
         Assert.Equal(3, single.Count);
         Assert.All(single, p => Assert.Equal(100, p.Value));
         Assert.All(single, p => Assert.Equal(100, p.DeltaValue));
+        /* Every row under the name agrees on the rate type, so the point carries it. */
+        Assert.All(single, p => Assert.Equal(PerfmonCounterTypes.PerfCounterBulkCount, p.CntrType));
 
         var singlePle = await _dataService.GetPerfmonTrendAsync(ServerId, PageLifeExpectancy, fromDate: startUtc, toDate: endUtc);
         Assert.Equal(3, singlePle.Count);
@@ -100,6 +102,7 @@ public sealed class LitePerfmonTotalInstanceLiveTests : IClassFixture<SharedDuck
         Assert.Equal(3, transactions!.Count);
         Assert.All(transactions, p => Assert.Equal(100, p.Value));
         Assert.All(transactions, p => Assert.Equal(100, p.DeltaValue));
+        Assert.All(transactions, p => Assert.Equal(PerfmonCounterTypes.PerfCounterBulkCount, p.CntrType));
 
         Assert.True(trends.TryGetValue(PageLifeExpectancy, out var ple), "Page life expectancy did not plot at all");
         Assert.Equal(3, ple!.Count);
@@ -110,6 +113,7 @@ public sealed class LitePerfmonTotalInstanceLiveTests : IClassFixture<SharedDuck
         Assert.Equal(3, buckets.Points.Count);
         Assert.All(buckets.Points, p => Assert.Equal(100, p.MaxValue));
         Assert.All(buckets.Points, p => Assert.Equal(100, p.RatedDelta));
+        Assert.All(buckets.Points, p => Assert.Equal(PerfmonCounterTypes.PerfCounterBulkCount, p.CntrType));
 
         var pleBuckets = await _dataService.GetPerfmonBucketsAsync(ServerId, PageLifeExpectancy, hoursBack: 1, asOfUtc: endUtc, bucketMinutes: 1);
         Assert.Equal(3, pleBuckets.Points.Count);

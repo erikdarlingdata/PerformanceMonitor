@@ -90,6 +90,8 @@ public sealed class PerfmonTotalInstanceLiveTests
                 Assert.Equal(3, transactions!.Count);
                 Assert.All(transactions, p => Assert.Equal(100, p.Value));
                 Assert.All(transactions, p => Assert.Equal(100, p.DeltaValue));
+                /* Every row under the name agrees on the rate type, so the point carries it. */
+                Assert.All(transactions, p => Assert.Equal(PerfmonCounterTypes.PerfCounterBulkCount, p.CntrType));
 
                 Assert.True(trends.TryGetValue(PageLifeExpectancy, out var ple), "Page life expectancy did not plot at all");
                 Assert.Equal(3, ple!.Count);
@@ -103,6 +105,7 @@ public sealed class PerfmonTotalInstanceLiveTests
                 Assert.Equal(3, transactions.Points.Count);
                 Assert.All(transactions.Points, p => Assert.Equal(100, p.MaxValue));
                 Assert.All(transactions.Points, p => Assert.Equal(100, p.RatedDelta));
+                Assert.All(transactions.Points, p => Assert.Equal(PerfmonCounterTypes.PerfCounterBulkCount, p.CntrType));
 
                 var ple = await DarlingTrendReader.GetPerfmonBucketsAsync(postgres, ServerId, PageLifeExpectancy, startUtc, endUtc, bucketMinutes: 1, ct);
                 Assert.Equal(3, ple.Points.Count);
