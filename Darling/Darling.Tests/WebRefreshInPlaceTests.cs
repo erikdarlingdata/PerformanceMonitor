@@ -189,4 +189,22 @@ public sealed class WebRefreshInPlaceTests
         Assert.Contains("new-scope", r.GetProperty("text").GetString());
         Assert.True(r.GetProperty("swapsWhenUnchanged").GetBoolean());
     }
+
+    [Fact]
+    public void SavedViewPoll_WhosePanelIsRefusedBusy_KeepsTheOldDataAndHoldsThePageUntilTheSecondAnswer()
+    {
+        // #7942: the Retry-After wait is neither a loading strip nor a counted read, so without this the notice replaced the data and the
+        // page was stamped updated while the panel's second read had not run.
+        if (!TryRun("busyRetryPoll", out var r)) return;
+        Assert.Contains("value-1", r.GetProperty("firstText").GetString());
+        Assert.True(r.GetProperty("samePanel").GetBoolean());
+        var duringWait = r.GetProperty("textDuringWait").GetString()!;
+        Assert.Contains("value-1", duringWait);
+        Assert.DoesNotContain("Retrying", duringWait);
+        Assert.True(r.GetProperty("inFlightDuringWait").GetBoolean(), "the Retry-After wait did not count as a read of the page");
+        Assert.Contains("value-2", r.GetProperty("textAfter").GetString());
+        Assert.False(r.GetProperty("inFlightAfter").GetBoolean());
+        Assert.Equal(0, r.GetProperty("loadingAfter").GetInt32());
+        Assert.Equal(3, r.GetProperty("readCalls").GetInt32());
+    }
 }

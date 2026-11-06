@@ -72,8 +72,10 @@ globalThis.scrollTo = (x, y) => { scrolledTo = y; };
 const [jsDir, scenario] = process.argv.slice(-2);
 
 /* ── the scripted fetch: each route has a version the scenario bumps, and a gate that holds the answer until released ── */
-const state = { fleetVersion: 1, readVersion: 1, fleetFail: false, readFail: false, fleetGate: null, readGate: null, fleetCalls: 0, readCalls: 0, online: true };
+const state = { fleetVersion: 1, readVersion: 1, fleetFail: false, readFail: false, fleetGate: null, readGate: null, fleetCalls: 0, readCalls: 0, online: true, busyOnce: false };
 const reply = (status, body) => ({ status, ok: status >= 200 && status < 300, text: async () => JSON.stringify(body) });
+/* The service refusing a read as busy: HTTP 429 with a Retry-After header of one second. */
+const busyReply = () => ({ ...reply(429, { error: "busy" }), headers: { get: (k) => (String(k).toLowerCase() === "retry-after" ? "1" : null) } });
 const card = () => ({ server_id: 7, server_name: "SRV1", display_name: "SRV1", is_postgres: false, band: "Healthy", band_label: "Healthy", is_online: state.online, status: "ok", last_collection: null, tags: [], is_silenced: false, metric_count: 0, measured_metric_count: 0 });
 globalThis.fetch = async (url) => {
   const u = String(url);
@@ -87,6 +89,7 @@ globalThis.fetch = async (url) => {
   if (u.startsWith("/api/read/get_stub")) {
     state.readCalls++;
     if (state.readGate) await state.readGate;
+    if (state.busyOnce) { state.busyOnce = false; return busyReply(); }
     if (state.readFail) return reply(500, { error: "read down" });
     return reply(200, { value: "value-" + state.readVersion });
   }
@@ -387,6 +390,34 @@ try {
       g.release();
       await settle();
       out.loadingAfter = loadingStrips(main);
+    },
+    /* #7942: a saved view's panel (it reads through a gate, so a busy refusal is sent once more after the Retry-After) polled while the
+       service answers 429. During the wait the panel on screen keeps its data: the "Retrying in N seconds" notice is not a drawn panel, so
+       the swap waits for the second answer. The wait counts as a read of the page, so the footer is not stamped and the next poll is not
+       planned before that answer. */
+    async busyRetryPoll() {
+      const rip = await load("refresh-in-place.js");
+      const panels = await load("panels.js");
+      const util = await load("util.js");
+      const gate = (start) => start(); /* a saved view's read gate with every slot free */
+      const desc = { read: "get_stub", params: { server: "SRV1" }, title: "Stub panel", render: (d) => util.el("div", { class: "stub-result", text: d.value }) };
+      const live = new FakeNode("div"); live.className = "panel-grid"; live.isRoot = true;
+      live.appendChild(panels.renderPanel(desc, undefined, gate));
+      await settle();
+      const livePanel = live.children[0];
+      out.firstText = text(livePanel);
+      state.busyOnce = true;
+      state.readVersion = 2;
+      rip.refreshGridInPlace(live, [panels.renderPanel(desc, undefined, gate)]);
+      await settle();
+      out.samePanel = live.children[0] === livePanel;
+      out.textDuringWait = text(livePanel);
+      out.inFlightDuringWait = util.hasInFlightReads();
+      await new Promise((r) => setTimeout(r, 1300));
+      out.textAfter = text(livePanel);
+      out.inFlightAfter = util.hasInFlightReads();
+      out.loadingAfter = loadingStrips(live);
+      out.readCalls = state.readCalls;
     },
   };
   if (!scenarios[scenario]) throw new Error("unknown scenario " + scenario);
