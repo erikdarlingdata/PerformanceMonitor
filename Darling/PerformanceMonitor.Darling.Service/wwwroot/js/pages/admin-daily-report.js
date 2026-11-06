@@ -98,9 +98,15 @@ export function dailyReportPreviewOnly() {
 }
 
 /* #7951: what the editor's boxes hold while a person types ({ enabled, send_at, time_zone, title }), kept here so a redraw of the
-   Settings tab draws the typed values and not the saved ones. Null while nothing has been typed since the last read; a successful save
-   clears it, so the repaint shows what was saved. */
+   Settings tab draws the typed values and not the saved ones. Null while nothing has been typed since the tab was drawn. A successful
+   save clears it, so the repaint shows what was saved, and so do a switch to another Admin tab and leaving Admin (admin.js calls
+   clearDailyReportDraft), so coming back shows the saved values and not unsaved text as if it had been saved. */
 let reportDraft = null;
+
+/** Drops the typed values, so the next draw of the editor shows the saved ones. */
+export function clearDailyReportDraft() {
+  reportDraft = null;
+}
 
 /** The editor, for a signed-in admin. `group` is the read's daily_report group (or undefined on a service that predates it);
     `repaint` redraws the Settings tab after a save so the saved values show. */

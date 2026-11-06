@@ -32,8 +32,8 @@ import { routeHash, el, mount, loadingStrip, errorStrip, emptyStrip, plainEmptyS
 import { getSession } from "../views-api.js";
 import { severityLabel } from "./analysis-findings.js";
 import { writeNote, startPractice, writeAccess, SIGN_IN_SENTENCE, NOTE_MAX_LENGTH, NOTE_MAX_DAYS, NOTE_DEFAULT_DAYS } from "../investigation-writes.js";
-import { dailyReportEditor, dailyReportPreviewOnly } from "./admin-daily-report.js";
-import { databaseProtectionEditor } from "./admin-database-protection.js";
+import { dailyReportEditor, dailyReportPreviewOnly, clearDailyReportDraft } from "./admin-daily-report.js";
+import { databaseProtectionEditor, clearDatabaseProtectionDraft } from "./admin-database-protection.js";
 import { buildAgentChanges, resetAgentChangesStatus } from "./admin-agent-changes.js";
 import { buildServerActions, resetServerActionsStatus, engineWord } from "./admin-server-actions.js";
 import { buildPeople, resetPeopleStatus } from "./admin-people.js";
@@ -2139,24 +2139,43 @@ function startBuilder(tabId, body, generation) {
   });
 }
 
+/* True when `hash` is this page's: #/admin or #/admin/<tab>. */
+const showsAdmin = (hash) => hash === "#/admin" || hash.startsWith("#/admin/");
+
 /* True when `hash` shows the Servers tab: #/admin or #/admin/servers, or a tab name the page does not know while the
    Servers tab is the one on screen (renderAdmin falls back the same way). */
 function showsServers(hash) {
-  if (hash !== "#/admin" && !hash.startsWith("#/admin/")) return false;
+  if (!showsAdmin(hash)) return false;
   return findTab(hash.slice("#/admin".length).replace(/^\//, "")).id === "servers";
+}
+
+/* #7951: the Alert Settings editors' unsaved text is dropped, so the next draw of the tab shows the saved values. */
+function clearSettingsDrafts() {
+  clearDailyReportDraft();
+  clearDatabaseProtectionDraft();
 }
 
 /* The one hashchange listener (D6, review finding 6). Another Admin tab is seen by renderAdmin, but leaving the page for
    another one is seen by nothing else, because no render of this page follows it. A hash that no longer shows the Servers
-   tab discards the open form, password first, and drops a by-id read still in flight. Discarding twice is harmless. */
+   tab discards the open form, password first, and drops a by-id read still in flight. Discarding twice is harmless.
+   #7951: a hash that leaves Admin also drops the Alert Settings editors' unsaved text. */
 function onHashChange() {
-  if (!showsServers(routeHash())) closeEdit();
+  const hash = routeHash();
+  if (!showsServers(hash)) closeEdit();
+  if (!showsAdmin(hash)) clearSettingsDrafts();
 }
 
-/* #7951: true while the focused element is a box a person types in or picks from (an input, a textarea or a select) inside `root`. */
+/* #7951: input types a person clicks rather than types in. A click leaves the focus on one, and a poll while it has the focus still draws. */
+const CLICK_INPUT_TYPES = ["checkbox", "radio", "button", "submit", "reset", "file", "range", "color"];
+
+/* #7951: true while the focused element inside `root` is a box a person types in or picks from: a textarea, a select, or an input that
+   takes text (not one of CLICK_INPUT_TYPES). */
 function typingInside(root) {
   const focused = document.activeElement;
-  return !!focused && !!root && root.contains(focused) && ["INPUT", "TEXTAREA", "SELECT"].includes(String(focused.tagName).toUpperCase());
+  if (!focused || !root || !root.contains(focused)) return false;
+  const tag = String(focused.tagName).toUpperCase();
+  if (tag === "TEXTAREA" || tag === "SELECT") return true;
+  return tag === "INPUT" && !CLICK_INPUT_TYPES.includes(String(focused.type || "").toLowerCase());
 }
 
 /** `opts.poll` is true when the 60 s poll (or the Refresh button) re-renders the page; a hashchange and the first paint carry no opts. */
@@ -2172,14 +2191,16 @@ export function renderAdmin(main, tabId, opts) {
   const sameTab = !!shownBody && shownTab === tab.id;
   /* #7951: every tab but Servers mounts new nodes on each draw, so a box being typed in would be a new node and the caret, an open
      list and an IME composition would be lost. While a form box inside the tab body has the focus, the poll's tick leaves the tab as it
-     is; the next tick draws from the then-current state. A hashchange, a save's repaint and the first paint are not polls and still draw. */
-  if (opts && opts.poll === true && sameTab && shownBody.parentNode === main && typingInside(shownBody)) return;
+     is; the next tick draws from the then-current state. A hashchange, a save's repaint and the first paint are not polls and still draw.
+     The Servers tab keeps its nodes across a draw (serverBoxes), so its poll reads the list under an open form and is not held back. */
+  if (opts && opts.poll === true && sameTab && tab.id !== "servers" && shownBody.parentNode === main && typingInside(shownBody)) return;
   const generation = ++renderGeneration;
   if (!sameTab) {
-    /* Arriving at a tab other than the one on screen discards an open edit form (its password is cleared first) and the
-       Servers tab's page state. The one thing kept is the answer of a save that landed while the Servers tab was off screen:
-       arriving at that tab shows it, once. */
+    /* Arriving at a tab other than the one on screen discards an open edit form (its password is cleared first), the
+       Servers tab's page state and the Alert Settings editors' unsaved text (#7951). The one thing kept is the answer of a
+       save that landed while the Servers tab was off screen: arriving at that tab shows it, once. */
     closeEdit();
+    clearSettingsDrafts();
     layout = null;
     summary = null;
     notesStatus = null;

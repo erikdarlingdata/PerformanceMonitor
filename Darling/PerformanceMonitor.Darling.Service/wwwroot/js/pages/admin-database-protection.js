@@ -46,9 +46,15 @@ function statusLine(out) {
 }
 
 /* #7951: the boxes' text while a person types ({ [group]: text }), kept here so a redraw of the Settings tab (the 60 s poll, a save's
-   repaint) draws the typed text and not the saved values. Null while nothing has been typed since the last read; a successful save
-   clears it, so the repaint shows what was saved. */
+   repaint) draws the typed text and not the saved values. Null while nothing has been typed since the tab was drawn. A successful save
+   clears it, so the repaint shows what was saved, and so do a switch to another Admin tab and leaving Admin (admin.js calls
+   clearDatabaseProtectionDraft), so coming back shows the saved values and not unsaved text as if it had been saved. */
 let protectionDraft = null;
+
+/** Drops the typed text, so the next draw of the editor shows the saved values. */
+export function clearDatabaseProtectionDraft() {
+  protectionDraft = null;
+}
 
 /** The editor, for a signed-in admin. `data` is the whole get_alert_settings read; each box starts at the saved value (the built-in value
     when the read does not carry the group). `repaint` redraws the Settings tab after a save so the saved values show. */
