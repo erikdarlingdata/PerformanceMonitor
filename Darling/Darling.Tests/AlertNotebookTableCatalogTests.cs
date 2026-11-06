@@ -126,6 +126,23 @@ public sealed class AlertNotebookTableCatalogTests
 
     private static JsonObject[] ResolveNames(string[] reads) => reads.Select(r => ReadCellOf("table", r)).ToArray();
 
+    /// <summary>#7670: a Custom View table built from a sample read keeps only key, label and format for each column. Its Collection Health
+    /// note still says the counts in words, because the catalog's column for the same key marks it plain.</summary>
+    [Fact]
+    public void ATableCellWithItsOwnColumns_StillSaysACollectionNoteInWords()
+    {
+        var own = ReadCellOf("table", "get_collection_health");
+        own["columns"] = new JsonArray(
+            new JsonObject { ["key"] = "collector", ["label"] = "Collector" },
+            new JsonObject { ["key"] = "note_summary", ["label"] = "Note" },
+            new JsonObject { ["key"] = "avg_duration_ms", ["label"] = "Avg Dur", ["format"] = "ms" });
+
+        var resolved = ResolveCells([own]).Single();
+
+        Assert.Equal(["collector", "note_summary", "avg_duration_ms"], resolved.GetProperty("columns").EnumerateArray().Select(c => c.GetString()!).ToArray());
+        Assert.Equal(["note_summary"], resolved.GetProperty("plain").EnumerateArray().Select(c => c.GetString()!).ToArray());
+    }
+
     private const string MatchedWaitType = "RESOURCE_SEMAPHORE";
     private const string MatchedCollector = "wait_stats_collector";
 

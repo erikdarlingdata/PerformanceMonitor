@@ -90,7 +90,7 @@ public sealed class ViewerIdentityCapacityTextTests : IDisposable
         /* 1,990,000,000 four days before the scan and 2,000,000,000 at it: 2,500,000 values a day against 147,483,647 left. */
         var rows = ViewerIdentityCapacityText.ColumnRows(Read([Int("Sales", "Audit", 2_000_000_000, 93.1, firstValue: 1_990_000_000)], ("Sales", Captured)));
 
-        Assert.Equal(new ViewerIdentityColumnRow("Sales", "dbo.Audit", "Id", "int", "93.1", "147,483,647", "2,500,000.0", "59.0", "critical"), rows.Single());
+        Assert.Equal(new ViewerIdentityColumnRow("Sales", "dbo.Audit", "Id", "int", "93.1", "147,483,647", "2,500,000.0", "59.0", "Critical"), rows.Single());
     }
 
     [Fact]
@@ -98,7 +98,7 @@ public sealed class ViewerIdentityCapacityTextTests : IDisposable
     {
         var rows = ViewerIdentityCapacityText.ColumnRows(Read([Int("Sales", "Warm", 1_600_000_000, 74.5)], ("Sales", Captured)));
 
-        Assert.Equal(new ViewerIdentityColumnRow("Sales", "dbo.Warm", "Id", "int", "74.5", "547,483,647", "-", "-", "warning"), rows.Single());
+        Assert.Equal(new ViewerIdentityColumnRow("Sales", "dbo.Warm", "Id", "int", "74.5", "547,483,647", "-", "-", "Warning"), rows.Single());
     }
 
     [Fact]
@@ -112,7 +112,7 @@ public sealed class ViewerIdentityCapacityTextTests : IDisposable
         Assert.Equal("decimal(38)", row.Type);
         Assert.Equal("9,999,999,999,999,999,999,999,999,999,876,543,210", row.ValuesRemaining);
         Assert.Equal("90.0", row.PercentUsed);
-        Assert.Equal("critical", row.Band);
+        Assert.Equal("Critical", row.Band);
     }
 
     [Fact]
@@ -122,7 +122,7 @@ public sealed class ViewerIdentityCapacityTextTests : IDisposable
 
         var row = ViewerIdentityCapacityText.ColumnRows(Read([fact], ("Big", Captured))).Single();
 
-        Assert.Equal(("96.5", "-", "-", "-", "critical"), (row.PercentUsed, row.ValuesRemaining, row.RatePerDay, row.DaysToExhaustion, row.Band));
+        Assert.Equal(("96.5", "-", "-", "-", "Critical"), (row.PercentUsed, row.ValuesRemaining, row.RatePerDay, row.DaysToExhaustion, row.Band));
     }
 
     [Fact]
@@ -319,7 +319,7 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id','int',10,$7::numeric,1,1,$8)",
 
             var rows = ViewerIdentityCapacityText.ColumnRows(read);
             Assert.Equal(["dbo.Audit", "dbo.Warm"], rows.Select(r => r.Table).ToArray());
-            Assert.Equal(["critical", "warning"], rows.Select(r => r.Band).ToArray());
+            Assert.Equal(["Critical", "Warning"], rows.Select(r => r.Band).ToArray());
             Assert.Equal(["147,483,647", "547,483,647"], rows.Select(r => r.ValuesRemaining).ToArray());
             /* The rate and the days left are the same two numbers, whichever surface draws them. */
             Assert.Equal(webColumns[0].GetProperty("rate_per_day").GetDouble(), read.Read!.Columns[0].Exhaustion!.Value.StepsPerDay, 1);

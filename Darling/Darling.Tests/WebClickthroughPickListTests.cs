@@ -224,8 +224,8 @@ public sealed class WebClickthroughPickListTests
         ];
         var r = Run("plain", System.Text.Json.JsonSerializer.Serialize(inputs));
         var o = Strings(r.GetProperty("out"));
-        Assert.Equal("latest run: shred gated: 1, events read: 0, report xml empty: 0", o[0]);
-        Assert.Equal("shred gated: 1, events read: 0", o[1]);
+        Assert.Equal("latest run: shred gated: 1 (no new events since the last run, so the XML was not read), events read: 0, report xml empty: 0", o[0]);
+        Assert.Equal("shred gated: 1 (no new events since the last run, so the XML was not read), events read: 0", o[1]);
         Assert.Equal(inputs[2], o[2]);
         Assert.Equal(inputs[3], o[3]);
     }

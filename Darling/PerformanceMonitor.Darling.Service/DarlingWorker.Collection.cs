@@ -2280,7 +2280,7 @@ public sealed partial class DarlingWorker
                catch-all for): one server's unexpected throw must never kill the collection loop, and a faulted
                fire-and-track Task must never surface as an unobserved exception. Log and isolate; the server
                retries on its next sweep exactly like a failed collector. */
-            _logger.LogError("[{Server}] Collection sweep failed: {Message}", server.Config.DisplayName, ex.Message);
+            _logger.LogError(ex, "[{Server}] Collection sweep failed: {Message}", server.Config.DisplayName, ex.Message);
         }
         finally
         {

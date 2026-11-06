@@ -118,7 +118,9 @@ public sealed class WaitingTasksBarsBehaviourTests
         var waiting = Run("lone").GetProperty("waiting");
 
         Assert.Equal(1, waiting.GetProperty("barColumns").GetInt32());
-        Assert.All(Ints(waiting, "widths"), w => Assert.True(w <= 64, "a lone bar was " + w + " px wide, over the 64 px cap"));
+        /* #7684 item 10: one sample on a day axis is one collection wide, which is the 8 px floor, not the 64 px a bar takes when it has no
+        neighbour to measure (about an hour and a half of the axis for one 2 ms wait). */
+        Assert.All(Ints(waiting, "widths"), w => Assert.True(w >= 8 && w <= 12, "a lone bar was " + w + " px wide, not the 8 px floor"));
     }
 
     [Fact]
