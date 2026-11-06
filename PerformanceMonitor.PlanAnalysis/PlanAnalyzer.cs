@@ -221,6 +221,51 @@ public static partial class PlanAnalyzer
     }
 
     /// <summary>
+    /// #7889: a Key Lookup's severity follows what the lookup cost, not its presence. In an actual plan that
+    /// recorded statement time, the lookup's own time share of the statement is graded on the bands Rule 7 uses
+    /// for spills: half or more of the statement is Critical, a tenth or more is Warning, less is Info, so a
+    /// lookup that fetched a dozen rows in no measurable time is Info and one that is most of a statement's
+    /// time is Critical. When the plan has runtime data but no statement time (QueryTimeStats is absent from
+    /// actual plans older than SQL Server 2016), the lookup's executions stand in, since a lookup runs once per
+    /// outer row: <see cref="KeyLookupWarningExecutions"/> or more is Warning, fewer is Info, and never Critical,
+    /// because without time nothing shows the lookup dominating. An estimated plan has neither, so the
+    /// operator's share of the plan's estimated cost grades it with the viewer's own expensive-operator bar
+    /// (<see cref="PlanNode.IsExpensive"/>, 25 percent): Warning at or past it, Info below, never Critical,
+    /// because cost is an estimate rather than a measurement. Returns the sentence that states the figure the
+    /// grade rests on, or null for an estimated plan, whose cost percentage is already shown on the operator.
+    /// A severity override from the analyzer config is applied afterwards, as for every rule.
+    /// </summary>
+    internal static (PlanWarningSeverity Severity, string? CostLine) GradeKeyLookup(PlanNode node, PlanStatement stmt)
+    {
+        if (!node.HasActualStats)
+            return (node.IsExpensive ? PlanWarningSeverity.Warning : PlanWarningSeverity.Info, null);
+
+        var stmtMs = stmt.QueryTimeStats?.ElapsedTimeMs ?? 0;
+        if (stmtMs > 0)
+        {
+            var ownMs = GetOperatorOwnElapsedMs(node);
+            var pct = (double)ownMs / stmtMs;
+            var severity = pct >= 0.5 ? PlanWarningSeverity.Critical
+                : pct >= 0.1 ? PlanWarningSeverity.Warning
+                : PlanWarningSeverity.Info;
+            return (severity, $"Operator time: {ownMs:N0}ms ({pct * 100:N0}% of statement) over {node.ActualExecutions:N0} lookups.");
+        }
+
+        return (node.ActualExecutions >= KeyLookupWarningExecutions ? PlanWarningSeverity.Warning : PlanWarningSeverity.Info,
+            $"Lookups performed: {node.ActualExecutions:N0}. The plan recorded no statement time to grade them against.");
+    }
+
+    /// <summary>
+    /// #7889: lookups performed in one execution at or past which a Key Lookup with no statement time to grade
+    /// on is a Warning. Each lookup is one clustered-index seek of a few logical reads, so a thousand of them is
+    /// a few thousand reads: a real cost, but not one that shows the lookup dominating, which is why this path
+    /// stops at Warning. Reasoned, not measured: the fleet figure for this finding counts how often a plan ran in
+    /// a week, a different quantity from how many rows one execution looked up, and only the time share in
+    /// <see cref="GradeKeyLookup"/> measures the lookup itself. The bar only ever lowers a grade below Critical.
+    /// </summary>
+    internal const long KeyLookupWarningExecutions = 1_000;
+
+    /// <summary>
     /// Rule types that predate the benefit-scoring framework and haven't been folded into A/B/C/D
     /// categorization yet. Tagged so reviewers can hold new-framework items to a higher bar vs
     /// known-legacy items that will be reworked later. Ported verbatim from
@@ -1105,6 +1150,11 @@ public static partial class PlanAnalyzer
                     lookupMsg += $"\nResidual predicate (filtered {node.ActualExecutions - node.ActualRows:N0} rows): {Truncate(node.Predicate, 200)}";
             }
 
+            /* #7889: the grade follows what the lookup cost (GradeKeyLookup), and the message states the figure it was graded on. */
+            var (lookupSeverity, lookupCostLine) = GradeKeyLookup(node, stmt);
+            if (lookupCostLine != null)
+                lookupMsg += "\n" + lookupCostLine;
+
             lookupMsg += "\nTo eliminate the lookup, consider adding the needed columns as INCLUDE columns on the nonclustered index. This widens the index, so weigh the read benefit against write and storage overhead.";
 
             node.Warnings.Add(new PlanWarning
@@ -1112,7 +1162,7 @@ public static partial class PlanAnalyzer
                 RuleNumber = 10,
                 WarningType = "Key Lookup",
                 Message = lookupMsg,
-                Severity = PlanWarningSeverity.Critical
+                Severity = lookupSeverity
             });
         }
 
