@@ -145,11 +145,23 @@ internal static class SweepInFlightWording
 /// reconnect's Extended Events setup and on-load snapshots (75 s or more of collection) on top of the
 /// slowness that caused the timeout, the very reconnect storm the PostgreSQL arm was written to avoid. A
 /// pre-login timeout on a hung server is also number -2, so a timeout is settled by a probe on a fresh
-/// connection with a short timeout: the runtime is dropped only when the probe fails.
+/// connection with a short timeout: the runtime is dropped only when the probe fails. One verdict serves every
+/// timeout the server raises within <see cref="LivenessProbeMemo.ReuseSeconds"/> of it (<see cref="LivenessProbeMemo"/>),
+/// and a probe that itself times out counts the server alive (<see cref="ProbeTimeoutMeansAlive"/>).
 /// </summary>
 internal static class ConnectionFaultDisposition
 {
     internal const int ProbeSeconds = 5;
+
+    /// <summary>
+    /// True when the probe's own failure is a timeout (number -2): the server took the connection but could not finish
+    /// the login, or answer SELECT 1, inside <see cref="ProbeSeconds"/>. That is a server that is slow, under CPU or
+    /// thread-pool pressure, not one that is gone, and dropping the runtime over it would add the reconnect's Extended
+    /// Events setup and on-load snapshots to the pressure that made it slow. A refused port or an unknown host fails
+    /// with a network error (class 20), never with -2, so those still read as dead; a server whose network silently
+    /// drops packets reaches a class 20 transport fault on the runtime's own next statement, which drops at once.
+    /// </summary>
+    internal static bool ProbeTimeoutMeansAlive(Exception exception) => exception is SqlException { Number: -2 };
 
     internal static async Task<bool> ShouldDropRuntimeAsync(
         Exception exception,
@@ -190,7 +202,19 @@ internal static class ConnectionFaultDisposition
     /// inside <see cref="ProbeSeconds"/> seconds. Unpooled so a hung server cannot answer from a pooled
     /// session that was already open.
     /// </summary>
-    internal static async Task<bool> ProbeFreshConnectionAsync(ServerRuntime runtime, CancellationToken cancellationToken)
+    internal static Task<bool> ProbeFreshConnectionAsync(ServerRuntime runtime, CancellationToken cancellationToken) =>
+        ProbeFreshConnectionAsync(runtime, OpenAndSelectOneAsync, cancellationToken);
+
+    /// <summary>
+    /// The probe with its login injected: <paramref name="openAndSelectOne"/> logs in on a fresh connection and runs
+    /// SELECT 1, or throws. What a throw means is decided here, so a test can hand in the driver's own faults: a
+    /// timeout keeps the runtime (<see cref="ProbeTimeoutMeansAlive"/>), and every other fault, a refused port, an
+    /// unknown host, a login the server rejected, or one outside the driver, is a failed probe that drops it.
+    /// </summary>
+    internal static async Task<bool> ProbeFreshConnectionAsync(
+        ServerRuntime runtime,
+        Func<ServerRuntime, CancellationToken, Task> openAndSelectOne,
+        CancellationToken cancellationToken)
     {
         if (runtime.Target.Engine != CollectorTargetEngine.SqlServer)
         {
@@ -199,26 +223,86 @@ internal static class ConnectionFaultDisposition
 
         try
         {
-            var builder = new SqlConnectionStringBuilder(runtime.ConnectionString)
-            {
-                Pooling = false,
-                ConnectTimeout = ProbeSeconds,
-                MultipleActiveResultSets = false,
-            };
-
-            using var connection = new SqlConnection(builder.ConnectionString);
-            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-            using var command = new SqlCommand("SELECT 1;", connection) { CommandTimeout = ProbeSeconds };
-            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+            await openAndSelectOne(runtime, cancellationToken).ConfigureAwait(false);
             return true;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
+        catch (SqlException sql) when (ProbeTimeoutMeansAlive(sql))
+        {
+            return true;
+        }
         catch (Exception)
         {
             return false;
         }
+    }
+
+    private static async Task OpenAndSelectOneAsync(ServerRuntime runtime, CancellationToken cancellationToken)
+    {
+        var builder = new SqlConnectionStringBuilder(runtime.ConnectionString)
+        {
+            Pooling = false,
+            ConnectTimeout = ProbeSeconds,
+            MultipleActiveResultSets = false,
+        };
+
+        using var connection = new SqlConnection(builder.ConnectionString);
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        using var command = new SqlCommand("SELECT 1;", connection) { CommandTimeout = ProbeSeconds };
+        await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+    }
+}
+
+/// <summary>The verdict of one liveness probe: when it ran and whether the server answered.</summary>
+internal sealed record LivenessVerdict(DateTime ProbedUtc, bool Alive);
+
+/// <summary>
+/// One server's memory of its last liveness probe. A server under CPU or thread-pool pressure times out many
+/// collectors close together, the sequential body's and the detached runs', and each timeout is settled by
+/// <see cref="ConnectionFaultDisposition.ShouldDropRuntimeAsync"/> with a probe. Each probe is a fresh unpooled
+/// login against the server that is already struggling, so one verdict serves every timeout that arrives within
+/// <see cref="ReuseSeconds"/> of it: two sweep ticks, enough for every timeout one tick's dispatch raises to share a
+/// probe, and short enough that a server that died is probed again on the first timeout past it. Lives on the
+/// server's loop state and is cleared when the runtime is dropped, so a reconnected server starts with no memory.
+/// The verdict is a reference, so a reader on another thread sees a whole one or none.
+/// </summary>
+internal sealed class LivenessProbeMemo
+{
+    internal const int ReuseSeconds = 30;
+
+    private LivenessVerdict? _last;
+
+    /// <summary>The last verdict, or null when none is held.</summary>
+    internal LivenessVerdict? Last => _last;
+
+    internal void Clear() => _last = null;
+
+    /// <summary>Whether a verdict stamped at <paramref name="verdict"/>.ProbedUtc still serves at <paramref name="nowUtc"/>.
+    /// A clock that stepped back does not.</summary>
+    internal static bool IsFresh(LivenessVerdict verdict, DateTime nowUtc) =>
+        nowUtc >= verdict.ProbedUtc && nowUtc - verdict.ProbedUtc < TimeSpan.FromSeconds(ReuseSeconds);
+
+    /// <summary>
+    /// The held verdict when it is fresh, else <paramref name="probe"/>'s answer, which is remembered as of
+    /// <paramref name="nowUtc"/>. Two timeouts that arrive together with no verdict held may both probe; the later
+    /// answer is the one kept.
+    /// </summary>
+    internal async Task<bool> ProbeAsync(
+        ServerRuntime runtime,
+        Func<ServerRuntime, CancellationToken, Task<bool>> probe,
+        DateTime nowUtc,
+        CancellationToken cancellationToken)
+    {
+        if (_last is { } last && IsFresh(last, nowUtc))
+        {
+            return last.Alive;
+        }
+
+        var alive = await probe(runtime, cancellationToken).ConfigureAwait(false);
+        _last = new LivenessVerdict(nowUtc, alive);
+        return alive;
     }
 }

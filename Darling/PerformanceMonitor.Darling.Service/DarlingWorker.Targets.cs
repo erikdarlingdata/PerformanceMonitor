@@ -3717,23 +3717,29 @@ LIMIT 1";
                snapshot, so one slow statement cost a stressed server 75 s or more of collection, alerts and
                analysis. ShouldDropRuntimeAsync settles a timeout with a probe on a fresh connection and drops
                only when the probe fails (a pre-login timeout on a hung server is also -2). Class 20+ still
-               drops at once. The PostgreSQL arm keeps its rule: ANY exception on a PostgreSQL target, not just
-               a PostgresException, because a dead socket surfaces as a plain NpgsqlException with no SQLSTATE,
-               and the provider already classifies that as ConnectionFatal. */
+               drops at once. The probe goes through the server's LivenessProbeMemo, so the timeouts a stressed
+               server raises close together share one probe login instead of each opening its own against it,
+               and a probe that itself times out counts the server alive (ProbeTimeoutMeansAlive): slow logins
+               are the symptom of the pressure, not evidence the server is gone. The PostgreSQL arm keeps its
+               rule: ANY exception on a PostgreSQL target, not just a PostgresException, because a dead socket
+               surfaces as a plain NpgsqlException with no SQLSTATE, and the provider already classifies that as
+               ConnectionFatal. */
             if (await ConnectionFaultDisposition.ShouldDropRuntimeAsync(
                     ex,
                     server.Runtime,
-                    LivenessProbeOverride ?? ConnectionFaultDisposition.ProbeFreshConnectionAsync,
+                    (probed, token) => server.Liveness.ProbeAsync(
+                        probed, LivenessProbeOverride ?? ConnectionFaultDisposition.ProbeFreshConnectionAsync, DateTime.UtcNow, token),
                     cancellationToken))
             {
                 server.Runtime = null;
+                server.Liveness.Clear();
                 server.NextConnectAttempt = DateTime.UtcNow.AddSeconds(60);
                 _logger.LogWarning("[{Server}] Connection-level failure — will reconnect", server.Config.DisplayName);
             }
             else if (ex is SqlException { Number: -2 })
             {
                 _logger.LogInformation(
-                    "[{Server}] {Collector} timed out, but a fresh connection answered — keeping the connection (#4710)",
+                    "[{Server}] {Collector} timed out, but a fresh connection reached the server — keeping the connection (#4710)",
                     server.Config.DisplayName, collectorName);
             }
 

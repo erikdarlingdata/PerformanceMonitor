@@ -1770,6 +1770,10 @@ LIMIT 1";
            normal interval. */
         public RefusedCollectorBackoff RefusedBackoff { get; } = new();
 
+        /* The verdict of this server's last liveness probe (#4710), reused for the command timeouts that follow it within
+           LivenessProbeMemo.ReuseSeconds. Cleared when the runtime is dropped, so a reconnected server is probed afresh. */
+        public LivenessProbeMemo Liveness { get; } = new();
+
         /* #4938: what a daily collector's run-time stamp in NextDue was computed from: the run time, the clock and the
            last run. One entry per collector that has a run time on this server, replaced whole (the record is
            immutable) so a reader never sees half of an update. Indexed by collector name only, like NextDue. */
