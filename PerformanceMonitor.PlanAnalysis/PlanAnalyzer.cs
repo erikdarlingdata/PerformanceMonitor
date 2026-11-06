@@ -2142,7 +2142,9 @@ public static partial class PlanAnalyzer
 
     /// <summary>
     /// Per-thread self-time calculation for parallel row mode operators.
-    /// For each worker thread: self = parent[t] - sum(effective children[t]).
+    /// For each worker thread: self = parent[t] - sum(effective children[t]),
+    /// less the slowest producer thread below any exchange among the children,
+    /// which comes off every thread alike (#7979).
     /// Returns max across worker threads. Thread 0 (the coordinator) is excluded
     /// from the parent side by WorkThreads, and the child side looks through
     /// batch subtrees and pass-throughs the same way the serial path does.
@@ -2154,21 +2156,42 @@ public static partial class PlanAnalyzer
         foreach (var ts in WorkThreads(node))
             parentByThread[ts.ThreadId] = ts.ActualElapsedMs;
 
-        // Build lookup: threadId -> sum of effective children's elapsed
+        // Build lookup: threadId -> sum of effective children's elapsed, plus the
+        // time that comes off every thread alike (the slowest producer below an exchange)
         var childSumByThread = new Dictionary<int, long>();
+        var everyThreadMs = 0L;
         foreach (var child in node.Children)
-            AddEffectiveChildElapsedByThread(child, childSumByThread);
+        {
+            // An exchange's own children run on the other side of it, on other threads
+            if (node.PhysicalOp == "Parallelism")
+                everyThreadMs += SlowestThreadElapsedMs(child);
+            else
+                AddEffectiveChildElapsedByThread(child, childSumByThread, ref everyThreadMs);
+        }
 
         // Self-time per thread = parent - children, take max across worker threads
         var maxSelf = 0L;
         foreach (var (threadId, parentMs) in parentByThread)
         {
             childSumByThread.TryGetValue(threadId, out var childMs);
-            var self = Math.Max(0, parentMs - childMs);
+            var self = Math.Max(0, parentMs - childMs - everyThreadMs);
             if (self > maxSelf) maxSelf = self;
         }
 
         return maxSelf;
+    }
+
+    /// <summary>
+    /// The longest any one worker thread spent in a subtree that runs on the
+    /// producer side of an exchange, by the same look-through rules as
+    /// <see cref="AddEffectiveChildElapsedByThread"/>.
+    /// </summary>
+    private static long SlowestThreadElapsedMs(PlanNode node)
+    {
+        var byThread = new Dictionary<int, long>();
+        var everyThreadMs = 0L;
+        AddEffectiveChildElapsedByThread(node, byThread, ref everyThreadMs);
+        return (byThread.Count > 0 ? byThread.Values.Max() : 0) + everyThreadMs;
     }
 
     /// <summary>
@@ -2299,21 +2322,31 @@ public static partial class PlanAnalyzer
     ///
     /// Together these can crown a row-mode operator above a batch subtree as
     /// the hottest operator in its plan, with the subtree's time double-counted.
+    ///
+    /// An exchange child adds to <paramref name="everyThreadMs"/> instead of
+    /// <paramref name="acc"/>: what is below it ran on other threads (#7979).
     /// </summary>
-    private static void AddEffectiveChildElapsedByThread(PlanNode child, Dictionary<int, long> acc)
+    private static void AddEffectiveChildElapsedByThread(PlanNode child, Dictionary<int, long> acc, ref long everyThreadMs)
     {
-        // Exchange operators have unreliable times — look through to their child
+        // An exchange moves rows between threads, so thread t above it is not doing
+        // thread t's work below it. Pairing them by number gave a Sort over a branch
+        // that ran on one producer thread the whole branch's time on every other
+        // thread (#7979). Every consumer thread waits on all the producers, and none
+        // finishes before the slowest does, so the slowest producer thread comes off
+        // every thread above: the per-thread form of the serial path's max child.
+        // The exchange's own time is not used. It soaks up time a spilling parent
+        // spends (sql.kiwi/2021/03), and subtracting it would hand that time to the
+        // exchange instead of the parent.
         if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
         {
-            var dominant = child.Children.OrderByDescending(c => c.ActualElapsedMs).First();
-            AddEffectiveChildElapsedByThread(dominant, acc);
+            everyThreadMs += child.Children.Max(SlowestThreadElapsedMs);
             return;
         }
 
         var mode = child.ActualExecutionMode ?? child.ExecutionMode;
         if (mode == "Batch" && child.HasActualStats)
         {
-            AddBatchSubtreeElapsedByThread(child, acc);
+            AddBatchSubtreeElapsedByThread(child, acc, ref everyThreadMs);
             return;
         }
 
@@ -2330,14 +2363,14 @@ public static partial class PlanAnalyzer
         // No runtime stats (e.g. a Compute Scalar pass-through): look through
         // to the descendants that have them.
         foreach (var grandchild in child.Children)
-            AddEffectiveChildElapsedByThread(grandchild, acc);
+            AddEffectiveChildElapsedByThread(grandchild, acc, ref everyThreadMs);
     }
 
     /// <summary>
     /// Per-thread sum across a contiguous batch-mode zone, stopping at exchanges.
     /// Batch operators pipeline, so their times add rather than nest.
     /// </summary>
-    private static void AddBatchSubtreeElapsedByThread(PlanNode node, Dictionary<int, long> acc)
+    private static void AddBatchSubtreeElapsedByThread(PlanNode node, Dictionary<int, long> acc, ref long everyThreadMs)
     {
         foreach (var ts in WorkThreads(node))
         {
@@ -2351,9 +2384,9 @@ public static partial class PlanAnalyzer
 
             var childMode = child.ActualExecutionMode ?? child.ExecutionMode;
             if (childMode == "Batch" && child.HasActualStats)
-                AddBatchSubtreeElapsedByThread(child, acc);
+                AddBatchSubtreeElapsedByThread(child, acc, ref everyThreadMs);
             else
-                AddEffectiveChildElapsedByThread(child, acc);
+                AddEffectiveChildElapsedByThread(child, acc, ref everyThreadMs);
         }
     }
 
