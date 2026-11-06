@@ -1067,7 +1067,7 @@ public sealed class DarlingMcpBlockingTools
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
                             factual: $"No lock waits recorded for {resolved.DisplayName} in the last {hours_back} hour(s)",
-                            coveredClaim: ". This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples."),
+                            coveredClaim: ". This server has collected wait stats before, so this window was quiet — widen hours_back to find the most recent samples."),
                         emptyHints)
                     : McpHelpers.Status(
                         "unavailable",
@@ -1168,7 +1168,7 @@ public sealed class DarlingMcpBlockingTools
         if (captureCount > 0)
             return McpHelpers.Status(
                 "empty",
-                $"No {subject} was recorded for {serverName}{ForChosenDatabases(databases)} in the last {hoursBack} hour(s). {captureCount} collector run(s) did execute over this window, so this is a genuine all-clear rather than missing data — see hints.captures for which collectors ran and when.",
+                $"No {subject} was recorded for {serverName}{ForChosenDatabases(databases)} in the last {hoursBack} hour(s). {captureCount.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)} collector run(s) did execute over this window, so this is a genuine all-clear rather than missing data — see hints.captures for which collectors ran and when.",
                 hints);
 
         var everCaptured = await hasEverCapturedAsync();

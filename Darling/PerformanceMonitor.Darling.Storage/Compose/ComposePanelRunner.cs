@@ -642,6 +642,22 @@ internal static class ComposePanelRunner
                     : $"{rawServerIds.Count} servers whose interval table could not serve the window were read from the raw tables, from the window's own start (#6115).";
             }
 
+            /* #7668: the validator's warnings for this panel ride the run's answer, so a panel saved before #7565 (a perfmon counter ending in /sec
+               charted as its running total) says so wherever it is run, not only in the reply to a save. The same sentences validate_custom_view and a
+               save return, from the same function; the stored definition is untouched. Absent when there are none, so a clean answer keeps its shape. */
+            var panelWarnings = new List<string>();
+            CustomViewValidation.AddCumulativePerfmonWarnings(panelWarnings, plan, "this panel");
+            if (panelWarnings.Count > 0)
+            {
+                var list = new JsonArray();
+                foreach (var warning in panelWarnings)
+                {
+                    list.Add(warning);
+                }
+
+                payload["warnings"] = list;
+            }
+
             return ComposeRunOutcome.Ok(payload);
         }
         catch (PostgresException ex)

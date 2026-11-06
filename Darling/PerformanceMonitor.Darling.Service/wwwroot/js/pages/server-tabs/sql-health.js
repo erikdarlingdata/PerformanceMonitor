@@ -48,6 +48,8 @@ export function collectionLogStatusBar(status, setStatus) {
     ...COLLECTION_LOG_STATUSES.map((s) => el("option", { value: s, text: s })),
   ]);
   select.value = status || "";
+  /* #7690: `editor-select` is full width for editor forms; here it sizes to its text and sits on the buttons' row. */
+  select.style.width = "auto";
   select.addEventListener("change", () => setStatus(select.value || null));
   const bar = el("div", { class: "log-status-bar" }, [seg, select]);
   Object.assign(bar.style, { gridColumn: "1 / -1", display: "flex", gap: "0.6rem", alignItems: "center", flexWrap: "wrap" });

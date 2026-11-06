@@ -713,7 +713,7 @@ public sealed class McpHealthParserTools
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice.WindowTruncated, notice.EffectiveStart,
-                    factual: $"{captured} {eventType} event(s) were captured for {serverName} in the last {hoursBack} hour(s) and {noneQualifiedBecause}",
+                    factual: $"{captured.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)} {eventType} event(s) were captured for {serverName} in the last {hoursBack} hour(s) and {noneQualifiedBecause}",
                     coveredClaim: ". Events ARE being captured, so this is the healthy answer for this read rather than missing data."),
                 sourceObserved: true, lastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: captured,
                 hints: notice.AsHints(), notificationCounts: notificationCounts);
@@ -726,8 +726,8 @@ public sealed class McpHealthParserTools
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice.WindowTruncated, notice.EffectiveStart,
-                    factual: $"No {eventType} events were captured for {serverName} in the last {hoursBack} hour(s). This server HAS captured them before (the newest was stored at {Stamp(seen)})",
-                    coveredClaim: ", so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events."),
+                    factual: $"No {eventType} events were captured for {serverName} in the last {hoursBack} hour(s). This server has captured them before (the newest was stored at {Stamp(seen)})",
+                    coveredClaim: ", so nothing happened in this window — widen hours_back to reach the most recent events."),
                 sourceObserved: true, lastCapturedAt, lastCapturedOfTypeAt: seen, eventsInWindow: 0,
                 hints: notice.AsHints());
         }
@@ -736,7 +736,7 @@ public sealed class McpHealthParserTools
         {
             return WitnessStatus(
                 "empty",
-                $"No {eventType} events have been captured for {serverName} at any time, but its system_health session IS being read — the collector last stored an event of another type at {Stamp(alive)} — so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot, and a wider window would not change it.",
+                $"No {eventType} events have been captured for {serverName} at any time, but its system_health session is being read — the collector last stored an event of another type at {Stamp(alive)} — so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot, and a wider window would not change it.",
                 sourceObserved: true, alive, lastCapturedOfTypeAt: null, eventsInWindow: 0,
                 hints: (await WindowNoticeAsync(dataService, serverId, hoursBack, windowEnd, emptyAnswer: true)).AsHints());
         }
