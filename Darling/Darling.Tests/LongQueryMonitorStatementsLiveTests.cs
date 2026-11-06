@@ -131,6 +131,39 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
         }
     }
 
+    /* #7684 item 1, the filtered branches of the rule the deleted pin held: with the collector off (no schedule row, the shipped default),
+       a chosen database is blamed on the opt-in switch only when the store holds no long-query row for the server in the window. With
+       rows for other databases the collector is on, so the answer is about the chosen database and leaves the switch out. */
+    [Fact]
+    public async Task AFilteredEmptyWindow_NamesTheOptInSwitchOnlyWhenTheStoreHoldsNoRow()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+        try
+        {
+            await SeedAsync(cs!, Array.Empty<string?>(), ct);
+            using (var noRows = JsonDocument.Parse(await DarlingMcpLongQueryTools.GetLongQueryCompletions(postgres, ServerName, 24, 30, database_name: "OtherDb", cancellationToken: ct)))
+            {
+                Assert.Equal("empty", noRows.RootElement.GetProperty("status").GetString());
+                Assert.Contains("opt-in (default OFF)", noRows.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+            }
+
+            await SeedAsync(cs!, new string?[] { null }, ct);
+            using var otherRows = JsonDocument.Parse(await DarlingMcpLongQueryTools.GetLongQueryCompletions(postgres, ServerName, 24, 30, database_name: "OtherDb", cancellationToken: ct));
+            Assert.Equal("empty", otherRows.RootElement.GetProperty("status").GetString());
+            Assert.DoesNotContain("opt-in", otherRows.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) => await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     /* #7684 item 1: the empty text points at the opt-in switch only when the schedule has the collector off. A server whose own
        schedule row switches it on, with nothing captured in the window, was told to enable it. */
     [Fact]

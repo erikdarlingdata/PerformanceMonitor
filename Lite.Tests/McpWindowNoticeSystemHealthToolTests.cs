@@ -934,7 +934,7 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, 'ring_buffer_t
         var root = Root(await CallAsync(Tool.SignificantWaits));
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
-        Assert.Contains("genuinely quiet", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        Assert.Contains("so nothing happened in this window", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
     }
 
     /* #6453: nothing of any type ever stored. The newest run read the live session through its event_file target and found

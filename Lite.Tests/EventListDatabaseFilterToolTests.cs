@@ -398,6 +398,32 @@ VALUES ($1, $2, $3, $4, $5, 'Enabled', 'Enabled', 'ok', $6, 'Active', $7, $8, 'S
         Assert.Contains("opt-in (default OFF)", off.GetProperty("message").GetString(), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #7684 item 1, the filtered branches of the rule the deleted pin held: with the collector off, a chosen database is blamed on
+    /// the opt-in switch only when the store holds no long-query row for the server in the window. With rows for other databases the
+    /// collector is on, so the answer is about the chosen database and leaves the switch out.
+    /// </summary>
+    [Fact]
+    public async Task LongQueries_FilteredEmptyAnswer_NamesTheOptInSwitchOnlyWhenTheStoreHoldsNoRow()
+    {
+        var server = _serverManager.GetAllServers().Single();
+        var schedules = new ScheduleManager(_configDir);
+        var runTimes = new McpCollectorRunTimes(schedules, _serverManager);
+        schedules.SetScheduleForServer(server.Id, new System.Collections.Generic.List<CollectorSchedule>
+        {
+            new() { Name = "long_query_completions", Enabled = false, FrequencyMinutes = 1, RetentionDays = 30 },
+        });
+
+        var noRows = Parse(await McpLongQueryTools.GetLongQueryCompletions(_service, _serverManager, ServerName, 24, 30, database_name: "DbB", runTimes: runTimes));
+        Assert.Equal("empty", noRows.GetProperty("status").GetString());
+        Assert.Contains("opt-in (default OFF)", noRows.GetProperty("message").GetString(), StringComparison.Ordinal);
+
+        await SeedLongQueryAsync("DbA", 9, 5);
+        var otherRows = Parse(await McpLongQueryTools.GetLongQueryCompletions(_service, _serverManager, ServerName, 24, 30, database_name: "DbB", runTimes: runTimes));
+        Assert.Equal("empty", otherRows.GetProperty("status").GetString());
+        Assert.DoesNotContain("opt-in", otherRows.GetProperty("message").GetString(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task PlanCorrections_EmptyAnswers_EchoTheDatabase_BlankIsNull()
     {
