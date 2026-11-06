@@ -164,7 +164,9 @@ public sealed class PasswordKeySelfCheckTests : IDisposable
 
     /// <summary>#8006: the step moved from build.yml, where the Linux image job became release-only (#6656) and the step
     /// was skipped on every run, to the Linux store workflow, which runs on a pull request touching the key code and nightly.
-    /// The step has no condition of its own, so nothing skips it inside the job.</summary>
+    /// The step has no condition of its own, so nothing skips it inside the job. The original deadness was a condition
+    /// above the step, so the job header, the workflow's <c>workflow_call</c> trigger and the nightly's call to it are
+    /// pinned too, and the step's assertions read only the step itself.</summary>
     [Fact]
     public void The_Linux_store_workflow_runs_the_verb_in_the_image_with_the_vector_mounted_read_only()
     {
@@ -173,9 +175,25 @@ public sealed class PasswordKeySelfCheckTests : IDisposable
         Assert.True(start >= 0, "the linux-store job was not found");
         var job = workflow[start..];
 
+        /* The job itself: no condition and no continue-on-error between its name and its steps. */
+        var stepsAt = job.IndexOf("\n    steps:", StringComparison.Ordinal);
+        Assert.True(stepsAt > 0, "the linux-store job's steps were not found");
+        var header = job[..stepsAt];
+        Assert.DoesNotMatch(@"(?m)^\s*if:", header);
+        Assert.DoesNotContain("continue-on-error", header, StringComparison.Ordinal);
+
+        /* The step, from its name to the next step, so nothing in a neighbouring step can satisfy an assertion; and it
+           must sit in this job, before any job declared after it. */
+        var stepStart = job.IndexOf("- name: Check the password key on Linux", StringComparison.Ordinal);
+        Assert.True(stepStart > stepsAt, "the password key step was not found in the linux-store job's steps");
+        var nextJob = System.Text.RegularExpressions.Regex.Match(job[1..], @"\n  [A-Za-z0-9_-]+:");
+        Assert.True(!nextJob.Success || stepStart < nextJob.Index + 1, "the password key step is not in the linux-store job");
+        var stepEnd = job.IndexOf("\n      - ", stepStart, StringComparison.Ordinal);
+        var window = stepEnd < 0 ? job[stepStart..] : job[stepStart..stepEnd];
+
         var step = job.IndexOf("--self-check-password-key", StringComparison.Ordinal);
         Assert.True(step >= 0, "the linux-store job does not run --self-check-password-key");
-        var window = job[Math.Max(0, step - 900)..Math.Min(job.Length, step + 300)];
+        Assert.Contains("--self-check-password-key", window, StringComparison.Ordinal);
         Assert.Contains("docker run", window, StringComparison.Ordinal);
         Assert.Contains("linux-self-check-vector.json", window, StringComparison.Ordinal);
         Assert.Contains(":ro", window, StringComparison.Ordinal);
@@ -193,6 +211,16 @@ public sealed class PasswordKeySelfCheckTests : IDisposable
         Assert.Contains("DarlingPasswordKey", paths, StringComparison.Ordinal);
         Assert.Contains("DarlingSecretSource.cs", paths, StringComparison.Ordinal);
         Assert.Contains("Fixtures/PasswordSeal", paths, StringComparison.Ordinal);
+
+        /* The nightly reaches this job only as a reusable workflow: the trigger and the call must both stay. The nightly
+           job's own has_changes/map_only gate is expected; it runs on every dev change. */
+        var onStart = workflow.IndexOf("\non:\n", StringComparison.Ordinal);
+        Assert.True(onStart >= 0, "the on: block was not found");
+        Assert.Contains("\n  workflow_call:", workflow[onStart..trigger], StringComparison.Ordinal);
+        Assert.Contains(
+            "uses: ./.github/workflows/darling-linux-store.yml",
+            ReadRepoFileLf(".github", "workflows", "nightly.yml"),
+            StringComparison.Ordinal);
 
         Assert.DoesNotContain("--self-check-password-key", ReadRepoFileLf(".github", "workflows", "build.yml"), StringComparison.Ordinal);
     }
