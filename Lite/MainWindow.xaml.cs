@@ -1276,13 +1276,19 @@ public partial class MainWindow : Window
         }
     }
 
-    /// <summary>The fields a search term matches against for a card: its display and instance names, plus each
-    /// of its tag names — so typing "prod" finds both <c>sql-prod-01</c> and every server tagged Production,
-    /// the same rule the viewer's sidebar uses.</summary>
+    /// <summary>The fields a search term matches against for a card: its display and instance names, each of its
+    /// tag names, and the names of the tags above each tag (#7984) — so typing "prod" finds <c>sql-prod-01</c>,
+    /// every server tagged Production and every server tagged under Production, the same rule the viewer's
+    /// Overview and sidebar use.</summary>
     private static string?[] SearchFields(ServerSummaryItem s)
     {
         var fields = new List<string?> { s.DisplayName, s.ServerName };
-        fields.AddRange(s.TagPills.Select(p => p.Name));
+        foreach (var pill in s.TagPills)
+        {
+            fields.Add(pill.Name);
+            fields.AddRange(pill.AncestorNames);
+        }
+
         return fields.ToArray();
     }
 
@@ -1329,26 +1335,17 @@ public partial class MainWindow : Window
     }
 
     /// <summary>Attaches each server's tags (as coloured pills) to its Overview summary, joining the loaded tag
-    /// list. Ordered by tag name so a card is stable; a server with no tags keeps its empty default.</summary>
+    /// list through <see cref="ServerTagPill.ForServer"/>: ordered by tag name so a card is stable, each pill
+    /// carrying the names of the tags above it for the search (#7984). A server with no tags keeps its empty default.</summary>
     private void StampTagPills(IReadOnlyList<ServerSummaryItem> summaries)
     {
         if (_tags.Count == 0 || _serverTagIds.Count == 0) return;
 
-        var tagById = _tags.ToDictionary(t => t.Id);
         foreach (var summary in summaries)
         {
-            if (!_serverTagIds.TryGetValue(summary.ServerId, out var tagIds) || tagIds.Count == 0)
-            {
-                summary.TagPills = Array.Empty<ServerTagPill>();
-                continue;
-            }
-
-            summary.TagPills = tagIds
-                .Select(id => tagById.TryGetValue(id, out var tag) ? tag : null)
-                .Where(t => t is not null)
-                .OrderBy(t => t!.Name, StringComparer.OrdinalIgnoreCase)
-                .Select(t => new ServerTagPill(t!.Name, t!.Colour))
-                .ToList();
+            summary.TagPills = _serverTagIds.TryGetValue(summary.ServerId, out var tagIds) && tagIds.Count > 0
+                ? ServerTagPill.ForServer(_tags, tagIds)
+                : Array.Empty<ServerTagPill>();
         }
     }
 

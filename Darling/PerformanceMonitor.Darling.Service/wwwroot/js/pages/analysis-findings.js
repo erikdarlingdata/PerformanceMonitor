@@ -559,7 +559,9 @@ export const analysisFindingsTab = {
     const body = el("div", { class: "panel-body" }, [loadingStrip()]);
     const load = async () => {
       const res = await readToolWithinKeptHistory("get_analysis_findings", { server, hours: ctx.hours, limit: 50, full_text: true }, ctx && ctx.signal);
-      if (res.kind === "aborted") return;
+      /* #7959: an aborted read is a route change, and an auth answer is a 401 whose sign-in strip the shell has put up. Neither redraws
+         the body, which would otherwise be emptied with no text. */
+      if (res.kind === "aborted" || res.kind === "auth") return;
       while (body.firstChild) body.removeChild(body.firstChild);
       for (const n of renderFindings(server, res)) if (n) body.appendChild(n);
     };
