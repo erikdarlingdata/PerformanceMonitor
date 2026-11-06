@@ -29,6 +29,10 @@ namespace PerformanceMonitorLite.Tests;
 /// over the window's distinct top plans, and the drill-down's <c>plan_warnings</c> never lists one plan's
 /// warning twice. The Darling twin is <c>PlanAdvisoryDistinctPlansLiveTests</c>.
 ///
+/// <para>A plan is a statement's plan, not a plan shape: <c>query_plan_hash</c> is a shape hash that two
+/// statements with one shape share, so two such statements with different plans are two plans and both are
+/// counted.</para>
+///
 /// <para>Real DuckDB (the shared fixture) because the read is the SQL itself: the fact collector and the
 /// drill-down both read the plans through <c>v_query_stats</c>.</para>
 /// </summary>
@@ -69,6 +73,8 @@ public sealed class PlanAdvisoryDistinctPlansTests : IClassFixture<SharedDuckDbF
     private static readonly string HotPlan = WarningPlan("c_hot");
     private static readonly string SecondPlan = WarningPlan("c_second");
     private static readonly string ThirdPlan = WarningPlan("c_third");
+    private static readonly string FirstStatementPlan = WarningPlan("c_first_statement");
+    private static readonly string SecondStatementPlan = WarningPlan("c_second_statement");
 
     private static AnalysisContext Context() => new()
     {
@@ -88,6 +94,56 @@ public sealed class PlanAdvisoryDistinctPlansTests : IClassFixture<SharedDuckDbF
             await SeedAsync(WindowEnd.AddMinutes(-5 * (i + 1)), "0xPLANHOT", HotPlan, workerTime: 900_000 - i);
         await SeedAsync(WindowEnd.AddMinutes(-10), "0xPLANSECOND", SecondPlan, workerTime: 400_000);
         await SeedAsync(WindowEnd.AddMinutes(-10), "0xPLANTHIRD", ThirdPlan, workerTime: 300_000);
+    }
+
+    /// <summary>
+    /// Two statements of one batch with one plan shape: the same query_plan_hash and plan_handle, a different
+    /// query_hash, and a different plan each, in one snapshot. Both plans raise a warning of their own.
+    /// </summary>
+    private async Task SeedTwoStatementsWithOnePlanShapeAsync()
+    {
+        await SeedAsync(WindowEnd.AddMinutes(-5), "0xSHAPE", FirstStatementPlan, workerTime: 900_000, queryHash: "0xSTMT1", planHandle: "0xBATCH");
+        await SeedAsync(WindowEnd.AddMinutes(-5), "0xSHAPE", SecondStatementPlan, workerTime: 800_000, queryHash: "0xSTMT2", planHandle: "0xBATCH");
+    }
+
+    [Fact]
+    public async Task PlanWarningFact_TwoStatementsWithOnePlanShape_CountsBothPlans()
+    {
+        await SeedTwoStatementsWithOnePlanShapeAsync();
+        var both = PlanAdvisoryAggregator.Summarize([FirstStatementPlan, SecondStatementPlan]);
+        Assert.True(both.WarningCount > PlanAdvisoryAggregator.Summarize([FirstStatementPlan]).WarningCount,
+            "the second statement's plan must add a warning of its own");
+
+        var facts = await new DuckDbFactCollector(_duckDb).CollectFactsAsync(Context());
+
+        var fact = Assert.Single(facts, f => f.Key == "PLAN_WARNING");
+        Assert.Equal(both.WarningCount, fact.Value);
+        Assert.Equal(both.WarningCount, fact.Metadata["warning_count"]);
+        Assert.Equal(both.CriticalCount, fact.Metadata["critical_count"]);
+    }
+
+    [Fact]
+    public async Task PlanWarningDrillDown_TwoStatementsWithOnePlanShape_ListsBothPlansWarnings()
+    {
+        await SeedTwoStatementsWithOnePlanShapeAsync();
+        var finding = new AnalysisFinding
+        {
+            RootFactKey = "PLAN_WARNING",
+            StoryPath = "PLAN_WARNING",
+            PathKeys = ["PLAN_WARNING"],
+            Severity = 1.0,
+        };
+
+        await new DrillDownCollector(_duckDb).EnrichFindingsAsync([finding], Context());
+
+        Assert.NotNull(finding.DrillDown);
+        Assert.True(finding.DrillDown.TryGetValue("plan_warnings", out var raw), "plan_warnings was not collected");
+        var warnings = JsonSerializer.Deserialize<List<DrillDownWarning>>(JsonSerializer.Serialize(raw))!;
+        var both = PlanAdvisoryAggregator.Extract([FirstStatementPlan, SecondStatementPlan]).Warnings;
+        Assert.True(both.Count > PlanAdvisoryAggregator.Extract([FirstStatementPlan]).Warnings.Count,
+            "the second statement's plan must add a warning of its own");
+        Assert.Equal(Math.Min(5, both.Count), warnings.Count);
+        Assert.Equal(warnings.Count, warnings.Select(w => (w.type, w.message)).Distinct().Count());
     }
 
     [Fact]
@@ -130,7 +186,8 @@ public sealed class PlanAdvisoryDistinctPlansTests : IClassFixture<SharedDuckDbF
 
     private sealed record DrillDownWarning(string type, string severity, string message);
 
-    private async Task SeedAsync(DateTime collectionTime, string planHash, string planXml, long workerTime)
+    /// <summary>One query_stats snapshot row. The query hash and plan handle derive from the plan hash unless given.</summary>
+    private async Task SeedAsync(DateTime collectionTime, string planHash, string planXml, long workerTime, string? queryHash = null, string? planHandle = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
         _seedConn ??= _duckDb.CreateConnection();
@@ -149,9 +206,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 10, $10, 1000000, 1000, 0, $11, $12)
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerName });
         cmd.Parameters.Add(new DuckDBParameter { Value = "PlanDedupDb" });
-        cmd.Parameters.Add(new DuckDBParameter { Value = planHash + "-query" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = queryHash ?? planHash + "-query" });
         cmd.Parameters.Add(new DuckDBParameter { Value = planHash });
-        cmd.Parameters.Add(new DuckDBParameter { Value = planHash + "-handle" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = planHandle ?? planHash + "-handle" });
         cmd.Parameters.Add(new DuckDBParameter { Value = WindowEnd.AddDays(-1) });
         cmd.Parameters.Add(new DuckDBParameter { Value = workerTime });
         cmd.Parameters.Add(new DuckDBParameter { Value = "SELECT * FROM dbo.t" });

@@ -31,6 +31,10 @@ namespace Darling.Tests;
 /// over the window's distinct top plans, and the drill-down's <c>plan_warnings</c> never lists one plan's
 /// warning twice. The Lite twin is <c>PlanAdvisoryDistinctPlansTests</c>.
 ///
+/// <para>A plan is a statement's plan, not a plan shape: <c>query_plan_hash</c> is a shape hash that two
+/// statements with one shape share, so two such statements with different plans are two plans and both are
+/// counted.</para>
+///
 /// <para>#1776 own-store: mints its own scratch database (<see cref="ScratchPostgres"/>), never the shared
 /// <c>live-postgres</c> collection.</para>
 /// </summary>
@@ -56,8 +60,69 @@ public sealed class PlanAdvisoryDistinctPlansLiveTests
     private static readonly string HotPlan = WarningPlan("c_hot");
     private static readonly string SecondPlan = WarningPlan("c_second");
     private static readonly string ThirdPlan = WarningPlan("c_third");
+    private static readonly string FirstStatementPlan = WarningPlan("c_first_statement");
+    private static readonly string SecondStatementPlan = WarningPlan("c_second_statement");
 
     private sealed record DrillDownWarning(string type, string severity, string message);
+
+    [Fact]
+    public async Task PlanWarningFactAndDrillDown_TwoStatementsWithOnePlanShape_CountBothPlans()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live plan advisory dedup test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        var periodEnd = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+
+            /* Two statements of one batch with one plan shape: the same query_plan_hash and plan_handle, a
+               different query_hash, and a different plan each, in one snapshot. Both plans raise a warning of their own. */
+            await SeedAsync(connection, periodEnd.AddMinutes(-5), "0xSHAPE", FirstStatementPlan, workerTime: 900_000, ct, queryHash: "0xSTMT1", planHandle: "0xBATCH");
+            await SeedAsync(connection, periodEnd.AddMinutes(-5), "0xSHAPE", SecondStatementPlan, workerTime: 800_000, ct, queryHash: "0xSTMT2", planHandle: "0xBATCH");
+        }
+
+        var both = PlanAdvisoryAggregator.Summarize([FirstStatementPlan, SecondStatementPlan]);
+        Assert.True(both.WarningCount > PlanAdvisoryAggregator.Summarize([FirstStatementPlan]).WarningCount,
+            "the second statement's plan must add a warning of its own");
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var context = new AnalysisContext
+        {
+            ServerId = ServerId,
+            ServerName = ServerName,
+            TimeRangeStart = periodEnd.AddHours(-4),
+            TimeRangeEnd = periodEnd,
+            ServerUtcOffset = TimeSpan.Zero,
+        };
+
+        var facts = await new PgFactCollector(postgres).CollectFactsAsync(context);
+
+        var fact = Assert.Single(facts, f => f.Key == "PLAN_WARNING");
+        Assert.Equal(both.WarningCount, fact.Value);
+        Assert.Equal(both.WarningCount, fact.Metadata["warning_count"]);
+        Assert.Equal(both.CriticalCount, fact.Metadata["critical_count"]);
+
+        var finding = new AnalysisFinding
+        {
+            RootFactKey = "PLAN_WARNING",
+            StoryPath = "PLAN_WARNING",
+            PathKeys = ["PLAN_WARNING"],
+            Severity = 1.0,
+        };
+
+        await new PgDrillDownCollector(postgres).EnrichFindingsAsync([finding], context);
+
+        Assert.True(finding.DrillDown!.TryGetValue("plan_warnings", out var raw), "plan_warnings was not collected");
+        var warnings = JsonSerializer.Deserialize<List<DrillDownWarning>>(JsonSerializer.Serialize(raw))!;
+        var bothDetail = PlanAdvisoryAggregator.Extract([FirstStatementPlan, SecondStatementPlan]).Warnings.Count;
+        Assert.Equal(Math.Min(5, bothDetail), warnings.Count);
+        Assert.Equal(warnings.Count, warnings.Select(w => (w.type, w.message)).Distinct().Count());
+    }
 
     [Fact]
     public async Task PlanWarningFactAndDrillDown_APlanInSixSnapshots_CountItsWarningsOnce()
@@ -120,7 +185,9 @@ public sealed class PlanAdvisoryDistinctPlansLiveTests
         Assert.Equal(warnings.Count, warnings.Select(w => (w.type, w.message)).Distinct().Count());
     }
 
-    private static async Task SeedAsync(NpgsqlConnection connection, DateTime collectionTime, string planHash, string planXml, long workerTime, CancellationToken ct)
+    /// <summary>One query_stats snapshot row. The query hash and plan handle derive from the plan hash unless given.</summary>
+    private static async Task SeedAsync(NpgsqlConnection connection, DateTime collectionTime, string planHash, string planXml, long workerTime, CancellationToken ct,
+        string? queryHash = null, string? planHandle = null)
     {
         await using var command = new NpgsqlCommand(@"
 INSERT INTO query_stats
@@ -131,9 +198,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)", connection);
         command.Parameters.AddWithValue(ServerId);
         command.Parameters.AddWithValue(ServerName);
         command.Parameters.AddWithValue("PlanDedupDb");
-        command.Parameters.AddWithValue(planHash + "-query");
+        command.Parameters.AddWithValue(queryHash ?? planHash + "-query");
         command.Parameters.AddWithValue(planHash);
-        command.Parameters.AddWithValue(planHash + "-handle");
+        command.Parameters.AddWithValue(planHandle ?? planHash + "-handle");
         command.Parameters.AddWithValue(planXml);
         command.Parameters.AddWithValue(workerTime);
         await command.ExecuteNonQueryAsync(ct);
