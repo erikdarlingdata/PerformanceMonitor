@@ -166,9 +166,10 @@ public sealed class ProvisioningVerdictTests
         /* Grant pressure with QUIET cpu: the old text would have blamed the memory ratio here. */
         var grants = ProvisioningVerdict.UnderProvisionedReason(11m, 3, 1, 2, 576, 142);
         Assert.Contains("workspace memory", grants, System.StringComparison.Ordinal);
-        Assert.Contains("3 grant waiter(s)", grants, System.StringComparison.Ordinal);
-        Assert.Contains("1 grant timeout(s)", grants, System.StringComparison.Ordinal);
-        Assert.Contains("2 forced grant(s)", grants, System.StringComparison.Ordinal);
+        Assert.Contains("3 grant waiters", grants, System.StringComparison.Ordinal);
+        Assert.Contains("1 grant timeout", grants, System.StringComparison.Ordinal);
+        Assert.Contains("2 forced grants", grants, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("(s)", grants, System.StringComparison.Ordinal);
         /* And it must NOT cite the retired threshold. */
         Assert.DoesNotContain("0.95", grants, System.StringComparison.Ordinal);
         Assert.DoesNotContain("memory ratio", grants, System.StringComparison.Ordinal);
