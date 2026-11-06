@@ -60,7 +60,7 @@ export const PG_INDEX_BLOAT_COLUMNS = [
   { key: "estimated_reclaimable_bytes", label: "Reclaimable", format: "bytes" },
   /* #7551: a reclaimable figure with nothing beside it reads as a measured 0 B. An estimated row has no leaf density to show (nothing walked its pages), so the figure it comes from and its basis sit here. */
   { key: "est_bloat_pct", label: "Est. Bloat %", format: "num1", hint: "The estimated share of the index that is free space. Blank when no estimate could be made." },
-  { key: "measurement_kind", label: "Basis", display: (row) => (row.measurement_kind === "estimated" ? "Estimated" : row.measurement_kind === "measured" ? "Measured" : "—"), hint: "Estimated: worked out from catalog statistics, so no leaf density or fragmentation exists. Measured: an older exact reading from pgstatindex." },
+  { key: "measurement_kind", label: "Basis", display: (row) => (row.skipped_reason ? "—" : row.measurement_kind === "estimated" ? "Estimated" : row.measurement_kind === "measured" ? "Measured" : "—"), hint: "Estimated: worked out from catalog statistics, so no leaf density or fragmentation exists. Measured: an older exact reading from pgstatindex." },
   detailColumn("skipped_reason", "Not Measured", indexSkipWord,
     "Why no bloat figure could be estimated for this index. Blank means it was estimated. Click a reason for the full text."),
 ];
