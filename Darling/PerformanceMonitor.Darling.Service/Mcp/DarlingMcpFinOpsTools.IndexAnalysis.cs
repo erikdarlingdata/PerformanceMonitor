@@ -219,7 +219,7 @@ public sealed partial class DarlingMcpFinOpsTools
                yet" would deny rows the store holds for it. Say what was measured; the caller adds the names (databases_left_out). */
             return emptyStatus
                 ?? (databasesLeftOut > 0
-                    ? McpHelpers.Status("empty", $"No index statistics for a database this server still has in the latest snapshots. {databasesLeftOut} database(s) the server no longer lists {DatabasesLeftOut.WasOrWere(databasesLeftOut)} left out of this read (see databases_left_out).")
+                    ? McpHelpers.Status("empty", $"No index statistics for a database this server still has in the latest snapshots.")
                     : McpHelpers.Status("empty", "No index statistics were collected for this server yet, so there is no index analysis."));
         }
 

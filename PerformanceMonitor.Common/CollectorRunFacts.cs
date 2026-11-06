@@ -81,7 +81,7 @@ public sealed record CollectorRunFacts(
                deny rows the collector did record there. Say what was measured: nothing in the databases it still has. */
             return ("empty",
                 string.Create(CultureInfo.InvariantCulture,
-                    $"No procedure ran in the last {hoursBack}h in a database this server still has: the procedure_stats collector ran successfully {SuccessfulRunsInWindow} time(s) in the window and recorded nothing for them. {databasesLeftOut} database(s) the server no longer lists {DatabasesLeftOut.WasOrWere(databasesLeftOut)} left out of this read (see databases_left_out)."));
+                    $"No procedure ran in the last {hoursBack}h in a database this server still has: the procedure_stats collector ran successfully {SuccessfulRunsInWindow} time(s) in the window and recorded nothing for them."));
         }
 
         if (SuccessfulRunsInWindow is > 0)

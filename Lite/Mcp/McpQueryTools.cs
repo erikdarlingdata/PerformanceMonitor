@@ -230,6 +230,7 @@ public sealed class McpQueryTools
                 /* #7725: disclosed, never silent (get_top_procedures_by_cpu's rule, Darling's twin): the dropped databases this read left out
                    and that have no row in the reply. Null when every one of them got rows, or the read left none out. */
                 databases_left_out = DatabasesLeftOut.Named(droppedWithoutRows),
+                databases_left_out_count = DatabasesLeftOut.Count(droppedWithoutRows),
                 databases_left_out_note = DatabasesLeftOut.Note(droppedWithoutRows),
                 queries = result
             }, McpHelpers.JsonOptions)!.AsObject();
@@ -411,6 +412,7 @@ public sealed class McpQueryTools
                 },
                 /* #5633 review (finding D): null when the read left no database out. */
                 databases_left_out = DatabasesLeftOut.Named(leftOutWithoutRows),
+                databases_left_out_count = DatabasesLeftOut.Count(leftOutWithoutRows),
                 databases_left_out_note = DatabasesLeftOut.Note(leftOutWithoutRows),
                 procedures = result
             }, tagScope.Named, node =>
@@ -747,6 +749,7 @@ public sealed class McpQueryTools
                 regressions = rows.Take(limit).Select(r => RegressionRowJson(r, full_text)),
                 /* #6654: the dropped databases this read left out, in the words get_top_procedures_by_cpu uses. */
                 databases_left_out = DatabasesLeftOut.Named(leftOut),
+                databases_left_out_count = DatabasesLeftOut.Count(leftOut),
                 databases_left_out_note = DatabasesLeftOut.Note(leftOut),
             }, McpHelpers.JsonOptions);
         }

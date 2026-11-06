@@ -129,6 +129,10 @@ public sealed class WebPartialWindowBehaviourTests
         Assert.StartsWith("83 databases were left out because the server no longer lists them.", more);
         Assert.EndsWith("db19, db20, and 63 more.", more);
         Assert.DoesNotContain("database_name", more);
+        /* The count is the reply's own field, never read from the note's words: the note here has no "(N in all" text. */
+        Assert.DoesNotContain("in all", S(r, "leftOutMoreNames")!);
+        /* A reply from an older service has no count field, so it is counted by its list. */
+        Assert.Equal("20 databases were left out because the server no longer lists them. They were dropped or detached: " + string.Join(", ", Enumerable.Range(1, 20).Select(i => "db" + i.ToString("D2"))) + ".", S(r, "leftOutNoCount"));
     }
 
     [Fact]

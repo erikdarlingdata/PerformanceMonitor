@@ -75,8 +75,10 @@ const leftDesc = { viz: "table", noteKey: "databases_left_out_note" };
 out.leftOutNames = text(leftOutStrip({ databases_left_out: ["a_old", "b_old", "c_old"], databases_left_out_note: leftOutNote }, leftDesc));
 out.leftOutOne = text(leftOutStrip({ databases_left_out: ["only_one"], databases_left_out_note: leftOutNote }, leftDesc));
 const names20 = Array.from({ length: 20 }, (_, i) => "db" + String(i + 1).padStart(2, "0"));
-const moreNote = "These databases were left out of this read because the server's newest database snapshot no longer lists them (dropped or detached since an earlier snapshot did) (83 in all; the first 20 are listed). Name one in database_name to read its history.";
-out.leftOutMoreNames = text(leftOutStrip({ databases_left_out: names20, databases_left_out_note: moreNote }, { viz: "table", moreNoteKeys: ["databases_left_out_note"] }));
+/* #7538: the note carries no "(N in all" words; the count is the reply's own `databases_left_out_count` field. */
+const moreNote = "These databases were left out of this read because the server's newest database snapshot no longer lists them (dropped or detached since an earlier snapshot did). Name one in database_name to read its history.";
+out.leftOutMoreNames = text(leftOutStrip({ databases_left_out: names20, databases_left_out_count: 83, databases_left_out_note: moreNote }, { viz: "table", moreNoteKeys: ["databases_left_out_note"] }));
+out.leftOutNoCount = text(leftOutStrip({ databases_left_out: names20, databases_left_out_note: moreNote }, { viz: "table", moreNoteKeys: ["databases_left_out_note"] }));
 
 /* the heading: a capped panel drops its window label, any other keeps it */
 out.subtitleActive = partialWindowSubtitle(active, { viz: "table" });

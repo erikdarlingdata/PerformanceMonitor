@@ -87,12 +87,10 @@ public sealed class CollectorRunEmptyReasonTests
         Assert.DoesNotContain("recorded nothing for it", message, StringComparison.Ordinal);
         Assert.DoesNotContain("matches this request", message, StringComparison.Ordinal);
         Assert.Contains("No procedure ran in the last 24h in a database this server still has", message, StringComparison.Ordinal);
-        Assert.Contains("3 database(s) the server no longer lists were left out", message, StringComparison.Ordinal);
-        /* #7726 item 4: the verb follows the count. */
-        var one = new CollectorRunFacts(2, 30, Last, 0).ProcedureStatsEmpty(24, 1).Message;
-        Assert.Contains("1 database(s) the server no longer lists was left out", one, StringComparison.Ordinal);
-        var two = new CollectorRunFacts(2, 30, Last, 0).ProcedureStatsEmpty(24, 2).Message;
-        Assert.Contains("2 database(s) the server no longer lists were left out", two, StringComparison.Ordinal);
+        /* #7538: the count of left-out databases is stated once, in the reply's databases_left_out_count and the page's strip, so the
+           empty sentence does not say it again. */
+        Assert.DoesNotContain("left out", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("database(s)", message, StringComparison.Ordinal);
         Assert.Equal(new CollectorRunFacts(2, 0, Last, 0).ProcedureStatsEmpty(24).Message, new CollectorRunFacts(2, 0, Last, 0).ProcedureStatsEmpty(24, 3).Message);
         Assert.Equal(new CollectorRunFacts(1, 1, Last, 0).ProcedureStatsEmpty(24).Message, new CollectorRunFacts(1, 1, Last, 0).ProcedureStatsEmpty(24, 3).Message);
     }
@@ -111,6 +109,10 @@ public sealed class CollectorRunEmptyReasonTests
         var wrapped = McpHelpers.WithDatabasesLeftOut(McpHelpers.Status("empty", "m"), all)!;
         using var doc = JsonDocument.Parse(wrapped);
         Assert.Equal(20, doc.RootElement.GetProperty("databases_left_out").GetArrayLength());
+        /* #7538: the reply carries the true count, so a page says "and 5 more" without reading the note's words. */
+        Assert.Equal(25, doc.RootElement.GetProperty("databases_left_out_count").GetInt32());
+        Assert.Equal(25, DatabasesLeftOut.Count(all));
+        Assert.Null(DatabasesLeftOut.Count(null));
         Assert.Equal(McpHelpers.Status("empty", "m"), McpHelpers.WithDatabasesLeftOut(McpHelpers.Status("empty", "m"), null));
     }
 

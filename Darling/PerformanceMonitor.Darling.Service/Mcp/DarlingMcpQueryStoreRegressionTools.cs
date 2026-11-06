@@ -200,6 +200,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                 regressions = shown.Select(r => RegressionRowJson(r, full_text)),
                 /* #6654: the dropped databases this read left out, in the words get_top_procedures_by_cpu uses. */
                 databases_left_out = DatabasesLeftOut.Named(leftOut),
+                databases_left_out_count = DatabasesLeftOut.Count(leftOut),
                 databases_left_out_note = DatabasesLeftOut.Note(leftOut),
             }, McpHelpers.JsonOptions);
 

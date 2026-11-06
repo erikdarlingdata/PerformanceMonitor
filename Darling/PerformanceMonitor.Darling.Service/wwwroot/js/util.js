@@ -621,17 +621,17 @@ export const LEFT_OUT_NOTE_KEY = "databases_left_out_note";
 /**
  * #7538, #7651: the sentence the page shows for a read that left databases out. The reply's own note is written for an MCP client
  * (it points at a `database_name` argument the page does not have), so the page says the same fact in its own words and names the
- * databases from the reply's `databases_left_out` list. The list holds at most 20 names; when the note says there are more
- * ("(83 in all; ...)", DatabasesLeftOut.Note) the rest is counted, not named. A reply with a note and no list (an older service) keeps its
- * note. Null when the reply carries no note.
+ * databases from the reply's `databases_left_out` list. The list holds at most 20 names; the reply's `databases_left_out_count` is how many were
+ * left out in all (DatabasesLeftOut.Count), and the rest is counted, not named. A reply without the count (an older service) is counted by
+ * its list. A reply with a note and no list keeps its note. Null when the reply carries no note.
  */
 export function leftOutNoteText(data) {
   const note = data && data[LEFT_OUT_NOTE_KEY];
   if (typeof note !== "string" || !note.trim()) return null;
   const names = Array.isArray(data.databases_left_out) ? data.databases_left_out.filter((n) => typeof n === "string" && n) : [];
   if (!names.length) return note;
-  const all = /\((\d+) in all;/.exec(note);
-  const total = all && Number(all[1]) > names.length ? Number(all[1]) : names.length;
+  const counted = data.databases_left_out_count;
+  const total = Number.isInteger(counted) && counted > names.length ? counted : names.length;
   const one = total === 1;
   const rest = total - names.length;
   return (
