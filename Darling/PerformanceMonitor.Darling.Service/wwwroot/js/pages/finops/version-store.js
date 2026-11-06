@@ -81,7 +81,10 @@ async function load(server, ctx, body) {
     return;
   }
   if (res.kind === "empty") {
-    mount(body, gatedEmptyStrip(res, ctx));
+    /* #7706: a database filter that picks only availability group secondary copies, which have no PVS row, answers empty; the empty reply
+       carries the note too, so the page still says why the copy is missing. */
+    const note = res.data && res.data.secondary_replica_note;
+    mount(body, [gatedEmptyStrip(res, ctx), ...(note ? [noticeStrip(note)] : [])]);
     return;
   }
   try {

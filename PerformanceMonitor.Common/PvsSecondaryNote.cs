@@ -21,6 +21,17 @@ namespace PerformanceMonitor.Common;
 /// </summary>
 public static class PvsSecondaryNote
 {
+    /// <summary>The JSON key the note travels under on <c>get_pvs_stats</c>, on its rows reply and on its empty reply.</summary>
+    public const string Key = "secondary_replica_note";
+
+    /// <summary>
+    /// The instant the replica roles are judged at: the time of the snapshot the note explains, so a snapshot that is hours old is
+    /// judged against the roles it was taken under and not today's. <paramref name="snapshotUtc"/> is the newest row's collection time,
+    /// or null when no row came back (an empty reply), which is judged now. Every surface that builds the note calls this one rule.
+    /// </summary>
+    public static DateTime ScopeTimeUtc(DateTime? snapshotUtc) =>
+        snapshotUtc is { } snapshot ? DateTime.SpecifyKind(snapshot, DateTimeKind.Utc) : DateTime.UtcNow;
+
     /// <summary>
     /// The sentence for the secondary databases that have no row in <paramref name="rowDatabases"/> and are among the databases the
     /// caller chose. <paramref name="chosenNames"/> null or empty means every database; <paramref name="excludedNames"/> are left out

@@ -83,4 +83,48 @@ VALUES ($1,$2,$3,$4,'AgDb',9,TRUE,5,500)",
         Assert.NotEmpty(withRow);
         Assert.Null(noNote);
     }
+
+    [Fact]
+    public async Task AFilterThatPicksOnlyASecondaryCopy_GetsTheNoteOnTheEmptyRowSet_AtTheSnapshotsOwnTime()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), BaseSkip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await FinOpsRecommendationsGoldenLiveTests.SeedAsync(connection, ct);
+
+        /* The newest PVS snapshot (master only) is five hours old. AgDb was a secondary copy then; the node has since become its primary. */
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO pvs_stats (collection_id, collection_time, server_id, server_name, database_name, database_id, is_accelerated_database_recovery_on, persistent_version_store_size_mb, database_data_size_mb)
+VALUES ($1,$2,$3,$4,'master',1,TRUE,10,1000)",
+            CollectionIdGenerator.Next(), Naive(TimeSpan.FromHours(5)), ServerId, ServerName);
+        foreach (var (role, age) in new[] { ("SECONDARY", TimeSpan.FromHours(5) + TimeSpan.FromMinutes(1)), ("PRIMARY", TimeSpan.FromMinutes(1)) })
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO ag_replica_states (collection_id, collection_time, server_id, server_name, ag_name, replica_server_name, role_desc, is_local) VALUES ($1,$2,$3,$4,'AG1','NODE1',$5,TRUE)",
+                CollectionIdGenerator.Next(), Naive(age), ServerId, ServerName, role);
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO ag_database_replica_states (collection_id, collection_time, server_id, server_name, ag_name, database_name, replica_server_name, is_local) VALUES ($1,$2,$3,$4,'AG1','AgDb','NODE1',TRUE)",
+                CollectionIdGenerator.Next(), Naive(age), ServerId, ServerName);
+        }
+
+        await using var viewer = new ViewerDataService(scratch.ConnectionString);
+
+        /* The rows reply: judged at the snapshot's time, so the old secondary role still explains the missing row. */
+        var (rows, note) = await viewer.GetPvsStatsLatestWithNoteAsync(ServerId, cancellationToken: ct);
+        Assert.Single(rows);
+        Assert.Equal(PvsSecondaryNote.WithoutRow(new[] { "AgDb" }, new[] { "master" }), note);
+
+        /* The saved filter chose only AgDb: no rows, and the grid strip still gets the sentence. */
+        var (emptyRows, emptyNote) = await viewer.GetPvsStatsLatestWithNoteAsync(ServerId, new[] { "AgDb" }, ct);
+        Assert.Empty(emptyRows);
+        Assert.Equal(PvsSecondaryNote.WithoutRow(new[] { "AgDb" }, Array.Empty<string>(), new[] { "AgDb" }), emptyNote);
+
+        /* A filter that leaves the secondary copy out says nothing about it. */
+        var (_, otherNote) = await viewer.GetPvsStatsLatestWithNoteAsync(ServerId, new[] { "master" }, ct);
+        Assert.Null(otherNote);
+    }
 }

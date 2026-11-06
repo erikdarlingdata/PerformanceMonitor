@@ -395,15 +395,15 @@ VALUES ($1, $2, $3, $4, $5, $6, 'ROWS', '', 100, 10, 10, 81920, 81920, 20, 30, 6
 
     // ── get_pvs_stats: secondary_replica_note (#7706) ──
 
-    /// <summary>The node is the local SECONDARY of AG1 for each named database, as of two minutes ago.</summary>
+    /// <summary>The node is the local SECONDARY of AG1 for each named database, as of six minutes ago: before the PVS snapshot (five minutes ago) the note is judged at.</summary>
     private async Task SeedSecondaryAsync(params string[] databases)
     {
         const string Replica = "INSERT INTO ag_replica_states (collection_id, collection_time, server_id, server_name, ag_name, replica_server_name, role_desc, is_local) VALUES ($1,$2,$3,$4,'AG1',$5,$6,$7)";
-        await ExecAsync(Replica, _nextId++, Minute(2), _serverId, ServerName, "NODE1", "SECONDARY", true);
-        await ExecAsync(Replica, _nextId++, Minute(2), _serverId, ServerName, "NODE2", "PRIMARY", false);
+        await ExecAsync(Replica, _nextId++, Minute(6), _serverId, ServerName, "NODE1", "SECONDARY", true);
+        await ExecAsync(Replica, _nextId++, Minute(6), _serverId, ServerName, "NODE2", "PRIMARY", false);
         const string Db = "INSERT INTO ag_database_replica_states (collection_id, collection_time, server_id, server_name, ag_name, database_name, replica_server_name, is_local) VALUES ($1,$2,$3,$4,'AG1',$5,'NODE1',true)";
         foreach (var database in databases)
-            await ExecAsync(Db, _nextId++, Minute(2), _serverId, ServerName, database);
+            await ExecAsync(Db, _nextId++, Minute(6), _serverId, ServerName, database);
     }
 
     private static string? SecondaryNoteOf(string json)
@@ -454,5 +454,53 @@ VALUES ($1, $2, $3, $4, $5, $6, 'ROWS', '', 100, 10, 10, 81920, 81920, 20, 30, 6
 
         var (_, filtered) = await _dataService.GetPvsStatsLatestWithNoteAsync(_serverId, new[] { "DbA" });
         Assert.Null(filtered);
+    }
+
+    [Fact]
+    public async Task PvsStats_AFilterThatPicksOnlyASecondaryCopy_GetsTheNoteOnTheEmptyReply()
+    {
+        await SeedPvsAsync("DbA", 5, 10);
+
+        // No availability group snapshot: a filter that matches nothing is empty and carries no note.
+        var plain = await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName, database_name: "DbSecondary");
+        Assert.Equal("empty", StatusOf(plain));
+        Assert.Null(SecondaryNoteOf(plain));
+
+        // The filter picked only the secondary copy, which has no PVS row: the empty reply carries the sentence.
+        await SeedSecondaryAsync("DbSecondary");
+        var empty = await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName, database_name: "DbSecondary");
+        Assert.Equal("empty", StatusOf(empty));
+        Assert.Equal(PvsSecondaryNote.WithoutRow(new[] { "DbSecondary" }, Array.Empty<string>(), new[] { "DbSecondary" }), SecondaryNoteOf(empty));
+
+        // The desktop grid strip is fed the same sentence for the empty row set.
+        var (rows, note) = await _dataService.GetPvsStatsLatestWithNoteAsync(_serverId, new[] { "DbSecondary" });
+        Assert.Empty(rows);
+        Assert.Equal(SecondaryNoteOf(empty), note);
+    }
+
+    [Fact]
+    public async Task PvsStats_TheReplicaRolesAreJudgedAtTheSnapshotsOwnTime_NotTodays()
+    {
+        // The newest PVS snapshot is five hours old. DbSecondary was a secondary copy then; the node has since become its primary.
+        await SeedPvsAsync("DbA", 5 * 60, 10);
+        const string Replica = "INSERT INTO ag_replica_states (collection_id, collection_time, server_id, server_name, ag_name, replica_server_name, role_desc, is_local) VALUES ($1,$2,$3,$4,'AG1','NODE1',$5,true)";
+        const string Db = "INSERT INTO ag_database_replica_states (collection_id, collection_time, server_id, server_name, ag_name, database_name, replica_server_name, is_local) VALUES ($1,$2,$3,$4,'AG1','DbSecondary','NODE1',true)";
+        foreach (var (role, minutesAgo) in new[] { ("SECONDARY", 5 * 60 + 1), ("PRIMARY", 1) })
+        {
+            await ExecAsync(Replica, _nextId++, Minute(minutesAgo), _serverId, ServerName, role);
+            await ExecAsync(Db, _nextId++, Minute(minutesAgo), _serverId, ServerName);
+        }
+
+        var expected = PvsSecondaryNote.WithoutRow(new[] { "DbSecondary" }, new[] { "DbA" });
+        Assert.Equal(expected, SecondaryNoteOf(await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName)));
+
+        var empty = await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName, database_name: "DbSecondary");
+        Assert.Equal(PvsSecondaryNote.WithoutRow(new[] { "DbSecondary" }, Array.Empty<string>(), new[] { "DbSecondary" }), SecondaryNoteOf(empty));
+    }
+
+    private static string StatusOf(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        return doc.RootElement.TryGetProperty("status", out var status) ? status.GetString() ?? "" : "rows";
     }
 }

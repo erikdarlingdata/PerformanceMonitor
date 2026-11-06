@@ -42,7 +42,8 @@ SELECT
     offrow_version_cleaner_end_time,
     pvs_off_row_page_skipped_low_water_mark,
     pvs_off_row_page_skipped_min_useful_xts,
-    pvs_off_row_page_skipped_oldest_aborted_xdesid
+    pvs_off_row_page_skipped_oldest_aborted_xdesid,
+    collection_time
 FROM v_pvs_stats
 WHERE server_id = $1
 AND   collection_time = (
@@ -124,19 +125,29 @@ ORDER BY lower(p.database_name), p.database_name, p.collection_time";
     /// <summary>
     /// #7706: the latest PVS rows plus the one-sentence note for a database this node holds only as an availability group secondary copy
     /// and that has no row here (<see cref="PvsSecondaryNote"/>, the sentence <c>get_pvs_stats</c> carries as <c>secondary_replica_note</c>
-    /// and the web page shows). The note is null when there are no rows, as on the web page, and fails open: stale or missing snapshots,
-    /// a standalone server and Azure SQL Database give no note.
+    /// and the web page shows). The note is built for an empty row set too: a database filter that picks only secondary copies returns no
+    /// rows, which is the case it explains. It is judged at the time of the snapshot it explains (the rows' collection time, or the
+    /// server's newest snapshot when the filter matched none of it, or now when there is none), so an old snapshot is not judged against
+    /// today's replica roles. It fails open: stale or missing snapshots, a standalone server and Azure SQL Database give no note.
     /// </summary>
     public async Task<(List<PvsStatsRow> Rows, string? SecondaryNote)> GetPvsStatsLatestWithNoteAsync(
         int serverId, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
         var rows = await GetPvsStatsLatestAsync(serverId, databaseNames, cancellationToken);
-        if (rows.Count == 0)
+
+        /* The anchor is the snapshot the rows came from. A filter that matched none of the newest snapshot has no row to read it from, so
+           the unfiltered newest snapshot supplies it. */
+        DateTime? snapshot = rows.Count > 0 ? rows[0].CollectionTime : null;
+        if (snapshot is null && databaseNames is { Count: > 0 })
         {
-            return (rows, null);
+            var all = await GetPvsStatsLatestAsync(serverId, null, cancellationToken);
+            if (all.Count > 0)
+            {
+                snapshot = all[0].CollectionTime;
+            }
         }
 
-        var secondary = await PgSecondaryReplicaScope.ReadAsync(_dataSource, serverId, DateTime.UtcNow, logger: null, cancellationToken);
+        var secondary = await PgSecondaryReplicaScope.ReadAsync(_dataSource, serverId, PvsSecondaryNote.ScopeTimeUtc(snapshot), logger: null, cancellationToken);
         return (rows, PvsSecondaryNote.WithoutRow(secondary, rows.Select(r => r.DatabaseName), databaseNames));
     }
 
@@ -167,7 +178,8 @@ ORDER BY lower(p.database_name), p.database_name, p.collection_time";
                 OffrowCleanerEndTime = reader.IsDBNull(11) ? null : reader.GetDateTime(11),
                 SkippedLowWaterMark = reader.IsDBNull(12) ? null : Convert.ToInt64(reader.GetValue(12)),
                 SkippedMinUsefulXts = reader.IsDBNull(13) ? null : Convert.ToInt64(reader.GetValue(13)),
-                SkippedOldestAborted = reader.IsDBNull(14) ? null : Convert.ToInt64(reader.GetValue(14))
+                SkippedOldestAborted = reader.IsDBNull(14) ? null : Convert.ToInt64(reader.GetValue(14)),
+                CollectionTime = reader.GetDateTime(15)
             });
         }
 
@@ -197,6 +209,9 @@ public sealed class PvsStatsRow
     public long? SkippedLowWaterMark { get; set; }
     public long? SkippedMinUsefulXts { get; set; }
     public long? SkippedOldestAborted { get; set; }
+
+    /// <summary>When the snapshot these rows belong to was collected (UTC), the instant a note about it judges the replica roles at (#7706).</summary>
+    public DateTime CollectionTime { get; set; }
 
     public string AdrDisplay => IsAdrOn switch
     {

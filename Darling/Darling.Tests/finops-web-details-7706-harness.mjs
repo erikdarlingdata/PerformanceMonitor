@@ -119,6 +119,11 @@ try {
   const note = "1 database has no row here: this server holds a secondary copy of it in an availability group. Check the primary replica for its persistent version store.";
   out.pvsNoted = (await build(versionStore, "get_pvs_stats", pvs(note))).textContent.includes(note);
   out.pvsNoNote = (await build(versionStore, "get_pvs_stats", pvs(null))).textContent.includes("availability group");
+  // The same note on the empty reply: a database filter that picks only secondary copies answers empty, and the page still says why.
+  const emptyReply = (extra) => ({ status: "empty", message: "No PVS rows for DbS on srv-a in the snapshot taken at 2026-11-05T10:00:00.0000000Z.", database_name: "DbS", ...extra });
+  const emptyNoted = await build(versionStore, "get_pvs_stats", emptyReply({ secondary_replica_note: note }));
+  out.pvsEmptyNoted = emptyNoted.textContent.includes(note) && emptyNoted.textContent.includes("No PVS rows for DbS");
+  out.pvsEmptyNoNote = (await build(versionStore, "get_pvs_stats", emptyReply({}))).textContent.includes("availability group");
 
   // 7. Storage Growth: sizes read as mbfit, a blank baseline is a dash with the sentence as its hint, the button column does not sort.
   const sg = await build(storageGrowth, "get_finops", {

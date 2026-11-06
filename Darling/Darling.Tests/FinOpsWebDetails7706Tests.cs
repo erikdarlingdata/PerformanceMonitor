@@ -84,6 +84,8 @@ public sealed class FinOpsWebDetails7706Tests
         var run = Result.Value;
         Assert.True(run.GetProperty("pvsNoted").GetBoolean());
         Assert.False(run.GetProperty("pvsNoNote").GetBoolean());
+        Assert.True(run.GetProperty("pvsEmptyNoted").GetBoolean());
+        Assert.False(run.GetProperty("pvsEmptyNoNote").GetBoolean());
     }
 
     [Fact]
