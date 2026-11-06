@@ -325,6 +325,7 @@ public sealed partial class ViewerDataService
                 MAX(CAST(max_num_physical_io_reads AS double precision)) AS max_num_physical_io_reads
             FROM deduped
             WHERE rn = 1
+            /*SELFKEY:deduped*/
             /*TAG:hash:query_hash*/
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             ORDER BY {{QueryStoreWeightedAverage.RankByDuration}} DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
@@ -525,8 +526,18 @@ public sealed partial class ViewerDataService
            at TopFill's final limit, not up to three rounds that each re-read the window; the tail looks up text only
            until the page is full, so the answer is the rounds' own (TopFill.FinalCandidates). */
         List<ViewerQueryStoreRow> rows;
-        await using (var command = _dataSource.CreateCommand(QueryTagReadJoin.Apply(QueryStoreTopSql, serverId, tags)))
+        /* #7736: the monitor's own statements leave ranked before its candidate limit once the key backfill has run, so the gate and
+           the read are one snapshot: one read-only REPEATABLE READ transaction, as the interval-table read below runs in. */
+        await using (var connection = await _dataSource.OpenConnectionAsync(cancellationToken))
+        await using (var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken))
         {
+            await using (var readOnly = new Npgsql.NpgsqlCommand("SET TRANSACTION READ ONLY", connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
+            {
+                await readOnly.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            var rawSql = await WithSelfKeysBeforeCandidateLimitAsync(connection, transaction, QueryTagReadJoin.Apply(QueryStoreTopSql, serverId, tags), cancellationToken);
+            await using var command = new Npgsql.NpgsqlCommand(rawSql, connection, transaction);
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             AddServerWindowParameters(command, serverId, startUtc, endUtc);
             command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
@@ -538,6 +549,15 @@ public sealed partial class ViewerDataService
 
         return (rows, null);
     }
+
+    /// <summary>#7736: <paramref name="sql"/> with the self-statement test on the key table in <c>ranked</c>, ahead of its candidate limit,
+    /// once its backfill has run (<see cref="QueryStoreSelfKeys.ReadyAsync"/>, read in this read's snapshot, closed on a store without
+    /// the state table), else as it is. The tail's text test still removes the monitor's own statements from a store the backfill has
+    /// not reached. The MCP read's <c>DarlingDataReader.WithSelfKeysBeforeCandidateLimitAsync</c> is the same shape.</summary>
+    private static async Task<string> WithSelfKeysBeforeCandidateLimitAsync(Npgsql.NpgsqlConnection connection, Npgsql.NpgsqlTransaction transaction, string sql, CancellationToken cancellationToken) =>
+        await QueryStoreSelfKeys.ReadyAsync(connection, transaction, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken)
+            ? QueryStoreSelfStatement.WithRankedKeyTest(sql)
+            : sql;
 
     /// <summary>
     /// #3953's gate and table read, on ONE connection in ONE read-only REPEATABLE READ transaction (M1, ruling
@@ -587,6 +607,9 @@ public sealed partial class ViewerDataService
             }
 
             topSql = QueryTagReadJoin.Apply(topSql, serverId, tags);
+
+            /* #7736: the monitor's own statements leave ranked before its candidate limit, once the key backfill has run. */
+            topSql = await WithSelfKeysBeforeCandidateLimitAsync(connection, transaction, topSql, cancellationToken);
             await using (var command = new Npgsql.NpgsqlCommand(topSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
             {
                 command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
@@ -744,6 +767,7 @@ public sealed partial class ViewerDataService
             WHERE server_id = $1
             AND   collection_time >= $2 AND collection_time <= $3
             AND   ($6::text[] IS NULL OR database_name = ANY($6))
+            /*SELFKEY:stats*/
         ),
         deduped_baseline AS (
             SELECT
@@ -766,6 +790,7 @@ public sealed partial class ViewerDataService
             WHERE server_id = $1
             AND   collection_time >= $4 AND collection_time <= $5
             AND   ($6::text[] IS NULL OR database_name = ANY($6))
+            /*SELFKEY:stats*/
         ),
         top_current AS (
             SELECT database_name, query_hash
@@ -885,7 +910,13 @@ public sealed partial class ViewerDataService
     {
         var items = new List<QueryStatsComparisonItem>();
 
-        await using var command = _dataSource.CreateCommand(QueryStoreComparisonSql);
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        /* #7730: the key table's test ahead of each window's top-100 cut once its backfill has run; the tail's text test stays for the
+           marker texts of a store the backfill has not reached. */
+        var comparisonSql = await QueryStoreSelfKeys.ReadyAsync(connection, null, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken)
+            ? QueryStoreSelfStatement.WithComparisonKeyTest(QueryStoreComparisonSql)
+            : QueryStoreComparisonSql;
+        await using var command = new Npgsql.NpgsqlCommand(comparisonSql, connection);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddComparisonParameters(command, serverId, currentStart, currentEnd, baselineStart, baselineEnd);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));

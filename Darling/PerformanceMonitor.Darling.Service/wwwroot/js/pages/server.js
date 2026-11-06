@@ -47,7 +47,7 @@
 
 import { keepScroll, refreshGridInPlace, replaceNodes } from "../refresh-in-place.js";
 import { keepLonePanelsWide } from "../panel-layout.js";
-import { el, mount, apiGet, apiGetFleet, setChartDataStart, onPageLeave, bandClass, loadingStrip, noticeStrip, setActiveRange, setActiveDatabaseFilter, localTime, storeHash, clampTileDetails } from "../util.js";
+import { el, mount, apiGet, apiGetFleet, setChartDataStart, onPageLeave, bandClass, loadingStrip, noticeStrip, setActiveRange, setActiveDatabaseFilter, localTime, localizeIsoText, storeHash, clampTileDetails } from "../util.js";
 import { getDatabaseFilter } from "../viewer-local.js";
 import { databaseFilterControl, databaseFilterUnavailable, closeDatabaseFilter } from "./database-filter.js";
 import { setPanelSignal } from "../panels.js";
@@ -659,7 +659,7 @@ function loadServerCard(server, onCard) {
  * rendered by fleet.js's own metricBands so there is one implementation rather than two, the reason is the same
  * sentence the fleet page shows, and the engine is the token the store recorded. A server outside the ranking
  * gets the chips and no sentence, because inventing one here is the second derivation this comment refuses. */
-function fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason) {
+export function fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason) {
   if (!card) return;
 
   /* The title names the server the way the sidebar, the fleet cards and every other page do: by display name.
@@ -668,10 +668,12 @@ function fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason
      in the heading. */
   if (card.display_name) title.textContent = card.display_name;
 
+  /* #7726: the unreachable-since reason has no seconds; the card's connect_down_since has them, so the strip prints the tile's own time. */
+  const sinceOpts = { minutes: true, since: card.connect_down_since || null };
   dot.className = "dot " + bandClass(card.band);
   mount(
     badgeSlot,
-    el("span", { class: "badge " + bandClass(card.band), text: card.status || card.band, title: reason || null })
+    el("span", { class: "badge " + bandClass(card.band), text: card.status || card.band, title: reason ? localizeIsoText(reason, sinceOpts) : null })
   );
 
   /* The engine badge is the answer to "why does this server have six tabs and that one twelve". Only a card
@@ -683,7 +685,7 @@ function fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason
   }
 
   mount(whySlot, [
-    reason ? el("div", { class: "server-reason " + bandClass(card.band), text: reason }) : null,
+    reason ? el("div", { class: "server-reason " + bandClass(card.band), text: localizeIsoText(reason, sinceOpts) }) : null,
     /* current.server is the server this render drew (set at the top of renderServer), so a redraw of the same server keeps its open tiles. */
     clampTileDetails(metricBands(card), undefined, openTilesFor(current.server)),
   ]);

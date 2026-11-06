@@ -122,11 +122,11 @@ export function pgDatabaseTrendSpecs(ctx) {
     {
       ...common,
       title: "Database Trend",
-      subtitle: ctx.label + ", the biggest temp-file spiller in this window, or the busiest by block access when nothing spilled; each point's hit ratio is its own intervals', not the lifetime average, and Worst Hit % is its worst single interval",
+      subtitle: ctx.label + ", the biggest temp-file spiller in this window, or the busiest by block access when nothing spilled; each point's hit ratio covers only its own interval, and Worst Hit % is its worst single interval",
       /* #7428: names the database the read followed. */
       subtitleFrom: (data) => {
         const subject = trendSubject(data && data.database, data && data.database_source);
-        return subject ? ctx.label + ", " + subject + "; each point's hit ratio is its own intervals', not the lifetime average, and Worst Hit % is its worst single interval" : null;
+        return subject ? ctx.label + ", " + subject + "; each point's hit ratio covers only its own interval, and Worst Hit % is its worst single interval" : null;
       },
       series: [
         { key: "cache_hit_pct", label: "Cache Hit %" },

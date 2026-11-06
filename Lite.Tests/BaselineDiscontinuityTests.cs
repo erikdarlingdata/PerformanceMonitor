@@ -317,6 +317,15 @@ public sealed class BaselineDiscontinuityTests
         Assert.Equal("SQL Server restarted at 2026-09-20 03:12. Rates start over there.", BaselineDiscontinuities.Sentence(T0, BaselineDiscontinuities.RestartReason));
     }
 
+    /// <summary>#7726 item 6: the identity fallback (the store no longer holds the old and new pair) says what could have
+    /// happened, not "the server's identity changed", which reads like a security event.</summary>
+    [Fact]
+    public void Sentence_ForAnIdentityChange_NamesTheThreeThingsItCouldBe()
+    {
+        Assert.Equal("SQL Server restarted, was renamed, or the connection reached another server at 2026-09-20 03:12. Rates start over there.",
+            BaselineDiscontinuities.Sentence(T0, BaselineDiscontinuities.IdentityReason));
+    }
+
     /// <summary>
     /// #4766: a surface passes the instant's UTC offset when its wall time happens twice in the display zone, and the
     /// sentence writes it after the time with one space. Without one (the default, and what every other time passes)

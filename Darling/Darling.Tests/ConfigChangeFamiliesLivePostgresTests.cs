@@ -81,12 +81,12 @@ public sealed class ConfigChangeFamiliesLivePostgresTests
 
             var advice = FactAdvice.TryReadStoryText(finding.StoryText);
             Assert.NotNull(advice);
-            Assert.StartsWith($"Database configuration changed: `{Db}` recovery_model FULL → SIMPLE", advice!.Headline, StringComparison.Ordinal);
+            Assert.StartsWith($"Database configuration changed: the recovery model of `{Db}` changed from FULL to SIMPLE", advice!.Headline, StringComparison.Ordinal);
             Assert.Contains("first observed by the configuration snapshot at", advice.Investigation, StringComparison.Ordinal);
             Assert.Contains("27 h since the previous snapshot", advice.Investigation, StringComparison.Ordinal);
             /* The status column flipped on the same capture and is not a change. */
             Assert.DoesNotContain("log_reuse_wait_desc", advice.Investigation, StringComparison.Ordinal);
-            Assert.Contains("`get_database_config_changes` lists the change", advice.Remediation, StringComparison.Ordinal);
+            Assert.Contains("the database configuration history lists the change", advice.Remediation, StringComparison.Ordinal);
 
             var m = finding.RootFactMetadata!;
             Assert.Equal(2, m[ConfigChangeAttribution.MetaChangeFamily]);
@@ -141,7 +141,7 @@ public sealed class ConfigChangeFamiliesLivePostgresTests
             Assert.StartsWith("Configuration changed: 2 configuration changes observed together", advice.Headline, StringComparison.Ordinal);
             Assert.Contains($"`{Maxdop}` 0 → 8, trace flag 4199 enabled (GLOBAL) — first observed", advice.Investigation, StringComparison.Ordinal);
             Assert.DoesNotContain("earlier configuration change", advice.Investigation, StringComparison.Ordinal);
-            Assert.Contains("`get_server_config_changes` / `get_trace_flag_changes` list the change", advice.Remediation, StringComparison.Ordinal);
+            Assert.Contains("the server configuration history / the trace flag history list the change", advice.Remediation, StringComparison.Ordinal);
 
             var m = finding.RootFactMetadata!;
             Assert.Equal(5, m[ConfigChangeAttribution.MetaChangeFamily]);

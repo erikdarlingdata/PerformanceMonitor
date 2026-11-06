@@ -298,11 +298,11 @@ public sealed class ConfigChangeAttributionPipelineTests : IClassFixture<SharedD
         Assert.Equal(ConfigChangeAttribution.InformationSeverity, finding.Severity, precision: 9);
 
         var advice = FactAdvice.TryReadStoryText(finding.StoryText)!;
-        Assert.StartsWith($"Database configuration changed: `{Db}` recovery_model FULL → SIMPLE", advice.Headline, StringComparison.Ordinal);
+        Assert.StartsWith($"Database configuration changed: the recovery model of `{Db}` changed from FULL to SIMPLE", advice.Headline, StringComparison.Ordinal);
         Assert.Contains("first observed by the configuration snapshot at", advice.Investigation, StringComparison.Ordinal);
         Assert.Contains("27 h since the previous snapshot", advice.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("log_reuse_wait_desc", advice.Investigation, StringComparison.Ordinal);
-        Assert.Contains("get_database_config_changes", advice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("the database configuration history lists the change", advice.Remediation, StringComparison.Ordinal);
 
         var m = finding.RootFactMetadata!;
         Assert.Equal((double)(int)ConfigChangeAttribution.ChangeFamily.DatabaseConfig, m[ConfigChangeAttribution.MetaChangeFamily]);
@@ -348,7 +348,7 @@ public sealed class ConfigChangeAttributionPipelineTests : IClassFixture<SharedD
         Assert.Null(finding.DatabaseName);
         var advice = FactAdvice.TryReadStoryText(finding.StoryText)!;
         Assert.StartsWith("Trace flag changed: trace flag 4199 enabled (GLOBAL)", advice.Headline, StringComparison.Ordinal);
-        Assert.Contains("get_trace_flag_changes", advice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("the trace flag history lists the change", advice.Remediation, StringComparison.Ordinal);
 
         var m = finding.RootFactMetadata!;
         Assert.Equal((double)(int)ConfigChangeAttribution.ChangeFamily.TraceFlags, m[ConfigChangeAttribution.MetaChangeFamily]);
