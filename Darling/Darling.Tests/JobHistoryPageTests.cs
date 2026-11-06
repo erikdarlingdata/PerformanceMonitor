@@ -88,7 +88,7 @@ public sealed class JobHistoryPageTests
         var app = Wwwroot("js", "app.js");
         Assert.Contains("import { renderJobHistory } from \"./pages/job-history.js\";", app);
         Assert.Contains("if (h === \"#/job-history\" || h === \"#/job-history/\") return { name: \"jobHistory\" };", app);
-        Assert.Contains("else if (r.name === \"jobHistory\") renderJobHistory(main);", app);
+        Assert.Contains("jobHistory: (m) => renderJobHistory(m),", app);
         Assert.Contains("if (r.name === \"jobHistory\") return \"job-history\";", app);
     }
 
