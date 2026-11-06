@@ -562,13 +562,17 @@ ORDER BY 1";
 
     /// <summary>
     /// CPU bucketed (#3960) — <see cref="GetCpuUtilizationAsync"/>'s window (the stored UTC instant, and for a
-    /// pre-v63 row with none its server-local stamp against the server-local bounds), averaged per bucket of the
-    /// server-local <c>sample_time</c> the tool has always published and the MCP tool used to average to the
-    /// minute itself. The busiest sample's SQL and total CPU ride beside the averages. A NULL SQL reading counts as 0,
+    /// pre-v63 row with none its server-local stamp against the server-local bounds), averaged per bucket. A row
+    /// that has a <c>sample_time_utc</c> is bucketed on that instant, as the chart read's UTC frame does (#7908), so
+    /// the two passes through a repeated autumn hour are two points rather than one average; a pre-v63 row with none
+    /// is bucketed on its server-local <c>sample_time</c>, and the two kinds never share a bucket. Every point is
+    /// stamped in the server-local form the tool has always published: a UTC-cut bucket's start taken through the
+    /// server's clock, so the two repeated-hour points share a wall-clock stamp and differ in their figures, and the
+    /// points come back in instant order. The busiest sample's SQL and total CPU ride beside the averages. A NULL SQL reading counts as 0,
     /// as that read always read it. A NULL other-process reading (SQL Server on Linux before 2025 CU1, #7682) is not
     /// 0: it leaves the sample out of the other, total, idle and peak-total figures, so a bucket whose samples all
     /// lack it returns null for them and a mixed bucket averages only the samples that have it. Stamped at each bucket's start, unclamped, as Darling's twin
-    /// (<c>DarlingDataReader.CpuUtilizationBucketedSql</c>) is.
+    /// (<c>DarlingDataReader.CpuUtilizationBucketedSql</c>, which buckets on the instant too) is.
     /// </summary>
     internal async Task<List<CpuBucketPoint>> GetCpuBucketsAsync(int serverId, int hoursBack, DateTime asOfUtc, ServerClock serverClock, int bucketMinutes)
     {
@@ -584,21 +588,25 @@ ORDER BY 1";
 
         command.CommandText = $@"
 SELECT
-    time_bucket(to_minutes(CAST($6 AS INTEGER)), sample_time, {TrendBuckets.OriginSql}) AS bucket_start,
+    CASE WHEN sample_time_utc IS NULL
+         THEN time_bucket(to_minutes(CAST($6 AS INTEGER)), sample_time, {TrendBuckets.OriginSql})
+         ELSE time_bucket(to_minutes(CAST($6 AS INTEGER)), sample_time_utc, {TrendBuckets.OriginSql})
+    END AS bucket_start,
     AVG(COALESCE(sqlserver_cpu_utilization, 0)) AS sql_server_cpu,
     AVG(other_process_cpu_utilization) AS other_process_cpu,
     AVG(CASE WHEN other_process_cpu_utilization IS NOT NULL THEN COALESCE(sqlserver_cpu_utilization, 0) + other_process_cpu_utilization END) AS total_cpu,
     AVG(CASE WHEN other_process_cpu_utilization IS NOT NULL THEN GREATEST(0, 100 - (COALESCE(sqlserver_cpu_utilization, 0) + other_process_cpu_utilization)) END) AS idle_cpu,
     MAX(COALESCE(sqlserver_cpu_utilization, 0)) AS peak_sql_server_cpu,
     MAX(CASE WHEN other_process_cpu_utilization IS NOT NULL THEN COALESCE(sqlserver_cpu_utilization, 0) + other_process_cpu_utilization END) AS peak_total_cpu,
-    COUNT(*) AS samples
+    COUNT(*) AS samples,
+    (sample_time_utc IS NULL) AS bucket_is_server_local
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
 AND   (
           (sample_time_utc IS NOT NULL AND sample_time_utc >= $2 AND sample_time_utc <= $3)
        OR (sample_time_utc IS NULL AND sample_time >= $4 AND sample_time <= $5)
       )
-GROUP BY 1
+GROUP BY 1, 9
 ORDER BY 1";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -608,22 +616,29 @@ ORDER BY 1";
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
-        var items = new List<CpuBucketPoint>();
+        /* bucket_start is in UTC for a bucket of rows that had a sample_time_utc and in the server's clock for a bucket of
+           rows that had none, so each is stamped in the server's clock and ordered by its instant; a wall-clock start that
+           names two instants takes the first, as ServerClock.ToUtc does. */
+        var items = new List<(DateTime Instant, CpuBucketPoint Point)>();
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            items.Add(new CpuBucketPoint(
-                reader.GetDateTime(0),
+            var bucketStart = reader.GetDateTime(0);
+            var bucketIsServerLocal = reader.GetBoolean(8);
+            var instant = bucketIsServerLocal ? serverClock.ToUtc(bucketStart) : bucketStart;
+            var stamp = bucketIsServerLocal ? bucketStart : serverClock.ToServerLocal(bucketStart);
+            items.Add((instant, new CpuBucketPoint(
+                stamp,
                 ToDouble(reader.GetValue(1)),
                 reader.IsDBNull(2) ? null : ToDouble(reader.GetValue(2)),
                 reader.IsDBNull(3) ? null : ToDouble(reader.GetValue(3)),
                 reader.IsDBNull(4) ? null : ToDouble(reader.GetValue(4)),
                 (int)ToInt64(reader.GetValue(5)),
                 reader.IsDBNull(6) ? null : (int)ToInt64(reader.GetValue(6)),
-                ToInt64(reader.GetValue(7))));
+                ToInt64(reader.GetValue(7)))));
         }
 
-        return items;
+        return items.OrderBy(i => i.Instant).Select(i => i.Point).ToList();
     }
 
     /// <summary>
