@@ -647,6 +647,16 @@ public partial class RemoteCollectorService
                         definition.Name, server.DisplayName, databaseName, budgetFailure.Message);
                     FoldFailedSlice(sqlSlice, sliceFolded, ref sqlMs);
                 }
+                catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException
+                                           && cancellationToken.IsCancellationRequested)
+                {
+                    /* Collection is stopping, and the read's cancellation arrived as the PROVIDER's exception
+                       rather than an OperationCanceledException (SqlClient reports a cancelled command as a
+                       SqlException). Surfaced as the cancellation it is, so RunCollectorAsync records CANCELLED:
+                       the skip arm below would count a stop as a failed database and, on the last database,
+                       rethrow it as an ERROR run. The same arm the shared driver has. */
+                    throw new OperationCanceledException(ex.Message, ex, cancellationToken);
+                }
                 catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
                 {
                     /* OOM is filtered OUT of this per-database skip and propagates: it is fatal, not a
