@@ -313,6 +313,7 @@ try {
       currentRoute: () => ({ name: "home", id: null, param: null }),
       isViewItemRoute: () => false,
       paintViewList: (_c, list) => { calls.paintViewList.push(list.filter((x) => x.personal && x.mine).length); },
+      viewListAfterRead: side.viewListAfterRead,
       paintServerList: () => { calls.paintServerList++; },
       updateStatusBar: () => {},
       clearViewGroups: () => { calls.cleared++; },
