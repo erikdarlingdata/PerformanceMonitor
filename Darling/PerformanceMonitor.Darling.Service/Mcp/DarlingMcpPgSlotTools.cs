@@ -224,8 +224,12 @@ public sealed class DarlingMcpPgSlotTools
                 worst_severity = worst.severity,
                 omitted_slots = omittedSlots,
                 omitted_slots_note = omittedNote,
+                /* #7939: the WAL the disk holds because of slots. Each slot's figure is the current WAL position minus its own
+                   restart_lsn, so slots behind on one cluster retain overlapping stretches of the same log and the server keeps
+                   WAL back to the oldest restart_lsn only. That is the largest measured figure, not the sum: three slots holding
+                   45, 8 and 1 GB of the same log hold 45 GB on disk. Unmeasured slots (the -1 sentinel, null here) are left out. */
                 total_retained_wal_gb = Math.Round(
-                    slots.Where(s => s.retained_wal_bytes > 0).Sum(s => s.retained_wal_bytes ?? 0) / 1024.0 / 1024.0 / 1024.0, 2),
+                    slots.Where(s => s.retained_wal_bytes > 0).Select(s => s.retained_wal_bytes ?? 0).DefaultIfEmpty(0L).Max() / 1024.0 / 1024.0 / 1024.0, 2),
                 slots,
             }, McpHelpers.JsonOptions), notice);
         }
