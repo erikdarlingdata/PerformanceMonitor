@@ -82,6 +82,13 @@ public static partial class DarlingWebEndpoints
     /// dispatch keys with the Custom Views catalog failed on the route it did not expect.</summary>
     private static readonly AsyncLocal<(string Name, ReadToolHandler Handler)?> s_testOnlyExtraDispatchEntry = new();
 
+    /// <summary>#7855, test-only: the statement sweep's budget for the <c>/api/read/*</c> bodies a <see cref="MapAll"/> call maps,
+    /// the seam <see cref="ToHttpResult"/> already has (#6341). A test that compares a route's body with its tool's and is not
+    /// about the filter hands in a budget over a fixed judge, so a CPU-starved run cannot spend the real judge's wall-clock budget
+    /// and make the sweep withhold values from a body that still answers 200. Read once when <see cref="MapAll"/> runs, held per
+    /// async flow like <see cref="s_testOnlyExtraDispatchEntry"/>; null in every production run, which keeps the shared judge's own budget.</summary>
+    internal static readonly AsyncLocal<SensitiveStatements.JudgeBudget?> TestOnlyReadSweepBudget = new();
+
     /// <summary>The test-only extra dispatch entry (#4442, #4782). Reads and writes the current async flow's
     /// value only; see the note on the backing field.</summary>
     internal static (string Name, ReadToolHandler Handler)? TestOnlyExtraDispatchEntry
@@ -442,6 +449,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            of a server built before it. Production calls MapAll once, so nothing changes there. A caller with
            no accumulator (a test that maps the routes directly) records nothing. */
         var readLatencyRecorder = new ReadLatencyRecorder(readLatency, logger, slowReads, readAdmission);
+        var readSweepBudget = TestOnlyReadSweepBudget.Value;
 
         /* #6445: the Admin writes the web's store login cannot make answer a 403 whose advice depends on the store. A managed store refuses
            postgres.webConnectionString, so its sentences say the dashboard lists only and the Viewer app makes the change. */
@@ -589,7 +597,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                         readScope.Scope.Uncount();
                         admission.NoteCacheHit(ReadSurface.Web, name);
                         RecordWebReadLatency(readLatencyRecorder, name, ReadOutcome.CacheHit, stopwatch.ElapsedMilliseconds, context, readScope.Scope);
-                        return ToHttpResult(stored, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+                        return ToHttpResult(stored, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, readSweepBudget);
                     }
 
                     /* D6: the read runs once, under the flight's token, which is cancelled only when every caller waiting for it
@@ -622,7 +630,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
                         RecordWebReadLatency(readLatencyRecorder, name, joinedOutcome, joinedAt.ElapsedMilliseconds, context, readScope.Scope);
                         return shared.Text is { } text
-                            ? ToHttpResult(text, DarlingWebFailureLog.RouteOf(context.Request), logger, joinedAt.ElapsedMilliseconds, callerAborted)
+                            ? ToHttpResult(text, DarlingWebFailureLog.RouteOf(context.Request), logger, joinedAt.ElapsedMilliseconds, callerAborted, readSweepBudget)
                             : shared.Answer;
                     }
                     catch (Exception ex)
@@ -754,7 +762,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     ThrowIfCallerGone(result, context.RequestAborted);
                     var cacheable = resolvedOutcome == ReadOutcome.Ok && ClassifyToolResponse(result) == ToolResponseKind.JsonPassthrough
                         && ReadResultCache.IsCacheableText(result, gcf: false);
-                    return new WebReadAnswer(ToHttpResult(result, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds, context.RequestAborted),
+                    return new WebReadAnswer(ToHttpResult(result, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, readSweepBudget),
                         cacheable ? result : null, resolvedOutcome);
                 }
             });

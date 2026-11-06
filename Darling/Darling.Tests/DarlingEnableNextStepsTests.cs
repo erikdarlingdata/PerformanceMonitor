@@ -131,6 +131,22 @@ public sealed class DarlingEnableNextStepsTests
         Assert.Contains(expectedAddress, text, StringComparison.Ordinal);
     }
 
+    /// <summary>A store name that is a path is refused at load (#7718): the listener is not TLS, so the loopback address is plain http.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void EnableVerb_ATlsStoreNameThatIsAPath_IsNotTls_SoLoopbackIsPlainHttp(bool mcp)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "A certificate store block is only a store on Windows.");
+
+        var extra = ", 'network': { 'listen': '0.0.0.0', 'allowFrom': '192.168.1.0/24', 'token': 'env:SOME_TOKEN', "
+                    + @"'tls': { 'store': { 'name': '\\\\host\\My', 'thumbprint': 'ABCD' } } }";
+        var text = Run(mcp, extra, port: 5153, managed: true);
+
+        Assert.Contains("http://localhost:5153/", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("https://", text, StringComparison.Ordinal);
+    }
+
     /// <summary>Opt-out on, no token: the MCP sentence says the setting is on and drops the header; the web address is still printed.</summary>
     [Fact]
     public void EnableMcp_WithTheOptOutAndNoToken_SaysToLeaveTheHeaderOff()

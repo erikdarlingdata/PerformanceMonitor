@@ -1038,7 +1038,7 @@ public static class FleetSweepEngine
             /* One sweep lost, loudly; the next slot tries again. The previous sweep remains the
                newest complete document — stale, stamped with its own instant, incapable of
                misleading anyone. */
-            logger.LogError("Fleet sweep failed; the previous sweep remains the newest complete one: {Message}", ex.Message);
+            logger.LogError(ex, "Fleet sweep failed; the previous sweep remains the newest complete one: {Message}", ex.Message);
         }
     }
 

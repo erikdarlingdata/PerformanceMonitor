@@ -5737,7 +5737,7 @@ FROM (
         }
         catch (Exception ex)
         {
-            _logger.LogError(
+            _logger.LogError(ex, 
                 "Could not restrict the ACL on {Path}{Detail} ({Message}). The DPAPI credential files it holds may be " +
                 "readable by other local users. If the owner is not this service, the re-ACL can never succeed — it " +
                 "needs ownership or FullControl — so restarting will not clear this; grant the service account " +
@@ -6235,7 +6235,7 @@ FROM (
         }
         catch (Exception ex)
         {
-            _logger.LogError(
+            _logger.LogError(ex, 
                 "Could not restrict the ACL on {Path}{Detail} ({Message}). If the owner is not this service, the " +
                 "re-ACL can never succeed — it needs ownership or FullControl — so restarting will not clear this; " +
                 "grant the service account FullControl or make it the owner.",
@@ -7045,7 +7045,7 @@ FROM (
         catch (Exception ex)
         {
             /* Round 4 #3: never let a network reconcile failure abort the bootstrap. */
-            _logger.LogCritical(
+            _logger.LogCritical(ex, 
                 "Store network reconcile failed ({Message}) — the store keeps running; verify pg_hba.conf / listen_addresses by hand.",
                 ex.Message);
         }

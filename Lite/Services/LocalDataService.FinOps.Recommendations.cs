@@ -60,7 +60,7 @@ SELECT @role;";
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"AG replica role detection failed: {ex.Message}");
+            AppLogger.Error("FinOps", $"AG replica role detection failed: {ex.Message}", ex);
             return "Standalone";
         }
     }
@@ -98,7 +98,7 @@ SELECT @count;";
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Advanced AG detection failed: {ex.Message}");
+            AppLogger.Error("FinOps", $"Advanced AG detection failed: {ex.Message}", ex);
             return 0;
         }
     }
@@ -325,7 +325,7 @@ END;", sqlConn);
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Recommendation check failed (Enterprise features): {ex.Message}");
+            AppLogger.Error("FinOps", $"Recommendation check failed (Enterprise features): {ex.Message}", ex);
         }
 
         /* A server enrolled minutes ago holds only the ring-buffer backfill of its first collect ("68 samples over 4 minutes"), which
@@ -367,7 +367,7 @@ END;", sqlConn);
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Recommendation check failed (CPU right-sizing): {ex.Message}");
+            AppLogger.Error("FinOps", $"Recommendation check failed (CPU right-sizing): {ex.Message}", ex);
         }
 
         // 3. Memory right-sizing score (from DuckDB)
@@ -441,7 +441,7 @@ AND   collection_time >= $2";
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Recommendation check failed (Memory right-sizing): {ex.Message}");
+            AppLogger.Error("FinOps", $"Recommendation check failed (Memory right-sizing): {ex.Message}", ex);
         }
 
         // 4. Unused index cost quantification (live SQL query)
@@ -463,7 +463,7 @@ AND   collection_time >= $2";
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Recommendation check failed (Index analysis): {ex.Message}");
+            AppLogger.Error("FinOps", $"Recommendation check failed (Index analysis): {ex.Message}", ex);
         }
 
         // 5. Compression savings estimator (live SQL query)
@@ -537,7 +537,7 @@ ORDER BY
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Recommendation check failed (Compression): {ex.Message}");
+            AppLogger.Error("FinOps", $"Recommendation check failed (Compression): {ex.Message}", ex);
         }
 
         // 6. Dormant database detection with cost impact (from DuckDB)
@@ -579,7 +579,7 @@ ORDER BY
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Recommendation check failed (Dormant databases): {ex.Message}");
+            AppLogger.Error("FinOps", $"Recommendation check failed (Dormant databases): {ex.Message}", ex);
         }
 
         // 7. Dev/test workload detection (live SQL query)
@@ -620,7 +620,7 @@ AND   database_id > 4", sqlConn);
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Recommendation check failed (Dev/test detection): {ex.Message}");
+            AppLogger.Error("FinOps", $"Recommendation check failed (Dev/test detection): {ex.Message}", ex);
         }
 
         // 11. Maintenance window efficiency — jobs running long (from DuckDB)
@@ -670,7 +670,7 @@ LIMIT 10";
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Recommendation check failed (Maintenance window): {ex.Message}");
+            AppLogger.Error("FinOps", $"Recommendation check failed (Maintenance window): {ex.Message}", ex);
         }
 
         // 12. VM right-sizing — prescriptive core/memory targets (from DuckDB)
@@ -797,7 +797,7 @@ AND   collection_time >= $2";
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Recommendation check failed (VM right-sizing): {ex.Message}");
+            AppLogger.Error("FinOps", $"Recommendation check failed (VM right-sizing): {ex.Message}", ex);
         }
 
         // 13. Storage tier optimization — flag databases with low IO latency (from DuckDB)
@@ -860,7 +860,7 @@ HAVING SUM(delta_reads) > 1000";
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Recommendation check failed (Storage tier): {ex.Message}");
+            AppLogger.Error("FinOps", $"Recommendation check failed (Storage tier): {ex.Message}", ex);
         }
 
         // 14. Reserved capacity candidates — stable CPU utilization (from DuckDB). Read through the archive view,
@@ -908,7 +908,7 @@ HAVING COUNT(*) >= 24";
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Recommendation check failed (Reserved capacity): {ex.Message}");
+            AppLogger.Error("FinOps", $"Recommendation check failed (Reserved capacity): {ex.Message}", ex);
         }
 
         return (recommendations.OrderBy(r => r.SeveritySort).ToList(), AgReplicaScope.SkippedNote(secondary));
@@ -958,7 +958,7 @@ AND   sqlserver_cpu_utilization IS NOT NULL";
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Recommendation check failed (CPU window coverage): {ex.Message}");
+            AppLogger.Error("FinOps", $"Recommendation check failed (CPU window coverage): {ex.Message}", ex);
         }
 
         return TimeSpan.Zero;

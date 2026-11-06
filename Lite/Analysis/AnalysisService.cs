@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
@@ -28,6 +29,12 @@ public class AnalysisService
     private readonly DrillDownCollector _drillDown;
     private readonly AnomalyDetector _anomalyDetector;
     private readonly BaselineProvider _baselineProvider;
+
+    /// <summary>
+    /// Per-server failure streaks of the pass's catch-all, so a store fault that persists writes its stack once per
+    /// streak rather than for every server on every scheduled pass (<see cref="FailureStreakLog{TKey}"/>).
+    /// </summary>
+    private readonly FailureStreakLog<int> _passFailures = new();
 
     /// <summary>
     /// #4726: the shared baseline tier this instance was handed (null when it keeps a private one). The MCP host
@@ -271,6 +278,7 @@ public class AnalysisService
                     $"Skipping analysis for {context.ServerName}: {dataSpanHours:F1}h data, need {MinimumDataHours}h");
 
                 LastAnalysisTime = DateTime.UtcNow;
+                _passFailures.Succeeded(context.ServerId);
                 return [];
             }
 
@@ -499,6 +507,7 @@ public class AnalysisService
                 $"highest severity {(findings.Count > 0 ? findings.Max(f => f.Severity) : 0):F2}" +
                 (context.PersistFindings ? string.Empty : " (anchored window — exploratory, not persisted)"));
 
+            _passFailures.Succeeded(context.ServerId);
             return findings;
         }
         catch (Exception ex) when (AnalysisAbandon.IsExpected(ex, context.CancellationToken))
@@ -525,7 +534,9 @@ public class AnalysisService
         }
         catch (Exception ex)
         {
-            AppLogger.Error("AnalysisService", $"Analysis failed for {context.ServerName}: {ex.Message}");
+            /* The exception is written on the first failure of a streak only: a store fault that persists lands here
+               for every server on every scheduled pass. */
+            _passFailures.Failed("AnalysisService", context.ServerId, $"Analysis failed for {context.ServerName}: {ex.Message}", ex);
             return [];
         }
         finally
