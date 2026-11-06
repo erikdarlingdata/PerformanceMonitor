@@ -721,12 +721,15 @@ CREATE OR REPLACE VIEW collect.v_memory_pressure_events AS SELECT * FROM collect
         // V251 (#7762): the compose rollup's row trigger marks from the hour of the writer's clock. The rewind puts V173's function and triggers back (the
         // probe's sentinel is the one-hour subtraction in the function's source), so a re-run of V251 replaces them again. V173's text is idempotent.
         new(251, "hasComposeStampLateMarkOffsetZero", PerformanceMonitor.Darling.Storage.QueryStoreComposeStamp.CreateSql),
-        // V252 (#7656): the Slack bot's route channel, the sealed tokens on the notification settings row and the request thread table. The
-        // probe's sentinel is the thread table, so the rewind drops it and the three columns, and a re-run of V252 adds them back. Safe on a
-        // store that never had them.
+        // V252 (#7656): the Slack bot's route channel and its stamp with the stamp's trigger, the sealed tokens on the notification settings row
+        // and the request thread table. The probe's sentinel is the thread table, so the rewind drops it, the trigger and its function, and the
+        // four columns, and a re-run of V252 adds them back. Safe on a store that never had them.
         new(252, "hasSlackBotThreads",
             @"DROP TABLE IF EXISTS config.investigation_request_threads;
+DROP TRIGGER IF EXISTS trg_notification_routes_slack_bot_channel_stamp ON config.config_notification_routes;
+DROP FUNCTION IF EXISTS config.notification_routes_stamp_slack_bot_channel();
 ALTER TABLE IF EXISTS config.config_notification_routes DROP COLUMN IF EXISTS slack_bot_channel;
+ALTER TABLE IF EXISTS config.config_notification_routes DROP COLUMN IF EXISTS slack_bot_channel_set_at;
 ALTER TABLE IF EXISTS config.config_notification DROP COLUMN IF EXISTS slack_bot_token;
 ALTER TABLE IF EXISTS config.config_notification DROP COLUMN IF EXISTS slack_app_token;"),
     ];

@@ -188,6 +188,11 @@ public sealed record NotificationRoute(
     /// no thread. Darling only: Lite has no routes with a Slack bot.</summary>
     public string SlackBotChannel { get; init; } = "";
 
+    /// <summary>When the route got its bot channel (<c>slack_bot_channel_set_at</c>, V252, #7656), UTC: set or moved when the channel goes from
+    /// blank to an id or to a different id, null when the channel is blank. The thread pass posts a request's parent only when the request
+    /// opened at or after it, so a route that gets its channel later does not post every open request's history. Darling only.</summary>
+    public DateTime? SlackBotChannelSetAt { get; init; }
+
     /// <summary>Whether this route's severity filter takes an alert of <paramref name="severity"/> (#6928). Null takes every route.</summary>
     public bool AcceptsSeverity(AlertSeverityLevel? severity) => NotificationRouteKinds.SeveritiesAccept(Severities, severity);
 

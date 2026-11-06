@@ -33,6 +33,10 @@ public interface ISlackRequestThreadStore
     /// <summary>Writes the once mark of one post and answers whether THIS call wrote it. The poster sends only on true.</summary>
     Task<bool> MarkOnceAsync(Guid requestId, int routeId, int serverId, string postKey, string onceKey, CancellationToken cancellationToken);
 
+    /// <summary>Writes the once mark of a post that is not sent, with <paramref name="reason"/> saying why, so the pass does not read the row
+    /// again. The mark row is the same kind and key a sent post gets; only its reason differs.</summary>
+    Task<bool> MarkSkippedAsync(Guid requestId, int routeId, int serverId, string postKey, string onceKey, string reason, CancellationToken cancellationToken);
+
     /// <summary>Takes back the once mark of one post after Slack answered 429: the post did not go out, so the next pass sends it.</summary>
     Task ReleaseMarkAsync(string onceKey, CancellationToken cancellationToken);
 }
@@ -104,6 +108,13 @@ ON CONFLICT (request_id) DO NOTHING";
     /// <inheritdoc />
     public Task<bool> MarkOnceAsync(Guid requestId, int routeId, int serverId, string postKey, string onceKey, CancellationToken cancellationToken) =>
         MarkOnceAsync(requestId, routeId, serverId, SlackThreadPosted, postKey, onceKey, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<bool> MarkSkippedAsync(Guid requestId, int routeId, int serverId, string postKey, string onceKey, string reason, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+        return MarkOnceAsync(requestId, routeId, serverId, SlackThreadPosted, postKey + ": " + reason, onceKey, cancellationToken);
+    }
 
     /* Apart from retention's age-out (DarlingRetention), this is the only delete on the journal. It exists because a 429 means the
        post did not go out, so its mark must go for the next pass to post it. The mark row is the service's own: the journal's

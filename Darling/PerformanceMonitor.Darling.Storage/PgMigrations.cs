@@ -2662,13 +2662,35 @@ CREATE OR REPLACE VIEW v_memory_pressure_events AS SELECT * FROM memory_pressure
     private static readonly string V251Sql =
         "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreComposeStamp.LateMarkOffsetZeroSql;
 
-    /* V252 (#7656): the Slack bot. A route's bot channel id, the sealed bot and app tokens on the notification settings row (opened like
-       the webhook URLs), and one thread per investigation request: the channel the parent post went to and its ts. The thread table is
-       owner-written, as config_server_actions is: REVOKE ALL ... CASCADE takes every privilege the default privileges gave from PUBLIC
-       and each of the four roles that exists, and SELECT goes back to admin alone. Managed provisioning section 10e5 and
-       provision-roles.sql step 3j5 do the same after their blanket grants. */
+    /* V252 (#7656): the Slack bot. A route's bot channel id and the time it was set, the sealed bot and app tokens on the notification
+       settings row (opened like the webhook URLs), and one thread per investigation request: the channel the parent post went to and its
+       ts. The stamp (slack_bot_channel_set_at, naive UTC) is written by a row trigger, so every path that writes the channel (the route
+       writer, the store functions and the undo function) stamps it the same way: set or moved when the channel goes from blank to an
+       id or to a different id, cleared when the channel is cleared, kept by a write that keeps the channel. The thread pass posts a
+       request's parent only when the request opened at or after the stamp. The thread table is owner-written, as config_server_actions
+       is: REVOKE ALL ... CASCADE takes every privilege the default privileges gave from PUBLIC and each of the four roles that exists,
+       and SELECT goes back to admin alone. Managed provisioning section 10e5 and provision-roles.sql step 3j5 do the same after their
+       blanket grants. */
     private const string V252Sql = @"
 ALTER TABLE config.config_notification_routes ADD COLUMN IF NOT EXISTS slack_bot_channel text NOT NULL DEFAULT '';
+ALTER TABLE config.config_notification_routes ADD COLUMN IF NOT EXISTS slack_bot_channel_set_at timestamp;
+
+CREATE OR REPLACE FUNCTION config.notification_routes_stamp_slack_bot_channel()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $fn$
+BEGIN
+    IF TG_OP = 'INSERT' OR NEW.slack_bot_channel IS DISTINCT FROM OLD.slack_bot_channel THEN
+        NEW.slack_bot_channel_set_at := CASE WHEN NEW.slack_bot_channel = '' THEN NULL ELSE (now() AT TIME ZONE 'UTC') END;
+    END IF;
+    RETURN NEW;
+END
+$fn$;
+
+DROP TRIGGER IF EXISTS trg_notification_routes_slack_bot_channel_stamp ON config.config_notification_routes;
+CREATE TRIGGER trg_notification_routes_slack_bot_channel_stamp
+    BEFORE INSERT OR UPDATE OF slack_bot_channel ON config.config_notification_routes
+    FOR EACH ROW EXECUTE FUNCTION config.notification_routes_stamp_slack_bot_channel();
 ALTER TABLE config.config_notification ADD COLUMN IF NOT EXISTS slack_bot_token text NOT NULL DEFAULT '';
 ALTER TABLE config.config_notification ADD COLUMN IF NOT EXISTS slack_app_token text NOT NULL DEFAULT '';
 CREATE TABLE IF NOT EXISTS config.investigation_request_threads (

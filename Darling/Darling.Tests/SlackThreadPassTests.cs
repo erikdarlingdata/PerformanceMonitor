@@ -44,6 +44,7 @@ public sealed class SlackThreadPassTests
     {
         public readonly Dictionary<Guid, SlackRequestThread> Threads = new();
         public readonly HashSet<string> Marks = new(StringComparer.Ordinal);
+        public readonly Dictionary<string, string> SkipReasons = new(StringComparer.Ordinal);
         public readonly List<string> Released = new();
         public readonly List<SlackThreadJournalRow> Rows = new();
         public readonly Dictionary<Guid, List<RequestChangeRow>> Changes = new();
@@ -60,6 +61,12 @@ public sealed class SlackThreadPassTests
 
         public Task<bool> MarkOnceAsync(Guid requestId, int routeId, int serverId, string postKey, string onceKey, CancellationToken cancellationToken) =>
             Task.FromResult(Marks.Add(onceKey));
+
+        public Task<bool> MarkSkippedAsync(Guid requestId, int routeId, int serverId, string postKey, string onceKey, string reason, CancellationToken cancellationToken)
+        {
+            SkipReasons[onceKey] = reason;
+            return Task.FromResult(Marks.Add(onceKey));
+        }
 
         public Task ReleaseMarkAsync(string onceKey, CancellationToken cancellationToken)
         {
@@ -327,6 +334,7 @@ public sealed class SlackThreadPassTests
         Assert.Contains(SlackThreadPosts.OnceKey(R1, SlackThreadPosts.RequestKey), store.Marks);
         Assert.Contains(SlackThreadPosts.OnceKey(R1, SlackThreadPosts.EventKey("claimed", 3)), store.Marks);
         Assert.Contains(SlackThreadPosts.OnceKey(R1, SlackThreadPosts.EventKey("resolved", 5)), store.Marks);
+        Assert.All(store.Marks, key => Assert.Equal(SlackThreadPass.OpenedBeforeChannel, store.SkipReasons[key]));
         Assert.Empty(await store.PendingSlackThreadRowsAsync(SlackThreadPass.PostedEvents, Now, 100, CancellationToken.None));
         Assert.Equal(0, await pass.RunOnceAsync(CancellationToken.None));
         Assert.Empty(posts.Posts);

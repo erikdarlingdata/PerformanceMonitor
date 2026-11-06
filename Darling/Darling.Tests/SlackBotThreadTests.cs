@@ -429,6 +429,9 @@ public sealed class SlackThreadPosterTests
             return Task.FromResult(Marks.Add(onceKey));
         }
 
+        public Task<bool> MarkSkippedAsync(Guid requestId, int routeId, int serverId, string postKey, string onceKey, string reason, CancellationToken cancellationToken) =>
+            MarkOnceAsync(requestId, routeId, serverId, postKey, onceKey, cancellationToken);
+
         public Task ReleaseMarkAsync(string onceKey, CancellationToken cancellationToken)
         {
             Marks.Remove(onceKey);

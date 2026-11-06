@@ -119,14 +119,19 @@ public static class SlackThreadPosts
         return new SlackThreadPostContent("Agent change: " + Escape(Clip(tool, 50)) + " " + Escape(Clip(result, 50)), [Section("*Agent change*\n" + line)]);
     }
 
-    /// <summary>A proposal, when it is made and at each decision: the kind, the server, the state, the statement at the mode
-    /// (<c>metadataOnly</c> withholds it and the link stands in), and the link to the proposal page.</summary>
-    public static SlackThreadPostContent ProposalPost(string tool, string serverName, string state, string? statement, string? proposalUrl, McpDataDetail mode)
+    /// <summary>A proposal, when it is made and at each decision: the kind, the server, the state, when it expires (the card, when it is
+    /// made), the statement at the mode (<c>metadataOnly</c> withholds it and the link stands in), and the link to the proposal page.</summary>
+    public static SlackThreadPostContent ProposalPost(string tool, string serverName, string state, string? statement, string? proposalUrl, McpDataDetail mode, DateTime? expiresUtc = null)
     {
         var kind = Escape(Clip(tool, 50));
         var server = Escape(Clip(serverName, TextLimit));
         var stateText = Escape(Clip(state, 50));
         var lines = new List<string> { $"*Proposed action: {kind}*", $"*Server:* {server}", $"*State:* {stateText}" };
+        if (expiresUtc is DateTime expires)
+        {
+            lines.Add("*Expires:* " + expires.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC");
+        }
+
         if (!string.IsNullOrWhiteSpace(statement) && mode != McpDataDetail.MetadataOnly)
         {
             var shown = mode == McpDataDetail.MaskLiterals ? McpDataDetailMasker.MaskLiterals(statement) : statement;
