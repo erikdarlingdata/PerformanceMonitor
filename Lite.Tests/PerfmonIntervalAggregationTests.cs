@@ -23,49 +23,15 @@ namespace Lite.Tests;
 /// (the Lock* counters 15), so a summed denominator yields rates 12-17x too LOW.</para>
 ///
 /// <para>Both Darling surfaces carry a dedicated pin for this (<c>DarlingTrendReader</c> and the Viewer's
-/// <c>PerfmonTrendsSql</c>); Lite had none, which a review caught. Lite's queries are inline
-/// <c>CommandText</c> rather than exposed constants, so this reads the source the way
-/// <see cref="ParitySource"/> exists to — the alternative is a live multi-instance DuckDB fixture, and
-/// <c>McpStatusEnvelopeTests</c> seeds one row per counter, so the case that breaks is exactly the one no
-/// existing test exercises.</para>
+/// <c>PerfmonTrendsSql</c>). Lite's side is a live multi-instance DuckDB case: the Transactions/sec case of
+/// <c>LitePerfmonTotalInstanceLiveTests</c> seeds three instance rows per collection and asserts the interval
+/// reads 60 on each read (#7843), and its mixed-object case (two objects under one counter name) pins the per-collection
+/// layer the same way (#7771), so a summed interval fails there at either layer. The tests below keep the rest of the
+/// interval's contract.</para>
 /// </summary>
 public sealed class PerfmonIntervalAggregationTests
 {
     private const string ReadPath = "Lite/Services/LocalDataService.Perfmon.cs";
-
-    /// <summary>Both trend reads — the single-counter one and its batched sibling — must take the interval
-    /// as MAX, at both of their layers: per object, where the instance rows are summed, and per collection,
-    /// over the per-object rows (#7771). Four occurrences, two per read, because a fix applied to only one of
-    /// the pair, or at only one layer, is the likelier mistake.
-    /// </summary>
-    [Fact]
-    public void BothPerfmonTrendReads_TakeTheIntervalAsMax()
-    {
-        var source = ParitySource.ReadFile(ReadPath);
-
-        var max = CountOccurrences(source, "MAX(sample_interval_seconds)");
-        Assert.Equal(4, max);
-    }
-
-    /// <summary>The failure mode itself: a summed interval across a collection's INSTANCE rows is the
-    /// 12-17x denominator inflation, and it is silent — the column is populated, the query succeeds, and
-    /// only the derived rate is wrong.
-    /// <para>#4234: the batched trend's bucketing legitimately adds a SECOND, different SUM over
-    /// <c>sample_interval_seconds</c> — the outer GROUP BY <c>counter_name, bucket_start</c> summing each
-    /// COLLECTION's own already-<c>MAX</c>'d interval across the collections a bucket holds (the ruling's
-    /// summed-intervals rate), never raw instance rows. That SUM always carries this exact
-    /// <c>FILTER (WHERE sample_interval_seconds &gt; 0)</c> right after it, so stripping just that
-    /// substring isolates exactly the original bug shape: a bare, unfiltered
-    /// <c>SUM(sample_interval_seconds)</c> grouped over instance rows.</para></summary>
-    [Fact]
-    public void NoPerfmonTrendRead_SumsTheIntervalAcrossInstanceRows()
-    {
-        var source = ParitySource.ReadFile(ReadPath);
-
-        var withoutTheBucketedSum = source.Replace(
-            "SUM(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0)", string.Empty);
-        Assert.DoesNotContain("SUM(sample_interval_seconds)", withoutTheBucketedSum, StringComparison.Ordinal);
-    }
 
     /// <summary>Guards the fix from being over-applied: the two columns that ARE additive are never taken as
     /// MAX, in either read. A well-meant "make it consistent" edit that turned these into MAX would silently
@@ -95,18 +61,5 @@ public sealed class PerfmonIntervalAggregationTests
 
         var shared = ParitySource.ReadFile("PerformanceMonitor.Common/Mcp/TrendPayloads.cs");
         Assert.Contains("[\"sample_interval_seconds\"] = seconds", shared, StringComparison.Ordinal);
-    }
-
-    private static int CountOccurrences(string haystack, string needle)
-    {
-        var count = 0;
-        for (var i = haystack.IndexOf(needle, StringComparison.Ordinal);
-             i >= 0;
-             i = haystack.IndexOf(needle, i + needle.Length, StringComparison.Ordinal))
-        {
-            count++;
-        }
-
-        return count;
     }
 }
