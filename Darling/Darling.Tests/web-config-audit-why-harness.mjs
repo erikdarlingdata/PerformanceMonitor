@@ -52,7 +52,7 @@ const whyOf = (columns, rows) => {
 
 /* The PostgreSQL sentences that name a read, as the service words them (PgTargetAdvice), and two that start with the name. */
 const pgWhy = [
-  "max_wal_size is 1 GB. No measured WAL rate accompanies this card, so there is no number to size against yet: read get_pg_write_stats over a busy window for wal_bytes and the requested-vs-timed split, then raise max_wal_size.",
+  "max_wal_size is 1 GB. No measured WAL rate accompanies this finding, so there is no number to size against yet: read get_pg_write_stats over a busy window for wal_bytes and the requested-vs-timed split, then raise max_wal_size.",
   "Set effective_cache_size to roughly 50-75 % of the host's RAM. Change it, then watch plan shapes on the top statements (get_pg_top_queries) rather than assuming the move was free.",
   "work_mem is 4 MB. Counter-objective: set too high, memory multiplies per sort. get_pg_top_queries has the statements writing the most temp blocks.",
   "Find out which statements are scanning in get_pg_predicate_stats, then follow their time in get_pg_query_duration_trend.",

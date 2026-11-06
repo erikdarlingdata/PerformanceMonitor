@@ -133,13 +133,22 @@ function toolWords(name) {
     .join(" ");
 }
 
+/* #7670: what a count means, for the few a reader cannot work out from the label. The gate skips the XML read when the extended-events counter has not moved since the last run. */
+const COUNT_MEANINGS = { shred_gated: { 1: "no new events since the last run, so the XML was not read", 0: "the XML was read" } };
+
+/** One count in words: "events read: 0", and for a count in COUNT_MEANINGS its meaning after it ("shred gated: 1 (no new events ...)"). */
+function countText(label, value) {
+  const meaning = COUNT_MEANINGS[label] && COUNT_MEANINGS[label][value];
+  return label.replace(/_/g, " ") + ": " + value + (meaning ? " (" + meaning + ")" : "");
+}
+
 /** The shown form of `label=value` counts: a run of pairs becomes "label words: value, label words: value". */
 function pairsToText(run) {
   return run
     .split(" ")
     .map((pair) => {
       const eq = pair.indexOf("=");
-      return pair.slice(0, eq).replace(/_/g, " ") + ": " + pair.slice(eq + 1);
+      return countText(pair.slice(0, eq), pair.slice(eq + 1));
     })
     .join(", ");
 }
@@ -150,7 +159,7 @@ function underscoreCountsToText(run) {
     .split(" ")
     .map((tok) => {
       const at = tok.lastIndexOf("_");
-      return tok.slice(0, at).replace(/_/g, " ") + ": " + tok.slice(at + 1);
+      return countText(tok.slice(0, at), tok.slice(at + 1));
     })
     .join(", ");
 }
