@@ -20,7 +20,7 @@
  * KnownPatternsPageBehaviourTests. All entry text, the note above all, reaches the DOM through el()/textContent.
  */
 
-import { storeHeaders, el, mount, apiGet, readTool, loadingStrip, errorStrip, emptyStrip, plainEmptyStrip, localTime, reportSessionExpired, networkErrorText, browserZoneOrBlank } from "../util.js";
+import { storeHeaders, el, mount, apiGet, readTool, loadingStrip, errorStrip, emptyStrip, plainEmptyStrip, localTime, parseUtc, reportSessionExpired, networkErrorText, browserZoneOrBlank } from "../util.js";
 import * as api from "../alerts-api.js";
 
 /** The most characters a note holds (KnownPatternMatcher.MaxNoteLength). The server refuses more; the counter only warns early. */
@@ -39,10 +39,8 @@ export function localInputToIso(v) {
 
 /** An ISO timestamp (the store returns UTC with or without a zone suffix) to a datetime-local value on the local clock, or "". */
 export function isoToLocalInput(iso) {
-  if (!iso) return "";
-  const hasZone = /[zZ]$|[+\-]\d\d:?\d\d$/.test(iso);
-  const d = new Date(hasZone ? iso : iso + "Z");
-  if (Number.isNaN(d.getTime())) return "";
+  const d = parseUtc(iso);
+  if (!d) return "";
   const p = (n) => String(n).padStart(2, "0");
   return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + "T" + p(d.getHours()) + ":" + p(d.getMinutes());
 }
@@ -100,10 +98,8 @@ export function interpretWrite(status, body) {
 /** Whether an entry's expiry has passed. */
 export function isExpired(e, now) {
   if (e.expired === true) return true;
-  const iso = e.expires_at_utc;
-  if (!iso) return false;
-  const d = new Date(/[zZ]$|[+\-]\d\d:?\d\d$/.test(iso) ? iso : iso + "Z");
-  return !Number.isNaN(d.getTime()) && d.getTime() <= (now || Date.now());
+  const d = parseUtc(e.expires_at_utc);
+  return !!d && d.getTime() <= (now || Date.now());
 }
 
 /** One line for the Scope column. */

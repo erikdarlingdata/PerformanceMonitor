@@ -202,5 +202,15 @@ public sealed class KnownPatternsPageBehaviourTests
         Assert.Equal("The refusal.", r.GetProperty("interpret400").GetProperty("message").GetString());
         Assert.Equal("notfound", r.GetProperty("interpret404").GetString());
         Assert.Equal("readonly", r.GetProperty("interpret403").GetString());
+
+        /* A stamp without a zone suffix is UTC: the same instant as its suffixed twin in the expiry box and in the expired test. */
+        Assert.Equal(r.GetProperty("suffixedLocalInput").GetString(), r.GetProperty("bareLocalInput").GetString());
+        Assert.Matches("^2030-01-0[12]T\\d\\d:\\d\\d$", r.GetProperty("bareLocalInput").GetString());
+        Assert.Equal("", r.GetProperty("unreadableLocalInput").GetString());
+        var expired = r.GetProperty("bareExpired");
+        Assert.True(expired.GetProperty("atTheInstant").GetBoolean());
+        Assert.False(expired.GetProperty("aMinuteBefore").GetBoolean());
+        Assert.False(expired.GetProperty("noExpiry").GetBoolean());
+        Assert.False(expired.GetProperty("unreadable").GetBoolean());
     }
 }

@@ -217,6 +217,13 @@ try {
       out.interpret400 = page.interpretWrite(400, { status: "invalid", error: "The refusal." });
       out.interpret404 = page.interpretWrite(404, { status: "not_found" }).kind;
       out.interpret403 = page.interpretWrite(403, {}).kind;
+      /* A stamp the store returns without a zone suffix is UTC: it reads as the same instant as its suffixed twin, in the expiry box
+         and in the expired test, and a blank or unreadable one is no expiry. */
+      out.bareLocalInput = page.isoToLocalInput("2030-01-02T03:04:00.0000000");
+      out.suffixedLocalInput = page.isoToLocalInput("2030-01-02T03:04:00Z");
+      out.unreadableLocalInput = page.isoToLocalInput("not a time");
+      const at = Date.UTC(2030, 0, 2, 3, 4, 0);
+      out.bareExpired = { atTheInstant: page.isExpired({ expires_at_utc: "2030-01-02T03:04:00" }, at), aMinuteBefore: page.isExpired({ expires_at_utc: "2030-01-02T03:04:00" }, at - 60000), noExpiry: page.isExpired({ expires_at_utc: null }, at), unreadable: page.isExpired({ expires_at_utc: "not a time" }, at) };
     },
   };
   await scenarios[scenario]();
