@@ -1116,7 +1116,7 @@
                                     <DataGridTextColumn Header="Rows" Binding="{Binding TotalRows, StringFormat=N0}" Width="110" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="To Disable" Binding="{Binding IndexesToDisable, StringFormat=N0}" Width="80" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="To Merge" Binding="{Binding IndexesToMerge, StringFormat=N0}" Width="80" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Compressable" Binding="{Binding CompressableIndexes, StringFormat=N0}" Width="100" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Compressible" Binding="{Binding CompressableIndexes, StringFormat=N0}" Width="100" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Unused" Binding="{Binding UnusedIndexes, StringFormat=N0}" Width="70" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Disable GB" Binding="{Binding UnusedSizeGb, StringFormat=#\,##0.00####}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Compress Min GB" Binding="{Binding CompressionMinSavingsGb, StringFormat=#\,##0.00####}" Width="120" ElementStyle="{StaticResource NumericCell}"/>

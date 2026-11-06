@@ -95,12 +95,14 @@ public partial class TimeRangeSlicerControl : UserControl
     /// Loads slicer data. All timestamps must be UTC.
     /// requestedStartUtc/requestedEndUtc define the full time window so the slicer
     /// shows the correct span even when data is sparse. Empty hours get zero-value buckets.
-    /// Selection defaults to the full range (no filtering until user interacts).
+    /// Selection defaults to the full range (no filtering until user interacts). A narrowed selection survives a reload
+    /// (<see cref="SlicerReloadSelection.Carry"/>) and is sent to the host again through <see cref="RangeChanged"/>, so the grid,
+    /// which the host loaded for the whole window, reads the range the highlight shows.
     /// </summary>
     public void LoadData(List<TimeSliceBucket> data, string metricLabel,
         DateTime? requestedStartUtc = null, DateTime? requestedEndUtc = null)
     {
-        // Preserve selection if we already have data (auto-refresh)
+        // A narrowed selection is kept across a reload (auto-refresh) as its two instants, re-placed on the new span below.
         DateTime? prevStart = null, prevEnd = null;
         if (_data.Count > 0 && (_rangeStart > 0 || _rangeEnd < 1.0))
         {
@@ -115,10 +117,11 @@ public partial class TimeRangeSlicerControl : UserControl
         _emptyText = null;
         _metricLabel = metricLabel;
 
-        if (prevStart.HasValue && prevEnd.HasValue && _data.Count >= 2)
+        var carried = _data.Count >= 2 ? SlicerReloadSelection.Carry(prevStart, prevEnd, DataStartUtc, DataEndUtc) : null;
+        if (carried is { } selection)
         {
-            _rangeStart = NormAtUtc(prevStart.Value);
-            _rangeEnd = NormAtUtc(prevEnd.Value);
+            _rangeStart = selection.Start;
+            _rangeEnd = selection.End;
         }
         else
         {
@@ -128,6 +131,11 @@ public partial class TimeRangeSlicerControl : UserControl
 
         UpdateRangeLabel();
         Redraw();
+
+        /* The host loads its grid for the whole window before it loads the slicer, so a carried selection goes to the grid the
+           way the handles send one: the grid then reads the range the highlight shows. */
+        if (carried is not null)
+            FireRangeChanged();
     }
 
     /// <summary>

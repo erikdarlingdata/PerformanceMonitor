@@ -168,7 +168,7 @@ CROSS JOIN range(0, 30) AS ii(i)";
     public void APointInAnHourWithNoBand_GetsNoMarker_AndTheOthersAreJudgedAgainstTheirOwnHour()
     {
         var t0 = new DateTime(2026, 11, 3, 0, 0, 0, DateTimeKind.Unspecified).ToOADate();
-        // Ten points, all at 5 ms. Band 0..2 ms for the first 0.35 day and the last 0.35 day; nothing between (points 4 and 5 sit there).
+        // Ten points, all at 5 ms. Band 0..2 ms for the first 0.35 day and the last 0.35 day; nothing between (points 4, 5 and 6 sit there, so 7 of the 10 are marked).
         var data = Enumerable.Range(0, 10).Select(i => (t0 + i / 10.0, 5.0)).ToList();
         IReadOnlyList<PerformanceMonitor.Ui.BaselineBand.HourStep> bands =
         [
@@ -176,17 +176,16 @@ CROSS JOIN range(0, 30) AS ii(i)";
             new(t0 + 0.65, t0 + 1, 1, 0, 2),
         ];
 
-        var dots = -1;
+        var marked = new List<double>();
         StaTestThread.Run(() =>
         {
             var control = new CorrelatedTimelineLanesControl();
             control.Initialize(null!, 1, () => TimeZoneInfo.Utc);
             control.UpdateLane(control.FileIoChart, "I/O ms", data, "#81C784", bands: bands, minAnomalyValue: 2);
-            dots = control.FileIoChart.Plot.GetPlottables<ScottPlot.Plottables.Scatter>()
-                .Where(sc => sc.LineWidth == 0).Sum(sc => sc.Data.GetScatterPoints().Count());
+            marked = Darling.Tests.OverviewLaneMarks.MarkedX(control.FileIoChart.Plot);
         });
 
-        Assert.Equal(8, dots);
+        Assert.Equal(new[] { 0, 1, 2, 3, 7, 8, 9 }.Select(i => t0 + i / 10.0).ToList(), marked);
     }
 
     [Fact]

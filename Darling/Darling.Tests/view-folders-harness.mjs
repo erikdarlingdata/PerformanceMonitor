@@ -178,6 +178,7 @@ try {
         options: all(b.node, (n) => n.tag === "option").map((n) => n.attrs.value),
         listLinked: folder.attrs.list === all(b.node, (n) => n.tag === "datalist")[0].attrs.id,
         maxlength: folder.attrs.maxlength,
+        links: all(b.node, (n) => n.tag === "a").map((n) => n.attrs.href + "|" + n.textContent),
       };
     };
     out.newWithIdentity = inspect(build(null, "alice"));
