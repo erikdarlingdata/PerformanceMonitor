@@ -30,7 +30,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// <see cref="MetricNames.IoLatencyChart"/> arm the Viewer's I/O lane reads, and blocking) and adds no statistics of its own.
 /// #7644: the answer is a stepped series, one step per local hour from the window start to now, so a window that crosses
 /// hours of the week draws each hour's own band; the page turns each step into mean +- 2 effective sigma, as the Viewer's
-/// lanes do. Because the read costs one step per hour of the window, <c>window_start</c> is bounded:
+/// lanes do. #7663: an hour that sat at exactly 0 is kept as a step marked <c>zero_activity</c> (no band, but not missing history); a lane with
+/// no step at all is null, and the page says "not enough history" for it. Because the read costs one step per hour of the window, <c>window_start</c> is bounded:
 /// <see cref="ValidateWindowStart"/> refuses one in the future (beyond <see cref="FutureSkew"/>) or older than
 /// <see cref="MaxWindowHours"/> plus <see cref="WindowSlack"/> before now, never clamping it.
 /// </summary>
@@ -85,32 +86,41 @@ internal static class DarlingWebOverviewBaselines
             var provider = ProviderFor(postgres, analysis);
             var lanes = await ReadLaneStepsAsync(provider, resolved.ServerId, startUtc, DateTime.UtcNow, cancellationToken);
 
-            var baselines = new JsonObject();
-            var any = false;
-            for (var i = 0; i < Lanes.Length; i++)
-            {
-                var usable = lanes[i].Count > 0;
-                any |= usable;
-                baselines[Lanes[i].Key] = usable ? new JsonObject { ["steps"] = new JsonArray(lanes[i].Select(Step).ToArray<JsonNode?>()) } : null;
-            }
-
-            /* Not enough history is its own answer, never a band at 0: the page draws no band and no markers and says why. */
-            if (!any)
-                return McpHelpers.Status("empty",
-                    "Not enough history yet to draw a baseline: the store holds no samples of CPU, waits, I/O latency or blocking for this hour of the week.");
-
-            return new JsonObject
-            {
-                ["status"] = "ok",
-                ["server"] = resolved.DisplayName,
-                ["window_start"] = startUtc.ToString("o", CultureInfo.InvariantCulture),
-                ["baselines"] = baselines,
-            }.ToJsonString(McpHelpers.JsonOptions);
+            return BuildReply(resolved.DisplayName, startUtc, lanes);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_overview_baselines", ex);
         }
+    }
+
+    /// <summary>
+    /// The reply for the four lanes' steps (in <see cref="Lanes"/> order). A lane with no step is null. A lane holding only zero-activity steps (#7663)
+    /// still counts as an answer, so a strip that sat at 0 on every metric is <c>ok</c>, not <c>empty</c>: the page says each metric sat at 0.
+    /// Not enough history in every lane is its own answer, never a band at 0: the page draws no band and no markers and says why.
+    /// </summary>
+    internal static string BuildReply(string displayName, DateTime startUtc, IReadOnlyList<PgBaselineProvider.BaselineStep>[] lanes)
+    {
+        var baselines = new JsonObject();
+        var any = false;
+        for (var i = 0; i < Lanes.Length; i++)
+        {
+            var usable = lanes[i].Count > 0;
+            any |= usable;
+            baselines[Lanes[i].Key] = usable ? new JsonObject { ["steps"] = new JsonArray(lanes[i].Select(Step).ToArray<JsonNode?>()) } : null;
+        }
+
+        if (!any)
+            return McpHelpers.Status("empty",
+                "Not enough history yet to draw a baseline: the store holds no samples of CPU, waits, I/O latency or blocking for this hour of the week.");
+
+        return new JsonObject
+        {
+            ["status"] = "ok",
+            ["server"] = displayName,
+            ["window_start"] = startUtc.ToString("o", CultureInfo.InvariantCulture),
+            ["baselines"] = baselines,
+        }.ToJsonString(McpHelpers.JsonOptions);
     }
 
     /// <summary>
@@ -129,11 +139,12 @@ internal static class DarlingWebOverviewBaselines
     }
 
     /// <summary>
-    /// #7644: the four lanes' usable hourly steps over the window, in <see cref="Lanes"/> order. The series is computed and cached
+    /// #7644: the four lanes' hourly steps over the window, in <see cref="Lanes"/> order. The series is computed and cached
     /// at <paramref name="nowUtc"/>, not at the window start: the answer holds all 168 hour-of-week buckets, and a
     /// daily-cache arm (I/O latency, CPU, blocking) keys on the UTC day of the instant it is asked at, so a window
     /// start of now minus 24 hours landed on yesterday's key, which the worker's pass never fills. Keyed on now it is the
-    /// key the worker uses and the shared tier holds. An hour with no usable bucket has no step.
+    /// key the worker uses and the shared tier holds. #7663: an hour keeps its step when it has a band (<see cref="Usable"/>) or sat at exactly 0
+    /// (<see cref="IsZeroActivity"/>, which <see cref="Step"/> marks); an hour with no samples has no step.
     /// </summary>
     internal static async Task<IReadOnlyList<PgBaselineProvider.BaselineStep>[]> ReadLaneStepsAsync(
         PgBaselineProvider provider, int serverId, DateTime windowStartUtc, DateTime nowUtc, CancellationToken cancellationToken)
@@ -142,13 +153,26 @@ internal static class DarlingWebOverviewBaselines
         for (var i = 0; i < Lanes.Length; i++)
             tasks[i] = provider.GetBaselineStepsSharedAsync(serverId, Lanes[i].Metric, windowStartUtc, nowUtc, nowUtc, cancellationToken);
         var all = await Task.WhenAll(tasks);
-        return all.Select(steps => (IReadOnlyList<PgBaselineProvider.BaselineStep>)steps.Where(s => Usable(s.Bucket)).ToList()).ToArray();
+        return all.Select(steps => (IReadOnlyList<PgBaselineProvider.BaselineStep>)steps.Where(s => Usable(s.Bucket) || IsZeroActivity(s.Bucket)).ToList()).ToArray();
     }
 
     /// <summary>The Viewer's own guard: a bucket with samples and a dispersion above zero draws a band; anything else draws none.</summary>
     internal static bool Usable(BaselineBucket bucket) => bucket.SampleCount > 0 && bucket.EffectiveStdDev > 0;
 
-    internal static JsonObject Step(PgBaselineProvider.BaselineStep step) => new()
+    /// <summary>
+    /// #7663: samples held, and every one read 0 (<see cref="BaselineBucket.EffectiveStdDev"/> is 0 only for mean 0 with no spread). Measured quiet, not
+    /// missing history: it draws no band, but the page says so instead of "not enough history".
+    /// </summary>
+    internal static bool IsZeroActivity(BaselineBucket bucket) => bucket.SampleCount > 0 && bucket.EffectiveStdDev <= 0;
+
+    internal static JsonObject Step(PgBaselineProvider.BaselineStep step)
+    {
+        var json = StepFields(step);
+        if (IsZeroActivity(step.Bucket)) json["zero_activity"] = true;
+        return json;
+    }
+
+    private static JsonObject StepFields(PgBaselineProvider.BaselineStep step) => new()
     {
         ["from"] = DateTime.SpecifyKind(step.FromUtc, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture),
         ["to"] = DateTime.SpecifyKind(step.ToUtc, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture),

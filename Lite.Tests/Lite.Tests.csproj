@@ -68,6 +68,8 @@
     <Compile Include="..\Darling\Darling.Tests\StatementScrubCanary.cs" Link="StatementScrubCanary.cs" />
     <!-- #5602 (was #5559's WpfStaGate): the one shared STA thread every WPF test body runs on, and the gate that keeps one body in at a time. -->
     <Compile Include="..\Darling\Darling.Tests\StaTestThread.cs" Link="StaTestThread.cs" />
+    <!-- #7678: reads the anomaly marks a lane drew (a run is one segment, a lone point one dot) from a real ScottPlot Plot, shared so both apps are held to the one rule. -->
+    <Compile Include="..\Darling\Darling.Tests\OverviewLaneMarks.cs" Link="OverviewLaneMarks.cs" />
     <!-- #7600: what the hang guard reads about the stuck thread (its native stack) and the process around it; StaTestThread.cs calls it. -->
     <Compile Include="..\Darling\Darling.Tests\StaThreadProbe.cs" Link="StaThreadProbe.cs" />
     <!-- #6136: finds the text a laid-out window cuts off, shared so both apps are held to the one rule. -->

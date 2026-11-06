@@ -249,12 +249,14 @@ function watchPlotWidth(host, draw, key, drawnW) {
  *   bucketMs   — optional ms (#7572): the width of one bucket of a trend whose reply states it (`bucket_minutes`). A step longer than
  *                one bucket breaks the line, so a quiet series thinned to its buckets with readings still shows its silences, and a
  *                lone reading is a dot. Absent => the cadence the series shows for itself, as before.
+ *   tooltipOffsetMs — optional ms (#7679): how far after its bucket's start each bar is stamped. A stacked bar is centred on its stamp, so an hourly
+ *                count is stamped at the middle of the hour, and the hover tooltip subtracts this to name the hour's start. Absent => the stamp, as before.
  *   windowExact— optional true (#7386): the window is exact and is never trimmed to the server's data start. A zoomed
  *                chart sets it. Without it, the axis starts at the later of windowStart and the server's data start
  *                (see xStartMs), moved back to the earliest plotted row when that is older.
  */
 export function renderLineChart(spec) {
-  const { points, xKey, series: allSeries, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2: series2Spec = null, onZoom = null, integerTicks = false, sizeUnit = null, windowStart = null, windowEnd = null, gapSeamMs = null, bucketMs = null } = spec;
+  const { points, xKey, series: allSeries, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2: series2Spec = null, onZoom = null, integerTicks = false, sizeUnit = null, windowStart = null, windowEnd = null, gapSeamMs = null, bucketMs = null, tooltipOffsetMs = 0 } = spec;
   const { title = null, source = null, zoomed = false, onResetZoom = null, menuKey = null, exportPoints = null } = spec;
   const widthKey = menuKey || spec.widthKey || null;
   const { hiddenKeys = null, onLegend = null, atTime = null } = spec;
@@ -790,7 +792,7 @@ export function renderLineChart(spec) {
 
       /* Tooltip is built with textContent only (values may include untrusted series labels). */
       while (tooltip.firstChild) tooltip.removeChild(tooltip.firstChild);
-      tooltip.appendChild(el("div", { class: "t-time", text: t.toLocaleString() }));
+      tooltip.appendChild(el("div", { class: "t-time", text: (tooltipOffsetMs ? new Date(t.getTime() - tooltipOffsetMs) : t).toLocaleString() }));
       for (const s of series) {
         const v = r[s.key];
         tooltip.appendChild(

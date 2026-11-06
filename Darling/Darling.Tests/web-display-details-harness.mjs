@@ -58,6 +58,9 @@ out.sqlReview = cellOf(AUDIT_COLUMNS, [{ setting: "max server memory (MB)", stat
 out.pgReview = cellOf(PG_AUDIT_COLUMNS, [{ setting: "work_mem", status: "review", current_value: "4" }], "Status");
 out.sqlOk = cellOf(AUDIT_COLUMNS, [{ setting: "x", status: "ok", current_value: "1" }], "Status");
 out.identityRemaining = cellOf(IDENTITY_COLUMNS, [{ database: "d", table: "t", column: "c", values_remaining: "1288348578" }], "Values remaining");
+/* #7679 item 7: the Band word is capitalised as Fleet Overview prints it, and the one casing for status words keeps ok as OK. */
+out.identityBandCritical = cellOf(IDENTITY_COLUMNS, [{ database: "d", table: "t", column: "c", band: "critical" }], "Band");
+out.identityBandOk = cellOf(IDENTITY_COLUMNS, [{ database: "d", table: "t", column: "c", band: "ok" }], "Band");
 out.bloatSize = cellOf(PG_INDEX_BLOAT_COLUMNS, [{ schema_name: "s", table_name: "t", index_name: "i", index_bytes: 209715, estimated_reclaimable_bytes: null }], "Size");
 out.bloatReclaimable = cellOf(PG_INDEX_BLOAT_COLUMNS, [{ schema_name: "s", table_name: "t", index_name: "i", index_bytes: 209715, estimated_reclaimable_bytes: null }], "Reclaimable");
 out.pid = cellOf(PG_SESSION_STATE_COLUMNS, [{ pid: 5828 }], "PID");
@@ -99,6 +102,13 @@ out.planId = cellOf(QUERY_STORE_COLUMNS, [{ query_id: 5568, plan_id: 7712 }], "P
   for (const [name, list] of Object.entries(sets)) {
     out.memoryState[name] = { count: list.length, noted: list.map((st) => tile(st, { system_memory_state: null, system_memory_state_note: note })).join("|"), bare: list.map((st) => tile(st, { system_memory_state: null })).join("|"), valued: list.map((st) => tile(st, { system_memory_state: "Available physical memory is high", system_memory_state_note: note })).join("|") };
   }
+}
+
+/* #7679 item 5: a line panel with no format prints a whole-number axis with the thousands separator (60,000, not 60000). */
+{
+  const pts = [0, 1, 2].map((i) => ({ time: "2026-11-05T0" + i + ":00:00", total_duration_ms: i * 30000 }));
+  const chart = VIZ.line({ rows: pts }, { rowsKey: "rows", xKey: "time", title: "Severity", series: [{ key: "total_duration_ms", label: "Total Wait (ms)" }] });
+  out.axisTicks = chart.findAll((n) => n.tag === "text").map((n) => n.textContent).filter((t) => /^[\d,]+$/.test(t)).join(" | ");
 }
 
 /* #7552 item 10: an hour of memory pressure events is stamped at its middle, because the chart centres a bar on its stamp. */
