@@ -96,21 +96,26 @@ public partial class ViewerServerTab
     private bool _suppressCompareRefresh;
 
     /// <summary>
-    /// The baseline window for the current Compare selection — a straight shift of the current window
-    /// (Yesterday = -1 day, Last week / Same day last week = -7 days). Null when Compare is "None".
+    /// The baseline window for a Compare selection: Yesterday is one day back, Last week and Same day last week
+    /// are seven days back, None (index &lt;= 0) is no comparison. A static helper, the way Lite's
+    /// <c>ServerTab.ShiftComparisonRange</c> is, so a test can drive the arithmetic without constructing the WPF
+    /// control.
     /// </summary>
-    private (DateTime From, DateTime To)? GetComparisonRange(DateTime currentStart, DateTime currentEnd)
-    {
-        if (CompareToCombo == null || CompareToCombo.SelectedIndex <= 0) return null;
-
-        return CompareToCombo.SelectedIndex switch
+    internal static (DateTime From, DateTime To)? ShiftComparisonRange(int selectedIndex, DateTime currentStart, DateTime currentEnd)
+        => selectedIndex switch
         {
             1 => (currentStart.AddDays(-1), currentEnd.AddDays(-1)),   // Yesterday
             2 => (currentStart.AddDays(-7), currentEnd.AddDays(-7)),   // Last week
             3 => (currentStart.AddDays(-7), currentEnd.AddDays(-7)),   // Same day last week
             _ => null,
         };
-    }
+
+    /// <summary>
+    /// The baseline window for the current Compare selection (<see cref="ShiftComparisonRange"/> over the combo's
+    /// index). Null when Compare is "None".
+    /// </summary>
+    private (DateTime From, DateTime To)? GetComparisonRange(DateTime currentStart, DateTime currentEnd)
+        => CompareToCombo == null ? null : ShiftComparisonRange(CompareToCombo.SelectedIndex, currentStart, currentEnd);
 
     private void SetComparisonMode(
         DataGrid normalGrid, DataGrid comparisonGrid, TextBlock banner,
