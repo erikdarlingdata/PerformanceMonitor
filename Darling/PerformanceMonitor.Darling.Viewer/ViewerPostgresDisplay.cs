@@ -173,25 +173,32 @@ internal static class PgDisplay
         public double? WinnerShareSort { get; init; }
     }
 
-    internal static XminRow Xmin(DarlingPgXminReader.PgXminRow row) => new()
+    /// <param name="row">One source's current holder and its window figures.</param>
+    /// <param name="capturesInWindow">Every successful pg_xmin_horizon capture in the window (<c>DarlingPgXminReader.GetXminCapturesInWindowAsync</c>), not this
+    /// source's own row count (#8014). The collector stores nothing on an unheld capture, so a source's own count is only the captures in which it was a
+    /// holder: a session that won both of its 2 rows out of 288 captures is not a standing holder.</param>
+    internal static XminRow Xmin(DarlingPgXminReader.PgXminRow row, long capturesInWindow) => new()
     {
         Source = row.Source,
         IsWinnerText = row.IsWinner ? "yes" : "",
         XminAge = Count(row.XminAge),
         PeakXminAge = Count(row.PeakXminAge),
-        /* The share, not the raw count. A slot that won 58 of 60 samples is a standing problem someone
+        /* The share, not the raw count. A slot that won 58 of 60 captures is a standing problem someone
            needs to own; a session that won twice is a query that ran long and finished. Reporting only the
-           current holder makes those two look the same. */
-        WinnerShare = row.Samples <= 0
+           current holder makes those two look the same. Over EVERY capture in the window, the denominator
+           get_pg_xmin_horizon's pct_of_window_winning uses (#3541 A12, #8014): the source's own row count
+           made 2 wins in 2 rows out of 60 captures read "2 of 2". Unclamped, as there: an undercounting log
+           shows a share above 100 rather than being rounded into a lie. */
+        WinnerShare = capturesInWindow <= 0
             ? NotApplicableText
-            : string.Create(CultureInfo.CurrentCulture, $"{row.SamplesAsWinner:N0} of {row.Samples:N0} samples"),
+            : string.Create(CultureInfo.CurrentCulture, $"{row.SamplesAsWinner:N0} of {capturesInWindow:N0} captures"),
         MeasuredAt = Timestamp(row.MeasuredAt),
         MeasuredAtUtc = row.MeasuredAt,
         Holder = row.Holder ?? "",
         Detail = row.Detail ?? "",
         XminAgeSort = Raw(row.XminAge),
         PeakXminAgeSort = Raw(row.PeakXminAge),
-        WinnerShareSort = row.Samples <= 0 ? null : row.SamplesAsWinner / (double)row.Samples,
+        WinnerShareSort = capturesInWindow <= 0 ? null : row.SamplesAsWinner / (double)capturesInWindow,
     };
 
     internal sealed class AutovacuumRow
