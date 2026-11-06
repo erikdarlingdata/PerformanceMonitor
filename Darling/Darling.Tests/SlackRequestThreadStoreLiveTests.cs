@@ -23,11 +23,11 @@ public sealed class SlackRequestThreadProbeTests
 {
     /// <summary>
     /// The thread table is the V252 sentinel and the top arm: a store with every sentinel maps to the build's schema version, and the same
-    /// store without the thread table maps to 249. Built by reflection, as the full-sentinel pin in <c>ViewerDataServiceTests</c> is, so
+    /// store without the thread table maps to 251. Built by reflection, as the full-sentinel pin in <c>ViewerDataServiceTests</c> is, so
     /// the arity tracks the signature and the arm is found by its parameter name rather than by its ordinal.
     /// </summary>
     [Fact]
-    public void TheProbe_MapsTheThreadTableTo252_AndItsAbsenceTo249()
+    public void TheProbe_MapsTheThreadTableTo252_AndItsAbsenceTo251()
     {
         var map = typeof(ViewerDataService).GetMethod(
             nameof(ViewerDataService.MapProbedSchemaVersion),
@@ -43,7 +43,7 @@ public sealed class SlackRequestThreadProbeTests
 
         var withoutThreads = (object[])allTrue.Clone();
         withoutThreads[threads] = false;
-        Assert.Equal(249, (int)map.Invoke(null, withoutThreads)!);
+        Assert.Equal(251, (int)map.Invoke(null, withoutThreads)!);
     }
 }
 
