@@ -1644,7 +1644,7 @@ table.data td.rec-text { min-width: 16rem; }
 .qh-grid .qh-cell { height: 22px; padding: 0; }
 .qh-grid .qh-corner, .qh-grid .qh-rowhead { width: var(--qh-head); box-sizing: border-box; } /* #7542: the one row-head width, also read by the table's min-width in query-heatmap.js */
 .qh-grid .qh-rowhead { position: sticky; left: 0; z-index: 1; background: var(--card); padding: 0 0.5rem 0 0; font-weight: normal; font-size: 0.7rem; color: var(--muted); text-align: right; white-space: nowrap; }
-.qh-grid .qh-tick { font-size: 0.65rem; color: var(--muted); font-weight: normal; text-align: left; white-space: nowrap; overflow: visible; }
+.qh-grid .qh-tick { font-size: 0.65rem; color: var(--muted); font-weight: normal; text-align: left; white-space: nowrap; overflow: hidden; } /* #7653: a label wider than its cell is clipped at the cell and never painted past the table, so .qh-wrap scrolls only when the cells themselves do not fit */
 .qh-empty { background: transparent; box-shadow: inset 0 0 0 1px rgba(168, 174, 186, 0.28); }
 .qh-band-1 { background: rgba(46, 174, 241, 0.20); }
 .qh-band-2 { background: rgba(46, 174, 241, 0.30); }

@@ -45,6 +45,7 @@ public sealed class PgStatementStatsRowCoherentResetTests
             (object?)statsSince ?? DBNull.Value,
             targetNow,
             DBNull.Value,
+            DBNull.Value,  /* #7731: database_name */
         };
 
     private static async Task<System.Collections.Generic.List<PgStatementStatsCollector.Row>> RunReadAsync(

@@ -85,9 +85,11 @@ export function renderHeatmapBody(data, opts) {
     const head = el("tr", {}, [el("th", { class: "qh-corner" })]);
     for (let c = 0; c < grid.columns; c += tick) {
       const span = Math.min(tick, grid.columns - c);
-      /* #7683: a window that starts and ends mid-bin leaves a last label with one or two columns under it, too narrow for its text (it clipped
-         to "11"). That label is left blank; its columns still count in the row. */
-      const label = span < Math.min(tick, 3) ? "" : axisTime(new Date(grid.startMs + c * grid.binMs), spansDays);
+      /* #7653: the last label sits over whatever columns are left after the 12-column ticks, 1 to 11 when the window starts or ends mid-bin
+         or a cut read starts at any bin. A label over fewer columns than a tick has no room its text is sure to fit (a day-qualified time
+         needs about a tick's width at 1280 px), and its text ran past the table's edge and gave the panel a sideways scrollbar. It is left
+         blank; its columns still count in the row. app.css clips each tick cell, so no label paints past the table at any width. */
+      const label = span < tick ? "" : axisTime(new Date(grid.startMs + c * grid.binMs), spansDays);
       head.appendChild(el("th", { class: "qh-tick", colspan: String(span), text: label }));
     }
     table.appendChild(head);

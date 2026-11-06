@@ -332,10 +332,12 @@ export const PG_LOGGING_AUDIT_COLUMNS = [
   { key: "cost_note", label: "Cost", exportOnly: true },
 ];
 
-/* #7410: the query text is the second column, with room to read (`query-cell`), and not the last one cut off after a few characters. The
-   Query ID stays first. The three counters only some engines fill (temp blocks, WAL, peak memory) leave the grid when every row of the
+/* #7410: the query text is the third column, with room to read (`query-cell`), and not the last one cut off after a few characters.
+   #7731: the Database is first, because one Query ID in two databases is two rows with different figures and the row has to say which.
+   The reply always carries a name (`database <id>` when none was collected), so the cell is plain text. The three counters only some engines fill (temp blocks, WAL, peak memory) leave the grid when every row of the
    reply holds 0 or nothing, which the reply says, so no engine name is tested. */
 export const PG_TOP_QUERY_COLUMNS = [
+  { key: "database_name", label: "Database" },
   { key: "queryid", label: "Query ID", mono: true },
   { key: "query_text", label: "Query", wrap: true, valueList: false, cellClass: () => "query-cell", render: (row) => codeDisclosure(row.service_statement && row.query_text ? "[Performance Monitor's own statement] " + row.query_text : row.query_text) },
   { key: "calls", label: "Calls", format: "int" },

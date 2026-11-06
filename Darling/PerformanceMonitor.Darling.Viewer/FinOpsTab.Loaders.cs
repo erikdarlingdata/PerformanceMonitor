@@ -441,7 +441,7 @@ public partial class FinOpsTab
 
     private async Task LoadFinOpsPvsStatsAsync()
     {
-        var (data, secondaryNote) = await _dataService.GetPvsStatsLatestWithNoteAsync(_server.ServerId, SelectedDatabaseFilter);
+        var (data, secondaryNote) = await _dataService.GetPvsStatsLatestWithNoteAsync(_server, SelectedDatabaseFilter);
 
         /* #7706: a database held only as an availability group secondary copy has no row here; the strip says so, as the web page does. */
         FinOpsPvsSecondaryNote.Text = secondaryNote ?? "";
