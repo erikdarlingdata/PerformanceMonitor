@@ -231,7 +231,9 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
         /* One snapshot a day for RetainedDays days, the newest one now, so each of the four tables holds about one chunk per
            day (the product's chunk interval is one day). The newest snapshot is the one every read below must plan for. */
         const int RetainedDays = 30;
-        var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+        /* LiveClock.Now(), not AnchoredEnd(): the answer holds at any hour. The snapshots are a day apart, so each lands in its
+           own one-day chunk wherever the boundary falls, and every read below matches the newest stamp exactly (#5608). */
+        var now = LiveClock.Now();
         for (var day = RetainedDays - 1; day >= 0; day--)
         {
             var stamp = now.AddDays(-day);
@@ -254,8 +256,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
                 $"{table} has {(chunks.TryGetValue(table, out var s) ? s.Count : 0)} chunk(s); the seed did not produce one per day, so the plan would prove nothing");
         }
 
-        var windowTwoDays = Naive(DateTime.UtcNow.AddDays(-2));
-        var windowThreeDays = Naive(DateTime.UtcNow.AddDays(-3));
+        var windowTwoDays = Naive(now.AddDays(-2));
+        var windowThreeDays = Naive(now.AddDays(-3));
 
         /* The snapshots as the readers resolve them: every probe lands on the newest row. */
         var sessionSnapshot = await DarlingSessionStatsReader.GetLatestSnapshotTimeAsync(postgres, FreshId, 30, ct);
