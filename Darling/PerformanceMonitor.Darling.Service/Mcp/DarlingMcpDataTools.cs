@@ -3738,15 +3738,18 @@ ORDER BY server_name";
         }
     }
 
-    [McpServerTool(Name = "get_current_waits_trend"), Description("Gets the two Current Waits series over time for a server: waiting-task total wait duration per wait type per collection, and blocked-session counts per database per collection. get_waiting_tasks answers 'what is waiting right now' and can never say whether it is worse than an hour ago — this is that question. Use it to tell a server that is always mildly blocked from one that just started, and to see which database owns the blocking over the window rather than in one snapshot.")]
+    [McpServerTool(Name = "get_current_waits_trend"), Description("Gets the two Current Waits series over time for a server: waiting-task total wait duration per wait type, and blocked-session counts per database, in time buckets. Each point is the figure of ONE collection averaged over the collections in its bucket (with the largest single collection as peak_* and the collection_count), so a wider bucket never reads as a bigger wait. get_waiting_tasks answers 'what is waiting right now' and can never say whether it is worse than an hour ago — this is that question. Use it to tell a server that is always mildly blocked from one that just started, and to see which database owns the blocking over the window rather than in one snapshot.")]
     public static Task<string> GetCurrentWaitsTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 4. No upper bound (this read exists to look further back than the 168-hour reads allow); a negative or zero value is refused rather than read as its absolute value.")] int hours_back = 4,
         [Description("Limit the blocked-session series to one database. Omit for all databases.")] string? database_name = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
         CancellationToken cancellationToken = default) =>
-        GetCurrentWaitsTrend(postgres, server_name, hours_back, DatabaseFilter.One(database_name), as_of, cancellationToken);
+        GetCurrentWaitsTrend(
+            postgres, server_name, hours_back, DatabaseFilter.One(database_name), as_of, bucket_minutes,
+            TrendBudget.Mcp(TrendBuckets.WaitMaxPoints), cancellationToken);
 
     /// <summary>
     /// #5244: <see cref="GetCurrentWaitsTrend(NpgsqlDataSource,string,int,string,string,CancellationToken)"/> over a SET of
@@ -3755,8 +3758,18 @@ ORDER BY server_name";
     /// both-series-empty answers below name no database: "nothing was waiting" is true of the whole server, because the
     /// waiting-task series the filter never touches is empty too, so neither text is a verdict about a database the read skipped.
     /// </summary>
-    internal static async Task<string> GetCurrentWaitsTrend(
+    internal static Task<string> GetCurrentWaitsTrend(
         NpgsqlDataSource postgres, string? server_name, int hours_back, DatabaseFilter databases, string? as_of,
+        CancellationToken cancellationToken = default) =>
+        GetCurrentWaitsTrend(postgres, server_name, hours_back, databases, as_of, null, TrendBudget.Mcp(TrendBuckets.WaitMaxPoints), cancellationToken);
+
+    /// <summary>
+    /// get_current_waits_trend under an explicit <paramref name="budget"/> (#7877, #7904), sized as <c>get_wait_trend</c> is: the MCP tool passes
+    /// <see cref="TrendBuckets.WaitMaxPoints"/>'s own, the web viewer's <c>/api/read</c> mirror <see cref="TrendBudget.Chart"/>. Both series are
+    /// bucketed, and the width is sized for the wait types plus the databases the window holds, because the budget counts points across every series.
+    /// </summary>
+    internal static async Task<string> GetCurrentWaitsTrend(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, DatabaseFilter databases, string? as_of, int? bucket_minutes, TrendBudget budget,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -3771,14 +3784,23 @@ ORDER BY server_name";
         var anchorError = DarlingReadWindow.ValidateUncapped(hours_back, as_of, out var windowEnd);
         if (anchorError != null) return anchorError;
 
+        /* An unusable width is refused before anything is read; the cap waits for the series count, as get_file_io_trend does. */
+        var widthError = TrendBuckets.ValidateWidth(bucket_minutes);
+        if (widthError != null) return widthError;
+
         try
         {
             var end = windowEnd;
             var start = end.AddHours(-hours_back);
 
-            var waits = await DarlingDataReader.GetWaitingTaskTrendAsync(postgres, resolved.ServerId, start, end, cancellationToken);
+            var seriesCount = await DarlingDataReader.CountWaitingTaskSeriesAsync(postgres, resolved.ServerId, start, end, cancellationToken)
+                + await DarlingDataReader.CountBlockedSessionSeriesAsync(postgres, resolved.ServerId, start, end, databases, cancellationToken);
+            var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, Math.Max(1, seriesCount), budget, out var bucketMinutes);
+            if (bucketError != null) return bucketError;
+
+            var waits = await DarlingDataReader.GetWaitingTaskTrendAsync(postgres, resolved.ServerId, start, end, bucketMinutes, cancellationToken);
             var blocked = await DarlingDataReader.GetBlockedSessionTrendAsync(
-                postgres, resolved.ServerId, start, end, databases, cancellationToken);
+                postgres, resolved.ServerId, start, end, databases, bucketMinutes, cancellationToken);
 
             if (waits.Count == 0 && blocked.Count == 0)
             {
@@ -3824,33 +3846,19 @@ ORDER BY server_name";
             }
 
             var notice = await TableNoticeAsync(postgres, "waiting_tasks", resolved.ServerName, start, end, emptyAnswer: false, cancellationToken);
-            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
+            var head = new Dictionary<string, object?>
             {
-                server = resolved.DisplayName,
-                hours_back = hours_back,
-                effective_start = notice.EffectiveStart,
-                window_truncated = notice.WindowTruncated,
-                truncation_note = notice.TruncationNote,
+                ["server"] = resolved.DisplayName,
+                ["hours_back"] = hours_back,
+                ["effective_start"] = notice.EffectiveStart,
+                ["window_truncated"] = notice.WindowTruncated,
+                ["truncation_note"] = notice.TruncationNote,
                 /* #5244: the name for one database, "the chosen databases" for two or more, null for all. */
-                database_name = databases.Describe(),
-                /*
-                    Two series in one payload because they are read together: a wait-type spike with no
-                    blocked sessions is a resource wait, and the same spike WITH them is contention. Split
-                    across two tools a caller can fetch one and draw the wrong conclusion.
-                */
-                waiting_tasks = waits.Select(w => new
-                {
-                    collection_time = w.CollectionTime.ToString("o"),
-                    wait_type = w.WaitType,
-                    total_wait_ms = w.TotalWaitMs,
-                }),
-                blocked_sessions = blocked.Select(b => new
-                {
-                    collection_time = b.CollectionTime.ToString("o"),
-                    database_name = b.DatabaseName,
-                    blocked_count = b.BlockedCount,
-                }),
-            }, McpHelpers.JsonOptions), notice);
+                ["database_name"] = databases.Describe(),
+            };
+            /* One builder for both SKUs' envelope (TrendPayloads), so the keys and the meaning of each figure cannot drift. */
+            return DarlingMcpWindowNotice.Finish(
+                TrendPayloads.CurrentWaitsTrend(head, waits, blocked, bucketMinutes, bucket_minutes is not null, budget.AutoPoints), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

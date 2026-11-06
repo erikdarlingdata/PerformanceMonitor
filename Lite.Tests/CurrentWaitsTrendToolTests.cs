@@ -8,9 +8,11 @@
 
 using System;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -138,6 +140,57 @@ public sealed class CurrentWaitsTrendToolTests : IClassFixture<SharedDuckDbFixtu
         var blocked = root.GetProperty("blocked_sessions");
         Assert.Equal(1, blocked.GetArrayLength());
         Assert.Equal("AppDb", blocked[0].GetProperty("database_name").GetString());
+    }
+
+    /// <summary>
+    /// #7877, #7904: two hours of one-minute collections read with a 30-hour look-back, as Darling's twin test does. The read summed a
+    /// bucket and said nothing about it; now each point is still the figure of ONE collection (averaged over the bucket) and the payload
+    /// names the width and each point's collection count.
+    /// </summary>
+    [Fact]
+    public async Task ALongWindow_IsBucketed_EachPointIsPerCollection_AndNamesItsWidthAndCount()
+    {
+        var service = new LocalDataService(_duckDb);
+        const int collections = 120;
+        for (var minute = 0; minute < collections; minute++)
+        {
+            await SeedWaitAsync(DateTime.UtcNow.AddMinutes(-(5 + minute)), "LCK_M_X", 500, blockingSessionId: 99, database: "AppDb");
+        }
+
+        var root = JsonDocument.Parse(await McpHealthTools.GetCurrentWaitsTrend(service, _serverManager, ServerName, 30, null)).RootElement;
+
+        var bucketMinutes = root.GetProperty("bucket_minutes").GetInt32();
+        Assert.True(bucketMinutes > 1, "a 30-hour window with two series cannot be served one collection per point");
+        Assert.Contains("ONE collection", root.GetProperty("note").GetString(), StringComparison.Ordinal);
+        var waits = root.GetProperty("waiting_tasks").EnumerateArray().ToArray();
+        var blocked = root.GetProperty("blocked_sessions").EnumerateArray().ToArray();
+        Assert.NotEmpty(waits);
+        Assert.NotEmpty(blocked);
+        Assert.True(waits.Length + blocked.Length <= TrendBuckets.McpPointBudget, "the two series together stay within the point budget");
+
+        /* Every point is the figure of one collection, whatever the width: 500 ms, never 500 times the collections it merged. */
+        Assert.All(waits, w =>
+        {
+            Assert.Equal(500, w.GetProperty("total_wait_ms").GetInt64());
+            Assert.Equal(500, w.GetProperty("peak_wait_ms").GetInt64());
+        });
+        Assert.All(blocked, b =>
+        {
+            Assert.Equal(1, b.GetProperty("blocked_count").GetDouble());
+            Assert.Equal(1, b.GetProperty("peak_blocked_count").GetInt64());
+        });
+        Assert.True(waits.Max(w => w.GetProperty("collection_count").GetInt64()) > 1, "a bucket says how many collections it covers");
+        Assert.Equal(collections, waits.Sum(w => w.GetProperty("collection_count").GetInt64()));
+
+        /* A width the caller names is refused, not widened, when it would put more points on the wire than the read's cap. */
+        var narrow = await McpHealthTools.GetCurrentWaitsTrend(service, _serverManager, ServerName, 30, null, null, 1);
+        Assert.Contains("bucket_minutes", narrow, StringComparison.Ordinal);
+        Assert.DoesNotContain("waiting_tasks", narrow, StringComparison.Ordinal);
+
+        /* A window short enough to need no bucketing serves one point per collection. */
+        var shortWindow = JsonDocument.Parse(await McpHealthTools.GetCurrentWaitsTrend(service, _serverManager, ServerName, 1, null)).RootElement;
+        Assert.Equal(1, shortWindow.GetProperty("bucket_minutes").GetInt32());
+        Assert.Equal(1, shortWindow.GetProperty("waiting_tasks")[0].GetProperty("collection_count").GetInt64());
     }
 
     /// <summary>#5244 L3: a blank database_name is "no filter" and is echoed as null, the way Darling's twin echoes it; a name is echoed as sent.</summary>

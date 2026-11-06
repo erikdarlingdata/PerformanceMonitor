@@ -40,6 +40,16 @@ internal sealed record LockWaitPoint(DateTime BucketStart, double WaitTimeMsPerS
 /// rated collections covered, and the worst single collection's wait rate.</summary>
 internal sealed record WaitBucketPoint(DateTime BucketStart, double WaitTimeMsPerSecond, double SignalWaitTimeMsPerSecond, double? PeakWaitTimeMsPerSecond);
 
+/// <summary>One bucket of one wait type on <c>get_current_waits_trend</c> (#7877, #7904): the wait type's total wait across its
+/// waiting tasks in ONE collection, averaged over the collections of the bucket in which it was waiting, the largest such single
+/// collection, and how many collections that was.</summary>
+internal sealed record CurrentWaitsWaitPoint(DateTime BucketStart, string WaitType, long AvgWaitMs, long PeakWaitMs, long CollectionCount);
+
+/// <summary>One bucket of one database's blocked sessions on <c>get_current_waits_trend</c> (#7877, #7904): the distinct blocked
+/// sessions in ONE collection, averaged over the bucket's collections in which the database had any, the most any one of them saw,
+/// and how many collections that was.</summary>
+internal sealed record CurrentWaitsBlockedPoint(DateTime BucketStart, string DatabaseName, double AvgBlockedCount, long PeakBlockedCount, long CollectionCount);
+
 /// <summary>One bucket of CPU samples (#3960): each percentage averaged over the samples in the bucket, the busiest
 /// single sample's SQL and total CPU, and how many samples the bucket held. The other, total, idle and peak-total figures are
 /// null for a bucket whose samples all lack an other-process reading (#7682: SQL Server on Linux before 2025 CU1 cannot report host CPU).</summary>
@@ -669,6 +679,50 @@ internal static class TrendPayloads
         p.RatedSeconds is > 0 ? (p.RatedDelta, p.RatedSeconds)
         : p.UnknowableCollections > 0 ? (p.UnknowableDelta, 0)
         : (p.UnrecordedDelta, null);
+
+    /// <summary>What a <c>get_current_waits_trend</c> point means (#7877, #7904), said once in the payload because the same keys meant
+    /// "one collection" before the read was bucketed.</summary>
+    public const string CurrentWaitsFiguresNote =
+        "total_wait_ms is the wait type's total across its waiting tasks in ONE collection, averaged over the collections of the bucket in which that wait type was waiting; "
+        + "blocked_count is the distinct blocked sessions of a database in ONE collection, averaged the same way. "
+        + "peak_wait_ms and peak_blocked_count are the largest single collection in the bucket, so a spike survives the rollup, and collection_count is how many collections the average covers. "
+        + "A collection in which a wait type or database had nothing waiting or blocked has no row and is not in its count. "
+        + "A bucket that holds one collection is that collection's own figure.";
+
+    /// <summary>
+    /// <c>get_current_waits_trend</c>'s data envelope (#7877, #7904), both SKUs: the waiting-task series per wait type and the
+    /// blocked-session series per database, each point one bucket stamped at the bucket's start under the existing
+    /// <c>collection_time</c> key. <paramref name="head"/> carries the keys the product puts first (its window notice fields,
+    /// the database echo); the bucket width, the figures note and the two series follow it.
+    /// </summary>
+    public static string CurrentWaitsTrend(
+        Dictionary<string, object?> head, IReadOnlyList<CurrentWaitsWaitPoint> waits, IReadOnlyList<CurrentWaitsBlockedPoint> blocked,
+        int bucketMinutes, bool requested, int autoBudget)
+    {
+        head["bucket"] = TrendBuckets.Word(bucketMinutes);
+        head["bucket_minutes"] = bucketMinutes;
+        head["aggregate_note"] = TrendBuckets.Sizing(requested, autoBudget);
+        head["note"] = $"Each point is one {TrendBuckets.Adjective(bucketMinutes)} bucket stamped at the bucket's start (the first point at the window's start). {CurrentWaitsFiguresNote}";
+        /* Two series in one payload because they are read together: a wait-type spike with no blocked sessions is a resource wait,
+           and the same spike WITH them is contention. */
+        head["waiting_tasks"] = waits.Select(w => new
+        {
+            collection_time = Stamp(w.BucketStart),
+            wait_type = w.WaitType,
+            total_wait_ms = w.AvgWaitMs,
+            peak_wait_ms = w.PeakWaitMs,
+            collection_count = w.CollectionCount,
+        });
+        head["blocked_sessions"] = blocked.Select(b => new
+        {
+            collection_time = Stamp(b.BucketStart),
+            database_name = b.DatabaseName,
+            blocked_count = Math.Round(b.AvgBlockedCount, 1),
+            peak_blocked_count = b.PeakBlockedCount,
+            collection_count = b.CollectionCount,
+        });
+        return JsonSerializer.Serialize(head, McpHelpers.JsonOptions);
+    }
 
     /// <summary>A point's stamp in the store's own frame (naive UTC, printed like every collection time).</summary>
     private static string Stamp(DateTime value) =>

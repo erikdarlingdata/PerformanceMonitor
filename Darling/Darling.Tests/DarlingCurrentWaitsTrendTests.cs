@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -176,6 +177,83 @@ public sealed class DarlingCurrentWaitsTrendTests
             /* A server with no probes in the window: empty, and the window statement is not a not_collected claim. */
             var probes = JsonDocument.Parse(await DarlingMcpStallProbeTools.GetCollectorStallProbes(dataSource, ServerName, 7));
             Assert.Equal("empty", probes.RootElement.GetProperty("status").GetString());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #7877, #7904: two hours of one-minute collections read with a 30-hour look-back. The read used to return one row per collection
+    /// per series (120 each, over the point budget); now each point is a bucket carrying its width and collection count, and its figure is
+    /// still the figure of ONE collection (the average over the bucket), never the bucket's sum.
+    /// </summary>
+    [Fact]
+    public async Task ALongWindow_IsBucketed_EachPointIsPerCollection_AndNamesItsWidthAndCount_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live current-waits trend test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET created_date = $2 WHERE server_id = $1", ServerId, DarlingMcpTestData.Naive(DateTime.UtcNow.AddDays(-3)));
+
+            const int collections = 120;
+            for (var minute = 0; minute < collections; minute++)
+            {
+                await SeedWaitAsync(connection, ct, MinutesAgo(5 + minute), "LCK_M_X", 500, blockingSessionId: 99, database: "AppDb");
+            }
+
+            var root = JsonDocument.Parse(await DarlingMcpDataTools.GetCurrentWaitsTrend(dataSource, ServerName, 30, null)).RootElement;
+
+            /* The width and its meaning ride the payload, and the answer stays inside the point budget. */
+            var bucketMinutes = root.GetProperty("bucket_minutes").GetInt32();
+            Assert.True(bucketMinutes > 1, "a 30-hour window with two series cannot be served one collection per point");
+            Assert.Contains("ONE collection", root.GetProperty("note").GetString(), StringComparison.Ordinal);
+            var waits = root.GetProperty("waiting_tasks").EnumerateArray().ToArray();
+            var blocked = root.GetProperty("blocked_sessions").EnumerateArray().ToArray();
+            Assert.NotEmpty(waits);
+            Assert.NotEmpty(blocked);
+            Assert.True(waits.Length + blocked.Length <= TrendBuckets.McpPointBudget, "the two series together stay within the point budget");
+
+            /* Every point is the figure of one collection, whatever the width: 500 ms, never 500 times the collections it merged. */
+            Assert.All(waits, w =>
+            {
+                Assert.Equal(500, w.GetProperty("total_wait_ms").GetInt64());
+                Assert.Equal(500, w.GetProperty("peak_wait_ms").GetInt64());
+            });
+            Assert.All(blocked, b =>
+            {
+                Assert.Equal(1, b.GetProperty("blocked_count").GetDouble());
+                Assert.Equal(1, b.GetProperty("peak_blocked_count").GetInt64());
+            });
+            Assert.True(waits.Max(w => w.GetProperty("collection_count").GetInt64()) > 1, "a bucket says how many collections it covers");
+            Assert.Equal(collections, waits.Sum(w => w.GetProperty("collection_count").GetInt64()));
+
+            /* A width the caller names is refused, not widened, when it would put more points on the wire than the read's cap. */
+            var narrow = await DarlingMcpDataTools.GetCurrentWaitsTrend(dataSource, ServerName, 30, null, null, 1);
+            Assert.Contains("bucket_minutes", narrow, StringComparison.Ordinal);
+            Assert.DoesNotContain("waiting_tasks", narrow, StringComparison.Ordinal);
+
+            /* A window short enough to need no bucketing serves one point per collection, as before. */
+            var shortWindow = JsonDocument.Parse(await DarlingMcpDataTools.GetCurrentWaitsTrend(dataSource, ServerName, 1, null)).RootElement;
+            Assert.Equal(1, shortWindow.GetProperty("bucket_minutes").GetInt32());
+            Assert.Equal(1, shortWindow.GetProperty("waiting_tasks")[0].GetProperty("collection_count").GetInt64());
 
             bodySucceeded = true;
         }
