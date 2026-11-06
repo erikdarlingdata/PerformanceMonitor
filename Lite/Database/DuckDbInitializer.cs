@@ -192,6 +192,12 @@ public partial class DuckDbInitializer : IDisposable
        a read hold is open reads it to know the writer has reached the lock wait before the hold ends. */
     internal static int WaitingWriteCountForTests => s_dbLock.WaitingWriteCount;
 
+    /* Test seam (#7256): how many budgeted writers are between asking for the write lock and holding it, polling or parked.
+       The lock's own waiting-writer count sees a parked writer only, and a budgeted writer polls for most of its budget. */
+    internal static int PendingWriteCountForTests => s_dbLock.WaitingWriteCount + Volatile.Read(ref s_pollingWriters);
+
+    private static int s_pollingWriters;
+
     /* Fires in ResetDatabaseCoreAsync after the database and WAL files are deleted and before the schema is
        recreated: a test throws from it to stand in for a process kill with no database file on disk. */
     internal static Action? AfterDatabaseFilesDeletedForTests { get; set; }
@@ -306,7 +312,8 @@ public partial class DuckDbInitializer : IDisposable
     /// Acquires an exclusive write lock on the database. Blocks until all readers finish.
     /// Dispose the returned object to release the lock.
     /// When a timeout is specified, throws <see cref="TimeoutException"/> if the lock
-    /// cannot be acquired within the given duration (e.g., archival is in progress).
+    /// cannot be acquired within the given duration (e.g., archival is in progress). A budgeted
+    /// wait polls for the lock first and parks only for its tail: <see cref="TryEnterWriteLockPollingFirst"/>.
     /// </summary>
     public IDisposable AcquireWriteLock(
         TimeSpan? timeout = null, [CallerMemberName] string? holderMember = null, [CallerFilePath] string? holderFile = null)
@@ -314,7 +321,7 @@ public partial class DuckDbInitializer : IDisposable
         if (timeout.HasValue)
         {
             var waitStarted = Stopwatch.GetTimestamp();
-            if (!s_dbLock.TryEnterWriteLock(timeout.Value))
+            if (!TryEnterWriteLockPollingFirst(timeout.Value, waitStarted))
             {
                 /* #5650: say who holds the lock and for how long, from the registry every acquisition writes
                    to. The old text named "archival or maintenance" whatever the holder was. */
@@ -330,6 +337,77 @@ public partial class DuckDbInitializer : IDisposable
         }
         return new LockReleaser(s_dbLock, write: true, StoreLockHolders.Register(holderMember, holderFile, write: true), WriteHoldWarnAfter);
     }
+
+    /// <summary>
+    /// #7256: a budgeted writer's wait, in two parts. For all but the last <see cref="WriteLockParkTail"/> of its budget
+    /// it asks for the lock with no wait, once every <see cref="WriteLockPollInterval"/>, and takes it the moment no
+    /// reader holds it. Only for that tail does it park in <c>TryEnterWriteLock</c> as a waiting writer.
+    ///
+    /// <para>The difference is what a waiting writer does to readers. <see cref="ReaderWriterLockSlim"/> admits no new
+    /// reader while a writer waits, so a writer parked for its whole budget behind one long archive read holds every
+    /// tab read of that time at the door for the rest of the read: on a store with hundreds of archive files, a tab
+    /// switch of over a second at the median against a few milliseconds alone. A polling writer is not waiting as far
+    /// as the lock knows, so readers keep flowing around it.</para>
+    ///
+    /// <para>The tail is the bound on starvation. A writer polling against readers that never leave a gap never finds
+    /// the lock free; once parked, no new reader gets in ahead of it, and it has the lock as soon as the readers in
+    /// flight finish. So a reader is held behind a budgeted writer for at most the tail, plus the writer's own hold,
+    /// and the writer keeps the whole budget it was given: the deadline is the same, and a budget no longer than the
+    /// tail parks at once. A writer whose budget runs out still throws <see cref="StoreLockTimeoutException"/>, and
+    /// every budgeted caller treats that as "skip this cycle".</para>
+    /// </summary>
+    private bool TryEnterWriteLockPollingFirst(TimeSpan timeout, long waitStarted)
+    {
+        var deadline = waitStarted + ToTimestampTicks(timeout);
+        var parkAt = deadline - ToTimestampTicks(WriteLockParkTail < timeout ? WriteLockParkTail : timeout);
+        Interlocked.Increment(ref s_pollingWriters);
+        try
+        {
+            while (true)
+            {
+                if (s_dbLock.TryEnterWriteLock(0))
+                {
+                    return true;
+                }
+
+                var now = Stopwatch.GetTimestamp();
+                if (now >= parkAt)
+                {
+                    break;
+                }
+
+                var untilPark = Stopwatch.GetElapsedTime(now, parkAt);
+                Thread.Sleep(untilPark < WriteLockPollInterval ? untilPark : WriteLockPollInterval);
+            }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref s_pollingWriters);
+        }
+
+        var remaining = Stopwatch.GetElapsedTime(Stopwatch.GetTimestamp(), deadline);
+        return s_dbLock.TryEnterWriteLock(remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero);
+    }
+
+    private static long ToTimestampTicks(TimeSpan duration) => (long)(duration.TotalSeconds * Stopwatch.Frequency);
+
+    /// <summary>
+    /// How often a budgeted writer asks for the lock while it polls (#7256). Only reached under contention, like
+    /// <see cref="ReadLockPollInterval"/>, and the same 50 ms: the writer joins at most that long after the last
+    /// reader leaves, and the wait stays in the kernel between asks rather than spinning.
+    /// </summary>
+    private static readonly TimeSpan WriteLockPollInterval = TimeSpan.FromMilliseconds(50);
+
+    /// <summary>
+    /// The last part of a budgeted writer's wait, spent parked as a waiting writer that holds new readers back
+    /// (#7256). One second: the longest any reader waits behind a budgeted writer, and long enough for the ordinary
+    /// store reads in flight at the park, which take milliseconds, to finish inside it so the writer gets its turn.
+    /// An instance value rather than a static so a test can set it on its own initializer; a tail no shorter than the
+    /// writer's budget makes it park at once.
+    /// </summary>
+    internal TimeSpan WriteLockParkTail { get; set; } = DefaultWriteLockParkTail;
+
+    internal static readonly TimeSpan DefaultWriteLockParkTail = TimeSpan.FromSeconds(1);
 
     /// <summary>
     /// #5731 hold watchdog: a WRITE hold that lasts longer than this logs one warning naming the holder when it
