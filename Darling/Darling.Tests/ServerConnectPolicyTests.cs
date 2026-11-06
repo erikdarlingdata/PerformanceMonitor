@@ -657,6 +657,28 @@ public sealed class ConnectionFaultDispositionTests
         Assert.Equal(2, probes);
     }
 
+    [Fact]
+    public async Task AProbeThatReturnsAfterTheMemoWasCleared_LeavesNeitherStreakNorVerdictBehind()
+    {
+        // #7851: run A's Dead verdict clears the memo while run B's probe is still in flight. B's late TimedOut is
+        // about the connection that was dropped, so it must not start the reconnected server at 1 of 3 or hold a verdict.
+        var memo = new LivenessProbeMemo();
+        var held = new TaskCompletionSource<LivenessProbeOutcome>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var ct = TestContext.Current.CancellationToken;
+
+        var b = memo.ProbeAsync(SqlRuntime(), (_, _) => held.Task, T0, ct);
+        memo.Clear();
+        held.SetResult(LivenessProbeOutcome.TimedOut);
+
+        Assert.True(await b); // B still gets its own answer
+        Assert.Equal(0, memo.TimedOutProbesInARow);
+        Assert.Null(memo.Last);
+
+        var probes = 0;
+        await memo.ProbeAsync(SqlRuntime(), (_, _) => { probes++; return Task.FromResult(LivenessProbeOutcome.LoggedIn); }, T0.AddSeconds(1), ct);
+        Assert.Equal(1, probes);
+    }
+
     /// <summary>The real probe with its login replaced by one that throws <paramref name="fault"/>.</summary>
     private static Func<ServerRuntime, CancellationToken, Task<LivenessProbeOutcome>> ProbeWhoseLoginThrows(Exception fault) =>
         (runtime, token) => ConnectionFaultDisposition.ProbeFreshConnectionAsync(runtime, (_, _) => Task.FromException(fault), token);
