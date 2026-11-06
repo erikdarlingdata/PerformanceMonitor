@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// descriptors and self-signed certificates, so no test touches the machine store. One test (Windows only) runs the
 /// real grant on a certificate with a persisted key it creates in the current user's store and deletes afterwards.
 /// </summary>
+[SupportedOSPlatform("windows")]
 public sealed class DarlingTlsKeyAccessTests
 {
     private static readonly SecurityIdentifier Service = new("S-1-5-80-1111-2222-3333-4444-5555");
@@ -526,7 +527,6 @@ public sealed class DarlingTlsKeyAccessTests
     /* ---- the shipped path: a real persisted key in the current user's store (Windows only) ---- */
 
     [Fact]
-    [SupportedOSPlatform("windows")]
     public void RealGrant_OnACurrentUserKey_AddsOneReadEntryAndKeepsTheRest_ThenSaysAlreadyGranted()
     {
         Assert.SkipWhen(!OperatingSystem.IsWindows(), "Certificate keys and their ACLs are Windows only.");

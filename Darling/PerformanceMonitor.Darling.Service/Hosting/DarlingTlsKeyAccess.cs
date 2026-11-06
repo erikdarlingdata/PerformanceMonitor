@@ -48,8 +48,9 @@ internal static class DarlingTlsKeyAccess
     internal const string Usage =
         "Usage: --grant-cert-key-access <thumbprint> [--account <name>] [--store-location LocalMachine|CurrentUser] [--store-name <name>]";
 
-    /// <summary>FILE_GENERIC_READ: the Read entry certlm.msc and <c>icacls (R)</c> grant. Never more.</summary>
-    internal const int ReadMask = (int)(FileSystemRights.Read | FileSystemRights.Synchronize);
+    /// <summary>FILE_GENERIC_READ (FileSystemRights.Read | Synchronize): the Read entry certlm.msc and <c>icacls (R)</c>
+    /// grant. Never more. A literal, because the enum is Windows-only to the analyzer and this is also the text of a test.</summary>
+    internal const int ReadMask = 0x120089;
 
     private const int GenericAll = 0x10000000;
     private const int GenericRead = unchecked((int)0x80000000);
@@ -217,6 +218,7 @@ internal static class DarlingTlsKeyAccess
     /// Anonymous, Guests, Domain Users and Domain Guests. The command refuses these whatever <c>--account</c> says: a
     /// TLS private key is read by the service account alone.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     internal static bool IsBroadPrincipal(SecurityIdentifier sid)
     {
         ArgumentNullException.ThrowIfNull(sid);
@@ -234,6 +236,7 @@ internal static class DarlingTlsKeyAccess
     /// Read is <see cref="GrantOutcome.BlockedByDeny"/> (it wins over any Allow). Otherwise ONE allow entry is added,
     /// Read only, to the account, ahead of the inherited entries, and every existing entry is kept as it was.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     internal static GrantPlan PlanGrant(byte[] descriptor, SecurityIdentifier account)
     {
         ArgumentNullException.ThrowIfNull(descriptor);
@@ -313,6 +316,7 @@ internal static class DarlingTlsKeyAccess
     /// Every refusal happens before anything is written, in this order: elevation (LocalMachine), the account, the
     /// store, the certificate (zero or two matches, no private key), the key, the Deny check.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     internal static int Run(GrantArgs args, GrantSeams seams, TextWriter output, TextWriter error)
     {
         ArgumentNullException.ThrowIfNull(args);
@@ -397,6 +401,7 @@ internal static class DarlingTlsKeyAccess
         }
     }
 
+    [SupportedOSPlatform("windows")]
     private static int GrantOn(
         IKeyAclTarget target, SecurityIdentifier account, string display, string which, TextWriter output, TextWriter error)
     {
