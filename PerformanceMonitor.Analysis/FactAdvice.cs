@@ -1356,9 +1356,9 @@ public static class FactAdvice
     }
 
     /// <summary>
-    /// DEADLOCKS composed: states the deadlock count and rate, then clean retrospective remediation,
-    /// then the RCSI sentence. Falls back to the static block (still appending RCSI) when the count
-    /// metadata was not collected.
+    /// DEADLOCKS composed: states the deadlock count and rate, and the busiest hour's count when it is above
+    /// that average (the figure the fact is graded on), then clean retrospective remediation, then the RCSI
+    /// sentence. Falls back to the static block (still appending RCSI) when the count metadata was not collected.
     /// </summary>
     private static AdviceBlock ComposeDeadlocks(IReadOnlyDictionary<string, Fact> facts)
     {
@@ -1369,9 +1369,14 @@ public static class FactAdvice
             return rcsi.Length == 0 ? fallback : fallback with { Remediation = fallback.Remediation + " " + rcsi };
 
         var perHour = FactMeta(facts, "DEADLOCKS", "deadlocks_per_hour");
+        var peakHour = FactMeta(facts, "DEADLOCKS", "peak_1h_deadlock_count");
         var inv = new StringBuilder($"{Plural(count.Value, "deadlock")} this window");
         if (perHour is > 0)
             inv.Append($", about {perHour.Value:0.#} per hour");
+        /* The busiest hour is what the fact grades, so it is named whenever it stands above the average (by more than
+           the average's one-decimal rounding); a steady rate would only repeat the figure before it. */
+        if (peakHour is > 0 && peakHour.Value > (perHour ?? 0) + 0.05)
+            inv.Append($", up to {peakHour.Value:N0} in the busiest hour");
         inv.Append(". A deadlock is two sessions each holding a lock the other needs; SQL Server kills the cheaper one as the victim and rolls it back. This reports a window that has already passed — the deadlock graphs were captured at the time, so the work now is stopping the recurrence.");
 
         var rem = new StringBuilder(

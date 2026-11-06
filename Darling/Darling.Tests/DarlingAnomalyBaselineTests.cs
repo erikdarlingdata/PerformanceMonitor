@@ -193,10 +193,10 @@ public sealed class DarlingAnomalyBaselineTests
 
             /* The firing rule, verbatim in both products. */
             Assert.Matches(
-                @"currentBlocking\s*>=\s*5\s*&&\s*\(\s*!blockingTrust\s*\|\|\s*currentBlockingPerHour\s*/\s*Math\.Max\(\s*baselineBlockingRate,\s*1\s*\)\s*>=\s*DefaultEventRatioThreshold\s*\)",
+                @"currentBlocking\s*>=\s*BlockingSpikeMinEvents\s*&&\s*\(\s*!blockingTrust\s*\|\|\s*currentBlockingPerHour\s*/\s*Math\.Max\(\s*baselineBlockingRate,\s*EventBaselineRateEpsilon\s*\)\s*>=\s*DefaultEventRatioThreshold\s*\)",
                 body);
             Assert.Matches(
-                @"currentDeadlocks\s*>=\s*3\s*&&\s*\(\s*!deadlockTrust\s*\|\|\s*currentDeadlocksPerHour\s*/\s*Math\.Max\(\s*baselineDeadlockRate,\s*1\s*\)\s*>=\s*DefaultEventRatioThreshold\s*\)",
+                @"currentDeadlocks\s*>=\s*DeadlockSpikeMinEvents\s*&&\s*\(\s*!deadlockTrust\s*\|\|\s*currentDeadlocksPerHour\s*/\s*Math\.Max\(\s*baselineDeadlockRate,\s*EventBaselineRateEpsilon\s*\)\s*>=\s*DefaultEventRatioThreshold\s*\)",
                 body);
         }
     }

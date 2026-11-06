@@ -104,7 +104,8 @@ LIMIT $4";
 
     /// <summary>Plan-cache text of the raw tier. $1 server_id, $2 database or null, $3 the escaped pattern, $4 row cap + 1,
     /// $5 the raw-tier floor (naive UTC). The server's distinct (hash, database, digest) in the window come first, so the pattern is tested
-    /// once per distinct text instead of once per sample; one row per query_hash, the newest sighting. The match and the page carry the digest
+    /// once per distinct text instead of once per sample; one row per query_hash and database, the newest sighting of each (#7905: a statement
+    /// that runs in several databases lists once per database, each with the <c>database_name</c> that <c>get_query_trend</c> takes). The match and the page carry the digest
     /// only: the whole text (<c>query_text_dim.query_text</c> has no size cap) is read by primary key for the at most $4 rows of the page, so a
     /// common pattern never sorts every matching text.
     /// <para>#7674: the match is <c>(d.query_text || '') ILIKE</c>, not <c>d.query_text ILIKE</c>, on purpose. With the opt-in trigram index on
@@ -123,29 +124,29 @@ WITH seen AS MATERIALIZED (
     GROUP BY query_hash, database_name, query_text_digest
 ),
 hits AS (
-    SELECT DISTINCT ON (s.query_hash)
+    SELECT DISTINCT ON (s.query_hash, s.database_name)
            s.query_hash, s.database_name, s.last_collected, s.query_text_digest
     FROM seen AS s
     JOIN query_text_dim AS d ON d.digest = s.query_text_digest
     WHERE (d.query_text || '') ILIKE '%' || $3 || '%' ESCAPE '\'
-    ORDER BY s.query_hash, s.last_collected DESC
+    ORDER BY s.query_hash, s.database_name, s.last_collected DESC
 ),
 page AS (
     SELECT query_hash, database_name, last_collected, query_text_digest
     FROM hits
-    ORDER BY last_collected DESC, query_hash
+    ORDER BY last_collected DESC, query_hash, database_name
     LIMIT $4
 )
 SELECT p.query_hash, p.database_name, p.last_collected, d.query_text
 FROM page AS p
 JOIN query_text_dim AS d ON d.digest = p.query_text_digest
-ORDER BY p.last_collected DESC, p.query_hash";
+ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
 
     /// <summary>#7674: the plan-cache text of every enabled server, served by the trigram index on <c>query_text_dim.query_text</c>. Only offered when
     /// <see cref="QueryTextTrigramIndex"/> reports <c>Ready</c>. $1 the escaped pattern, $2 row cap + 1, $3 the raw-tier floor (naive UTC). The match is
     /// the bare column, so the planner may use the index for the text match. The index does not reach the sample side: <c>query_stats</c> has no index on
     /// <c>query_text_digest</c>, so the samples of every enabled server in the raw window are read and joined to the matched digests, and on a large store
-    /// this can reach the budget (the reply then says <c>stopped</c>); one row per (server, query_hash), the newest sighting. The page carries the digest and the whole text is read by primary key for the
+    /// this can reach the budget (the reply then says <c>stopped</c>); one row per server, query_hash and database, the newest sighting of each (#7905). The page carries the digest and the whole text is read by primary key for the
     /// at most $2 rows of it, as in <see cref="PlanCacheSql"/>.</summary>
     internal const string PlanCacheAllServersSql = @"
 WITH matched AS MATERIALIZED (
@@ -154,24 +155,24 @@ WITH matched AS MATERIALIZED (
     WHERE query_text ILIKE '%' || $1 || '%' ESCAPE '\'
 ),
 hits AS (
-    SELECT DISTINCT ON (s.server_id, s.query_hash)
+    SELECT DISTINCT ON (s.server_id, s.query_hash, s.database_name)
            s.server_id, s.query_hash, s.database_name, s.collection_time AS last_collected, s.query_text_digest
     FROM query_stats AS s
     JOIN matched AS m ON m.digest = s.query_text_digest
     JOIN servers AS v ON v.server_id = s.server_id AND v.is_enabled
     WHERE s.collection_time >= $3
-    ORDER BY s.server_id, s.query_hash, s.collection_time DESC
+    ORDER BY s.server_id, s.query_hash, s.database_name, s.collection_time DESC
 ),
 page AS (
     SELECT server_id, query_hash, database_name, last_collected, query_text_digest
     FROM hits
-    ORDER BY last_collected DESC, server_id, query_hash
+    ORDER BY last_collected DESC, server_id, query_hash, database_name
     LIMIT $2
 )
 SELECT p.server_id, p.query_hash, p.database_name, p.last_collected, d.query_text
 FROM page AS p
 JOIN query_text_dim AS d ON d.digest = p.query_text_digest
-ORDER BY p.last_collected DESC, p.server_id, p.query_hash";
+ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
 
     /// <summary>Escapes the LIKE metacharacters (<c>\</c>, <c>%</c>, <c>_</c>) so the pattern matches the text as typed.</summary>
     internal static string EscapeLike(string pattern) =>
@@ -210,12 +211,12 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash";
     internal static string PlanCacheHorizon { get; } =
         "Plan-cache text of the raw tier (query_stats): the last "
         + ((int)TimescaleSupport.RawRetentionSpan.TotalDays).ToString(CultureInfo.InvariantCulture)
-        + " days, one row per query_hash. A statement that left the plan cache before that, or ran only before the server was monitored, is not here.";
+        + " days, one row per query_hash and database. A statement that left the plan cache before that, or ran only before the server was monitored, is not here.";
 
     internal static string PlanCacheAllServersHorizon { get; } =
         "Plan-cache text of the raw tier (query_stats) for every enabled server (the text is matched through the trigram index, then the samples in the raw window are read): the last "
         + ((int)TimescaleSupport.RawRetentionSpan.TotalDays).ToString(CultureInfo.InvariantCulture)
-        + " days, one row per server and query_hash. A statement that left the plan cache before that, or ran only before the server was monitored, is not here.";
+        + " days, one row per server, query_hash and database. A statement that left the plan cache before that, or ran only before the server was monitored, is not here.";
 
     [McpServerTool(Name = "find_queries_by_text"), Description(
         "Finds statements whose text contains a piece of text (a table name, a fragment of SQL), and returns the keys the other query reads take: query_id and database for get_query_store_query_history, query_hash for get_query_trend. pattern is a literal substring, case-insensitive (% and _ match themselves), at least 3 characters. Name a server with server_name: database_name narrows it and makes the search much faster. Two sources, each reported separately with its own horizon: Query Store text and the plan-cache text of the raw tier. There is no index on the text unless the operator turned one on, so each source has a 4 second budget; a source that runs out is reported stopped (name a database to narrow it). Leave server_name out to search the plan-cache text of every server: that is served only when the opt-in trigram index is ready (darling.json queryTextTrigramIndexEnabled; get_store_metrics query_text_index says its state), is refused with the state otherwise, and does not search Query Store text, which is searched one server at a time. The index finds the matching texts only; the samples of every enabled server in the raw window are then read to find where they ran, so on a large store the all-servers search can reach the 4 second budget and report stopped. Each source in the reply carries a status: ok (rows found), empty (searched, nothing matched), stopped (the budget ran out, so the rows listed may be incomplete) or not_searched (the all-servers scope does not search that source, Query Store text). Refused when mcp.dataDetail hides statement text, because a search on hidden text would reveal it. Rows carry a ~300 character excerpt around the first match, never the whole text; a statement the sensitive-statement filter withholds is listed with the withheld marker in place of the excerpt.")]
