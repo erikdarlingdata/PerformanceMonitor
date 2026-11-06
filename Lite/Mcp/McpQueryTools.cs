@@ -972,7 +972,7 @@ public sealed class McpQueryTools
             McpHelpers.QuietUnlessCut(
                 notice.WindowTruncated, notice.EffectiveStart,
                 factual: $"No query on {serverName} regressed in the last {hours_back} hour(s). Both a baseline and this window were collected and no query's Regular average CPU is more than 25% worse than its baseline with at least 1 s of added CPU, and none of their timeouts or errors rose",
-                coveredClaim: " — this IS the all-clear for this read."),
+                coveredClaim: " — this is the all-clear for this read."),
             notice.AsHints());
     }
 

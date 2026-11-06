@@ -135,7 +135,11 @@ public static class ViewerIdentityCapacityText
         Digits(c.ValuesRemaining),
         c.Exhaustion is { } e ? e.StepsPerDay.ToString("N1", CultureInfo.InvariantCulture) : Dash,
         c.Exhaustion is { } x ? x.DaysLeft.ToString("N1", CultureInfo.InvariantCulture) : Dash,
-        c.Band ?? Dash);
+        BandWord(c.Band));
+
+    /// <summary>#7679: the band as a word, as the web grid and Fleet Overview print it: <c>Critical</c>, <c>Warning</c>, <c>OK</c>. The read's own band stays lower case.</summary>
+    private static string BandWord(string? band) =>
+        string.IsNullOrEmpty(band) ? Dash : band == IdentityCapacityMath.BandOk ? "OK" : char.ToUpperInvariant(band[0]) + band[1..];
 
     private static string TypeText(IdentityColumnFact c) =>
         c.DataType is "decimal" or "numeric" && c.TypePrecision is > 0

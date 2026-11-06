@@ -366,7 +366,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
             _service, _serverManager, ServerName, database_name: "NoSuchDb"));
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
-        Assert.Contains("No blocked process reports found in the specified time range for the database NoSuchDb.",
+        Assert.Contains("No blocked process reports found in this window for the database NoSuchDb.",
             root.GetProperty("message").GetString()!, StringComparison.Ordinal);
     }
 
@@ -376,7 +376,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         var root = Parse(await McpBlockingTools.GetBlockedProcessReports(_service, _serverManager, ServerName));
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
-        Assert.Equal("No blocked process reports found in the specified time range.", root.GetProperty("message").GetString());
+        Assert.Equal("No blocked process reports found in this window.", root.GetProperty("message").GetString());
     }
 
     /* ───────────────────────── seeding ───────────────────────── */

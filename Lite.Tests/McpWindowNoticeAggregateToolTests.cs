@@ -482,7 +482,7 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
         Assert.Equal("empty", root.GetProperty("status").GetString());
         AssertCovered(root.GetProperty("hints"), WindowStart);
         Assert.Equal(
-            $"No blocking or deadlocks recorded for {ServerName} in the last {HoursBack} hour(s). The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind.",
+            $"No blocking or deadlocks recorded for {ServerName} in the last {HoursBack} hour(s). The blocking collectors have run successfully for this server, so there was no blocking or deadlock in this window.",
             root.GetProperty("message").GetString());
     }
 
