@@ -83,9 +83,8 @@ public static class QueryStoreRegressionRules
     /// <summary>The closing sentence of <c>truncation_note</c> when the store starts at or after <c>baseline_end</c> (#6750): the
     /// baseline holds no hours, so <see cref="BaselineWindowTail"/> ("holds only the part from effective_start to baseline_end")
     /// would name an empty or backwards span. The sentence says what can still be flagged: timeouts and errors on recent runs alone, and
-    /// cost only from an interval that ran before <c>baseline_end</c> and was collected after it. Darling's baseline keeps rows on their last
-    /// run time, so such an interval can enter it, and a per-execution average needs no hours. Lite's baseline rows are filtered on
-    /// collection time, so no such interval enters there and the sentence holds for both. Chosen by <see cref="TailFor"/>, and rewritten by the web page's
+    /// cost only from an interval that ran before <c>baseline_end</c> and was collected after it. Both products keep baseline rows on their last
+    /// run time (Lite since #7875), so such an interval can enter it, and a per-execution average needs no hours. Chosen by <see cref="TailFor"/>, and rewritten by the web page's
     /// <c>plain-text.js</c> as <see cref="BaselineWindowTail"/> is.</summary>
     public const string EmptyBaselineTail =
         "Here effective_start is at or after baseline_end, so the baseline holds no hours: timeouts and errors are flagged on recent runs alone, and a cost flag can come only from an interval that ran before baseline_end and was collected after it.";
