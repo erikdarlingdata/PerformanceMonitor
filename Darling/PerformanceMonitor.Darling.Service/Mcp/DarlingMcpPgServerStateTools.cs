@@ -548,7 +548,9 @@ public sealed class DarlingMcpPgServerStateTools
                          : string.Empty)
                      + "A SAMPLE of pg_locks, not an event log: a lock taken and released between two "
                      + "captures does not appear. Read `captures` against `total_captures` — that ratio is "
-                     + "how much of the window the lock was present for. Ungranted rows are the contended "
+                     + "how much of the window the lock was present for. `total_captures` counts the "
+                     + "collector's successful runs in the window, the runs that saw no lock included, so a "
+                     + "lock seen in 3 of 60 runs reads as 3 of 60. Ungranted rows are the contended "
                      + "ones; for who is blocking whom, use get_pg_blocking.",
                 locks,
             }, McpHelpers.JsonOptions);
