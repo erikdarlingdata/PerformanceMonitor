@@ -145,18 +145,19 @@ public static class DarlingPasswordKeySource
     public static PasswordKeyFileLoad LoadFromSetting(string reference, string? credentialsDirectory, ILogger logger)
     {
         var path = reference ?? "";
-        var trimmed = path.Trim();
 
-        /* Resolve passes a literal through unchanged, and not every caller ran Validate first. */
-        if (!DarlingSecretSource.IsReference(trimmed))
+        /* Resolve passes a literal through unchanged, and not every caller ran Validate first. The prefix counts only at
+           the start of the value as written, the rule of Resolve and of the owned set: a value with leading whitespace
+           is a literal here too, so no key can load from a reference the owned set does not hold. */
+        if (!DarlingSecretSource.IsReference(path))
         {
             return Refused(SettingName, LiteralRefusal);
         }
 
-        var isFile = trimmed.StartsWith(FilePrefix, StringComparison.Ordinal);
+        var isFile = path.StartsWith(FilePrefix, StringComparison.Ordinal);
         var named = isFile
-            ? trimmed.Substring(FilePrefix.Length).Trim()
-            : trimmed.Substring(EnvPrefix.Length).Trim();
+            ? path.Substring(FilePrefix.Length).Trim()
+            : path.Substring(EnvPrefix.Length).Trim();
         var target = isFile ? $"file '{named}'" : $"environment variable '{named}'";
 
         byte[]? pkcs8 = null;
@@ -174,7 +175,7 @@ public static class DarlingPasswordKeySource
             string text;
             try
             {
-                text = DarlingSecretSource.Resolve(trimmed, SettingName);
+                text = DarlingSecretSource.Resolve(path, SettingName);
             }
             catch (InvalidOperationException ex)
             {

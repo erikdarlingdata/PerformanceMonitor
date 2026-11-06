@@ -603,8 +603,10 @@ public sealed class DarlingConfig
         }
 
         /* #8006: a literal key in darling.json is the plaintext secret the setting exists to avoid, so it is fatal rather
-           than a warning. The sentence is a constant and never repeats the value. */
-        if (!string.IsNullOrWhiteSpace(PasswordKey) && !DarlingSecretSource.IsReference(PasswordKey.Trim()))
+           than a warning. The sentence is a constant and never repeats the value. The prefix is tested on the value as
+           written, not trimmed: the owned set (DarlingOwnedSecrets.Visit) does the same, so a value with leading
+           whitespace that slipped past here would load a key that no owned-secret check covers. */
+        if (!string.IsNullOrWhiteSpace(PasswordKey) && !DarlingSecretSource.IsReference(PasswordKey))
         {
             problems.Add(DarlingPasswordKeySource.LiteralRefusal);
         }

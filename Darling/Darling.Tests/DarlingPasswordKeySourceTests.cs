@@ -11,8 +11,10 @@ using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -24,6 +26,7 @@ namespace Darling.Tests;
 /// value, the reference is kept as written at load (the key is read later, never into the config object), and a
 /// <c>file:</c> reference joins the owned set so no configured path can name the key file.
 /// </summary>
+[Collection("darling-owned-secrets")]
 public sealed class DarlingPasswordKeySourceTests
 {
     [Fact]
@@ -49,9 +52,103 @@ public sealed class DarlingPasswordKeySourceTests
     public void ThePasswordKeyReference_IsInTheOwnedSet()
     {
         var dir = Directory.CreateTempSubdirectory().FullName;
-        var config = DarlingConfig.Parse("{\"postgres\":{\"connectionString\":\"Host=h\"},\"passwordKey\":\"file:" + Path.Combine(dir, "pk").Replace("\\", "\\\\") + "\"}");
-        var set = DarlingOwnedSecrets.Compute(config, Path.Combine(dir, "darling.json"));
-        Assert.Contains(Path.Combine(dir, "pk"), set.Paths);
+        try
+        {
+            var config = DarlingConfig.Parse("{\"postgres\":{\"connectionString\":\"Host=h\"},\"passwordKey\":\"file:" + Path.Combine(dir, "pk").Replace("\\", "\\\\") + "\"}");
+            var set = DarlingOwnedSecrets.Compute(config, Path.Combine(dir, "darling.json"));
+            Assert.Contains(Path.Combine(dir, "pk"), set.Paths);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// The spec's "a request path naming either is refused": a server password that names the passwordKey file or
+    /// variable is refused on the host's add path, as every other owned secret is. The key sits outside the config
+    /// directory (which is owned anyway), so only the setting's own entry in the owned set can refuse it.
+    /// </summary>
+    [Fact]
+    public void AServerPasswordNamingThePasswordKey_IsRefusedOnTheRequestPath()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName;
+        var before = DarlingOwnedSecrets.Current;
+        try
+        {
+            var configDir = Directory.CreateDirectory(Path.Combine(root, "config")).FullName;
+            var keyDir = Directory.CreateDirectory(Path.Combine(root, "keys")).FullName;
+            var configPath = Path.Combine(configDir, "darling.json");
+            var keyFile = Path.Combine(keyDir, "pk");
+            var variable = UniqueVariable();
+
+            foreach (var reference in new[] { "file:" + keyFile, "env:" + variable })
+            {
+                var config = ConfigWith(reference);
+                Assert.DoesNotContain(DarlingPasswordKeySource.LiteralRefusal, config.Validate());
+                DarlingOwnedSecrets.Set(DarlingOwnedSecrets.Compute(config, configPath));
+
+                var (entries, invalid, whole) = DarlingMcpServerAdminTools.ParseRequest(
+                    ServerBody(reference), TestKeyRings.NotReady.Status, allowSecretReferences: true);
+
+                Assert.Null(whole);
+                Assert.Empty(entries);
+                Assert.Equal(DarlingOwnedSecrets.ReferenceRefusalText, Assert.Single(invalid).Detail);
+            }
+
+            /* Padded, the value is not a reference at all (the prefix only counts at the start), so it never reaches
+               the owned set: Validate refuses it as a literal instead of letting it load unowned. */
+            foreach (var padded in new[] { " file:" + keyFile, "\tenv:" + variable })
+            {
+                Assert.Contains(DarlingPasswordKeySource.LiteralRefusal, ConfigWith(padded).Validate());
+            }
+        }
+        finally
+        {
+            DarlingOwnedSecrets.Set(before);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// A value with leading whitespace is a literal, the rule <see cref="DarlingSecretSource.IsReference"/> and the
+    /// owned set use: Validate and the loader refuse it, so a key it would load can never be outside the owned set.
+    /// Trailing whitespace keeps the prefix at the start, and loads the way <see cref="DarlingSecretSource.Resolve"/>
+    /// reads it, by trimming the path or the name.
+    /// </summary>
+    [Fact]
+    public void ALeadingSpace_MakesALiteral_AndATrailingSpace_StillLoads()
+    {
+        var (pkcs8, keyId) = NewKey();
+        var dir = Directory.CreateTempSubdirectory().FullName;
+        var variable = UniqueVariable();
+        try
+        {
+            var keyFile = Path.Combine(dir, "pk");
+            File.WriteAllText(keyFile, Convert.ToBase64String(pkcs8));
+            Environment.SetEnvironmentVariable(variable, Convert.ToBase64String(pkcs8));
+
+            foreach (var padded in new[] { " file:" + keyFile, "\tenv:" + variable, "\nfile:" + keyFile })
+            {
+                Assert.Contains(DarlingPasswordKeySource.LiteralRefusal, ConfigWith(padded).Validate());
+
+                var load = DarlingPasswordKeySource.LoadFromSetting(padded, null, NullLogger.Instance);
+                AssertRefused(load, DarlingPasswordKeySource.SettingName, Convert.ToBase64String(pkcs8));
+                Assert.Equal(DarlingPasswordKeySource.LiteralRefusal, load.Refusal);
+            }
+
+            foreach (var trailing in new[] { "file:" + keyFile + " ", "env:" + variable + "\t" })
+            {
+                Assert.DoesNotContain(DarlingPasswordKeySource.LiteralRefusal, ConfigWith(trailing).Validate());
+                AssertLoaded(DarlingPasswordKeySource.LoadFromSetting(trailing, null, NullLogger.Instance), trailing, keyId);
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variable, null);
+            CryptographicOperations.ZeroMemory(pkcs8);
+            Directory.Delete(dir, recursive: true);
+        }
     }
 
     [Fact]
@@ -488,7 +585,7 @@ public sealed class DarlingPasswordKeySourceTests
     private static readonly string Bom = ((char)0xFEFF).ToString();
 
     private static DarlingConfig ConfigWith(string reference) =>
-        DarlingConfig.Parse("{\"postgres\":{\"connectionString\":\"Host=h\"},\"passwordKey\":\"" + reference.Replace("\\", "\\\\", StringComparison.Ordinal) + "\"}");
+        DarlingConfig.Parse("{\"postgres\":{\"connectionString\":\"Host=h\"},\"passwordKey\":" + JsonSerializer.Serialize(reference) + "}");
 
     private static (byte[] Pkcs8, string KeyId) NewKey()
     {
@@ -502,6 +599,9 @@ public sealed class DarlingPasswordKeySourceTests
         rsa.ImportPkcs8PrivateKey(pkcs8, out _);
         return PasswordSeal.KeyIdFor(rsa.ExportSubjectPublicKeyInfo());
     }
+
+    private static string ServerBody(string password) =>
+        JsonSerializer.Serialize(new[] { new { host = "sql01", auth = "SQL", username = "monitor", password } });
 
     private static string PemOf(byte[] pkcs8) => new(PemEncoding.Write("PRIVATE KEY", pkcs8));
 
