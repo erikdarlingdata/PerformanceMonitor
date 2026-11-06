@@ -20,7 +20,7 @@
 
 import { FILTERED, readScope } from "./database-filter-reads.js";
 import { plainText, shortEmptyLine } from "./plain-text.js";
-import { withPlotPoints } from "./trend-points.js";
+import { MEAN_ONLY_READS, TREND_POINT_READS, withPlotPoints } from "./trend-points.js";
 
 /* ─────────────────────────── DOM builders (textContent-only) ─────────────────────────── */
 
@@ -1980,6 +1980,7 @@ export function alertDeliveryState(a) {
 export function readTool(tool, params, signal, options) {
   const plan = planCustomRange(tool, params, !!(options && options.wholeWindow));
   const selection = params ? params[TRIM_TO] : undefined;
+  const bucketStarts = stampsBucketStarts(tool);
   /* #7661: a line chart over a rate read asks for about one point per 2 px of its plot (trend-points.js), so a day does not come back as 1-minute
      buckets the plot cannot show. Only a caller that draws that line says so, with `options.plotPx` (the measured or estimated plot of the panel);
      a table, a stat or any other caller passes none and its read keeps the old budget, and so does a read of a level (withPlotPoints). */
@@ -1987,8 +1988,8 @@ export function readTool(tool, params, signal, options) {
   const sized = withPlotPoints(tool, plan.params, plotPx);
   return apiGetJoined("/api/read/" + tool + buildQuery(withDatabaseFilter(tool, sized)), signal)
     .then(localizeWindowNote)
-    .then((res) => finishCustomRange(res, plan))
-    .then((res) => (selection && res && res.kind === "data" ? { ...res, data: trimToRange(res.data, selection.startMs, selection.endMs, 0) } : res));
+    .then((res) => finishCustomRange(res, plan, bucketStarts))
+    .then((res) => (selection && res && res.kind === "data" ? { ...res, data: trimToRange(res.data, selection.startMs, selection.endMs, 0, bucketStarts) } : res));
 }
 
 /** #6301: a read of an event list (blocking, deadlocks, active snapshots) that carries this key, as `{ startMs, endMs }`, has its rows cut to
@@ -2088,14 +2089,23 @@ function planCustomRange(tool, params, wholeWindow) {
   return { params: withEnd, range: { ...range, startMs: Math.max(range.startMs, range.endMs - kept * 3600000) }, ignored: false, narrowed: true };
 }
 
-function finishCustomRange(res, plan) {
+/* #7945: the reads whose rows are time buckets, each stamped at its bucket's START: the trend reads the charts draw and the heatmap's cells. The
+   stamp's name does not say so (get_cpu_utilization stamps its buckets under sample_time, the trends under time or collection_time, system_health
+   under event_time, the heatmap under time_bucket), so the read's name decides. A bucket that starts at a range's end lies wholly outside the range
+   and is cut; a row stamped at an instant (an event, a sample, a run) that lands on the end is inside it and kept. */
+function stampsBucketStarts(tool) {
+  return TREND_POINT_READS.has(tool) || MEAN_ONLY_READS.has(tool) || tool === "get_query_heatmap";
+}
+
+function finishCustomRange(res, plan, bucketStarts) {
   if (plan.ignored) return res && (res.kind === "data" || res.kind === "empty") ? { ...res, presetHours: Number(plan.params.hours) } : res;
   if (plan.narrowed && res && (res.kind === "data" || res.kind === "empty")) res = { ...res, keptCustom: true };
   if (!plan.range || !res || res.kind !== "data") return res;
-  return { ...res, data: trimToRange(res.data, plan.range.startMs, plan.range.asOf ? plan.range.endMs : Infinity, 0) };
+  return { ...res, data: trimToRange(res.data, plan.range.startMs, plan.range.asOf ? plan.range.endMs : Infinity, 0, bucketStarts) };
 }
 
-function trimToRange(node, startMs, endMs, depth) {
+/* `bucketStarts` (#7945, stampsBucketStarts): the rows are bucket starts, so the end is exclusive; otherwise a row at the end is inside the range. */
+function trimToRange(node, startMs, endMs, depth, bucketStarts) {
   if (!node || typeof node !== "object" || Array.isArray(node) || depth > 2) return node;
   let out = node;
   for (const [key, value] of Object.entries(node)) {
@@ -2104,16 +2114,14 @@ function trimToRange(node, startMs, endMs, depth) {
       const first = value.find((r) => r && typeof r === "object");
       const field = first ? INSTANT_FIELDS.find((f) => f in first) : null;
       if (field) {
-        /* #7945: a time_bucket stamp is the bucket's start, so a bucket that starts at the range's end lies outside it; an instant at the end is inside. */
-        const endInside = field !== "time_bucket";
         next = value.filter((r) => {
           const at = r && parseUtc(r[field]);
-          return !at || (at.getTime() >= startMs && (endInside ? at.getTime() <= endMs : at.getTime() < endMs));
+          return !at || (at.getTime() >= startMs && (bucketStarts ? at.getTime() < endMs : at.getTime() <= endMs));
         });
         if (next.length === value.length) next = value;
       }
     } else {
-      next = trimToRange(value, startMs, endMs, depth + 1);
+      next = trimToRange(value, startMs, endMs, depth + 1, bucketStarts);
     }
     if (next !== value) {
       if (out === node) out = { ...node };
