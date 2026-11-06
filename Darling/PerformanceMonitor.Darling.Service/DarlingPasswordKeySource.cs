@@ -37,6 +37,8 @@ public static class DarlingPasswordKeySource
 
     private const string FilePrefix = "file:";
     private const string EnvPrefix = "env:";
+    /* A UTF-8 BOM as it reads after decoding, written as a code so no editor can strip it unseen. */
+    private const char ByteOrderMark = (char)0xFEFF;
     private const string PemBegin = "-----BEGIN";
     private const string PrivateKeyLabel = "PRIVATE KEY";
     private const string Pkcs1Label = "RSA PRIVATE KEY";
@@ -150,7 +152,7 @@ public static class DarlingPasswordKeySource
                 return Refused(path, $"{SettingName}: the key in {target} cannot be used: {problem ?? NotAKeyProblem}.");
             }
 
-            logger?.LogDebug($"{SettingName}: read the password key from {target}.");
+            logger?.LogDebug("{Setting}: read the password key from {Target}.", SettingName, target);
             return new PasswordKeyFileLoad(true, false, null, pkcs8, false, path);
         }
         catch (Exception ex)
@@ -176,7 +178,7 @@ public static class DarlingPasswordKeySource
     internal static (byte[]? Pkcs8, string? Problem) ParseKeyText(string text)
     {
         var span = (text ?? "").AsSpan().Trim();
-        if (span.Length > 0 && span[0] == '﻿')
+        if (span.Length > 0 && span[0] == ByteOrderMark)
         {
             span = span.Slice(1).Trim();
         }

@@ -116,7 +116,7 @@ public sealed class DarlingPasswordKeySourceTests
             AssertLoaded(DarlingPasswordKeySource.LoadFromSetting("file:" + path, null, NullLogger.Instance), "file:" + path, keyId);
 
             /* The parser strips a BOM itself too: an env: value never goes through File.ReadAllText. */
-            foreach (var withBom in new[] { "﻿" + text, "﻿" + Convert.ToBase64String(pkcs8) + "\r\n" })
+            foreach (var withBom in new[] { Bom + text, Bom + Convert.ToBase64String(pkcs8) + "\r\n" })
             {
                 var (parsed, problem) = DarlingPasswordKeySource.ParseKeyText(withBom);
                 Assert.Null(problem);
@@ -437,6 +437,9 @@ public sealed class DarlingPasswordKeySourceTests
             Directory.Delete(dir, recursive: true);
         }
     }
+
+    /* A UTF-8 BOM as it reads after decoding, written as a code so no editor can strip it unseen. */
+    private static readonly string Bom = ((char)0xFEFF).ToString();
 
     private static DarlingConfig ConfigWith(string reference) =>
         DarlingConfig.Parse("{\"postgres\":{\"connectionString\":\"Host=h\"},\"passwordKey\":\"" + reference.Replace("\\", "\\\\", StringComparison.Ordinal) + "\"}");
