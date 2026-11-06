@@ -121,8 +121,12 @@ OPTION(RECOMPILE);";
                 reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11), CultureInfo.InvariantCulture)));
         }
 
-        return rows;
+        return DeltaBaselineRollbackRows.Capture(rows, context, BaselineGroups, r => $"{r.PoolId}_{r.ResourceSemaphoreId}");
     }
+
+    /* The delta groups WritePayload advances for each row, captured at the end of the read so a write that fails
+       before the rows are stored can hand them back (DeltaBaselineRollbackRows). */
+    private static readonly string[] BaselineGroups = { "memory_grants_timeouts", "memory_grants_forced" };
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
     {

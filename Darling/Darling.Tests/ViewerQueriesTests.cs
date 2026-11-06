@@ -630,6 +630,7 @@ public sealed class ViewerQueriesLivePostgresTests
     private const int DedupServerId = -970809;
     private const int IntervalIdentityServerId = -970810;
     private const int WindowEdgeServerId = -970811;
+    private const int GridWindowEdgeServerId = -977776;
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -1061,6 +1062,76 @@ public sealed class ViewerQueriesLivePostgresTests
         {
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, "query_store_stats", DedupServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #7776 against a real store: the grid's rows are the rows the slicer's bars are drawn from. The bars place an interval by the
+    /// hour its work RAN (<c>interval_start_time_utc</c>); the grid used to bound the same window on <c>collection_time</c>, so a
+    /// slice showed an interval that started before it (collected inside it) and lacked one that started inside it (collected after
+    /// its end). Same fixture shape as the window-edge test below, read through <see cref="ViewerDataService.GetQueryStoreTopQueriesAsync"/>.
+    /// </summary>
+    [Fact]
+    public async Task QueryStoreGrid_FiltersOnTheIntervalTheBarsUse_NotTheCollectionClock_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live Query Store grid window test.");
+
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "query_store_stats", GridWindowEdgeServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(cs!);
+
+        var h0 = TruncateToHour(TruncateToSeconds(DateTime.UtcNow).AddHours(-8));
+        var h1 = h0.AddHours(1);
+        var h3 = h0.AddHours(3);
+        var h4 = h0.AddHours(4);
+        var start = h1;
+        var end = h3.AddMinutes(59);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* Ran before the window, collected inside it: its collection time is in the slice, its interval is not. Not shown. */
+            await InsertQueryStoreAsync(connection, GridWindowEdgeServerId, h0.AddHours(2).AddMinutes(5), "GridEdgeDb",
+                queryId: 1, planId: 11, execCount: 3, avgDurationUs: 2_000, avgCpuUs: 1_000, forced: false,
+                maxMemPages: 0, queryText: "SELECT before", firstExecutionTimeUtc: h0.AddMinutes(1),
+                intervalId: 8901, intervalStartUtc: h0);
+
+            /* Ran in the window's last hour, collected after the window ends: its interval is in the slice, its collection time is not. Shown. */
+            await InsertQueryStoreAsync(connection, GridWindowEdgeServerId, h4.AddMinutes(5), "GridEdgeDb",
+                queryId: 2, planId: 22, execCount: 7, avgDurationUs: 3_000, avgCpuUs: 1_000, forced: false,
+                maxMemPages: 0, queryText: "SELECT after", firstExecutionTimeUtc: h3.AddMinutes(1),
+                intervalId: 8902, intervalStartUtc: h3);
+
+            /* Interior: shown. */
+            await InsertQueryStoreAsync(connection, GridWindowEdgeServerId, h1.AddMinutes(50), "GridEdgeDb",
+                queryId: 3, planId: 33, execCount: 5, avgDurationUs: 1_000, avgCpuUs: 1_000, forced: false,
+                maxMemPages: 0, queryText: "SELECT inside", firstExecutionTimeUtc: h1.AddMinutes(1),
+                intervalId: 8903, intervalStartUtc: h1);
+
+            var rows = await viewer.GetQueryStoreTopQueriesAsync(GridWindowEdgeServerId, start, end);
+
+            Assert.Equal(new long[] { 2, 3 }, rows.Select(r => r.QueryId).OrderBy(id => id).ToArray());
+            Assert.Equal(7, Assert.Single(rows, r => r.QueryId == 2).TotalExecutions);
+
+            /* The text of both rows is inline on the fact row only (no query_store_text row, the legacy shape). Query 2 was collected
+               after the window's end, so the inline-text lookup has to reach past it the way the fact rows do. */
+            Assert.Equal("SELECT after", Assert.Single(rows, r => r.QueryId == 2).QueryText);
+            Assert.Equal("SELECT inside", Assert.Single(rows, r => r.QueryId == 3).QueryText);
+
+            /* The bars above the grid are drawn from the same intervals. */
+            var buckets = await viewer.GetQueryStoreSlicerDataAsync(GridWindowEdgeServerId, start, end);
+            Assert.Equal(new[] { h1, h3 }, buckets.Select(b => b.BucketTime).OrderBy(t => t).ToArray());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "query_store_stats", GridWindowEdgeServerId, cleanupCt));
         }
     }
 

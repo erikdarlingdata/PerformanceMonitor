@@ -869,7 +869,7 @@
                                         <StackPanel>
                                             <TextBlock Text="{Binding TotalServers}" FontSize="22" FontWeight="Bold"
                                                        Foreground="{DynamicResource ForegroundBrush}" HorizontalAlignment="Center"/>
-                                            <TextBlock Text="Servers" FontSize="10" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                            <TextBlock Text="Enabled servers" FontSize="10" Foreground="{DynamicResource ForegroundMutedBrush}"
                                                        HorizontalAlignment="Center"/>
                                         </StackPanel>
                                     </Border>

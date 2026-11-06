@@ -374,7 +374,7 @@ public sealed class FleetRollup
     public int OfflineCount { get; init; }
 
     /// <summary>
-    /// Registered servers whose per-server summary read did NOT complete this cycle (#2753 review finding)
+    /// Enabled servers whose per-server summary read did NOT complete this cycle (#2753 review finding)
     /// — <c>TotalServers</c> minus however many summaries actually loaded. Deliberately tracked separately
     /// from <see cref="ServersWithCollectionFailures"/>, which only reflects a LOADED summary's own FAILING
     /// collectors: a server that failed to load this cycle has no summary to ask, so it cannot be banded
@@ -417,8 +417,8 @@ public sealed class FleetRollup
     /// service's <c>get_fleet_overview</c> report the same denominator against the same total rather than
     /// two surfaces each having an opinion.
     ///
-    /// <para><see cref="FleetDeadlockCoverage.ServersTotal"/> is <see cref="TotalServers"/>, the REGISTERED
-    /// fleet — the same population the SQL total counts over, which is every server in the store and not
+    /// <para><see cref="FleetDeadlockCoverage.ServersTotal"/> is <see cref="TotalServers"/>, the ENABLED
+    /// fleet — the servers the Overview builds cards for, which is every enabled server in the store and not
     /// just the ones whose card loaded this cycle. So its four causes need not add up to it: the shortfall
     /// is <see cref="UnknownCount"/>, the servers this cycle has no summary to classify, and that gap has
     /// its own line already (<see cref="UnknownStatusText"/>) rather than being attributed to a cause it
@@ -468,22 +468,24 @@ public sealed class FleetRollup
     /// <summary>The all-clear affirmation shown when nothing needs attention. Content assumes the caller
     /// only renders this when <see cref="IsAllClear"/> is true — see that property's remarks.</summary>
     public string AllHealthyText => TotalServers == 1
-        ? "All 1 server healthy"
-        : $"All {TotalServers} servers healthy";
+        ? "All 1 enabled server healthy"
+        : $"All {TotalServers} enabled servers healthy";
 
-    /// <summary>The registered fleet size when this roll-up counts only the servers the Overview search leaves
-    /// (<see cref="OverviewCardView.BuildRollup"/>); null when it counts the whole fleet.</summary>
+    /// <summary>The enabled fleet size when this roll-up counts only the servers the Overview search leaves
+    /// (<see cref="OverviewCardView.BuildRollup"/>); null when it counts the whole enabled fleet.</summary>
     public int? FilteredOfTotal { get; internal set; }
 
-    /// <summary>"Monitoring N servers" subtitle for the fleet header; "Monitoring N of M servers" while the
-    /// Overview search narrows it to N of the M registered.</summary>
+    /// <summary>"Monitoring N enabled servers" subtitle for the fleet header; "Monitoring N of M enabled servers"
+    /// while the Overview search narrows it to N of the M enabled. The count is the enabled fleet, the servers the
+    /// Overview builds cards for, while the sidebar's "Servers: N" counts every registered server, so each line here
+    /// that states the count names the one it counts.</summary>
     public string MonitoringText => FilteredOfTotal.HasValue
         ? FilteredOfTotal.Value == 1
-            ? $"Monitoring {TotalServers} of 1 server"
-            : $"Monitoring {TotalServers} of {FilteredOfTotal.Value} servers"
+            ? $"Monitoring {TotalServers} of 1 enabled server"
+            : $"Monitoring {TotalServers} of {FilteredOfTotal.Value} enabled servers"
         : TotalServers == 1
-            ? "Monitoring 1 server"
-            : $"Monitoring {TotalServers} servers";
+            ? "Monitoring 1 enabled server"
+            : $"Monitoring {TotalServers} enabled servers";
 
     /// <summary>"N server(s)" for the collection-failures total line.</summary>
     public string CollectionFailuresText => ServersWithCollectionFailures == 1
@@ -558,10 +560,10 @@ public sealed class FleetRollup
     public bool HasDeadlockCoverage => DeadlockCoverage.ServersTotal > 0;
 
     /// <summary>
-    /// True when <see cref="TotalDeadlocks"/> did not read every registered server — the flag the coverage
+    /// True when <see cref="TotalDeadlocks"/> did not read every enabled server — the flag the coverage
     /// line's colour tracks. It tracks COVERAGE rather than the deadlock count's own severity: "read all 12
-    /// servers" beside a large count is good news about a bad number and must not be painted as part of the
-    /// alarm.
+    /// enabled servers" beside a large count is good news about a bad number and must not be painted as part
+    /// of the alarm.
     /// </summary>
     public bool DeadlockCoverageIsPartial => TotalsUnavailable || DeadlockCoverage.ServersRead < DeadlockCoverage.ServersTotal;
 
@@ -584,7 +586,7 @@ public sealed class FleetRollup
         get
         {
             var total = DeadlockCoverage.ServersTotal;
-            var noun = total == 1 ? "server" : "servers";
+            var noun = total == 1 ? "enabled server" : "enabled servers";
 
             /* The deadlock total beside this line is the fleet-totals read's answer. When that read failed there is no total for
                the coverage to qualify, and "read all N servers" would vouch for a number nothing read. */
@@ -649,10 +651,10 @@ public sealed class FleetRollup
     /// card banding (no new bands); the blocking / deadlock totals come from the cross-server
     /// <paramref name="totals"/> SQL read. <paramref name="worstCount"/> caps the "Needs attention" list.
     ///
-    /// <para><paramref name="totalServerCount"/> is the REGISTERED fleet size — the same count the sidebar
-    /// shows — and is what <see cref="TotalServers"/> reports. It defaults to <paramref name="summaries"/>'
+    /// <para><paramref name="totalServerCount"/> is the ENABLED fleet size — the servers the Overview builds
+    /// cards for — and is what <see cref="TotalServers"/> reports. It defaults to <paramref name="summaries"/>'
     /// own count for callers (tests, mainly) that only ever pass a fully-loaded set, but the real caller
-    /// MUST pass the registered count explicitly: <paramref name="summaries"/> is only the servers whose
+    /// MUST pass the enabled count explicitly: <paramref name="summaries"/> is only the servers whose
     /// per-server summary read succeeded THIS cycle (#2753 — a transient per-server read failure silently
     /// drops that server from <paramref name="summaries"/>, so deriving the fleet total from its count made
     /// the Overview's "Total Servers" wobble cycle to cycle while the sidebar, sourced from the registry,
@@ -753,9 +755,9 @@ public sealed class FleetRollup
     /// construction rather than by two reads agreeing (#3029).
     ///
     /// <para><paramref name="registeredTotal"/> is the denominator, not <paramref name="summaries"/>' own
-    /// count. The SQL total is a cross-server COUNT over the whole store, so the population it covers is the
-    /// registered fleet; a denominator that shrank to whatever loaded this cycle would report a smaller
-    /// fleet than exists, which is a new wrong number in place of the old one rather than a fix.</para>
+    /// count. The SQL total is a cross-server COUNT over the whole store, so the denominator is the whole
+    /// enabled fleet the Overview reads; a denominator that shrank to whatever loaded this cycle would report
+    /// a smaller fleet than exists, which is a new wrong number in place of the old one rather than a fix.</para>
     ///
     /// <para><b>Only the arms <see cref="FleetDeadlockCoverage.IsCovered"/> names count as read</b> — every
     /// other arm, INCLUDING an enum value a later build adds and this switch has never heard of, lands in
@@ -765,7 +767,7 @@ public sealed class FleetRollup
     /// instrument, the read count names the coverage.</para>
     ///
     /// <para>The three uncovered-or-read causes therefore need not sum to <paramref name="registeredTotal"/>:
-    /// a registered server with no summary this cycle is classified by none of them, and that shortfall is
+    /// an enabled server with no summary this cycle is classified by none of them, and that shortfall is
     /// <see cref="UnknownCount"/> — stated in its own words by <see cref="UnknownStatusText"/> and by
     /// <see cref="DeadlockUnreportedCause"/>, rather than attributed to a cause it was not measured to
     /// have.</para>

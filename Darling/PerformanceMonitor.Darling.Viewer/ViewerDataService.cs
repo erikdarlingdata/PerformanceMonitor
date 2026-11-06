@@ -321,7 +321,13 @@ public sealed class DarlingServer : INotifyPropertyChanged
     /// third names the gesture THIS surface supports: <c>ServerList_MouseDoubleClick</c> opens the tab, and a
     /// single click only selects, so naming one would be naming a no-op.</para>
     /// </summary>
-    public string DotTooltip => ConnectDownSince.HasValue
+    public string DotTooltip => !IsEnabled
+        ? string.Join(
+            "\n",
+            "Collection is disabled for this server",
+            "The service does not collect from a disabled server, so its silence is not an outage.",
+            "Double-click the row to open this server's tab")
+        : ConnectDownSince.HasValue
         ? string.Join(
             "\n",
             ServerCollectionStatus.Offline.Headline(),
@@ -358,6 +364,18 @@ public sealed class DarlingServer : INotifyPropertyChanged
     /// </summary>
     public void ApplyFreshness(DateTime? lastCollectionUtc, DateTime nowUtc)
     {
+        /* A disabled server collects nothing by the operator's choice, so the age of its newest collection says nothing about its
+           health: the freshness ladder would call it Offline for as long as it stays disabled. Its dot is the unclassified grey, and
+           DotTooltip says why. */
+        if (!IsEnabled)
+        {
+            IsOnline = null;
+            RaiseDotChanged();
+            CollectionStale = false;
+            AwaitingFirstCollection = false;
+            return;
+        }
+
         /* #7590: a collection newer than the first failed connect proves a later connect worked, so the flag (whose clearing write the service may
            have lost) stops counting here, before the dot, the tooltip, the tab header and Run all collectors now read it. */
         ConnectDownSince = ServerHealthClassifier.EffectiveConnectDownSince(lastCollectionUtc, ConnectDownSince);

@@ -162,7 +162,10 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
         await using var viewer = new ViewerDataService(scratch.ConnectionString);
         var gridRows = await viewer.GetQueryStoreTopQueriesAsync(ServerId, WindowStart, LiteralEnd, TestTop, null, literalEndUtc: LiteralEnd);
         var gridRow = gridRows.Single(r => r.DatabaseName == "qsStraddle" && r.QueryId == 7001);
-        Assert.Equal(192, gridRow.TotalExecutions);
+        /* #7776: the grid places its window by the interval's start (day0, inside the window), so the re-fetch collected after
+           LiteralEnd is the interval's newest state and the grid shows it: 385, the answer the table path gives. Before, the grid
+           windowed on collection_time and showed the 192 snapshot. The MCP read below still windows on collection_time (#7814). */
+        Assert.Equal(385, gridRow.TotalExecutions);
 
         /* The MCP/web top read: endUtc doubles as both the window end and the gate's literal end (#3953's own
            doc comment on DarlingDataReader.GetQueryStoreTopAsync), so an explicit as_of/end IS this parameter. */
