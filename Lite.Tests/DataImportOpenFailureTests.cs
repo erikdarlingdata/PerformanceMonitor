@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -90,6 +91,75 @@ public sealed class DataImportOpenFailureTests : IDisposable
         var wrapped = new InvalidOperationException("open failed", new IOException("Could not set lock on file: Conflicting lock is held"));
 
         Assert.Equal(DataImportOpenFailure.Locked, DataImportOpenFailureClassifier.Classify(wrapped));
+    }
+
+    /// <summary>
+    /// Lite runs on Windows, where DuckDB reports a sharing violation as "Cannot open file ...:" followed by the OS
+    /// message in the user's language, with "File is already open in [exe] (PID n)" appended when it can name the holder.
+    /// The Win32 sharing-violation (32) and lock-violation (33) codes also arrive as an <see cref="IOException"/>
+    /// HResult or an inner <see cref="Win32Exception"/>. Each is a lock, whatever language the OS text is in.
+    /// </summary>
+    public static TheoryData<string, Exception> WindowsLockShapes() => new()
+    {
+        { "already open in, behind a localized OS message", new InvalidOperationException("IO Error: Cannot open file \"C:\\old\\monitor.duckdb\": Der Prozess kann nicht auf die Datei zugreifen, da sie von einem anderen Prozess verwendet wird.\r\n\nFile is already open in \nC:\\old\\Lite.exe (PID 4242)") },
+        { "IOException with the sharing-violation HResult", new IOException("Cannot open file \"C:\\old\\monitor.duckdb\": Zugriff verweigert", unchecked((int)0x80070020)) },
+        { "IOException with the lock-violation HResult", new IOException("Cannot open file \"C:\\old\\monitor.duckdb\": Zugriff verweigert", unchecked((int)0x80070021)) },
+        { "inner Win32Exception 32", new InvalidOperationException("open failed", new Win32Exception(32, "Zugriff verweigert")) },
+        { "inner Win32Exception 33", new InvalidOperationException("open failed", new Win32Exception(33, "Zugriff verweigert")) },
+    };
+
+    [Theory]
+    [MemberData(nameof(WindowsLockShapes))]
+    public void Classify_ReadsTheWindowsLockShapes(string label, Exception ex)
+    {
+        var kind = DataImportOpenFailureClassifier.Classify(ex);
+
+        Assert.True(kind == DataImportOpenFailure.Locked, $"{label}: classified as {kind}");
+    }
+
+    /// <summary>
+    /// When only the old hot database cannot be read, the parquet files already in the old install's archive folder are
+    /// still worth importing: the import copies them, refreshes the views, and reports the failure next to the count.
+    /// </summary>
+    [Fact]
+    public async Task AnOldStoreThatCannotBeRead_StillImportsItsArchiveFolder_AndReportsTheFailureWithTheCount()
+    {
+        var table = ArchiveService.ArchivableTables[0].Table;
+        var oldInstall = Path.Combine(_tempRoot, "old-install");
+        var oldArchive = Path.Combine(oldInstall, "archive");
+        Directory.CreateDirectory(oldArchive);
+        File.WriteAllBytes(Path.Combine(oldInstall, "monitor.duckdb"), Enumerable.Repeat((byte)0xAB, 8192).ToArray());
+        var currentDir = Path.Combine(_tempRoot, "current");
+        var currentArchive = Path.Combine(currentDir, "archive");
+        Directory.CreateDirectory(currentArchive);
+        using var current = new DuckDbInitializer(Path.Combine(currentDir, "monitor.duckdb"));
+        await current.InitializeFromTemplateAsync();
+        /* One parquet file in the old install's archive folder, exported from the same table so the refreshed views read it. */
+        var oldParquet = Path.Combine(oldArchive, $"20260101_0000_{table}.parquet").Replace("\\", "/");
+        using (current.AcquireReadLock())
+        using (var connection = current.CreateConnection())
+        {
+            await connection.OpenAsync();
+            using var export = connection.CreateCommand();
+            export.CommandText = $"COPY (SELECT * FROM {table} LIMIT 0) TO '{DuckDbInitializer.EscapeSqlPath(oldParquet)}' (FORMAT PARQUET)";
+            await export.ExecuteNonQueryAsync();
+        }
+        var import = new DataImportService(current, currentArchive);
+        var retryPrompts = 0;
+
+        var result = await import.RunImportAsync(oldInstall, _ =>
+        {
+            retryPrompts++;
+            return Task.FromResult(false);
+        });
+
+        Assert.Equal(0, retryPrompts);
+        Assert.Equal(1, result.FilesImported);
+        Assert.True(File.Exists(Path.Combine(currentArchive, $"imported_20260101_0000_{table}.parquet")), "the old install's archive file was not copied");
+        Assert.False(result.Success);
+        Assert.NotNull(result.ErrorMessage);
+        Assert.Contains("corrupt", result.ErrorMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("1 parquet file", result.ErrorMessage, StringComparison.Ordinal);
     }
 
     [Theory]
