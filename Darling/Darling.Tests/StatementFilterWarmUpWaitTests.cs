@@ -269,18 +269,20 @@ public sealed class StatementFilterWarmUpWaitTests
     public async Task TheWarmUpsOwnApplyCalls_NeverWaitOnTheWarmUp()
     {
         await StatementFilterWarmUp.EnsureAsync();
-        long insideMs = -1;
+
+        // Seam: SensitiveStatements.WarmUpWaits counts the callers that waited on a running warm-up. A clock cannot
+        // tell "did not wait" from "slow machine": on a busy runner the two judging calls alone outlast the limit a
+        // wait would have cost. The collection is serial, so no other test moves the counter.
+        var before = SensitiveStatements.WarmUpWaits;
         var warmUp = AlertStatementFilter.WarmUpAsync(() =>
         {
             // Large enough to be gated: only the warm-up's own flag keeps these from waiting the whole limit on themselves.
-            var watch = Stopwatch.StartNew();
             _ = AlertStatementFilter.Apply(LargeContext());
             _ = AlertStatementFilter.Apply(new FindingAlert("A", "SRV", "1", "1", "101", LargeContext(), 0.9, 0.5, "plain", true));
-            insideMs = watch.ElapsedMilliseconds;
         });
 
         await warmUp.WaitAsync(TimeSpan.FromSeconds(20));
-        Assert.InRange(insideMs, 0, 2000);
+        Assert.Equal(before, SensitiveStatements.WarmUpWaits);
     }
 
     [Fact]
