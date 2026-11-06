@@ -699,7 +699,7 @@ $v238$;
                  WHERE attrelid = 'config.config_notification_routes'::regclass
                    AND attname = 'slack_bot_channel' AND NOT attisdropped) THEN
          EXECUTE $v252$
-GRANT SELECT (slack_bot_channel, slack_bot_channel_set_at) ON config.config_notification_routes TOviewer;
+GRANT SELECT (slack_bot_channel, slack_bot_channel_set_at) ON config.config_notification_routes TO viewer;
 $v252$;
       END IF;
    END IF;
@@ -874,7 +874,7 @@ $v238$;
                  WHERE attrelid = 'config.config_notification_routes'::regclass
                    AND attname = 'slack_bot_channel' AND NOT attisdropped) THEN
          EXECUTE $v252$
-GRANT SELECT (slack_bot_channel, slack_bot_channel_set_at) ON config.config_notification_routes TOweb;
+GRANT SELECT (slack_bot_channel, slack_bot_channel_set_at) ON config.config_notification_routes TO web;
 $v252$;
       END IF;
    END IF;
@@ -1037,7 +1037,7 @@ $v238$;
                  WHERE attrelid = 'config.config_notification_routes'::regclass
                    AND attname = 'slack_bot_channel' AND NOT attisdropped) THEN
          EXECUTE $v252$
-GRANT SELECT (slack_bot_channel, slack_bot_channel_set_at) ON config.config_notification_routes TOmcp;
+GRANT SELECT (slack_bot_channel, slack_bot_channel_set_at) ON config.config_notification_routes TO mcp;
 $v252$;
       END IF;
    END IF;
