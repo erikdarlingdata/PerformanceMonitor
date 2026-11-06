@@ -273,10 +273,9 @@ async function loadPanelBody(desc, body, signal, onRetry = null) {
        Read through getPath and rendered as TEXT by noticeStrip, so a note is inert markup like every other
        server value on this page (R4). */
     /* #7538, #7651: the left-out note is the one the page words itself and gives the names (leftOutNoteText); any other note is the server's text. */
-    const noteOf = (k) => (k === LEFT_OUT_NOTE_KEY ? leftOutNoteText(res.data) : getPath(res.data, k));
-    const note = desc.noteKey ? noteOf(desc.noteKey) : null;
+    const note = desc.noteKey === LEFT_OUT_NOTE_KEY ? leftOutNoteText(res.data) : desc.noteKey ? getPath(res.data, desc.noteKey) : null;
     /* #4925: a panel may carry further server notes (`moreNoteKeys`), each rendered as its own line when non-null. */
-    const moreNotes = (desc.moreNoteKeys || []).map(noteOf);
+    const moreNotes = (desc.moreNoteKeys || []).map((k) => (k === LEFT_OUT_NOTE_KEY ? leftOutNoteText(res.data) : getPath(res.data, k)));
     /* #7428: a note the page composes from the answer's fields (`noteFrom(data)`), for a sentence the server does not write, such as why a tile is blank. */
     if (typeof desc.noteFrom === "function") moreNotes.push(desc.noteFrom(res.data));
     /* #4966: a grid says where its table's data starts when that is after the window's start (windowFloorStrip). */
