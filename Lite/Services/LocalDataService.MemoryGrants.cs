@@ -236,6 +236,72 @@ ORDER BY pool_id, 2";
     }
 
     /// <summary>
+    /// #7879: the newest collection's per-pool grant detail, the read behind get_memory_grants' grants[]. One row per
+    /// pool at the most recent collection in the window, the sizing and activity figures SUMmed across that pool's
+    /// resource semaphores (the same per-pool total the chart read builds per collection) and never averaged over a
+    /// bucket: <see cref="GetMemoryGrantChartDataAsync"/> buckets a long window (a bucket is wider than the collection
+    /// interval past about 25 hours), and its last bucket is a mean stamped at the bucket's start, not a moment. The same
+    /// shape as Darling's <c>MemoryGrantsLatestSql</c>. $1 server_id, $2 window start, $3 window end.
+    /// </summary>
+    internal const string MemoryGrantsLatestSql = @"
+WITH latest AS
+(
+    SELECT MAX(collection_time) AS mx
+    FROM v_memory_grant_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+)
+SELECT
+    collection_time,
+    pool_id,
+    SUM(available_memory_mb) AS available_memory_mb,
+    SUM(granted_memory_mb) AS granted_memory_mb,
+    SUM(used_memory_mb) AS used_memory_mb,
+    SUM(grantee_count) AS grantee_count,
+    SUM(waiter_count) AS waiter_count,
+    SUM(timeout_error_count_delta) AS timeout_error_count_delta,
+    SUM(forced_grant_count_delta) AS forced_grant_count_delta
+FROM v_memory_grant_stats
+WHERE server_id = $1
+AND   collection_time = (SELECT mx FROM latest)
+GROUP BY collection_time, pool_id
+ORDER BY pool_id";
+
+    /// <summary>#7879: the newest collection's rows per pool, unaveraged. See <see cref="MemoryGrantsLatestSql"/>.</summary>
+    public async Task<List<MemoryGrantChartPoint>> GetMemoryGrantsLatestAsync(int serverId, int hoursBack = 1, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+
+        command.CommandText = MemoryGrantsLatestSql;
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+
+        var items = new List<MemoryGrantChartPoint>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new MemoryGrantChartPoint
+            {
+                CollectionTime = reader.GetDateTime(0),
+                PoolId = reader.IsDBNull(1) ? 0 : (int)ToInt64(reader.GetValue(1)),
+                AvailableMemoryMb = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
+                GrantedMemoryMb = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
+                UsedMemoryMb = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                GranteeCount = reader.IsDBNull(5) ? 0 : (int)ToInt64(reader.GetValue(5)),
+                WaiterCount = reader.IsDBNull(6) ? 0 : (int)ToInt64(reader.GetValue(6)),
+                TimeoutErrorCountDelta = reader.IsDBNull(7) ? 0 : ToInt64(reader.GetValue(7)),
+                ForcedGrantCountDelta = reader.IsDBNull(8) ? 0 : ToInt64(reader.GetValue(8))
+            });
+        }
+        return items;
+    }
+
+    /// <summary>
     /// The resource-semaphore latest-snapshot read (the get_resource_semaphore MCP lens): every resource
     /// semaphore captured at the most recent collection in the window, with the full ceiling column set
     /// (target / max-target / total workspace memory, cumulative timeout/forced grant counts, and the
