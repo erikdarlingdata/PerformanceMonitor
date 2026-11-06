@@ -817,7 +817,7 @@ public sealed class ConnectionFaultDispositionTests
         worker.DispatchOverrideForTests = (_, _, _) => dispatch();
         var runOne = typeof(DarlingWorker).GetMethod("RunOneAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
         await (Task<int>)runOne.Invoke(
-            worker, [server, NewRunner(), "wait_stats", null, TestContext.Current.CancellationToken, false, null, null])!;
+            worker, [server, NewRunner(), "wait_stats", null, TestContext.Current.CancellationToken, false, null, null, null])!;
     }
 
     [Fact]
