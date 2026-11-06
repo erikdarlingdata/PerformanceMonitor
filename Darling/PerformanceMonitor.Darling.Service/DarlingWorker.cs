@@ -532,6 +532,11 @@ public sealed partial class DarlingWorker : BackgroundService
        catalog-function reads plus ~30 narrow INSERTs. */
     private static readonly TimeSpan s_storeMetricsInterval = TimeSpan.FromHours(1);
 
+    /* #7762: the Query Store compose rollup's own timer. The build used to be the last tenant of the hourly maintenance tick, so an hour became
+       readable at the service's start minute and the fleet panel's tail depended on when the service started. At 15 minutes an hour that comes
+       of age (QueryStoreComposeStamp.BuildLag) waits at most 15 minutes for its build, and a tick with nothing to build is a plan read. */
+    private static readonly TimeSpan s_composeStampInterval = QueryStoreComposeStamp.ComposeTickInterval;
+
     /* #4823: the checkpointer's cumulative sync time is read once a minute, so the hourly Store Checkpointer Pressure
        evaluation can judge the LONGEST single sync as well as the hour's average (a difference of two hourly rows is
        the hour's total, which an average over the hour's checkpoints spreads thin). One trivial single-row read; the
@@ -1147,6 +1152,11 @@ public sealed partial class DarlingWorker : BackgroundService
 
     /* #4970: the in-flight hourly store self-metrics tick. Only the launch loop writes it. */
     private Task? _storeMetricsTick;
+
+    /* #7762: the in-flight Query Store compose rollup tick and its next due time. MinValue = the first tick runs on the first pass after the start. Only
+       the launch loop writes them. */
+    private Task? _composeStampTick;
+    private DateTime _nextComposeStampUtc = DateTime.MinValue;
 
     /* MinValue = the first loop pass after startup runs the fleet sweep (#3466 lane 2), then on the
        operator-configured cadence (fleet_sweep_interval_minutes, default hourly, clamped by

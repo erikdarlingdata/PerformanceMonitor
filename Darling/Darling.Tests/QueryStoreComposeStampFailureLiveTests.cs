@@ -21,7 +21,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #5867: a Query Store compose build that throws is recorded per hour (<c>collect.query_store_compose_stamp_failures</c>), retried next
-/// tick (under the extended timeout after a statement timeout), and after <see cref="QueryStoreComposeStamp.FailuresBeforeBackoff"/>
+/// tick (under the extended timeout after a statement timeout), and after <see cref="QueryStoreComposeStamp.ComposeFailuresBeforeBackoff"/>
 /// failures in a row, or a timeout under the extended timeout, retried once a day instead of every tick. A success clears the record. The
 /// failing build is planted with a row trigger on the rollup that raises for one hour only; a <c>query_canceled</c> raise carries SQLSTATE
 /// 57014, the code a <c>statement_timeout</c> cancel carries, so the timeout path runs without waiting a minute.
@@ -107,17 +107,25 @@ EXECUTE FUNCTION collect.fail_5867();", ct);
             var planned = Assert.Single((await QueryStoreComposeStamp.PlanAsync(connection, ClockWithin(hourNow), RetentionDays, ct, ClockWithin(hourNow))).Builds);
             Assert.Equal(new QueryStoreComposeStamp.Build(failing, false, 1, false), planned);
 
-            /* Ticks 2 and 3: the third failure in a row moves the hour to its daily attempt. */
-            Assert.Equal(1, (await TickAsync(source, logger, hourNow, ct)).Failed);
+            /* Ticks 2 on: each failure is retried next tick, until the one that makes ComposeFailuresBeforeBackoff in a row (three hours of
+               the 15-minute timer, #7762, not three failures) moves the hour to its daily attempt. */
+            for (var tick = 2; tick < QueryStoreComposeStamp.ComposeFailuresBeforeBackoff; tick++)
+            {
+                var retried = await TickAsync(source, logger, hourNow, ct);
+                Assert.Equal(1, retried.Failed);
+                Assert.Equal(0, retried.BackedOff);
+                Assert.False(Assert.Single(await QueryStoreComposeStamp.ReadFailuresAsync(connection, ct)).InBackoff);
+            }
+
             var third = await TickAsync(source, logger, hourNow, ct);
             Assert.Equal(1, third.Failed);
             Assert.Equal(1, third.BackedOff);
             record = Assert.Single(await QueryStoreComposeStamp.ReadFailuresAsync(connection, ct));
-            Assert.Equal(QueryStoreComposeStamp.FailuresBeforeBackoff, record.Failures);
+            Assert.Equal(QueryStoreComposeStamp.ComposeFailuresBeforeBackoff, record.Failures);
             Assert.True(record.InBackoff);
             Assert.Equal(record.LastFailedAt + QueryStoreComposeStamp.BackoffInterval, record.NextAttemptAt);
             var backoffLine = logger.Lines.Last(l => l.StartsWith("Warning:", StringComparison.Ordinal));
-            Assert.Contains("has failed 3 time(s) in a row; it is retried once a day", backoffLine, StringComparison.Ordinal);
+            Assert.Contains($"has failed {QueryStoreComposeStamp.ComposeFailuresBeforeBackoff} time(s) in a row; it is retried once a day", backoffLine, StringComparison.Ordinal);
 
             /* Tick 4, the next hour: the hour in backoff is not planned, not built, and logs nothing. */
             var warnings = logger.CountAtLevel(LogLevel.Warning);
@@ -126,14 +134,14 @@ EXECUTE FUNCTION collect.fail_5867();", ct);
             Assert.Equal(0, fourth.Failed);
             Assert.Equal(0, fourth.Built);
             Assert.Equal(warnings, logger.CountAtLevel(LogLevel.Warning));
-            Assert.Equal(QueryStoreComposeStamp.FailuresBeforeBackoff, Assert.Single(await QueryStoreComposeStamp.ReadFailuresAsync(connection, ct)).Failures);
+            Assert.Equal(QueryStoreComposeStamp.ComposeFailuresBeforeBackoff, Assert.Single(await QueryStoreComposeStamp.ReadFailuresAsync(connection, ct)).Failures);
 
             /* A day later it is tried once, fails once more, and goes back to waiting a day. */
             await ADayPassesAsync(connection, ct);
             var daily = await TickAsync(source, logger, hourNow, ct);
             Assert.Equal(1, daily.Failed);
             Assert.Equal(1, daily.BackedOff);
-            Assert.Equal(QueryStoreComposeStamp.FailuresBeforeBackoff + 1, Assert.Single(await QueryStoreComposeStamp.ReadFailuresAsync(connection, ct)).Failures);
+            Assert.Equal(QueryStoreComposeStamp.ComposeFailuresBeforeBackoff + 1, Assert.Single(await QueryStoreComposeStamp.ReadFailuresAsync(connection, ct)).Failures);
             Assert.Equal(0, (await TickAsync(source, logger, hourNow, ct)).Failed);
 
             /* The cause goes away: the next daily attempt builds the hour and clears its record. */

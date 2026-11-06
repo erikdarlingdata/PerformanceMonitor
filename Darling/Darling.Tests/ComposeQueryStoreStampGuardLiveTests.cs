@@ -39,6 +39,7 @@ public sealed class ComposeQueryStoreStampGuardLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), ComposeStampLiveSupport.SkipReason);
         var ct = TestContext.Current.CancellationToken;
         var (scratch, connection, source, hourNow) = await ComposeStampLiveSupport.ArrangeAsync(ct);
+        await ComposeStampLiveSupport.UnbuildNewestTwoAsync(connection, hourNow, ct); /* the tail arm reads the newest two hours (#7762: the seed builds them now) */
         var bodySucceeded = false;
         try
         {
@@ -105,6 +106,7 @@ public sealed class ComposeQueryStoreStampGuardLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), ComposeStampLiveSupport.SkipReason);
         var ct = TestContext.Current.CancellationToken;
         var (scratch, connection, source, hourNow) = await ComposeStampLiveSupport.ArrangeAsync(ct);
+        await ComposeStampLiveSupport.UnbuildNewestTwoAsync(connection, hourNow, ct); /* the tail arm reads the newest two hours (#7762: the seed builds them now) */
         var bodySucceeded = false;
         try
         {

@@ -222,6 +222,24 @@ public sealed partial class DarlingWorker
     }
 
     /// <summary>
+    /// The Query Store compose rollup timer's launcher (#7762): one tracked background tick at a time, every 15 minutes
+    /// (<see cref="s_composeStampInterval"/>). When the previous tick is still running at the next due time this one is skipped with a
+    /// Debug line: the caller has already advanced the due stamp, and a build that outlasts 15 minutes (the tick is bounded by
+    /// <see cref="QueryStoreComposeStamp.MaxTickDuration"/>) has the next tick at the following slot.
+    /// </summary>
+    internal bool TryStartComposeStampTick(Func<CancellationToken, Task> runTick, CancellationToken stoppingToken)
+    {
+        if (_composeStampTick is { IsCompleted: false })
+        {
+            _logger.LogDebug("the previous Query Store compose rollup tick was still running at this tick's due time — skipping this slot");
+            return false;
+        }
+
+        _composeStampTick = RunTrackedTickAsync("Query Store compose rollup tick", runTick, stoppingToken);
+        return true;
+    }
+
+    /// <summary>
     /// The hourly store self-metrics tick's launcher (#4970). The sweep and the self-alert evaluators that judge
     /// its rows used to be awaited inline in the collection launch loop; they now run as one tracked background
     /// task, one at a time. While the store-maintenance tick still runs this returns false WITHOUT advancing the
@@ -818,12 +836,9 @@ public sealed partial class DarlingWorker
            Its own method and its own catch-all; nothing to do (and nothing awaited) unless a start failed. */
         await RetryRoleProvisioningAsync(stoppingToken);
 
-        /* #5582: the ninth tenant, same contract - its own method, its own catch-all, one awaited statement. The exact stamp-grain
-           rollup of the wide Query Store table (V173) needs no TimescaleDB (its tables are plain and the wide table is a plain
-           partitioned table), so it sits outside the gate and runs on every store shape. It sits BEFORE the I/O rollup, not
-           after it: the pins keep the I/O rollup directly before the module-map refresh and the PLAN_REGRESSION builder, which
-           can run up to a 10-minute tick, as the last await. At most six hours a tick, so a fault or a slow build skips nothing. */
-        await BuildQueryStoreComposeStampAsync(stoppingToken);
+        /* #7762: the Query Store compose rollup (#5582) is no longer a tenant of this tick. It runs on its own 15-minute timer
+           (TryStartComposeStampTick), so it never runs twice in one cycle and its build minute does not depend on the minute this
+           service started. */
 
         /* #5495: the eighth tenant, same contract — its own method, its own catch-all, one awaited statement. The hourly
            PostgreSQL I/O rollup needs no TimescaleDB (its tables are plain), so it sits outside the gate and runs on every
@@ -900,10 +915,12 @@ public sealed partial class DarlingWorker
     }
 
     /// <summary>
-    /// The hourly store-maintenance tick's ninth tenant (#5582): builds the exact stamp-grain rollup of the wide Query Store table that
-    /// the Query Store panels of the composer read for the hours before the last three, one failure-isolated pass (see
+    /// The Query Store compose rollup's tick body (#5582, on its own 15-minute timer since #7762): builds the exact stamp-grain rollup of the wide
+    /// Query Store table that the Query Store panels of the composer read for the hours before the last <see cref="QueryStoreComposeStamp.BuildLag"/>,
+    /// one failure-isolated pass (see
     /// <see cref="QueryStoreComposeStamp.RunTickAsync(Npgsql.NpgsqlDataSource, DateTime, int, ILogger, CancellationToken)"/>). At most
-    /// <see cref="QueryStoreComposeStamp.MaxBuildsPerTick"/> hours per tick, stale hours first. Its own catch-all: nothing here can fail the tick.
+    /// <see cref="QueryStoreComposeStamp.MaxBuildsPerTick"/> hours per tick, stale hours first. A tick with nothing to build is a plan read and a Debug
+    /// line. Its own catch-all: nothing here can fail the tick.
     /// </summary>
     private async Task BuildQueryStoreComposeStampAsync(CancellationToken stoppingToken)
     {
@@ -914,7 +931,7 @@ public sealed partial class DarlingWorker
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogWarning("Query Store compose rollup could not run; the next hourly tick retries: {Message}", ex.Message);
+            _logger.LogWarning("Query Store compose rollup could not run; the next 15-minute tick retries: {Message}", ex.Message);
         }
 
         /* #5867: the hours whose build now waits a day between attempts raise the Compose Rollup Hours Stuck self-alert, from its own

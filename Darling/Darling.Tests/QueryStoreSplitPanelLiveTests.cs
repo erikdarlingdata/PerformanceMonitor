@@ -252,6 +252,7 @@ VALUES (1, (now() AT TIME ZONE 'UTC') - interval '30 hours', now() AT TIME ZONE 
         Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), ComposeStampLiveSupport.SkipReason);
         var ct = TestContext.Current.CancellationToken;
         var (scratch, connection, source, hourNow) = await ComposeStampLiveSupport.ArrangeAsync(ct);
+        await ComposeStampLiveSupport.UnbuildNewestTwoAsync(connection, hourNow, ct); /* the tail arm reads the newest two hours (#7762: the seed builds them now) */
         /* #7081: the one clock value of the body. Every window end, the refused server's coverage claim and the poison rows' times come from it.
            A window end read from the clock at each read moved by a 5-minute stamp between two reads, and the split total of server 1 fell by that
            stamp's rows (6 million executions) after a row the split does not read had been added. */

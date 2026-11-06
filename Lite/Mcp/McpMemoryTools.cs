@@ -389,7 +389,9 @@ public sealed class McpMemoryTools
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            var rows = await dataService.GetMemoryGrantChartDataAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
+            /* #7879: grants[] is the newest collection itself. The chart read this used to take its last row from buckets a
+               long window (past about 25 hours) averages into one stamped at the bucket start, so "now" was a mean over minutes. */
+            var rows = await dataService.GetMemoryGrantsLatestAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
                 /* #7005: the window notice, so an empty answer says whether the store holds the window. */
@@ -400,8 +402,8 @@ public sealed class McpMemoryTools
             }
 
             /* grants[] is the latest snapshot in the window; window[] is the whole window (#3541 A10). */
-            var latestTime = rows.Max(r => r.CollectionTime);
-            var latest = rows.Where(r => r.CollectionTime == latestTime);
+            var latestTime = rows[0].CollectionTime;
+            var latest = rows;
             var window = await dataService.GetMemoryGrantsWindowAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
             var result = latest.Select(r => new

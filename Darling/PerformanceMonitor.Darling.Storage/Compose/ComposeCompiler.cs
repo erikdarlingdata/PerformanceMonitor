@@ -1705,9 +1705,11 @@ public static class ComposeCompiler
     /// <list type="number">
     /// <item><b>rollup</b>: the rollup's rows in <c>[wideStart, $stampThrough)</c> of hours whose (server, hour) was built and has had no
     /// late write since (<c>built_seq = late_seq</c>, a semi-join on the build ledger);</item>
-    /// <item><b>stale</b>: for each ledger pair in an hour of <c>[date_trunc('hour', wideStart), $stampThrough)</c> whose build is behind its
-    /// late writes (<c>built_seq IS DISTINCT FROM late_seq</c>), the wide rows of that server and hour inside the same bounds, each as
-    /// the partials of the one row (<c>CROSS JOIN LATERAL</c>, so the wide table is probed per pair);</item>
+    /// <item><b>stale</b>: for each hour of <c>[date_trunc('hour', wideStart), $stampThrough)</c> that has a ledger pair whose build is behind its
+    /// late writes (<c>built_seq IS DISTINCT FROM late_seq</c>), the wide rows of those servers in that hour inside the same bounds, each as
+    /// the partials of the one row (<c>CROSS JOIN LATERAL</c> over the stale hours, with <c>server_id = ANY(...)</c>: the wide table is probed once
+    /// per stale HOUR, not once per pair, #7762). A stale pair no longer ends the rollup at its hour: the rollup arm leaves exactly the stale pairs
+    /// out and this arm reads exactly them, so every row is read once whatever <c>$stampThrough</c> is;</item>
     /// <item><b>tail</b>: the wide rows from <c>$stampThrough</c> (never the window start) through the window end, as partials.</item>
     /// </list>
     /// Every arm applies the server scope and the pushable dimension filters, over the registry join <c>s</c> and the fact-row alias
@@ -1765,16 +1767,20 @@ public static class ComposeCompiler
            into a plain join and may start from the wide table, scanning every wide row of the window and probing the ledger once per
            row, which is the read this rollup exists to avoid. With it the ledger's stale pairs drive, and the wide table is probed once
            per stale pair, so no stale pair means no wide read at all. */
-        var stale = $"SELECT {Head}{rowPartials} FROM {built} AS b "
-            + $"CROSS JOIN LATERAL (SELECT w.* FROM {wide} AS w WHERE w.server_id = b.server_id AND w.collection_time >= b.hour AND w.collection_time < b.hour + interval '1 hour' "
-            + $"AND w.collection_time >= {wideStartParam} AND w.collection_time < {through} OFFSET 0) AS f "
-            + $"JOIN {servers} AS s ON s.server_id = f.server_id "
+        /* #7762: one probe per stale HOUR, with the hour's stale servers in an array, not one per stale pair. At 210 servers a late write that touches many
+           servers of one hour made one wide-table probe per server; the array probe is one per hour, and it reads the same rows. */
+        var stale = $"SELECT {Head}{rowPartials} FROM "
+            + $"(SELECT b.hour, array_agg(b.server_id) AS server_ids FROM {built} AS b "
             + $"WHERE b.hour >= date_trunc('hour', {wideStartParam}) AND b.hour < {through} AND b.built_seq IS DISTINCT FROM b.late_seq"
             /* The server scope on the LEDGER row too (#5582 part 3, found on a live plan): spelled only over the registry join it is applied
                after the lateral, so every stale pair of every server cost a wide-table probe and a scoped panel paid for servers it never
                asked about. On b it is applied before the lateral; the scope over s stays for the unregistered-name spelling. */
             + (stamp.LedgerScopeSql is null ? string.Empty : " AND " + stamp.LedgerScopeSql)
-            + scopeAndFilters;
+            + " GROUP BY b.hour) AS sh "
+            + $"CROSS JOIN LATERAL (SELECT w.* FROM {wide} AS w WHERE w.server_id = ANY(sh.server_ids) AND w.collection_time >= sh.hour AND w.collection_time < sh.hour + interval '1 hour' "
+            + $"AND w.collection_time >= {wideStartParam} AND w.collection_time < {through} OFFSET 0) AS f "
+            + $"JOIN {servers} AS s ON s.server_id = f.server_id "
+            + $"WHERE TRUE{scopeAndFilters}";
 
         var tail = $"SELECT {Head}{rowPartials} FROM {wide} AS f JOIN {servers} AS s ON s.server_id = f.server_id "
             + $"WHERE f.collection_time >= {through} AND f.collection_time <= {endParam}"
