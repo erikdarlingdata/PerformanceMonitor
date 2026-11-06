@@ -180,10 +180,10 @@ internal static class DarlingQueryStoreAbortsReader
         }
 
         List<AbortRow> rows;
-        await using var rawConnection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
         /* #7730: the key table's test in place of the marker-only text test once the backfill has run. */
-        var rawSql = await QueryStoreSelfKeys.WithStoredTextKeyTestWhenReadyAsync(rawConnection, null, McpCommandDeadlines.ReadSeconds, RawSql, cancellationToken);
-        await using (var command = new NpgsqlCommand(rawSql, rawConnection))
+        var rawSql = await QueryStoreSelfKeys.WithStoredTextKeyTestWhenReadyAsync(connection, null, McpCommandDeadlines.ReadSeconds, RawSql, cancellationToken);
+        await using (var command = new NpgsqlCommand(rawSql, connection))
         {
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             Bind(command, serverId, startUtc, endUtc, limit, databases);
