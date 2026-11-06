@@ -802,15 +802,15 @@ public sealed class DailyCollectorDetachTests
             await worker.RunDueCollectorsAsync(server, null!, ct);
             Assert.Equal(1, runs.Started(Daily));
 
-            /* The skip costs the collector its day, so it is counted once as a lost daily slot and warned about, and
-               with no run queued for a permit the line says the previous run is still executing. */
+            /* The skip costs the collector its day, so it is counted once as a lost daily slot and warned about, and the
+               line states the permit backlog beside it: here, no daily run is waiting. */
             Assert.Equal(1, server.CycleSkips.Pending);
             Assert.Contains(
                 logger.Snapshot(),
                 e => e.Level == LogLevel.Warning
                      && e.Message.Contains("previous", StringComparison.Ordinal)
                      && e.Message.Contains(Daily, StringComparison.Ordinal)
-                     && e.Message.Contains("No daily run is waiting for a permit", StringComparison.Ordinal));
+                     && e.Message.Contains("Daily permits: 0 waiting of ", StringComparison.Ordinal));
 
             /* The skip lasts only while the run does: once it finishes, the next due tick runs. */
             runs.ReleaseAll();

@@ -32,8 +32,8 @@ public sealed class CycleSkipAccumulatorTests
 {
     private static readonly DateTime T0 = new(2026, 10, 12, 12, 0, 0, DateTimeKind.Utc);
 
-    /// <summary>A lost daily slot names the daily runs that were waiting for a permit when the cause carries them, so the row
-    /// says the day was lost to the permit backlog and not to a slow body, and says nothing of permits when none waited.</summary>
+    /// <summary>A lost daily slot states the permit backlog beside it when the cause carries one (how many daily runs were
+    /// waiting and for how long), as a fact and not as the cause, and says nothing of permits when none waited.</summary>
     [Fact]
     public void ALostDailySlot_NamesTheRunsWaitingForAPermit_WhenTheCauseCarriesThem()
     {
@@ -44,7 +44,7 @@ public sealed class CycleSkipAccumulatorTests
             tally.TryTake(T0, DarlingCycleSkip.RowMinInterval)!,
             new CycleSkipCauses(0, null, 0, 0, DailyRunsWaiting: 3, OldestDailyWaitMs: 94_200_000), T0)!;
         Assert.Contains(
-            "1 run-time collector slot(s) lost their day (index object stats) while 3 daily run(s) waited for a permit, the oldest for ",
+            "1 run-time collector slot(s) lost their day (index object stats), daily permits: 3 waiting, oldest 26 h 10 min",
             withBacklog.Message, StringComparison.Ordinal);
 
         var without = DarlingCycleSkip.Build(tally.TryTake(T0, DarlingCycleSkip.RowMinInterval)!, new CycleSkipCauses(0, null, 0, 0), T0)!;
