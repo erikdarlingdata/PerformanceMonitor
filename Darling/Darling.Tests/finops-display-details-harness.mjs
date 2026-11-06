@@ -140,6 +140,8 @@ try {
   out.hostOsFallback = (await osOf("Windows Server 2016 Datacenter 10.0 <X64> (Build 14393: ) (Hypervisor)")).includes("Windows Server 2016 Datacenter 10.0") ? "raw" : "short";
   out.hostOsFallbackText = (await osOf("Windows Server 2016 Datacenter 10.0 <X64> (Build 14393: ) (Hypervisor)")).includes("Windows Server 2016 Datacenter") ? "named" : "missing";
   out.hostOsLinux = (await osOf("Ubuntu 20.04.6 LTS")).includes("Ubuntu 20.04.6 LTS");
+  /* #7699: a Windows NT value keeps its number (HostOsText.Clean does), so the page copy of the cut must agree with the read. */
+  out.hostOsNt = (await osOf("Windows NT 6.3 <X64> (Build 9600: ) (Hypervisor)")).includes("Windows NT 6.3");
 
   out.ram = sweeps.ramText({ effective_bytes: 4 * 1024 ** 3, total_bytes: 4 * 1024 ** 3, source: "GlobalMemoryStatusEx" });
   const rowText = (rows) => rows.map((r) => r[0] + ": " + r[1]).join(" | ");
