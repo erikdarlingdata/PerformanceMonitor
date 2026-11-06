@@ -44,7 +44,7 @@ const ROLLUP_COLUMNS = [
   { key: "total_rows", label: "Rows", format: "int" },
   { key: "indexes_to_disable", label: "To Disable", format: "int" },
   { key: "indexes_to_merge", label: "To Merge", format: "int" },
-  { key: "compressable_indexes", label: "Compressable", format: "int" },
+  { key: "compressable_indexes", label: "Compressible", format: "int" },
   { key: "unused_indexes", label: "Unused", format: "int" },
   gbColumn("unused_size_gb", "Disable"),
   gbColumn("compression_min_savings_gb", "Compress Min"),
@@ -139,7 +139,7 @@ function noticeText(data, n, db) {
       ? "Showing the largest " + n + " of " + data.recommendation_count + " recommendations. The list stops at " + n + ", so " + (left === 1 ? "1 more is" : left + " more are") + " not shown."
       : n + (n === 1 ? " recommendation." : " recommendations."));
   const narrow = rowsCut && !db ? " Choose a database above to see its own list." : "";
-  const cut = data.databases_truncated ? " Showing the largest databases of " + data.database_count + "." : "";
+  const cut = data.databases_truncated ? " Showing the largest " + (data.databases || []).length + " of " + data.database_count + " databases." : "";
   const workload = data.overall_workload_reason ? " Overall row: " + data.overall_workload_reason + "." : "";
   const filter = db ? " Database " + db + "." : "";
   return count + filter + narrow + cut + " Analyzed from each database's newest collected snapshot." + workload;

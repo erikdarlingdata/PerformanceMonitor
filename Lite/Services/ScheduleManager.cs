@@ -672,6 +672,18 @@ public class ScheduleManager
     }
 
     /// <summary>
+    /// #7684 item 1: whether a collector is switched on for one server, keyed by the storage id like
+    /// <see cref="GetFrequencyForStorageServer"/>. Null for a server the list no longer holds or a collector the schedule does
+    /// not know, which the caller reads as "cannot tell".
+    /// </summary>
+    internal bool? IsCollectorEnabledForStorageServer(ServerManager servers, int serverId, string collectorName)
+    {
+        var server = servers.GetAllServers().FirstOrDefault(s =>
+            RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s)) == serverId);
+        return server is null ? null : GetScheduleForServer(server.Id, collectorName)?.Enabled;
+    }
+
+    /// <summary>
     /// Records a collector run for a specific server.
     /// </summary>
     public void MarkCollectorRunForServer(string serverId, string collectorName, DateTime runTime)

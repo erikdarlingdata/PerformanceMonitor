@@ -46,7 +46,8 @@ export const SERVER_COLUMNS = [
   { key: "version", label: "Version" },
   { key: "status", label: "Status" },
   { key: "freshness", label: "Freshness", statusSev: true },
-  { key: "monthly_cost", label: "Monthly Cost ($)", align: "right", sortValue: (r) => r.monthly_cost_usd },
+  /* #7670: the cells carry the "$", so the header does not. A server with no cost set (the service sends 0, which FinOps says as "Monthly cost not set") shows a dash, not "$0". */
+  { key: "monthly_cost", label: "Monthly Cost", align: "right", sortValue: (r) => r.monthly_cost_usd, display: (r) => (r.monthly_cost_usd > 0 ? r.monthly_cost : "—") },
   { key: "read_only", label: "Read only", format: "bool" },
   { key: "added", label: "Added", format: "time" },
   { key: "last_collected", label: "Last Collected", format: "time" },
@@ -1884,10 +1885,10 @@ export const OVERRIDE_COLUMNS = [
 ];
 
 const OVERRIDES_NOTE_EDITING =
-  "A threshold held for one server, for one database on it, or for a server tag (every server under the tag and the tags below it), that differs from the global value. " +
+  "This list shows each threshold that differs from the global value, for one server, one database or a server tag (every server under the tag and the tags below it). " +
   "A database override wins over a server override, then the deepest tag the server is under, then the global value. A change applies within the alert engine's reload interval. To silence an alert, mute it.";
 const overridesNoteReadOnly = (managed, adminWritesOff) =>
-  "A threshold held for one server, for one database on it, or for a server tag, that differs from the global value. " +
+  "This list shows each threshold that differs from the global value, for one server, one database or a server tag. " +
   adminListOnlyNote(managed, "this page lists them only", "To change an override", adminWritesOff);
 const OVERRIDE_DENIED = "Changing a threshold override needs";
 
