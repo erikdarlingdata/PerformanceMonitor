@@ -80,6 +80,22 @@ public sealed class WebMemoryPressureChartBehaviourTests
         Assert.Equal("stacked-bar", chart.GetProperty("mode").GetString());
     }
 
+    /// <summary>#7691: a server with several memory nodes stores one record per node for the same event. The chart counts an event
+    /// once: rows at one second with one notification, or 1 ms apart in one second, are one; two notifications at one second are two.</summary>
+    [Fact]
+    public void RecordsOfOneEventOnSeveralNodes_AreCountedOnce_ButTwoNotificationsAreTwo()
+    {
+        var chart = Run("nodes").GetProperty("charts")[0];
+        var rows = chart.GetProperty("points").EnumerateArray()
+            .Select(p => p.EnumerateArray().Select(v => v.ValueKind == JsonValueKind.Number ? v.GetInt32() : -1).Skip(1).ToArray())
+            .Where(r => r.Sum() > 0)
+            .Select(r => r[0])
+            .ToArray();
+
+        // Hours oldest first, SQL medium count: 1 (same second twice), 2 (two notifications), 1 (1 ms apart).
+        Assert.Equal(new[] { 1, 2, 1 }, rows);
+    }
+
     [Fact]
     public void HoursWithNoSample_AreDrawnAsZero_AcrossTheWindow_AndTheNoticeSaysWhatAZeroMeans()
     {
