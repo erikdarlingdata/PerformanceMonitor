@@ -100,7 +100,6 @@ public sealed class McpPlanAnalysisEnvelopeTests
         var stmt = Assert.Single(doc.RootElement.GetProperty("statements").EnumerateArray());
 
         Assert.True(stmt.GetProperty("has_actual_stats").GetBoolean());
-        Assert.Equal("self_elapsed_ms", McpPlanAnalysisFormatter.RankedBySelfElapsed);
         Assert.Equal(McpPlanAnalysisFormatter.RankedBySelfElapsed, stmt.GetProperty("operators_ranked_by").GetString());
         Assert.True(stmt.GetProperty("truncated").GetBoolean());
 
@@ -128,8 +127,9 @@ public sealed class McpPlanAnalysisEnvelopeTests
     /// #7887 on a real parallel plan (PerformanceStudio's <c>eager_index_spool_plan.sqlplan</c>, #4534). The root is a
     /// Gather Streams exchange whose cumulative elapsed is the whole 17,647 ms statement; it owns 1 ms of it. Under it a
     /// Nested Loops (1 ms own) and a Top (0 ms own) sit over the Eager Index Spool that owns 17,613 ms. Ranked by
-    /// cumulative time the exchange leads and the spool is fourth; ranked by own time the spool leads and the exchange
-    /// carries its cumulative figure beside its own.
+    /// cumulative time the exchange leads and the spool is fourth; ranked by own time the spool leads, and the exchange
+    /// keeps its place and its cumulative figure with a null own time, because an exchange's time is wait on the
+    /// operators around it rather than work (#4690).
     /// </summary>
     [Fact]
     public void TopOperators_OnAParallelFixture_LeadWithTheSpoolThatOwnsTheTime_NotTheGatherStreamsAboveIt()
@@ -146,10 +146,94 @@ public sealed class McpPlanAnalysisEnvelopeTests
         Assert.Contains("Spool", top[0].GetProperty("physical_op").GetString(), StringComparison.Ordinal);
         Assert.Equal(17_613, top[0].GetProperty("self_elapsed_ms").GetInt64());
 
+        /* The Gather Streams root stays in the cut with its cumulative 17,647 ms, but an exchange's time is wait, not
+           work, so its own time is null and the row says why. */
         var gather = Assert.Single(top, o => o.GetProperty("node_id").GetInt32() == 0);
         Assert.Equal("Parallelism", gather.GetProperty("physical_op").GetString());
         Assert.Equal(17_647, gather.GetProperty("actual_elapsed_ms").GetInt64());
-        Assert.Equal(1, gather.GetProperty("self_elapsed_ms").GetInt64());
+        Assert.Equal(JsonValueKind.Null, gather.GetProperty("self_elapsed_ms").ValueKind);
+        Assert.False(string.IsNullOrEmpty(gather.GetProperty("self_elapsed_note").GetString()));
+    }
+
+    /// <summary>
+    /// #7887, the exchange rule, on a real plan (PerformanceStudio's <c>serially-parallel.sqlplan</c>). An exchange's
+    /// elapsed time is time spent waiting on the operators that feed and drain it, not work of its own (#4690, the
+    /// reason rule 35 skips exchanges), so it has no own time to rank by. Here the Repartition Streams (node 3) would
+    /// otherwise show the 17,111 ms of the Sort above it as its own and outrank every operator that did work. The
+    /// first row is never an exchange, no exchange sits above a row that carries an own time, and any exchange in the
+    /// cut keeps its cumulative figure with a null own time and a note saying so. Which operator leads is not pinned:
+    /// it depends on how the own time of the operator above an exchange is computed, which is not this rule.
+    /// </summary>
+    [Fact]
+    public void TopOperators_OnAPlanWithExchanges_NeverLeadWithOne_AndRankEveryExchangeAfterTheOperatorsThatDidWork()
+    {
+        var xml = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "OriginPlans", "serially-parallel.sqlplan"));
+        using var doc = JsonDocument.Parse(McpPlanAnalysisFormatter.BuildAnalysisResult(xml, "s", "xml", null));
+        var stmt = Assert.Single(doc.RootElement.GetProperty("statements").EnumerateArray());
+
+        Assert.True(stmt.GetProperty("parallel").GetBoolean());
+        Assert.Equal(McpPlanAnalysisFormatter.RankedBySelfElapsed, stmt.GetProperty("operators_ranked_by").GetString());
+        var top = stmt.GetProperty("top_operators").EnumerateArray().ToList();
+
+        Assert.False(IsExchange(top[0]), $"an exchange leads: node {top[0].GetProperty("node_id")} {top[0].GetProperty("logical_op")}");
+        AssertExchangesRankAfterTheOperatorsThatDidWork(top);
+    }
+
+    /// <summary>
+    /// #7887, the exchange rule, on the smallest plan that shows it: a Repartition Streams over a Sort over a scan, in
+    /// row mode on one thread, where the gap between the exchange's cumulative elapsed and the Sort's is wait and
+    /// larger than any operator's own time. Ranked on the exchange's own figure it would lead. Instead the Sort and the
+    /// scan lead, the exchange follows them with its cumulative 1,000 ms, a null own time and the note, and the
+    /// synthetic statement node, which has no runtime statistics at all, is last.
+    /// </summary>
+    [Fact]
+    public void TopOperators_OnARepartitionOverASort_GiveTheExchangeANullSelfElapsed_AndRankItAfterTheOperatorsThatDidWork()
+    {
+        const long exchangeMs = 1000, sortMs = 100, scanMs = 50;
+        using var doc = JsonDocument.Parse(McpPlanAnalysisFormatter.BuildAnalysisResult(RepartitionOverSortPlan(exchangeMs, sortMs, scanMs), "s", "xml", null));
+        var stmt = Assert.Single(doc.RootElement.GetProperty("statements").EnumerateArray());
+
+        Assert.True(stmt.GetProperty("has_actual_stats").GetBoolean());
+        var top = stmt.GetProperty("top_operators").EnumerateArray().ToList();
+        Assert.Equal(3 + SyntheticStatementNodes, top.Count);
+
+        Assert.False(IsExchange(top[0]), $"an exchange leads: node {top[0].GetProperty("node_id")} {top[0].GetProperty("logical_op")}");
+        AssertExchangesRankAfterTheOperatorsThatDidWork(top);
+
+        /* The Sort (node 1) and the scan (node 2) own 50 ms each and lead in cumulative order; the exchange (node 0)
+           is third with its cumulative figure and no own time; the statement node is last. */
+        Assert.Equal(new[] { 1, 2, 0, -1 }, top.Select(o => o.GetProperty("node_id").GetInt32()).ToArray());
+        Assert.Equal(sortMs - scanMs, top[0].GetProperty("self_elapsed_ms").GetInt64());
+        Assert.Equal(scanMs, top[1].GetProperty("self_elapsed_ms").GetInt64());
+        Assert.Equal(exchangeMs, top[2].GetProperty("actual_elapsed_ms").GetInt64());
+    }
+
+    private static bool IsExchange(JsonElement op) =>
+        op.GetProperty("physical_op").GetString() == "Parallelism";
+
+    /// <summary>The exchange rule's shape on any <c>top_operators</c> list: no exchange above a row that carries an
+    /// own time, and every exchange row keeps its cumulative figure, carries a null own time and says why, while
+    /// every other row carries no such note.</summary>
+    private static void AssertExchangesRankAfterTheOperatorsThatDidWork(List<JsonElement> top)
+    {
+        var lastWithOwnTime = top.FindLastIndex(o => o.GetProperty("self_elapsed_ms").ValueKind != JsonValueKind.Null);
+        var firstExchange = top.FindIndex(IsExchange);
+        Assert.True(firstExchange < 0 || firstExchange > lastWithOwnTime,
+            $"an exchange ranks {firstExchange} while an operator with an own time ranks {lastWithOwnTime}");
+
+        Assert.All(top, o =>
+        {
+            if (IsExchange(o))
+            {
+                Assert.NotEqual(JsonValueKind.Null, o.GetProperty("actual_elapsed_ms").ValueKind);
+                Assert.Equal(JsonValueKind.Null, o.GetProperty("self_elapsed_ms").ValueKind);
+                Assert.False(string.IsNullOrEmpty(o.GetProperty("self_elapsed_note").GetString()));
+            }
+            else
+            {
+                Assert.Equal(JsonValueKind.Null, o.GetProperty("self_elapsed_note").ValueKind);
+            }
+        });
     }
 
     /// <summary>#7887: an estimated plan has no measurement, so <c>self_elapsed_ms</c> is null on every row (null,
@@ -321,14 +405,49 @@ public sealed class McpPlanAnalysisEnvelopeTests
         ChainPlan(relOps, withMissingIndex: false, secondGroupOnUsers: false,
             elapsedMsFor: i => leafMs + (relOps - 1 - i) * ownMsPerAncestor);
 
+    /// <summary>#7887: a Repartition Streams exchange over a Sort over a Clustered Index Scan, row mode on one thread,
+    /// with the cumulative elapsed showplan reports: the exchange's <paramref name="exchangeMs"/> contains the Sort's
+    /// <paramref name="sortMs"/>, which contains the scan's <paramref name="scanMs"/>.</summary>
+    private static string RepartitionOverSortPlan(long exchangeMs, long sortMs, long scanMs)
+    {
+        var sb = new StringBuilder();
+        sb.Append(PlanOpen);
+        sb.Append(RelOpOpen(0, "Parallelism", "Repartition Streams", subtreeCost: 30.0, exchangeMs)).Append("<Parallelism>");
+        sb.Append(RelOpOpen(1, "Sort", "Sort", subtreeCost: 20.0, sortMs)).Append("<Sort Distinct=\"0\">");
+        sb.Append(RelOpOpen(2, "Clustered Index Scan", "Clustered Index Scan", subtreeCost: 10.0, scanMs)).Append(ScanBody).Append("</IndexScan></RelOp>");
+        sb.Append("</Sort></RelOp>");
+        sb.Append("</Parallelism></RelOp>");
+        sb.Append(PlanClose);
+        return sb.ToString();
+    }
+
+    private const string PlanOpen =
+        "<?xml version=\"1.0\" encoding=\"utf-16\"?>" +
+        "<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\" Version=\"1.539\" Build=\"16.0.1000.6\">" +
+        "<BatchSequence><Batch><Statements>" +
+        "<StmtSimple StatementText=\"SELECT 1\" StatementId=\"1\" StatementType=\"SELECT\" StatementSubTreeCost=\"100\" StatementEstRows=\"10\">" +
+        "<QueryPlan CachedPlanSize=\"16\" CompileTime=\"1\" CompileCPU=\"1\" CompileMemory=\"64\">";
+
+    private const string PlanClose = "</QueryPlan></StmtSimple></Statements></Batch></BatchSequence></ShowPlanXML>";
+
+    private const string ScanBody =
+        "<IndexScan Ordered=\"0\" ForcedIndex=\"0\" ForceScan=\"0\" NoExpandHint=\"0\" Storage=\"RowStore\">" +
+        "<DefinedValues /><Object Database=\"[StackOverflow]\" Schema=\"[dbo]\" Table=\"[Posts]\" Index=\"[PK_Posts]\" IndexKind=\"Clustered\" Storage=\"RowStore\" />";
+
+    /// <summary>A RelOp open tag with its OutputList and, when <paramref name="elapsedMs"/> is given, one thread of
+    /// row-mode runtime statistics reporting that cumulative elapsed.</summary>
+    private static string RelOpOpen(int nodeId, string physicalOp, string logicalOp, double subtreeCost, long? elapsedMs)
+    {
+        var relOp = $"<RelOp NodeId=\"{nodeId}\" PhysicalOp=\"{physicalOp}\" LogicalOp=\"{logicalOp}\" EstimateRows=\"{10 + nodeId}\" EstimateIO=\"0.1\" EstimateCPU=\"0.1\" AvgRowSize=\"9\" EstimatedTotalSubtreeCost=\"{subtreeCost}\" Parallel=\"0\" EstimateRebinds=\"0\" EstimateRewinds=\"0\" EstimatedExecutionMode=\"Row\"><OutputList />";
+        return elapsedMs is { } ms
+            ? relOp + $"<RunTimeInformation><RunTimeCountersPerThread Thread=\"0\" ActualRows=\"{10 + nodeId}\" ActualExecutions=\"1\" ActualExecutionMode=\"Row\" ActualElapsedms=\"{ms}\" ActualCPUms=\"{ms}\" /></RunTimeInformation>"
+            : relOp;
+    }
+
     private static string ChainPlan(int relOps, bool withMissingIndex, bool secondGroupOnUsers, Func<int, long>? elapsedMsFor)
     {
         var sb = new StringBuilder();
-        sb.Append("<?xml version=\"1.0\" encoding=\"utf-16\"?>");
-        sb.Append("<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\" Version=\"1.539\" Build=\"16.0.1000.6\">");
-        sb.Append("<BatchSequence><Batch><Statements>");
-        sb.Append("<StmtSimple StatementText=\"SELECT 1\" StatementId=\"1\" StatementType=\"SELECT\" StatementSubTreeCost=\"100\" StatementEstRows=\"10\">");
-        sb.Append("<QueryPlan CachedPlanSize=\"16\" CompileTime=\"1\" CompileCPU=\"1\" CompileMemory=\"64\">");
+        sb.Append(PlanOpen);
         if (withMissingIndex)
         {
             sb.Append("<MissingIndexes><MissingIndexGroup Impact=\"87.5\">");
@@ -351,21 +470,9 @@ public sealed class McpPlanAnalysisEnvelopeTests
         /* Subtree costs descend from the root so every operator's own cost (subtree minus children) is distinct. */
         for (var i = 0; i < relOps; i++)
         {
-            var subtree = (relOps - i) * 10.0;
-            var op = i == relOps - 1 ? "Clustered Index Scan" : "Nested Loops";
-            sb.Append($"<RelOp NodeId=\"{i}\" PhysicalOp=\"{op}\" LogicalOp=\"{(i == relOps - 1 ? "Clustered Index Scan" : "Inner Join")}\" EstimateRows=\"{10 + i}\" EstimateIO=\"0.1\" EstimateCPU=\"0.1\" AvgRowSize=\"9\" EstimatedTotalSubtreeCost=\"{subtree}\" Parallel=\"0\" EstimateRebinds=\"0\" EstimateRewinds=\"0\" EstimatedExecutionMode=\"Row\">");
-            sb.Append("<OutputList />");
-            if (elapsedMsFor != null)
-            {
-                var ms = elapsedMsFor(i);
-                sb.Append($"<RunTimeInformation><RunTimeCountersPerThread Thread=\"0\" ActualRows=\"{10 + i}\" ActualExecutions=\"1\" ActualExecutionMode=\"Row\" ActualElapsedms=\"{ms}\" ActualCPUms=\"{ms}\" /></RunTimeInformation>");
-            }
-
-            sb.Append(i == relOps - 1 ? "<IndexScan Ordered=\"0\" ForcedIndex=\"0\" ForceScan=\"0\" NoExpandHint=\"0\" Storage=\"RowStore\">" : "<NestedLoops Optimized=\"0\">");
-            if (i == relOps - 1)
-            {
-                sb.Append("<DefinedValues /><Object Database=\"[StackOverflow]\" Schema=\"[dbo]\" Table=\"[Posts]\" Index=\"[PK_Posts]\" IndexKind=\"Clustered\" Storage=\"RowStore\" />");
-            }
+            var leaf = i == relOps - 1;
+            sb.Append(RelOpOpen(i, leaf ? "Clustered Index Scan" : "Nested Loops", leaf ? "Clustered Index Scan" : "Inner Join", subtreeCost: (relOps - i) * 10.0, elapsedMsFor?.Invoke(i)));
+            sb.Append(leaf ? ScanBody : "<NestedLoops Optimized=\"0\">");
         }
 
         for (var i = relOps - 1; i >= 0; i--)
@@ -374,8 +481,7 @@ public sealed class McpPlanAnalysisEnvelopeTests
             sb.Append("</RelOp>");
         }
 
-        sb.Append("</QueryPlan></StmtSimple>");
-        sb.Append("</Statements></Batch></BatchSequence></ShowPlanXML>");
+        sb.Append(PlanClose);
         return sb.ToString();
     }
 }
