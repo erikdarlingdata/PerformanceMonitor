@@ -74,8 +74,11 @@ public partial class InvestigationsWindow : Window
             StatusText.Text = requests.Count == 0
                 ? "No investigation requests."
                 : requests.Count + " requests shown" + (truncated ? "; older ones are not listed. Narrow the state or family." : "");
-            /* #8007: the new list clears the pick, so a detail read still out is for a request the window no longer has picked, and
-               maybe no longer lists. Its answer is discarded, or it would draw that request's pane under a cleared grid. */
+            /* #8007: the new list clears the pick. InvestigationPanelRequest is a record, so a new list that holds an equal request
+               keeps it selected unless the pick is cleared here; a null pick starts no detail read. A detail read still out is then
+               for a request the window no longer has picked, and maybe no longer lists. Its answer is discarded, or it would draw
+               that request's pane under a cleared grid. */
+            RequestsGrid.SelectedItem = null;
             ++_detailSeq;
             ClearDetail("Pick a request to see its reports and journal.");
         }
