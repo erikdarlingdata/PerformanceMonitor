@@ -1227,8 +1227,8 @@ try {
       const answers = {
         approved: () => { pending = pending.filter((n) => n.note_id !== 7); return { status: 200, body: { status: "approved", note_id: 7 } }; },
         gone: () => { pending = pending.filter((n) => n.note_id !== 7); return { status: 404, body: { error: "That note is not pending: it was already decided, or it is gone." } }; },
-        refused: () => ({ status: 403, body: { error: "Deciding a note needs a store login with the admin role." } }),
-        signin: () => ({ status: 403, body: { error: "Sign in to the web as an admin to make this change, or use the Viewer." } }),
+        refused: () => ({ status: 403, body: { error: "This dashboard's store login has no write access, so it cannot decide notes. Decide them in the Viewer app.", reason: "store_refused" } }),
+        signin: () => ({ status: 403, body: { error: "Sign in to the web as an admin to make this change, or use the Viewer.", reason: "sign_in_required" } }),
         broken: () => ({ status: 500, body: { error: "The store did not answer." } }),
       };
       state.responder = (method, url) => {
