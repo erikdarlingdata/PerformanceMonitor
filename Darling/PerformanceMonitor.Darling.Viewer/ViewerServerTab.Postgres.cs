@@ -142,12 +142,12 @@ public partial class ViewerServerTab
     /// #7410: <see cref="PanelNote"/> for a panel whose empty state has a long explanation. <paramref name="shortText"/> is the plain sentence
     /// the panel shows; <paramref name="fullText"/> is the explanation that used to be the panel's whole note, kept one hover away.
     /// </summary>
-    private PanelNoteText PanelNoteParts(string collectorName, int rowCount, string shortText, string fullText)
+    private PanelNoteText PanelNoteParts(string collectorName, int rowCount, string shortText, string fullText, ClearedRows? cleared = null)
     {
         var gap = CollectorEngineCapability.NotCollectedMessage(
             _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None);
 
-        return EmptyNoteParts(gap, _pgOffline, rowCount, shortText, fullText);
+        return EmptyNoteParts(gap, _pgOffline, rowCount, shortText, fullText, cleared);
     }
 
     /// <summary>The note a panel shows (<see cref="Text"/>) and the longer explanation behind a hover (<see cref="Detail"/>, null when there is none).</summary>
@@ -158,11 +158,42 @@ public partial class ViewerServerTab
     /// its full explanation. An engine gap, an offline server and a panel with rows say what <see cref="EmptyNote"/> says and carry no detail.
     /// The detail is dropped when it adds nothing to the short line.
     /// </summary>
-    internal static PanelNoteText EmptyNoteParts(string? gap, bool offline, int rowCount, string shortText, string fullText)
+    internal static PanelNoteText EmptyNoteParts(
+        string? gap, bool offline, int rowCount, string shortText, string fullText, ClearedRows? cleared = null)
     {
+        /* #7878, #7910: the grid lists current rows only, so rows that cleared or were dropped earlier in the window are counted here
+           instead. With none current, the healthy sentence ("nothing in this window") would be false, so the panel says what the newest
+           capture holds and how many earlier ones it left out. An engine gap and an offline server keep their own sentences. */
+        if (cleared is { Count: > 0 } && gap is null && !(offline && rowCount == 0))
+        {
+            return new PanelNoteText(rowCount == 0 ? cleared.Value.NothingNow + " " + cleared.Value.Sentence : cleared.Value.Sentence, null);
+        }
+
         var text = EmptyNote(gap, offline, rowCount, shortText);
         var healthy = gap is null && rowCount == 0 && !(offline && shortText.Length > 0);
         return healthy && fullText.Length > 0 && fullText != text ? new PanelNoteText(text, fullText) : new PanelNoteText(text, null);
+    }
+
+    /// <summary>
+    /// The rows a panel left out because they are not in the collector's newest capture (#7878, #7910): <see cref="Count"/> of them, called
+    /// <see cref="Noun"/> in the sentence. <see cref="NothingNow"/> is what the panel says when no current row is left. <see cref="AtLeast"/>
+    /// marks a count read from a full page, which may not have reached every cleared row.
+    /// </summary>
+    internal readonly record struct ClearedRows(int Count, string Noun, string NothingNow, bool AtLeast = false)
+    {
+        /// <summary>The count, as the note says it.</summary>
+        internal string Sentence =>
+            $"{(AtLeast ? "At least " : string.Empty)}{Count} {Noun}{(Count == 1 ? string.Empty : "s")} from earlier in this window "
+            + $"{(Count == 1 && !AtLeast ? "is" : "are")} not in the newest capture, so {(Count == 1 && !AtLeast ? "it is" : "they are")} not listed here.";
+
+        internal static ClearedRows Xmin(int count) => new(count, "xmin holder", "Nothing holds the xmin horizon back in the newest capture.");
+
+        internal static ClearedRows Autovacuum(int count, bool atLeast = false) =>
+            new(count, "table", "No table reports an autovacuum backlog in the newest capture.", atLeast);
+
+        internal static ClearedRows Wraparound(int count) => new(count, "database", "No per-database freeze headroom was collected in the newest capture.");
+
+        internal static ClearedRows Slot(int count) => new(count, "replication slot", "The newest capture has no replication slots.");
     }
 
     /// <summary>Shows a note on a panel's TextBlock: the short line, and the full explanation as its tooltip (cleared when there is none).</summary>
@@ -1098,23 +1129,31 @@ public partial class ViewerServerTab
                   + "and closed between two captures never appears, and a grey row is one PostgreSQL "
                   + "redacted because the monitoring login lacks pg_monitor.";
 
-        PgXminHorizonGrid.ItemsSource = xminTask.Result.Select(PgDisplay.Xmin).ToList();
-        ShowNote(PgXminNote, PanelNoteParts("pg_xmin_horizon", xminTask.Result.Count,
+        /* #7878, #7910: the reads return the rows that cleared too (includeCleared), and each grid shows only the current ones. */
+        var xminCurrent = xminTask.Result.Where(r => r.IsCurrent).ToList();
+        PgXminHorizonGrid.ItemsSource = xminCurrent.Select(PgDisplay.Xmin).ToList();
+        ShowNote(PgXminNote, PanelNoteParts("pg_xmin_horizon", xminCurrent.Count,
             "Nothing held the xmin horizon back in this window.",
             "Nothing held the xmin horizon back in this window — no long-running transaction, replication "
             + "slot, standby feedback or prepared transaction pinned an old xmin. Zero rows is the healthy "
-            + "answer here, not a missing read."));
+            + "answer here, not a missing read.",
+            ClearedRows.Xmin(xminTask.Result.Count - xminCurrent.Count)));
 
-        PgAutovacuumGrid.ItemsSource = autovacuumTask.Result.Select(PgDisplay.Autovacuum).ToList();
-        ShowNote(PgAutovacuumNote, PanelNoteParts("pg_autovacuum_stats", autovacuumTask.Result.Count,
+        var autovacuumCurrent = autovacuumTask.Result.Where(r => r.IsCurrent).ToList();
+        PgAutovacuumGrid.ItemsSource = autovacuumCurrent.Select(PgDisplay.Autovacuum).ToList();
+        ShowNote(PgAutovacuumNote, PanelNoteParts("pg_autovacuum_stats", autovacuumCurrent.Count,
             "No table reported an autovacuum backlog in this window.",
             "No table reported an autovacuum backlog in this window. This collector runs on the WRITER "
             + "only — pg_stat_user_tables reports zeros on a replica — so an empty grid on a reader is "
-            + "expected rather than informative."));
+            + "expected rather than informative.",
+            /* Current tables sort first, so a full page may have stopped before every cleared one: the count is then a floor. */
+            ClearedRows.Autovacuum(autovacuumTask.Result.Count - autovacuumCurrent.Count, autovacuumTask.Result.Count >= PgGridRowLimit)));
 
-        PgWraparoundGrid.ItemsSource = wraparoundTask.Result.Select(PgDisplay.Wraparound).ToList();
-        PgWraparoundNote.Text = PanelNote("pg_wraparound_stats", wraparoundTask.Result.Count,
-            "No per-database freeze headroom has been collected in this window.");
+        var wraparoundCurrent = wraparoundTask.Result.Where(r => r.IsCurrent).ToList();
+        PgWraparoundGrid.ItemsSource = wraparoundCurrent.Select(PgDisplay.Wraparound).ToList();
+        ShowNote(PgWraparoundNote, PanelNoteParts("pg_wraparound_stats", wraparoundCurrent.Count,
+            "No per-database freeze headroom has been collected in this window.", string.Empty,
+            ClearedRows.Wraparound(wraparoundTask.Result.Count - wraparoundCurrent.Count)));
 
         PgPlanCaptureGrid.ItemsSource = planCaptureTask.Result.Select(PgDisplay.PlanCapture).ToList();
 
@@ -1347,11 +1386,13 @@ public partial class ViewerServerTab
 
         var rows = await _dataService.GetPgSlotsAsync(_server.ServerId, startUtc, endUtc);
 
-        PgReplicationSlotsGrid.ItemsSource = rows.Select(PgDisplay.Slot).ToList();
-        ShowNote(PgReplicationNote, PanelNoteParts("pg_replication_slots", rows.Count,
+        var current = rows.Where(r => r.IsCurrent).ToList();
+        PgReplicationSlotsGrid.ItemsSource = current.Select(PgDisplay.Slot).ToList();
+        ShowNote(PgReplicationNote, PanelNoteParts("pg_replication_slots", current.Count,
             "This server has no replication slots.",
             "This server has no replication slots, so nothing is retaining WAL or pinning an xmin on their "
-            + "account. Zero rows is the healthy answer here, not a missing read."));
+            + "account. Zero rows is the healthy answer here, not a missing read.",
+            ClearedRows.Slot(rows.Count - current.Count)));
 
         await LoadPgReplicationStatsAsync(startUtc, endUtc);
     }
