@@ -155,7 +155,7 @@ public sealed class FinOpsIndexAnalysisLeftOverTests
 
         Assert.DoesNotContain("Compression", failed);
         var rec = Assert.Single(recs, r => r.Finding.Contains("uncompressed object", StringComparison.Ordinal));
-        Assert.StartsWith("1 uncompressed object(s)", rec.Finding, StringComparison.Ordinal);
+        Assert.StartsWith("1 uncompressed object over", rec.Finding, StringComparison.Ordinal);
         Assert.Contains("CurrentDb.", rec.Detail, StringComparison.Ordinal);
         Assert.DoesNotContain("OldDb", rec.Detail, StringComparison.Ordinal);
     }

@@ -81,14 +81,14 @@ public sealed record CollectorRunFacts(
                deny rows the collector did record there. Say what was measured: nothing in the databases it still has. */
             return ("empty",
                 string.Create(CultureInfo.InvariantCulture,
-                    $"No procedure ran in the last {hoursBack}h in a database this server still has: the procedure_stats collector ran successfully {SuccessfulRunsInWindow} time(s) in the window and recorded nothing for them. {databasesLeftOut} database(s) the server no longer lists were left out of this read (see databases_left_out)."));
+                    $"No procedure ran in the last {hoursBack}h in a database this server still has: the procedure_stats collector ran successfully {SuccessfulRunsInWindow:N0} time(s) in the window and recorded nothing for them. {databasesLeftOut} database(s) the server no longer lists were left out of this read (see databases_left_out)."));
         }
 
         if (SuccessfulRunsInWindow is > 0)
         {
             return ("empty",
                 string.Create(CultureInfo.InvariantCulture,
-                    $"No procedure executed in the last {hoursBack}h that matches this request: the procedure_stats collector ran successfully {SuccessfulRunsInWindow} time(s) in the window and recorded nothing for it."));
+                    $"No procedure executed in the last {hoursBack}h that matches this request: the procedure_stats collector ran successfully {SuccessfulRunsInWindow:N0} time(s) in the window and recorded nothing for it."));
         }
 
         var last = LastSuccessUtc is { } at ? string.Create(CultureInfo.InvariantCulture, $" (its last successful run was {at:yyyy-MM-dd HH:mm:ss} UTC)") : "";
@@ -115,7 +115,7 @@ public sealed record CollectorRunFacts(
 
         var verdict = scope is null ? $"found no {found} to store" : $"stored no {found} for {scope}";
         return string.Create(CultureInfo.InvariantCulture,
-            $"{collectorName} ran {SuccessfulRunsInWindow} time(s) in the last {hoursBack} hour(s) and {verdict}. This is not a collection gap: collection health showing successful runs that stored no rows is consistent with it.");
+            $"{collectorName} ran {SuccessfulRunsInWindow:N0} time(s) in the last {hoursBack} hour(s) and {verdict}. This is not a collection gap: collection health showing successful runs that stored no rows is consistent with it.");
     }
 
     /// <summary>
