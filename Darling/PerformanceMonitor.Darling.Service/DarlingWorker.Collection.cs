@@ -1768,30 +1768,29 @@ public sealed partial class DarlingWorker
                     fleetSweepServers.Add((target.Config.ServerId, target.Config.DisplayName));
                 }
 
-                /* #4925: an Azure SQL Database master's signals count only its own blocking and deadlocks. A target
-                   whose list cannot be built reads unscoped (null), never fails the sweep. */
-                var fleetSweepSeparate = new Dictionary<int, IReadOnlyList<string>?>();
+                /* #4925: an Azure SQL Database master's signals count only its own blocking and deadlocks. A master that is
+                   disconnected when the sweep fires has no runtime to ask, so its list comes from the stored edition and the
+                   registry, the same way the MCP and web hosts get it; reading it unscoped would count its earlier events
+                   twice in the sweep band. That lookup is a store read per disconnected target, so it runs inside the
+                   tracked task with the sweep it scopes (RunFleetSweepAsync), never on this loop thread. The runtimes are
+                   snapshotted here like the server list above; the registry is read once per fire. A target whose list
+                   cannot be built reads unscoped (null), never fails the sweep. */
+                var fleetSweepRegistry = _registryState?.Read();
+                var fleetSweepTargets = new List<(int ServerId, ServerRuntime? Runtime)>(sweepTargets.Length);
                 foreach (var target in sweepTargets)
                 {
-                    try
-                    {
-                        /* A master that is disconnected when the sweep fires has no runtime to ask, so its list comes from the
-                           stored edition and the registry, the same way the MCP and web hosts get it; reading it unscoped
-                           would count its earlier events twice in the sweep band. */
-                        fleetSweepSeparate[target.Config.ServerId] = target.Runtime is null
-                            ? await AnalysisSeparatelyMonitoredDatabasesAsync(target.Config.ServerId, _registryState?.Read(), postgres, stoppingToken)
-                            : AnalysisSeparatelyMonitoredDatabases(target.Runtime);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        _logger.LogWarning(ex, "Fleet sweep could not list the separately monitored databases for server {ServerId}; reading it unscoped", target.Config.ServerId);
-                        fleetSweepSeparate[target.Config.ServerId] = null;
-                    }
+                    fleetSweepTargets.Add((target.Config.ServerId, target.Runtime));
                 }
 
-                _fleetSweep = FleetSweepEngine.RunAsync(
-                    postgres, fleetSweepServers, TimeSpan.FromMinutes(fleetSweepMinutes),
-                    config.Alerts.Enabled, _logger, fleetSweepSeparate, stoppingToken);
+                var fleetSweepSpan = TimeSpan.FromMinutes(fleetSweepMinutes);
+                var fleetSweepAlertsEnabled = config.Alerts.Enabled;
+                _fleetSweep = RunFleetSweepAsync(
+                    fleetSweepTargets,
+                    storedLookup: (serverId, token) => AnalysisSeparatelyMonitoredDatabasesAsync(serverId, fleetSweepRegistry, postgres, token),
+                    runtimeLookup: runtime => AnalysisSeparatelyMonitoredDatabases(runtime),
+                    runSweep: (separate, token) => FleetSweepEngine.RunAsync(
+                        postgres, fleetSweepServers, fleetSweepSpan, fleetSweepAlertsEnabled, _logger, separate, token),
+                    _logger, stoppingToken);
             }
 
             /* #4823: the once-a-minute checkpointer sync-time sample, AHEAD of the hourly tick below so the sample taken
