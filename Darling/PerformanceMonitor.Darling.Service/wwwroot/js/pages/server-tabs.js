@@ -402,6 +402,9 @@ export const SERVER_TABS = [
           rowsKey: "waiting_tasks",
           xKey: "collection_time",
           series: WAITING_TASK_SERIES,
+          /* #7655: the series is milliseconds of wait, and the legend lists wait types, so the axis is the one place the unit can be. The
+             ticks print it in the unit of the largest tick (46,800 ms reads 47 s), as the other duration axes do. */
+          format: "ms",
           emptyText:
             "Nothing was waiting in this window.",
         },
@@ -425,6 +428,10 @@ export const SERVER_TABS = [
          this chart drew as one jagged line. get_wait_trend can chart one LCK type; this is the whole family. */
       linePanel("Lock Waits", "get_lock_wait_trend", { server, hours: ctx.hours }, "trend", "collection_time", LOCK_WAIT_SERIES, {
         subtitle: ctx.label,
+        /* #7655: milliseconds of lock wait per second of wall time. The caption names the unit and the ticks group their thousands, as the
+           Memory Clerks axis does; a rate keeps its decimals in the tooltip. */
+        format: "rate",
+        unit: "ms/s",
         atTimeItem: "blocking",
         emptyText:
           "No lock waits in this window.",
