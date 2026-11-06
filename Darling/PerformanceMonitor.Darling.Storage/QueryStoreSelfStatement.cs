@@ -64,6 +64,24 @@ public static class QueryStoreSelfStatement
     }
 
     /// <summary>
+    /// #7730: the marker test OR the old-statement test (<see cref="SqlServerOwnStatement"/>) over a text expression, true for a
+    /// statement the monitor sent: one that carries the marker, or one of the closed list of texts that builds before #7463 sent
+    /// with no marker. The old-statement test is the whole text with its ASCII whitespace removed, hashed and compared with the list's
+    /// digests, behind a length bound so a large text is never run through the regular expression. The expression is repeated, so it
+    /// is for a column reference (the key triggers and the backfill), not a subquery. NULL is not the monitor's own (every branch
+    /// tests <c>COALESCE(text, '')</c>).
+    /// </summary>
+    public static string SelfOrOldOfText(string textExpression)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(textExpression);
+        var text = "COALESCE(" + textExpression + ", '')";
+        var digests = string.Join(", ", System.Linq.Enumerable.Select(SqlServerOwnStatement.StrippedDigests, d => "'" + d + "'"));
+        return "(" + Open + textExpression + Close + " > 0 OR (length(" + text + ") <= "
+            + SqlServerOwnStatement.MaxRawLength.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            + " AND encode(sha256(convert_to(regexp_replace(" + text + ", '" + SqlServerOwnStatement.WhitespaceClassForPostgres + "+', '', 'g'), 'UTF8')), 'hex') IN (" + digests + ")))";
+    }
+
+    /// <summary>
     /// The predicate for a read that has not resolved the text: the text is looked up in <c>query_store_text</c> by its key
     /// (one primary-key probe per row), falling back to <paramref name="inlineTextExpression"/> when that table has no row for the
     /// query. A read whose rows can only carry inline text from before the separate-fetch cutover passes <c>null</c>: the

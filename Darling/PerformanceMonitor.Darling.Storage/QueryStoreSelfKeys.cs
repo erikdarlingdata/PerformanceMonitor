@@ -90,11 +90,28 @@ CREATE TABLE IF NOT EXISTS collect.query_store_self_keys_state (
     /// schema-qualified. <c>CREATE TRIGGER</c> is a catalog change that reads no row, but it takes a SHARE ROW EXCLUSIVE lock on the
     /// text table, so the rung sets the lock timeout V173 uses for its trigger on an older table.</para>
     /// </summary>
-    public static readonly string TriggerSql = @"
+    public static readonly string TriggerSql = BuildTriggerSql(IsSelf);
+
+    /// <summary>
+    /// V219's trigger as it shipped: the marker test alone. V219 keeps running this text, so a migration that already ran is never
+    /// edited (V247 replaces the function with <see cref="TriggerSql"/>, which also recognizes the old statements, #7730).
+    /// </summary>
+    public static readonly string MarkerOnlyTriggerSql = BuildTriggerSql(QueryStoreSelfStatement.SelfOfText);
+
+    /// <summary>
+    /// V247 (#7730): reopens the backfill. The state row is deleted, so <see cref="ReadyAsync"/> answers false until
+    /// <see cref="RunDelayedAsync"/> has run <see cref="BackfillAsync"/> again, which now also keys the old statements stored earlier
+    /// (<see cref="SqlServerOwnStatement"/>). The reads use the text probe meanwhile, as they do on a store that was never backfilled.
+    /// The backfill tolerates the keys that already exist (<c>ON CONFLICT DO NOTHING</c>, <see cref="BackfillSql"/>) and its stamp is
+    /// idempotent (<see cref="StampSql"/>). The delete touches one row and scans no text, so it stays inside the migration.
+    /// </summary>
+    public const string ReopenBackfillSql = "DELETE FROM collect.query_store_self_keys_state;";
+
+    private static string BuildTriggerSql(Func<string, string> isSelf) => @"
 CREATE OR REPLACE FUNCTION " + TrackFunctionName + @"() RETURNS trigger
 LANGUAGE plpgsql AS $f$
 BEGIN
-    IF " + IsSelf("NEW.query_sql_text") + @" THEN
+    IF " + isSelf("NEW.query_sql_text") + @" THEN
         INSERT INTO collect.query_store_self_keys (server_id, database_name, query_id)
         VALUES (NEW.server_id, NEW.database_name, NEW.query_id)
         ON CONFLICT (server_id, database_name, query_id) DO NOTHING;
@@ -110,7 +127,7 @@ DROP TRIGGER IF EXISTS " + InsertTriggerName + @" ON collect.query_store_text;
 CREATE TRIGGER " + InsertTriggerName + @"
     AFTER INSERT ON collect.query_store_text
     FOR EACH ROW
-    WHEN (" + IsSelf("NEW.query_sql_text") + @")
+    WHEN (" + isSelf("NEW.query_sql_text") + @")
     EXECUTE FUNCTION " + TrackFunctionName + @"();
 
 DROP TRIGGER IF EXISTS " + UpdateTriggerName + @" ON collect.query_store_text;
@@ -120,9 +137,10 @@ CREATE TRIGGER " + UpdateTriggerName + @"
     WHEN (OLD.query_sql_text IS DISTINCT FROM NEW.query_sql_text)
     EXECUTE FUNCTION " + TrackFunctionName + @"();";
 
-    /// <summary>The marker test over a text expression, true for the monitor's own statement. An alias of
-    /// <see cref="QueryStoreSelfStatement.SelfOfText"/>, so the key table and the text probe are one definition.</summary>
-    internal static string IsSelf(string textExpression) => QueryStoreSelfStatement.SelfOfText(textExpression);
+    /// <summary>The test over a text expression, true for the monitor's own statement: the marker, or one of the old statements the
+    /// monitor sent before #7463 (<see cref="QueryStoreSelfStatement.SelfOrOldOfText"/>, #7730). The key triggers and the backfill use
+    /// it, so the keys record both, and one definition feeds both.</summary>
+    internal static string IsSelf(string textExpression) => QueryStoreSelfStatement.SelfOrOldOfText(textExpression);
 
     /// <summary>
     /// Records the keys of every stored text that carries the marker. One sequential scan of the text table (it reads the

@@ -261,6 +261,70 @@ public sealed class QueryStoreSelfKeysLiveTests
         AssertOwnHidden(await ReadBothAsync(rig, now, ct));
     }
 
+    /// <summary>
+    /// #7730: an old statement (no marker, <see cref="SqlServerOwnStatement"/>) gets its key from the trigger when it is stored, and from
+    /// the reopened backfill when it was stored earlier. V247 deletes the state row, so the gate is closed until the backfill has run and the
+    /// reads (the marker-only text probe meanwhile) still list it; once the backfill has keyed it, both Regressions reads and both Query Store
+    /// top reads hide it.
+    /// </summary>
+    [Fact]
+    public async Task AnOldUnmarkedStatement_GetsItsKey_AfterTheReopenedBackfill_AndLeavesRegressionsAndTop()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #7730 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var now = LiveClock.Now();
+        await using var rig = await OpenRigAsync(now, ct);
+        var oldText = SqlServerOwnStatement.OldTexts[0].Replace("\n", "\r\n\t", StringComparison.Ordinal);
+        Assert.False(oldText.Contains(QueryStoreCollector.SelfQueryMarker, StringComparison.Ordinal));
+        var stamp = DateTime.SpecifyKind(now, DateTimeKind.Unspecified);
+
+        await using (var insert = new NpgsqlCommand(
+            "INSERT INTO collect.query_store_text (server_id, database_name, query_id, query_sql_text, last_seen) SELECT $1, $2, q, CASE WHEN q = $3 THEN $4 ELSE 'SELECT ' || q END, $5 FROM unnest($6::bigint[]) AS q",
+            rig.Connection))
+        {
+            insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
+            insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = Db });
+            insert.Parameters.Add(new NpgsqlParameter<long> { TypedValue = Own });
+            insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = oldText });
+            insert.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = stamp });
+            insert.Parameters.Add(new NpgsqlParameter<long[]> { TypedValue = [.. Ordinary, Own] });
+            await insert.ExecuteNonQueryAsync(ct);
+        }
+
+        /* V247's trigger keys the old text as it lands (and only that text). */
+        Assert.Equal([Own], await KeyIdsAsync(rig.Connection, ct));
+
+        /* The text stored before the rung: no key, and the gate reopened (V247 deletes the state row). */
+        await using (var reset = new NpgsqlCommand("DELETE FROM collect.query_store_self_keys; " + QueryStoreSelfKeys.ReopenBackfillSql, rig.Connection))
+        {
+            await reset.ExecuteNonQueryAsync(ct);
+        }
+
+        Assert.Equal(0L, await KeysAsync(rig.Connection, ct));
+        Assert.False(await QueryStoreSelfKeys.ReadyAsync(rig.Connection, null, 30, ct));
+        var start = now.AddHours(-24);
+        var end = now.AddMinutes(1);
+
+        /* Not vacuous: the old statement is stored and, with no key and the marker-only probe, both reads still list it. */
+        var before = await ReadBothAsync(rig, now, ct);
+        Assert.Contains(Own, before.Mcp);
+        Assert.Contains(Own, before.Viewer);
+        var topBefore = await DarlingDataReader.GetQueryStoreTopAsync(rig.Postgres, ServerId, start, end, 10, DatabaseFilter.All, ct);
+        Assert.Contains(Own, topBefore.Select(r => r.QueryId));
+
+        Assert.Equal(1, await QueryStoreSelfKeys.BackfillAsync(rig.Connection, ct));
+        Assert.True(await QueryStoreSelfKeys.ReadyAsync(rig.Connection, null, 30, ct));
+        Assert.Equal([Own], await KeyIdsAsync(rig.Connection, ct));
+
+        AssertOwnHidden(await ReadBothAsync(rig, now, ct));
+        var topAfter = await DarlingDataReader.GetQueryStoreTopAsync(rig.Postgres, ServerId, start, end, 10, DatabaseFilter.All, ct);
+        Assert.DoesNotContain(Own, topAfter.Select(r => r.QueryId));
+        Assert.Equal(Ordinary.OrderBy(x => x), topAfter.Select(r => r.QueryId).Distinct().OrderBy(x => x));
+        await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
+        var grid = await viewer.GetQueryStoreTopQueriesAsync(ServerId, start, end, 10, null, null, null, ct);
+        Assert.DoesNotContain(Own, grid.Select(r => r.QueryId));
+    }
+
     /// <summary>The text upsert as dev shipped it before #6750 part 3, copied as a literal: the statement an older build runs against a
     /// store a newer build migrated past V219 (a rollback, or an older instance sharing the store). It knows nothing of the key table.</summary>
     private const string PreV219UpsertSql = @"INSERT INTO collect.query_store_text

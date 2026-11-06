@@ -699,6 +699,10 @@ CREATE OR REPLACE VIEW collect.v_blocked_process_reports AS SELECT * FROM collec
         // found by catalog (it lives in the materialization's schema), and a no-op without it; the re-run of V246 builds it again.
         new(246, "hasQueryStoreHashIndex",
             @"DO $$ DECLARE v regclass; BEGIN SELECT c.oid::regclass INTO v FROM pg_class c WHERE c.relkind = 'i' AND c.relname = 'ix_qs_corrected_hourly_hash_bucket'; IF v IS NOT NULL THEN EXECUTE format('DROP INDEX %s', v); END IF; END $$;"),
+        // V247 (#7730): the key trigger also recognizes the old statements, and the state row is deleted so the backfill runs again. The rewind puts
+        // V219's marker-only function back (the probe's sentinel is the digest test in the function's source), so a re-run of V247 replaces it
+        // again. The state row is left as it is: the re-run deletes it.
+        new(247, "hasSelfKeysOldStatements", QueryStoreSelfKeys.MarkerOnlyTriggerSql),
     ];
 
     /// <summary>
