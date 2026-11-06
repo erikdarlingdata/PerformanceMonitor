@@ -448,11 +448,11 @@ VALUES ($1, $2, $3, $4, $5, $6, 'ROWS', '', 100, 10, 10, 81920, 81920, 20, 30, 6
         await SeedPvsAsync("DbA", 5, 10);
         await SeedSecondaryAsync("DbSecondary");
 
-        var (rows, note) = await _dataService.GetPvsStatsLatestWithNoteAsync(_serverId);
+        var (rows, note) = await _dataService.GetPvsStatsLatestWithNoteAsync(_serverId, _serverManager);
         Assert.Equal("DbA", Assert.Single(rows).DatabaseName);
         Assert.Equal(PvsSecondaryNote.WithoutRow(new[] { "DbSecondary" }, new[] { "DbA" }), note);
 
-        var (_, filtered) = await _dataService.GetPvsStatsLatestWithNoteAsync(_serverId, new[] { "DbA" });
+        var (_, filtered) = await _dataService.GetPvsStatsLatestWithNoteAsync(_serverId, _serverManager, new[] { "DbA" });
         Assert.Null(filtered);
     }
 
@@ -473,7 +473,7 @@ VALUES ($1, $2, $3, $4, $5, $6, 'ROWS', '', 100, 10, 10, 81920, 81920, 20, 30, 6
         Assert.Equal(PvsSecondaryNote.WithoutRow(new[] { "DbSecondary" }, Array.Empty<string>(), new[] { "DbSecondary" }), SecondaryNoteOf(empty));
 
         // The desktop grid strip is fed the same sentence for the empty row set.
-        var (rows, note) = await _dataService.GetPvsStatsLatestWithNoteAsync(_serverId, new[] { "DbSecondary" });
+        var (rows, note) = await _dataService.GetPvsStatsLatestWithNoteAsync(_serverId, _serverManager, new[] { "DbSecondary" });
         Assert.Empty(rows);
         Assert.Equal(SecondaryNoteOf(empty), note);
     }
@@ -543,6 +543,35 @@ VALUES ($1, $2, $3, $4, $5, $6, 'ROWS', '', 100, 10, 10, 81920, 81920, 20, 30, 6
         var reply = await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName);
         Assert.Equal("empty", StatusOf(reply));
         Assert.Equal(PvsSecondaryNote.WithoutRow(new[] { "DbSecondary" }, Array.Empty<string>()), SecondaryNoteOf(reply));
+    }
+
+    [Fact]
+    public async Task PvsStatsLatestWithNote_TheDesktopGridOnASql2017Secondary_HasNoNote()
+    {
+        // #7822: SQL Server 2017 has no persistent version store, so the primary has none either and "check the primary" is wrong. The grid
+        // strip is fed by this read, so the gate has to be here and not only in the MCP tool.
+        SetServerMajorVersion(14);
+        await SeedSecondaryAsync("DbSecondary");
+
+        var (rows, note) = await _dataService.GetPvsStatsLatestWithNoteAsync(_serverId, _serverManager);
+        Assert.Empty(rows);
+        Assert.Null(note);
+
+        var (_, filtered) = await _dataService.GetPvsStatsLatestWithNoteAsync(_serverId, _serverManager, new[] { "DbSecondary" });
+        Assert.Null(filtered);
+    }
+
+    [Fact]
+    public async Task PvsStatsLatestWithNote_TheDesktopGridOnASql2019Secondary_KeepsTheNote()
+    {
+        SetServerMajorVersion(15);
+        await SeedSecondaryAsync("DbSecondary");
+
+        var (rows, note) = await _dataService.GetPvsStatsLatestWithNoteAsync(_serverId, _serverManager);
+        Assert.Empty(rows);
+        var expected = PvsSecondaryNote.WithoutRow(new[] { "DbSecondary" }, Array.Empty<string>());
+        Assert.NotNull(expected);
+        Assert.Equal(expected, note);
     }
 
     private static string StatusOf(string json)
