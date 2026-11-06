@@ -93,7 +93,7 @@ public sealed class ManageTagsPageTests
         var app = Wwwroot("js", "app.js");
         Assert.Contains("import { renderManageTags } from \"./pages/manage-tags.js\";", app);
         Assert.Contains("if (h === \"#/manage-tags\") return { name: \"manageTags\" };", app);
-        Assert.Contains("else if (r.name === \"manageTags\") renderManageTags(main);", app);
+        Assert.Contains("manageTags: (m) => renderManageTags(m),", app);
         Assert.Contains("if (r.name === \"manageTags\") return \"manage-tags\";", app);
     }
 }

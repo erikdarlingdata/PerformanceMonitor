@@ -14,6 +14,8 @@ const policy = await import(pathToFileURL(policyPath).href);
 
 const stripped = fs.readFileSync(appPath, "utf8")
   .replace(/^import .*;[ \t]*\r?$/gm, "")
+  /* app.js exports the router's table and currentRoute() for the route-load test (#7864); a script has no export keyword. */
+  .replace(/^export (?=(?:const|function) )/gm, "")
   .replace(/^startFrontDoor\(\)\.catch\(\(\) => \{\}\)\.then\(start\);[ \t]*\r?$/m, "");
 if (/^import /m.test(stripped) || /^startFrontDoor\(/m.test(stripped)) {
   throw new Error("app.js layout changed: the harness cannot separate its imports and its start() call");
