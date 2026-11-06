@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -147,6 +148,16 @@ ORDER BY lower(p.database_name), p.database_name, p.collection_time";
                 snapshot = all[0].CollectionTime;
             }
         }
+
+        /* #7822: the note only for a server whose SQL Server version has a persistent version store, judged from the registry entry the tab
+           already holds (the same AppliesTo gate get_pvs_stats uses). Before 2019 no database has a row and the primary has none either. */
+        var target = new CollectorTargetInfo
+        {
+            IsAzureSqlDb = server.EngineEdition == CollectorEngineCapability.AzureSqlDatabaseEngineEdition,
+            IsAzureManagedInstance = server.EngineEdition == CollectorEngineCapability.AzureManagedInstanceEngineEdition,
+            SqlMajorVersion = server.SqlMajorVersion ?? 0,
+        };
+        if (!PvsStatsCollector.Instance.AppliesTo(target)) return (rows, null);
 
         var secondary = await PgSecondaryReplicaScope.ReadAsync(_dataSource, serverId, PvsSecondaryNote.ScopeTimeUtc(snapshot), logger: null, cancellationToken);
         return (rows, PvsSecondaryNote.WithoutRow(secondary, rows.Select(r => r.DatabaseName), databaseNames));
