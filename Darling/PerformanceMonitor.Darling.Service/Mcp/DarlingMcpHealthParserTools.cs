@@ -939,7 +939,7 @@ public sealed class DarlingMcpHealthParserTools
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice.WindowTruncated, notice.EffectiveStart,
-                    factual: $"{c.RawEventCount} {eventType} event(s) were captured for {c.DisplayName} in the last {hoursBack} hour(s) and {noneQualifiedBecause}",
+                    factual: $"{c.RawEventCount.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)} {eventType} event(s) were captured for {c.DisplayName} in the last {hoursBack} hour(s) and {noneQualifiedBecause}",
                     coveredClaim: ". Events ARE being captured, so this is the healthy answer for this read rather than missing data."),
                 sourceObserved: true, c.LastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: c.RawEventCount, hints: notice.AsHints(), notificationCounts: c.NotificationCounts);
         }

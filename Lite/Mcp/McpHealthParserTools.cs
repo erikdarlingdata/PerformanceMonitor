@@ -713,7 +713,7 @@ public sealed class McpHealthParserTools
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice.WindowTruncated, notice.EffectiveStart,
-                    factual: $"{captured} {eventType} event(s) were captured for {serverName} in the last {hoursBack} hour(s) and {noneQualifiedBecause}",
+                    factual: $"{captured.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)} {eventType} event(s) were captured for {serverName} in the last {hoursBack} hour(s) and {noneQualifiedBecause}",
                     coveredClaim: ". Events ARE being captured, so this is the healthy answer for this read rather than missing data."),
                 sourceObserved: true, lastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: captured,
                 hints: notice.AsHints(), notificationCounts: notificationCounts);
