@@ -74,6 +74,9 @@ public partial class InvestigationsWindow : Window
             StatusText.Text = requests.Count == 0
                 ? "No investigation requests."
                 : requests.Count + " requests shown" + (truncated ? "; older ones are not listed. Narrow the state or family." : "");
+            /* #8007: the new list clears the pick, so a detail read still out is for a request the window no longer has picked, and
+               maybe no longer lists. Its answer is discarded, or it would draw that request's pane under a cleared grid. */
+            ++_detailSeq;
             ClearDetail("Pick a request to see its reports and journal.");
         }
         catch (Exception ex)
