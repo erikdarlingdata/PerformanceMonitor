@@ -842,6 +842,8 @@ export function linePanel(title, read, params, rowsKey, xKey, series, opts = {})
     sourceKey: opts.sourceKey,
     /* #7508: the answer's field holding the instant a series changes grain (get_query_store_duration_trend's routing.raw_from); absent on every other line. */
     seamKey: opts.seamKey,
+    /* #7699: a function of the seam instant that returns the sentence drawn under the chart. */
+    seamCaption: opts.seamCaption,
     /* #5644 W16: wording that follows the collector that answered (see BLOCKING_BY_SOURCE); absent on every other line. */
     bySource: opts.bySource,
     /* The panel is not drawn when the server answers "not collected" (it does not apply to this kind of server). */

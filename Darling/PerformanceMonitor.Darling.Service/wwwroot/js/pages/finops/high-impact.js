@@ -44,7 +44,8 @@ function databaseCell(row) {
 
 const COLUMNS = [
   { key: "impact_score", label: "Score", format: "int" },
-  { key: "impact_band", label: "Band", sevKey: "impact_band_sev" },
+  /* #7699: the band prints as a word with a capital (High, Medium, Low), as the other verdict columns do. */
+  { key: "impact_band", label: "Band", format: "status", sevKey: "impact_band_sev" },
   { key: "database_name", label: "Database", render: databaseCell, cellClass: () => "name-cell" },
   { key: "query_hash", label: "Query hash", mono: true },
   { key: "sample_query_text", label: "Query preview", clamp: true, valueList: false },

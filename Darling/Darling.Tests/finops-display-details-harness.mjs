@@ -131,7 +131,7 @@ try {
     status: "ok", server: "srv-a", view: "high_impact", hours_back: 24,
     rows: ["high", "medium", "low"].map((b, i) => ({ impact_score: 90 - i * 30, impact_band: b, database_name: "Sales", query_hash: "0x0" + i, total_executions: 1 })),
   });
-  out.band = { high: sevOf(impact, "high"), medium: sevOf(impact, "medium"), low: sevOf(impact, "low") };
+  out.band = { high: sevOf(impact, "High"), medium: sevOf(impact, "Medium"), low: sevOf(impact, "Low") };
 
   const osOf = async (text) => {
     const root = await build(inventory, "get_finops_inventory", { status: "ok", total_servers: 1, truncated: false, servers: [{ server: "srv-a", host_os_version: text, health_band: "good" }] });
