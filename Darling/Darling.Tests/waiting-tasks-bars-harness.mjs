@@ -98,10 +98,12 @@ const nameBlocked = [
 ];
 
 /* #7877: the read now serves a bucket MEAN, so a database blocked in 2 of 5 collections of a bucket is 0.4, not 0. The first time has
-   two means, one whole and one fractional. */
+   two means, one whole and one fractional. #7974: the mean is over every collection that ran, so a database blocked in 1 of 60 is 0.017, a
+   third mean at the first time. */
 const meanBlocked = [
   { collection_time: ago(3), database_name: "Sales", blocked_count: 0.4 },
   { collection_time: ago(3), database_name: "Orders", blocked_count: 1.5 },
+  { collection_time: ago(3), database_name: "Billing", blocked_count: 0.017 },
   { collection_time: ago(1), database_name: "Sales", blocked_count: 2 },
 ];
 

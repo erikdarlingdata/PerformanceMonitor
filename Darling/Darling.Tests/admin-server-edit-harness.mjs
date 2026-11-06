@@ -1227,8 +1227,8 @@ try {
       const answers = {
         approved: () => { pending = pending.filter((n) => n.note_id !== 7); return { status: 200, body: { status: "approved", note_id: 7 } }; },
         gone: () => { pending = pending.filter((n) => n.note_id !== 7); return { status: 404, body: { error: "That note is not pending: it was already decided, or it is gone." } }; },
-        refused: () => ({ status: 403, body: { error: "Deciding a note needs a store login with the admin role." } }),
-        signin: () => ({ status: 403, body: { error: "Sign in to the web as an admin to make this change, or use the Viewer." } }),
+        refused: () => ({ status: 403, body: { error: "This dashboard's store login has no write access, so it cannot decide notes. Decide them in the Viewer app.", reason: "store_refused" } }),
+        signin: () => ({ status: 403, body: { error: "Sign in to the web as an admin to make this change, or use the Viewer.", reason: "sign_in_required" } }),
         broken: () => ({ status: 500, body: { error: "The store did not answer." } }),
       };
       state.responder = (method, url) => {
@@ -1430,6 +1430,18 @@ try {
         reads: requests.filter((r) => r.url === "/api/read/get_daily_health_report").length,
         writes: requests.filter((r) => r.method !== "GET").length,
       };
+    },
+    /* #7950: the Servers tab of a can-edit seat on a managed store with web.allowAdminWrites off ("off") or on ("on"). The switch never
+       covered adding and editing servers (they follow the edit seat), so Edit is drawn either way; with the switch off the line under the
+       Admin heading names the changes that are off and says servers still save. Returns that line (null when none is drawn) and the Edit
+       buttons drawn. */
+    writesOffServers: async (param) => {
+      seed();
+      state.canEdit = true;
+      state.sessionReply = () => ({ status: 200, body: { can_edit: true, signed_in_admin: true, managed_store: true, admin_writes_off: param === "off" } });
+      await mountPage("servers");
+      const heading = all(main, (n) => n.classList.contains("admin-writes-off"))[0];
+      return { heading: heading && heading.children.length ? text(heading) : null, editButtons: buttons(main, "Edit").length };
     },
     /* One call of an admin.js export, {"fn": "buildEditBody", "args": [...]} on stdin, printed as {"result": ...}; or
        {"calls": [{"fn": ..., "args": [...]}, ...]} for a table of calls in one process, printed as {"results": [...]}.
