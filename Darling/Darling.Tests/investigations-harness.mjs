@@ -278,6 +278,47 @@ try {
   await settle();
   out.noReport = slotText();
 
+  /* #7957: a Close under a State filter. The closed request no longer matches the filter, so the re-read's list does not hold it, and the
+     pane that showed it must go: with another request still listed, with the read answering empty, and with the read answering no rows. */
+  session.signed_in_admin = true;
+  const C = "44444444-4444-4444-4444-444444444444";
+  const rowB = list(false).requests[1];
+  const rowC = { ...rowB, request_id: C, server_name: "srv-third" };
+  const openList = (...rows) => ({ status: "ok", requests_returned: rows.length, truncated: false, requests: rows });
+  bodies.list_investigation_requests = openList(rowB, rowC);
+  byLabel(main, "Family").value = "";
+  byLabel(main, "Family").handlers.change();
+  byLabel(main, "State").value = "open";
+  byLabel(main, "State").handlers.change();
+  await settle();
+  const closeUnderFilter = async (listBefore, listAfter) => {
+    bodies.list_investigation_requests = listBefore;
+    renderInvestigations(main);
+    await settle();
+    rowsOf(main)[0].handlers.click({ type: "click" });
+    await settle();
+    const paneBefore = slotText();
+    bodies.list_investigation_requests = listAfter;
+    closes.length = 0;
+    fetches.length = 0;
+    closeButton().handlers.click({ type: "click" });
+    await settle();
+    return {
+      paneBefore,
+      puts: closes.length,
+      closedUrl: closes[0] ? closes[0].url : null,
+      listCalls: calls("list_investigation_requests"),
+      pane: slotText(),
+      rows: rowsOf(main).map((r) => cells(r)[2]),
+      emptyLine: main.textContent.includes("No investigation request matches these filters."),
+    };
+  };
+  out.closedUnderFilter = await closeUnderFilter(openList(rowB, rowC), openList(rowC));
+  out.closedLastUnderFilter = await closeUnderFilter(openList(rowB), { status: "empty", message: "No investigation request matches these filters." });
+  out.closedNoRowsUnderFilter = await closeUnderFilter(openList(rowB), openList());
+  session.signed_in_admin = false;
+  bodies.list_investigation_requests = list(false);
+
   // The notices and the empty and error lines.
   bodies.list_investigation_requests = list(true);
   renderInvestigations(main);

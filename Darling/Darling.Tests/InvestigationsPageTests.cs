@@ -174,6 +174,26 @@ public sealed class InvestigationsPageTests
         Assert.True(closing.GetProperty("buttonEnabledAfter").GetBoolean());
     }
 
+    /// <summary>#7957: a Close under a State filter. The closed request no longer matches the filter, so the re-read's list does not hold
+    /// it, and the pane that showed it is emptied: with another request still listed, with the read answering empty, and with the read
+    /// answering no rows. One PUT goes out and the list is read again with the filter.</summary>
+    [Theory]
+    [InlineData("closedUnderFilter", "srv-third", false)]
+    [InlineData("closedLastUnderFilter", "", true)]
+    [InlineData("closedNoRowsUnderFilter", "", false)]
+    public void ACloseUnderAStateFilter_EmptiesThePane_WhenTheClosedRequestLeftTheList(string phase, string rowsLeft, bool emptyLine)
+    {
+        var closed = Run().GetProperty(phase);
+        Assert.Contains("Request on srv-old", closed.GetProperty("paneBefore").GetString());
+        Assert.Equal(1, closed.GetProperty("puts").GetInt32());
+        Assert.Equal("/api/investigation-requests/22222222-2222-2222-2222-222222222222/close", closed.GetProperty("closedUrl").GetString());
+        var read = Assert.Single(closed.GetProperty("listCalls").EnumerateArray());
+        Assert.Equal("open", read.GetProperty("state").GetString());
+        Assert.Equal(rowsLeft, string.Join(",", Strings(closed.GetProperty("rows"))));
+        Assert.Equal(emptyLine, closed.GetProperty("emptyLine").GetBoolean());
+        Assert.Equal("", closed.GetProperty("pane").GetString());
+    }
+
     [Fact]
     public void AStateAndFamilyPick_AreSentToTheRead_AndDropTheOpenRequest()
     {
