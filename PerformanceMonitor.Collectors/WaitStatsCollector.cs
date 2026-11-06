@@ -259,8 +259,12 @@ FROM sys.dm_os_sys_info AS dosi;";
                     reader.IsDBNull(1) ? null : reader.GetString(1)));
         }
 
-        return rows;
+        return DeltaBaselineRollbackRows.Capture(rows, context, BaselineGroups, r => r.WaitType);
     }
+
+    /* The delta groups WritePayload advances for each row, captured at the end of the read so a write that fails
+       before the rows are stored can hand them back (DeltaBaselineRollbackRows). */
+    private static readonly string[] BaselineGroups = { "wait_stats_tasks", "wait_stats_time", "wait_stats_signal" };
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
     {
