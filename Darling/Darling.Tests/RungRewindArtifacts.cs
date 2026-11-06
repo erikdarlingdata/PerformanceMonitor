@@ -703,9 +703,9 @@ CREATE OR REPLACE VIEW collect.v_blocked_process_reports AS SELECT * FROM collec
         // sentinel, so the rewind drops it and the re-run of V247 adds it back empty. Safe on a store that never had it.
         new(247, "hasXeSessionDatabases",
             @"ALTER TABLE IF EXISTS config.config_monitored_servers DROP COLUMN IF EXISTS xe_session_databases;"),
-        // V248 (#7731): the database name on the statement stats. A plain nullable column with no view over it, so the rewind is the drop alone, and the
-        // re-run of V248 adds it back. Safe on a store that never had it.
-        new(248, "hasStatementStatsDatabaseName",
+        // V249 (#7731): the database name on the statement stats. A plain nullable column with no view over it, so the rewind is the drop alone, and the
+        // re-run of V249 adds it back. Safe on a store that never had it.
+        new(249, "hasStatementStatsDatabaseName",
             @"ALTER TABLE IF EXISTS collect.pg_statement_stats DROP COLUMN IF EXISTS database_name;"),
     ];
 

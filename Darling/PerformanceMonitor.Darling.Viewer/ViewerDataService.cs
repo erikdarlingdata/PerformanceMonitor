@@ -1463,7 +1463,7 @@ SELECT
     /* V247 (#7639) adds the per-server list of databases that get Extended Events sessions to the server registry. Found by catalog so the
        answer does not depend on the connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
     EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_monitored_servers') AND attname = 'xe_session_databases' AND NOT attisdropped),
-    /* V248 (#7731) adds the database name to the statement stats. Found by catalog so the answer does not depend on the
+    /* V249 (#7731) adds the database name to the statement stats. Found by catalog so the answer does not depend on the
        connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
     EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.pg_statement_stats') AND attname = 'database_name' AND NOT attisdropped)";
 
@@ -1742,10 +1742,10 @@ SELECT
         /* V245 (#7611): the Database Protection thresholds on the alert settings. Column-existence sentinel, newest-first, and the TOP rung, so a
            fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 244 and showing a spurious upgrade
            banner on a store that is current. */
-        /* V248 (#7731): the database name on the statement stats. Column-existence sentinel, newest-first, and the TOP rung. */
+        /* V249 (#7731): the database name on the statement stats. Column-existence sentinel, newest-first, and the TOP rung. */
         if (hasStatementStatsDatabaseName)
         {
-            return 248;
+            return 249;
         }
         /* V247 (#7639): the per-server list of databases that get Extended Events sessions on the server registry. Column-existence sentinel,
            newest-first, and the TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to

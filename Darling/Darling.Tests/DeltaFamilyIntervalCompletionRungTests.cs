@@ -44,6 +44,10 @@ public sealed class DeltaFamilyIntervalCompletionRungTests
 
     private const string IntervalColumn = "sample_interval_seconds";
 
+    /* Columns a LATER rung appended after the interval column: pg_statement_stats gained database_name (V249, #7731). */
+    private static string[] LaterColumnsAfterTheInterval(string table) =>
+        table == "pg_statement_stats" ? new[] { "database_name" } : Array.Empty<string>();
+
     private static readonly string[] IntervalTables = { "procedure_stats", "memory_grant_stats", "pg_wait_stats", "pg_statement_stats" };
 
     private static readonly string[] OffsetColumns = { "statement_start_offset", "statement_end_offset" };
@@ -196,11 +200,19 @@ public sealed class DeltaFamilyIntervalCompletionRungTests
             var definition = CollectorCatalog.Find(table);
             Assert.NotNull(definition);
 
-            Assert.Equal(IntervalColumn, definition!.PayloadColumns[^1].Name);
-            Assert.Equal(CollectorColumnType.Integer, definition.PayloadColumns[^1].Type);
+            /* #7731 (V249): pg_statement_stats gained database_name after this rung, appended last, so its
+               interval column is the last one this rung added and sits just ahead of that later column. The
+               rule is unchanged: the rung's column was appended to the end when it landed, and a later rung
+               appends after it, never between. */
+            var laterColumns = LaterColumnsAfterTheInterval(table);
+            var intervalAt = definition!.PayloadColumns.Count - 1 - laterColumns.Length;
+            Assert.Equal(IntervalColumn, definition.PayloadColumns[intervalAt].Name);
+            Assert.Equal(CollectorColumnType.Integer, definition.PayloadColumns[intervalAt].Type);
+            Assert.Equal(laterColumns, definition.PayloadColumns.Skip(intervalAt + 1).Select(c => c.Name).ToArray());
 
             var ddl = PgSchemaGenerator.CreateTable(definition);
-            Assert.EndsWith($"    {IntervalColumn} integer\n);", ddl, StringComparison.Ordinal);
+            var laterDdl = string.Concat(laterColumns.Select(c => $",\n    {c} text"));
+            Assert.EndsWith($"    {IntervalColumn} integer{laterDdl}\n);", ddl, StringComparison.Ordinal);
         }
 
         var queryStats = CollectorCatalog.Find("query_stats")!;
@@ -214,7 +226,8 @@ public sealed class DeltaFamilyIntervalCompletionRungTests
             PgCollectorRowWriter.CopyCommandFor(QueryStatsCollector.Instance), StringComparison.Ordinal);
         foreach (var table in IntervalTables)
         {
-            Assert.EndsWith($", {IntervalColumn}) FROM STDIN (FORMAT BINARY)",
+            var later = string.Concat(LaterColumnsAfterTheInterval(table).Select(c => ", " + c));
+            Assert.EndsWith($", {IntervalColumn}{later}) FROM STDIN (FORMAT BINARY)",
                 PgCollectorRowWriter.CopyCommandFor(CollectorCatalog.Find(table)!), StringComparison.Ordinal);
         }
     }
@@ -344,7 +357,7 @@ public sealed class DeltaFamilyIntervalCompletionRungTests
             ("ProcedureStatsCollector.cs", 7, "var interval = Math.Min(", ".Value(sampleIntervalSeconds);"),
             ("MemoryGrantsCollector.cs", 2, "var sampleIntervalSeconds = Math.Min(", ".Value(sampleIntervalSeconds);"),
             ("PgWaitStatsCollector.cs", 2, "var sampleIntervalSeconds = Math.Min(", ".Value(row.SampleIntervalSeconds);"),
-            ("PgStatementStatsCollector.cs", 3, "var sampleIntervalSeconds = Math.Min(", ".Value(row.SampleIntervalSeconds);"),
+            ("PgStatementStatsCollector.cs", 3, "var sampleIntervalSeconds = Math.Min(", ".Value(row.SampleIntervalSeconds)"),
         })
         {
             var source = RepoFile.ReadRepoFile("PerformanceMonitor.Collectors", file);
