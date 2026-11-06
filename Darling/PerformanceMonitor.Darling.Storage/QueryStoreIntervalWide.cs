@@ -473,12 +473,14 @@ WHERE t.server_id = $1;";
 
     /// <summary>
     /// The table's floor over every server (#7746): the oldest interval any server has left. The purge is one pass over the whole
-    /// table with one cutoff (<c>first_execution_time &lt; now - 10 days</c>), oldest first, for every server at once, so every row it
-    /// has ever deleted, of any server, is below this minimum, exactly as every row it deleted of one server is below that server's own
-    /// floor (<see cref="PlainTableFloorSql"/>). Clause 3 of <see cref="UseTable"/> needs an upper bound on the intervals the table
-    /// dropped for the server it decides, and takes the lower of the two floors: a server whose own floor is young, because it was
-    /// enrolled a day or two ago and its first intervals are all the table has of it, is proved by this floor where its own cannot be.
-    /// Its own floor is not evidence of a purge; it is the age of its history. Read only when a server's own floor refused clause 3, and
+    /// table with one cutoff (<c>first_execution_time &lt; now - 10 days</c>), oldest first, for every server at once, so this minimum
+    /// stands in for that cutoff where a server's own floor (<see cref="PlainTableFloorSql"/>) is the age of its history instead.
+    /// It can sit below the cutoff: <see cref="UpsertSql"/> copies <c>first_execution_time</c> from raw with no lower bound, and raw
+    /// takes it from the monitored server's clock, so one server whose clock runs behind holds rows below the horizon until the next
+    /// purge. <see cref="UseTable"/> therefore raises it to <c>applied_through - <see cref="QueryStoreIntervalPartitions.WideHorizonDays"/></c>
+    /// before taking the lower of it and the server's own floor: a server whose own floor is young, because it was enrolled a day or
+    /// two ago and its first intervals are all the table has of it, is proved by this floor where its own cannot be, and a mature server
+    /// whose own floor refuses is never let through by a skewed row. Read only when a server's own floor refused clause 3, and
     /// tried once per check through <see cref="StoreWideInputsCache"/> (<see cref="StoreWideInputsCache.ReadTableFloorAllServersAsync"/>),
     /// success or fault, under a savepoint inside the tag rollup's transaction. It has no server predicate, so it reads the index the
     /// one-server statement uses from its lowest key over the whole table.
@@ -927,8 +929,10 @@ FROM (
     /// <c>H</c> and that the table dropped. A NULL <paramref name="tableFloor"/> means the table holds nothing
     /// for the server, and clause 2 already refuses that case. <c>H</c> is the lower of the server's own floor and
     /// <paramref name="tableFloorAllServers"/>, the table's floor over every server (#7746, <see cref="PlainTableFloorAllServersSql"/>):
-    /// the purge runs over the whole table with one cutoff, so both floors bound every interval it dropped for this server, and a
-    /// newly enrolled server, whose own floor is the age of its history and not a purge edge, passes on the whole-table floor.
+    /// the purge runs over the whole table with one cutoff, so a newly enrolled server, whose own floor is the age of its history
+    /// and not a purge edge, passes on the whole-table floor. That floor is first raised to <paramref name="appliedThrough"/> minus
+    /// <see cref="QueryStoreIntervalPartitions.WideHorizonDays"/>, the purge's cutoff by the service clock: a monitored clock running
+    /// behind writes rows below it that sit in the table until the next purge, and they are not a purge edge either.
     /// NULL leaves the server's own floor alone.</item>
     /// <item>A literal <paramref name="literalWindowEnd"/> (a custom range, MCP <c>as_of</c>) must be at or
     /// after <paramref name="appliedThrough"/>. NULL means an open end (a preset), which skips this clause
@@ -966,11 +970,26 @@ FROM (
 
         if (tableFloor is DateTime h)
         {
-            /* #7746: both floors are at or above the last cutoff the purge applied, so the lower one is the tighter bound on the
-               intervals it dropped for this server. */
-            if (tableFloorAllServers is DateTime all && all < h)
+            /* #7746: the server's own floor is at or above the last cutoff the purge applied, because the purge deletes oldest first on
+               first_execution_time. The whole-table floor need not be: UpsertSql copies first_execution_time from raw with no lower bound,
+               and raw takes it from the monitored server's clock, so one server whose clock runs behind holds rows below the horizon
+               until the next purge (QueryStoreIntervalPartitions reports them in DEFAULT). The horizon is the service clock minus
+               WideHorizonDays, the purge's own cutoff, and appliedThrough is that clock at this server's last applied batch, so the
+               whole-table floor is raised to appliedThrough - WideHorizonDays before the lower of the two floors is taken. A skewed row
+               can lower H to the horizon and no further, and the clamp only ever raises the whole-table floor. */
+            if (tableFloorAllServers is DateTime all)
             {
-                h = all;
+                var horizon = TimeSpan.FromDays(QueryStoreIntervalPartitions.WideHorizonDays);
+                var purgeHorizon = appliedThrough - DateTime.MinValue >= horizon ? appliedThrough - horizon : DateTime.MinValue;
+                if (all < purgeHorizon)
+                {
+                    all = purgeHorizon;
+                }
+
+                if (all < h)
+                {
+                    h = all;
+                }
             }
 
             var edgeFloor = windowStart - PurgeEdgeMargin;
