@@ -125,12 +125,13 @@ public sealed class PgMidReadFaultBaselineRollbackTests
         table.Columns.Add("stats_since", typeof(DateTime));
         table.Columns.Add("target_now", typeof(DateTime));
         table.Columns.Add("dealloc", typeof(long));
+        table.Columns.Add("database_name", typeof(string));
         foreach (var (queryId, calls, statsSince) in rows)
         {
             table.Rows.Add(queryId, 16384L, 10L, true, calls, calls * 2.5, 1.0, 5.0, 2.5, calls * 3,
                 calls * 20, 0L, 0L, 0L, 0L, 0L, 0.0, 0.0,
                 DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
-                DBNull.Value, (object?)statsSince ?? DBNull.Value, targetNow, DBNull.Value);
+                DBNull.Value, (object?)statsSince ?? DBNull.Value, targetNow, DBNull.Value, "pm_database");
         }
 
         return table;

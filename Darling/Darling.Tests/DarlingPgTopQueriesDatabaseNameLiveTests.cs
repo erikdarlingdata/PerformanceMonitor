@@ -110,6 +110,90 @@ public sealed class DarlingPgTopQueriesDatabaseNameLiveTests
         Assert.True(reader.IsDBNull(2), "the column has no default");
     }
 
+    /// <summary>
+    /// V249 on a COMPRESSED hypertable, the shape field stores have. The store is built at V248 (the column dropped again), a row is
+    /// planted, the table is made a hypertable and its chunk compressed the product's way, then the V249 stamp is rolled back and the
+    /// ladder re-run. The ALTER must succeed, the column must exist and be nullable, the planted row must read NULL, and a second run
+    /// must change nothing.
+    /// </summary>
+    [Fact]
+    public async Task AStoreAtV248WithCompressedChunks_MigratesToV249_AndOldRowsReadDatabaseNameNull()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the V249 compressed-hypertable round trip.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        /* A V248 store has no database_name column. */
+        await DarlingMcpTestData.ExecAsync(connection, ct, "ALTER TABLE collect.pg_statement_stats DROP COLUMN database_name");
+        await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.pg_statement_stats
+    (collection_id, collection_time, server_id, server_name, queryid, database_id, user_id, toplevel,
+     calls, total_exec_time_ms, max_exec_time_ms, rows_returned, delta_calls, delta_total_exec_time_ms, delta_rows)
+VALUES ($1, $2, $3, $4, $5, 16384, 10, TRUE, 100, 5000, 91.5, 250, 7, 70, 0)",
+            1L, DarlingMcpTestData.Naive(new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc)), ServerId, ServerName, QueryId);
+
+        Assert.True(await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct),
+            "TimescaleDB must be available on CI for the compressed-hypertable round trip");
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            "SELECT create_hypertable('collect.pg_statement_stats', by_range('collection_time', INTERVAL '1 days'), if_not_exists => true, migrate_data => true)");
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            "ALTER TABLE collect.pg_statement_stats SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')");
+
+        var chunks = new System.Collections.Generic.List<string>();
+        await using (var list = new NpgsqlCommand("SELECT show_chunks('collect.pg_statement_stats')::text", connection))
+        await using (var reader = await list.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                chunks.Add(reader.GetString(0));
+            }
+        }
+
+        foreach (var chunk in chunks)
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct, $"SELECT compress_chunk('{chunk}', if_not_compressed => true)");
+        }
+
+        Assert.Equal(true, await ScalarAsync(connection, ct,
+            "SELECT EXISTS (SELECT 1 FROM timescaledb_information.chunks WHERE hypertable_name = 'pg_statement_stats' AND is_compressed)"));
+        Assert.Equal(false, await ScalarAsync(connection, ct,
+            "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'pg_statement_stats' AND column_name = 'database_name')"));
+
+        /* Roll the version stamp back to V248, then upgrade: exactly V249 is left to apply. */
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM darling_schema_version WHERE version >= 249");
+        Assert.Equal(1, await PgMigrations.MigrateAsync(connection, ct));
+
+        await using (var column = new NpgsqlCommand(
+            "SELECT data_type, is_nullable, column_default FROM information_schema.columns "
+            + "WHERE table_schema = 'collect' AND table_name = 'pg_statement_stats' AND column_name = 'database_name'", connection))
+        await using (var reader = await column.ExecuteReaderAsync(ct))
+        {
+            Assert.True(await reader.ReadAsync(ct), "V249 did not add database_name to the compressed hypertable");
+            Assert.Equal("text", reader.GetString(0));
+            Assert.Equal("YES", reader.GetString(1));
+            Assert.True(reader.IsDBNull(2), "the column has no default");
+        }
+
+        Assert.Equal(true, await ScalarAsync(connection, ct,
+            "SELECT database_name IS NULL FROM collect.pg_statement_stats WHERE collection_id = 1"));
+        Assert.Equal(true, await ScalarAsync(connection, ct,
+            "SELECT EXISTS (SELECT 1 FROM timescaledb_information.chunks WHERE hypertable_name = 'pg_statement_stats' AND is_compressed)"));
+
+        Assert.Equal(0, await PgMigrations.MigrateAsync(connection, ct));
+    }
+
+    private static async Task<object?> ScalarAsync(NpgsqlConnection connection, CancellationToken ct, string sql)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        return await command.ExecuteScalarAsync(ct);
+    }
+
     private static async Task SeedAsync(
         NpgsqlConnection connection, CancellationToken ct, DateTime collectionTimeUtc, long databaseId, string? databaseName, long deltaCalls, long deltaTimeMs) =>
         await DarlingMcpTestData.ExecAsync(connection, ct, @"

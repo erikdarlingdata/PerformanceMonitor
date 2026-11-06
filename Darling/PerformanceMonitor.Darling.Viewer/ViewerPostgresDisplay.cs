@@ -780,8 +780,6 @@ internal static class PgDisplay
         public string QueryText { get; init; } = "";
         /// <summary>The number <see cref="QueryId"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
         public long? QueryIdSort { get; init; }
-        /// <summary>The number <see cref="DatabaseId"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
-        public long? DatabaseIdSort { get; init; }
         /// <summary>The number <see cref="Calls"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
         public long? CallsSort { get; init; }
         /// <summary>The number <see cref="TotalExecTimeMs"/> is formatted from (#6104). The column sorts by it, not by that text; null where the cell shows the not-applicable dash or is blank.</summary>
@@ -840,7 +838,6 @@ internal static class PgDisplay
             ? "[Performance Monitor's own statement] " + row.QueryText
             : row.QueryText ?? "(statement text not captured yet)",
         QueryIdSort = row.QueryId,
-        DatabaseIdSort = row.DatabaseId,
         CallsSort = Raw(row.Calls),
         TotalExecTimeMsSort = Raw(row.TotalExecTimeMs),
         AvgExecTimeMsSort = row.Calls <= 0 ? null : row.TotalExecTimeMs / (double)row.Calls,

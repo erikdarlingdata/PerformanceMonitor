@@ -351,13 +351,15 @@ public sealed class DeltaFamilyIntervalCompletionRungTests
     {
         /* #5449: ProcedureStatsCollector computes its deltas in ComputeDeltas (the idle skip needs them in
            ReadAsync), so the minimum is taken into `interval` there and WritePayload writes it as
-           sampleIntervalSeconds = d.IntervalSeconds. The minimum is the same; only the variable moved. */
+           sampleIntervalSeconds = d.IntervalSeconds. The minimum is the same; only the variable moved.
+           PgStatementStatsCollector is not listed (#7731, #5833): its minimum and its written interval are covered by behaviour, in
+           PgStatementStatsRowCoherentResetTests (the minimum over a row's groups, 0 on any reset) and
+           PgStatementStatsAbandonedWriteBaselineTests (the interval WritePayload stores at ordinal 30, beside database_name at 31). */
         foreach (var (file, groups, minimum, written) in new[]
         {
             ("ProcedureStatsCollector.cs", 7, "var interval = Math.Min(", ".Value(sampleIntervalSeconds);"),
             ("MemoryGrantsCollector.cs", 2, "var sampleIntervalSeconds = Math.Min(", ".Value(sampleIntervalSeconds);"),
             ("PgWaitStatsCollector.cs", 2, "var sampleIntervalSeconds = Math.Min(", ".Value(row.SampleIntervalSeconds);"),
-            ("PgStatementStatsCollector.cs", 3, "var sampleIntervalSeconds = Math.Min(", ".Value(row.SampleIntervalSeconds)"),
         })
         {
             var source = RepoFile.ReadRepoFile("PerformanceMonitor.Collectors", file);
