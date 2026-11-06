@@ -119,13 +119,19 @@ export function multiPicker(opts) {
     render();
     onChange(listedValues.filter((o) => state.checked.has(o)), state.metric);
   };
+  /* #7578: the limit text only explains why the other boxes are disabled, so it prints muted (data-limit); a refusal's reason still prints as a warning. */
+  const setHint = (text, isLimit) => {
+    hint.textContent = text;
+    if (isLimit && text) hint.dataset.limit = "1";
+    else delete hint.dataset.limit;
+  };
   const render = () => {
     const full = state.checked.size >= max;
     const limitHint = "Limit reached: uncheck a " + noun + " to pick another.";
     const blocked = (o) => (refuse && !state.checked.has(o) ? refuse(o, state.checked) : null);
     /* #6159: "0 / 50 selected" read as 50 items listed; the 50 is the most a person may pick. */
     count.textContent = state.checked.size + " selected (up to " + max + ")";
-    hint.textContent = full ? limitHint : (listedValues.map(blocked).find((r) => r) || "");
+    setHint(full ? limitHint : (listedValues.map(blocked).find((r) => r) || ""), full);
     const rows = visible().map((o) => {
       const on = state.checked.has(o);
       const box = el("input", { type: "checkbox", "aria-label": o });
@@ -135,13 +141,13 @@ export function multiPicker(opts) {
         if (box.checked) {
           if (state.checked.size >= max) {
             box.checked = false;
-            hint.textContent = limitHint;
+            setHint(limitHint, true);
             return;
           }
           const why = blocked(o);
           if (why) {
             box.checked = false;
-            hint.textContent = why;
+            setHint(why, false);
             return;
           }
           state.checked.add(o);

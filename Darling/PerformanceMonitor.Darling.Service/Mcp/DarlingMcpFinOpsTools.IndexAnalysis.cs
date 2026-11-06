@@ -28,7 +28,7 @@ public sealed partial class DarlingMcpFinOpsTools
         "index_analysis: index cleanup findings and reclaimable space.";
 
     internal const string IndexAnalysisViewGuide =
-        "index_analysis runs the monitor-side sp_IndexCleanup reproduction over each database's newest collected index snapshot; each databases entry carries captured_at, when that snapshot was collected (a database that left collection scope shows an older one), and overall carries none; hours_back other than 24 is refused. overall and databases are the reclaimable-space roll-ups in GB (3 decimals); workload counters are per database only. recommendations is ordered by index size, then name; limit (1 to 500, default 10) caps it, recommendation_count and counts_by_action count all findings, and truncated says when rows were cut. databases lists at most 13, largest total_max_savings_gb first, and databases_truncated says when more exist; database_name reads any database, including one outside those 13. script and original_index_definition are cut to 300 characters unless full_text=true, which returns them in full with no size cap; the *_truncated flags say so. At limit 500 the answer is about 0.45 MB with typical names, around 1 MB with long names, and up to about 3.5 MB with full_text on wide indexes; use database_name or a smaller limit for less. notes carries the uptime and dedupe-only caveats and the analyzer's stated limitations. REVIEW rows carry no script. Text numbers use the invariant culture.";
+        "index_analysis runs the monitor-side sp_IndexCleanup reproduction over each database's newest collected index snapshot; each databases entry carries captured_at, when that snapshot was collected (a database that left collection scope shows an older one; when it is more than 2 days older than the server's newest snapshot the entry carries left_over=true, and its figures are in neither overall nor recommendations), and overall carries none; hours_back other than 24 is refused. overall and databases are the reclaimable-space roll-ups in GB (6 decimals); workload counters are per database only. recommendations is ordered by index size, then name; limit (1 to 500, default 10) caps it, recommendation_count and counts_by_action count all findings, and truncated says when rows were cut. databases lists at most 13, current databases first and then largest total_max_savings_gb first, and databases_truncated says when more exist; database_name reads any database, including one outside those 13. script and original_index_definition are cut to 300 characters unless full_text=true, which returns them in full with no size cap; the *_truncated flags say so. At limit 500 the answer is about 0.45 MB with typical names, around 1 MB with long names, and up to about 3.5 MB with full_text on wide indexes; use database_name or a smaller limit for less. notes carries the uptime and dedupe-only caveats and the analyzer's stated limitations. REVIEW rows carry no script. Text numbers use the invariant culture.";
 
     /// <summary>The longest <c>script</c> or <c>original_index_definition</c> text kept when <c>full_text</c> is false.</summary>
     internal const int IndexAnalysisTextCap = 300;
@@ -100,19 +100,24 @@ public sealed partial class DarlingMcpFinOpsTools
             .ThenBy(r => r.IndexId)
             .ToList();
 
-    /// <summary>The database ordering: largest possible reclaim, then name.</summary>
-    internal static List<IndexCleanupRollup> OrderIndexAnalysisDatabases(IEnumerable<IndexCleanupRollup> rows) =>
-        rows.OrderByDescending(r => r.TotalMaxSavingsGb)
+    /// <summary>The database ordering: current databases before left-over ones (#7701, so a cut keeps the live ones), then largest possible reclaim, then name.</summary>
+    internal static List<IndexCleanupRollup> OrderIndexAnalysisDatabases(IEnumerable<IndexCleanupRollup> rows, IReadOnlySet<int>? leftOverIds = null) =>
+        rows.OrderBy(r => IsLeftOver(leftOverIds, r.DatabaseId))
+            .ThenByDescending(r => r.TotalMaxSavingsGb)
             .ThenBy(r => r.DatabaseName, StringComparer.Ordinal)
             .ToList();
 
-    private static decimal Gb(decimal value) => FinOpsWireFigures.Clean(Math.Round(value, 3, MidpointRounding.AwayFromZero));
+    private static bool IsLeftOver(IReadOnlySet<int>? leftOverIds, int? databaseId) =>
+        databaseId is { } id && leftOverIds?.Contains(id) == true;
+
+    /* #7702 item 1: six places, not three, so a 2 MB index (0.002 GB) and a 400 KB one (0.0004 GB) still show a size; the page prints the figure in the unit that fits it. */
+    private static decimal Gb(decimal value) => FinOpsWireFigures.Clean(Math.Round(value, 6, MidpointRounding.AwayFromZero));
 
     private static decimal AvgWait(long waitInMs, long waitCount) =>
         FinOpsWireFigures.Clean(Math.Round(IndexCleanupRollupFigures.AverageWaitMs(waitInMs, waitCount), 2, MidpointRounding.AwayFromZero));
 
     /// <summary>One roll-up row; the workload counters are included only for a per-database row.</summary>
-    internal static object IndexAnalysisRollupRow(IndexCleanupRollup r, bool withWorkload, DateTime? capturedAt = null)
+    internal static object IndexAnalysisRollupRow(IndexCleanupRollup r, bool withWorkload, DateTime? capturedAt = null, bool leftOver = false)
     {
         if (!withWorkload)
         {
@@ -139,6 +144,8 @@ public sealed partial class DarlingMcpFinOpsTools
             database_name = r.DatabaseName,
             /* When this database's newest snapshot was collected (null only if the read named no such database). */
             captured_at = capturedAt is { } at ? McpHelpers.FormatEffectiveStart(at) : null,
+            /* #7701: set only on a database whose snapshot is left over; its figures are in no total and none of its indexes are in the recommendations. */
+            left_over = leftOver ? true : (bool?)null,
             tables_analyzed = r.TablesAnalyzed,
             index_count = r.IndexCount,
             total_size_gb = Gb(r.TotalSizeGb),
@@ -204,7 +211,7 @@ public sealed partial class DarlingMcpFinOpsTools
     /// </summary>
     internal static string BuildIndexAnalysisPayload(
         string serverName, IndexCleanupAnalysisResult result, int limit, string? databaseName, bool fullText, string? emptyStatus,
-        IReadOnlyDictionary<int, DateTime>? snapshotTimes = null, int databasesLeftOut = 0)
+        IReadOnlyDictionary<int, DateTime>? snapshotTimes = null, int databasesLeftOut = 0, IReadOnlySet<int>? leftOverIds = null)
     {
         if (result.DatabaseRollups.Count == 0)
         {
@@ -228,7 +235,7 @@ public sealed partial class DarlingMcpFinOpsTools
             ? result.Recommendations.Where(r => string.Equals(r.DatabaseName, databaseName, StringComparison.OrdinalIgnoreCase))
             : result.Recommendations;
         var ordered = OrderIndexAnalysisRecommendations(recs);
-        var dbs = OrderIndexAnalysisDatabases(rollups);
+        var dbs = OrderIndexAnalysisDatabases(rollups, leftOverIds);
 
         var counts = new Dictionary<string, int>();
         foreach (var a in IndexAnalysisActions) counts[a] = 0;
@@ -257,7 +264,7 @@ public sealed partial class DarlingMcpFinOpsTools
             overall_workload_reason = filtered ? null : "workload counters are reported per database only, as sp_IndexCleanup does",
             database_count = dbs.Count,
             databases_truncated = dbs.Count > MaxIndexAnalysisDatabases,
-            databases = dbs.Take(MaxIndexAnalysisDatabases).Select(d => IndexAnalysisRollupRow(d, true, SnapshotTimeOf(snapshotTimes, d.DatabaseId))).ToList(),
+            databases = dbs.Take(MaxIndexAnalysisDatabases).Select(d => IndexAnalysisRollupRow(d, true, SnapshotTimeOf(snapshotTimes, d.DatabaseId), IsLeftOver(leftOverIds, d.DatabaseId))).ToList(),
             recommendation_count = ordered.Count,
             truncated = ordered.Count > limit,
             limit,
@@ -296,7 +303,7 @@ public sealed partial class DarlingMcpFinOpsTools
 
         /* #5633 review (finding D): a page with rows or without names the databases the read left out, in the envelope. */
         return McpHelpers.WithDatabasesLeftOut(
-            BuildIndexAnalysisPayload(resolved.DisplayName, result, limit, databaseName, fullText, notCollected, read.SnapshotTimes, read.OmittedDatabases?.Count ?? 0),
+            BuildIndexAnalysisPayload(resolved.DisplayName, result, limit, databaseName, fullText, notCollected, read.SnapshotTimes, read.OmittedDatabases?.Count ?? 0, read.LeftOverDatabaseIds),
             read.OmittedDatabases)!;
     }
 }

@@ -121,10 +121,10 @@ try {
       out.copyPresent = !!button("Copy your sign-in key");
       out.strips = strips().length;
     },
-    /* The page's own explanation of grants: what the notice strip says an approve grant does. */
+    /* The page's own explanation of grants: what the caption says an approve grant does (#7558: a standing explanation is a caption, not a yellow notice). */
     async notice() {
       await draw();
-      out.notice = body.every((n) => n.className.startsWith("strip notice")).map((n) => n.textContent).join(" ");
+      out.notice = body.every((n) => n.className.startsWith("strip source")).map((n) => n.textContent).join(" ");
     },
     /* The admin's forms: add a person, a Slack sign-in (upper-cased, team and user joined) and an approve grant with its kinds on a tag. */
     async forms() {

@@ -16,7 +16,9 @@
  * this string. pages/deadlock-graph.js keeps its own copy for the same reason (it does not import this file).
  */
 
-import { storeHash, el, mount, parseUtc, axisTime, emptyStrip, setQueryWaitFilter, waitIsLinked, xStartMs, chartDataStart, sizeAxisPer } from "./util.js";
+import { storeHash, el, mount, parseUtc, axisTime, emptyStrip, setQueryWaitFilter, waitIsLinked, xStartMs, chartDataStart, sizeAxisPer, ticksCarryUnit } from "./util.js";
+/* #7578: the rule lives in util.js, where the page code that words a heading reaches it without the chart module; charts.js keeps exporting it. */
+export { ticksCarryUnit };
 import { gapThresholdMs, splitAtGaps, bucketMsOf } from "./chart-gaps.js";
 import { focusSnapshotAt } from "./snapshot-pick.js";
 
@@ -433,7 +435,7 @@ export function renderLineChart(spec) {
     /* Y-axis unit caption. Skipped for "%" (the tick labels already carry the unit, and stacking a caption
        on the top tick collided with its label — the design review's must-fix); for bare-number axes it sits
        in the extra top headroom reserved above (well clear of the top tick's label). */
-    if (unit && unit !== "%") {
+    if (unit && unit !== "%" && !ticksCarryUnit(yLabels)) {
       const cap = svg("text", { class: "axis-unit", x: M.l - 8, y: 11, "text-anchor": "end" });
       cap.textContent = unit;
       axis.appendChild(cap);
@@ -480,7 +482,7 @@ export function renderLineChart(spec) {
         label.textContent = yLabels2[ti];
         axis.appendChild(label);
       }
-      if (series2.unit && series2.unit !== "%") {
+      if (series2.unit && series2.unit !== "%" && !ticksCarryUnit(yLabels2)) {
         const cap2 = svg("text", { class: "axis-unit", x: plotRight + 8, y: 11, "text-anchor": "start", fill: normalizeColor(series2.color) });
         cap2.textContent = series2.unit;
         axis.appendChild(cap2);
@@ -1341,6 +1343,7 @@ function niceNum(range, round) {
   }
   return nf * Math.pow(10, exp);
 }
+
 
 /**
  * The labels for one axis's ticks (#6158): each tick formatted with its step (so a small range prints the decimals it

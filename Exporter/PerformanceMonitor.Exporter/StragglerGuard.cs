@@ -85,11 +85,19 @@ public static class StragglerGuard
         return new StragglerGuardResult(lastCount, totalWait.TotalSeconds);
     }
 
-    private static async Task<long> CountStragglersAsync(
+    /// <summary>
+    /// One count. Both the production overload and the exporter's test-only short-wait path call this, so the two
+    /// cannot bind different parameters.
+    /// </summary>
+    internal static async Task<long> CountStragglersAsync(
         NpgsqlConnectionStringBuilder connectionStringBuilder, DateTime collectionTo, CancellationToken ct)
     {
         await using var connection = await StoreConnectionFactory.OpenAsync(connectionStringBuilder, ct).ConfigureAwait(false);
         await using var command = new NpgsqlCommand(Sql, connection);
+        command.Parameters.Add(new NpgsqlParameter("application_name", NpgsqlDbType.Text)
+        {
+            Value = connectionStringBuilder.ApplicationName ?? "",
+        });
         command.Parameters.Add(new NpgsqlParameter("collection_to", NpgsqlDbType.Timestamp)
         {
             Value = DateTime.SpecifyKind(collectionTo, DateTimeKind.Unspecified),

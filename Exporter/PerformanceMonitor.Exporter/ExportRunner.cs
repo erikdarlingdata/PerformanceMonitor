@@ -195,7 +195,20 @@ public sealed class ExportRunner
     {
         var (known, unknown) = OptionalTableRunner.Resolve(options.Also, OptionalTables.TryGet);
         var runResult = await OptionalTableRunner.RunAsync(connectionStringBuilder, options, known, unknown, output, ct, darlingSchemaVersion).ConfigureAwait(false);
+        await PublishOptionalRunAsync(options, runResult, output, ct).ConfigureAwait(false);
+        return runResult.Failed.Count > 0 || runResult.DeniedCount > 0 ? 3 : 0;
+    }
 
+    /// <summary>
+    /// Writes the optional manifest, uploads the run when `--upload` is set and at least one table produced a file, and
+    /// only then records the run's new `pg_statement_text` keys. The keys follow the upload, as the core path's dimension
+    /// keys do: a failed upload records nothing, so the next run fetches that text again instead of skipping it as known.
+    /// <paramref name="createUploader"/> exists for tests; the default is <see cref="UploaderFactory.Create"/>.
+    /// </summary>
+    public static async Task PublishOptionalRunAsync(
+        ExportOptions options, OptionalRunResult runResult, TextWriter output, CancellationToken ct,
+        Func<UploadSettings, IUploader>? createUploader = null)
+    {
         var optionalManifest = new Manifest
         {
             Store = options.Store,
@@ -216,11 +229,15 @@ public sealed class ExportRunner
         if (options.Upload is not null && runResult.Entries.Count > 0)
         {
             var settings = UploadSettings.FromUri(options.Upload, options.AwsRegion);
-            await using var uploader = UploaderFactory.Create(settings);
+            await using var uploader = createUploader is null ? UploaderFactory.Create(settings) : createUploader(settings);
             await RunUpload.UploadRunAsync(uploader, settings.Layout, options, optionalManifest, optionalManifestPath, output, ct).ConfigureAwait(false);
         }
 
-        return runResult.Failed.Count > 0 || runResult.DeniedCount > 0 ? 3 : 0;
+        if (runResult.PgTextKeys is { Count: > 0 } pgTextKeys)
+        {
+            using var stateStore = StateStore.Open(options.StateDir);
+            stateStore.RecordPgTextKeys(options.Store, pgTextKeys);
+        }
     }
 
     private static void RecordExportedDimensionKeys(ExportOptions options)
@@ -445,7 +462,7 @@ public sealed class ExportRunner
         var result = waitAsync is null
             ? await StragglerGuard.CheckAsync(connectionStringBuilder, collectionTo, ct).ConfigureAwait(false)
             : await StragglerGuard.CheckAsync(
-                innerCt => StragglerGuardCountAsync(connectionStringBuilder, collectionTo, innerCt),
+                innerCt => StragglerGuard.CountStragglersAsync(connectionStringBuilder, collectionTo, innerCt),
                 ct,
                 waitAsync).ConfigureAwait(false);
 
@@ -455,23 +472,6 @@ public sealed class ExportRunner
         }
 
         return result;
-    }
-
-    private static async Task<long> StragglerGuardCountAsync(
-        NpgsqlConnectionStringBuilder connectionStringBuilder, DateTime collectionTo, CancellationToken ct)
-    {
-        await using var connection = await StoreConnectionFactory.OpenAsync(connectionStringBuilder, ct).ConfigureAwait(false);
-        await using var command = new NpgsqlCommand(StragglerGuard.Sql, connection);
-        command.Parameters.Add(new NpgsqlParameter("application_name", NpgsqlTypes.NpgsqlDbType.Text)
-        {
-            Value = connectionStringBuilder.ApplicationName ?? "",
-        });
-        command.Parameters.Add(new NpgsqlParameter("collection_to", NpgsqlTypes.NpgsqlDbType.Timestamp)
-        {
-            Value = DateTime.SpecifyKind(collectionTo, DateTimeKind.Unspecified),
-        });
-        var scalar = await command.ExecuteScalarAsync(ct).ConfigureAwait(false);
-        return scalar is null or DBNull ? 0 : Convert.ToInt64(scalar);
     }
 }
 

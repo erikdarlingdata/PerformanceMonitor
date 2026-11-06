@@ -293,6 +293,20 @@ export function listOnlyNote(managedStore, lists, toChange, adminWritesOff) {
       ", use the Viewer app, or give the web an admin store login (set postgres.webConnectionString to an admin login).";
 }
 
+/** #7558: the sentence Admin says once, under its heading, when the managed store's web.allowAdminWrites switch is off. Every tab used to
+    open its list-only note with "Changes from this page are turned off" and the switch's name; now a tab says only what it lists. */
+export const ADMIN_WRITES_OFF_NOTE = "Changes from the web are turned off. To let a signed-in admin make them here, set web.allowAdminWrites to true in darling.json and restart the service.";
+
+/** #7558: listOnlyNote for an Admin tab. With the switch off the heading already said so (ADMIN_WRITES_OFF_NOTE), so the tab keeps only what
+    it lists and where to change it. Any other cause is a fact about this store login and stays in the tab's own words. */
+export function adminListOnlyNote(managedStore, lists, toChange, adminWritesOff) {
+  if (managedStore === true && adminWritesOff === true) {
+    const first = typeof lists === "string" && lists ? lists.charAt(0).toUpperCase() + lists.slice(1) : lists;
+    return first + ". " + toChange + ", use the Viewer app.";
+  }
+  return listOnlyNote(managedStore, lists, toChange, adminWritesOff);
+}
+
 /** The browser's IANA zone ("America/New_York"), or "" when the browser does not say. (time-range.js's browserZone answers "UTC" instead.) */
 export function browserZoneOrBlank() {
   try {
@@ -331,9 +345,9 @@ export function noticeStrip(message) {
  * #7410: a yellow note with a long tool text behind it. `short` is the one plain sentence the strip shows. The tool's whole note sits
  * behind "More detail" (the same disclosure plainEmptyStrip uses), so nothing is lost.
  */
-export function noticeStripWithDetail(short, full) {
-  if (typeof full !== "string" || !full.trim() || plainText(full) === short) return noticeStrip(short);
-  return el("div", { class: "strip notice plain-note", role: "status" }, [
+export function noticeStripWithDetail(short, full, quiet) {
+  if (typeof full !== "string" || !full.trim() || plainText(full) === short) return quiet === true ? captionStrip(short) : noticeStrip(short);
+  return el("div", { class: (quiet === true ? "strip source" : "strip notice") + " plain-note", role: "status" }, [
     localizeIsoText(short),
     disclosure("More detail", localizeIsoText(plainText(full)), { title: "What the read said, in full" }),
   ]);
@@ -347,8 +361,11 @@ export function noticeStripWithDetail(short, full) {
 export function noteStrip(desc, note, data) {
   /* `noteShort` is a sentence, or a function of the read's data for a note that has two cases (Statement Evictions: unknown, or a pass count). */
   const short = desc && typeof desc.noteShort === "function" ? desc.noteShort(data) : desc && desc.noteShort;
-  if (typeof short === "string" && short) return noticeStripWithDetail(short, note);
-  return noticeStrip(note);
+  /* #7558: a panel whose note only explains the table (what a column counts, why a column is blank) names `noteQuiet`, and its note is the
+     quiet caption. Yellow stays for a note that warns about the data. */
+  const quiet = !!desc && desc.noteQuiet === true;
+  if (typeof short === "string" && short) return noticeStripWithDetail(short, note, quiet);
+  return quiet ? captionStrip(note) : noticeStrip(note);
 }
 
 /** #7402: a routine line under a tab's heading (a row count, a window, when a snapshot was taken). It is the quiet `strip source`, not the
@@ -2129,4 +2146,13 @@ export function dbScopeChip(read, override) {
     look = " engine";
   }
   return el("span", { class: "badge db-scope db-scope-" + state + look, title, text, dataset: { dbScope: state } });
+}
+
+/**
+ * #7578: whether an axis's tick labels already print the unit (400 MB, 200 ms, 0.3 MB/s: a number, a space and a unit word). The unit is
+ * then not printed again as a caption over the axis, so every chart says its unit once, on the ticks or in the caption, never both.
+ * A bare number ("150") or a compact one ("1.5K") carries no unit, so its axis keeps the caption.
+ */
+export function ticksCarryUnit(labels) {
+  return labels.some((l) => /\d\s+[A-Za-z%][A-Za-z%/]*$/.test(String(l).trim()));
 }

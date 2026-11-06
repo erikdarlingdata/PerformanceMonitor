@@ -350,4 +350,13 @@ async function pvsAxis(sizes) {
 out.pvsSmall = await pvsAxis([0.001, 0.004, 0.002, 0.009, 0.003, 0.006, 0.0005]);
 out.pvsLarge = await pvsAxis([1200, 4800, 2500, 9100, 3300, 6000, 700]);
 
+/* #7578: a unit is printed once. A caption over the axis shows only when the tick labels do not carry the unit already. */
+const captionsOf = (spec) => find(charts.renderLineChart({ xKey: "t", series: [{ key: "a", label: "A", color: "#f00" }], ...spec }), (n) => n.tag === "text" && cls(n).includes("axis-unit")).map((n) => n.text);
+out.unitCaptions = {
+  ticksWithUnit: captionsOf({ points: rows([100, 200, 300, 400]), formatValue: (v, o) => util.applyFormat("ms", v, o), unit: "ms" }),
+  ticksWithRateUnit: captionsOf({ points: rows([0.1, 0.2, 0.3]), formatValue: (v) => v.toFixed(1) + " MB/s", unit: "MB/s" }),
+  bareTicks: captionsOf({ points: rows([100, 200, 300, 400]), formatValue: (v) => util.fmtInt(v), unit: "MB" }),
+  secondAxisWithUnit: captionsOf({ points: rows([1, 2, 3], "a", [10, 20, 30]), formatValue: (v) => String(v), unit: "n", series2: { key: "b", label: "B", color: "#00f", formatValue: (v) => v + " ms", unit: "ms" } }),
+};
+
 console.log(JSON.stringify(out));

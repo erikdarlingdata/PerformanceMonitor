@@ -4,7 +4,7 @@ using Xunit;
 namespace PerformanceMonitor.Exporter.Tests;
 
 /// <summary>
-/// The fail-closed deny-list, enforced in four places . This file covers place 1 (registry load) and
+/// The fail-closed deny-list, enforced in four places. This file covers place 1 (registry load) and
 /// place 3 (the SQL builder); OptionalTableRunnerTests covers place 2 (name resolution) and
 /// the config-schema secret-like-column tripwire.
 /// </summary>

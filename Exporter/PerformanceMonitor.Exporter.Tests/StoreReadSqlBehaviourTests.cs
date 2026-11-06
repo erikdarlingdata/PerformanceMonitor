@@ -665,6 +665,61 @@ public sealed class StoreReadSqlBehaviourTests : IClassFixture<StoreReadSqlBehav
         }
     }
 
+    // ---- the straggler guard, through the same overload a real export calls ------------------------------
+
+    private static readonly Func<TimeSpan, CancellationToken, Task> NoWait = (_, _) => Task.CompletedTask;
+
+    private NpgsqlConnectionStringBuilder WithApplicationName(string applicationName) =>
+        new(Builder!.ConnectionString) { ApplicationName = applicationName };
+
+    /// <summary>Opens a connection under the given application name and leaves a transaction open that has written.</summary>
+    private async Task<(NpgsqlConnection Connection, NpgsqlTransaction Transaction)> OpenWritingTransactionAsync(string applicationName)
+    {
+        var connection = new NpgsqlConnection(WithApplicationName(applicationName).ConnectionString);
+        await connection.OpenAsync();
+        var transaction = await connection.BeginTransactionAsync();
+        await using var write = new NpgsqlCommand("SELECT txid_current()", connection, transaction); // assigns backend_xid
+        await write.ExecuteScalarAsync();
+        return (connection, transaction);
+    }
+
+    [Fact]
+    public async Task Straggler_guard_counts_another_sessions_open_write_but_not_one_under_its_own_application_name()
+    {
+        if (Builder is null) { return; }
+        var guard = WithApplicationName("darling-export-guard-test");
+        var cutoff = DateTime.UtcNow.AddMinutes(10);
+
+        var quiet = await StragglerGuard.CheckAsync(guard, cutoff, default, NoWait);
+        Assert.Equal(0, quiet.LastCount);
+        Assert.Equal(0, quiet.WaitSeconds);
+
+        var (own, ownTx) = await OpenWritingTransactionAsync("darling-export-guard-test");
+        try
+        {
+            var ownOnly = await StragglerGuard.CheckAsync(guard, cutoff, default, NoWait);
+            Assert.Equal(0, ownOnly.LastCount);
+
+            var (other, otherTx) = await OpenWritingTransactionAsync("another-writer");
+            try
+            {
+                var withOther = await StragglerGuard.CheckAsync(guard, cutoff, default, NoWait);
+                Assert.Equal(1, withOther.LastCount);
+                Assert.Equal(StragglerGuard.MaxRetries * StragglerGuard.RetryDelay.TotalSeconds, withOther.WaitSeconds);
+            }
+            finally
+            {
+                await otherTx.RollbackAsync();
+                await other.DisposeAsync();
+            }
+        }
+        finally
+        {
+            await ownTx.RollbackAsync();
+            await own.DisposeAsync();
+        }
+    }
+
     // ---- the EXPLAIN gate script, run for real ------------------------------------------------------------
 
     private static readonly DateTime GateFrom = new(2026, 9, 27, 23, 0, 0, DateTimeKind.Utc);

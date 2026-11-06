@@ -85,6 +85,9 @@ public sealed record RunSettings
             return "restart.detector must be darling_process, file, command or off";
         if (Restart.Detector == "file" && string.IsNullOrWhiteSpace(Restart.File)) return "restart.file is required for the file detector";
         if (Restart.Detector == "command" && Restart.Command is not { Count: > 0 }) return "restart.command is required for the command detector";
+        // An empty prefix matches every entry under temp_dir, so the sweep would delete files that are not the exporter's.
+        if (Retention.TempPrefixes is null || Retention.TempPrefixes.Any(string.IsNullOrWhiteSpace))
+            return "retention.temp_prefixes must not contain an empty or whitespace entry (it would match every entry under temp_dir)";
         if (ProcedurePlanReuse is not null && !ProcedurePlanReuseModes.Names.Contains(ProcedurePlanReuse))
             return $"procedure_plan_reuse must be one of: {string.Join(", ", ProcedurePlanReuseModes.Names)}";
         if (QueryStoreSource is not null && !QueryStoreSourceModes.Names.Contains(QueryStoreSource))

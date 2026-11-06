@@ -140,6 +140,12 @@ const scenarios = {
     });
     return modules.tabs.memoryPressurePanels("SRV1", { hours: 6, label: "last 6 hours" });
   },
+  // #7578: the Memory tab's two Plan Cache panels, over a read that answers one snapshot.
+  plancache: () => {
+    answer = (url) => data(tool(url) === "get_memory_pressure_events" ? { events: [] } : {});
+    const tab = modules.tabs.SERVER_TABS.find((t) => t.id === "memory");
+    return tab.build("SRV1", { hours: 24, label: "last 24 hours" });
+  },
   empty: () => {
     answer = () => data({ status: "empty", message: "No memory pressure events found in the requested time range." });
     return modules.tabs.memoryPressurePanels("SRV1", { hours: 6, label: "last 6 hours" });
@@ -164,8 +170,12 @@ const calls = modules.charts.chartCalls;
 
 console.log(JSON.stringify({
   charts: calls.map((c) => ({ series: c.series, unit: c.unit, mode: c.mode, points: c.points.map((p) => [p.time, p.sql_medium, p.sql_severe, p.os_medium, p.os_severe]), windowStart: c.windowStart, windowEnd: c.windowEnd })),
+  panelHeads: all(root, "h3").map((h) => h.textContent),
+  tableCells: table ? all(table, "tr").map((tr) => all(tr, "td").map((td) => td.textContent)).filter((cells) => cells.length) : [],
   tableRows: table ? all(table, "tr").map((tr) => all(tr, "td").map((td) => td.textContent)).filter((cells) => cells.length).length : 0,
   notices: all(root, "div").filter((n) => n.className === "strip notice").map((n) => n.textContent),
+  /* #7558: the chart's note on what a 0 hour means only explains the chart, so it is the quiet caption, not the yellow notice. */
+  captions: all(root, "div").filter((n) => n.className === "strip source").map((n) => n.textContent),
   empties: all(root, "div").filter((n) => n.className === "strip empty").map((n) => n.textContent),
   errors: all(root, "div").filter((n) => n.className === "strip error").map((n) => n.textContent),
   fetches,

@@ -28,7 +28,7 @@
    it reaches a row. */
 
 import { VIZ } from "../panels.js";
-import { routeHash, el, mount, loadingStrip, errorStrip, emptyStrip, plainEmptyStrip, noticeStrip, listOnlyNote, readTool, apiGet, apiGetFleet, apiWrite, onSessionExpired, localizeIsoText, storeHash } from "../util.js";
+import { routeHash, el, mount, loadingStrip, errorStrip, emptyStrip, plainEmptyStrip, noticeStrip, captionStrip, adminListOnlyNote, ADMIN_WRITES_OFF_NOTE, readTool, apiGet, apiGetFleet, apiWrite, onSessionExpired, localizeIsoText, storeHash } from "../util.js";
 import { getSession } from "../views-api.js";
 import { writeNote, startPractice, writeAccess, SIGN_IN_SENTENCE, NOTE_MAX_LENGTH, NOTE_MAX_DAYS, NOTE_DEFAULT_DAYS } from "../investigation-writes.js";
 import { dailyReportEditor, dailyReportPreviewOnly } from "./admin-daily-report.js";
@@ -791,6 +791,8 @@ let editForm = null;
 let opening = 0;
 let notice = null;
 let summary = null;
+/* #7558: the Servers summary is a quiet caption, except when the sign-in probe failed: that one is a real warning. */
+let summaryWarns = false;
 let busy = false;
 let held = null;
 let hashWatched = false;
@@ -814,7 +816,7 @@ function drawNotice() {
   if (notice) {
     nodes.push(el("div", { class: "strip " + (notice.isError ? "error" : "notice"), role: notice.isError ? "alert" : "status", text: notice.message }));
   }
-  if (summary) nodes.push(noticeStrip(summary));
+  if (summary) nodes.push(summaryWarns ? noticeStrip(summary) : captionStrip(summary));
   mount(layout.noticeBox, nodes);
 }
 
@@ -867,6 +869,7 @@ async function buildServers(body, generation) {
   }
   const rows = serverRows(res.data);
   summary = rows.length + (rows.length === 1 ? " server. " : " servers. ") + serversNote(session);
+  summaryWarns = session.probe_failed === true;
   drawNotice();
   mount(boxes.tableBox, VIZ.table({ servers: rows }, {
     rowsKey: "servers",
@@ -1296,7 +1299,7 @@ async function buildRoutes(body, generation) {
   const signingNodes = signing && signing.kind === "data" ? signingStatusLines(signing.data).map((t) => noticeStrip(t)) : [];
   mount(body, [
     ...(access.routes ? routeEditorNodes(options) : routeListOnlyNodes(access.message, access.managed, access.adminWritesOff)),
-    noticeStrip(ROUTES_NOTE),
+    captionStrip(ROUTES_NOTE),
     ...signingNodes,
     ...nobodyCanApproveNodes(approvers),
     VIZ.table({ routes: rows }, {
@@ -1344,11 +1347,11 @@ async function buildSettings(body, generation) {
   if (bad) return mount(body, bad);
   const sections = settingSections(res.data);
   if (!sections.length) return mount(body, emptyStrip("The service reported no alert settings."));
-  const nodes = [noticeStrip(SETTINGS_NOTE)];
+  const nodes = [captionStrip(SETTINGS_NOTE)];
   /* #7700: with web.allowAdminWrites off the service refuses both forms, so they are not drawn and the page says why. */
   const writesOff = !!session && session.can_edit === true && session.admin_writes_off === true;
   const canEditSettings = !!session && session.can_edit === true && !writesOff;
-  if (writesOff) nodes.push(noticeStrip(listOnlyNote(session.managed_store === true, "this page lists the settings only", "To change one", true)));
+  if (writesOff) nodes.push(captionStrip(adminListOnlyNote(session.managed_store === true, "this page lists the settings only", "To change one", true)));
   for (const s of sections) {
     nodes.push(el("h3", { class: "section-title", text: s.title }));
     nodes.push(VIZ.table({ rows: s.rows }, { rowsKey: "rows", columns: SETTING_COLUMNS }));
@@ -1392,13 +1395,17 @@ export const FEEDBACK_NOTE =
   "one that did. A second feedback from the same person replaces their first. Reports are listed newest first.";
 
 /* Shown instead of the form when the store says this dashboard's login may not record (can_record false). */
-export const feedbackListOnly = (managed, adminWritesOff) => listOnlyNote(managed, "this page is list-only", "To record feedback", adminWritesOff);
+export const feedbackListOnly = (managed, adminWritesOff) => adminListOnlyNote(managed, "this page is list-only", "To record feedback", adminWritesOff);
 
 /* What the counts and the list are taken over, in words: the answer's own window (hours_back). */
 export function feedbackWindowLabel(hours) {
-  const h = Number.isInteger(hours) && hours > 0 ? hours : 168;
-  const span = h % 24 === 0 ? (h / 24) + (h === 24 ? " day" : " days") : h + " hours";
-  return "Counts and reports cover the requests opened in the last " + span + " that have a report.";
+  return "Counts and reports cover the requests opened in the last " + windowSpan(hours, 168) + " that have a report.";
+}
+
+/* #7558: a window the read counts in hours, in the unit a person reads: whole days when it is one ("7 days"), hours otherwise. */
+export function windowSpan(hours, fallback) {
+  const h = Number.isInteger(hours) && hours > 0 ? hours : fallback;
+  return h % 24 === 0 ? (h / 24) + (h === 24 ? " day" : " days") : h + " hours";
 }
 
 export const FEEDBACK_FAMILY_COLUMNS = [
@@ -1513,14 +1520,14 @@ async function buildFeedback(body, generation) {
   const families = Array.isArray(data.families) ? data.families : [];
   const rerender = () => buildFeedback(body, generation);
   const canRecord = session.can_edit === true && data.can_record === true;
-  const nodes = [noticeStrip(FEEDBACK_NOTE)];
-  if (data.can_record !== true) nodes.push(noticeStrip(feedbackListOnly(session.managed_store === true, session.admin_writes_off === true)));
+  const nodes = [captionStrip(FEEDBACK_NOTE)];
+  if (data.can_record !== true) nodes.push(captionStrip(feedbackListOnly(session.managed_store === true, session.admin_writes_off === true)));
   nodes.push(el("h3", { class: "section-title", text: "False positives by alert family" }));
   nodes.push(el("p", { class: "mute-label", "data-fb-window": "1", text: feedbackWindowLabel(data.hours_back) }));
   nodes.push(VIZ.table({ families }, {
     rowsKey: "families",
     columns: FEEDBACK_FAMILY_COLUMNS,
-    emptyText: "No investigation reports in the last " + (data.hours_back || 168) + " hours.",
+    emptyText: "No investigation reports in the last " + windowSpan(data.hours_back, 168) + ".",
   }));
   nodes.push(el("h3", { class: "section-title", text: "Reports" }));
   if (data.truncated === true) nodes.push(noticeStrip("Showing the newest " + requests.length + " reports; older ones in the window are not listed, and the counts above still cover them."));
@@ -1618,16 +1625,16 @@ async function buildPractice(body, generation) {
   if (bad) return mount(body, bad);
   const data = res.data || {};
   const agents = practiceRows(data.agents);
-  const nodes = [noticeStrip(PRACTICE_NOTE)];
+  const nodes = [captionStrip(PRACTICE_NOTE)];
   const practiceAccess = writeAccess(session);
-  if (practiceAccess === "sign-in") nodes.push(noticeStrip(SIGN_IN_SENTENCE));
-  if (practiceAccess === "off") nodes.push(noticeStrip(listOnlyNote(session.managed_store === true, "this page lists the scores only", "To start a practice request", true)));
+  if (practiceAccess === "sign-in") nodes.push(captionStrip(SIGN_IN_SENTENCE));
+  if (practiceAccess === "off") nodes.push(captionStrip(adminListOnlyNote(session.managed_store === true, "this page lists the scores only", "To start a practice request", true)));
   if (practiceAccess === "yes") {
     const feedback = await apiGet("/api/investigation-feedback");
     if (generation !== renderGeneration) return;
     nodes.push(practiceStartForm(feedback.kind === "data" ? judgedCases(feedback.data) : []));
   }
-  nodes.push(el("p", { class: "mute-label", "data-practice-window": "1", text: "Practice requests opened in the last " + (data.hours_back || 720) + " hours." }));
+  nodes.push(el("p", { class: "mute-label", "data-practice-window": "1", text: "Practice requests opened in the last " + windowSpan(data.hours_back, 720) + "." }));
   if (!agents.length) nodes.push(emptyStrip("No agent has reported on a practice request in this window."));
   else nodes.push(VIZ.table({ agents }, { rowsKey: "agents", columns: PRACTICE_COLUMNS, emptyText: "No practice scores." }));
   mount(body, nodes);
@@ -1841,9 +1848,9 @@ async function buildPending(body, generation) {
      not signed in sees the list and the sentence that says what to do. */
   const access = writeAccess(session);
   const canEdit = access === "yes";
-  nodes.push(noticeStrip((canEdit ? NOTES_NOTE_EDITING : access === "off" ? NOTES_NOTE_LISTED : NOTES_NOTE_READ_ONLY) + NOTES_NOTE_EXPIRY));
-  if (access === "sign-in") nodes.push(noticeStrip(SIGN_IN_SENTENCE));
-  if (access === "off") nodes.push(noticeStrip(listOnlyNote(session.managed_store === true, "this page lists the notes only", "To approve, reject or write a note", true)));
+  nodes.push(captionStrip((canEdit ? NOTES_NOTE_EDITING : access === "off" ? NOTES_NOTE_LISTED : NOTES_NOTE_READ_ONLY) + NOTES_NOTE_EXPIRY));
+  if (access === "sign-in") nodes.push(captionStrip(SIGN_IN_SENTENCE));
+  if (access === "off") nodes.push(captionStrip(adminListOnlyNote(session.managed_store === true, "this page lists the notes only", "To approve, reject or write a note", true)));
   if (canEdit) {
     const serverList = await apiGet("/api/admin/servers");
     if (generation !== renderGeneration) return;
@@ -1881,7 +1888,7 @@ const OVERRIDES_NOTE_EDITING =
   "A database override wins over a server override, then the deepest tag the server is under, then the global value. A change applies within the alert engine's reload interval. To silence an alert, mute it.";
 const overridesNoteReadOnly = (managed, adminWritesOff) =>
   "A threshold held for one server, for one database on it, or for a server tag, that differs from the global value. " +
-  listOnlyNote(managed, "this page lists them only", "To change an override", adminWritesOff);
+  adminListOnlyNote(managed, "this page lists them only", "To change an override", adminWritesOff);
 const OVERRIDE_DENIED = "Changing a threshold override needs";
 
 /** The rows of the overrides grid from the list read's body. `database` and `server_id` stay on the row for Edit and Remove. */
@@ -2048,7 +2055,7 @@ async function buildOverrides(body, generation) {
      the store login holds the write grant on this table. */
   const canEdit = session.can_edit === true && !!res.data && res.data.can_edit === true;
   const keys = Array.isArray(res.data && res.data.keys) ? res.data.keys : [];
-  nodes.push(noticeStrip(canEdit ? OVERRIDES_NOTE_EDITING : overridesNoteReadOnly(session.managed_store === true, session.admin_writes_off === true)));
+  nodes.push(captionStrip(canEdit ? OVERRIDES_NOTE_EDITING : overridesNoteReadOnly(session.managed_store === true, session.admin_writes_off === true)));
   if (res.data && typeof res.data.note === "string" && res.data.note) nodes.push(noticeStrip(res.data.note));
   if (canEdit) nodes.push(overrideFormNode(Array.isArray(res.data.servers) ? res.data.servers : [], keys, res.data.tags));
   nodes.push(VIZ.table({ overrides: overrideRows(res.data) }, {
@@ -2150,7 +2157,12 @@ export function renderAdmin(main, tabId) {
      around the body changes, so main is NOT mounted again. Mounting main takes the body, and the open form inside it, out of
      the document, and a focused box inside a node taken out loses its focus. Only the builder runs. */
   if (!(sameTab && body.parentNode === main)) {
-    mount(main, [el("div", { class: "page-head" }, [el("h2", { text: "Admin" })]), tabBar(tab), body]);
+    const writesOffBox = el("div", { class: "admin-writes-off" });
+    mount(main, [el("div", {}, [el("div", { class: "page-head" }, [el("h2", { text: "Admin" })]), writesOffBox]), tabBar(tab), body]);
+    /* #7558: with web.allowAdminWrites off, every tab used to open its note with the same "turned off" sentence. It is said once, here. */
+    getSession().then((session) => {
+      if (session && session.managed_store === true && session.admin_writes_off === true) mount(writesOffBox, [captionStrip(ADMIN_WRITES_OFF_NOTE)]);
+    }, () => {});
   }
   startBuilder(tab.id, body, generation);
 }

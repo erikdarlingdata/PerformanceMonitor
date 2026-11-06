@@ -90,7 +90,8 @@ public sealed class WebMemoryPressureChartBehaviourTests
         Assert.InRange(points.GetArrayLength(), 6, 8);
         var zero = points.EnumerateArray().Count(p => p.EnumerateArray().Skip(1).All(v => v.GetInt32() == 0));
         Assert.True(zero >= 4, "empty hours must be present as 0");
-        var notice = Assert.Single(r.GetProperty("notices").EnumerateArray()).GetString()!;
+        // #7558: the note only explains what a 0 hour means, so it is the quiet caption, not the yellow notice.
+        var notice = Assert.Single(r.GetProperty("captions").EnumerateArray()).GetString()!;
         Assert.Contains("an hour with none draws no bar", notice, StringComparison.Ordinal);
         Assert.Contains("before collection began", notice, StringComparison.Ordinal);
     }
@@ -122,5 +123,30 @@ public sealed class WebMemoryPressureChartBehaviourTests
         Assert.Contains(r.GetProperty("empties").EnumerateArray(), e => e.GetString()!.Contains("healthy state", StringComparison.Ordinal)
             && e.GetString()!.Contains("before collection began", StringComparison.Ordinal));
         Assert.Single(r.GetProperty("fetches").EnumerateArray());
+    }
+
+    [Fact]
+    public void ThePlanCachePanels_SayTheyShowOneSnapshot_NotTheWindow()
+    {
+        var heads = Run("plancache").GetProperty("panelHeads").EnumerateArray().Select(h => h.GetString()!).ToArray();
+        foreach (var title in new[] { "Plan Cache", "Plan Cache by Type" })
+        {
+            // The tab also draws a Plan Cache size trend over the window, whose heading is rightly just the range: look at the snapshot panels only.
+            var head = Assert.Single(heads, h => h.StartsWith(title + " newest snapshot", StringComparison.Ordinal));
+            Assert.Contains("newest snapshot in last 24 hours", head, StringComparison.Ordinal);
+            Assert.Contains("a moment, not the window", head, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void TheGrid_ListsTheNewestSampleFirst_WhileTheReadStaysOldestFirst()
+    {
+        // #7578: the read sends oldest first. The "counts" scenario's oldest sample is process Medium, system Normal and its newest
+        // is process Normal, system Severe, so the first grid row must be the newest.
+        var cells = Run("counts").GetProperty("tableCells").EnumerateArray()
+            .Select(row => row.EnumerateArray().Select(c => c.GetString()!).ToArray()).ToArray();
+        Assert.Equal(5, cells.Length);
+        Assert.Equal(new[] { "Normal", "Severe" }, cells[0].TakeLast(2).ToArray());
+        Assert.Equal(new[] { "Medium", "Normal" }, cells[^1].TakeLast(2).ToArray());
     }
 }

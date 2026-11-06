@@ -235,4 +235,39 @@ public sealed partial class ViewerDataService
         var baseline = await GetBaselineProvider().GetBaselineAsync(serverId, metricName, referenceTime);
         return baseline.SampleCount > 0 ? baseline : BaselineBucket.Empty;
     }
+
+    /// <summary>
+    /// #7644: the lane's band as one step per local hour of the window, the way the web Overview draws it. Read from the same shared
+    /// entry the web reply reads, computed and cached at now (the key the worker fills), so the Viewer and the web agree. An hour with
+    /// no usable bucket has no step.
+    /// </summary>
+    public async Task<IReadOnlyList<PerformanceMonitor.Ui.BaselineBand.HourStep>> GetBaselineStepsForLaneAsync(
+        int serverId, string metricName, DateTime windowStartUtc, DateTime windowEndUtc)
+    {
+        var steps = await GetBaselineProvider().GetBaselineStepsSharedAsync(
+            serverId, metricName, windowStartUtc, windowEndUtc, DateTime.UtcNow);
+        return ToBandSteps(steps, windowStartUtc, windowEndUtc);
+    }
+
+    /// <summary>
+    /// The usable hours (a bucket with samples and a dispersion above zero) as lane steps on the OADate axis, clipped to the window
+    /// so the first hour does not start before the lane's left edge.
+    /// </summary>
+    internal static IReadOnlyList<PerformanceMonitor.Ui.BaselineBand.HourStep> ToBandSteps(
+        IReadOnlyList<PgBaselineProvider.BaselineStep> steps, DateTime windowStartUtc, DateTime windowEndUtc)
+    {
+        var result = new List<PerformanceMonitor.Ui.BaselineBand.HourStep>(steps.Count);
+        foreach (var step in steps)
+        {
+            if (step.Bucket.SampleCount <= 0 || step.Bucket.EffectiveStdDev <= 0)
+                continue;
+            var from = step.FromUtc < windowStartUtc ? windowStartUtc : step.FromUtc;
+            var to = step.ToUtc > windowEndUtc ? windowEndUtc : step.ToUtc;
+            if (to <= from)
+                continue;
+            result.Add(PerformanceMonitor.Ui.BaselineBand.MakeStep(from.ToOADate(), to.ToOADate(), step.Bucket.Mean, step.Bucket.EffectiveStdDev));
+        }
+
+        return result;
+    }
 }

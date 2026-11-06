@@ -300,10 +300,16 @@ export const SERVER_TABS = [
         },
       ]),
       ...fanout("get_plan_cache_bloat", { server, hours: ctx.hours }, [
-        { title: "Plan Cache", subtitle: ctx.label, viz: "stat", stats: PLAN_CACHE_STATS },
+        {
+          title: "Plan Cache",
+          subtitle: "newest snapshot in " + ctx.label + " - a moment, not the window",
+          viz: "stat",
+          stats: PLAN_CACHE_STATS,
+        },
         {
           title: "Plan Cache by Type",
-          subtitle: ctx.label,
+          subtitle: "newest snapshot in " + ctx.label + " - a moment, not the window",
+          windowNote: false,
           viz: "table",
           rowsKey: "cache_types",
           columns: CACHE_TYPE_COLUMNS,
@@ -725,6 +731,7 @@ export const SERVER_TABS = [
           floorKey: "window",
           columns: QS_OVERHEAD_WAIT_COLUMNS,
           noteKey: "qs_overhead.wait_stats.excluded_note",
+          noteQuiet: true,
           noteShort: "Query Store's idle sleep waits are left out of this table on purpose. It lists only the waits that cost something, and it is not the whole of Query Store's cost.",
           emptyText:
             "No non-sleep QDS_* wait deltas in this window. Query Store's four sleep waits are dropped at " +
@@ -738,6 +745,7 @@ export const SERVER_TABS = [
           viz: "stat",
           stats: QS_CLERK_STATS,
           noteKey: "qs_overhead.memory_clerk.note",
+          noteQuiet: true,
           /* #7410: no emptyText. When every tile is blank the note already says why (no capture, or outside the top 25), and an empty sentence under it said the same thing twice. */
         },
       ]),
@@ -1733,7 +1741,7 @@ export const POSTGRES_TABS = [
         /* #7409: Amazon Aurora has its own instrument and answers "not collected" here, so the panel is not drawn there. */
         true,
         /* #7428: what Backends Seen counts differs by instrument, and the answer says which instrument fed it. */
-        { noteFrom: pgWaitSamplingBackendsNote }
+        { noteFrom: pgWaitSamplingBackendsNote, noteQuiet: true }
       ),
       tablePanel(
         "OS CPU by Query (pg_stat_kcache)",
@@ -1805,7 +1813,7 @@ export const POSTGRES_TABS = [
         2,
         "No checkpoint or WAL activity differenced yet. These are differenced across snapshots, so a single collection has nothing to difference against and the window fills on the second.",
         /* #7428: says why a tile is blank, from the reply's own fields. */
-        { noteFrom: pgWriteStatsBlankNote }
+        { noteFrom: pgWriteStatsBlankNote, noteQuiet: true }
       ),
       /* #2663 the I/O time series. Everything above this line describes one window; this follows one
          (backend_type, context) pair through it. The pair is the subject rather than the backend type alone
