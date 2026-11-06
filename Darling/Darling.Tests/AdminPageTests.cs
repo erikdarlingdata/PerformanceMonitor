@@ -179,6 +179,6 @@ public sealed class AdminPageTests
         var admin = app.IndexOf("if (h === \"#/admin\" || h.startsWith(\"#/admin/\")) return { name: \"admin\"", StringComparison.Ordinal);
         Assert.True(editor >= 0 && admin > editor);
         Assert.DoesNotContain("\n  if (h.startsWith", app.Substring(editor + 10, admin - editor - 10));
-        Assert.Contains("else if (r.name === \"admin\") renderAdmin(main, r.tab);", app);
+        Assert.Contains("admin: (m, r) => renderAdmin(m, r.tab),", app);
     }
 }

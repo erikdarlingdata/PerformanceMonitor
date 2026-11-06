@@ -486,28 +486,28 @@ public sealed class DarlingWebHostGateLiveTests
     }
 
     /// <summary>
-    /// A navigation the person started (a click or a typed address) carries <c>Sec-Fetch-User: ?1</c>; a script
-    /// redirect, a meta refresh or a popup nobody clicked does not. The re-navigation page is for the first kind only.
+    /// #7846: a link that passes through a redirect (Safe Links, a mail gateway) reaches this host as a script
+    /// navigation from the other site, which carries no <c>Sec-Fetch-User</c> (or carries <c>?0</c>). Any cross-site
+    /// top-level GET gets the re-navigation page, whatever the header says, so the live session opens the page.
     /// </summary>
     [Theory]
     [InlineData(null)]
     [InlineData("?0")]
     [InlineData("1")]
     [InlineData("true")]
-    public async Task ACrossSitePageRequest_NotStartedByAPerson_GetsTheSignInForm_AsBefore(string? fetchUser)
+    public async Task ACrossSitePageRequest_WithoutAUserActivationFlag_GetsTheReNavigationPage(string? fetchUser)
     {
         using var server = await BuildServer(networkMode: false, requireTokenWhenLoopbackOnly: true);
 
-        var (ctx, body) = await SendPage(server, "/triage", string.Empty, "localhost", IPAddress.Loopback, "cross-site", fetchUser: fetchUser);
-        var (_, plain) = await SendPage(server, "/triage", string.Empty, "localhost", IPAddress.Loopback, fetchSite: null, fetchMode: null, fetchDest: null, fetchUser: null);
+        var (ctx, body) = await SendPage(server, "/triage", "?server=s1", "localhost", IPAddress.Loopback, "cross-site", fetchUser: fetchUser);
 
         Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
-        Assert.DoesNotContain(DarlingWebHostService.ReNavigationScriptBlock, body, StringComparison.Ordinal);
-        Assert.Equal(plain, body);
-        Assert.Contains("<form", body, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(DarlingWebHostService.ReNavigationScriptBlock, body, StringComparison.Ordinal);
+        Assert.Equal(DarlingWebHostService.ReNavigationPagePolicy, ctx.Response.Headers["Content-Security-Policy"].ToString());
+        Assert.DoesNotContain("<form", body, StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>The same click-started cross-site request does get the re-navigation page, and only a GET does.</summary>
+    /// <summary>The same cross-site request does get the re-navigation page, and only a GET does.</summary>
     [Theory]
     [InlineData("HEAD")]
     [InlineData("OPTIONS")]

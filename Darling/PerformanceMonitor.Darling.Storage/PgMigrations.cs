@@ -2639,6 +2639,28 @@ ALTER TABLE config.config_monitored_servers
     /// </summary>
     private const string V249Sql = @"
 ALTER TABLE collect.pg_statement_stats ADD COLUMN IF NOT EXISTS database_name text;";
+    /// V250 (#7691): <c>collect.memory_pressure_events.memory_node_id</c>, the memory node a resource monitor ring buffer record came from. A server
+    /// with several memory nodes writes one record per node for the same event, so the grid listed one event once per node with nothing to tell the
+    /// rows apart. One nullable <c>integer</c>, no DEFAULT, no backfill, no scan of the table (V241's shape): a row stored before this rung never read
+    /// the node, so NULL is the honest value. Catalog-only, accepted on a compressed hypertable. <b>Appended LAST</b> after
+    /// <c>memory_indicators_system</c>, because the writer is a positional binary COPY with an explicit column list: a fresh store (the generated V1
+    /// table carries the column from the collector's payload, and this ALTER no-ops there) and an upgraded one share one physical column order. The
+    /// trailing <c>CREATE OR REPLACE VIEW</c> re-expands <c>v_memory_pressure_events</c>' pinned <c>SELECT *</c>. An older build writes its own column
+    /// list, so the column stays NULL for the rows it writes, and its reads name their columns, so the extra one changes nothing for it.
+    /// </summary>
+    private const string V250Sql = @"
+ALTER TABLE collect.memory_pressure_events ADD COLUMN IF NOT EXISTS memory_node_id integer;
+CREATE OR REPLACE VIEW v_memory_pressure_events AS SELECT * FROM memory_pressure_events;";
+
+    /// <summary>
+    /// V251 (#7762): the Query Store compose rollup's row trigger marks every row of an hour written from the next hour on, one hour sooner than V173's
+    /// trigger did, so the builder can read an hour at 90 minutes instead of three hours and the 24-hour fleet panel's tail holds one to two hours of rows
+    /// instead of three to four. Replaces the trigger function and creates both triggers again
+    /// (<see cref="QueryStoreComposeStamp.LateMarkOffsetZeroSql"/>), catalog-only on the partitioned parent, with V173's lock timeout. No row is read or
+    /// rewritten. Idempotent. <b>No Lite twin:</b> Lite has no PostgreSQL store. An older build marks and builds under the old rule, which is the safe side.
+    /// </summary>
+    private static readonly string V251Sql =
+        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreComposeStamp.LateMarkOffsetZeroSql;
 
     /* V252 (#7656): the Slack bot. A route's bot channel id, the sealed bot and app tokens on the notification settings row (opened like
        the webhook URLs), and one thread per investigation request: the channel the parent post went to and its ts. The thread table is
@@ -3183,6 +3205,8 @@ $rung$;";
         new Migration(247, "xe-session-databases", V247Sql),
         new Migration(248, "query-store-self-keys-old-statements", V248Sql),
         new Migration(249, "pg-statement-stats-database-name", V249Sql),
+        new Migration(250, "memory-pressure-node", V250Sql),
+        new Migration(251, "compose-stamp-late-mark-offset-zero", V251Sql),
         new Migration(252, "slack-bot-threads", V252Sql),
     };
 

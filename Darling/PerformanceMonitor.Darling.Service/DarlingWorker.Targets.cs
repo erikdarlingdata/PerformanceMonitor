@@ -866,10 +866,13 @@ public sealed partial class DarlingWorker
             var now = DateTime.UtcNow;
 
             /* #5735: what the PREVIOUS body measured is the cause of any slot this one steps over, so it is read before this
-               body overwrites it. */
+               body overwrites it. The daily-run permit backlog is read as it stands now, so a row that carries a lost daily
+               slot can state it beside the loss. */
             var priorCauses = new CycleSkipCauses(
                 server.LastBodyMs, server.LastBodySlowestName, server.LastBodySlowestMs, server.LastGateWaitMs,
-                server.LastAnalysisMs, server.LastGateWaitAnalysisHolders);
+                server.LastAnalysisMs, server.LastGateWaitAnalysisHolders,
+                _dailyRunPermits.Waiting,
+                _dailyRunPermits.OldestWaitUtc is { } oldestDailyWait ? (long)Math.Max(0, (now - oldestDailyWait).TotalMilliseconds) : 0);
             var bodyStarted = Stopwatch.GetTimestamp();
             var bodySlowestName = (string?)null;
             var bodySlowestMs = 0L;
@@ -1138,7 +1141,7 @@ public sealed partial class DarlingWorker
                    the analysis read right after connecting, and it runs once per connect, outside any pass. */
                 else
                 {
-                    TrackDetachedRun(RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken, detachedDaily: true, runTimeHandOff: handOff));
+                    TrackDetachedRun(RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken, detachedDaily: true, runTimeHandOff: handOff, dueUtc: due));
                 }
             }
 
@@ -1163,7 +1166,8 @@ public sealed partial class DarlingWorker
     internal async Task FlushCycleSkipAsync(ServerLoopState server, ServerRuntime runtime, CycleSkipCauses causes, CancellationToken cancellationToken)
     {
         var postgres = _postgres;
-        if (postgres is null || server.Retired)
+        var write = CycleSkipWriteOverride;
+        if ((postgres is null && write is null) || server.Retired)
         {
             return;
         }
@@ -1181,11 +1185,18 @@ public sealed partial class DarlingWorker
             return;
         }
 
-        if (await DarlingObservability.LogCycleSkipAsync(postgres, runtime, now, report, _logger, cancellationToken))
+        var written = write is not null
+            ? await write(report)
+            : await DarlingObservability.LogCycleSkipAsync(postgres!, runtime, now, report, _logger, cancellationToken);
+        if (written)
         {
             server.CycleSkips.Commit(taken, now);
         }
     }
+
+    /// <summary>Test seam: stands in for the <c>collection_cycle</c> row write in <see cref="FlushCycleSkipAsync"/>, so a test
+    /// reads the row a pass flushes without a store. Returns whether the row was written.</summary>
+    internal Func<CycleSkipReport, Task<bool>>? CycleSkipWriteOverride { get; set; }
 
     /// <summary>
     /// The <c>snapshot_now</c> command handler (Lite's Live Snapshot, control-plane form): runs EVERY
@@ -2766,9 +2777,15 @@ LIMIT 1";
     /// finds the slot held records none of it, so the slot stays due and the next tick tries again.
     /// </param>
     /// <param name="runOutcome">#4938: when given, set to whether this run succeeded.</param>
+    /// <param name="dueUtc">
+    /// The slot's due time, when the dispatch knows it. A daily run refused because its previous run has not finished counts
+    /// its lost slot from it, so the server's collection_cycle row starts the gap where the slot was due and not where the run
+    /// was refused, as a run-time collector's lost day does. Null when the caller has no slot, and the refusal is then counted
+    /// from the moment it happens.
+    /// </param>
     private async Task<int> RunOneAsync(
         ServerLoopState server, DarlingCollectorRunner runner, string collectorName, int? peerMaxAtDispatchMs, CancellationToken cancellationToken,
-        bool detachedDaily = false, RunTimeHandOff? runTimeHandOff = null, RunOutcome? runOutcome = null)
+        bool detachedDaily = false, RunTimeHandOff? runTimeHandOff = null, RunOutcome? runOutcome = null, DateTime? dueUtc = null)
     {
         var runtime = server.Runtime;
         if (runtime is null || !s_dispatch.TryGetValue(collectorName, out var run))
@@ -2822,11 +2839,24 @@ LIMIT 1";
             {
                 /* #4938: a daily run's skip costs a whole day for that collector on that server, not one tick, so
                    it says so rather than "re-reads next tick". It only happens when the previous run, which may
-                   still be waiting for a permit, has not finished by the time this one comes due. */
-                _logger.LogInformation(
+                   still be waiting for a permit, has not finished by the time this one comes due. On a fleet whose
+                   daily runs need more permit time than a day holds, that is some collector every day, so the lost
+                   day is counted where the fleet gate and the server's collection_cycle row (what
+                   get_collection_health reads) see it. Only a daily on the interval grid reaches this skip (the pass
+                   does not hand off a run-time daily whose slot is held), and the grid counted this slot as run when
+                   it dispatched it, so that run is moved to skipped: the slot reads as one skipped slot and no run, as
+                   a run-time collector's lost day does, and it is counted from the slot's due time, so the row's gap
+                   starts where the slot was due. The line states the permit backlog beside the skip, how many daily
+                   runs are waiting and for how long, without naming it as the cause: the gate cannot tell a previous
+                   run that is waiting for a permit from one that is still executing. */
+                var skippedAt = DateTime.UtcNow;
+                _fleetGateStats?.MoveRunToSkipped();
+                server.CycleSkips.AddDailyLost(collectorName, 1, dueUtc ?? skippedAt);
+                _logger.LogWarning(
                     "  [{Server}] {Collector} skipped this run — its previous daily run has not finished (#4938). " +
-                    "It runs again at its next daily interval.",
-                    server.Config.DisplayName, collectorName);
+                    "It runs again at its next daily interval. {Backlog}.",
+                    server.Config.DisplayName, collectorName,
+                    DailyRunLimiter.DescribeBacklog(_dailyRunPermits.Waiting, _dailyRunPermits.Cap, _dailyRunPermits.OldestWaitUtc, skippedAt));
                 return 0;
             }
 
@@ -3731,11 +3761,20 @@ LIMIT 1";
                The PostgreSQL arm keeps its rule: ANY exception on a PostgreSQL target, not just a
                PostgresException, because a dead socket surfaces as a plain NpgsqlException with no SQLSTATE, and
                the provider already classifies that as ConnectionFatal. */
+            /* The probe's result is kept here for the log below, not read back from the memo: another run's drop may
+               have cleared the memo while this probe was in flight (#7851). */
+            LivenessProbeResult? probeResult = null;
             if (await ConnectionFaultDisposition.ShouldDropRuntimeAsync(
                     ex,
                     server.Runtime,
-                    (probed, token) => server.Liveness.ProbeAsync(
-                        probed, LivenessProbeOverride ?? ConnectionFaultDisposition.ProbeFreshConnectionAsync, DateTime.UtcNow, token),
+                    async (probed, token) =>
+                    {
+                        var result = await server.Liveness.ProbeWithResultAsync(
+                            probed, LivenessProbeOverride ?? ConnectionFaultDisposition.ProbeFreshConnectionAsync, DateTime.UtcNow, token)
+                            .ConfigureAwait(false);
+                        probeResult = result;
+                        return result.Alive;
+                    },
                     cancellationToken))
             {
                 server.Runtime = null;
@@ -3745,11 +3784,18 @@ LIMIT 1";
             }
             else if (ex is SqlException { Number: -2 })
             {
-                if (server.Liveness.Last is { Outcome: LivenessProbeOutcome.TimedOut })
+                if (probeResult is { Stale: true } stale)
+                {
+                    _logger.LogInformation(
+                        "[{Server}] {Collector} timed out, and the liveness probe {ProbeOutcome}, but another run already dropped and reset the connection — nothing more to do (#7851)",
+                        server.Config.DisplayName, collectorName,
+                        stale.Outcome == LivenessProbeOutcome.TimedOut ? "timed out" : "logged in");
+                }
+                else if (probeResult is { Outcome: LivenessProbeOutcome.TimedOut } timedOut)
                 {
                     _logger.LogInformation(
                         "[{Server}] {Collector} timed out, and so did the liveness probe's own login — keeping the connection, since open sessions answer while new logins wait; probe {Streak} of {Limit} in a row to time out (#4710)",
-                        server.Config.DisplayName, collectorName, server.Liveness.TimedOutProbesInARow, LivenessProbeMemo.MaxTimedOutProbesInARow);
+                        server.Config.DisplayName, collectorName, timedOut.TimedOutInARow, LivenessProbeMemo.MaxTimedOutProbesInARow);
                 }
                 else
                 {
@@ -3799,11 +3845,11 @@ LIMIT 1";
     /// </summary>
     private async Task RunDetachedAsync(
         ServerLoopState server, DarlingCollectorRunner runner, string collectorName, int? peerMaxAtDispatchMs, CancellationToken cancellationToken,
-        bool detachedDaily = false, RunTimeHandOff? runTimeHandOff = null)
+        bool detachedDaily = false, RunTimeHandOff? runTimeHandOff = null, DateTime? dueUtc = null)
     {
         try
         {
-            await RunOneAsync(server, runner, collectorName, peerMaxAtDispatchMs, cancellationToken, detachedDaily, runTimeHandOff);
+            await RunOneAsync(server, runner, collectorName, peerMaxAtDispatchMs, cancellationToken, detachedDaily, runTimeHandOff, dueUtc: dueUtc);
         }
         catch (OperationCanceledException)
         {

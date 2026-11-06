@@ -1059,7 +1059,7 @@ internal sealed class DarlingSelfAlertEvaluator
     private const string RawPurgeOverHorizonKeyPrefix = "rawpurgehorizon:";
 
     /* Query Store Compose Hours Stuck edge state (#5867). FLEET-level, ONE key: the store has hours of the Query Store compose
-       rollup whose build has failed often enough to be retried only once a day (QueryStoreComposeStamp.FailuresBeforeBackoff, or a
+       rollup whose build has failed often enough to be retried only once a day (QueryStoreComposeStamp.ComposeFailuresBeforeBackoff, or a
        statement timeout under the extended timeout). STANDING, the Raw Purge Over Horizon idiom: fire once, re-fire on the state
        cooldown while it persists, one clearing resolution when no hour is in backoff. */
     private readonly ConcurrentDictionary<string, bool> _activeComposeStuck = new(StringComparer.Ordinal);
@@ -1520,7 +1520,7 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         catch (Exception ex)
         {
-            _logger?.LogError("[{Server}] Collection-health self-alert failed after {ElapsedMs} ms: {Message}", serverName, collectionReadClock.ElapsedMilliseconds, ex.Message);
+            _logger?.LogError(ex, "[{Server}] Collection-health self-alert failed after {ElapsedMs} ms: {Message}", serverName, collectionReadClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(Key(serverId), CollectionSignalsReadName, collectionReadClock.ElapsedMilliseconds);
         }
 
@@ -1576,7 +1576,7 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         catch (Exception ex)
         {
-            _logger?.LogError("[{Server}] Capture-down self-alert failed after {ElapsedMs} ms: {Message}", serverName, captureReadClock.ElapsedMilliseconds, ex.Message);
+            _logger?.LogError(ex, "[{Server}] Capture-down self-alert failed after {ElapsedMs} ms: {Message}", serverName, captureReadClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(Key(serverId), MissingCaptureSessionsReadName, captureReadClock.ElapsedMilliseconds);
         }
 
@@ -1621,7 +1621,7 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         catch (Exception ex)
         {
-            _logger?.LogError("[{Server}] Agent-not-running self-alert failed after {ElapsedMs} ms: {Message}", serverName, agentReadClock.ElapsedMilliseconds, ex.Message);
+            _logger?.LogError(ex, "[{Server}] Agent-not-running self-alert failed after {ElapsedMs} ms: {Message}", serverName, agentReadClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(Key(serverId), AgentStatusReadName, agentReadClock.ElapsedMilliseconds);
         }
 
@@ -1643,7 +1643,7 @@ internal sealed class DarlingSelfAlertEvaluator
             }
             catch (Exception ex)
             {
-                _logger?.LogError("[{Server}] Agent-alert-setup self-alert failed after {ElapsedMs} ms: {Message}", serverName, agentAlertReadClock.ElapsedMilliseconds, ex.Message);
+                _logger?.LogError(ex, "[{Server}] Agent-alert-setup self-alert failed after {ElapsedMs} ms: {Message}", serverName, agentAlertReadClock.ElapsedMilliseconds, ex.Message);
                 _readFailures?.RecordReadFailure(Key(serverId), AgentAlertSetupReadName, agentAlertReadClock.ElapsedMilliseconds);
             }
         }
@@ -1665,7 +1665,7 @@ internal sealed class DarlingSelfAlertEvaluator
             }
             catch (Exception ex)
             {
-                _logger?.LogError("[{Server}] Database-protection self-alert failed after {ElapsedMs} ms: {Message}", serverName, protectionReadClock.ElapsedMilliseconds, ex.Message);
+                _logger?.LogError(ex, "[{Server}] Database-protection self-alert failed after {ElapsedMs} ms: {Message}", serverName, protectionReadClock.ElapsedMilliseconds, ex.Message);
                 _readFailures?.RecordReadFailure(Key(serverId), DatabaseProtectionReadName, protectionReadClock.ElapsedMilliseconds);
             }
         }
@@ -1688,7 +1688,7 @@ internal sealed class DarlingSelfAlertEvaluator
             }
             catch (Exception ex)
             {
-                _logger?.LogError("[{Server}] Identity-capacity self-alert failed after {ElapsedMs} ms: {Message}", serverName, identityReadClock.ElapsedMilliseconds, ex.Message);
+                _logger?.LogError(ex, "[{Server}] Identity-capacity self-alert failed after {ElapsedMs} ms: {Message}", serverName, identityReadClock.ElapsedMilliseconds, ex.Message);
                 _readFailures?.RecordReadFailure(Key(serverId), IdentityCapacityReadName, identityReadClock.ElapsedMilliseconds);
             }
         }
@@ -1729,7 +1729,7 @@ internal sealed class DarlingSelfAlertEvaluator
             }
             catch (Exception ex)
             {
-                _logger?.LogError("[{Server}] Availability-Group self-alert failed after {ElapsedMs} ms: {Message}", serverName, agReadClock.ElapsedMilliseconds, ex.Message);
+                _logger?.LogError(ex, "[{Server}] Availability-Group self-alert failed after {ElapsedMs} ms: {Message}", serverName, agReadClock.ElapsedMilliseconds, ex.Message);
                 _readFailures?.RecordReadFailure(Key(serverId), AgStateReadName, agReadClock.ElapsedMilliseconds);
             }
         }
@@ -5409,7 +5409,7 @@ internal sealed class DarlingSelfAlertEvaluator
         catch (Exception ex)
         {
             /* NOT counted by #3013's swallowed-read counter: the DELIVERY path, not a condition read. */
-            _logger?.LogError("[{Server}] Connection-change self-alert delivery failed: {Message}", serverName, ex.Message);
+            _logger?.LogError(ex, "[{Server}] Connection-change self-alert delivery failed: {Message}", serverName, ex.Message);
         }
     }
 
@@ -5949,7 +5949,7 @@ internal sealed class DarlingSelfAlertEvaluator
             /* NOT counted by #3013's swallowed-read counter: this method is handed its evidence as parameters and
                performs no store read — the catch covers the apply/deliver half. The reads that FEED it are counted
                at their own sites in DarlingWorker. */
-            _logger?.LogError("Store disk-pressure self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Store disk-pressure self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -6144,7 +6144,7 @@ internal sealed class DarlingSelfAlertEvaluator
         catch (Exception ex)
         {
             /* Not counted as a swallowed read: the read above succeeded, this catch covers the apply/deliver half. */
-            _logger?.LogError("Store autovacuum self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Store autovacuum self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -6308,7 +6308,7 @@ internal sealed class DarlingSelfAlertEvaluator
                as a parameter and performs no store read — the catch covers the apply/deliver half, exactly
                like the sibling store self-alert wrappers. The read that BUILDS the report lives in
                CustomAlertEvaluator, outside this alert-pass census. */
-            _logger?.LogError("Custom-alert rule-health self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Custom-alert rule-health self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -6477,7 +6477,7 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             /* NOT counted by #3013's swallowed-read counter: the report arrives as a parameter and this method reads
                nothing; the worker's read of the counts records its own failure. */
-            _logger?.LogError("External-alert delivery self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "External-alert delivery self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -6581,7 +6581,7 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             /* NOT counted by #3013's swallowed-read counter: the rules arrive as a parameter from the live
                MuteRuleService cache and this method performs no store read. */
-            _logger?.LogError("Stale-mute self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Stale-mute self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -6915,7 +6915,7 @@ internal sealed class DarlingSelfAlertEvaluator
             /* NOT counted by #3013's swallowed-read counter: the report is a parameter DarlingWorker already
                built (its one store read, the rejected-verdict list, is isolated at its own call site); this
                method performs no store read of its own. */
-            _logger?.LogError("Store settings self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Store settings self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -7225,7 +7225,7 @@ internal sealed class DarlingSelfAlertEvaluator
         catch (Exception ex)
         {
             /* NOT counted by #3013's swallowed-read counter: the report is a parameter; no store read happens here. */
-            _logger?.LogError("Store runtime upgrade self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Store runtime upgrade self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -7319,7 +7319,7 @@ WHERE c.is_enabled";
         catch (Exception ex)
         {
             /* The report is a parameter; no store read happens here. */
-            _logger?.LogError("Collection gap at start self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Collection gap at start self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -7387,7 +7387,7 @@ WHERE c.is_enabled";
         catch (Exception ex)
         {
             /* NOT counted by #3013's swallowed-read counter: the report is a parameter; no store read happens here. */
-            _logger?.LogError("Store TimescaleDB self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Store TimescaleDB self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -7522,7 +7522,7 @@ WHERE c.is_enabled";
         {
             /* NOT counted by #3013's swallowed-read counter: the report is a parameter built from the worker's
                in-memory gate counts, and this method performs no store read. */
-            _logger?.LogError("Fleet gate self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Fleet gate self-alert failed: {Message}", ex.Message);
         }
 
         /* With the master switch off ApplyFleetGateAsync returns before it can resolve, so an alert that fired earlier
@@ -7757,14 +7757,16 @@ WHERE c.is_enabled";
                host's in-memory TLS certificate state publish (WebTlsCertificateState for the web host,
                McpTlsCertificateState for the MCP host), and this method performs no store read. Two literal
                messages in ONE catch rather than a templated one: the failed-read census reads this catch's
-               text, and the web line stays byte-identical to what it has always logged. */
+               text, and the web line's formatted message stays byte-identical to what it has always logged.
+               The exception rides with each call, so the file log appends " | Type: Message" to that line, and
+               the console log also shows the stack. */
             if (listener == TlsListener.Mcp)
             {
-                _logger?.LogError("MCP TLS certificate self-alert failed: {Message}", ex.Message);
+                _logger?.LogError(ex, "MCP TLS certificate self-alert failed: {Message}", ex.Message);
             }
             else
             {
-                _logger?.LogError("Web TLS certificate self-alert failed: {Message}", ex.Message);
+                _logger?.LogError(ex, "Web TLS certificate self-alert failed: {Message}", ex.Message);
             }
         }
     }
@@ -8036,7 +8038,7 @@ WHERE c.is_enabled";
         {
             /* NOT counted by #3013's swallowed-read counter: the reading is a parameter; the read that
                produces it is counted in DarlingWorker.EvaluateCompressionJobHealthAsync. */
-            _logger?.LogError("Store policy-job health self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Store policy-job health self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -8060,7 +8062,7 @@ WHERE c.is_enabled";
         {
             /* NOT counted by #3013's swallowed-read counter: the readings are a parameter; the read that produces
                them is counted in DarlingWorker.EvaluateCompressionJobHealthAsync. */
-            _logger?.LogError("Store-job cadence self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Store-job cadence self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -8184,7 +8186,7 @@ WHERE c.is_enabled";
         {
             /* NOT counted by #3013's swallowed-read counter: the policies are a parameter; the read that produces
                them is counted in DarlingWorker.EvaluateCompressionJobHealthAsync. */
-            _logger?.LogError("Retention-held self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Retention-held self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -8370,7 +8372,7 @@ WHERE c.is_enabled";
         {
             /* NOT counted by #3013's swallowed-read counter: the readings are a parameter; the reads that
                produce them are counted in DarlingWorker.EvaluateCompressionJobHealthAsync. */
-            _logger?.LogError("Raw-purge-over-horizon self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Raw-purge-over-horizon self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -8498,14 +8500,14 @@ WHERE c.is_enabled";
         {
             /* NOT counted by #3013's swallowed-read counter: the failure record is a parameter; the read that produces it is
                isolated in DarlingWorker.BuildQueryStoreComposeStampAsync. */
-            _logger?.LogError("Compose-rollup-hours-stuck self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Compose-rollup-hours-stuck self-alert failed: {Message}", ex.Message);
         }
     }
 
     /// <summary>
     /// Applies the fleet-level Compose Rollup Hours Stuck condition (#5867): one WARNING while any hour of the Query Store compose
     /// rollup is in backoff (<see cref="QueryStoreComposeStamp.HourFailure.InBackoff"/>: its build has failed
-    /// <see cref="QueryStoreComposeStamp.FailuresBeforeBackoff"/> times in a row, or timed out under the extended timeout, and is now
+    /// <see cref="QueryStoreComposeStamp.ComposeFailuresBeforeBackoff"/> times in a row, or timed out under the extended timeout, and is now
     /// tried once a day). The alert names how many hours, the oldest, its count and its last reason; <c>get_store_metrics</c> lists
     /// them all. Hours that failed but are still retried every tick do not fire it. A STANDING condition, the Raw Purge Over Horizon
     /// idiom: fire once, re-fire on the cooldown while it persists, one clearing resolution once no hour is in backoff. Gated on the
@@ -8536,7 +8538,7 @@ WHERE c.is_enabled";
                     StoreKey(ComposeHoursStuckKeyPrefix + key), _storeLabel, ComposeHoursStuckMetric,
                     $"{stuck.Count} {(stuck.Count == 1 ? "hour" : "hours")}", "0 hours",
                     detail: StateRepeatNote(decision, refire) +
-                        $"{stuck.Count} {(stuck.Count == 1 ? "hour" : "hours")} of the Query Store compose rollup failed to build {QueryStoreComposeStamp.FailuresBeforeBackoff} times in a row " +
+                        $"{stuck.Count} {(stuck.Count == 1 ? "hour" : "hours")} of the Query Store compose rollup failed to build {QueryStoreComposeStamp.ComposeFailuresBeforeBackoff} times in a row " +
                         $"(or timed out under the longer timeout) and {(stuck.Count == 1 ? "is" : "are")} now retried once a day. " +
                         $"The oldest is {oldest.Hour:yyyy-MM-dd HH}:00 UTC: {oldest.Failures} {(oldest.Failures == 1 ? "failure" : "failures")}, last reason {reason}, next attempt {oldest.NextAttemptAt:yyyy-MM-dd HH:mm} UTC. " +
                         "get_store_metrics lists every such hour under query_store_compose; the service log's 'Query Store compose rollup: building hour' " +
@@ -8603,7 +8605,7 @@ WHERE c.is_enabled";
         catch (Exception ex)
         {
             /* NOT counted by #3013's swallowed-read counter: the counts are read from memory, not the store. */
-            _logger?.LogError("Notification-channel self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Notification-channel self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -10416,7 +10418,7 @@ ORDER BY ag_name, database_name, replica_server_name";
             /* An audit-row write must never break the loop (RecordAlertAsync is already failure-isolated;
                this is belt-and-suspenders for any other IAlertHistoryStore). */
             /* NOT counted by #3013's swallowed-read counter: an audit-row WRITE, not a condition read. */
-            _logger?.LogError("Failed to record resolution '{Title}': {Message}", resolution.Title, ex.Message);
+            _logger?.LogError(ex, "Failed to record resolution '{Title}': {Message}", resolution.Title, ex.Message);
         }
     }
 

@@ -334,7 +334,7 @@ public static class DarlingXeSessions
                     }
                     else
                     {
-                        logger?.LogError("[{Server}] Failed to ensure attention XE session: {Message} — client-timeout collection will record SESSION_MISSING until resolved",
+                        logger?.LogError(ex, "[{Server}] Failed to ensure attention XE session: {Message} — client-timeout collection will record SESSION_MISSING until resolved",
                             server.Config.DisplayName, ex.Message);
                     }
                 }
@@ -350,7 +350,7 @@ public static class DarlingXeSessions
                 outcome.BlockedProcessTransient = true;
             }
 
-            logger?.LogError("[{Server}] Failed to ensure XE sessions: {Message} — the deadlock, blocked-process and client-timeout runs will fail to connect to read them until resolved",
+            logger?.LogError(ex, "[{Server}] Failed to ensure XE sessions: {Message} — the deadlock, blocked-process and client-timeout runs will fail to connect to read them until resolved",
                 server.Config.DisplayName, ex.Message);
         }
 
@@ -372,7 +372,7 @@ public static class DarlingXeSessions
         }
         else
         {
-            logger?.LogError("[{Server}] Failed to ensure {Capture} XE session: {Message} — {Collector} collection will record SESSION_MISSING until resolved",
+            logger?.LogError(ex, "[{Server}] Failed to ensure {Capture} XE session: {Message} — {Collector} collection will record SESSION_MISSING until resolved",
                 server.Config.DisplayName, captureName, ex.Message, collectorWord);
         }
     }
@@ -424,7 +424,7 @@ public static class DarlingXeSessions
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger?.LogError("[{Server}] Failed to enumerate databases for XE sessions: {Message} — the deadlock and blocked-process runs fail the same enumeration until resolved",
+            logger?.LogError(ex, "[{Server}] Failed to enumerate databases for XE sessions: {Message} — the deadlock and blocked-process runs fail the same enumeration until resolved",
                 server.Config.DisplayName, ex.Message);
             return null;
         }

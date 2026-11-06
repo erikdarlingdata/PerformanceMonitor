@@ -536,7 +536,7 @@ public sealed partial class DarlingWorker
         }
         catch (Exception ex)
         {
-            _logger.LogError("[{Server}] Analysis failed: {Message}", displayName, ex.Message);
+            _logger.LogError(ex, "[{Server}] Analysis failed: {Message}", displayName, ex.Message);
 
             /* If the pass was never launched (e.g. the service ctor threw), no continuation exists to
                clear the marker or release the token source — do both here, or this server is skipped

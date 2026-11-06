@@ -7,7 +7,7 @@
  */
 
 import { fmtMs } from "../../util.js";
-import { codeDisclosure, pgQueryIdText } from "./shared.js";
+import { codeDisclosure, pgQueryIdText, pgSeverityWord } from "./shared.js";
 
 /**
  * A cell over a column whose store writes -1 for "there was none of this".
@@ -54,7 +54,8 @@ export const PG_SESSION_STATE_STATS = [
 export const PG_AUTOVACUUM_COLUMNS = [
   { key: "database_name", label: "Database" },
   { key: "table_name", label: "Table" },
-  { key: "severity", label: "Severity" },
+  /* #7655: the read's token, printed as the word the Severity tile over this grid prints for it (pgSeverityWord). */
+  { key: "severity", label: "Severity", display: (r) => pgSeverityWord(r.severity) },
   { key: "dead_tuples", label: "Dead Tuples", format: "int" },
   { key: "vacuum_threshold", label: "Vacuum At", format: "int" },
   /* The headline number: 1.0 means autovacuum should be triggering right now. Null where the table has never
@@ -77,7 +78,8 @@ export const PG_AUTOVACUUM_COLUMNS = [
    database can be comfortable on one and in trouble on the other, and the remedies differ. */
 export const PG_WRAPAROUND_COLUMNS = [
   { key: "database_name", label: "Database" },
-  { key: "severity", label: "Severity" },
+  /* #7655: the same word the Freeze Headroom tile prints for the token. */
+  { key: "severity", label: "Severity", display: (r) => pgSeverityWord(r.severity) },
   { key: "frozen_xid_age", label: "Frozen XID Age", format: "int" },
   { key: "xids_remaining", label: "XIDs Left", format: "int" },
   { key: "pct_toward_wraparound", label: "% to Wraparound", format: "num2" },

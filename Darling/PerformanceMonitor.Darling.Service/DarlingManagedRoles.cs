@@ -1036,7 +1036,7 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogError(
+            logger.LogError(ex, 
                 "Could not re-assert the compose statement_timeout/temp_file_limit on the viewer/mcp roles ({Message}) — the live ceilings are whatever the last successful provisioning set, and the next service start will converge them.",
                 ex.Message);
             return false;
@@ -1206,7 +1206,7 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
            shutdown must never be reported to an operator as an ACL failure they should go fix. */
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogError(
+            logger.LogError(ex, 
                 "Could not restrict the ACL on {Path}{Detail} ({Message}). If the owner is not this service, the " +
                 "re-ACL can never succeed — it needs ownership or FullControl — so restarting will not clear this; " +
                 "grant the service account FullControl or make it the owner.",
@@ -5635,7 +5635,7 @@ WHERE u.rolname = current_user";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogError(
+            logger.LogError(ex, 
                 "Could not write the compose store's '{Role}' credential {File} ({Message}). The role has this start's password; the next start generates a new one and re-asserts it.",
                 credential.Role, path, ex.Message);
             try

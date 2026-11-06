@@ -93,7 +93,7 @@ ON CONFLICT (server_id, metric_name) DO UPDATE SET
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Could not persist edge-trigger watermark ({Metric}): {Message}", metricName, ex.Message);
+            _logger?.LogError(ex, "Could not persist edge-trigger watermark ({Metric}): {Message}", metricName, ex.Message);
         }
     }
 
@@ -137,7 +137,7 @@ AND   watermark_time IS NULL", connection) { CommandTimeout = DarlingAlertReadAd
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Could not load the unannounced deadlock pairs: {Message}", ex.Message);
+            _logger?.LogError(ex, "Could not load the unannounced deadlock pairs: {Message}", ex.Message);
             return null;
         }
     }
@@ -181,7 +181,7 @@ AND   metric_name <> ALL($3)", connection) { CommandTimeout = DarlingAlertReadAd
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Could not persist the unannounced deadlock pairs: {Message}", ex.Message);
+            _logger?.LogError(ex, "Could not persist the unannounced deadlock pairs: {Message}", ex.Message);
         }
     }
 
@@ -201,7 +201,7 @@ AND   starts_with(metric_name, $2)", connection) { CommandTimeout = DarlingAlert
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Could not clear the unannounced deadlock pairs: {Message}", ex.Message);
+            _logger?.LogError(ex, "Could not clear the unannounced deadlock pairs: {Message}", ex.Message);
         }
     }
 
@@ -262,7 +262,7 @@ ON CONFLICT (server_id, metric_name) DO UPDATE SET
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Could not persist failed-job watermark: {Message}", ex.Message);
+            _logger?.LogError(ex, "Could not persist failed-job watermark: {Message}", ex.Message);
         }
     }
 
@@ -380,7 +380,7 @@ AND   metric_name = $2", connection) { CommandTimeout = DarlingAlertReadAdapter.
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Could not load incident occurrences ({Metric}): {Message}", metricName, ex.Message);
+            _logger?.LogError(ex, "Could not load incident occurrences ({Metric}): {Message}", metricName, ex.Message);
             return new Dictionary<string, IncidentOccurrenceState>(StringComparer.Ordinal);
         }
 
@@ -478,7 +478,7 @@ ON CONFLICT (server_id, metric_name, dedup_key) DO UPDATE SET
             /* Same posture as the watermark writes: a dropped write costs accuracy on the NEXT delivery's
                total (the fingerprint reads as new and restarts, with a fresh start time saying so), never
                a missed or duplicated alert. The alert itself has already been decided by the gate. */
-            _logger?.LogError("Could not persist incident occurrences ({Metric}): {Message}", metricName, ex.Message);
+            _logger?.LogError(ex, "Could not persist incident occurrences ({Metric}): {Message}", metricName, ex.Message);
         }
     }
 
@@ -558,7 +558,7 @@ ON CONFLICT (server_id, metric_name) DO UPDATE SET
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Could not persist the alert persistence gate ({Metric}): {Message}", metricName, ex.Message);
+            _logger?.LogError(ex, "Could not persist the alert persistence gate ({Metric}): {Message}", metricName, ex.Message);
         }
     }
 

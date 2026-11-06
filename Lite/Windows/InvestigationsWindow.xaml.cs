@@ -78,7 +78,7 @@ public partial class InvestigationsWindow : Window
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Investigations", $"Could not read the investigation requests: {ex.Message}");
+            AppLogger.Error("Investigations", $"Could not read the investigation requests: {ex.Message}", ex);
             if (seq == _listSeq)
             {
                 StatusText.Text = "Could not read the investigation requests: " + ex.Message;
@@ -108,7 +108,7 @@ public partial class InvestigationsWindow : Window
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Investigations", $"Could not read investigation request {requestId}: {ex.Message}");
+            AppLogger.Error("Investigations", $"Could not read investigation request {requestId}: {ex.Message}", ex);
             if (seq == _detailSeq)
             {
                 ClearDetail("Could not read this request: " + ex.Message);

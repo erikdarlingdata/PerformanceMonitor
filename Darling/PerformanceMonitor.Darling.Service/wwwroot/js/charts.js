@@ -63,11 +63,43 @@ function svg(tag, attrs) {
   return node;
 }
 
+/**
+ * A unit caption on its axis (#7856). The caption is anchored beside its axis: "end" at the left axis, "start" at a right axis, "end" at the
+ * plot's right edge. A caption wider than the room on its growing side ran off the chart ("snapshot rows" lost its first 20 px at the 58 px
+ * margin), so it is moved to the chart's edge instead: the plot keeps its size, and a short caption keeps the placement it always had.
+ * `rightPx` is the room kept clear at the chart's right edge: UNIT_CAPTION_EDGE_PX by default, MENU_BTN_CLEAR_PX for the right-axis caption of a chart
+ * that draws the menu button over that corner (#7863).
+ */
+export function unitCaption(text, x, anchor, W, attrs, rightPx = UNIT_CAPTION_EDGE_PX) {
+  const px = String(text).length * UNIT_CAPTION_CHAR_PX;
+  let at = x;
+  let how = anchor;
+  if (anchor === "end" && x - px < UNIT_CAPTION_EDGE_PX) {
+    at = UNIT_CAPTION_EDGE_PX;
+    how = "start";
+  } else if (anchor === "start" && x + px > W - rightPx) {
+    at = W - rightPx;
+    how = "end";
+  }
+  const cap = svg("text", { class: "axis-unit", x: at, y: 11, "text-anchor": how, ...attrs });
+  cap.textContent = text;
+  return cap;
+}
+
 /* x-axis label room (#5586). An axis label is 11px tabular text, about 6.6px per character; two neighbours want a gap
    between them. The tick count is how many labels fit across the plot, so none overlap at 360 px and a wide panel gets
    more ticks, not wider ones. */
 const X_LABEL_CHAR_PX = 6.6;
 const X_LABEL_GAP_PX = 32;
+/* A unit caption is 10px text (app.css .axis-unit), about 6px per character. Its width is estimated, as the tick labels' is. */
+const UNIT_CAPTION_CHAR_PX = 6;
+const UNIT_CAPTION_EDGE_PX = 2;
+/* The chart's menu button sits over the top-right corner (app.css .chart-menu-btn: right 4px, top 2px, 24 px wide as drawn, so its left edge is
+   28 px from the chart's right edge). A right-axis caption at the top of the chart ends left of it, with a small gap (#7863). */
+const MENU_BTN_RIGHT_PX = 4;
+const MENU_BTN_W_PX = 24;
+const MENU_BTN_GAP_PX = 4;
+const MENU_BTN_CLEAR_PX = MENU_BTN_RIGHT_PX + MENU_BTN_W_PX + MENU_BTN_GAP_PX;
 const X_MAX_INTERVALS = 10;
 
 /* The last width each chart was measured at, by chart key (#5586): a line chart's menuKey (zoomableLineChart sets one) or the
@@ -440,9 +472,7 @@ export function renderLineChart(spec) {
        on the top tick collided with its label — the design review's must-fix); for bare-number axes it sits
        in the extra top headroom reserved above (well clear of the top tick's label). */
     if (unit && unit !== "%" && !ticksCarryUnit(yLabels)) {
-      const cap = svg("text", { class: "axis-unit", x: M.l - 8, y: 11, "text-anchor": "end" });
-      cap.textContent = unit;
-      axis.appendChild(cap);
+      axis.appendChild(unitCaption(unit, M.l - 8, "end", W));
     }
 
     /* Vertical gridlines + x labels (6 ticks). The label widens to include the calendar date when the domain
@@ -487,9 +517,7 @@ export function renderLineChart(spec) {
         axis.appendChild(label);
       }
       if (series2.unit && series2.unit !== "%" && !ticksCarryUnit(yLabels2)) {
-        const cap2 = svg("text", { class: "axis-unit", x: plotRight + 8, y: 11, "text-anchor": "start", fill: normalizeColor(series2.color) });
-        cap2.textContent = series2.unit;
-        axis.appendChild(cap2);
+        axis.appendChild(unitCaption(series2.unit, plotRight + 8, "start", W, { fill: normalizeColor(series2.color) }, MENU_BTN_CLEAR_PX));
       }
     }
 
@@ -1108,15 +1136,11 @@ export function renderScatterChart(spec) {
       axis.appendChild(label);
     }
     if (unitY && unitY !== "%") {
-      const cap = svg("text", { class: "axis-unit", x: M.l - 8, y: 11, "text-anchor": "end" });
-      cap.textContent = unitY;
-      axis.appendChild(cap);
+      axis.appendChild(unitCaption(unitY, M.l - 8, "end", W));
     }
     if (unitX) {
       /* Top right, level with the y unit caption: at the bottom right it sat on the last tick label (#5586). */
-      const cap = svg("text", { class: "axis-unit", x: plotRight, y: 11, "text-anchor": "end" });
-      cap.textContent = unitX;
-      axis.appendChild(cap);
+      axis.appendChild(unitCaption(unitX, plotRight, "end", W));
     }
     root.appendChild(axis);
 

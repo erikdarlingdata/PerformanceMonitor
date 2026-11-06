@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+import { pgSeverityWord } from "./shared.js";
 
 /* worst_* beside latest on every lag measure. Lag is spiky, a sample catches one instant, and a grid showing
    only the latest value reports a replica that fell an hour behind and caught up as perfectly healthy. */
@@ -22,7 +23,8 @@ export const PG_REPLICATION_STATS_COLUMNS = [
 
 export const PG_SLOT_COLUMNS = [
   { key: "slot_name", label: "Slot" },
-  { key: "severity", label: "Severity" },
+  /* #7655: the read's token, printed as the word the Slot Summary tile prints for it (pgSeverityWord). */
+  { key: "severity", label: "Severity", display: (r) => pgSeverityWord(r.severity) },
   { key: "slot_type", label: "Type" },
   { key: "plugin", label: "Plugin" },
   { key: "database_name", label: "Database" },

@@ -216,6 +216,32 @@ try {
   step("zeroFillPanel", () => drawn({ source: "blocked-process-report", bucket_minutes: 5, trend: fiveApart }, trendDesc));
   step("zeroFillPanelSnapshot", () => drawn({ source: "DMV snapshot", bucket_minutes: 5, trend: fiveApart }, trendDesc));
   step("zeroFillPanelNoSource", () => drawn({ bucket_minutes: 5, trend: fiveApart }, { ...trendDesc, sourceKey: undefined }));
+
+  /* #7850: the fill is 0 only inside the reply's `covered` ranges. One hour ending 10:05 in minute buckets, an event at 09:10 and one at 09:50.
+     A hole in coverage (09:30 to 09:40, a stretch no run read) draws nothing; a fully covered window with no event in most of it still draws 0 in
+     every covered minute; a reply with no `covered` field (an older service) keeps the whole-window fill; an empty list is a window no run read. */
+  const gapped = [{ time: "2026-11-05T09:10:00.000Z", count: 3 }, { time: "2026-11-05T09:50:00.000Z", count: 2 }];
+  const coverDesc = { ...trendDesc, sourceKey: undefined };
+  const range = (from, to) => ({ start: "2026-11-05T" + from + ":00.000Z", end: "2026-11-05T" + to + ":00.000Z" });
+  const gapStart = Date.parse("2026-11-05T09:30:00Z");
+  const gapEnd = Date.parse("2026-11-05T09:40:00Z");
+  const coveredDraw = (covered) => {
+    specs.length = 0;
+    VIZ.line({ bucket_minutes: 1, trend: gapped, ...(covered ? { covered } : {}) }, coverDesc);
+    const pts = specs[0].points;
+    return {
+      count: pts.length,
+      zeros: pts.filter((p) => p.count === 0).length,
+      inGap: pts.filter((p) => Date.parse(p.time) >= gapStart && Date.parse(p.time) < gapEnd).length,
+      kept: pts.filter((p) => gapped.includes(p)).length,
+      last: pts[pts.length - 1].time,
+    };
+  };
+  step("coveredGap", () => coveredDraw([range("09:05", "09:30"), range("09:40", "10:05")]));
+  step("coveredWhole", () => coveredDraw([range("09:05", "10:05")]));
+  step("coveredAbsent", () => coveredDraw(null));
+  step("coveredEmpty", () => coveredDraw([]));
+  step("coveredUnreadable", () => coveredDraw([{ start: "not a time", end: "2026-11-05T10:05:00.000Z" }, range("09:05", "10:05")]));
   Date.now = realNow;
 
   process.stdout.write(JSON.stringify(out) + "\n");

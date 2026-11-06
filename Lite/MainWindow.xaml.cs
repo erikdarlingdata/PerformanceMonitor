@@ -849,7 +849,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            AppLogger.Error("MCP", $"Failed to start MCP server: {ex.Message}");
+            AppLogger.Error("MCP", $"Failed to start MCP server: {ex.Message}", ex);
         }
     }
 
@@ -2540,7 +2540,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            AppLogger.Error("ConnectionAlerts", $"Webhook channel check failed: {ex.Message}");
+            AppLogger.Error("ConnectionAlerts", $"Webhook channel check failed: {ex.Message}", ex);
         }
     }
 
@@ -2683,7 +2683,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            AppLogger.Error("ConnectionAlerts", $"Connection check notify failed: {ex.Message}");
+            AppLogger.Error("ConnectionAlerts", $"Connection check notify failed: {ex.Message}", ex);
         }
     }
 

@@ -226,7 +226,7 @@ public class EmailAlertService : IFindingAlertSender
         }
         catch (Exception ex)
         {
-            _logger.LogError($"TrySendAlertEmailAsync outer error: {ex.Message}");
+            _logger.LogError(ex, $"TrySendAlertEmailAsync outer error: {ex.Message}");
             return null;
         }
     }
@@ -351,7 +351,7 @@ public class EmailAlertService : IFindingAlertSender
         }
         catch (Exception ex)
         {
-            _logger.LogError($"SendFindingSummaryAsync error: {ex.Message}");
+            _logger.LogError(ex, $"SendFindingSummaryAsync error: {ex.Message}");
             return null;
         }
     }
@@ -386,7 +386,7 @@ public class EmailAlertService : IFindingAlertSender
         }
         catch (Exception ex)
         {
-            _logger.LogError($"RecordHeldAlertAsync error: {ex.Message}");
+            _logger.LogError(ex, $"RecordHeldAlertAsync error: {ex.Message}");
             return null;
         }
     }
@@ -414,7 +414,7 @@ public class EmailAlertService : IFindingAlertSender
         }
         catch (Exception ex)
         {
-            _logger.LogError($"RecordDigestRoutedFindingAsync error: {ex.Message}");
+            _logger.LogError(ex, $"RecordDigestRoutedFindingAsync error: {ex.Message}");
             return null;
         }
     }

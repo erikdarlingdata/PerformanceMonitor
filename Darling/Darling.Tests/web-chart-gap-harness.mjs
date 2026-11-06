@@ -346,5 +346,45 @@ out.pageWiring = {
 
 out.split = charts.splitAtGaps([0, 1, 2, 3, 4], [0, 1, 2, 100, 101], 10).map((r) => r.join(","));
 
+/* #7850: the Blocking and Deadlock trends fill the buckets inside the reply's `covered` ranges with 0 and leave the rest out. The chart's own spacing
+   guess reads three events hours apart as events and joined them into one slope across time nobody observed. With a `covered` list the panel hands the
+   chart the fill's bucket, so any two neighbouring points more than one bucket apart break the line, and a lone point is a dot. A 6 hour window ending
+   at T0 + 6 hours, 5 minute buckets. A reply without `covered` keeps the whole-window fill and the chart's own rule. */
+const realNow = Date.now;
+Date.now = () => T0 + 360 * MIN;
+const trendPanelDesc = { viz: "line", rowsKey: "trend", xKey: "time", series: [{ key: "count", label: "Reports" }], format: "int", zeroFill: true, params: { server: "srv-a", hours: 6 }, emptyText: "none" };
+const coveredDrawn = (events, covered) => {
+  const host = panels.VIZ.line({ bucket_minutes: 5, trend: events.map((m, i) => ({ time: iso(T0 + m * MIN), count: 3 - (i % 3) })), ...(covered ? { covered } : {}) }, trendPanelDesc);
+  return { runs: vertexCounts(host), dots: marks(host).dots };
+};
+const spanOf = (from, to) => ({ start: iso(T0 + from * MIN) + "Z", end: iso(T0 + to * MIN) + "Z" });
+/* a 90 minute hole (120 to 210) inside covered time, events at 60, 65 and 250: two runs, one each side */
+out.coveredHole = coveredDrawn([60, 65, 250], [spanOf(0, 120), spanOf(210, 360)]);
+/* no covered field: the whole window is filled, one line of 73 points, no dots */
+out.coveredAbsent = coveredDrawn([60, 65, 250], null);
+/* covered is an empty list and three events hours apart: three separate dots, no line joins two of them */
+out.coveredEmptyEvents = coveredDrawn([30, 180, 270], []);
+/* an event in the hole between two short covered ranges (55 to 65 and 245 to 255) is a dot of its own and joins neither run */
+out.coveredEventInHole = coveredDrawn([60, 150, 250], [spanOf(55, 65), spanOf(245, 255)]);
+/* two events a bucket apart with nothing covered are one short line, not two dots */
+out.coveredEmptyAdjacent = coveredDrawn([30, 35], []);
+/* #7850, the reply as the tools send it: get_blocking_trend and get_deadlock_trend state `bucket_minutes: 1` (DarlingMcpBlockingTools, the reply
+   dictionaries; the SQL buckets by minute), and the panel takes its step from it. The same three cases the guess used to get wrong. */
+const realDrawn = (events, covered, hours = 6) => {
+  const host = panels.VIZ.line({ hours_back: hours, bucket_minutes: 1, trend: events.map((m, i) => ({ time: iso(T0 + m * MIN), count: 3 - (i % 3) })), covered }, { ...trendPanelDesc, params: { server: "srv-a", hours } });
+  const pts = lineXs(host);
+  return { runs: pts.map((xs) => xs.length), dots: marks(host).dots };
+};
+/* nothing covered, events at 30, 180 and 270: three dots, and no line (the old guess of a 90 minute step joined 180 to 270) */
+out.realEmpty = realDrawn([30, 180, 270], []);
+/* a stop between 10:00 and 12:00 (minutes 60 to 180 here): two events, one on each side. Each side is its own 60 minute run of zeros and the event, no line across */
+out.realStop = realDrawn([30, 210], [spanOf(0, 60), spanOf(180, 240)]);
+/* covered all six hours, events 40 minutes apart: a zero in every minute between them, one line of 360 points */
+out.realFull = realDrawn([40, 80, 120], [spanOf(0, 360)]);
+/* the longest window the tools accept, 720 hours, covered end to end in minute buckets with three events: 43,200 points in ONE run, no dot. The fill once
+   stopped at 20,000 buckets and left the rest as dots. */
+out.realLongWindow = realDrawn([-40000, -20000, -100], [spanOf(-43200, 360)], 720);
+Date.now = realNow;
+
 fs.rmSync(scratch, { recursive: true, force: true });
 console.log(JSON.stringify(out));

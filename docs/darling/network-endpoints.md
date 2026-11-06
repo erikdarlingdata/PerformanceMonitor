@@ -143,7 +143,7 @@ MCP can serve HTTPS itself ([#5288](https://github.com/erikdarlingdata/Performan
 }
 ```
 
-Give one form, a PKCS#12 bundle or a PEM pair, and never both. The password can sit in `encryptedPfxPassword` (DPAPI), in `pfxPassword` as a `file:` or `env:` reference, or nowhere if the bundle has no password. With a specific `listen` IP, only the network listener serves HTTPS. The two loopback listeners stay plain HTTP, and they still require the token. With `0.0.0.0` or `::`, the one listener serves HTTPS to everyone, loopback included. There is no redirect from HTTP and no second port, so a plain-HTTP client fails the handshake.
+Give one form, a PKCS#12 bundle, a PEM pair or a [Windows certificate store entry](#certificate-from-the-windows-certificate-store), and never more than one. The password can sit in `encryptedPfxPassword` (DPAPI), in `pfxPassword` as a `file:` or `env:` reference, or nowhere if the bundle has no password. With a specific `listen` IP, only the network listener serves HTTPS. The two loopback listeners stay plain HTTP, and they still require the token. With `0.0.0.0` or `::`, the one listener serves HTTPS to everyone, loopback included. There is no redirect from HTTP and no second port, so a plain-HTTP client fails the handshake.
 
 The service reads the certificate file when MCP starts. After you renew the certificate, restart the service. The product consumes a certificate and does not manage a PKI: there is no ACME and no self-signed fallback. Loading fails closed. A certificate that is missing, unreadable, ambiguous, expired, or not yet valid keeps MCP loopback-only and logs a Critical line. It never falls back to plain HTTP. The token is still required on that loopback listener. Only SYSTEM, Administrators and the service account should be able to read the key file (the PEM key, or a PKCS#12 bundle), for `web.network.tls` and `mcp.network.tls` alike, and on Windows the service logs a warning at start that names the file when ordinary users can read it.
 
@@ -204,11 +204,79 @@ New-NetFirewallRule -DisplayName "Darling Web" -Direction Inbound -Action Allow 
 }
 ```
 
-Give **one** form, never both — a PKCS#12 bundle or a PEM pair — and the password may sit in `encryptedPfxPassword` (DPAPI), in `pfxPassword` as a `file:`/`env:` reference, or nowhere at all if the bundle is unprotected. TLS applies to the **network listener only**: the loopback listeners stay plain HTTP, because your certificate names the LAN address and not `localhost`, and loopback traffic never reaches the segment this protects. There is no redirect-from-HTTP, because one port cannot speak both schemes and adding a second HTTP port would reopen the cleartext surface; a plain-HTTP client simply fails the handshake.
+Give **one** form, never more than one: a PKCS#12 bundle, a PEM pair or a [Windows certificate store entry](#certificate-from-the-windows-certificate-store). The password may sit in `encryptedPfxPassword` (DPAPI), in `pfxPassword` as a `file:`/`env:` reference, or nowhere at all if the bundle is unprotected. TLS applies to the **network listener only**: the loopback listeners stay plain HTTP, because your certificate names the LAN address and not `localhost`, and loopback traffic never reaches the segment this protects. There is no redirect-from-HTTP, because one port cannot speak both schemes and adding a second HTTP port would reopen the cleartext surface; a plain-HTTP client simply fails the handshake.
 
 The product **consumes** a certificate and does not manage a PKI — no ACME, and deliberately no self-signed fallback, which would buy encryption without authentication and train you to click through the warning. An internal CA is the normal answer on a LAN. Loading **fails closed**: a certificate that is missing, unreadable, ambiguous, or **expired** keeps the dashboard loopback-only (the token is still required on that loopback listener) with a Critical log line rather than quietly serving the LAN over HTTP — and because an expired certificate takes the dashboard down, the service warns for the last 30 days before that happens. The listener negotiates TLS 1.2 and 1.3 only. A TLS-terminating reverse proxy in front of the port remains a perfectly good alternative. MCP has its own `tls` block, described in the MCP section above.
 
 **Behind a reverse proxy, list the proxy in `trustedProxies`.** The connection from the proxy to this host is plain HTTP, so without it the session cookie is not marked `Secure` and an OIDC `redirect_uri` is built as `http://` (which an IdP refuses). With `"trustedProxies": ["10.0.0.5"]` (IPs or CIDRs) the host honors `X-Forwarded-Proto`, `X-Forwarded-For` and `X-Forwarded-Host` **from those addresses only** — from anyone else the headers are ignored. Two consequences: `allowFrom` is then checked against the forwarded client address, so it has to cover your operators rather than the proxy; and the sign-in throttle counts per client instead of per proxy. Set `web.publicBaseUrl` to the name the proxy serves so the Host allowlist admits it. Set it too when the proxy rewrites the `Host` header (nginx's `proxy_pass` does by default): a sign-in POST from a browser that does not send `Sec-Fetch-Site` is accepted only when its `Origin` or `Referer` names the host the request was addressed to, the `X-Forwarded-Host` a trusted proxy sent, or `web.publicBaseUrl`'s host (Unicode and punycode spellings of a name are the same name). A browser that sends `Sec-Fetch-Site: same-origin` needs none of that. An entry that does not parse keeps the dashboard loopback-only with a Critical line. `Strict-Transport-Security` is **off by default**. Set `"hsts": true` in the `network` block, once the dashboard is reached over HTTPS only, and responses to a request that came over HTTPS (the listener's own, or a trusted proxy's) carry it (one year, no subdomains). HSTS is kept per host name and ignores the port: once a browser has reached the dashboard over HTTPS by name, it uses HTTPS for every port of that same name for a year, including other services on that name that speak plain HTTP. The proxy must append the client's address to `X-Forwarded-For` or overwrite it, and `trustedProxies` must not cover clients that connect directly. Only the address of the connection itself can be loopback for `allowFrom`: a forwarded `127.0.0.1` or `::1` is judged against `allowFrom` like any other address.
+
+### Certificate from the Windows certificate store
+
+A certificate enrolled from an internal CA usually sits in the Windows certificate store. Its key often cannot be exported, so you cannot make a PFX or a PEM file from it. For `web.network.tls` and `mcp.network.tls` alike, a third form reads the certificate from the store ([#7718](https://github.com/erikdarlingdata/PerformanceMonitor/issues/7718)). It works on Windows only. On any other host the service refuses it and says to use `pfxPath` or `certPath` and `keyPath`.
+
+```jsonc
+"tls": {
+  "store": {
+    "location": "LocalMachine",       // the default, or "CurrentUser"
+    "name": "My",                      // the default (Personal)
+    "thumbprint": "A1 B2 C3 D4 ..."    // or "subject": "darling.example.com"
+  }
+}
+```
+
+Give exactly one form: `store`, a PKCS#12 bundle or a PEM pair. A `store` block next to `pfxPath`, `certPath` or `keyPath` is refused, and so is one with both `thumbprint` and `subject` or with neither. `LocalMachine` is what almost every install wants, because a service account with no loaded profile has no useful `CurrentUser` store. The service opens the store read-only and never changes it.
+
+- **`thumbprint`** names one exact certificate. Spaces and case do not matter, so you can paste it from the certificate snap-in. A thumbprint that matches nothing, or matches two certificates, is refused, and so is a certificate with no private key. The certificate's dates are judged by the same check the file forms use, so an expired one is refused and still raises the expiry alert.
+- **`subject`** is a DNS name. The service serves the newest certificate, by start date, that meets four rules. It is valid now. It has the Server Authentication usage. It has a private key. It lists the name as a DNS name in its Subject Alternative Name. A wildcard name such as `*.example.com` counts for one label. The common name never counts. When nothing qualifies, the Critical line says how many certificates carried the name and why each was skipped.
+
+#### Give the service account Read on the key
+
+The service runs as `NT SERVICE\PerformanceMonitor Darling` unless you moved it to another account. A machine key is usually readable by SYSTEM and Administrators only. You must grant Read to the service account once for each certificate. Do it again after a renewal that makes a new key. There are two ways.
+
+- In `certlm.msc` (`certmgr.msc` for `CurrentUser`), open the certificate. Choose All Tasks, then Manage Private Keys, and add the service account with Read.
+- From an elevated prompt, run the command below.
+
+```
+PerformanceMonitor.Darling.Service.exe --grant-cert-key-access <thumbprint> [--account <name>] [--store-location LocalMachine|CurrentUser] [--store-name <name>]
+```
+
+The command follows these rules:
+
+- It grants **Read only**, to **one** account. That account is the one the service is registered under, or the one `--account` names.
+- It grants to one account and refuses every group except the local Administrators group, by asking Windows what the account is. That covers Everyone, Users, Authenticated Users, SERVICE, ALL SERVICES, LOCAL, Domain Users, Domain Computers and every other group. It accepts a user (a domain user, a local user, a group managed service account) and these service identities: LocalSystem, LocalService, NetworkService, a per-service virtual account (`NT SERVICE\<name>`, only when a service with that name is registered on this machine, so a mistyped name is refused), an IIS application pool identity and the local Administrators group. When it cannot tell what the account is, it refuses.
+- It refuses an empty `--account`, and a `--store-name` with a backslash or a slash in it. The same store name in `darling.json` fails closed with a Critical line, because a name like `\\host\My` would open another machine's store over remote registry as the service account.
+- It adds one entry to the key's access list and keeps every existing entry. It never replaces the list.
+- For a `LocalMachine` certificate it needs an elevated prompt. Without one it says so and changes nothing.
+- It finds the certificate by thumbprint. It refuses when none or two match, and when the certificate has no private key.
+- If the account already has Read, it says `Already granted` and changes nothing.
+- If an explicit Deny entry on the account covers Read, it stops and tells you to remove the Deny first.
+- When it succeeds, it names the account and the certificate's subject and thumbprint. It tells you to restart the service.
+- It works on CNG keys and on legacy CAPI RSA keys. It does not handle a key on a smart card or a hardware module.
+
+#### Renewal needs a restart
+
+The service reads the certificate once, when it starts. After you renew, restart the service. There is no reload.
+
+- With `subject`, the service then picks up the newest valid certificate by itself.
+- With `thumbprint`, you must also put the new thumbprint in `darling.json`, because a renewal changes it.
+- If the renewal brings a new key, grant the key access to the new certificate first.
+
+The expiry alert catches a restart that you forget. `Web TLS Certificate Expiring` and `MCP TLS Certificate Expiring` read the certificate that the service loaded. They keep warning while the old certificate runs toward its end date.
+
+#### What fails closed
+
+Each of these keeps the endpoint loopback-only and logs one Critical line. None of them falls back to plain HTTP.
+
+- The store cannot be opened, for example because `name` has a typo.
+- No certificate matches.
+- Two certificates share the thumbprint.
+- The certificate has no private key.
+- The certificate is expired or not valid yet.
+- The private key cannot be opened.
+
+For the last one, the line names the service account and the fix. The fix is the `certlm.msc` steps above, or the `--grant-cert-key-access` command with the account filled in.
+
+The `--configure-network` status line reads `TLS: on (certificate store, LocalMachine\My, <thumbprint>)`. When you chose `subject`, it reads `newest valid for <name>` in place of the thumbprint.
 
 ## Front door to store connections
 

@@ -83,10 +83,13 @@ const statusbar = document.getElementById("statusbar");
 
 /* ─────────────────────────── routing ─────────────────────────── */
 
-/* RULE for every route this switch returns: a route must never write, export or confirm anything on load. A link
+/* RULE for every route currentRoute() returns: a route must never write, export or confirm anything on load. A link
    from another site can open the dashboard with a live session behind it (#6286), so a page reached by an address
-   may only read and draw; a change happens after a click on a button inside the page, never from the address. */
-function currentRoute() {
+   may only read and draw; a change happens after a click on a button inside the page, never from the address.
+   The only POSTs a route sends on load are reads: /api/compose/run (notebooks and views), and the alert editor's
+   /api/alerts/validate and /api/alerts/test, which check the rule and save or deliver nothing (#7846).
+   WebRouteLoadWritesTests (#7864) draws every route in ROUTE_RENDERERS and fails on any other POST, PUT, PATCH or DELETE. */
+export function currentRoute() {
   /* #6840: a front door's #/s/{store}/ prefix is not part of the route; the store it names is applied in route(). */
   const h = routeHash() || "#/fleet";
   if (h.startsWith("#/server/")) return serverRoute(h.slice("#/server/".length));
@@ -261,6 +264,35 @@ function finopsRoute(rest) {
 /* #6159: another page, server or tab opens at the top; the poll re-render of the same route keeps the scroll position. */
 const resetScrollOnRouteChange = makeScrollReset(() => window.scrollTo(0, 0));
 
+/* The renderer each route name draws, with the arguments route() hands it. This is the router's one table: currentRoute() names
+   a route, route() looks it up here, and a route name with no entry draws the fleet. Exported so the load test (#7864) can
+   draw every route and record what each one sends; keep every name currentRoute() returns in it. */
+export const ROUTE_RENDERERS = {
+  server: (m, r, o) => renderServer(m, r.param, r.tab, o),
+  finops: (m, r, o) => renderFinops(m, r.param, r.tab, o),
+  ag: (m, r, o) => renderAg(m, o),
+  sweeps: (m, r, o) => renderSweeps(m, o),
+  alerts: (m) => renderAlerts(m),
+  investigations: (m, r) => renderInvestigations(m, r.request),
+  proposals: (m, r, o) => renderProposals(m, r.proposal, o),
+  alertRules: (m) => renderAlertRuleList(m),
+  alertEditor: (m, r) => renderAlertEditor(m, r.id, r.template),
+  admin: (m, r) => renderAdmin(m, r.tab),
+  triage: (m, r) => renderTriage(m, r.query),
+  views: (m) => renderViewList(m),
+  view: (m, r, o) => renderView(m, r.id, o),
+  editor: (m, r) => renderEditor(m, r.id),
+  notebook: (m, r, o) => renderView(m, r.id, o), // renderView kind-detects -> notebook document
+  notebookEditor: (m, r) => renderNotebookEditor(m, r.id, r.template),
+  muteRules: (m, r) => renderMuteRules(m, r.query),
+  knownPatterns: (m) => renderKnownPatterns(m),
+  manageTags: (m) => renderManageTags(m),
+  manageQueryTags: (m) => renderManageQueryTags(m),
+  queryTagUsage: (m) => renderQueryTagUsage(m),
+  jobHistory: (m) => renderJobHistory(m),
+  fleet: (m, r, o) => renderFleet(m, o),
+};
+
 /**
  * @param {object} [opts] — forwarded to renderServer; `{ poll: true }` marks this call as the 60s poll's own
  * refresh rather than a hashchange (sub-tab click, deep link) or the first paint (#4190/#4191). Also forwarded
@@ -287,29 +319,7 @@ function route(opts) {
   resetScrollOnRouteChange(r, !!(opts && opts.poll === true));
   markPageRenderStart(r.name, !!(opts && opts.poll === true));
   setActiveNav(r);
-  if (r.name === "server") renderServer(main, r.param, r.tab, opts);
-  else if (r.name === "finops") renderFinops(main, r.param, r.tab, opts);
-  else if (r.name === "ag") renderAg(main, opts);
-  else if (r.name === "sweeps") renderSweeps(main, opts);
-  else if (r.name === "alerts") renderAlerts(main);
-  else if (r.name === "investigations") renderInvestigations(main, r.request);
-  else if (r.name === "proposals") renderProposals(main, r.proposal, opts);
-  else if (r.name === "alertRules") renderAlertRuleList(main);
-  else if (r.name === "alertEditor") renderAlertEditor(main, r.id, r.template);
-  else if (r.name === "admin") renderAdmin(main, r.tab);
-  else if (r.name === "triage") renderTriage(main, r.query);
-  else if (r.name === "views") renderViewList(main);
-  else if (r.name === "view") renderView(main, r.id, opts);
-  else if (r.name === "editor") renderEditor(main, r.id);
-  else if (r.name === "notebook") renderView(main, r.id, opts); // renderView kind-detects -> notebook document
-  else if (r.name === "notebookEditor") renderNotebookEditor(main, r.id, r.template);
-  else if (r.name === "muteRules") renderMuteRules(main, r.query);
-  else if (r.name === "knownPatterns") renderKnownPatterns(main);
-  else if (r.name === "manageTags") renderManageTags(main);
-  else if (r.name === "manageQueryTags") renderManageQueryTags(main);
-  else if (r.name === "queryTagUsage") renderQueryTagUsage(main);
-  else if (r.name === "jobHistory") renderJobHistory(main);
-  else renderFleet(main, opts);
+  (ROUTE_RENDERERS[r.name] || ROUTE_RENDERERS.fleet)(main, r, opts);
 }
 
 /* Whether a route targets a specific saved view/notebook (its renderer or composer) — the routes whose sidebar

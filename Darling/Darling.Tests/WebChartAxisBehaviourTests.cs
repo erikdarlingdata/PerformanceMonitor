@@ -421,4 +421,82 @@ public sealed class WebChartAxisBehaviourTests
         Assert.Equal(new[] { "MB" }, Strings(c.GetProperty("bareTicks")));
         Assert.Equal(new[] { "n" }, Strings(c.GetProperty("secondAxisWithUnit")));
     }
+
+    private static (string Text, double X, string Anchor, double Left, double Right)[] Captions(JsonElement chart) =>
+        chart.GetProperty("caps").EnumerateArray()
+            .Select(e => (e.GetProperty("text").GetString()!, e.GetProperty("x").GetDouble(), e.GetProperty("anchor").GetString()!, e.GetProperty("left").GetDouble(), e.GetProperty("right").GetDouble()))
+            .ToArray();
+
+    /// <summary>#7856: a unit caption wider than the room beside its axis ("snapshot rows" at the 58 px left margin) lost its first letters
+    /// off the chart's left edge. Every caption now sits inside the chart, on the left axis, the right axis and the scatter's two captions.</summary>
+    [Fact]
+    public void ALongUnitCaption_StaysInsideTheChart_OnEveryCaptionSite()
+    {
+        var e = Run().GetProperty("captionEdges");
+        foreach (var name in new[] { "lineLong", "lineRightLong", "scatterLong" })
+        {
+            var chart = e.GetProperty(name);
+            var width = chart.GetProperty("width").GetDouble();
+            var caps = Captions(chart);
+            Assert.NotEmpty(caps);
+            foreach (var c in caps)
+            {
+                Assert.True(c.Left >= 0, $"{name}: caption '{c.Text}' starts at {c.Left}, left of the chart");
+                Assert.True(c.Right <= width, $"{name}: caption '{c.Text}' ends at {c.Right}, right of the {width} px chart");
+            }
+        }
+    }
+
+    /// <summary>#7856: a caption that already fit keeps the placement it had: right-aligned to the axis on the left, left-aligned on the
+    /// right axis, right-aligned at the plot's edge for the scatter's x unit.</summary>
+    [Fact]
+    public void AShortUnitCaption_KeepsItsPlacement()
+    {
+        var e = Run().GetProperty("captionEdges");
+        var line = Captions(e.GetProperty("lineShort")).Single();
+        Assert.Equal(("ms", 50d, "end"), (line.Text, line.X, line.Anchor));
+        var dual = Captions(e.GetProperty("lineRightShort"));
+        Assert.Contains(dual, c => c.Text == "ms" && c.Anchor == "start");
+        Assert.Contains(dual, c => c.Text == "n" && c.X == 50 && c.Anchor == "end");
+        var scatter = Captions(e.GetProperty("scatterShort"));
+        Assert.Contains(scatter, c => c.Text == "ms" && c.X == 50 && c.Anchor == "end");
+        Assert.Contains(scatter, c => c.Text == "MB" && c.Anchor == "end" && c.X > 100);
+    }
+
+    /// <summary>#7863: the chart's menu button sits over the top-right corner. Measured in a browser it is 24 px wide at right 4 px, so its left
+    /// edge is 28 px in from the chart's right edge. A long right-axis caption used to end at the chart's edge, under the button.</summary>
+    private const double MenuButtonLeftFromRight = 28;
+
+    [Fact]
+    public void ALongRightAxisCaption_EndsLeftOfTheMenuButton()
+    {
+        var e = Run().GetProperty("captionEdges");
+        foreach (var name in new[] { "lineRightLong", "lineRightMenuLong" })
+        {
+            var chart = e.GetProperty(name);
+            var buttonLeft = chart.GetProperty("width").GetDouble() - MenuButtonLeftFromRight;
+            var right = Captions(chart).Single(c => c.Anchor != "end" || c.X > 100);
+            Assert.True(right.Right <= buttonLeft, $"{name}: right-axis caption '{right.Text}' ends at {right.Right}, under the menu button that starts at {buttonLeft}");
+        }
+    }
+
+    /// <summary>#7863: a right-axis caption that already clears the button stays where it was: left-aligned at the tick labels' x.</summary>
+    [Fact]
+    public void AShortRightAxisCaption_ThatClearsTheMenuButton_KeepsItsX()
+    {
+        var chart = Run().GetProperty("captionEdges").GetProperty("lineRightShort");
+        var right = Captions(chart).Single(c => c.Text == "ms");
+        Assert.Equal("start", right.Anchor);
+        Assert.Equal(chart.GetProperty("rightTickX").GetDouble(), right.X);
+        Assert.True(right.Right <= chart.GetProperty("width").GetDouble() - MenuButtonLeftFromRight);
+    }
+
+    /// <summary>#7863: with no menu button the long caption keeps ending 2 px inside the chart's right edge.</summary>
+    [Fact]
+    public void ALongCaption_WithNoMenuButton_StillEndsAtTheChartEdge()
+    {
+        var c = Run().GetProperty("noMenuCaption");
+        Assert.Equal(998d, c.GetProperty("x").GetDouble());
+        Assert.Equal("end", c.GetProperty("anchor").GetString());
+    }
 }

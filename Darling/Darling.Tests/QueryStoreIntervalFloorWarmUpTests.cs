@@ -77,27 +77,30 @@ public sealed class QueryStoreIntervalFloorWarmUpTests
     /* ---- source pins ---------------------------------------------------------------------------------- */
 
     /// <summary>
-    /// The warm-up executes the two shipped <c>PlainTableFloorSql</c> constants and nothing else against an interval
-    /// table: it names each constant once, its <c>FloorSql</c> hands back the constants themselves, and the only
-    /// statements it builds are the lock timeout, the registry read and the floor read. A copy of the floor read, or a
-    /// <c>SELECT DISTINCT server_id</c> on the big table, would walk a different plan from the gate's.
+    /// The warm-up executes the two shipped <c>PlainTableFloorSql</c> constants, and the wide gate's whole-table floor constant
+    /// (<c>PlainTableFloorAllServersSql</c>, #7746), and nothing else against an interval table: it names each constant once, its
+    /// <c>FloorSql</c> hands back the per-server constants themselves, and the only statements it builds are the lock timeout, the
+    /// registry read and the floor reads. A copy of a floor read, or a <c>SELECT DISTINCT server_id</c> on the big table, would walk
+    /// a different plan from the gate's.
     /// </summary>
     [Fact]
-    public void TheWarmUp_ExecutesOnlyTheTwoShippedFloorConstants()
+    public void TheWarmUp_ExecutesOnlyTheShippedFloorConstants()
     {
         var source = ReadSource("Darling", "PerformanceMonitor.Darling.Service", "QueryStoreIntervalFloorWarmUp.cs");
         var code = Regex.Replace(source, @"^\s*///.*$", string.Empty, RegexOptions.Multiline);
 
         Assert.Single(Regex.Matches(code, @"QueryStoreIntervalWide\.PlainTableFloorSql"));
         Assert.Single(Regex.Matches(code, @"QueryStoreIntervalLatest\.PlainTableFloorSql"));
+        Assert.Single(Regex.Matches(code, @"QueryStoreIntervalWide\.PlainTableFloorAllServersSql"));
         Assert.Equal(QueryStoreIntervalWide.PlainTableFloorSql, QueryStoreIntervalFloorWarmUp.FloorSql(IntervalFloorTable.Wide));
         Assert.Equal(QueryStoreIntervalLatest.PlainTableFloorSql, QueryStoreIntervalFloorWarmUp.FloorSql(IntervalFloorTable.Latest));
 
+        var lockTimeout = "\"SET lock_timeout = \" + lockTimeoutMilliseconds.ToString(CultureInfo.InvariantCulture)";
         var commands = Regex.Matches(code, @"new NpgsqlCommand\(\s*([^,]+),", RegexOptions.Singleline)
             .Select(m => Regex.Replace(m.Groups[1].Value, @"\s+", " ").Trim())
             .ToArray();
         Assert.Equal(
-            new[] { "\"SET lock_timeout = \" + lockTimeoutMilliseconds.ToString(CultureInfo.InvariantCulture)", "sql", "ServerIdsSql" },
+            new[] { lockTimeout, "sql", lockTimeout, "QueryStoreIntervalWide.PlainTableFloorAllServersSql", "ServerIdsSql" },
             commands);
 
         /* The only table the file reads by name is the registry; no DISTINCT over a fact table. */
