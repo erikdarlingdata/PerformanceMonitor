@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -210,11 +211,15 @@ public sealed class AttentionPlainTableTests
                     "SELECT count(*) FROM pg_indexes WHERE schemaname = 'collect' AND tablename = 'attention_events' AND indexname = 'idx_attention_events_time'", ct));
             }
 
-            /* Rows: 45 and 31 days old (past the horizon), 29 days, 1 day and now (inside it). */
+            /* Rows: 45 and 31 days old (past the horizon), 29 days, 1 day and now (inside it). One clock, read once here,
+               both seeds the rows and measures their ages below: a run that crosses midnight UTC between the seed and the
+               read would otherwise find every row a day older than it was seeded. The purge measures from its own clock a
+               few seconds later, and every row sits a full day or more from its 30-day horizon. */
+            var seedTime = "TIMESTAMP '" + DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture) + "'";
             await ExecAsync(connection, "DELETE FROM collect.attention_events WHERE server_id = " + TestServerId, ct);
             await ExecAsync(connection,
                 "INSERT INTO collect.attention_events (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count) "
-                + "SELECT 700000 + d, (now() AT TIME ZONE 'UTC') - make_interval(days => d), " + TestServerId + ", 'plain-table-test', 'count', 1 "
+                + "SELECT 700000 + d, " + seedTime + " - make_interval(days => d), " + TestServerId + ", 'plain-table-test', 'count', 1 "
                 + "FROM unnest(ARRAY[45, 31, 29, 1, 0]) AS d", ct);
 
             var log = new CapturingTestLogger();
@@ -222,7 +227,7 @@ public sealed class AttentionPlainTableTests
             await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: timescale, log, ct);
 
             Assert.Equal("0,1,29", await ScalarAsync(connection,
-                "SELECT string_agg(d::text, ',' ORDER BY d) FROM (SELECT ((now() AT TIME ZONE 'UTC')::date - collection_time::date) AS d "
+                "SELECT string_agg(d::text, ',' ORDER BY d) FROM (SELECT ((" + seedTime + ")::date - collection_time::date) AS d "
                 + "FROM collect.attention_events WHERE server_id = " + TestServerId + ") AS x", ct));
 
             /* No drop_chunks attempt on the plain table, so no "failed" warning for it. */

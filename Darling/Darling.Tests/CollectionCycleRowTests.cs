@@ -32,6 +32,26 @@ public sealed class CycleSkipAccumulatorTests
 {
     private static readonly DateTime T0 = new(2026, 10, 12, 12, 0, 0, DateTimeKind.Utc);
 
+    /// <summary>A lost daily slot states the permit backlog beside it when the cause carries one (how many daily runs were
+    /// waiting and for how long), as a fact and not as the cause, and says nothing of permits when none waited.</summary>
+    [Fact]
+    public void ALostDailySlot_NamesTheRunsWaitingForAPermit_WhenTheCauseCarriesThem()
+    {
+        var tally = new CycleSkipAccumulator();
+        tally.AddDailyLost("index_object_stats", 1, T0.AddMinutes(-6));
+
+        var withBacklog = DarlingCycleSkip.Build(
+            tally.TryTake(T0, DarlingCycleSkip.RowMinInterval)!,
+            new CycleSkipCauses(0, null, 0, 0, DailyRunsWaiting: 3, OldestDailyWaitMs: 94_200_000), T0)!;
+        Assert.Contains(
+            "1 daily collector slot(s) lost their day (index object stats), daily permits: 3 waiting, oldest 26 h 10 min",
+            withBacklog.Message, StringComparison.Ordinal);
+
+        var without = DarlingCycleSkip.Build(tally.TryTake(T0, DarlingCycleSkip.RowMinInterval)!, new CycleSkipCauses(0, null, 0, 0), T0)!;
+        Assert.Contains("1 daily collector slot(s) lost their day (index object stats)", without.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("daily permits", without.Message, StringComparison.Ordinal);
+    }
+
     /// <summary>Three slots stepped over on one server, across two collectors, are one report: 3 slots, both ends of the gap
     /// named, the top collectors listed, no equals sign (a baseline marker read keys on one).</summary>
     [Fact]
@@ -74,7 +94,7 @@ public sealed class CycleSkipAccumulatorTests
         Assert.Equal(360_000, report.SlowestItemMs);
         Assert.Contains("waited 45s for a fleet collection slot", report.Message, StringComparison.Ordinal);
         Assert.Contains("memory launch guard held collection off for 5 slot(s)", report.Message, StringComparison.Ordinal);
-        Assert.Contains("1 run-time collector slot(s) lost their day (index object stats)", report.Message, StringComparison.Ordinal);
+        Assert.Contains("1 daily collector slot(s) lost their day (index object stats)", report.Message, StringComparison.Ordinal);
 
         var gateOnly = new CycleSkipAccumulator();
         gateOnly.AddGrid("wait_stats", 1, T0.AddMinutes(-1));

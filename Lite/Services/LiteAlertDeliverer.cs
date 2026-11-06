@@ -246,7 +246,7 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Alert delivery failed for {outcome.MetricName} on {outcome.ServerName}: {ex.Message}");
+            AppLogger.Error("Alerts", $"Alert delivery failed for {outcome.MetricName} on {outcome.ServerName}: {ex.Message}", ex);
             return null;
         }
     }

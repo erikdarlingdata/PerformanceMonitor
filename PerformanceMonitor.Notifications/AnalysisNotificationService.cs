@@ -589,7 +589,7 @@ public sealed class AnalysisNotificationService : IDisposable
             {
                 /* SendFindingAlertAsync is documented never to throw; this guards a
                    formatter defect so one bad incident cannot abort the rest. */
-                _logger.LogError(
+                _logger.LogError(ex, 
                     $"AnalysisNotificationService: failed to notify on incident {incident.Key}: {ex.GetType().Name}: {ex.Message}");
             }
         }
@@ -708,7 +708,7 @@ public sealed class AnalysisNotificationService : IDisposable
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError(
+                        _logger.LogError(ex, 
                             $"AnalysisNotificationService: failed to deliver a held page for {page.Alert.MetricName} on {page.Alert.ServerName}: {ex.GetType().Name}: {ex.Message}");
                     }
                 }
@@ -735,7 +735,7 @@ public sealed class AnalysisNotificationService : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogError($"AnalysisNotificationService: page flush failed: {ex.GetType().Name}: {ex.Message}");
+            _logger.LogError(ex, $"AnalysisNotificationService: page flush failed: {ex.GetType().Name}: {ex.Message}");
         }
         finally
         {
@@ -753,7 +753,7 @@ public sealed class AnalysisNotificationService : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogError($"AnalysisNotificationService: mute re-check failed for {page.Alert.MetricName}: {ex.GetType().Name}: {ex.Message}");
+            _logger.LogError(ex, $"AnalysisNotificationService: mute re-check failed for {page.Alert.MetricName}: {ex.GetType().Name}: {ex.Message}");
             return false;
         }
     }

@@ -432,7 +432,7 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
-            AppLogger.Error("App", $"Failed to retrieve webhook URL for {credentialKey}: {ex.Message}");
+            AppLogger.Error("App", $"Failed to retrieve webhook URL for {credentialKey}: {ex.Message}", ex);
             return "";
         }
     }
@@ -496,7 +496,7 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
-            AppLogger.Error("App", $"Failed to save webhook URL for {credentialKey} ({url?.Length ?? 0} characters): {ex.Message}");
+            AppLogger.Error("App", $"Failed to save webhook URL for {credentialKey} ({url?.Length ?? 0} characters): {ex.Message}", ex);
             return $"The {name} was not saved because {ex.Message.TrimEnd('.', ' ')}.";
         }
     }
@@ -525,7 +525,7 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
-            AppLogger.Error("App", $"Failed to retrieve SMTP password: {ex.Message}");
+            AppLogger.Error("App", $"Failed to retrieve SMTP password: {ex.Message}", ex);
             return null;
         }
     }
@@ -565,7 +565,7 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
-            AppLogger.Error("App", $"Failed to save SMTP password: {ex.Message}");
+            AppLogger.Error("App", $"Failed to save SMTP password: {ex.Message}", ex);
             return $"The {name} was not saved because {ex.Message.TrimEnd('.', ' ')}.";
         }
     }
@@ -1730,7 +1730,7 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Settings", $"Failed to save {what}: settings.json could not be written ({ex.Message})");
+            AppLogger.Error("Settings", $"Failed to save {what}: settings.json could not be written ({ex.Message})", ex);
             return false;
         }
     }
@@ -1760,7 +1760,7 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Settings", $"Failed to save {what}: {ex.Message}");
+            AppLogger.Error("Settings", $"Failed to save {what}: {ex.Message}", ex);
             return false;
         }
     }

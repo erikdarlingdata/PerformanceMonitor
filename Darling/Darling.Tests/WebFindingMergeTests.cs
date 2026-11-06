@@ -62,6 +62,21 @@ public sealed class WebFindingMergeTests
         Assert.Equal(S(expected, "last"), S(row, "lastSeen"));
     }
 
+    /// <summary>
+    /// #7652: a row that covers several chains puts its sentence in a click-to-open cell, and in a wrap column the stylesheet capped that cell
+    /// at 15% of the window, so a 70 character sentence read "Query Store shows more timeouts and e..." in a 577 px column while the one-chain
+    /// rows beside it wrapped their whole sentence. The Finding cell is a flow cell on every row, so the sentence takes the column's width
+    /// and wraps whether or not the row opens to its chains.
+    /// </summary>
+    [Theory]
+    [InlineData("sameSentence")]
+    [InlineData("sameChain")]
+    public void TheFindingCell_IsAFlowCell_WhetherOrNotTheRowOpensToItsChains(string scenario)
+    {
+        var row = Run(scenario).GetProperty("rows").EnumerateArray().Single();
+        Assert.Contains("flow-cell", S(row, "findingCellClass").Split(' '));
+    }
+
     [Fact]
     public void AMergedRow_ListsItsChainsInWords_EachWithItsOwnSeverityAndOccurrences_AndNoArrowsOrHashes()
     {

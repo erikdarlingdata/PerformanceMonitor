@@ -189,7 +189,7 @@ public partial class WebhookAlertService
     {
         if (entries.Count == 0)
         {
-            _logger.LogError($"{channel} (a destination no channel names) webhook error: {ex.Message}");
+            _logger.LogError(ex, $"{channel} (a destination no channel names) webhook error: {ex.Message}");
             return;
         }
 
@@ -198,7 +198,7 @@ public partial class WebhookAlertService
             var health = HealthOf(channel, routeId);
             Interlocked.Increment(ref health.Failures);
             health.LastError = ex.Message;
-            _logger.LogError($"{WebhookChannelFailureCount.LabelOf(channel, routeId)} webhook error: {ex.Message}");
+            _logger.LogError(ex, $"{WebhookChannelFailureCount.LabelOf(channel, routeId)} webhook error: {ex.Message}");
         }
     }
 

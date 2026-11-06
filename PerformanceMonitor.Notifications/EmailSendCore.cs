@@ -315,11 +315,11 @@ public sealed class EmailSendCore
 
                         if (_consecutiveFailures <= 3)
                         {
-                            _logger.LogError($"ALERT EMAIL FAILED ({_consecutiveFailures}x): {ex.GetType().Name}: {ex.Message}");
+                            _logger.LogError(ex, $"ALERT EMAIL FAILED ({_consecutiveFailures}x): {ex.GetType().Name}: {ex.Message}");
                         }
                         else if (_consecutiveFailures % 50 == 0)
                         {
-                            _logger.LogError($"ALERT EMAIL STILL FAILING: {_consecutiveFailures} consecutive failures. Last error: {ex.Message}");
+                            _logger.LogError(ex, $"ALERT EMAIL STILL FAILING: {_consecutiveFailures} consecutive failures. Last error: {ex.Message}");
                         }
                     }
                 }
@@ -403,7 +403,7 @@ public sealed class EmailSendCore
         }
         catch (Exception ex)
         {
-            _logger.LogError($"ALERT RESOLUTION EMAIL FAILED for {title} on {serverName}: {ex.GetType().Name}: {ex.Message}");
+            _logger.LogError(ex, $"ALERT RESOLUTION EMAIL FAILED for {title} on {serverName}: {ex.GetType().Name}: {ex.Message}");
             return ex.Message;
         }
     }
@@ -425,7 +425,7 @@ public sealed class EmailSendCore
         }
         catch (Exception ex)
         {
-            _logger.LogError($"NOTICE EMAIL FAILED for {title} on {serverName}: {ex.GetType().Name}: {ex.Message}");
+            _logger.LogError(ex, $"NOTICE EMAIL FAILED for {title} on {serverName}: {ex.GetType().Name}: {ex.Message}");
             return ex.Message;
         }
     }

@@ -497,7 +497,7 @@ public partial class WebhookAlertService
                any post. It is still a failure of this alert's delivery and not a suppression, and it is the
                one route to a `failed` row that no per-channel health counter records, so the message is the
                only place the reason survives. */
-            _logger.LogError($"TrySendWebhookAlertsAsync outer error: {ex.Message}");
+            _logger.LogError(ex, $"TrySendWebhookAlertsAsync outer error: {ex.Message}");
             return WebhookFanoutResult.Failed($"webhook fan-out: {ex.Message}");
         }
     }

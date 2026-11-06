@@ -64,7 +64,7 @@ public partial class FinOpsTab : UserControl
         catch (Exception ex)
         {
             _suppressLockingDbChange = false;
-            AppLogger.Error("FinOps", $"Failed to load locking databases: {ex.Message}");
+            AppLogger.Error("FinOps", $"Failed to load locking databases: {ex.Message}", ex);
         }
     }
 
@@ -98,7 +98,7 @@ public partial class FinOpsTab : UserControl
             catch (Exception noteEx)
             {
                 /* A failed flag read leaves the note collapsed; the grid above has loaded. */
-                AppLogger.Error("FinOps", $"Failed to load optimized locking note: {noteEx.Message}");
+                AppLogger.Error("FinOps", $"Failed to load optimized locking note: {noteEx.Message}", noteEx);
             }
             if (_loads.Superseded(nameof(LoadIndexLockingGridAsync), gen)) return;
             var separatelyMonitoredNote = PerformanceMonitorLite.Analysis.SeparatelyMonitoredScope.ListNote(serverId);
@@ -109,7 +109,7 @@ public partial class FinOpsTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Failed to load index locking: {ex.Message}");
+            AppLogger.Error("FinOps", $"Failed to load index locking: {ex.Message}", ex);
         }
     }
 

@@ -34,6 +34,14 @@ public partial class MainWindow : Window
     private readonly KnownEngineEditions _engineEditions = new();
 
     /// <summary>
+    /// Per-server failure streaks of the engine sweep's and the Availability Group evaluation's catch-alls, so a fault
+    /// that persists writes its stack once per streak rather than for every server on every tick
+    /// (<see cref="FailureStreakLog{TKey}"/>). One each, because a sweep that completes says nothing about the other.
+    /// </summary>
+    private readonly FailureStreakLog<int> _sweepFailures = new();
+    private readonly FailureStreakLog<int> _agSweepFailures = new();
+
+    /// <summary>
     /// Seeds <see cref="_engineEditions"/> with every server's stored edition in one read. MainWindow_Loaded awaits it
     /// right after the database is initialized and before it starts anything that reads the scope: the background
     /// service (its scheduled analysis), the alert engine (a sweep returns early while it is null), the MCP server,
@@ -176,6 +184,7 @@ public partial class MainWindow : Window
         try
         {
             sweep = await _alertEngine.EvaluateServerAsync(snapshot, stopping);
+            _sweepFailures.Succeeded(summary.ServerId);
         }
         catch (OperationCanceledException) when (stopping.IsCancellationRequested)
         {
@@ -187,8 +196,10 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             /* The engine absorbs per-check failures itself; this catches the truly unexpected so
-               an async-void sweep can never take down the dispatcher. Badges stay untouched. */
-            AppLogger.Error("Alerts", $"Alert sweep failed for {summary.DisplayName}: {ex.Message}");
+               an async-void sweep can never take down the dispatcher. Badges stay untouched. The exception
+               is written on the first failure of a streak only: a fault that persists lands here for every
+               server on every sweep. */
+            _sweepFailures.Failed("Alerts", summary.ServerId, $"Alert sweep failed for {summary.DisplayName}: {ex.Message}", ex);
             return;
         }
 
@@ -322,7 +333,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            AppLogger.Error("ConnectionAlerts", $"Connection alert delivery failed for {metricName}: {ex.Message}");
+            AppLogger.Error("ConnectionAlerts", $"Connection alert delivery failed for {metricName}: {ex.Message}", ex);
             return Task.FromResult<PerformanceMonitor.Notifications.AlertDelivery?>(null);
         }
     }
@@ -358,7 +369,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            AppLogger.Error("ConnectionAlerts", $"Recording the Server Unreachable delivery failed: {ex.Message}");
+            AppLogger.Error("ConnectionAlerts", $"Recording the Server Unreachable delivery failed: {ex.Message}", ex);
         }
         finally
         {
@@ -540,6 +551,7 @@ public partial class MainWindow : Window
 
             if (alerts.Count == 0 || suppressed)
             {
+                _agSweepFailures.Succeeded(serverId);
                 return;
             }
 
@@ -556,12 +568,16 @@ public partial class MainWindow : Window
                 _agAlertEvaluator.NoteSent(alert, delivery, TimeSpan.FromMinutes(App.AlertCooldownMinutes));
             }
 
+            _agSweepFailures.Succeeded(serverId);
+
             bool IsFresh(DateTime? snapshotUtc) =>
                 snapshotUtc.HasValue && now - snapshotUtc.Value < TimeSpan.FromMinutes(30);
         }
         catch (Exception ex)
         {
-            AppLogger.Error("AgAlerts", $"Availability Group alert evaluation failed for {serverName}: {ex.Message}");
+            /* The exception is written on the first failure of a streak only: a store fault that persists lands here
+               for every server on every sweep. */
+            _agSweepFailures.Failed("AgAlerts", serverId, $"Availability Group alert evaluation failed for {serverName}: {ex.Message}", ex);
         }
         finally
         {
@@ -628,7 +644,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            AppLogger.Error("AgAlerts", $"AG alert delivery failed for {alert.MetricName}: {ex.Message}");
+            AppLogger.Error("AgAlerts", $"AG alert delivery failed for {alert.MetricName}: {ex.Message}", ex);
             return Task.FromResult<PerformanceMonitor.Notifications.AlertDelivery?>(null);
         }
     }
