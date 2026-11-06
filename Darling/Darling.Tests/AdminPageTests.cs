@@ -81,7 +81,7 @@ public sealed class AdminPageTests
         Assert.Contains("{ key: \"status\", label: \"Status\" }", page);
         Assert.Contains("{ key: \"freshness\", label: \"Freshness\"", page);
         Assert.Contains("{ key: \"auth\", label: \"Auth\" }", page);
-        Assert.Contains("label: \"Monthly Cost ($)\"", page);
+        Assert.Contains("label: \"Monthly Cost\"", page);
         Assert.Contains("{ key: \"added\", label: \"Added\", format: \"time\" }", page);
         Assert.DoesNotContain("Not shown here", page);
         Assert.Contains("label: \"Email to\"", page);

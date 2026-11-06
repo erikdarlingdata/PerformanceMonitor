@@ -81,7 +81,11 @@ export const PG_BLOAT_COLUMNS = [
   { key: "bloat_bytes_estimate", label: "Bloat (est.)", format: "bytes" },
   { key: "bloat_pct_estimate", label: "Bloat % (est.)", format: "num2" },
   { key: "estimate_suppressed", label: "Suppressed", format: "bool" },
-  { key: "estimate_suppression_reason", label: "Why Suppressed", clamp: true },
+  /* #7684 item 14: every reason the service writes opens with "SUPPRESSED:", which the Suppressed column beside it already says. The MCP reply keeps the word; the page drops it. */
+  { key: "estimate_suppression_reason", label: "Why Suppressed", clamp: true, display: (row) => {
+    const reason = typeof row.estimate_suppression_reason === "string" ? row.estimate_suppression_reason.replace(/^SUPPRESSED:\s*/, "") : "";
+    return reason ? reason.charAt(0).toUpperCase() + reason.slice(1) : null;
+  } },
   /* Measured, from the server's own counters - what a suppressed estimate degrades TO rather than to
      nothing. */
   { key: "dead_tuples", label: "Dead Tuples", format: "int", hint: "Rows deleted or updated and not yet cleaned up by vacuum. A count from the server's own statistics, not an estimate." },
