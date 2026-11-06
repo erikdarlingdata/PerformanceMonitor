@@ -25,8 +25,9 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 /// <para>The rules, all of them about doing no more than that:</para>
 /// <list type="bullet">
 /// <item>It grants Read, and only Read (<see cref="ReadMask"/>, the same bits <c>icacls (R)</c> grants), to ONE account:
-/// the service's registered account, or the one <c>--account</c> names. It refuses Everyone, Users, Authenticated Users
-/// and the other broad principals (<see cref="IsBroadPrincipal"/>), whatever the operator typed.</item>
+/// the service's registered account, or the one <c>--account</c> names. It refuses every group, whatever the operator
+/// typed: the broad principals by SID (<see cref="IsBroadPrincipal"/>) and every other group by what Windows says the SID
+/// names (<see cref="RefuseByKind"/>).</item>
 /// <item>It ADDS one allow entry and keeps every existing one. The new entry is placed after the explicit entries and
 /// before the inherited ones, so the list stays in canonical order. The DACL is never replaced.</item>
 /// <item>It changes nothing without elevation for <c>LocalMachine</c>, and nothing when the account already has Read
@@ -158,9 +159,22 @@ internal static class DarlingTlsKeyAccess
             return false;
         }
 
+        if (account is not null && string.IsNullOrWhiteSpace(account))
+        {
+            /* An empty value (a script's unset variable) must not fall through to "the registered account". */
+            errorMessage = "--account is empty. Name the account, or leave --account out to use the service's registered account." + Environment.NewLine + Usage;
+            return false;
+        }
+
         if (storeName is not null && string.IsNullOrWhiteSpace(storeName))
         {
             errorMessage = "--store-name is empty." + Environment.NewLine + Usage;
+            return false;
+        }
+
+        if (storeName is not null && DarlingTlsStore.HasPathSeparator(storeName))
+        {
+            errorMessage = "--store-name is a store name, not a path: it cannot contain a backslash or a slash." + Environment.NewLine + Usage;
             return false;
         }
 
@@ -214,9 +228,13 @@ internal static class DarlingTlsKeyAccess
     /* ---- PURE: who may be granted, and the one new entry ---- */
 
     /// <summary>
-    /// True for a principal that stands for many accounts: Everyone, Users, Authenticated Users, Interactive, Network,
-    /// Anonymous, Guests, Domain Users and Domain Guests. The command refuses these whatever <c>--account</c> says: a
-    /// TLS private key is read by the service account alone.
+    /// True for a principal that stands for many accounts, by SID alone: Everyone, Users, Authenticated Users, Interactive,
+    /// Network, Batch, Service, Anonymous, Terminal Server User, Remote Interactive Logon, This Organization, Local account,
+    /// Local, Console Logon, ALL SERVICES, every application package group, Guests, Power Users, Remote Desktop Users,
+    /// Pre-Windows 2000 Compatible Access, IIS_IUSRS, Remote Management Users, and a domain's Domain Users, Domain Guests
+    /// and Domain Computers. The command refuses these whatever <c>--account</c> says (#7718): a TLS private key is read by
+    /// the service account alone. <see cref="RefuseByKind"/> is the second check, by what the SID names, and refuses every
+    /// other group.
     /// </summary>
     [SupportedOSPlatform("windows")]
     internal static bool IsBroadPrincipal(SecurityIdentifier sid)
@@ -225,8 +243,63 @@ internal static class DarlingTlsKeyAccess
 
         var value = sid.Value;
         return value is "S-1-1-0" or "S-1-5-32-545" or "S-1-5-11" or "S-1-5-4" or "S-1-5-2" or "S-1-5-7" or "S-1-5-32-546"
+                or "S-1-5-6" or "S-1-5-3" or "S-1-5-13" or "S-1-5-14" or "S-1-5-15" or "S-1-5-113" or "S-1-5-80-0"
+                or "S-1-5-32-547" or "S-1-5-32-554" or "S-1-5-32-555" or "S-1-5-32-568" or "S-1-5-32-580"
+            || value.StartsWith("S-1-2-", StringComparison.Ordinal)
+            || value.StartsWith("S-1-15-2-", StringComparison.Ordinal)
             || (value.StartsWith("S-1-5-21-", StringComparison.Ordinal)
-                && (value.EndsWith("-513", StringComparison.Ordinal) || value.EndsWith("-514", StringComparison.Ordinal)));
+                && (value.EndsWith("-513", StringComparison.Ordinal) || value.EndsWith("-514", StringComparison.Ordinal)
+                    || value.EndsWith("-515", StringComparison.Ordinal)));
+    }
+
+    /// <summary>What <c>LookupAccountSid</c> says a SID names (<c>SID_NAME_USE</c>).</summary>
+    internal enum SidNameUse
+    {
+        User = 1,
+        Group = 2,
+        Domain = 3,
+        Alias = 4,
+        WellKnownGroup = 5,
+        DeletedAccount = 6,
+        Invalid = 7,
+        Unknown = 8,
+        Computer = 9,
+        Label = 10,
+        LogonSession = 11,
+    }
+
+    /// <summary>
+    /// PURE: the reason <paramref name="sid"/>, which names a <paramref name="use"/>, may not be granted, or null when it
+    /// may. The command grants to ONE account, so only a user (a domain user, a local user, a gMSA) passes, plus the
+    /// service identities that Windows reports as a group but that name one service: LocalSystem, LocalService,
+    /// NetworkService, a per-service virtual account (<c>NT SERVICE\name</c>, S-1-5-80-x, but not the S-1-5-80-0 group
+    /// ALL SERVICES), an IIS application pool identity (S-1-5-82-*) and the local Administrators group.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static string? RefuseByKind(SecurityIdentifier sid, SidNameUse use)
+    {
+        ArgumentNullException.ThrowIfNull(sid);
+
+        if (IsServiceIdentity(sid) || use == SidNameUse.User)
+        {
+            return null;
+        }
+
+        return use switch
+        {
+            SidNameUse.Group or SidNameUse.Alias or SidNameUse.WellKnownGroup => "is a group",
+            SidNameUse.Computer => "is a computer",
+            _ => $"is not a user or service account ({use})",
+        };
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static bool IsServiceIdentity(SecurityIdentifier sid)
+    {
+        var value = sid.Value;
+        return value is "S-1-5-18" or "S-1-5-19" or "S-1-5-20" or "S-1-5-32-544"
+            || (value.StartsWith("S-1-5-80-", StringComparison.Ordinal) && value != "S-1-5-80-0")
+            || value.StartsWith("S-1-5-82-", StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -343,7 +416,7 @@ internal static class DarlingTlsKeyAccess
 
         if (IsBroadPrincipal(account.Sid))
         {
-            error.WriteLine($"{VerbName}: {account.Display} stands for many accounts. A TLS private key is granted to the service account alone, never to a group everyone is in.");
+            error.WriteLine($"{VerbName}: {account.Display} stands for many accounts. This command grants a TLS private key to one account (the service's own), never to a group.");
             error.WriteLine("Nothing was changed.");
             return 1;
         }
@@ -530,8 +603,59 @@ internal static class DarlingTlsKeyAccess
             display = sid.Value;
         }
 
-        return new AccountResolution(sid, display, null);
+        if (IsBroadPrincipal(sid) || IsServiceIdentity(sid))
+        {
+            /* A broad group is refused by Run, with the message for a broad group. A service identity is accepted whatever
+               the lookup says: a per-service virtual account does not always resolve, and Windows calls it a group. */
+            return new AccountResolution(sid, display, null);
+        }
+
+        /* The command grants to ONE account: ask Windows what the SID names and refuse every group. A lookup that fails
+           refuses too, because "not a group" was not shown. */
+        if (!TryLookupSidNameUse(sid, out var use))
+        {
+            return new AccountResolution(
+                null, display, $"could not tell whether '{display}' is a user or a group (the account lookup failed), so it is not granted. This command grants to one account, the service's own.");
+        }
+
+        var refusal = RefuseByKind(sid, use);
+        return refusal is null
+            ? new AccountResolution(sid, display, null)
+            : new AccountResolution(null, display, $"'{display}' {refusal}. This command grants to one account (the service's own), never to a group.");
     }
+
+    [SupportedOSPlatform("windows")]
+    private static bool TryLookupSidNameUse(SecurityIdentifier sid, out SidNameUse use)
+    {
+        use = SidNameUse.Unknown;
+        var binary = new byte[sid.BinaryLength];
+        sid.GetBinaryForm(binary, 0);
+
+        uint nameLength = 0;
+        uint domainLength = 0;
+        /* The first call only sizes the buffers: it fails with ERROR_INSUFFICIENT_BUFFER, which is expected. */
+        _ = LookupAccountSidW(null, binary, null, ref nameLength, null, ref domainLength, out _);
+        if (nameLength == 0 || domainLength == 0)
+        {
+            return false;
+        }
+
+        var name = new char[nameLength];
+        var domain = new char[domainLength];
+        if (!LookupAccountSidW(null, binary, name, ref nameLength, domain, ref domainLength, out var kind))
+        {
+            return false;
+        }
+
+        use = (SidNameUse)kind;
+        return true;
+    }
+
+    [System.Runtime.InteropServices.DllImport("advapi32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool LookupAccountSidW(
+        string? systemName, byte[] sid, [System.Runtime.InteropServices.Out] char[]? name, ref uint nameLength,
+        [System.Runtime.InteropServices.Out] char[]? referencedDomainName, ref uint domainLength, out int use);
 
     /// <summary>
     /// The security descriptor of the certificate's private key. A CNG key (RSA or ECDSA) is read and written through its

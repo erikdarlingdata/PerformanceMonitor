@@ -440,6 +440,43 @@ public sealed class DarlingTlsStoreTests
         Assert.Contains("certificate store could not be opened", state.Read()!.LoadRefusal, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(@"\\host\My")]
+    [InlineData("//host/My")]
+    [InlineData(@"My\Sub")]
+    [SupportedOSPlatform("windows")]
+    public void Resolve_AStoreNameThatIsAPath_FailsClosed_AndOpensNoStore(string name)
+    {
+        Assert.SkipWhen(!OperatingSystem.IsWindows(), "The store form is Windows only.");
+
+        var opens = 0;
+        var log = new RecordingLogger();
+        var state = new WebTlsCertificateState();
+        /* CurrentUser, so that even a regression opens nothing on another machine. */
+        var store = new WebTlsStoreConfig { Location = "CurrentUser", Name = name, Thumbprint = "ABCD" };
+
+        var ex = Assert.Throws<InvalidOperationException>(() => DarlingTlsStore.Load(
+            store,
+            "web",
+            (_, _) =>
+            {
+                opens++;
+                return new List<X509Certificate2>();
+            },
+            _ => null,
+            () => "unused",
+            Now));
+        Assert.Contains("web.network.tls.store.name", ex.Message, StringComparison.Ordinal);
+        Assert.Equal(0, opens);
+
+        var outcome = DarlingListenerTls.Resolve(
+            log, state, ListenerTlsLabels.Web, new WebTlsConfig { Store = store }, IPAddress.Parse("192.168.1.205"), 5153, null);
+
+        Assert.False(outcome.Expose);
+        Assert.Null(outcome.Certificate);
+        Assert.StartsWith("Web dashboard TLS certificate could not be loaded (web.network.tls.store.name", Assert.Single(log.At(LogLevel.Critical)), StringComparison.Ordinal);
+    }
+
     [Fact]
     [SupportedOSPlatform("windows")]
     public void Resolve_FromTheCurrentUserStore_ServesTheNewestValidCertificate_AndPublishesItForTheExpiryAlert()

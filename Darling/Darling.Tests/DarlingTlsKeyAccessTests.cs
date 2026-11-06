@@ -106,6 +106,10 @@ public sealed class DarlingTlsKeyAccessTests
     [InlineData(new[] { "AB", "--everyone" }, "Unknown or unexpected argument")]
     [InlineData(new[] { "AB", "--store-location", "Machine" }, "is not LocalMachine or CurrentUser")]
     [InlineData(new[] { "AB", "--store-name", " " }, "--store-name is empty")]
+    [InlineData(new[] { "AB", "--account", "" }, "--account is empty")]
+    [InlineData(new[] { "AB", "--account", "  " }, "--account is empty")]
+    [InlineData(new[] { "AB", "--store-name", @"\\host\My" }, "--store-name is a store name, not a path")]
+    [InlineData(new[] { "AB", "--store-name", "//host/My" }, "--store-name is a store name, not a path")]
     public void TryParseArgs_Refuses(string[] rest, string expected)
     {
         Assert.False(DarlingTlsKeyAccess.TryParseArgs(rest, out var args, out var error));
@@ -127,8 +131,47 @@ public sealed class DarlingTlsKeyAccessTests
     [InlineData("S-1-5-32-546")]
     [InlineData("S-1-5-21-111-222-333-513")]
     [InlineData("S-1-5-21-111-222-333-514")]
+    [InlineData("S-1-5-21-111-222-333-515")] // Domain Computers
+    [InlineData("S-1-5-6")] // SERVICE
+    [InlineData("S-1-5-80-0")] // NT SERVICE\ALL SERVICES
+    [InlineData("S-1-2-0")] // LOCAL
+    [InlineData("S-1-2-1")] // CONSOLE LOGON
+    [InlineData("S-1-5-3")] // BATCH
+    [InlineData("S-1-5-13")] // TERMINAL SERVER USER
+    [InlineData("S-1-5-14")] // REMOTE INTERACTIVE LOGON
+    [InlineData("S-1-5-15")] // This Organization
+    [InlineData("S-1-5-113")] // Local account
+    [InlineData("S-1-15-2-1")] // ALL APPLICATION PACKAGES
+    [InlineData("S-1-15-2-2")] // ALL RESTRICTED APPLICATION PACKAGES
+    [InlineData("S-1-5-32-554")] // Pre-Windows 2000 Compatible Access
+    [InlineData("S-1-5-32-547")] // Power Users
+    [InlineData("S-1-5-32-555")] // Remote Desktop Users
+    [InlineData("S-1-5-32-568")] // IIS_IUSRS
+    [InlineData("S-1-5-32-580")] // Remote Management Users
     public void IsBroadPrincipal_RefusesTheGroupsEveryoneIsIn(string sid)
         => Assert.True(DarlingTlsKeyAccess.IsBroadPrincipal(new SecurityIdentifier(sid)));
+
+    [Theory]
+    [InlineData("S-1-5-32-559", (int)DarlingTlsKeyAccess.SidNameUse.Alias)] // Performance Log Users
+    [InlineData("S-1-5-21-111-222-333-1105", (int)DarlingTlsKeyAccess.SidNameUse.Group)] // a domain group
+    [InlineData("S-1-5-21-111-222-333-1106", (int)DarlingTlsKeyAccess.SidNameUse.WellKnownGroup)]
+    [InlineData("S-1-5-21-111-222-333-1107", (int)DarlingTlsKeyAccess.SidNameUse.Computer)]
+    [InlineData("S-1-5-21-111-222-333-1108", (int)DarlingTlsKeyAccess.SidNameUse.Unknown)]
+    [InlineData("S-1-5-21-111-222-333-1109", (int)DarlingTlsKeyAccess.SidNameUse.DeletedAccount)]
+    [InlineData("S-1-5-80-0", (int)DarlingTlsKeyAccess.SidNameUse.WellKnownGroup)]
+    public void RefuseByKind_RefusesEveryGroupAndEveryNonAccount(string sid, int use)
+        => Assert.NotNull(DarlingTlsKeyAccess.RefuseByKind(new SecurityIdentifier(sid), (DarlingTlsKeyAccess.SidNameUse)use));
+
+    [Theory]
+    [InlineData("S-1-5-21-111-222-333-1105", (int)DarlingTlsKeyAccess.SidNameUse.User)] // a domain user or a gMSA
+    [InlineData("S-1-5-18", (int)DarlingTlsKeyAccess.SidNameUse.WellKnownGroup)] // LocalSystem
+    [InlineData("S-1-5-19", (int)DarlingTlsKeyAccess.SidNameUse.WellKnownGroup)] // LocalService
+    [InlineData("S-1-5-20", (int)DarlingTlsKeyAccess.SidNameUse.WellKnownGroup)] // NetworkService
+    [InlineData("S-1-5-80-1111-2222-3333-4444-5555", (int)DarlingTlsKeyAccess.SidNameUse.WellKnownGroup)] // NT SERVICE\name
+    [InlineData("S-1-5-82-1111-2222-3333-4444-5555", (int)DarlingTlsKeyAccess.SidNameUse.User)] // an IIS app pool identity
+    [InlineData("S-1-5-32-544", (int)DarlingTlsKeyAccess.SidNameUse.Alias)] // Administrators
+    public void RefuseByKind_AcceptsAUserAndTheServiceIdentities(string sid, int use)
+        => Assert.Null(DarlingTlsKeyAccess.RefuseByKind(new SecurityIdentifier(sid), (DarlingTlsKeyAccess.SidNameUse)use));
 
     [Theory]
     [InlineData("S-1-5-80-1111-2222-3333-4444-5555")]
@@ -388,6 +431,11 @@ public sealed class DarlingTlsKeyAccessTests
     [InlineData("S-1-1-0")]
     [InlineData("S-1-5-32-545")]
     [InlineData("S-1-5-11")]
+    [InlineData("S-1-5-6")]
+    [InlineData("S-1-5-80-0")]
+    [InlineData("S-1-2-0")]
+    [InlineData("S-1-5-32-547")]
+    [InlineData("S-1-5-21-111-222-333-515")]
     public void Run_EveryoneUsersAndAuthenticatedUsers_AreRefused_WhateverTheOperatorTyped(string sid)
     {
         using var certificate = Make("grant.corp.test");
@@ -400,6 +448,83 @@ public sealed class DarlingTlsKeyAccessTests
         Assert.Contains("stands for many accounts", rig.Error.ToString(), StringComparison.Ordinal);
         Assert.Equal(0, rig.StoreReads);
         Assert.Equal(0, target.Writes);
+    }
+
+    [Theory]
+    [InlineData("S-1-5-19")] // LocalService
+    [InlineData("S-1-5-18")] // LocalSystem
+    [InlineData("S-1-5-20")] // NetworkService
+    [InlineData("S-1-5-80-1111-2222-3333-4444-5555")] // a per-service virtual account
+    public void Run_AServiceIdentity_IsGranted_ThroughTheRealAccountLookup(string sid)
+    {
+        Assert.SkipWhen(!OperatingSystem.IsWindows(), "The account lookup is Windows only.");
+
+        var rig = RunWithTheRealLookup(sid, out var target, out var certificate);
+        using (certificate)
+        {
+            Assert.Equal(0, rig.Code);
+            Assert.Equal(1, target.Writes);
+        }
+    }
+
+    [Theory]
+    [InlineData("S-1-5-32-559")] // Performance Log Users: a BUILTIN alias the SID list does not name
+    [InlineData("S-1-5-32-558")] // Performance Monitor Users
+    [InlineData("S-1-5-6")] // SERVICE
+    [InlineData("S-1-5-80-0")] // NT SERVICE\ALL SERVICES
+    [InlineData("S-1-2-0")] // LOCAL
+    [InlineData("S-1-5-32-547")] // Power Users
+    [InlineData("S-1-5-21-111-222-333-1105")] // a domain SID the machine cannot resolve: fail closed
+    public void Run_AGroupOrAnAccountThatCannotBeTyped_IsRefused_WithNoWrites_ThroughTheRealAccountLookup(string sid)
+    {
+        Assert.SkipWhen(!OperatingSystem.IsWindows(), "The account lookup is Windows only.");
+
+        var rig = RunWithTheRealLookup(sid, out var target, out var certificate);
+        using (certificate)
+        {
+            Assert.Equal(1, rig.Code);
+            Assert.Equal(0, target.Writes);
+            Assert.Equal(0, rig.StoreReads);
+            Assert.Contains("Nothing was changed", rig.Error.ToString(), StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void Run_AGroup_NamesTheAccount_AndSaysTheCommandGrantsToOneAccount()
+    {
+        Assert.SkipWhen(!OperatingSystem.IsWindows(), "The account lookup is Windows only.");
+
+        var rig = RunWithTheRealLookup("S-1-5-32-559", out _, out var certificate);
+        using (certificate)
+        {
+            var error = rig.Error.ToString();
+            Assert.Contains("is a group", error, StringComparison.Ordinal);
+            Assert.Contains("grants to one account", error, StringComparison.Ordinal);
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static (int Code, int StoreReads, StringWriter Error) RunWithTheRealLookup(
+        string sid, out FakeTarget target, out X509Certificate2 certificate)
+    {
+        var made = Make("grant.corp.test");
+        var fake = new FakeTarget(Descriptor(Ace(AceQualifier.AccessAllowed, FullControl, Admins)));
+        certificate = made;
+        target = fake;
+        var reads = 0;
+        var error = new StringWriter();
+        var seams = new DarlingTlsKeyAccess.GrantSeams(
+            () => true,
+            (_, _) =>
+            {
+                reads++;
+                return new[] { made };
+            },
+            name => DarlingTlsKeyAccess.ResolveAccount(name, "no such service here"),
+            _ => fake);
+
+        var code = DarlingTlsKeyAccess.Run(Args(made.Thumbprint, account: sid), seams, new StringWriter(), error);
+        return (code, reads, error);
     }
 
     [Fact]
@@ -531,7 +656,7 @@ public sealed class DarlingTlsKeyAccessTests
     {
         Assert.SkipWhen(!OperatingSystem.IsWindows(), "Certificate keys and their ACLs are Windows only.");
 
-        const string account = "S-1-5-32-559"; // Performance Log Users: present on every Windows, never broad
+        const string account = "S-1-5-19"; // LocalService: present on every Windows, one account, never a group
         using var installed = new InstalledCertificate(Make($"darling-7718-grant-{Guid.NewGuid():N}.corp.test"));
         var thumbprint = installed.Certificate.Thumbprint;
 

@@ -66,7 +66,24 @@ internal static class DarlingTlsStore
         }
 
         var name = string.IsNullOrWhiteSpace(store.Name) ? DefaultStoreName : store.Name.Trim();
+        if (HasPathSeparator(name))
+        {
+            /* X509Store takes \\Computer\StoreName for LocalMachine and opens that store over remote registry as the
+               service account, which sends its credentials to that host on every start (#7718). Fail closed. */
+            throw new InvalidOperationException(
+                $"{section}.network.tls.store.name '{name}' is a store name, not a path: it cannot contain a backslash or a slash.");
+        }
+
         return (location, name);
+    }
+
+    /// <summary>True when a certificate store name holds a path separator. A store name is a single registry key name
+    /// (<c>My</c>, <c>WebHosting</c>); a separator makes <see cref="X509Store"/> read it as another machine's store.</summary>
+    internal static bool HasPathSeparator(string name)
+    {
+        ArgumentNullException.ThrowIfNull(name);
+
+        return name.Contains('\\', StringComparison.Ordinal) || name.Contains('/', StringComparison.Ordinal);
     }
 
     /// <summary>

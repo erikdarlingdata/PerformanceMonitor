@@ -243,7 +243,8 @@ PerformanceMonitor.Darling.Service.exe --grant-cert-key-access <thumbprint> [--a
 The command follows these rules:
 
 - It grants **Read only**, to **one** account. That account is the one the service is registered under, or the one `--account` names.
-- It refuses Everyone, Users, Authenticated Users and the other broad groups.
+- It grants to one account and refuses every group, by asking Windows what the account is. That covers Everyone, Users, Authenticated Users, SERVICE, ALL SERVICES, LOCAL, Domain Users, Domain Computers and every other group. It accepts a user (a domain user, a local user, a group managed service account) and these service identities: LocalSystem, LocalService, NetworkService, a per-service virtual account (`NT SERVICE\<name>`), an IIS application pool identity and the local Administrators group. When it cannot tell what the account is, it refuses.
+- It refuses an empty `--account`, and a `--store-name` with a backslash or a slash in it. The same store name in `darling.json` fails closed with a Critical line, because a name like `\\host\My` would open another machine's store over remote registry as the service account.
 - It adds one entry to the key's access list and keeps every existing entry. It never replaces the list.
 - For a `LocalMachine` certificate it needs an elevated prompt. Without one it says so and changes nothing.
 - It finds the certificate by thumbprint. It refuses when none or two match, and when the certificate has no private key.
