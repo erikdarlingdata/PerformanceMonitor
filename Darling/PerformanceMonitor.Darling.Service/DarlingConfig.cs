@@ -2254,26 +2254,24 @@ public sealed class WebNetworkConfig
 /// <summary>
 /// One named web dashboard access token (#7735), the twin of <see cref="McpTokenEntry"/>: a <see cref="Name"/> (1 to 64 of
 /// <c>A-Za-z0-9._:-</c>), the token itself (<see cref="EncryptedToken"/> or <see cref="Token"/>, the same rules as <c>web.network</c>'s),
-/// and a <see cref="Role"/>: <c>reader</c> (the read-only seat) or <c>operator</c> (the edit seat), the <c>mcp.tokens</c> words. The words
-/// <c>web.network.oidc</c> uses for the same two seats, <c>viewer</c> and <c>admin</c>, are accepted too. There is no <c>agent</c> seat on the
-/// web. The name is what the log and the <c>updated_by</c> stamp record; the value is never logged.
+/// and a <see cref="Role"/>: <c>reader</c> (the read-only seat) or <c>operator</c> (the edit seat), the <c>mcp.tokens</c> words and only
+/// those. There is no <c>agent</c> seat on the web. The name is what the log and the <c>updated_by</c> stamp record; the value is never logged.
 /// </summary>
 public sealed class WebTokenEntry
 {
-    /// <summary>The <c>reader</c> role: the read-only seat, the one an OIDC viewer gets. <c>viewer</c> is accepted as the same role.</summary>
+    /// <summary>The <c>reader</c> role: the read-only seat, the one an OIDC viewer gets.</summary>
     public const string ReaderRole = "reader";
 
-    /// <summary>The <c>operator</c> role: the edit seat, the one the shared token and an OIDC admin get. <c>admin</c> is accepted as the
-    /// same role.</summary>
+    /// <summary>The <c>operator</c> role: the edit seat, the one the shared token and an OIDC admin get.</summary>
     public const string OperatorRole = "operator";
 
-    /// <summary>The role word as served, or null when <paramref name="role"/> names no web seat: <c>reader</c> and <c>viewer</c> are
-    /// <see cref="ReaderRole"/>, <c>operator</c> and <c>admin</c> are <see cref="OperatorRole"/>, compared ignoring case and surrounding
-    /// space. <c>agent</c> is no web seat.</summary>
+    /// <summary>The role word as served, or null when <paramref name="role"/> names no web seat: <c>reader</c> is
+    /// <see cref="ReaderRole"/> and <c>operator</c> is <see cref="OperatorRole"/>, compared ignoring case and surrounding space. Any other
+    /// word, <c>agent</c> included, is no web seat.</summary>
     public static string? NormalizeRole(string? role) => (role ?? "").Trim().ToLowerInvariant() switch
     {
-        ReaderRole or "viewer" => ReaderRole,
-        OperatorRole or "admin" => OperatorRole,
+        ReaderRole => ReaderRole,
+        OperatorRole => OperatorRole,
         _ => null,
     };
 

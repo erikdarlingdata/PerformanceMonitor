@@ -132,7 +132,7 @@ internal sealed class DarlingWebTokenSet
             var role = WebTokenEntry.NormalizeRole(entry.Role);
             if (role is null)
             {
-                problems.Add(label + " has no valid role: the role is reader or operator (viewer and admin name the same two seats). " +
+                problems.Add(label + " has no valid role: the role is reader or operator. " +
                     "There is no agent seat on the web. The token is not served.");
                 continue;
             }
