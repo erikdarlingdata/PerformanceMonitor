@@ -17,10 +17,10 @@ using static Darling.Tests.RepoFile;
 namespace Darling.Tests;
 
 /// <summary>
-/// #7655: three display details on the web charts and tiles. The Blocking tab's Waiting Tasks and Lock Waits axes name their unit and
-/// group their thousands as the other axes do, and the PostgreSQL Severity tiles print a plain word rather than the read's token. The
-/// shipped page runs under Node (<c>web-details-7655-harness.mjs</c>) against a scripted <c>/api/read</c>; Node is skipped when it is not
-/// installed.
+/// #7655: three display details on the web charts, tiles and grids. The Blocking tab's Waiting Tasks and Lock Waits axes name their unit and
+/// group their thousands as the other axes do, and the PostgreSQL Severity tiles and the Severity column of the grids under them print a
+/// plain word rather than the read's token. The shipped page runs under Node (<c>web-details-7655-harness.mjs</c>) against a scripted
+/// <c>/api/read</c>; Node is skipped when it is not installed.
 /// </summary>
 public sealed class WebDetails7655BehaviourTests
 {
@@ -95,6 +95,26 @@ public sealed class WebDetails7655BehaviourTests
     }
 
     /// <summary>
+    /// The Lock Waits axis over figures between 1.000 and 1.008 ms/s steps by a fraction. Its tick labels take their decimals from the
+    /// step, as the other whole-number axes do (#6158): every tick prints the same decimals (0.0, 0.5, 1.0, 1.5), no two read alike and
+    /// none is left blank. A formatter that ignores the step prints "0, 0.5, 1, 1.5", and on a finer step one label twice.
+    /// </summary>
+    [Fact]
+    public void LockWaits_KeepsEveryTickDistinct_OnANarrowRange()
+    {
+        var axis = Run("blockingNarrow").GetProperty("lockWaits");
+
+        Assert.True(axis.GetProperty("present").GetBoolean());
+        var labels = Strings(axis, "labels");
+        Assert.True(labels.Length >= 3, "the axis drew " + labels.Length + " tick labels");
+        Assert.All(labels, l => Assert.Matches(@"^\d[\d,]*(\.\d+)?$", l));
+        Assert.Equal(labels.Length, labels.Distinct().Count());
+        var decimals = labels.Select(l => l.Contains('.') ? l.Length - l.IndexOf('.') - 1 : 0).Distinct().ToArray();
+        Assert.True(decimals.Length == 1 && decimals[0] >= 1, "the ticks read " + string.Join(", ", labels) + ": one axis, one precision, taken from its step");
+        Assert.Equal(new[] { "ms/s" }, Strings(axis, "caption"));
+    }
+
+    /// <summary>
     /// The Severity tile of Freeze Headroom, Autovacuum Backlog and Replication Slots printed the read's token as it arrived ("ok",
     /// "warning_inactive_and_growing"). The token stays in the tool reply; the tile prints a plain word from one shared map, starting with a
     /// capital as the severity words elsewhere on these pages do, with the token's reason after it in words.
@@ -118,5 +138,24 @@ public sealed class WebDetails7655BehaviourTests
     public void TheSeverityTile_KeepsItsDash_WhenTheReadHasNoSeverity()
     {
         Assert.Equal("—", Run("tiles").GetProperty("slotsMissing").GetString());
+    }
+
+    /// <summary>
+    /// The Severity column of Per-Database Headroom, Tables Behind and Slots carries the same tokens as the tile over it, and prints the
+    /// same word for the same token: a tile that reads "Critical: failsafe range" over a grid row that reads "critical_failsafe_range"
+    /// names one severity two ways. The grid's words are pinned, and each is compared with the tile drawn for that token, so the two
+    /// cannot drift apart. A row with no severity keeps the grid's dash.
+    /// </summary>
+    [Theory]
+    [InlineData("wraparoundGrid", new[] { "Healthy", "Critical: failsafe range" }, new[] { "wraparoundOk", "wraparoundCritical" })]
+    [InlineData("autovacuumGrid", new[] { "Warning: past threshold and growing", "Critical: far past threshold" }, new[] { "autovacuumWarning", "autovacuumCritical" })]
+    [InlineData("slotsGrid", new[] { "Warning: inactive and growing", "Warning", "—" }, new[] { "slotsWarning", "slotsPlainWarning", "slotsMissing" })]
+    public void TheSeverityColumn_PrintsTheTilesWord_ForTheSameToken(string grid, string[] expected, string[] tiles)
+    {
+        var r = Run("tiles");
+
+        var cells = Strings(r, grid);
+        Assert.Equal(expected, cells);
+        Assert.Equal(tiles.Select(t => r.GetProperty(t).GetString()).ToArray(), cells);
     }
 }

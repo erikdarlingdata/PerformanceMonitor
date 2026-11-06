@@ -2,7 +2,9 @@
    answer, and prints as one line of JSON what a person reads:
      - blocking: the Blocking tab's Waiting Tasks and Lock Waits charts (wwwroot/js/pages/server-tabs.js), their y-axis tick labels and
        unit captions;
-     - tiles: the Severity tile of Freeze Headroom, Autovacuum Backlog and Replication Slots (shared.js PG_*_STATS through panels.js).
+     - blockingNarrow: the same tab with every lock wait figure between 1.000 and 1.008 ms/s, so the Lock Waits axis steps by a fraction;
+     - tiles: the Severity tile of Freeze Headroom, Autovacuum Backlog and Replication Slots (shared.js PG_*_STATS through panels.js), and
+       the Severity column of the grid under each (pg-vacuum.js and pg-replication.js PG_*_COLUMNS through panels.js VIZ.table).
    WebDetails7655BehaviourTests starts it as
        node web-details-7655-harness.mjs <path to wwwroot/js> <scenario>
    The whole js tree is copied into a scratch folder first, so a module another change adds needs no edit here. Only the DOM and
@@ -70,11 +72,18 @@ const WAITS = [
   { collection_time: ago(2), wait_type: "LATCH_EX", total_wait_ms: 900 },
 ];
 const BLOCKED = [{ collection_time: ago(4), database_name: "Sales", blocked_count: 3 }];
-const LOCKS = [
-  { collection_time: ago(6), wait_time_ms_per_second: 120.5 },
-  { collection_time: ago(4), wait_time_ms_per_second: 3000 },
-  { collection_time: ago(2), wait_time_ms_per_second: 40 },
-];
+const LOCKS = scenario === "blockingNarrow"
+  /* Every figure within 8 thousandths of 1 ms/s, so the axis's tick step is a fraction and a tick label needs its decimals to stay distinct. */
+  ? [
+    { collection_time: ago(6), wait_time_ms_per_second: 1.0 },
+    { collection_time: ago(4), wait_time_ms_per_second: 1.008 },
+    { collection_time: ago(2), wait_time_ms_per_second: 1.003 },
+  ]
+  : [
+    { collection_time: ago(6), wait_time_ms_per_second: 120.5 },
+    { collection_time: ago(4), wait_time_ms_per_second: 3000 },
+    { collection_time: ago(2), wait_time_ms_per_second: 40 },
+  ];
 const answerFor = (name) => {
   if (name === "get_current_waits_trend") return { server: "a", waiting_tasks: WAITS, blocked_sessions: BLOCKED };
   if (name === "get_lock_wait_trend") return { server: "a", trend: LOCKS, wait_types: ["LCK_M_X"] };
@@ -93,7 +102,14 @@ try {
   fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
   const load = (rel) => import(pathToFileURL(path.join(scratch, rel)).href);
-  modules = { util: await load("util.js"), panels: await load("panels.js"), tabs: await load(path.join("pages", "server-tabs.js")), shared: await load(path.join("pages", "server-tabs", "shared.js")) };
+  modules = {
+    util: await load("util.js"),
+    panels: await load("panels.js"),
+    tabs: await load(path.join("pages", "server-tabs.js")),
+    shared: await load(path.join("pages", "server-tabs", "shared.js")),
+    vacuum: await load(path.join("pages", "server-tabs", "pg-vacuum.js")),
+    replication: await load(path.join("pages", "server-tabs", "pg-replication.js")),
+  };
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
 }
@@ -125,15 +141,35 @@ const axisOf = (panel) => {
   };
 };
 const tiles = (root) => Object.fromEntries(all(root).filter((n) => hasClass(n, "stat")).map((n) => [n.children[1].textContent, n.children[0].textContent]));
+/* The Severity cell of each body row of a grid drawn by the shipped table viz over the given columns, as the pg grid text harness reads one. */
+const gridSeverity = (columns, rows) => {
+  const table = modules.panels.VIZ.table({ rows }, { rowsKey: "rows", title: "Grid", tools: false, columns });
+  const at = columns.findIndex((c) => c.key === "severity");
+  return all(table).filter((n) => n.tag === "tr" && n.parent && n.parent.tag === "tbody").map((tr) => tr.children[at].textContent);
+};
 
 const out = {};
-if (scenario === "blocking") {
+if (scenario === "blocking" || scenario === "blockingNarrow") {
   const root = await draw(modules.tabs.SERVER_TABS, "blocking");
   out.waitingTasks = axisOf(panelOf(root, "Waiting Tasks"));
   out.lockWaits = axisOf(panelOf(root, "Lock Waits"));
 } else if (scenario === "tiles") {
-  const { panels, shared } = modules;
+  const { panels, shared, vacuum, replication } = modules;
   const severity = (stats, data) => tiles(panels.VIZ.stat(data, { stats }))["Severity"];
+  /* Each grid under a tile, drawn over one row per token the tile above it is drawn for, so the two can be read side by side. */
+  out.wraparoundGrid = gridSeverity(vacuum.PG_WRAPAROUND_COLUMNS, [
+    { database_name: "sales", severity: "ok", frozen_xid_age: 1200, pct_toward_wraparound: 12.5 },
+    { database_name: "hr", severity: "critical_failsafe_range", frozen_xid_age: 1900000000, pct_toward_wraparound: 97.2 },
+  ]);
+  out.autovacuumGrid = gridSeverity(vacuum.PG_AUTOVACUUM_COLUMNS, [
+    { database_name: "sales", table_name: "public.orders", severity: "warning_past_threshold_and_growing", dead_tuples: 5200, vacuum_threshold: 4000 },
+    { database_name: "sales", table_name: "public.lines", severity: "critical_far_past_threshold", dead_tuples: 91000, vacuum_threshold: 4000 },
+  ]);
+  out.slotsGrid = gridSeverity(replication.PG_SLOT_COLUMNS, [
+    { slot_name: "sub_a", severity: "warning_inactive_and_growing", slot_type: "logical", is_active: false, retained_wal_gb: 1.2 },
+    { slot_name: "sub_b", severity: "warning", slot_type: "logical", is_active: true, retained_wal_gb: 0.1 },
+    { slot_name: "sub_c", severity: null, slot_type: "physical", is_active: true, retained_wal_gb: 0 },
+  ]);
   out.wraparoundOk = severity(shared.PG_WRAPAROUND_STATS, { worst_database: "sales", worst_severity: "ok", worst_pct_toward_wraparound: 12.5 });
   out.wraparoundCritical = severity(shared.PG_WRAPAROUND_STATS, { worst_database: "sales", worst_severity: "critical_failsafe_range", worst_pct_toward_wraparound: 97.2 });
   out.autovacuumWarning = severity(shared.PG_AUTOVACUUM_STATS, { past_threshold_count: 2, growing_count: 1, autovacuum_disabled_count: 0, worst_table: "public.orders", worst_severity: "warning_past_threshold_and_growing" });
