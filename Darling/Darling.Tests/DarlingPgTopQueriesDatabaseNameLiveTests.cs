@@ -165,9 +165,9 @@ VALUES ($1, $2, $3, $4, $5, 16384, 10, TRUE, 100, 5000, 91.5, 250, 7, 70, 0)",
         Assert.Equal(false, await ScalarAsync(connection, ct,
             "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'pg_statement_stats' AND column_name = 'database_name')"));
 
-        /* Roll the version stamp back to V248, then upgrade: V249 and every rung above it is left to apply (V250 since #7762). */
+        /* Roll the version stamp back to V248, then upgrade: V249 and every rung above it apply. */
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM darling_schema_version WHERE version >= 249");
-        Assert.Equal(PgMigrations.Scripts.Count(s => s.Version >= 249), await PgMigrations.MigrateAsync(connection, ct));
+        Assert.Equal(StorageVersion.SchemaVersion - 248, await PgMigrations.MigrateAsync(connection, ct));
 
         await using (var column = new NpgsqlCommand(
             "SELECT data_type, is_nullable, column_default FROM information_schema.columns "

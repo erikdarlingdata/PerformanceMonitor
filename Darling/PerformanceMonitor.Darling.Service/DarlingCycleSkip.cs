@@ -30,20 +30,24 @@ internal sealed record CycleSkipSnapshot(
 }
 
 /// <summary>The measured causes the late run carries in: the previous body's length and its slowest collector, the time
-/// this body queued for a fleet slot, and (#5824) the previous body's scheduled analysis pass length and how many analysis
-/// passes held fleet slots when this body got its slot. 0 or null is "not measured".</summary>
+/// this body queued for a fleet slot, (#5824) the previous body's scheduled analysis pass length and how many analysis
+/// passes held fleet slots when this body got its slot, and the daily-run permit backlog as this body started: how many
+/// daily runs were waiting for a permit and how long the oldest had waited. 0 or null is "not measured".</summary>
 internal readonly record struct CycleSkipCauses(
     long PrevBodyMs,
     string? PrevBodySlowestName,
     long PrevBodySlowestMs,
     long GateWaitMs,
     long PrevAnalysisMs = 0,
-    int GateWaitAnalysisHolders = 0);
+    int GateWaitAnalysisHolders = 0,
+    int DailyRunsWaiting = 0,
+    long OldestDailyWaitMs = 0);
 
 /// <summary>
-/// #5735: the slots one server has lost since its last <c>collection_cycle</c> row, summed over its collectors. The three
-/// places that step over a slot add to it (the grid advance and the run-time collector's lost day in
-/// <c>RunDueCollectorsAsync</c>, and <c>CountHeldSlots</c> while the memory launch guard holds bodies off); the server's next
+/// #5735: the slots one server has lost since its last <c>collection_cycle</c> row, summed over its collectors. The places
+/// that step over a slot add to it (the grid advance and the run-time collector's lost day in <c>RunDueCollectorsAsync</c>, the
+/// daily run refused behind its own unfinished run in <c>RunOneAsync</c>, and <c>CountHeldSlots</c> while the memory launch
+/// guard holds bodies off); the server's next
 /// body writes one row from it, at most one in <see cref="DarlingCycleSkip.RowMinInterval"/>, and counts keep adding in
 /// between. Thread-safe: the sweep loop's thread and the body's thread both touch it.
 /// </summary>
@@ -74,7 +78,9 @@ internal sealed class CycleSkipAccumulator
     /// <summary>Slots that came due while the memory launch guard held bodies off.</summary>
     internal void AddHeld(string collector, long slots, DateTime dueUtc) => Add(_held, collector, slots, dueUtc);
 
-    /// <summary>A run-time collector's day that was lost (the pass could not hand it off within the grace).</summary>
+    /// <summary>A daily collector's day that was lost: a run-time collector the pass could not hand off within its grace, or an
+    /// interval daily refused at its single-flight slot because its previous run had not finished. <paramref name="dueUtc"/> is
+    /// the slot that was due, for both kinds.</summary>
     internal void AddDailyLost(string collector, long slots, DateTime dueUtc) => Add(_daily, collector, slots, dueUtc);
 
     private void Add(Dictionary<string, long> map, string collector, long slots, DateTime dueUtc)
@@ -159,7 +165,7 @@ internal sealed class CycleSkipAccumulator
 /// #5735: words the report for the slots a server's loop stepped over. Darling's unit is one scheduled run of one
 /// collector (Lite's is a whole collection cycle), so a row's <c>fanout_item_count</c> is slots summed across the server's
 /// collectors, and the cause is one of: the previous body still running (no relaunch while in flight), the wait for a fleet
-/// slot, the memory launch guard's hold, or a run-time collector that lost its day. A host that slept, a clock that
+/// slot, the memory launch guard's hold, or a daily collector that lost its day. A host that slept, a clock that
 /// stepped and a pause write no row: <see cref="SkipCreditFloor"/> leaves those slots out of every count, which is the
 /// documented difference from Lite (it records a wait overrun for a slept computer). Static and clockless, so a test
 /// drives it with stamps.
@@ -254,8 +260,15 @@ internal static class DarlingCycleSkip
         if (dailySlots > 0)
         {
             var lost = string.Join(", ", snapshot.DailyLostSlots.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).Select(k => k.Replace('_', ' ')));
+            /* The permit backlog as the pass read it, stated beside the lost day: how many daily runs were waiting and how long
+               the oldest had waited. It is not named as the cause, because the row cannot tell whether this server's own
+               previous run was one of the waiters or was still executing. */
+            var backlog = causes.DailyRunsWaiting > 0
+                ? string.Create(CultureInfo.InvariantCulture,
+                    $", daily permits: {causes.DailyRunsWaiting} waiting, oldest {DailyRunLimiter.DescribeWait(TimeSpan.FromMilliseconds(causes.OldestDailyWaitMs))}")
+                : string.Empty;
             candidates.Add((
-                string.Create(CultureInfo.InvariantCulture, $"{dailySlots} run-time collector slot(s) lost their day ({lost})"),
+                string.Create(CultureInfo.InvariantCulture, $"{dailySlots} daily collector slot(s) lost their day ({lost}){backlog}"),
                 null, snapshot.DailyLostSlots.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).First(), 0));
         }
 

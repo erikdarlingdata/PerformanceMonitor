@@ -1076,9 +1076,10 @@ internal sealed class DarlingSelfAlertEvaluator
 
     private const string ComposeHoursStuckKey = "querystore";
 
-    /* Notification Channel Failing edge state (#4750). FLEET-level, MULTI-keyed by channel name (Teams, Slack,
-       Generic, PagerDuty). A webhook channel counts its own failures in a row and logs the first few, but
-       nothing else showed it, so a channel could fail for weeks while another one delivered every alert.
+    /* Notification Channel Failing edge state (#4750). FLEET-level, MULTI-keyed by destination
+       (WebhookChannelFailureCount.Key: the channel name for the settings row's destination, the channel name and
+       route id for a route's). A webhook destination counts its own failures in a row and logs the first few, but
+       nothing else showed it, so a destination could fail for weeks while another one delivered every alert.
        Unlike Raw Purge Over Horizon this is an EDGE, not a standing condition: it fires once when a
        channel's count first reaches WebhookAlertService.FailingChannelThreshold, does not repeat while the
        count stays there or climbs, and writes one resolution when the count is back at 0 or when the channel
@@ -1519,7 +1520,7 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         catch (Exception ex)
         {
-            _logger?.LogError("[{Server}] Collection-health self-alert failed after {ElapsedMs} ms: {Message}", serverName, collectionReadClock.ElapsedMilliseconds, ex.Message);
+            _logger?.LogError(ex, "[{Server}] Collection-health self-alert failed after {ElapsedMs} ms: {Message}", serverName, collectionReadClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(Key(serverId), CollectionSignalsReadName, collectionReadClock.ElapsedMilliseconds);
         }
 
@@ -1575,7 +1576,7 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         catch (Exception ex)
         {
-            _logger?.LogError("[{Server}] Capture-down self-alert failed after {ElapsedMs} ms: {Message}", serverName, captureReadClock.ElapsedMilliseconds, ex.Message);
+            _logger?.LogError(ex, "[{Server}] Capture-down self-alert failed after {ElapsedMs} ms: {Message}", serverName, captureReadClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(Key(serverId), MissingCaptureSessionsReadName, captureReadClock.ElapsedMilliseconds);
         }
 
@@ -1620,7 +1621,7 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         catch (Exception ex)
         {
-            _logger?.LogError("[{Server}] Agent-not-running self-alert failed after {ElapsedMs} ms: {Message}", serverName, agentReadClock.ElapsedMilliseconds, ex.Message);
+            _logger?.LogError(ex, "[{Server}] Agent-not-running self-alert failed after {ElapsedMs} ms: {Message}", serverName, agentReadClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(Key(serverId), AgentStatusReadName, agentReadClock.ElapsedMilliseconds);
         }
 
@@ -1642,7 +1643,7 @@ internal sealed class DarlingSelfAlertEvaluator
             }
             catch (Exception ex)
             {
-                _logger?.LogError("[{Server}] Agent-alert-setup self-alert failed after {ElapsedMs} ms: {Message}", serverName, agentAlertReadClock.ElapsedMilliseconds, ex.Message);
+                _logger?.LogError(ex, "[{Server}] Agent-alert-setup self-alert failed after {ElapsedMs} ms: {Message}", serverName, agentAlertReadClock.ElapsedMilliseconds, ex.Message);
                 _readFailures?.RecordReadFailure(Key(serverId), AgentAlertSetupReadName, agentAlertReadClock.ElapsedMilliseconds);
             }
         }
@@ -1664,7 +1665,7 @@ internal sealed class DarlingSelfAlertEvaluator
             }
             catch (Exception ex)
             {
-                _logger?.LogError("[{Server}] Database-protection self-alert failed after {ElapsedMs} ms: {Message}", serverName, protectionReadClock.ElapsedMilliseconds, ex.Message);
+                _logger?.LogError(ex, "[{Server}] Database-protection self-alert failed after {ElapsedMs} ms: {Message}", serverName, protectionReadClock.ElapsedMilliseconds, ex.Message);
                 _readFailures?.RecordReadFailure(Key(serverId), DatabaseProtectionReadName, protectionReadClock.ElapsedMilliseconds);
             }
         }
@@ -1687,7 +1688,7 @@ internal sealed class DarlingSelfAlertEvaluator
             }
             catch (Exception ex)
             {
-                _logger?.LogError("[{Server}] Identity-capacity self-alert failed after {ElapsedMs} ms: {Message}", serverName, identityReadClock.ElapsedMilliseconds, ex.Message);
+                _logger?.LogError(ex, "[{Server}] Identity-capacity self-alert failed after {ElapsedMs} ms: {Message}", serverName, identityReadClock.ElapsedMilliseconds, ex.Message);
                 _readFailures?.RecordReadFailure(Key(serverId), IdentityCapacityReadName, identityReadClock.ElapsedMilliseconds);
             }
         }
@@ -1728,7 +1729,7 @@ internal sealed class DarlingSelfAlertEvaluator
             }
             catch (Exception ex)
             {
-                _logger?.LogError("[{Server}] Availability-Group self-alert failed after {ElapsedMs} ms: {Message}", serverName, agReadClock.ElapsedMilliseconds, ex.Message);
+                _logger?.LogError(ex, "[{Server}] Availability-Group self-alert failed after {ElapsedMs} ms: {Message}", serverName, agReadClock.ElapsedMilliseconds, ex.Message);
                 _readFailures?.RecordReadFailure(Key(serverId), AgStateReadName, agReadClock.ElapsedMilliseconds);
             }
         }
@@ -5408,7 +5409,7 @@ internal sealed class DarlingSelfAlertEvaluator
         catch (Exception ex)
         {
             /* NOT counted by #3013's swallowed-read counter: the DELIVERY path, not a condition read. */
-            _logger?.LogError("[{Server}] Connection-change self-alert delivery failed: {Message}", serverName, ex.Message);
+            _logger?.LogError(ex, "[{Server}] Connection-change self-alert delivery failed: {Message}", serverName, ex.Message);
         }
     }
 
@@ -5948,7 +5949,7 @@ internal sealed class DarlingSelfAlertEvaluator
             /* NOT counted by #3013's swallowed-read counter: this method is handed its evidence as parameters and
                performs no store read — the catch covers the apply/deliver half. The reads that FEED it are counted
                at their own sites in DarlingWorker. */
-            _logger?.LogError("Store disk-pressure self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Store disk-pressure self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -6143,7 +6144,7 @@ internal sealed class DarlingSelfAlertEvaluator
         catch (Exception ex)
         {
             /* Not counted as a swallowed read: the read above succeeded, this catch covers the apply/deliver half. */
-            _logger?.LogError("Store autovacuum self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Store autovacuum self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -6307,7 +6308,7 @@ internal sealed class DarlingSelfAlertEvaluator
                as a parameter and performs no store read — the catch covers the apply/deliver half, exactly
                like the sibling store self-alert wrappers. The read that BUILDS the report lives in
                CustomAlertEvaluator, outside this alert-pass census. */
-            _logger?.LogError("Custom-alert rule-health self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Custom-alert rule-health self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -6476,7 +6477,7 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             /* NOT counted by #3013's swallowed-read counter: the report arrives as a parameter and this method reads
                nothing; the worker's read of the counts records its own failure. */
-            _logger?.LogError("External-alert delivery self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "External-alert delivery self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -6580,7 +6581,7 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             /* NOT counted by #3013's swallowed-read counter: the rules arrive as a parameter from the live
                MuteRuleService cache and this method performs no store read. */
-            _logger?.LogError("Stale-mute self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Stale-mute self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -6914,7 +6915,7 @@ internal sealed class DarlingSelfAlertEvaluator
             /* NOT counted by #3013's swallowed-read counter: the report is a parameter DarlingWorker already
                built (its one store read, the rejected-verdict list, is isolated at its own call site); this
                method performs no store read of its own. */
-            _logger?.LogError("Store settings self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Store settings self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -7224,7 +7225,7 @@ internal sealed class DarlingSelfAlertEvaluator
         catch (Exception ex)
         {
             /* NOT counted by #3013's swallowed-read counter: the report is a parameter; no store read happens here. */
-            _logger?.LogError("Store runtime upgrade self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Store runtime upgrade self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -7318,7 +7319,7 @@ WHERE c.is_enabled";
         catch (Exception ex)
         {
             /* The report is a parameter; no store read happens here. */
-            _logger?.LogError("Collection gap at start self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Collection gap at start self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -7386,7 +7387,7 @@ WHERE c.is_enabled";
         catch (Exception ex)
         {
             /* NOT counted by #3013's swallowed-read counter: the report is a parameter; no store read happens here. */
-            _logger?.LogError("Store TimescaleDB self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Store TimescaleDB self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -7521,7 +7522,7 @@ WHERE c.is_enabled";
         {
             /* NOT counted by #3013's swallowed-read counter: the report is a parameter built from the worker's
                in-memory gate counts, and this method performs no store read. */
-            _logger?.LogError("Fleet gate self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Fleet gate self-alert failed: {Message}", ex.Message);
         }
 
         /* With the master switch off ApplyFleetGateAsync returns before it can resolve, so an alert that fired earlier
@@ -7756,14 +7757,16 @@ WHERE c.is_enabled";
                host's in-memory TLS certificate state publish (WebTlsCertificateState for the web host,
                McpTlsCertificateState for the MCP host), and this method performs no store read. Two literal
                messages in ONE catch rather than a templated one: the failed-read census reads this catch's
-               text, and the web line stays byte-identical to what it has always logged. */
+               text, and the web line's formatted message stays byte-identical to what it has always logged.
+               The exception rides with each call, so the file log appends " | Type: Message" to that line, and
+               the console log also shows the stack. */
             if (listener == TlsListener.Mcp)
             {
-                _logger?.LogError("MCP TLS certificate self-alert failed: {Message}", ex.Message);
+                _logger?.LogError(ex, "MCP TLS certificate self-alert failed: {Message}", ex.Message);
             }
             else
             {
-                _logger?.LogError("Web TLS certificate self-alert failed: {Message}", ex.Message);
+                _logger?.LogError(ex, "Web TLS certificate self-alert failed: {Message}", ex.Message);
             }
         }
     }
@@ -8035,7 +8038,7 @@ WHERE c.is_enabled";
         {
             /* NOT counted by #3013's swallowed-read counter: the reading is a parameter; the read that
                produces it is counted in DarlingWorker.EvaluateCompressionJobHealthAsync. */
-            _logger?.LogError("Store policy-job health self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Store policy-job health self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -8059,7 +8062,7 @@ WHERE c.is_enabled";
         {
             /* NOT counted by #3013's swallowed-read counter: the readings are a parameter; the read that produces
                them is counted in DarlingWorker.EvaluateCompressionJobHealthAsync. */
-            _logger?.LogError("Store-job cadence self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Store-job cadence self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -8183,7 +8186,7 @@ WHERE c.is_enabled";
         {
             /* NOT counted by #3013's swallowed-read counter: the policies are a parameter; the read that produces
                them is counted in DarlingWorker.EvaluateCompressionJobHealthAsync. */
-            _logger?.LogError("Retention-held self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Retention-held self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -8369,7 +8372,7 @@ WHERE c.is_enabled";
         {
             /* NOT counted by #3013's swallowed-read counter: the readings are a parameter; the reads that
                produce them are counted in DarlingWorker.EvaluateCompressionJobHealthAsync. */
-            _logger?.LogError("Raw-purge-over-horizon self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Raw-purge-over-horizon self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -8497,7 +8500,7 @@ WHERE c.is_enabled";
         {
             /* NOT counted by #3013's swallowed-read counter: the failure record is a parameter; the read that produces it is
                isolated in DarlingWorker.BuildQueryStoreComposeStampAsync. */
-            _logger?.LogError("Compose-rollup-hours-stuck self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Compose-rollup-hours-stuck self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -8602,7 +8605,7 @@ WHERE c.is_enabled";
         catch (Exception ex)
         {
             /* NOT counted by #3013's swallowed-read counter: the counts are read from memory, not the store. */
-            _logger?.LogError("Notification-channel self-alert failed: {Message}", ex.Message);
+            _logger?.LogError(ex, "Notification-channel self-alert failed: {Message}", ex.Message);
         }
     }
 
@@ -8612,16 +8615,19 @@ WHERE c.is_enabled";
     /// weeks while another channel delivers every alert, and until this the only trace was an Error log line
     /// for each of its first three failures and every fiftieth after.
     ///
-    /// <para>Each channel is judged on its own by the shared <see cref="WebhookChannelFailurePolicy"/>: ONE
-    /// alert when the count first reaches the threshold, nothing while it stays there or climbs, and ONE
-    /// <see cref="NotificationChannelRecoveredMetric"/> resolution row when it is back at 0 or when the channel
-    /// has no destination left. An edge, not a standing condition, so there is no cooldown re-fire: the alert
-    /// is delivered through the OTHER channels, and the channel that broke cannot carry its own notice.</para>
+    /// <para>Each destination (a channel's settings-row destination, and each route's own) is judged on its own by
+    /// the shared <see cref="WebhookChannelFailurePolicy"/>: ONE alert when its count first reaches the threshold,
+    /// nothing while it stays there or climbs, and ONE <see cref="NotificationChannelRecoveredMetric"/> resolution
+    /// row when it is back at 0 or when the destination is gone. An edge, not a standing condition, so there is no
+    /// cooldown re-fire: the alert is delivered through the OTHER channels, and the channel that broke cannot carry
+    /// its own notice.</para>
     ///
-    /// <para><b>Turning the channel off closes the alert.</b> Turning a failing channel off is the expected
-    /// response to it, so a channel that is no longer configured (disabled, or its URL or key removed, with no
-    /// enabled route carrying one) resolves as turned off, in words that say so: the channel did not deliver
-    /// again. A channel with no destination is never raised. The two resolutions share the metric names.</para>
+    /// <para><b>Turning the destination off closes the alert.</b> Turning a failing destination off is the expected
+    /// response to it, so a destination that is no longer configured resolves as turned off, in words that say so:
+    /// the channel did not deliver again. The settings row's destination is gone when the channel is disabled or its
+    /// URL or key removed. A route's is gone when the route is deleted, disabled, cannot match, no longer names the
+    /// channel, or has the channel off on it (<see cref="NotificationRouter.RouteConfiguresWebhookChannel"/>). A
+    /// destination with nothing to send to is never raised. The two resolutions share the metric names.</para>
     ///
     /// <para><b>The text carries no error.</b> It names the channel and the count and points at the service
     /// log for the reason. A webhook error can carry the endpoint's URL, and a Slack or Teams webhook URL is
@@ -8637,46 +8643,51 @@ WHERE c.is_enabled";
             return;
         }
 
+        /* One entry per destination: the channel's settings-row destination, and each route's own. The memory and the
+           alert key are the entry's Key, so two routes pointing one channel at two destinations are two alerts, and the
+           text names the route (Label), never the URL. */
         foreach (var channel in _webhookChannelFailures())
         {
             var name = channel.Channel;
+            var key = channel.Key;
+            var label = channel.Label;
             var count = channel.ConsecutiveFailures;
-            var wasFailing = _activeNotificationChannelFailing.TryGetValue(name, out var active) && active;
+            var wasFailing = _activeNotificationChannelFailing.TryGetValue(key, out var active) && active;
 
             switch (WebhookChannelFailurePolicy.Decide(wasFailing, count, channel.Configured))
             {
                 case WebhookChannelNotice.Failing:
-                    _activeNotificationChannelFailing[name] = true;
+                    _activeNotificationChannelFailing[key] = true;
                     await FireAsync(
-                        StoreKey(NotificationChannelKeyPrefix + name), _storeLabel, NotificationChannelFailingMetric,
+                        StoreKey(NotificationChannelKeyPrefix + key), _storeLabel, NotificationChannelFailingMetric,
                         $"{count} failures in a row", $"{WebhookAlertService.FailingChannelThreshold} failures in a row",
-                        detail: $"The {name} webhook channel has failed {count} times in a row, so alerts sent to " +
-                            $"{name} are not arriving there. The other channels are not affected. The service log's " +
+                        detail: $"The {label} webhook channel has failed {count} times in a row, so alerts sent to " +
+                            $"{label} are not arriving there. The other channels are not affected. The service log's " +
                             $"'{name.ToUpperInvariant()} WEBHOOK FAILED' lines name the error for each failure. This " +
                             "is stated once; a 'Notification Channel Recovered' entry follows when the channel " +
                             "delivers again.",
                         severity: AlertSeverityLevel.Warning,
-                        shortMessage: $"{name} webhook failed {count} times in a row",
+                        shortMessage: $"{label} webhook failed {count} times in a row",
                         numericCurrentValue: count,
                         numericThresholdValue: WebhookAlertService.FailingChannelThreshold,
                         cancellationToken);
                     break;
 
                 case WebhookChannelNotice.Recovered:
-                    _activeNotificationChannelFailing.TryRemove(name, out _);
+                    _activeNotificationChannelFailing.TryRemove(key, out _);
                     await RecordResolutionAsync(new AlertResolution(
-                        StoreKey(NotificationChannelKeyPrefix + name), _storeLabel, NotificationChannelFailingMetric,
+                        StoreKey(NotificationChannelKeyPrefix + key), _storeLabel, NotificationChannelFailingMetric,
                         NotificationChannelRecoveredMetric,
-                        $"{_storeLabel}: the {name} webhook channel is delivering again (failures in a row back to 0)"),
+                        $"{_storeLabel}: the {label} webhook channel is delivering again (failures in a row back to 0)"),
                         cancellationToken);
                     break;
 
                 case WebhookChannelNotice.TurnedOff:
-                    _activeNotificationChannelFailing.TryRemove(name, out _);
+                    _activeNotificationChannelFailing.TryRemove(key, out _);
                     await RecordResolutionAsync(new AlertResolution(
-                        StoreKey(NotificationChannelKeyPrefix + name), _storeLabel, NotificationChannelFailingMetric,
+                        StoreKey(NotificationChannelKeyPrefix + key), _storeLabel, NotificationChannelFailingMetric,
                         NotificationChannelRecoveredMetric,
-                        $"{_storeLabel}: the {name} webhook channel was turned off (no destination is configured for it)"),
+                        $"{_storeLabel}: the {label} webhook channel was turned off (no destination is configured for it)"),
                         cancellationToken);
                     break;
             }
@@ -10407,7 +10418,7 @@ ORDER BY ag_name, database_name, replica_server_name";
             /* An audit-row write must never break the loop (RecordAlertAsync is already failure-isolated;
                this is belt-and-suspenders for any other IAlertHistoryStore). */
             /* NOT counted by #3013's swallowed-read counter: an audit-row WRITE, not a condition read. */
-            _logger?.LogError("Failed to record resolution '{Title}': {Message}", resolution.Title, ex.Message);
+            _logger?.LogError(ex, "Failed to record resolution '{Title}': {Message}", resolution.Title, ex.Message);
         }
     }
 

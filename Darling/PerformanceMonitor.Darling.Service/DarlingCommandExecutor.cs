@@ -283,7 +283,7 @@ WHERE status = 'in_progress'
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Command {Id} ({Type}) failed: {Message}", command.CommandId, command.CommandType, ex.Message);
+            _logger?.LogError(ex, "Command {Id} ({Type}) failed: {Message}", command.CommandId, command.CommandType, ex.Message);
             outcome = new CommandOutcome(false, "error", ErrorJson(ex.Message));
         }
 

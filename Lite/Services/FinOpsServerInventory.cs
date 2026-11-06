@@ -61,7 +61,7 @@ internal static class FinOpsServerInventory
             }
             catch (Exception ex)
             {
-                AppLogger.Error("FinOps", $"Failed to query {server.DisplayName}: {ex.Message}");
+                AppLogger.Error("FinOps", $"Failed to query {server.DisplayName}: {ex.Message}", ex);
                 return (ServerPropertyRow?)null;
             }
         });
@@ -83,7 +83,7 @@ internal static class FinOpsServerInventory
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Failed to read collected server metrics; the Server Inventory overlay stays blank: {ex.Message}");
+            AppLogger.Error("FinOps", $"Failed to read collected server metrics; the Server Inventory overlay stays blank: {ex.Message}", ex);
             return new Dictionary<int, LocalDataService.ServerMetricsRow>();
         }
     }
@@ -111,7 +111,7 @@ internal static class FinOpsServerInventory
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Failed to overlay collected metrics for {server.DisplayName}: {ex.Message}");
+            AppLogger.Error("FinOps", $"Failed to overlay collected metrics for {server.DisplayName}: {ex.Message}", ex);
         }
     }
 }

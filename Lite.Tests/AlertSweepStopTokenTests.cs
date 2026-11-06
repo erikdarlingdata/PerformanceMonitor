@@ -66,8 +66,9 @@ public sealed class AlertSweepStopTokenTests
         Assert.Contains("return;", body, StringComparison.Ordinal);
         Assert.DoesNotContain("AppLogger", body, StringComparison.Ordinal);
 
-        /* The control: the catch that does log is the one after it, so the check above is not passing because the
-           logger is spelled some other way. */
-        Assert.Contains("AppLogger.Error(\"Alerts\", $\"Alert sweep failed for", sweep[generic..], StringComparison.Ordinal);
+        /* The control: the catch that does log is the one after it, so the checks above are not passing because the
+           logger is spelled some other way. A failed sweep logs through the per-server failure streak, which writes
+           the exception on the first failure of a streak. */
+        Assert.Contains("_sweepFailures.Failed(\"Alerts\", summary.ServerId, $\"Alert sweep failed for", sweep[generic..], StringComparison.Ordinal);
     }
 }

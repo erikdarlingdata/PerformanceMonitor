@@ -108,7 +108,7 @@ public sealed class AdminPageBehaviourTests
     {
         var texts = Texts(Tab("tab:settings"));
 
-        Assert.Contains("Alert thresholds", texts);
+        Assert.Contains("Alert Thresholds", texts);
         Assert.Contains("Long Running Query Filters", texts);
         Assert.Contains("Long-running query: exclude backups", texts);
         Assert.Contains("Long-running query: threshold (minutes)", texts);

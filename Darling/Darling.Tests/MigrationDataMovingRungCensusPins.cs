@@ -422,7 +422,7 @@ public sealed class MigrationDataMovingRungCensusPins
             + "rewrites no collected row (the backfill runs in the background after start), so it spends none of the lock-wait budget "
             + "and the multiple stays 5."),
         new(
-            250,
+            251,
             SetsTheFloor: false,
             "Replaces the compose-stamp trigger function and creates both row triggers again (#7762), with the threshold moved to the hour of the "
             + "writer's clock. The function body names an INSERT ... SELECT into collect.query_store_compose_stamp_built (created V173), which is the "

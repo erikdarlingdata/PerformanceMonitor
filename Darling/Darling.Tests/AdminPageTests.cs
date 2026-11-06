@@ -92,9 +92,9 @@ public sealed class AdminPageTests
     public void TheSettingsTab_SplitsTheLongRunningQueryFilters_IntoTheirOwnSectionAfterAlertThresholds()
     {
         var page = Page();
-        var thresholds = page.IndexOf("title: \"Alert thresholds\"", StringComparison.Ordinal);
+        var thresholds = page.IndexOf("title: \"Alert Thresholds\"", StringComparison.Ordinal);
         var filters = page.IndexOf("title: \"Long Running Query Filters\"", StringComparison.Ordinal);
-        var bands = page.IndexOf("title: \"Health bands\"", StringComparison.Ordinal);
+        var bands = page.IndexOf("title: \"Health Bands\"", StringComparison.Ordinal);
         Assert.True(thresholds >= 0 && filters > thresholds && bands > filters);
     }
 

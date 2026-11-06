@@ -216,7 +216,7 @@ public partial class RecommendationsTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Recommendations", $"Failed to load recommendations: {ex.Message}");
+            AppLogger.Error("Recommendations", $"Failed to load recommendations: {ex.Message}", ex);
             // Fall back to the empty state rather than leaving the spinner up.
             ApplyViewModel(LiteRecommendationsViewModel.FromItems(Array.Empty<LiteRecommendationItem>()));
         }
@@ -328,7 +328,7 @@ public partial class RecommendationsTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Recommendations", $"Failed to generate recommendations: {ex.Message}");
+            AppLogger.Error("Recommendations", $"Failed to generate recommendations: {ex.Message}", ex);
             StatusText.Text = "Generate failed — see log.";
             ApplyViewModel(LiteRecommendationsViewModel.FromItems(Array.Empty<LiteRecommendationItem>()));
         }

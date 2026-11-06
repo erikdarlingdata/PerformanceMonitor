@@ -192,7 +192,7 @@ public sealed partial class DarlingWorker
         }
         catch (Exception ex)
         {
-            _logger.LogError("[{Server}] Latest-CPU read for the alert pass failed after {ElapsedMs} ms: {Message}",
+            _logger.LogError(ex, "[{Server}] Latest-CPU read for the alert pass failed after {ElapsedMs} ms: {Message}",
                 server.Config.DisplayName, cpuReadClock.ElapsedMilliseconds, ex.Message);
             _readFailures.RecordReadFailure(
                 runtime.ServerId.ToString(CultureInfo.InvariantCulture), LatestCpuReadName, cpuReadClock.ElapsedMilliseconds);
@@ -255,7 +255,7 @@ public sealed partial class DarlingWorker
         }
         catch (Exception ex)
         {
-            _logger.LogError("[{Server}] Alert sweep failed after {ElapsedMs} ms: {Message}", server.Config.DisplayName, sweepReadClock.ElapsedMilliseconds, ex.Message);
+            _logger.LogError(ex, "[{Server}] Alert sweep failed after {ElapsedMs} ms: {Message}", server.Config.DisplayName, sweepReadClock.ElapsedMilliseconds, ex.Message);
             _readFailures.RecordReadFailure(
                 runtime.ServerId.ToString(CultureInfo.InvariantCulture),
                 "shared engine sweep", sweepReadClock.ElapsedMilliseconds);
@@ -521,7 +521,7 @@ public sealed partial class DarlingWorker
         }
         catch (Exception ex)
         {
-            _logger.LogError("[{Server}] PostgreSQL alert evaluation failed after {ElapsedMs} ms: {Message}",
+            _logger.LogError(ex, "[{Server}] PostgreSQL alert evaluation failed after {ElapsedMs} ms: {Message}",
                 runtime.Config.DisplayName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL outage-predictor reads", readClock.ElapsedMilliseconds);
         }
@@ -1003,7 +1003,7 @@ public sealed partial class DarlingWorker
         }
         catch (Exception ex)
         {
-            _logger.LogError("[{Server}] PostgreSQL CPU alert evaluation failed after {ElapsedMs} ms: {Message}",
+            _logger.LogError(ex, "[{Server}] PostgreSQL CPU alert evaluation failed after {ElapsedMs} ms: {Message}",
                 runtime.Config.DisplayName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL CPU alert read", readClock.ElapsedMilliseconds);
         }
@@ -1277,7 +1277,7 @@ public sealed partial class DarlingWorker
         }
         catch (Exception ex)
         {
-            _logger.LogError("[{Server}] PostgreSQL deadlock alert evaluation failed after {ElapsedMs} ms: {Message}",
+            _logger.LogError(ex, "[{Server}] PostgreSQL deadlock alert evaluation failed after {ElapsedMs} ms: {Message}",
                 runtime.Config.DisplayName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL deadlock alert read", readClock.ElapsedMilliseconds);
         }
@@ -1858,7 +1858,7 @@ public sealed partial class DarlingWorker
         }
         catch (Exception ex)
         {
-            _logger.LogError("[{Server}] PostgreSQL blocking alert evaluation failed after {ElapsedMs} ms: {Message}",
+            _logger.LogError(ex, "[{Server}] PostgreSQL blocking alert evaluation failed after {ElapsedMs} ms: {Message}",
                 runtime.Config.DisplayName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL blocking alert read", readClock.ElapsedMilliseconds);
         }
@@ -2165,7 +2165,7 @@ public sealed partial class DarlingWorker
         }
         catch (Exception ex)
         {
-            _logger.LogError("[{Server}] PostgreSQL long-running-query alert evaluation failed after {ElapsedMs} ms: {Message}",
+            _logger.LogError(ex, "[{Server}] PostgreSQL long-running-query alert evaluation failed after {ElapsedMs} ms: {Message}",
                 runtime.Config.DisplayName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL long-running-query alert read", readClock.ElapsedMilliseconds);
         }
@@ -2659,7 +2659,7 @@ public sealed partial class DarlingWorker
         }
         catch (Exception ex)
         {
-            _logger.LogError("[{Server}] PostgreSQL poison wait alert evaluation failed after {ElapsedMs} ms: {Message}",
+            _logger.LogError(ex, "[{Server}] PostgreSQL poison wait alert evaluation failed after {ElapsedMs} ms: {Message}",
                 runtime.Config.DisplayName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL poison wait alert read", readClock.ElapsedMilliseconds);
         }

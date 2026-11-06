@@ -438,7 +438,7 @@ AND NOT EXISTS (
             }
             catch (Exception rbEx)
             {
-                AppLogger.Error("AlertDismiss", $"Rollback failed: {rbEx.Message}");
+                AppLogger.Error("AlertDismiss", $"Rollback failed: {rbEx.Message}", rbEx);
             }
             throw;
         }

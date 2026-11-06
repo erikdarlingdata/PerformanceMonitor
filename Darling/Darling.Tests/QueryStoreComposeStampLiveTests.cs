@@ -401,7 +401,7 @@ SELECT md5(
             Assert.Equal(0, await PgMigrations.MigrateAsync(connection, ct));
             await using (var transaction = await connection.BeginTransactionAsync(ct))
             {
-                /* V173's text, then V250's (#7762), which replaces its trigger function and triggers: the pair is the rung text run again over the newest store. */
+                /* V173's text, then V251's (#7762), which replaces its trigger function and triggers: the pair is the rung text run again over the newest store. */
                 foreach (var version in new[] { QueryStoreComposeStamp.RungVersion, QueryStoreComposeStamp.LateMarkOffsetZeroRungVersion })
                 {
                     await using var command = new NpgsqlCommand(PgMigrations.Scripts.Single(s => s.Version == version).Sql, connection, transaction) { CommandTimeout = 120 };

@@ -437,14 +437,14 @@ public sealed class QueryStoreComposeStampTests
         {
             Assert.Contains("clock_timestamp() AT TIME ZONE 'UTC'", when, StringComparison.Ordinal);
             Assert.DoesNotContain("now()", when, StringComparison.Ordinal);
-            /* V173's literal is frozen: it still subtracts the one-hour offset. V250 (LateMarkOffsetZeroSql) is the rung that moves it to zero. */
+            /* V173's literal is frozen: it still subtracts the one-hour offset. V251 (LateMarkOffsetZeroSql) is the rung that moves it to zero. */
             Assert.Contains("- interval '1 hour'", when, StringComparison.Ordinal);
         }
 
         Assert.Contains("OLD.collection_time <", whens[1], StringComparison.Ordinal);
         Assert.Contains("NEW.collection_time <", whens[1], StringComparison.Ordinal);
         Assert.DoesNotContain("now()", sql.Replace("transaction start", string.Empty, StringComparison.Ordinal)[sql.IndexOf("DECLARE", StringComparison.Ordinal)..], StringComparison.Ordinal);
-        /* V250 (#7762): the replacement rung marks from the hour of the writer's clock, with no offset, and the builder reads an hour only after it. */
+        /* V251 (#7762): the replacement rung marks from the hour of the writer's clock, with no offset, and the builder reads an hour only after it. */
         Assert.Equal(TimeSpan.Zero, QueryStoreComposeStamp.WhenOffset);
         Assert.True(TimeSpan.FromHours(1) + QueryStoreComposeStamp.WhenOffset < QueryStoreComposeStamp.BuildLag, "the trigger must mark an hour before the builder reads it");
         var rung = NormalizeEol(QueryStoreComposeStamp.LateMarkOffsetZeroSql);

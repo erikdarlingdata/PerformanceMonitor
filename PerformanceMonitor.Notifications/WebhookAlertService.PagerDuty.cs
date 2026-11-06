@@ -101,7 +101,7 @@ public partial class WebhookAlertService
         }
         catch (Exception ex)
         {
-            _logger.LogError($"PagerDuty resolve error for {firingMetric}: {ex.Message}");
+            _logger.LogError(ex, $"PagerDuty resolve error for {firingMetric}: {ex.Message}");
             return AlertChannelOutcome.Failed;
         }
     }
@@ -129,6 +129,8 @@ public partial class WebhookAlertService
         var serverName = facts.ServerName;
         var triageUrl = facts.TriageUrl;
         var now = facts.ClearedAtUtc;
+        /* The sends count the outcome against every health entry that names the destination (EntriesNaming), as the signing
+           keys below are found by destination too. */
         return channel switch
         {
             NotificationRouter.TeamsChannel => await TrySendTeamsAlertAsync(
@@ -226,8 +228,9 @@ public partial class WebhookAlertService
         string routingKey, string dedupKey, string firingMetric, string serverName, string serverId, string? detailText,
         CancellationToken cancellationToken = default)
     {
+        var delivery = _settings.SnapshotForDelivery();
         var error = await TrySendPagerDutyAlertAsync(
-            _settings.SnapshotForDelivery(), autoResolve: true, routingKey, firingMetric, serverName, "resolved", "", serverId,
+            delivery, autoResolve: true, routingKey, firingMetric, serverName, "resolved", "", serverId,
             context: null, triageUrl: null, detailText, _utcNow(), displayName: null,
             resolveIncident: true, dedupKeyOverride: dedupKey, cancellationToken: cancellationToken);
         if (error is null)
@@ -260,6 +263,7 @@ public partial class WebhookAlertService
         string? dedupKeyOverride = null,
         CancellationToken cancellationToken = default)
     {
+        var entries = EntriesNaming(settings, NotificationRouter.PagerDutyChannel, routingKey);
         try
         {
             /* Derive the dedup_key from the same fingerprint the cooldown uses, so repeated alerts for
@@ -289,11 +293,11 @@ public partial class WebhookAlertService
 
             if (error != null)
             {
-                RecordChannelFailure(ref _consecutivePagerDutyFailures, ref _lastPagerDutyError, "PagerDuty", error);
+                RecordChannelFailure(NotificationRouter.PagerDutyChannel, entries, error);
                 return error;
             }
 
-            RecordChannelRecovered(ref _consecutivePagerDutyFailures, ref _lastPagerDutyError, "PagerDuty");
+            RecordChannelRecovered(NotificationRouter.PagerDutyChannel, entries);
             _logger.LogInformation($"PagerDuty webhook sent for {metricName} on {serverName}");
             return null;
         }
@@ -304,7 +308,7 @@ public partial class WebhookAlertService
         }
         catch (Exception ex)
         {
-            RecordChannelException(ref _consecutivePagerDutyFailures, ref _lastPagerDutyError, "PagerDuty", ex);
+            RecordChannelException(NotificationRouter.PagerDutyChannel, entries, ex);
             return ex.Message;
         }
     }

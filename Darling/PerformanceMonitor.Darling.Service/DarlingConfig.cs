@@ -204,6 +204,18 @@ public sealed class DarlingConfig
     public bool RawChunkIntervalReconcileEnabled { get; set; } = true;
 
     /// <summary>
+    /// Whether the service builds a <c>pg_trgm</c> GIN index on the plan-cache text (<c>collect.query_text_dim.query_text</c>, #7674).
+    /// Default FALSE: on a store the size of the largest field store the index is 3.1 GB (52% of the table), a build takes about 17
+    /// minutes and it adds about 0.5 ms to each written row. When true the service creates the <c>pg_trgm</c> extension if the store
+    /// login can, then builds the index with <c>CREATE INDEX CONCURRENTLY</c> in the background, never inside a migration rung and never
+    /// ahead of collection. When false the service drops the index if it exists. A failed build is dropped, reported by
+    /// <c>get_store_metrics</c> (<c>query_text_index</c>) and retried with a growing wait. A file-only knob (not seeded into the
+    /// control-plane store), so an edit takes effect on the next restart.
+    /// </summary>
+    [JsonPropertyName("queryTextTrigramIndexEnabled")]
+    public bool QueryTextTrigramIndexEnabled { get; set; }
+
+    /// <summary>
     /// #2862: how many collection cycles pass between plan-XML captures for <c>procedure_stats</c> — 1 is
     /// every cycle (the pre-#2862 collector, byte-identical), 4 is one cycle in four. Clamped to [1,60] on
     /// read. Only <c>procedure_stats</c> is gated; every other plan-capturing collector is untouched.
@@ -2349,6 +2361,34 @@ public sealed class WebOidcConfig
 }
 
 /// <summary>
+/// The <c>store</c> form of a <c>tls</c> block (#7718): which Windows certificate store to open, and which
+/// certificate in it to serve. Exactly one of <see cref="Thumbprint"/> and <see cref="Subject"/> picks it.
+/// Read-only: the service never writes to a store.
+/// </summary>
+public sealed class WebTlsStoreConfig
+{
+    /// <summary><c>LocalMachine</c> (the default) or <c>CurrentUser</c>. A service account with no loaded
+    /// profile has no useful <c>CurrentUser</c> store, so <c>LocalMachine</c> is what almost every install wants.</summary>
+    [JsonPropertyName("location")]
+    public string? Location { get; set; }
+
+    /// <summary>The store name, <c>My</c> (Personal) by default.</summary>
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+
+    /// <summary>The exact certificate to serve, as the 40 hex digits of its SHA-1 thumbprint. Spaces and case do
+    /// not matter. A thumbprint changes at every renewal; use <see cref="Subject"/> to follow renewals.</summary>
+    [JsonPropertyName("thumbprint")]
+    public string? Thumbprint { get; set; }
+
+    /// <summary>A DNS name. The service serves the newest certificate (by <c>NotBefore</c>) that is valid now, has
+    /// the Server Authentication usage and a private key, and carries this name as a dNSName SAN, so a renewed
+    /// certificate is picked up at the next service start without editing the config.</summary>
+    [JsonPropertyName("subject")]
+    public string? Subject { get; set; }
+}
+
+/// <summary>
 /// Opt-in TLS for a network listener (#2562, #5288). This one type backs BOTH <c>web.network.tls</c> (the web
 /// dashboard) and <c>mcp.network.tls</c> (the MCP endpoint): two separate blocks, each its own fail-closed
 /// decision, with no shared block and no precedence rule. To serve one certificate on both, point both blocks at
@@ -2358,10 +2398,12 @@ public sealed class WebOidcConfig
 /// exchanged for; on MCP, every tool result) crosses the segment in the clear over HTTP, and the in-app CIDR
 /// check bounds who can ROUTE to the port, never what an on-path attacker can read off the wire.
 ///
-/// <para><b>Two forms, exactly one at a time.</b> A PKCS#12 bundle (<see cref="PfxPath"/>, with the password
-/// in whichever of the three slots suits the platform) or a PEM pair (<see cref="CertPath"/> +
-/// <see cref="KeyPath"/>, which is what a container mounts). Configuring both is refused rather than resolved
-/// by precedence — see <see cref="Hosting.DarlingWebTls.Describe"/>.</para>
+/// <para><b>Three forms, exactly one at a time.</b> A PKCS#12 bundle (<see cref="PfxPath"/>, with the password
+/// in whichever of the three slots suits the platform), a PEM pair (<see cref="CertPath"/> +
+/// <see cref="KeyPath"/>, which is what a container mounts), or a Windows certificate-store entry
+/// (<see cref="Store"/>, #7718: a certificate whose private key is not exportable cannot be made into a file).
+/// Configuring two forms is refused rather than resolved by precedence — see
+/// <see cref="Hosting.DarlingWebTls.Describe"/>.</para>
 ///
 /// <para><b>The product consumes a certificate; it does not manage a PKI.</b> No issuance, no ACME, no
 /// self-signed fallback: a certificate the product minted itself would buy encryption without authentication
@@ -2413,11 +2455,20 @@ public sealed class WebTlsConfig
     [JsonPropertyName("keyPath")]
     public string? KeyPath { get; set; }
 
+    /// <summary>
+    /// A certificate in a Windows certificate store (#7718), used instead of a file. Windows only; mutually
+    /// exclusive with <see cref="PfxPath"/> and <see cref="CertPath"/>/<see cref="KeyPath"/>. The service reads
+    /// it once, at start.
+    /// </summary>
+    [JsonPropertyName("store")]
+    public WebTlsStoreConfig? Store { get; set; }
+
     /// <summary>True when any field is set. Drives the "this block is configured" half of the decision — a
     /// block set but unusable must FAIL rather than read as "TLS was never asked for".</summary>
     [JsonIgnore]
     public bool IsConfigured =>
-        !string.IsNullOrWhiteSpace(PfxPath)
+        Store is not null
+        || !string.IsNullOrWhiteSpace(PfxPath)
         || !string.IsNullOrWhiteSpace(EncryptedPfxPassword)
         || !string.IsNullOrWhiteSpace(PfxPassword)
         || !string.IsNullOrWhiteSpace(CertPath)

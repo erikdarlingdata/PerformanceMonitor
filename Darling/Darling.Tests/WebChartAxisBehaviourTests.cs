@@ -72,15 +72,16 @@ public sealed class WebChartAxisBehaviourTests
     }
 
     /// <summary>#7586: the FinOps Version Store (PVS) size trend, drawn by the shipped tab (version-store.js) from a stand-in read. A range
-    /// under 0.01 MB reads one decimal finer than the step needs, so every tick is its own value; a large range keeps its two decimals.</summary>
+    /// under 0.01 MB reads one decimal finer than the step needs, so every tick is its own value. #7702: a large range, whose step is a whole
+    /// number, prints no decimals (2,000, not 2,000.00), as the other size axes do.</summary>
     [Fact]
-    public void ThePvsSizeAxis_GrowsDecimalsWithItsStep_AndKeepsTwoOnALargeRange()
+    public void ThePvsSizeAxis_GrowsDecimalsWithItsStep_AndPrintsNoneOnAWholeNumberStep()
     {
         var r = Run();
         var small = Strings(r.GetProperty("pvsSmall"));
         Assert.Equal(new[] { "0.000", "0.002", "0.004", "0.006", "0.008", "0.010" }, small);
         Assert.Equal(small.Length, small.Distinct().Count());
-        Assert.Equal(new[] { "0.00", "2,000.00", "4,000.00", "6,000.00", "8,000.00", "10,000.00" }, Strings(r.GetProperty("pvsLarge")));
+        Assert.Equal(new[] { "0", "2,000", "4,000", "6,000", "8,000", "10,000" }, Strings(r.GetProperty("pvsLarge")));
     }
 
     /// <summary>#7670: the Collector Duration Trends chart, drawn by the shipped panel (shared.js) from a stand-in read. A longest run of 78 s
@@ -419,5 +420,46 @@ public sealed class WebChartAxisBehaviourTests
         Assert.Empty(Strings(c.GetProperty("stackedSecondsTicks")));
         Assert.Equal(new[] { "MB" }, Strings(c.GetProperty("bareTicks")));
         Assert.Equal(new[] { "n" }, Strings(c.GetProperty("secondAxisWithUnit")));
+    }
+
+    private static (string Text, double X, string Anchor, double Left, double Right)[] Captions(JsonElement chart) =>
+        chart.GetProperty("caps").EnumerateArray()
+            .Select(e => (e.GetProperty("text").GetString()!, e.GetProperty("x").GetDouble(), e.GetProperty("anchor").GetString()!, e.GetProperty("left").GetDouble(), e.GetProperty("right").GetDouble()))
+            .ToArray();
+
+    /// <summary>#7856: a unit caption wider than the room beside its axis ("snapshot rows" at the 58 px left margin) lost its first letters
+    /// off the chart's left edge. Every caption now sits inside the chart, on the left axis, the right axis and the scatter's two captions.</summary>
+    [Fact]
+    public void ALongUnitCaption_StaysInsideTheChart_OnEveryCaptionSite()
+    {
+        var e = Run().GetProperty("captionEdges");
+        foreach (var name in new[] { "lineLong", "lineRightLong", "scatterLong" })
+        {
+            var chart = e.GetProperty(name);
+            var width = chart.GetProperty("width").GetDouble();
+            var caps = Captions(chart);
+            Assert.NotEmpty(caps);
+            foreach (var c in caps)
+            {
+                Assert.True(c.Left >= 0, $"{name}: caption '{c.Text}' starts at {c.Left}, left of the chart");
+                Assert.True(c.Right <= width, $"{name}: caption '{c.Text}' ends at {c.Right}, right of the {width} px chart");
+            }
+        }
+    }
+
+    /// <summary>#7856: a caption that already fit keeps the placement it had: right-aligned to the axis on the left, left-aligned on the
+    /// right axis, right-aligned at the plot's edge for the scatter's x unit.</summary>
+    [Fact]
+    public void AShortUnitCaption_KeepsItsPlacement()
+    {
+        var e = Run().GetProperty("captionEdges");
+        var line = Captions(e.GetProperty("lineShort")).Single();
+        Assert.Equal(("ms", 50d, "end"), (line.Text, line.X, line.Anchor));
+        var dual = Captions(e.GetProperty("lineRightShort"));
+        Assert.Contains(dual, c => c.Text == "ms" && c.Anchor == "start");
+        Assert.Contains(dual, c => c.Text == "n" && c.X == 50 && c.Anchor == "end");
+        var scatter = Captions(e.GetProperty("scatterShort"));
+        Assert.Contains(scatter, c => c.Text == "ms" && c.X == 50 && c.Anchor == "end");
+        Assert.Contains(scatter, c => c.Text == "MB" && c.Anchor == "end" && c.X > 100);
     }
 }

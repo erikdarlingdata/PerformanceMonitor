@@ -843,6 +843,9 @@ export function linePanel(title, read, params, rowsKey, xKey, series, opts = {})
     emptyWins: opts.emptyWins === true,
     /* #5244: the answer's field naming the collector that answered (get_blocking_trend's `source`); absent on every other line. */
     sourceKey: opts.sourceKey,
+    /* An event-count read that returns only the buckets with events: the buckets it leaves out are drawn at 0 (zeroFilledPoints), unless the
+       answer's `sourceKey` names the DMV snapshot, a sample whose trend is drawn as it came. */
+    zeroFill: opts.zeroFill === true,
     /* #7508: the answer's field holding the instant a series changes grain (get_query_store_duration_trend's routing.raw_from); absent on every other line. */
     seamKey: opts.seamKey,
     /* #7692: the answer's field stating the bucket width (bucket_minutes), for a read with rows only where something ran; absent on every other line. */
@@ -1351,8 +1354,11 @@ export const FINDING_COLUMNS = [
   { key: "category", label: "Category", display: (r) => r.category_name || r.category, sortValue: (r) => r.category_name || r.category },
   /* The finding's headline, not its story key; severity as a word, not the score (the cards on the Recommendations tab do the same).
      #7582: rows arrive merged to one per sentence (findingsPanel), so `finding_title` is the sentence and the sort, the column filter
-     and the CSV follow it. A row that covers several chains opens to list them. */
-  { key: "finding_title", label: "Finding", render: (r) => findingCell(r), sortValue: (r) => findingTitle(r), wrap: true },
+     and the CSV follow it. A row that covers several chains opens to list them.
+     #7652: a flow cell, so the sentence takes the column's width and wraps on every row. In a plain wrap column the stylesheet caps a
+     click-to-open cell at 15% of the window (a statement preview's cap), which cut a 70 character sentence to "...and e..." in a 577 px
+     column while the one-chain rows beside it wrapped their whole sentence. */
+  { key: "finding_title", label: "Finding", render: (r) => findingCell(r), sortValue: (r) => findingTitle(r), wrap: true, cellClass: () => "flow-cell" },
   { key: "severity", label: "Severity", display: (r) => severityLabel(r.severity), sortValue: (r) => Number(r.severity), cellClass: (r) => { const w = severityLabel(r.severity); return w === "Info" ? null : "sev-" + w; } },
   { key: "occurrences", label: "Occurrences", format: "int" },
   { key: "first_seen", label: "First seen", format: "time" },
@@ -1473,14 +1479,24 @@ export const HEAVIEST_COLUMNS = [
 
 /* ─────────────────────────── PostgreSQL stat descriptors ─────────────────────────── */
 
-/* Severity reaches these tiles and grids as the read's own token — `critical_far_past_threshold`,
-   `warning_inactive_and_growing`, `ok`. It is NOT translated here. Two lexicons for one vocabulary drift, and
-   the one that drifts is never the one being read; the tokens are also what the MCP surface already hands an
-   agent, so an operator reading the screen and an agent reading the tool see the same word. */
+/* Severity reaches these tiles, and the Severity column of the grids under them (pg-vacuum.js, pg-replication.js), as the
+   read's own token: `ok`, `warning`, `critical`, or one with its reason after it (`critical_far_past_threshold`,
+   `warning_inactive_and_growing`). The token stays in the tool reply, so an agent reading the tool reads the read's word;
+   the tiles and grids print it as a plain word from this one map (#7655), as the Category column of Analysis Findings
+   prints its plain name (#7486), so a tile and the grid under it name one severity one way. The three severity levels are
+   the words the other severity tiles and columns use, and a reason follows its level in words. */
+const PG_SEVERITY_WORDS = { ok: "Healthy", warning: "Warning", critical: "Critical" };
+export function pgSeverityWord(token) {
+  if (token == null || token === "") return null;
+  const [level, ...reason] = String(token).split("_");
+  const word = PG_SEVERITY_WORDS[level.toLowerCase()] || level.charAt(0).toUpperCase() + level.slice(1).toLowerCase();
+  return reason.length ? word + ": " + reason.join(" ") : word;
+}
+const PG_SEVERITY_TILE = { key: "worst_severity", label: "Severity", display: (d) => pgSeverityWord(d.worst_severity), small: true };
 
 export const PG_WRAPAROUND_STATS = [
   { key: "worst_database", label: "Closest to wraparound", format: "text", small: true },
-  { key: "worst_severity", label: "Severity", format: "text", small: true },
+  PG_SEVERITY_TILE,
   { key: "worst_pct_toward_wraparound", label: "Toward wraparound (%)", format: "num2" },
 ];
 
@@ -1495,7 +1511,7 @@ export const PG_SLOT_STATS = [
   { key: "inactive_count", label: "Inactive", format: "int" },
   { key: "total_retained_wal_gb", label: "Retained WAL (GB)", format: "num2" },
   { key: "worst_slot", label: "Worst slot", format: "text", small: true },
-  { key: "worst_severity", label: "Severity", format: "text", small: true },
+  PG_SEVERITY_TILE,
 ];
 
 export const PG_AUTOVACUUM_STATS = [
@@ -1503,6 +1519,6 @@ export const PG_AUTOVACUUM_STATS = [
   { key: "growing_count", label: "Still growing", format: "int" },
   { key: "autovacuum_disabled_count", label: "Autovacuum off", format: "int" },
   { key: "worst_table", label: "Worst table", format: "text", small: true },
-  { key: "worst_severity", label: "Severity", format: "text", small: true },
+  PG_SEVERITY_TILE,
 ];
 

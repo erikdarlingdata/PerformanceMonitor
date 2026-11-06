@@ -657,7 +657,7 @@ public partial class SettingsWindow : Window
                the caller is told the page did not validate. Reporting Valid = true here was the #2433
                instance the review bot found, and it is not survivable now that this method writes nothing
                it could be wrong about. */
-            AppLogger.Error("Settings", $"Failed to save MCP settings: {ex.Message}");
+            AppLogger.Error("Settings", $"Failed to save MCP settings: {ex.Message}", ex);
             MessageBox.Show(
                 $"The MCP port could not be checked, so the MCP settings were left unchanged:\n\n{ex.Message}",
                 "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);

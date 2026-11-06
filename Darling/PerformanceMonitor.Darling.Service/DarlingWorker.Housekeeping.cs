@@ -509,7 +509,7 @@ public sealed partial class DarlingWorker
                The measurement stays, because a figure for the operation that actually faulted is still
                worth having and the clock boundaries above make it one operation's. What does not stay is
                any claim that it discriminates a client cutoff from a store fault at this site. */
-            _logger.LogError("Compression-job health check failed after {ElapsedMs} ms: {Message}", readClock.ElapsedMilliseconds, ex.Message);
+            _logger.LogError(ex, "Compression-job health check failed after {ElapsedMs} ms: {Message}", readClock.ElapsedMilliseconds, ex.Message);
             _readFailures.RecordReadFailure(
                 null, "store background-job health reads (compression, job cadence, retention holds)", readClock.ElapsedMilliseconds);
         }
@@ -1796,7 +1796,7 @@ AND   j.hypertable_name = '{relation}'", connection))
             }
             else
             {
-                _logger.LogError("Store self-metrics sweep failed: {Message}", ex.Message);
+                _logger.LogError(ex, "Store self-metrics sweep failed: {Message}", ex.Message);
             }
         }
     }

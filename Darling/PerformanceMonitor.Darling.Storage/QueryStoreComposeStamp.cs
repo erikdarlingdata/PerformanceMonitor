@@ -47,7 +47,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <para><b>Order:</b> stale hours first (a stale hour is one the compiler can no longer serve from the rollup), then the hours
 /// the builder has never done, newest first, so the default one-day window is servable after about 21 builds rather than after
 /// the whole backlog. An hour is built once it is <see cref="BuildLag"/> (90 minutes, #7762) old, when most rows of it have stopped
-/// changing (about H + 1:05 to H + 1:15, estimated). The trigger (V250) marks every row of an hour written from H + 1 h on, so a write after the build
+/// changing (about H + 1:05 to H + 1:15, estimated). The trigger (V251) marks every row of an hour written from H + 1 h on, so a write after the build
 /// makes the hour stale and the next tick (a 15-minute timer, #7762) rebuilds it; not every hour is rebuilt, and an hour is built 1 + p times, p the
 /// share of hours written after their first build.</para>
 ///
@@ -79,7 +79,7 @@ public static class QueryStoreComposeStamp
 
     /// <summary>How old an hour must be before the builder does it: build hour H once now is at least H + this (#7762: 90 minutes, from 3 hours, so
     /// the newest hours leave the panel's tail sooner).
-    /// <para><b>Why 90 minutes is safe.</b> The row trigger (V250, <see cref="WhenOffset"/> zero) marks every row of hour H written from H + 1 h on. A row
+    /// <para><b>Why 90 minutes is safe.</b> The row trigger (V251, <see cref="WhenOffset"/> zero) marks every row of hour H written from H + 1 h on. A row
     /// of H written before H + 1 h is unmarked, and the writer that wrote it began its transaction before H + 1 h. The build starts at H + 1 h 30 min at the
     /// earliest, so a transaction that began in hour H must stay open for over 30 minutes to be open at the build. The collector's transactions last
     /// seconds (a command times out at 10 s), so that margin only sets how often a build defers. The correctness is the open-writer guard
@@ -88,14 +88,14 @@ public static class QueryStoreComposeStamp
     /// </summary>
     public static readonly TimeSpan BuildLag = TimeSpan.FromMinutes(BuildLagMinutes);
 
-    /// <summary>The trigger marks a row whose hour is more than this before the hour of the writer's clock (the <c>WHEN</c> offset). Zero from V250
+    /// <summary>The trigger marks a row whose hour is more than this before the hour of the writer's clock (the <c>WHEN</c> offset). Zero from V251
     /// (#7762), one hour in V173's literal: a row is marked from H + 1 h on (it was H + 2 h). More rows are marked, each costing one upsert per (server,
     /// hour) per transaction, so a build or two more an hour rebuilds an hour that was written after its first build (estimated 1 + p builds an hour,
     /// p the share of hours written after their first build). The offset is a literal in the rung (a shipped migration is never edited);
-    /// <see cref="LateMarkThresholdSql"/> is the text the V250 rung is built from.</summary>
+    /// <see cref="LateMarkThresholdSql"/> is the text the V251 rung is built from.</summary>
     public static readonly TimeSpan WhenOffset = TimeSpan.Zero;
 
-    /// <summary>The row trigger's threshold from V250: the hour of the writer's clock (UTC). A row older than it is marked.</summary>
+    /// <summary>The row trigger's threshold from V251: the hour of the writer's clock (UTC). A row older than it is marked.</summary>
     public const string LateMarkThresholdSql = "date_trunc('hour', clock_timestamp() AT TIME ZONE 'UTC')";
 
     /// <summary>
@@ -361,12 +361,12 @@ CREATE TRIGGER trg_query_store_compose_stamp_late_upd
 """;
 
     /// <summary>
-    /// The version of the rung that moves the row trigger's threshold to the hour of the writer's clock (#7762): V250.
+    /// The version of the rung that moves the row trigger's threshold to the hour of the writer's clock (#7762): V251.
     /// </summary>
-    public const int LateMarkOffsetZeroRungVersion = 250;
+    public const int LateMarkOffsetZeroRungVersion = 251;
 
     /// <summary>
-    /// V250 (#7762): the V173 trigger function and both row triggers again, with the threshold at the hour of the writer's clock
+    /// V251 (#7762): the V173 trigger function and both row triggers again, with the threshold at the hour of the writer's clock
     /// (<see cref="LateMarkThresholdSql"/>) instead of one hour before it. A row of hour H written from H + 1 h on is marked (it was H + 2 h), so the
     /// builder can read H at H + 1 h 30 min (<see cref="BuildLag"/>) and the open-writer guard is one hour (<see cref="WriterGuardSql"/>). V173's text is
     /// never edited: this is the same function and the same two triggers, replaced. Only the three thresholds differ from <see cref="CreateSql"/>.
@@ -375,7 +375,7 @@ CREATE TRIGGER trg_query_store_compose_stamp_late_upd
     /// <b>No gap at the switch:</b> a row written under the old threshold and left unmarked (hour H, written between H + 1 h and H + 2 h) belongs to a
     /// transaction that committed before this rung's DDL could take its lock (a writer that has written holds ROW EXCLUSIVE on the table, which the
     /// trigger DDL waits for), and the rung runs before the planner of the build that carries it, so every hour built from then on reads those rows.
-    /// An hour already built stays valid until a marked write moves it. An older build run on a V250 store marks more than it expects and keeps its
+    /// An hour already built stays valid until a marked write moves it. An older build run on a V251 store marks more than it expects and keeps its
     /// own three-hour lag and two-hour guard, which are the safe side.
     /// </summary>
     public const string LateMarkOffsetZeroSql = """
@@ -392,7 +392,7 @@ AS $f$
    1970-01-01), so one lookup is a substring test. After a commit the setting reads back as an empty string, not NULL.
    An UPDATE marks the hour it moves a row OUT of (OLD) as well as the hour it lands in (NEW): the open interval's row is
    refreshed with a newer collection_time, so a built hour loses a row. The threshold is the writer's own clock, not the
-   transaction start, and (V250, #7762) the hour of it with no offset: a row of an earlier hour is marked. */
+   transaction start, and (V251, #7762) the hour of it with no offset: a row of an earlier hour is marked. */
 DECLARE
     threshold timestamp := date_trunc('hour', clock_timestamp() AT TIME ZONE 'UTC');
     marked text := coalesce(nullif(current_setting('darling.query_store_compose_stamp_marked', true), ''), ',');
@@ -760,7 +760,7 @@ WHERE collection_time < $1;";
 
     /// <summary>
     /// What follows an hour expression to say "an open writer would defer this hour" against the <c>cutoff</c> CTE
-    /// (<see cref="WriterCutoffSql"/>): the row trigger (V250) skips a row of the writer's own hour, so a row of hour H can land
+    /// (<see cref="WriterCutoffSql"/>): the row trigger (V251) skips a row of the writer's own hour, so a row of hour H can land
     /// unmarked only while the store's clock is before H + 1 h (<see cref="OpenWriterSql"/>, <see cref="WriterGuardSql"/>). The planner and the fleet rollup read both
     /// use it, so an hour the builder will not build because of a writer is the same hour the read does not wait for.
     /// </summary>
@@ -769,7 +769,7 @@ WHERE collection_time < $1;";
     /// <summary>
     /// The margin guard (#5582 review round 1, narrowed in round 2): the oldest open WRITER OF THE WIDE TABLE (<see cref="WideWriterRowsSql"/>)
     /// that could hold an unmarked row of the hour, if there is one: $1 the hour. The row trigger skips a row whose
-    /// <c>collection_time</c> is in the hour of the writer's clock (<see cref="WhenOffset"/> is zero from V250), so a row of hour H can land
+    /// <c>collection_time</c> is in the hour of the writer's clock (<see cref="WhenOffset"/> is zero from V251), so a row of hour H can land
     /// unmarked only while the store's clock is before H + 1 h (<see cref="WriterGuardSql"/>), and the writer's transaction began before that. If such a transaction is
     /// still open when the build starts, its rows may commit after the build read them, and nothing would ever mark the pair: the hour
     /// would read as current with the rows missing. So the build waits (it is deferred to the next tick) until no such transaction is
