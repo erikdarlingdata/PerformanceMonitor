@@ -382,6 +382,8 @@ export function plainText(text) {
   /* A trend's width note: "...near 1500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer
      points." The page picks the width, so only the narrower range is left to say. */
   t = t.replace(/pass bucket_minutes \(1-\d+\) for another width, or /g, "");
+  /* #7684 item 2: the Monitor statements switch sits right above this sentence on the Queries, Waits and Active Queries panels, so it names the switch, not the argument the MCP reply names. */
+  t = t.replace(/Pass include_monitor=true to include them\./g, "Turn on Monitor statements to include them.");
   /* #5644 W8: a trend note's closing advice, and the field names it explains. The CPU and Memory pages have no bucket control (the
      page picks the width), so "narrow the bucket" is said as the control that exists, the time range; the Waits, Latch/Spinlock
      and Activity notes name their fields by the column or tile the page shows. */

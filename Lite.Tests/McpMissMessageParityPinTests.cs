@@ -93,7 +93,7 @@ public sealed class McpMissMessageParityPinTests
     public static TheoryData<string> SharedMissFragments() => new()
     {
         /* get_wait_types */
-        "This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.",
+        "This server has collected wait stats before, so this window was quiet — widen hours_back to find the most recent samples.",
         "Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled.",
 
         /* get_collection_log. Byte-identical in DarlingMcpDataTools and Lite McpHealthTools, and it was
@@ -104,8 +104,8 @@ public sealed class McpMissMessageParityPinTests
         /* #4966: the covered-window variants of the quiet and all-clear CLAIMS, byte-identical on both SKUs. Each sits after
            the message's own factual first sentence, which is kept on a cut window too. The cut-window claims are two
            constants in Common (McpHelpers.CutWindowNothingMessage and CutWindowNothingReadMessage), pinned below. */
-        "The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind.",
-        "this IS the all-clear for this read.",
+        "The blocking collectors have run successfully for this server, so there was no blocking or deadlock in this window.",
+        "this is the all-clear for this read.",
         "A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected.",
         "This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist.",
 
@@ -236,7 +236,7 @@ public sealed class McpMissMessageParityPinTests
            stamp), so what is compared is the literal text a caller receives. The dead rung keeps the
            "system_health session is started" sentence EngineCapabilityMissTests pins on both SKUs. */
         ". Events ARE being captured, so this is the healthy answer for this read rather than missing data.",
-        ", so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events.",
+        ", so nothing happened in this window — widen hours_back to reach the most recent events.",
         " — so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot, and a wider window would not change it.",
         "No system_health events of ANY type have EVER been captured for ",
         ", so this is NOT an all-clear — there is nothing here to be clear about. This read is served from the collected system_health ring buffer: check that collection is running for this server and that its system_health session is started before concluding nothing happened.",
