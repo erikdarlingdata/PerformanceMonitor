@@ -40,6 +40,13 @@ public class DataImportService
         public int FilesImported { get; init; }
         public int TablesFlushed { get; init; }
         public string? ErrorMessage { get; init; }
+
+        /// <summary>
+        /// True when the archive views were rebuilt over the imported files: after a full import, and after a partial
+        /// one whose old hot database could not be read. The window then re-reads the store. False when the import
+        /// was cancelled at the retry prompt or failed before the copy.
+        /// </summary>
+        public bool ViewsRefreshed { get; init; }
     }
 
     /// <summary>
@@ -52,10 +59,10 @@ public class DataImportService
 
     /// <summary>
     /// Opens the old DuckDB in read-write mode to flush hot table data to parquet. <c>Failure</c> says why the open
-    /// failed, <see cref="DataImportOpenFailure.None"/> when it opened. <c>FailureMessage</c> is the user-facing text for a
-    /// failure no retry can fix, and null for a lock or an unknown failure, which the caller handles with its retry prompt.
+    /// failed, <see cref="DataImportOpenFailure.None"/> when it opened, and <c>OpenError</c> is the exception behind a
+    /// failure, whose text the caller's message carries.
     /// </summary>
-    public static (DataImportOpenFailure Failure, int TablesFlushed, string? FailureMessage) FlushOldDatabase(string folderPath)
+    public static (DataImportOpenFailure Failure, int TablesFlushed, Exception? OpenError) FlushOldDatabase(string folderPath)
     {
         var dbPath = Path.Combine(folderPath, "monitor.duckdb");
         var archivePath = Path.Combine(folderPath, "archive");
@@ -72,7 +79,7 @@ public class DataImportService
             connection?.Dispose();
             var failure = DataImportOpenFailureClassifier.Classify(ex);
             AppLogger.Warn("DataImport", $"Could not open old database for flushing ({failure}): {ex.Message}");
-            return (failure, 0, failure is DataImportOpenFailure.Locked or DataImportOpenFailure.Unknown ? null : DataImportOpenFailureClassifier.UserMessage(failure, ex));
+            return (failure, 0, ex);
         }
 
         try
@@ -200,6 +207,10 @@ public class DataImportService
         AppLogger.Info("DataImport", "Archive views refreshed after import");
     }
 
+    /* Test seam: stands in for FlushOldDatabase inside RunImportAsync, so a test can drive the retry loop with a Locked
+       or an Unknown open failure. A real lock needs a second process, and an unknown failure has no file shape to stage. */
+    internal Func<string, (DataImportOpenFailure Failure, int TablesFlushed, Exception? OpenError)>? FlushOldDatabaseForTests { get; set; }
+
     /// <summary>
     /// Runs the full import pipeline: flush old DB, copy parquet files, refresh views.
     /// This method is designed to be called from a background thread via Task.Run.
@@ -215,7 +226,8 @@ public class DataImportService
                it frees the file. A failure no known shape matches gets the same prompt, since that is the one remedy a
                user can try. A storage-version mismatch or a corrupt file is final: the hot data cannot be read, so the
                import goes on to the archive folder and reports the failure next to what it copied. */
-            var (failure, tablesFlushed, failureMessage) = FlushOldDatabase(sourceFolder);
+            var flush = FlushOldDatabaseForTests ?? FlushOldDatabase;
+            var (failure, tablesFlushed, openError) = flush(sourceFolder);
             while (failure is DataImportOpenFailure.Locked or DataImportOpenFailure.Unknown)
             {
                 var retry = await tryLockOldDb(sourceFolder);
@@ -224,7 +236,7 @@ public class DataImportService
                     AppLogger.Info("DataImport", "Import cancelled by user (database lock)");
                     return new ImportResult { Success = false, ErrorMessage = "Import cancelled." };
                 }
-                (failure, tablesFlushed, failureMessage) = FlushOldDatabase(sourceFolder);
+                (failure, tablesFlushed, openError) = flush(sourceFolder);
             }
 
             if (failure == DataImportOpenFailure.None)
@@ -249,7 +261,8 @@ public class DataImportService
                 {
                     Success = false,
                     FilesImported = filesCopied,
-                    ErrorMessage = DataImportOpenFailureClassifier.WithArchiveOutcome(failureMessage!, filesCopied)
+                    ViewsRefreshed = true,
+                    ErrorMessage = DataImportOpenFailureClassifier.UserMessage(failure, openError!, filesCopied)
                 };
             }
 
@@ -259,7 +272,8 @@ public class DataImportService
             {
                 Success = true,
                 FilesImported = filesCopied,
-                TablesFlushed = tablesFlushed
+                TablesFlushed = tablesFlushed,
+                ViewsRefreshed = true
             };
         }
         catch (Exception ex)

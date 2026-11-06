@@ -40,8 +40,9 @@ public enum DataImportOpenFailure
 /// suffix DuckDB appends on Windows when it can name the holder, which survives an OS message in another language. A
 /// Win32 sharing-violation (32) or lock-violation (33) code carried as an exception HResult. The same code on an inner
 /// <see cref="Win32Exception"/>.</para>
-/// <para>A storage mismatch reports "Trying to read a database file with version number" or "Failed to deserialize".
-/// Corruption reports "not a valid DuckDB database file" or "Corrupt database file". Anything else is
+/// <para>A storage mismatch reports "Trying to read a database file with version number", "Failed to deserialize" or
+/// the bare words "storage version". Corruption reports "not a valid DuckDB database file" or "Corrupt database file".
+/// The phrases are matched over the exception's full text, inner exceptions included. Anything else is
 /// <see cref="DataImportOpenFailure.Unknown"/>. Pure, so a test drives it with the exception shapes alone.</para>
 /// </summary>
 public static class DataImportOpenFailureClassifier
@@ -90,21 +91,22 @@ public static class DataImportOpenFailureClassifier
     private static bool IsSharingOrLockViolation(int code) => code is SharingViolation or LockViolation;
 
     /// <summary>
-    /// The message the import reports for a failure no retry can fix. It names the cause and carries DuckDB's own text.
+    /// The message the import reports for a failure no retry can fix, built after the archive copy so it states what
+    /// the import did: the parquet files copied from the previous install's archive folder, or that there were none,
+    /// and that the data the old install had not yet archived was not imported. It names the cause and carries
+    /// DuckDB's own text.
     /// </summary>
-    public static string UserMessage(DataImportOpenFailure failure, Exception ex) => failure switch
+    public static string UserMessage(DataImportOpenFailure failure, Exception ex, int filesCopied)
     {
-        DataImportOpenFailure.StorageVersion =>
-            "The previous install's database was written by a DuckDB storage version this build does not read, so the data it has not yet archived cannot be imported. Closing the previous application will not help.\n\n" + ex.Message,
-        _ =>
-            "The previous install's database could not be opened. The file is corrupt or incomplete, so the data it has not yet archived cannot be imported. Closing the previous application will not help.\n\n" + ex.Message,
-    };
-
-    /// <summary>
-    /// Appends what the import still did when the hot database could not be read: the parquet files copied from the
-    /// previous install's archive folder, or that there were none.
-    /// </summary>
-    public static string WithArchiveOutcome(string failureMessage, int filesCopied) => filesCopied == 0
-        ? failureMessage + "\n\nNo parquet files were found in the previous install's archive folder, so nothing was imported."
-        : failureMessage + $"\n\nThe previous install's archive folder was still imported: {filesCopied} parquet file(s) copied and the views refreshed. Only the data it had not yet archived is missing.";
+        var cause = failure == DataImportOpenFailure.StorageVersion
+            ? "The previous install's database was written by a DuckDB storage version this build does not read."
+            : "The previous install's database could not be opened: the file is corrupt or incomplete.";
+        var outcome = filesCopied switch
+        {
+            0 => "Its archive folder held no parquet files, so nothing was imported.",
+            1 => "Its archive folder was imported: 1 parquet file was copied and the views refreshed. The data it had not yet archived was not imported.",
+            _ => $"Its archive folder was imported: {filesCopied} parquet files were copied and the views refreshed. The data it had not yet archived was not imported.",
+        };
+        return $"{cause} {outcome} Closing the previous application will not help.\n\n{ex.Message}";
+    }
 }
