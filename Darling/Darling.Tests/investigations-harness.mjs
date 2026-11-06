@@ -88,6 +88,11 @@ const closes = [];
 let closeGate = null;
 /* When set, the service's answer to the next close writes: a refusal such as a 409 with its sentence (#7987). */
 let closeAnswer = null;
+/* #8007: a gate that holds the detail reads (get_investigation_reports) open, and the signal of each read sent while it is set, so a scenario
+   can drop the picked request while its detail read is still out and see whether the read was aborted. A held read whose signal is
+   aborted rejects with an AbortError once the gate opens, as a real fetch does. */
+let detailGate = null;
+const detailSignals = [];
 globalThis.fetch = async (url, init) => {
   const u = String(url);
   fetches.push(u);
@@ -107,6 +112,12 @@ globalThis.fetch = async (url, init) => {
     return { status: 200, ok: true, text: async () => JSON.stringify(body) };
   }
   const tool = u.split("/api/read/")[1].split("?")[0];
+  if (tool === "get_investigation_reports" && detailGate) {
+    const signal = init && init.signal ? init.signal : null;
+    detailSignals.push(signal);
+    await detailGate;
+    if (signal && signal.aborted) throw Object.assign(new Error("The operation was aborted."), { name: "AbortError" });
+  }
   const b = bodies[tool];
   if (b && b.fail) return { status: 500, ok: false, text: async () => JSON.stringify({ error: "the store is down" }) };
   return { status: 200, ok: true, text: async () => JSON.stringify(b) };
@@ -384,6 +395,46 @@ try {
   out.closedUnderFilter = await closeUnderFilter(openList(rowB, rowC), openList(rowC));
   out.closedLastUnderFilter = await closeUnderFilter(openList(rowB), { status: "empty", message: "No investigation request matches these filters." });
   out.closedNoRowsUnderFilter = await closeUnderFilter(openList(rowB), openList());
+  session.signed_in_admin = false;
+  bodies.list_investigation_requests = list(false);
+
+  /* #8007: request A's detail read is still out when A is dropped: by a State pick (the filter change) and by a list re-read that no longer
+     holds it (the poll's rebuild with A gone from the list). The read then answers. The pane must stay empty with no Close form for A, and
+     the read's fetch must have been aborted when A was dropped. */
+  session.signed_in_admin = true;
+  const droppedDetail = async (drop) => {
+    bodies.list_investigation_requests = list(false);
+    bodies.get_investigation_reports = reportsA;
+    renderInvestigations(main);
+    await settle();
+    let open;
+    detailGate = new Promise((r) => (open = r));
+    detailSignals.length = 0;
+    rowsOf(main)[0].handlers.click({ type: "click" });
+    await settle();
+    const paneWhileOut = slotText();
+    drop();
+    await settle();
+    const abortedBeforeAnswer = detailSignals.map((s) => (s ? s.aborted : false));
+    open();
+    detailGate = null;
+    await settle();
+    return {
+      detailReads: detailSignals.length,
+      paneWhileOut,
+      abortedBeforeAnswer,
+      pane: slotText(),
+      closeButtons: all(main, "button").filter((b) => b.attrs["data-close-request"] != null).length,
+    };
+  };
+  out.droppedByFilter = await droppedDetail(() => {
+    byLabel(main, "State").value = "claimed";
+    byLabel(main, "State").handlers.change();
+  });
+  out.droppedByReRead = await droppedDetail(() => {
+    bodies.list_investigation_requests = openList(rowB, rowC);
+    renderInvestigations(main);
+  });
   session.signed_in_admin = false;
   bodies.list_investigation_requests = list(false);
 
