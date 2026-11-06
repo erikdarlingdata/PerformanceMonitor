@@ -13,7 +13,7 @@
  * neither button: the server answers 403 to it anyway, so this is the affordance layer, never the enforcement.
  */
 
-import { el, mount, apiGet, apiGetFleet, apiWrite, readTool } from "../util.js";
+import { el, mount, apiGet, apiGetFleet, apiWrite, readTool, localTime } from "../util.js";
 import { getSession, peekSession } from "../views-api.js";
 import { plainTextCounts } from "../plain-text.js";
 
@@ -157,7 +157,8 @@ function resultTable(rows) {
   const body = rows.map((run) =>
     el("tr", {}, [
       el("td", {}, [String(run.collector)]),
-      el("td", {}, [run.collection_time ? new Date(run.collection_time).toLocaleString() : ""]),
+      /* #7930: collection_time is the store's naive UTC stamp (no zone); localTime reads it as UTC, as every other time cell does. */
+      el("td", {}, [run.collection_time ? localTime(run.collection_time) : ""]),
       el("td", {}, [String(run.status || "")]),
       el("td", {}, [run.rows_collected == null ? "" : String(run.rows_collected)]),
       el("td", {}, [run.error_message ? plainTextCounts(String(run.error_message)) : ""]),
