@@ -46,7 +46,8 @@ public sealed class QueryStoreRegressionsWindowSplitTests : IClassFixture<Shared
 
     /// <summary>Query 1 has a baseline interval 3 days back (100 runs at 1 ms) and one interval with a snapshot a minute before the
     /// window start (100 runs) and its latest a minute after it (150 runs, last run after the start). Those 150 runs are the recent
-    /// window's alone: 100 baseline runs and 150 recent, not 250 and 150.</summary>
+    /// window's alone: 100 baseline runs and 150 recent. The old read gave 200 and 150: its baseline kept the latest snapshot of each interval
+    /// collected before the start (interval 1's 100 and interval 2's 100 from a minute before it), and its recent window kept interval 2's 150.</summary>
     [Fact]
     public async Task AnIntervalSnapshottedOnBothSidesOfTheWindowStart_CountsOnTheRecentSideOnly()
     {
@@ -112,6 +113,85 @@ public sealed class QueryStoreRegressionsWindowSplitTests : IClassFixture<Shared
         Assert.Equal("timeouts", row.RegressionReason);
         Assert.Equal(5, row.Aborted.RecentCount);
         Assert.Null(row.Aborted.BaselinePerHour);
+    }
+
+    /// <summary>The same baseline that holds no hours, with Errors (Exception runs) instead of timeouts: the errors arm of the empty-baseline
+    /// rule lists the query on its 5 recent errors and the baseline's per-hour figure stays null, not compared with the 5 baseline errors.</summary>
+    [Fact]
+    public async Task ABaselineThatHoldsNoHours_ListsTheRecentErrors_AndLeavesTheBaselineRateNull()
+    {
+        var (asOf, start) = Window();
+        await SeedAsync(start.AddMinutes(10), start.AddMinutes(-5), 5, 1000, intervalId: 1, queryId: 5, executionType: "Exception");
+        await SeedAsync(start.AddMinutes(20), start.AddMinutes(20), 5, 1000, intervalId: 2, queryId: 5, executionType: "Exception");
+
+        var row = Assert.Single(await ReadAsync(asOf));
+
+        Assert.Equal(5, row.QueryId);
+        Assert.Equal("errors", row.RegressionReason);
+        Assert.Equal(5, row.Exception.RecentCount);
+        Assert.Null(row.Exception.BaselinePerHour);
+    }
+
+    /// <summary>An empty baseline puts a timeouts row in the HIGH band, as a baseline that had none does: the 5 baseline timeouts have no rate
+    /// to divide, so the row is not a MEDIUM one.</summary>
+    [Fact]
+    public async Task ABaselineThatHoldsNoHours_PutsTheTimeoutsRowInTheHighBand()
+    {
+        var (asOf, start) = Window();
+        await SeedAsync(start.AddMinutes(10), start.AddMinutes(-5), 5, 1000, intervalId: 1, queryId: 6, executionType: "Aborted");
+        await SeedAsync(start.AddMinutes(20), start.AddMinutes(20), 5, 1000, intervalId: 2, queryId: 6, executionType: "Aborted");
+
+        var row = Assert.Single(await ReadAsync(asOf));
+
+        Assert.Equal("timeouts", row.RegressionReason);
+        Assert.Equal("HIGH", row.Severity);
+    }
+
+    /// <summary>The errors twin of the timeouts band test above.</summary>
+    [Fact]
+    public async Task ABaselineThatHoldsNoHours_PutsTheErrorsRowInTheHighBand()
+    {
+        var (asOf, start) = Window();
+        await SeedAsync(start.AddMinutes(10), start.AddMinutes(-5), 5, 1000, intervalId: 1, queryId: 7, executionType: "Exception");
+        await SeedAsync(start.AddMinutes(20), start.AddMinutes(20), 5, 1000, intervalId: 2, queryId: 7, executionType: "Exception");
+
+        var row = Assert.Single(await ReadAsync(asOf));
+
+        Assert.Equal("errors", row.RegressionReason);
+        Assert.Equal("HIGH", row.Severity);
+    }
+
+    /// <summary>The tool description says a baseline with no hours still lists cost against an interval that ran before the window start and
+    /// was collected after it. Query 8's interval 1 is that interval (100 Regular runs at 1 ms, last run before the start, collected after
+    /// it, so the store holds no baseline hour), and the 150 runs at 10 ms in the window are compared with it (they add 1.35 s of CPU, over the cost floor).</summary>
+    [Fact]
+    public async Task ABaselineThatHoldsNoHours_ListsCostAgainstAnIntervalThatRanBeforeTheStart()
+    {
+        var (asOf, start) = Window();
+        await SeedAsync(start.AddMinutes(10), start.AddMinutes(-5), 100, 1000, intervalId: 1, queryId: 8);
+        await SeedAsync(start.AddMinutes(20), start.AddMinutes(20), 150, 10_000, intervalId: 2, queryId: 8);
+
+        var row = Assert.Single(await ReadAsync(asOf));
+
+        Assert.Equal(8, row.QueryId);
+        Assert.Equal("cost", row.RegressionReason);
+        Assert.Equal(100, row.BaselineExecCount);
+        Assert.Equal(1.0, row.BaselineCpuMs, 3);
+        Assert.Equal(10.0, row.RecentCpuMs, 3);
+    }
+
+    /// <summary>An interval whose only snapshot was collected after the window start but last ran before it: the read puts it on the baseline
+    /// side, so the probe says the baseline has rows and the recent window has none. The old probe tested collection_time and said the opposite.</summary>
+    [Fact]
+    public async Task Coverage_PutsAnIntervalCollectedAfterTheStartButLastRunBeforeItOnTheBaselineSide()
+    {
+        var (asOf, start) = Window();
+        await SeedAsync(start.AddMinutes(10), start.AddMinutes(-5), 100, 10_000, intervalId: 1, queryId: 9);
+
+        var (hasBaseline, hasRecent) = await new LocalDataService(_duckDb).GetQueryStoreRegressionCoverageAsync(_serverId, 2, asOf);
+
+        Assert.True(hasBaseline);
+        Assert.False(hasRecent);
     }
 
     private static (DateTime AsOf, DateTime Start) Window()
