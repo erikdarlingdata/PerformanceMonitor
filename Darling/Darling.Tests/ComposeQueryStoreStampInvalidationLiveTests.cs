@@ -67,6 +67,42 @@ JOIN collect.query_store_compose_stamp_hours AS h ON h.hour = b.hour
 WHERE b.built_seq IS DISTINCT FROM b.late_seq", ct);
 
     [Fact]
+    public async Task StalePairsOnSomeServers_DoNotMoveTheTail_AndThePanelAnswersWhatTheWideTableAloneAnswers()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), ComposeStampLiveSupport.SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection, source, hourNow) = await ComposeStampLiveSupport.ArrangeAsync(ct);
+        var bodySucceeded = false;
+        try
+        {
+            var start = hourNow.AddHours(-28).AddMinutes(17);
+            var end = hourNow.AddMinutes(-40);
+
+            /* Stale pairs on servers 1 and 2 (server 1 in two hours, one of them shared with server 2), none on server 3. */
+            await ComposeStampLiveSupport.InsertRowAsync(connection, 1, hourNow.AddHours(-10).AddMinutes(55), 9_000_001, ct);
+            await ComposeStampLiveSupport.InsertRowAsync(connection, 1, hourNow.AddHours(-20).AddMinutes(40), 9_000_002, ct);
+            await ComposeStampLiveSupport.InsertRowAsync(connection, 2, hourNow.AddHours(-10).AddMinutes(50), 9_000_003, ct);
+            Assert.Equal(
+                $"{Pair(1, hourNow.AddHours(-20))},{Pair(1, hourNow.AddHours(-10))},{Pair(2, hourNow.AddHours(-10))}",
+                await StaleListAsync(connection, ct));
+
+            /* The lookup passes every stale hour: the hours after the oldest stale one come from the rollup, not the tail. */
+            var through = await ComposeStampLiveSupport.StampThroughAsync(connection, start, end, ct);
+            Assert.Equal(end, through);
+
+            /* Every row once, none twice: the answer equals the one with no rollup at all, for the fleet, a server with stale pairs and the one without. */
+            await AssertSameAsOracleAsync(connection, start, end, through, null, "stale pairs, fleet", ct);
+            await AssertSameAsOracleAsync(connection, start, end, through, new[] { "srv1" }, "stale pairs, server 1", ct);
+            await AssertSameAsOracleAsync(connection, start, end, through, new[] { "srv3" }, "stale pairs, server 3 (none stale)", ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await ComposeStampLiveSupport.CleanupAsync(scratch, connection, source, bodySucceeded);
+        }
+    }
+
+    [Fact]
     public async Task AReplayedRow_AndARowMovedOutOfABuiltHour_DoNotMoveTheLookup_TheStaleArmGivesTheOraclesAnswer_AndARebuildMakesTheHourCurrent()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), ComposeStampLiveSupport.SkipReason);

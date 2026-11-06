@@ -213,6 +213,13 @@ VALUES (TIMESTAMP '{At(collectionTime)}', {serverId}, 'dbX', 99, 99, 'Regular', 
     /// <summary>The 'now' a builder tick is given: half past <paramref name="hourNow"/>, taken from the same clock read as the seed's hour so a run that crosses an hour boundary mid-test cannot move the builder's cut-off past the seeded data.</summary>
     internal static DateTime ClockWithin(DateTime hourNow) => hourNow + ClockOffset;
 
+    /// <summary>
+    /// Puts the newest two seeded hours back to never built (their rows leave the hours table), the shape every seed had when the lag was three
+    /// hours: the lookup then answers <c>hourNow - 2 h</c> and the tail holds the two newest hours. For the tests that read the tail arm.
+    /// </summary>
+    internal static Task UnbuildNewestTwoAsync(NpgsqlConnection connection, DateTime hourNow, CancellationToken ct) =>
+        ExecAsync(connection, $"DELETE FROM collect.query_store_compose_stamp_hours WHERE hour >= TIMESTAMP '{At(hourNow.AddHours(-2))}'", ct);
+
     /// <summary>The store's own clock (UTC), as the plan reads it.</summary>
     internal static async Task<DateTime> StoreClockAsync(NpgsqlConnection connection, CancellationToken ct)
     {
