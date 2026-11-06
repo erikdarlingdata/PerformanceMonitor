@@ -146,6 +146,34 @@ public sealed class InvestigationsPageTests
         Assert.Equal("", run.GetProperty("closed").GetString());
     }
 
+    /// <summary>#7956: the poll's rebuild of the page draws the Close form again with the reason as typed so far, in one box, and a
+    /// successful close sends that reason and clears it.</summary>
+    [Fact]
+    public void TheRebuild_KeepsTheCloseReasonBeingTyped_AndASuccessfulClose_SendsAndClearsIt()
+    {
+        var run = Run();
+        var draft = run.GetProperty("draft");
+        Assert.Equal("The blocker was a one-off import", draft.GetProperty("kept").GetString());
+        Assert.Equal(1, draft.GetProperty("boxes").GetInt32());
+        var closing = run.GetProperty("closing");
+        Assert.Equal("The blocker was a one-off import", closing.GetProperty("reasonSent").GetString());
+        Assert.Equal("", closing.GetProperty("draftAfterClose").GetString());
+    }
+
+    /// <summary>#7956: a close whose PUT is still out when the poll redraws the form: the new button is disabled, a press on it sends
+    /// nothing, one PUT reaches the service, and the button is enabled again once the service has answered.</summary>
+    [Fact]
+    public void ACloseInFlight_KeepsTheRebuiltButtonDisabled_AndOnePutIsSent()
+    {
+        var closing = Run().GetProperty("closing");
+        Assert.Equal("/api/investigation-requests/11111111-1111-1111-1111-111111111111/close", closing.GetProperty("url").GetString());
+        Assert.Equal(1, closing.GetProperty("putsBeforeReply").GetInt32());
+        Assert.True(closing.GetProperty("rebuiltDisabled").GetBoolean());
+        Assert.Equal(1, closing.GetProperty("putsAfterSecondPress").GetInt32());
+        Assert.Equal(1, closing.GetProperty("putsAfterReply").GetInt32());
+        Assert.True(closing.GetProperty("buttonEnabledAfter").GetBoolean());
+    }
+
     [Fact]
     public void AStateAndFamilyPick_AreSentToTheRead_AndDropTheOpenRequest()
     {
