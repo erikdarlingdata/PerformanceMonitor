@@ -159,7 +159,7 @@ export const IDENTITY_COLUMNS = [
   { key: "values_remaining", label: "Values remaining", align: "right", render: (r) => el("span", { text: identityDigits(r.values_remaining) }), sortValue: (r) => (r.values_remaining == null ? -1 : Number(r.values_remaining)) },
   { key: "rate_per_day", label: "Rate per day", format: "num1" },
   { key: "days_to_exhaustion", label: "Days to exhaustion", format: "num1" },
-  { key: "band", label: "Band", format: "text", small: true },
+  { key: "band", label: "Band", format: "status", small: true },
 ];
 const IDENTITY_SCAN_COLUMNS = [
   { key: "database", label: "Database", name: true },

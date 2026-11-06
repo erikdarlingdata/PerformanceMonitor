@@ -83,6 +83,17 @@ public sealed class WebChartAxisBehaviourTests
         Assert.Equal(new[] { "0.00", "2,000.00", "4,000.00", "6,000.00", "8,000.00", "10,000.00" }, Strings(r.GetProperty("pvsLarge")));
     }
 
+    /// <summary>#7670: the Collector Duration Trends chart, drawn by the shipped panel (shared.js) from a stand-in read. A longest run of 78 s
+    /// reads in minutes, and its ticks are picked in minutes: 0, 0.5, 1.0, 1.5 min, not 20 s steps that printed as 0.3 and 0.7 min. A run under a
+    /// minute keeps its seconds.</summary>
+    [Fact]
+    public void TheCollectorDurationAxis_PicksItsTicksInTheUnitItPrints()
+    {
+        var r = Run();
+        Assert.Equal(new[] { "0 min", "0.5 min", "1.0 min", "1.5 min" }, Strings(r.GetProperty("collectorDurationMinutes")));
+        Assert.Equal(new[] { "0 s", "10 s", "20 s", "30 s", "40 s" }, Strings(r.GetProperty("collectorDurationSeconds")));
+    }
+
     /// <summary>A range that was already whole reads exactly as before, and a formatter that ignores the step still draws no
     /// repeated label: the repeat is left blank.</summary>
     [Fact]
@@ -405,6 +416,7 @@ public sealed class WebChartAxisBehaviourTests
         var c = Run().GetProperty("unitCaptions");
         Assert.Empty(Strings(c.GetProperty("ticksWithUnit")));
         Assert.Empty(Strings(c.GetProperty("ticksWithRateUnit")));
+        Assert.Empty(Strings(c.GetProperty("stackedSecondsTicks")));
         Assert.Equal(new[] { "MB" }, Strings(c.GetProperty("bareTicks")));
         Assert.Equal(new[] { "n" }, Strings(c.GetProperty("secondAxisWithUnit")));
     }

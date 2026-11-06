@@ -148,7 +148,7 @@ BEGIN TRY
     SELECT
         @cpu_count = osi.cpu_count,
         @hyperthread_ratio = osi.hyperthread_ratio,
-        @physical_memory_mb = osi.physical_memory_kb / 1024,
+        @physical_memory_mb = CONVERT(bigint, ROUND(osi.physical_memory_kb / 1024.0, 0)),
         @socket_count = osi.socket_count,
         @cores_per_socket = osi.cores_per_socket,
         @sqlserver_start_time = osi.sqlserver_start_time
