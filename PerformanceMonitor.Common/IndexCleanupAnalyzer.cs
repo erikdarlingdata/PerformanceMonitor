@@ -142,7 +142,7 @@ namespace PerformanceMonitor.Common
                 OverallRollup = BuildOverallRollup(databaseRollups),
                 UptimeWarning = uptimeWarning,
                 DedupeOnlyApplied = dedupeOnly,
-                Notes = BuildNotes(ordered),
+                Notes = BuildNotes(ordered, options),
             };
         }
 
@@ -1213,7 +1213,7 @@ namespace PerformanceMonitor.Common
             LatchWaitInMs = perDb.Sum(r => r.LatchWaitInMs),
         };
 
-        private static List<string> BuildNotes(List<IndexCleanupRecommendation> recommendations)
+        private static List<string> BuildNotes(List<IndexCleanupRecommendation> recommendations, IndexCleanupOptions options)
         {
             var notes = new List<string>();
 
