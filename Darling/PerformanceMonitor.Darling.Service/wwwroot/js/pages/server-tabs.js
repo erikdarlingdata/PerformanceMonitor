@@ -418,7 +418,9 @@ export const SERVER_TABS = [
           rowsKey: "blocked_sessions",
           xKey: "collection_time",
           series: BLOCKED_SESSION_SERIES,
-          format: "int",
+          /* #7877: each point is the MEAN of the collections in its bucket (0.4 sessions is real), so one decimal, and not format "int", which
+             would print 0.4 as 0 and also declare a count axis (whole-number ticks) for a series that is no longer whole. */
+          format: "num1",
           emptyText: "No blocked sessions in this window.",
         },
       ]),
