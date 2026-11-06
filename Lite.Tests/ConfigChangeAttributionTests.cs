@@ -1233,6 +1233,42 @@ public sealed class ConfigChangeAttributionTests
         Assert.Contains("The trace dated 1 of the 2 settings; `trace flag 4199` had no matching line", advice.Investigation, StringComparison.Ordinal);
     }
 
+    /// <summary>#7726 item 7: the settings the trace could not date print as words, not as store keys
+    /// (<c>Sales.state_desc</c>, <c>Sales.is_query_store_on</c>).</summary>
+    [Fact]
+    public void Compose_UndatedDatabaseSettings_PrintAsWords_NotStoreKeys()
+    {
+        var dbEvent = Assert.Single(DatabaseEvents(
+            [DbSnapshot(T0.AddHours(-23), "Sales", ("state_desc", "ONLINE"), ("is_query_store_on", "false")), DbSnapshot(T0, "Sales", ("state_desc", "OFFLINE"), ("is_query_store_on", "true"))],
+            T0.AddHours(-4), T0.AddHours(1)));
+        var folded = Assert.Single(ConfigChangeAttribution.MergeSameConnectEvents([MaxdopEvent(T0.AddSeconds(-2), T0.AddHours(-23)), dbEvent]));
+        var lines = new[] { new ConfigChangeAttribution.TraceLine(T0.AddHours(-5), RawLine(Maxdop, 0, 8)) };
+        var anchor = ConfigChangeAttribution.ResolveServerConfigTraceAnchor(folded, lines);
+
+        var fact = ConfigChangeAttribution.BuildFact(1, folded, 0, ConfigChangeAttribution.WindowsFor(T0.AddHours(-5), T0.AddHours(4)), null, null, null, anchor);
+        var advice = FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { fact }.ToFactLookup())!;
+
+        Assert.Contains("The trace dated 1 of the 3 settings; ", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("the state of `Sales`", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("whether Query Store is on in `Sales`", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("`Sales.state_desc`", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("`Sales.is_query_store_on`", advice.Investigation, StringComparison.Ordinal);
+    }
+
+    /// <summary>#7726 items 1 and 7: the memory pressure card names no tool in the sentence a person reads, and the
+    /// single-use plans card cites no source file of the frozen Dashboard.</summary>
+    [Fact]
+    public void Compose_StaticCards_CiteNeitherATool_NorADashboardSourceLine()
+    {
+        var pressure = FactAdvice.Compose("MEMORY_PRESSURE_EVENTS", Array.Empty<Fact>().ToFactLookup())!;
+        Assert.DoesNotContain("get_memory_pressure_events", pressure.Investigation, StringComparison.Ordinal);
+        Assert.Contains("lists each notification with its process and system indicators", pressure.Investigation, StringComparison.Ordinal);
+
+        var bloat = FactAdvice.Compose("PLAN_CACHE_BLOAT", Array.Empty<Fact>().ToFactLookup())!;
+        Assert.DoesNotContain("install/47", bloat.Remediation + bloat.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("Sourced from", bloat.Remediation + bloat.Investigation, StringComparison.Ordinal);
+    }
+
     /// <summary>The database family's prose: the headline names the family and the database, the body its option old → new, the remediation its history read and grader.</summary>
     [Fact]
     public void Compose_DatabaseFamily_NamesTheDatabase_TheOption_AndItsOwnTools()
