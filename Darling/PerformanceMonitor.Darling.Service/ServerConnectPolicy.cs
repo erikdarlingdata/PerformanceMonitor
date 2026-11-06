@@ -299,6 +299,7 @@ internal sealed class LivenessProbeMemo
 
     private LivenessVerdict? _last;
     private int _timedOutInARow;
+    private int _generation;
 
     /// <summary>The last verdict, or null when none is held.</summary>
     internal LivenessVerdict? Last => _last;
@@ -309,6 +310,7 @@ internal sealed class LivenessProbeMemo
     /// <summary>Forgets the verdict and the streak: the runtime was dropped, and a reconnected server starts afresh.</summary>
     internal void Clear()
     {
+        Interlocked.Increment(ref _generation);
         _last = null;
         _timedOutInARow = 0;
     }
@@ -326,7 +328,9 @@ internal sealed class LivenessProbeMemo
     /// The held verdict when it is fresh, else <paramref name="probe"/>'s answer, remembered as of <paramref name="nowUtc"/>:
     /// a login counts the server alive and ends the timed-out streak, a timeout counts it alive while the streak is within
     /// <see cref="MaxTimedOutProbesInARow"/> and dead past it, and any other fault counts it dead. Two timeouts that arrive
-    /// together with no verdict held may both probe; the later answer is the one kept.
+    /// together with no verdict held may both probe; the later answer is the one kept. A probe that returns after
+    /// <see cref="Clear"/> ran (a Dead verdict dropped the runtime while it was in flight) answers its own caller but writes
+    /// neither the streak nor a verdict: it is about the connection that was let go, not the one that replaces it (#7851).
     /// </summary>
     internal async Task<bool> ProbeAsync(
         ServerRuntime runtime,
@@ -339,20 +343,30 @@ internal sealed class LivenessProbeMemo
             return last.Alive;
         }
 
+        var generation = Volatile.Read(ref _generation);
         var outcome = await probe(runtime, cancellationToken).ConfigureAwait(false);
         var alive = false;
+        var current = generation == Volatile.Read(ref _generation);
         switch (outcome)
         {
             case LivenessProbeOutcome.LoggedIn:
-                _timedOutInARow = 0;
+                if (current)
+                {
+                    _timedOutInARow = 0;
+                }
+
                 alive = true;
                 break;
             case LivenessProbeOutcome.TimedOut:
-                alive = Interlocked.Increment(ref _timedOutInARow) <= MaxTimedOutProbesInARow;
+                alive = !current || Interlocked.Increment(ref _timedOutInARow) <= MaxTimedOutProbesInARow;
                 break;
         }
 
-        _last = new LivenessVerdict(nowUtc, outcome, alive);
+        if (current)
+        {
+            _last = new LivenessVerdict(nowUtc, outcome, alive);
+        }
+
         return alive;
     }
 }
