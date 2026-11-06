@@ -225,9 +225,12 @@ FROM
            row of a cached plan resolves to the same plan XML. Without this rank the hottest plan fills all
            ten slots and is parsed once per snapshot, so PLAN_WARNING's warning_count and critical_count
            multiply by its snapshot count and the two facts cover one to three plans instead of ten. The
-           plan's costliest snapshot row stands for it, and the limit below counts distinct plans. A row
-           stored without a query_plan_hash keys on its plan_handle, so a missing hash never merges two plans. */
-        ROW_NUMBER() OVER (PARTITION BY COALESCE(query_plan_hash, plan_handle) ORDER BY delta_worker_time DESC) AS plan_rank
+           plan's costliest snapshot row stands for it, and the limit below counts distinct plans. A plan is
+           a statement's plan in one database: query_plan_hash is a shape hash that two statements with one
+           shape share, as does one statement in two databases, and a hashless row's plan_handle is shared by
+           every statement in its batch, so database_name and query_hash stay in the key. The window sorts
+           every in-window row that has a plan, plan column included, before the limit takes ten. */
+        ROW_NUMBER() OVER (PARTITION BY database_name, query_hash, COALESCE(query_plan_hash, plan_handle) ORDER BY delta_worker_time DESC) AS plan_rank
     FROM v_query_stats
     WHERE server_id = $1
     AND   collection_time >= $2
