@@ -8,7 +8,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
@@ -82,5 +84,51 @@ public sealed class ViewerDisabledServerStatusTests
         var fleet = new List<DarlingServer> { Server(1, isEnabled: true), Server(2, isEnabled: true) };
 
         Assert.Equal(2, MainWindow.OverviewServers(fleet).Count);
+    }
+
+    /// <summary>A healthy card whose deadlock collector ran, so the coverage line reads the card as covered.</summary>
+    private static ServerSummaryItem Card(DarlingServer server) => new()
+    {
+        ServerId = server.ServerId,
+        DisplayName = server.DisplayName,
+        ServerName = server.ServerName,
+        IsOnline = true,
+        DeadlockCollectorBand = CollectorHealthClassifier.Healthy,
+    };
+
+    /// <summary>
+    /// The Overview's total is the enabled fleet, while the sidebar's "Servers: N" counts every registered server, so
+    /// a fleet with a disabled server shows two different numbers. Every roll-up line that states the Overview's count
+    /// says which one it is.
+    /// </summary>
+    [Fact]
+    public void OverviewRollup_LabelsItsCountAsEnabledServers()
+    {
+        var fleet = new List<DarlingServer>
+        {
+            Server(1, isEnabled: true),
+            Server(2, isEnabled: false),
+            Server(3, isEnabled: true),
+        };
+        var enabled = MainWindow.OverviewServers(fleet);
+        var cards = enabled.Select(Card).ToList();
+
+        var whole = OverviewCardView.BuildRollup(cards, new FleetTotals(), registeredCount: enabled.Count, search: null);
+
+        Assert.Equal(2, whole.TotalServers);
+        Assert.Equal("Monitoring 2 enabled servers", whole.MonitoringText);
+        Assert.Equal("All 2 enabled servers healthy", whole.AllHealthyText);
+        Assert.Equal("Deadlock coverage: read all 2 enabled servers", whole.DeadlockCoverageText);
+
+        /* The search narrows the roll-up to the matching cards; the denominator is still the enabled fleet. */
+        var narrowed = OverviewCardView.BuildRollup(cards, new FleetTotals(), registeredCount: enabled.Count, search: "target-1");
+
+        Assert.Equal("Monitoring 1 of 2 enabled servers", narrowed.MonitoringText);
+
+        var one = OverviewCardView.BuildRollup(cards.Take(1).ToList(), new FleetTotals(), registeredCount: 1, search: null);
+
+        Assert.Equal("Monitoring 1 enabled server", one.MonitoringText);
+        Assert.Equal("All 1 enabled server healthy", one.AllHealthyText);
+        Assert.Equal("Deadlock coverage: read all 1 enabled server", one.DeadlockCoverageText);
     }
 }
