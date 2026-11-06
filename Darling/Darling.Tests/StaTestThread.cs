@@ -303,6 +303,7 @@ internal sealed class StaHost
             var began = Environment.TickCount64;
             Interlocked.Exchange(ref _bodyBegan, began);
             var opsAtStart = Interlocked.Read(ref _opsStarted);
+            var engineLoadedAtStart = StaThreadProbe.RenderEngineLoaded();
             _step = "(the body named no step)";
             Interlocked.Exchange(ref _stepTick, began);
             var finished = dispatcher.InvokeAsync(() => Job(body, e => error = e)).Task.Unwrap();
@@ -318,7 +319,7 @@ internal sealed class StaHost
                 throw new TimeoutException(
                     $"WPF test body did not return within {(HangGuard < TimeSpan.FromSeconds(1) ? $"{HangGuard.TotalMilliseconds:0} ms" : $"{HangGuard.TotalSeconds:0} s")}: {name}. The shared STA test thread is stuck inside it, "
                     + "so every WPF test that starts while it is still inside fails at once naming this test (#5602). "
-                    + DescribeStuckBody(opsAtStart));
+                    + DescribeStuckBody(opsAtStart, engineLoadedAtStart));
             }
 
             error?.Throw();
@@ -422,7 +423,7 @@ internal sealed class StaHost
     /// named, what the dispatcher has been doing (a run of operations that never ends, one operation that never finishes, or nothing at
     /// all), and whether the thread is burning CPU or waiting. It samples for a quarter second, so "burning" means it is still going now.
     /// </summary>
-    private string DescribeStuckBody(long opsAtStart)
+    private string DescribeStuckBody(long opsAtStart, bool engineLoadedAtStart)
     {
         try
         {
@@ -437,6 +438,7 @@ internal sealed class StaHost
             var cpuAfter = ReadThread(out var threadState, out var inWait);
             var countersAfter = ReadProbe(StaThreadProbe.ReadCounters);
             var stackAfter = ReadText(() => StaThreadProbe.NativeStack(_nativeThreadId));
+            var renderThreads = ReadText(() => StaThreadProbe.RenderThreadStacks(_nativeThreadId));
             var running = startedAfter - Interlocked.Read(ref _opsCompleted);
             var last = _lastStarted;
             var lastName = last is null
@@ -458,7 +460,7 @@ internal sealed class StaHost
                 + $"The dispatcher started {startedBefore - opsAtStart} operations during the body and {ran} more in the next {s_sampleWindow.TotalMilliseconds:0} ms, "
                 + $"{running} of them still running; the last it started was {lastName}. "
                 + $"The thread is {threadState} and used {cpu.TotalMilliseconds:0} ms of CPU in those {s_sampleWindow.TotalMilliseconds:0} ms, so {verdict} (#6216). "
-                + DescribeWhere(stackBefore, stackAfter, countersBefore, countersAfter);
+                + DescribeWhere(stackBefore, stackAfter, countersBefore, countersAfter, engineLoadedAtStart, renderThreads);
         }
         catch (Exception ex)
         {
@@ -471,15 +473,20 @@ internal sealed class StaHost
     /// explain. This adds what names the wait: the runtime's own state for the thread (WaitSleepJoin is a .NET wait on a lock, an event or a
     /// task; Running with an operating-system wait is a native call or a message wait), its native stack at the start and the end of the
     /// sample (the same frames twice is a thread parked in one call, not one that makes slow progress), and the process counters around it.
+    /// The three stalls of 11-06 then showed the thread waiting in <c>wpfgfx_cor3!MilComposition_SyncFlush</c> for WPF's render thread, early in a
+    /// fresh process, in bodies of one TextBlock or one small window. So the message also says whether the render engine was already loaded when
+    /// the body began (a body that loads it pays the engine's start-up) and carries the render thread's own stack, which names what it waited on.
     /// </summary>
-    private string DescribeWhere(string stackBefore, string stackAfter, Result<StaThreadProbe.Counters> before, Result<StaThreadProbe.Counters> after)
+    private string DescribeWhere(
+        string stackBefore, string stackAfter, Result<StaThreadProbe.Counters> before, Result<StaThreadProbe.Counters> after, bool engineLoadedAtStart, string renderThreads)
     {
         var managed = _thread is { } thread ? thread.ThreadState.ToString() : "(the thread object was not kept)";
         var counters = before.Failure is null && after.Failure is null
             ? StaThreadProbe.Describe(before.Value, after.Value, s_sampleWindow)
             : $"(the process counters could not be read: {before.Failure ?? after.Failure})";
         var moved = stackBefore == stackAfter ? "the same at the start of the sample" : $"different at the start of the sample: {stackBefore}";
-        return $"The runtime's state for the thread is {managed}. Its native stack, leaf first, was {stackAfter}, and it was {moved}. {counters}";
+        return $"The runtime's state for the thread is {managed}. Its native stack, leaf first, was {stackAfter}, and it was {moved}. {counters} "
+            + $"WPF's render engine ({StaThreadProbe.RenderEngine}) was {(engineLoadedAtStart ? "already" : "not yet")} loaded when the body began. {renderThreads}";
     }
 
     private static string ReadText(Func<string> read)
