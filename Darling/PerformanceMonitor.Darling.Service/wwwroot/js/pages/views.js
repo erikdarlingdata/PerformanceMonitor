@@ -117,21 +117,32 @@ export async function renderViewList(main, opts) {
 
   /* #6243: the list needs only the session and the view list. The fleet read exists for the dashboard templates' server
      picker, so the list is drawn the moment those two answer; a slow or hung fleet read used to hold the page on
-     "Loading views…". The picker is filled in when the fleet answers, if the page is still this one. The poll keeps the
-     picker it has, so it does not read the fleet. */
-  const serversRead = inPlace ? null : loadServerNames();
+     "Loading views…". The picker is filled in when the fleet answers, if the page is still this one. The poll reads the
+     fleet too: a server added since the first paint reaches the picker on screen once the read answers. */
+  const serversRead = loadServerNames();
   const [session, res] = await Promise.all([api.getSession(), api.listViews()]);
   const canEdit = !!session.can_edit;
   const ourHash = location.hash;
 
+  /* The page is kept through the poll only while it shows the hero or the cards. A first paint that failed left an error page under the
+     key, and that is drawn again: there is no earlier list to keep under a refresh notice, and an empty list must draw the hero. */
+  const held = inPlace && holdsPage(main, LIST_KEY, true) && showsViews(main);
+
   if (res.kind === "error") {
-    if (inPlace && showRefreshError(main, LIST_KEY, res.message)) return;
+    if (held && showRefreshError(main, LIST_KEY, res.message)) return;
     showPage(main, LIST_KEY, [listHead(canEdit, []), errorStrip(res.message)]);
     return;
   }
 
   const views = Array.isArray(res.data) ? res.data : [];
-  if (inPlace && holdsPage(main, LIST_KEY, true) && swapCards(main, views)) return;
+  /* The affordances follow the session: a seat whose can_edit differs from what the page was drawn for (a probe that failed at the first
+     paint and has since answered, #7928) gets the page drawn again. Only the cards are swapped otherwise, and the fleet answer goes into
+     the pickers on screen when it arrives, so a slow fleet read does not hold the cards. */
+  if (held && editShown(main) === canEdit && swapCards(main, views)) {
+    const servers = await serversRead;
+    if (location.hash === ourHash && holdsPage(main, LIST_KEY, true)) refreshPickers(main, servers);
+    return;
+  }
 
   const head = listHead(canEdit, []);
   const nodes = [head];
@@ -146,7 +157,6 @@ export async function renderViewList(main, opts) {
   }
   showPage(main, LIST_KEY, nodes);
 
-  if (!serversRead) return;
   const servers = await serversRead;
   if (!servers.length || location.hash !== ourHash || main.firstChild !== head) return;
   if (!views.length) {
@@ -159,13 +169,14 @@ export async function renderViewList(main, opts) {
 }
 
 /* #7925: the poll's redraw of a list that is on screen. The cards are replaced in one step, with the reader's scroll position kept,
-   and the head and the import panel stay as they are; an earlier poll's failure notice comes down. False when the page is not a
-   list of cards (the first-run hero) and views now exist, or when it is one and no views are left: the caller draws the whole page.
-   A hero over a store that still has no views stays as it is. */
+   and the head and the import panel stay as they are; an earlier poll's failure notice comes down. True only when the page on screen
+   still fits the list: the cards with views to draw into them, or the hero over a store that still has no views, which stays as it is.
+   False otherwise, and the caller draws the whole page: the hero when views now exist, a list whose views are all gone, and an error
+   page, which shows neither. */
 function swapCards(main, views) {
   const children = () => Array.from(main.children || []);
   const live = children().find((n) => hasClass(n, "view-cards"));
-  if (!live) return !views.length;
+  if (!live) return !views.length && children().some((n) => hasClass(n, "views-hero"));
   if (!views.length) return false;
   keepScroll(() => {
     const stale = children().find((n) => hasClass(n, "refresh-error"));
@@ -175,8 +186,55 @@ function swapCards(main, views) {
   return true;
 }
 
+/* True while the page shows the hero or the cards, the two pages a poll keeps on screen. An error page is neither. */
+function showsViews(main) {
+  return Array.from(main.children || []).some((n) => hasClass(n, "view-cards") || hasClass(n, "views-hero"));
+}
+
+/* The can_edit the page on screen was drawn for. The template menu is drawn only for a seat that can edit, in the head and in the hero
+   alike, so its presence says which variant is up. */
+function editShown(main) {
+  return findAll(main, (n) => hasClass(n, "template-menu")).length > 0;
+}
+
+/* #7925: the poll's fleet answer, put into the pickers on screen: the head's template menu, and over the hero its menu and its starter
+   row. A picker that is up keeps its element and its picked server, so an open menu stays open and a pick stays picked; only its
+   options follow the fleet. A menu or starter row drawn while the fleet had no server gains the picker. An empty answer (a fleet with
+   no server, or a failed read) leaves the pickers as they are, as the first paint leaves them. */
+function refreshPickers(main, servers) {
+  if (!servers.length) return;
+  for (const menu of findAll(main, (n) => hasClass(n, "template-menu"))) {
+    const select = findAll(menu, (n) => hasClass(n, "starter-select"))[0];
+    const list = findAll(menu, (n) => hasClass(n, "template-list"))[0];
+    if (select) refreshServerSelect(select, servers);
+    else if (list) mount(list, Array.from(findAll(templateMenu(servers), (n) => hasClass(n, "template-list"))[0].children));
+  }
+  const row = findAll(main, (n) => hasClass(n, "hero-suggest"))[0];
+  if (row) {
+    const select = findAll(row, (n) => hasClass(n, "starter-select"))[0];
+    if (select) refreshServerSelect(select, servers);
+    else mount(row, Array.from(starterRow(servers).children));
+  }
+}
+
+/* The picker's options follow the fleet, and the picked server stays picked while the fleet still has it. A fleet that matches the
+   options already shown changes nothing. */
+function refreshServerSelect(select, servers) {
+  const shown = Array.from(select.children || []);
+  if (shown.length === servers.length && shown.every((o, i) => o.getAttribute("value") === servers[i].value && o.textContent === servers[i].label)) return;
+  const picked = select.value;
+  mount(select, servers.map((s) => el("option", { value: s.value, text: s.label })));
+  select.value = servers.some((s) => s.value === picked) ? picked : servers[0].value;
+}
+
 function hasClass(n, name) {
   return typeof n.className === "string" && (" " + n.className + " ").includes(" " + name + " ");
+}
+
+function findAll(node, pred, out = []) {
+  if (pred(node)) out.push(node);
+  for (const c of Array.from(node.children || [])) findAll(c, pred, out);
+  return out;
 }
 
 /* First-run hero (M4): a centered pitch + a prominent New view + a few starting-point ideas + the (secondary)

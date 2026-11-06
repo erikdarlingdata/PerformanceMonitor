@@ -48,14 +48,24 @@ export async function renderAlertRuleList(main, opts) {
   const [session, res, templates] = await Promise.all([api.getSession(), api.listAlertRules(), loadTemplates()]);
   const canEdit = !!session.can_edit;
 
+  /* The page is kept through the poll only while it shows the hero or the cards. A first paint that failed left an error page under the
+     key, and that is drawn again: there is no earlier list to keep under a refresh notice, and an empty list must draw the hero. */
+  const held = inPlace && holdsPage(main, LIST_KEY, true) && showsRules(main);
+
   if (res.kind === "error") {
-    if (inPlace && showRefreshError(main, LIST_KEY, res.message)) return;
+    if (held && showRefreshError(main, LIST_KEY, res.message)) return;
     showPage(main, LIST_KEY, [listHead(canEdit, templates), errorStrip(res.message)]);
     return;
   }
 
   const rules = Array.isArray(res.data) ? res.data : [];
-  if (inPlace && holdsPage(main, LIST_KEY, true) && swapCards(main, rules)) return;
+  /* The affordances follow the session: a seat whose can_edit differs from what the page was drawn for (a probe that failed at the first
+     paint and has since answered, #7928) gets the page drawn again. Only the cards are swapped otherwise, and the templates answer goes
+     into the menus on screen. */
+  if (held && editShown(main) === canEdit && swapCards(main, rules)) {
+    refreshTemplateMenus(main, templates);
+    return;
+  }
 
   const nodes = [listHead(canEdit, templates)];
 
@@ -71,13 +81,14 @@ export async function renderAlertRuleList(main, opts) {
 }
 
 /* #7927: the poll's redraw of a list that is on screen. The cards are replaced in one step, with the reader's scroll position kept,
-   and the head with its template menu stays as it is; an earlier poll's failure notice comes down. False when the page is not a list
-   of cards (the first-run hero) and rules now exist, or when it is one and no rules are left: the caller draws the whole page. A
-   hero over a store that still has no rules stays as it is. */
+   and the head with its template menu stays as it is; an earlier poll's failure notice comes down. True only when the page on screen
+   still fits the list: the cards with rules to draw into them, or the hero over a store that still has no rules, which stays as it is.
+   False otherwise, and the caller draws the whole page: the hero when rules now exist, a list whose rules are all gone, and an error
+   page, which shows neither. */
 function swapCards(main, rules) {
   const children = () => Array.from(main.children || []);
   const live = children().find((n) => hasClass(n, "view-cards"));
-  if (!live) return !rules.length;
+  if (!live) return !rules.length && children().some((n) => hasClass(n, "views-hero"));
   if (!rules.length) return false;
   keepScroll(() => {
     const stale = children().find((n) => hasClass(n, "refresh-error"));
@@ -87,8 +98,47 @@ function swapCards(main, rules) {
   return true;
 }
 
+/* True while the page shows the hero or the cards, the two pages a poll keeps on screen. An error page is neither. */
+function showsRules(main) {
+  return Array.from(main.children || []).some((n) => hasClass(n, "view-cards") || hasClass(n, "views-hero"));
+}
+
+/* The can_edit the page on screen was drawn for. The template menu is drawn only for a seat that can edit, in the head and in the hero
+   alike, so its presence says which variant is up. */
+function editShown(main) {
+  return findAll(main, (n) => hasClass(n, "template-menu")).length > 0;
+}
+
+/* #7927: the templates the menu on screen was drawn from, by menu element, so a poll can tell an unchanged answer from a changed one. */
+const menuTemplates = new WeakMap();
+
+function templatesKey(templates) {
+  return templates.map((t) => [t.key, t.name, t.description].join("\u0001")).join("\u0002");
+}
+
+/* #7927: the poll's templates answer, put into the menus on screen: the head's, and over the hero its own. The <details> keeps its
+   element, so an open menu stays open; only its items follow the templates, and only when they changed. An empty answer (no templates,
+   or a failed read) leaves the menus as they are. */
+function refreshTemplateMenus(main, templates) {
+  if (!templates.length) return;
+  const key = templatesKey(templates);
+  for (const menu of findAll(main, (n) => hasClass(n, "template-menu"))) {
+    if (menuTemplates.get(menu) === key) continue;
+    const list = findAll(menu, (n) => hasClass(n, "template-list"))[0];
+    if (!list) continue;
+    mount(list, Array.from(findAll(templateMenu(templates), (n) => hasClass(n, "template-list"))[0].children));
+    menuTemplates.set(menu, key);
+  }
+}
+
 function hasClass(n, name) {
   return typeof n.className === "string" && (" " + n.className + " ").includes(" " + name + " ");
+}
+
+function findAll(node, pred, out = []) {
+  if (pred(node)) out.push(node);
+  for (const c of Array.from(node.children || [])) findAll(c, pred, out);
+  return out;
 }
 
 /** The starter templates for the "New from template" menu, or [] on any failure (every caller handles empty). */
@@ -142,22 +192,20 @@ function firstRunHero(canEdit, templates) {
    want tuning before they are saved (unlike a dashboard template, which is created as-is). Built with
    el()/textContent like everything else. */
 function templateMenu(templates) {
-  if (!templates.length) {
-    return el("details", { class: "template-menu" }, [
-      el("summary", { class: "btn template-summary", text: "New from template ▾" }),
-      el("div", { class: "template-list" }, [el("div", { class: "template-note", text: "Starter templates are unavailable right now." })]),
-    ]);
-  }
-  const items = templates.map((t) =>
-    el("a", { class: "template-item", href: storeHash("#/alert-rule/new/") + encodeURIComponent(t.key), title: t.description }, [
-      el("span", { class: "template-label", text: t.name }),
-      el("span", { class: "template-desc", text: t.description }),
-    ])
-  );
-  return el("details", { class: "template-menu" }, [
+  const items = templates.length
+    ? templates.map((t) =>
+        el("a", { class: "template-item", href: storeHash("#/alert-rule/new/") + encodeURIComponent(t.key), title: t.description }, [
+          el("span", { class: "template-label", text: t.name }),
+          el("span", { class: "template-desc", text: t.description }),
+        ])
+      )
+    : [el("div", { class: "template-note", text: "Starter templates are unavailable right now." })];
+  const menu = el("details", { class: "template-menu" }, [
     el("summary", { class: "btn template-summary", text: "New from template ▾" }),
     el("div", { class: "template-list" }, items),
   ]);
+  menuTemplates.set(menu, templatesKey(templates));
+  return menu;
 }
 
 /* One rule -> a card linking to its editor. The summary carries name + enabled + last_fired synchronously; the
