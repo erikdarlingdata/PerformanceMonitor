@@ -1408,6 +1408,18 @@ try {
         writes: requests.filter((r) => r.method !== "GET").length,
       };
     },
+    /* #7950: the Servers tab of a can-edit seat on a managed store with web.allowAdminWrites off ("off") or on ("on"). The switch never
+       covered adding and editing servers (they follow the edit seat), so Edit is drawn either way; with the switch off the line under the
+       Admin heading names the changes that are off and says servers still save. Returns that line (null when none is drawn) and the Edit
+       buttons drawn. */
+    writesOffServers: async (param) => {
+      seed();
+      state.canEdit = true;
+      state.sessionReply = () => ({ status: 200, body: { can_edit: true, signed_in_admin: true, managed_store: true, admin_writes_off: param === "off" } });
+      await mountPage("servers");
+      const heading = all(main, (n) => n.classList.contains("admin-writes-off"))[0];
+      return { heading: heading && heading.children.length ? text(heading) : null, editButtons: buttons(main, "Edit").length };
+    },
     /* One call of an admin.js export, {"fn": "buildEditBody", "args": [...]} on stdin, printed as {"result": ...}; or
        {"calls": [{"fn": ..., "args": [...]}, ...]} for a table of calls in one process, printed as {"results": [...]}.
        An export that is not a function (EDIT_FIELDS) is returned as it is. */
