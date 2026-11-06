@@ -54,13 +54,42 @@ public sealed class AdminPendingNotesTests
         Assert.Empty(Pure("pendingNoteRows", (object?)null).EnumerateArray());
     }
 
+    /* #7955: a refused decision carries a machine-readable reason, and the page shows the service's own sentence for each reason it
+       sends, whatever the words are. The sentences are built by the service here, so a reworded refusal cannot leave the page behind. */
+    [Fact]
+    public void EachRefusalReason_ShowsTheServicesOwnSentence_NotThePagesGenericLine_Pure()
+    {
+        var sentences = new (string Reason, string Sentence)[]
+        {
+            ("store_refused", DarlingWebEndpoints.NoteDecisionRefusedMessage(true)),
+            ("store_refused", DarlingWebEndpoints.NoteDecisionRefusedMessage(false)),
+            ("admin_writes_off", DarlingWebEndpoints.NoteDecisionRefusedMessage(true, adminWritesOff: true)),
+            ("sign_in_required", DarlingWebEndpoints.InvestigationWriteSignInMessage),
+            ("read_only_seat", DarlingWebEndpoints.ReadOnlyAccountText),
+            ("reads_only_dashboard", PerformanceMonitor.Darling.Service.Mcp.DarlingWebHostService.TokenlessWriteRefusedMessage),
+        };
+        foreach (var (reason, sentence) in sentences)
+        {
+            var outcome = Pure("noteDecisionOutcome", "approve", 7, new { status = 403, body = new { error = sentence, reason } });
+            Assert.Equal(sentence, outcome.GetProperty("message").GetString());
+            Assert.True(outcome.GetProperty("isError").GetBoolean());
+            Assert.False(outcome.GetProperty("reread").GetBoolean());
+        }
+
+        // A 403 that is not the service's (no reason, or no sentence) keeps the page's own read-only line.
+        Assert.Equal("This sign-in is read-only, so it cannot approve notes.",
+            Pure("noteDecisionOutcome", "approve", 7, new { status = 403, body = new { error = "Forbidden" } }).GetProperty("message").GetString());
+        Assert.Equal("This sign-in is read-only, so it cannot reject notes.",
+            Pure("noteDecisionOutcome", "reject", 7, new { status = 403, body = new { reason = "store_refused" } }).GetProperty("message").GetString());
+    }
+
     [Theory]
     [InlineData("approve", 200, """{"status":"approved","note_id":7}""", "Note 7 approved.", false, true)]
     [InlineData("reject", 200, """{"status":"rejected","note_id":7}""", "Note 7 rejected.", false, true)]
     [InlineData("approve", 404, """{"error":"That note is not pending: it was already decided, or it is gone."}""",
         "Note 7 was not changed. That note is not pending: it was already decided, or it is gone.", true, true)]
-    [InlineData("approve", 403, """{"error":"Deciding a note needs a store login with the admin role. Managed and compose stores connect the web dashboard as the viewer role."}""",
-        "Deciding a note needs a store login with the admin role. Managed and compose stores connect the web dashboard as the viewer role.", true, false)]
+    [InlineData("approve", 403, """{"error":"This dashboard's store login has no write access, so it cannot decide notes. Decide them in the Viewer app.","reason":"store_refused"}""",
+        "This dashboard's store login has no write access, so it cannot decide notes. Decide them in the Viewer app.", true, false)]
     [InlineData("reject", 403, null, "This sign-in is read-only, so it cannot reject notes.", true, false)]
     [InlineData("approve", 500, """{"error":"The store did not answer."}""",
         "Note 7 was not approved. The service answered 500. The store did not answer.", true, false)]
