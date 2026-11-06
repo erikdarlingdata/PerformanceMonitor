@@ -392,6 +392,12 @@ export function plainText(text) {
     /\btop_application_name, top_application_connections, top_host_name and top_host_connections are\b/g,
     "the top application, its connection count, the top host and its connection count are",
   );
+  /* #7682: get_cpu_utilization's host_cpu_note names its fields for an MCP client. The CPU tab says what is not reported and what is drawn;
+     the engine and version words in the parenthesis stay as the reply wrote them. */
+  t = t.replace(
+    /other_process_cpu, total_cpu, idle_cpu and peak_total_cpu are null for buckets where the server cannot report host CPU( \([^)]*\))?\. Only sql_server_cpu is measured there; null is not 0\./g,
+    (_m, why) => "This server cannot report host CPU" + (why || "") + ", so only SQL Server's own CPU is drawn.",
+  );
   /* #6831: the system_health event names ("1431 scheduler_monitor_system_health_ring_buffer_recorded event(s) were captured") in words, with
      the count's own plural. The same words say the name inside "No ... events were captured". */
   t = t.replace(
