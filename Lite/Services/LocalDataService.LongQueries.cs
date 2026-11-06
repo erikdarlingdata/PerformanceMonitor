@@ -167,7 +167,7 @@ SELECT
                     LogicalReads = reader.IsDBNull(14) ? null : reader.GetInt64(14),
                     Writes = reader.IsDBNull(15) ? null : reader.GetInt64(15),
                     RowCountValue = reader.IsDBNull(16) ? null : reader.GetInt64(16),
-                    Result = reader.IsDBNull(17) ? "" : reader.GetString(17),
+                    Result = reader.IsDBNull(17) ? "" : PerformanceMonitor.Common.LongQueryResultText.Word(reader.GetString(17)) ?? "",
                     StatementText = reader.IsDBNull(18) ? "" : reader.GetString(18),
                     ObjectName = reader.IsDBNull(19) ? "" : reader.GetString(19),
                 });

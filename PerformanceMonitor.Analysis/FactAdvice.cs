@@ -1061,9 +1061,14 @@ public static class FactAdvice
         if (cap is null)
             return string.Empty;
         var total = FactValue(facts, "MEMORY_TOTAL_PHYSICAL_MB");
-        var sb = new StringBuilder(cap.Value >= 2147483647L
-            ? "This server's max server memory is at its unlimited default"
-            : $"This server's max server memory is set to {cap.Value:N0} MB");
+        /* #7699 item 6: " of N MB physical RAM" read correctly after "is set to 51,200 MB" and wrongly after "unlimited default", as if the
+           default were the size of the server. The unlimited branch states the RAM as a fact about the server instead. */
+        if (cap.Value >= 2147483647L)
+            return total is > 0
+                ? $"This server's max server memory is at its unlimited default, on a server with {total.Value:N0} MB of physical RAM."
+                : "This server's max server memory is at its unlimited default.";
+
+        var sb = new StringBuilder($"This server's max server memory is set to {cap.Value:N0} MB");
         if (total is > 0)
             sb.Append($" of {total.Value:N0} MB physical RAM");
         sb.Append('.');
