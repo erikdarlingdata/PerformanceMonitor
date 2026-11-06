@@ -108,7 +108,7 @@ const sandbox = {
   PAGE_REFRESH_CHOICES: policy.PAGE_REFRESH_CHOICES,
   loadPageRefreshChoice: policy.loadPageRefreshChoice,
   savePageRefreshChoice: policy.savePageRefreshChoice,
-  buildPageRefreshControl: () => ({ root: {}, select: {} }),
+  buildPageRefreshControl: () => ({ root: {}, select: {}, setIntervalShown: () => {} }),
   favoritesFirst: (cmp) => cmp,
   refreshAttention: async () => {},
   onLocalChange() {},
