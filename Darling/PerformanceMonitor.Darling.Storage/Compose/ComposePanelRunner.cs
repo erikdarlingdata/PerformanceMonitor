@@ -604,7 +604,7 @@ internal static class ComposePanelRunner
 
             if (ComposeStoreAvailability.CombineNotices(
                     retentionNotice,
-                    ComposeStoreAvailability.BuildRowCapNotice(plan.Mode, rows.Count)) is string notice)
+                    ComposeStoreAvailability.BuildRowCapNotice(plan.Mode, rows.Count, rows.Count >= ComposeLimits.HardRowCap ? EarliestBucket(rows) : null)) is string notice)
             {
                 payload["notice"] = notice;
 
@@ -1297,6 +1297,24 @@ internal static class ComposePanelRunner
 
             return null;
         }
+    }
+
+    /// <summary>#7729: the earliest <c>bucket</c> of a time-series answer (UTC, written as <c>yyyy-MM-ddTHH:mm:ss</c> by <see cref="DbValueToJson"/>), or null when no row
+    /// carries one. The row-cap notice names it as where the capped data starts.</summary>
+    internal static DateTime? EarliestBucket(JsonArray rows)
+    {
+        DateTime? earliest = null;
+        foreach (var node in rows)
+        {
+            if (node is JsonObject row && row["bucket"] is JsonValue value && value.TryGetValue<string>(out var text)
+                && DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var at)
+                && (earliest is null || at < earliest))
+            {
+                earliest = at;
+            }
+        }
+
+        return earliest;
     }
 
     /// <summary>Runs a compiled composed query on the viewer pool and serializes its rows to a JSON array of

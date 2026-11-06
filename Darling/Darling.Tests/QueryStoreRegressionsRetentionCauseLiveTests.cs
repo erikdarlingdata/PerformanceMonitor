@@ -175,7 +175,7 @@ WHERE NOT {(collectionGap ? "TRUE" : "FALSE")} OR t < now() - INTERVAL '10 days'
 
         var hints = root.GetProperty("hints");
         Assert.True(hints.GetProperty("window_truncated").GetBoolean());
-        Assert.Contains("further back than this server's raw query_store_stats retains", hints.GetProperty("truncation_note").GetString()!, StringComparison.Ordinal);
+        Assert.Contains("This range reaches past the detailed history this server keeps", hints.GetProperty("truncation_note").GetString()!, StringComparison.Ordinal);
         Assert.NotEqual(JsonValueKind.Null, hints.GetProperty("effective_start").ValueKind);
     }
 

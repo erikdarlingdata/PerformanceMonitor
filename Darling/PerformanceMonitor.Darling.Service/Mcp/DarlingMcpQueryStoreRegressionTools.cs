@@ -242,10 +242,12 @@ public sealed class DarlingMcpQueryStoreRegressionTools
     {
         var cost = McpHelpers.FormatEffectiveStart(spans.CostStart);
         var failure = McpHelpers.FormatEffectiveStart(spans.FailureStart);
-        var note = "The window reaches further back than this server's raw query_store_stats retains, so the baseline was read from the per-interval tables, each from where it holds complete history. ";
+        /* #7729: no table names and no retention figures. The page prints this sentence, and a person cannot act on query_store_interval_wide: they need
+           how far back each comparison reaches. */
+        var note = "This range reaches past the detailed history this server keeps, so the baseline was read from its Query Store interval summaries, each from where it holds complete history. ";
         note += spans.CostFromLatest
-            ? $"Cost (Regular runs) was compared from {cost} to the end of the baseline, from query_store_interval_latest, which keeps {DarlingRetention.QueryStoreIntervalLatestRetentionDays} days. Timeouts and errors were compared from {failure} to the end of the baseline, from query_store_interval_wide, which keeps {QueryStoreIntervalPartitions.WideHorizonDays} days."
-            : $"Cost, timeouts and errors were compared from {failure} to the end of the baseline, from query_store_interval_wide, which keeps {QueryStoreIntervalPartitions.WideHorizonDays} days.";
+            ? $"Cost (Regular runs) was compared from {cost}, and timeouts and errors from {failure}, each to the end of the baseline."
+            : $"Cost, timeouts and errors were compared from {failure} to the end of the baseline.";
         if (DateTime.SpecifyKind(spans.FailureStart, DateTimeKind.Unspecified) >= DateTime.SpecifyKind(baselineEnd, DateTimeKind.Unspecified))
         {
             note += " That timeouts and errors baseline holds no hours, so timeouts and errors are flagged on recent runs alone.";

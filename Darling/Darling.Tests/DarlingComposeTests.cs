@@ -1480,8 +1480,17 @@ public sealed class DarlingComposeTests
 
         var notice = ComposeStoreAvailability.BuildRowCapNotice(PanelMode.TimeSeries, ComposeLimits.HardRowCap);
         Assert.NotNull(notice);
-        Assert.Contains("row cap reached", notice, StringComparison.Ordinal);
+        /* #7729: a sentence starts with a capital, has no dash, and names where the capped data starts when the rows say so. */
+        Assert.StartsWith("Row cap reached.", notice, StringComparison.Ordinal);
+        Assert.DoesNotContain("—", notice, StringComparison.Ordinal);
         Assert.Contains("most recent", notice, StringComparison.Ordinal);
+        var rows = new System.Text.Json.Nodes.JsonArray(
+            new System.Text.Json.Nodes.JsonObject { ["bucket"] = "2026-11-03T08:00:00", ["value"] = 1 },
+            new System.Text.Json.Nodes.JsonObject { ["bucket"] = "2026-11-02T20:30:00", ["value"] = 2 });
+        var first = ComposePanelRunner.EarliestBucket(rows);
+        Assert.Equal(new DateTime(2026, 11, 2, 20, 30, 0, DateTimeKind.Utc), first);
+        Assert.Contains("buckets of the window, from 2026-11-02 20:30 UTC, not the whole of it", ComposeStoreAvailability.BuildRowCapNotice(PanelMode.TimeSeries, ComposeLimits.HardRowCap, first), StringComparison.Ordinal);
+        Assert.Null(ComposePanelRunner.EarliestBucket(new System.Text.Json.Nodes.JsonArray()));
 
         /* Names both escape hatches, because "it was truncated" without "here is what to do" is only
            half the fix. */
