@@ -113,7 +113,7 @@ public partial class WebhookAlertService
     {
         failures++;
         lastError = ex.Message;
-        _logger.LogError($"{channelLabel} webhook error: {ex.Message}");
+        _logger.LogError(ex, $"{channelLabel} webhook error: {ex.Message}");
     }
 
     /// <summary>A send that succeeded: say so when it ends a run of failures, then clear the count and last error.</summary>

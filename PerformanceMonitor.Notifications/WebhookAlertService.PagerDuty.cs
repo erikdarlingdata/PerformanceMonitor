@@ -101,7 +101,7 @@ public partial class WebhookAlertService
         }
         catch (Exception ex)
         {
-            _logger.LogError($"PagerDuty resolve error for {firingMetric}: {ex.Message}");
+            _logger.LogError(ex, $"PagerDuty resolve error for {firingMetric}: {ex.Message}");
             return AlertChannelOutcome.Failed;
         }
     }

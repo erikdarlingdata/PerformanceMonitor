@@ -594,7 +594,7 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Could not read the open {Metric} incident from alert history for {ServerKey} after {ElapsedMs} ms; a standing condition may be announced again after this restart: {Message}", metric, key, readClock.ElapsedMilliseconds, ex.Message);
+            _logger?.LogError(ex, "Could not read the open {Metric} incident from alert history for {ServerKey} after {ElapsedMs} ms; a standing condition may be announced again after this restart: {Message}", metric, key, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "standing incident seed", readClock.ElapsedMilliseconds);
             return null;
         }
@@ -781,7 +781,7 @@ public sealed class AlertEngine
                 {
                     /* #7295: the load throws on a failed read now. A missing opened time was always survivable (the incident then
                        reads as opened at its first sweep here), and it must not cost the CPU record already restored above. */
-                    _logger?.LogError("Could not read when the CPU incident for {ServerKey} opened after {ElapsedMs} ms: {Message}", key, openedClock.ElapsedMilliseconds, ex.Message);
+                    _logger?.LogError(ex, "Could not read when the CPU incident for {ServerKey} opened after {ElapsedMs} ms: {Message}", key, openedClock.ElapsedMilliseconds, ex.Message);
                     _readFailures?.RecordReadFailure(key, "CPU incident opened-time seed", openedClock.ElapsedMilliseconds);
                 }
 
@@ -850,7 +850,7 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to seed the {What} for {ServerKey} after {ElapsedMs} ms; the check that needs it is skipped and the read is tried again on the next sweep: {Message}", what, key, readClock.ElapsedMilliseconds, ex.Message);
+            _logger?.LogError(ex, "Failed to seed the {What} for {ServerKey} after {ElapsedMs} ms; the check that needs it is skipped and the read is tried again on the next sweep: {Message}", what, key, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "edge-trigger watermark seed", readClock.ElapsedMilliseconds);
             if (_seedLoadCap.RecordFailedLoad(_logger, _stateStore.GetType().Name, key, what, ex))
             {
@@ -902,7 +902,7 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to seed the blocking and deadlock count watermarks for {ServerKey} after {ElapsedMs} ms; those two checks are skipped and the read is tried again on the next sweep: {Message}", key, readClock.ElapsedMilliseconds, ex.Message);
+            _logger?.LogError(ex, "Failed to seed the blocking and deadlock count watermarks for {ServerKey} after {ElapsedMs} ms; those two checks are skipped and the read is tried again on the next sweep: {Message}", key, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "blocking and deadlock count watermark seed", readClock.ElapsedMilliseconds);
             if (_seedLoadCap.RecordFailedLoad(_logger, _stateStore.GetType().Name, key, CountWatermarkSeedStep, ex))
             {
@@ -975,7 +975,7 @@ public sealed class AlertEngine
             }
             catch (Exception ex)
             {
-                _logger?.LogError("Could not read the {Metric} tier from alert history for {ServerKey} after {ElapsedMs} ms; a Warning-to-Critical escalation across a restart is not seeded this sweep: {Message}", metric, key, readClock.ElapsedMilliseconds, ex.Message);
+                _logger?.LogError(ex, "Could not read the {Metric} tier from alert history for {ServerKey} after {ElapsedMs} ms; a Warning-to-Critical escalation across a restart is not seeded this sweep: {Message}", metric, key, readClock.ElapsedMilliseconds, ex.Message);
                 _readFailures?.RecordReadFailure(key, "escalation tier seed", readClock.ElapsedMilliseconds);
             }
         }
@@ -1308,7 +1308,7 @@ public sealed class AlertEngine
                     /* The save sits between the gate's persisted rising edge and the queued fire, so a store write that throws here
                        would lose the opening page for good: the gate already holds Firing and never produces that edge again. Log and
                        carry on. With no stored instant a restart seeds this incident unbounded, as for a legacy one. */
-                    _logger?.LogError("Could not save the High CPU incident's opening instant for {ServerKey}; the opening page still goes out, and a restart will read this incident unbounded: {Message}", key, ex.Message);
+                    _logger?.LogError(ex, "Could not save the High CPU incident's opening instant for {ServerKey}; the opening page still goes out, and a restart will read this incident unbounded: {Message}", key, ex.Message);
                 }
             }
 
@@ -1861,7 +1861,7 @@ public sealed class AlertEngine
             {
                 /* :129-132 shape — log and skip this check for the sweep (class remarks
                    adaptation (2)): never run the gate on a fabricated zero count. */
-                _logger?.LogError("Failed to check blocking for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+                _logger?.LogError(ex, "Failed to check blocking for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
                 _readFailures?.RecordReadFailure(key, "blocking", readClock.ElapsedMilliseconds);
                 return;
             }
@@ -2193,7 +2193,7 @@ public sealed class AlertEngine
         {
             /* Log and skip for the sweep — state untouched, so a transient store error neither
                fires nor resolves (the same adaptation (2) shape as the count gate). */
-            _logger?.LogError("Failed to check blocking wait time for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            _logger?.LogError(ex, "Failed to check blocking wait time for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "blocking wait time", readClock.ElapsedMilliseconds);
             return;
         }
@@ -2385,7 +2385,7 @@ public sealed class AlertEngine
             catch (Exception ex)
             {
                 /* :207-210 shape — log and skip (class remarks adaptation (2)). */
-                _logger?.LogError("Failed to check deadlocks for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+                _logger?.LogError(ex, "Failed to check deadlocks for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
                 _readFailures?.RecordReadFailure(key, "deadlocks", readClock.ElapsedMilliseconds);
                 return;
             }
@@ -2685,7 +2685,7 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to check poison waits for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :337 */
+            _logger?.LogError(ex, "Failed to check poison waits for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :337 */
             _readFailures?.RecordReadFailure(key, "poison waits", readClock.ElapsedMilliseconds);
         }
     }
@@ -2911,7 +2911,7 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to check runnable queue for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            _logger?.LogError(ex, "Failed to check runnable queue for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "runnable queue", readClock.ElapsedMilliseconds);
         }
     }
@@ -3119,7 +3119,7 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to check client timeouts for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            _logger?.LogError(ex, "Failed to check client timeouts for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "client timeouts", readClock.ElapsedMilliseconds);
         }
     }
@@ -3416,7 +3416,7 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to check long-running queries for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :409 */
+            _logger?.LogError(ex, "Failed to check long-running queries for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :409 */
             _readFailures?.RecordReadFailure(key, "long-running queries", readClock.ElapsedMilliseconds);
         }
     }
@@ -3536,7 +3536,7 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to check TempDB space for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :471 */
+            _logger?.LogError(ex, "Failed to check TempDB space for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :471 */
             _readFailures?.RecordReadFailure(key, "TempDB space", readClock.ElapsedMilliseconds);
         }
     }
@@ -3690,7 +3690,7 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to check volume free space for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :553 */
+            _logger?.LogError(ex, "Failed to check volume free space for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :553 */
             _readFailures?.RecordReadFailure(key, "volume free space", readClock.ElapsedMilliseconds);
         }
 
@@ -3815,7 +3815,7 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to check PVS pressure for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            _logger?.LogError(ex, "Failed to check PVS pressure for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "PVS pressure", readClock.ElapsedMilliseconds);
         }
     }
@@ -4046,7 +4046,7 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to check database file growth for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            _logger?.LogError(ex, "Failed to check database file growth for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "database file growth", readClock.ElapsedMilliseconds);
         }
     }
@@ -4159,7 +4159,7 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to check anomalous jobs for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :630 */
+            _logger?.LogError(ex, "Failed to check anomalous jobs for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :630 */
             _readFailures?.RecordReadFailure(key, "anomalous jobs", readClock.ElapsedMilliseconds);
         }
     }
@@ -4297,7 +4297,7 @@ public sealed class AlertEngine
                not persist failed-job watermark" without rethrowing), so it cannot reach this catch at
                all. The write sitting inside this try where the blocking, deadlock and database-state
                checks keep theirs outside is a real asymmetry and an inert one. */
-            _logger?.LogError("Failed to check failed jobs for {Server}: {Message}", serverName, ex.Message); /* :715 */
+            _logger?.LogError(ex, "Failed to check failed jobs for {Server}: {Message}", serverName, ex.Message); /* :715 */
         }
 
         return conditionPresent;
@@ -4341,7 +4341,7 @@ public sealed class AlertEngine
         {
             /* Log-and-skip, like the other collected reads: never resolve an active database on a
                failed fetch (that would fabricate a recovery), and never fire on absent evidence. */
-            _logger?.LogError("Failed to check database state for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            _logger?.LogError(ex, "Failed to check database state for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "database state", readClock.ElapsedMilliseconds);
             return;
         }
@@ -4591,7 +4591,7 @@ public sealed class AlertEngine
         {
             /* Log-and-skip, like every other collected read: never resolve an active plan on a failed
                fetch (that would fabricate a recovery), and never fire on absent evidence. */
-            _logger?.LogError("Failed to check forced-plan failures for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            _logger?.LogError(ex, "Failed to check forced-plan failures for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "forced-plan failures", readClock.ElapsedMilliseconds);
             return;
         }
@@ -5065,7 +5065,7 @@ public sealed class AlertEngine
             /* NOT counted by #3013's swallowed-read counter: this is the DELIVERY path, not a condition read.
                A failed delivery is a different fact with a different remedy, and #3013 deliberately left
                alerting on the alerting out of scope as its own decision. */
-            _logger?.LogError("Alert resolution callback failed for {Server} / {Metric}: {Message}",
+            _logger?.LogError(ex, "Alert resolution callback failed for {Server} / {Metric}: {Message}",
                 resolution.ServerName, resolution.MetricName, ex.Message);
         }
     }
