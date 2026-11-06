@@ -403,7 +403,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
                     await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_store", cancellationToken)
                     ?? McpHelpers.Status("empty",
                         $"No Query Store history for query_id {query_id} in database '{database_name}' in the {hours_back}-hour window searched.",
-                        emptyHints), cancellationToken);
+                        emptyHints), cancellationToken, start);
 
             var allPlans = FoldPlans(rows);
             var plansTruncated = allPlans.Count > MaxPlans;

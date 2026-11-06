@@ -70,7 +70,7 @@ public sealed class McpDefaultTraceTools
                     ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.StatusForDatabase("empty",
                         $"No significant default trace events found in the requested time range{McpDatabaseSelection.ForChosen(database is null ? null : new[] { database })}.",
                         database,
-                        (await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd, serverClock, emptyAnswer: true)).AsHints()));
+                        (await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd, serverClock, emptyAnswer: true)).AsHints()), windowEnd.AddHours(-hours_back));
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd, serverClock);
 

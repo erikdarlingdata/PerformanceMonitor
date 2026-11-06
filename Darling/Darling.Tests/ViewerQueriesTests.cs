@@ -137,7 +137,8 @@ public sealed class ViewerQueriesSqlTests
         Assert.Contains("database_name = ANY($5)", sql, StringComparison.Ordinal);
         /* #5313: $6 is the candidate limit now (top + 5 first, refilled), still not an offset or staleness parameter. */
         Assert.Contains("LIMIT $6", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("$7", sql, StringComparison.Ordinal);
+        /* #7725: $7 is the databases the server dropped (left out of the listed ranking); the live hourly tests cover that slot. */
+        Assert.DoesNotContain("$8", sql, StringComparison.Ordinal);
     }
 
     [Fact]

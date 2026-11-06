@@ -217,7 +217,7 @@ public sealed class DarlingMcpPgPlanTools
             + "the healthy case for this read: the collector writes one row per facet on every run whatever "
             + "it finds, so an absence means nothing was collected rather than that nothing was wrong. It "
             + "runs HOURLY, so widen hours_back before concluding anything — a window shorter than the "
-            + "cadence is legitimately empty on a server that is collecting normally."), cancellationToken);
+            + "cadence is legitimately empty on a server that is collecting normally."), cancellationToken, windowEnd.AddHours(-hoursBack));
     }
 
     /// <summary>
@@ -329,7 +329,7 @@ public sealed class DarlingMcpPgPlanTools
         /* #4966: only the empty answer carries the window floor; not_collected and precondition above stay bare. */
         var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_plans", serverName, start, end, emptyAnswer: true, logger, cancellationToken);
-        return await DarlingServerOfflineNote.EmptyAsync(postgres, serverId, serverName, end, McpHelpers.Status("empty", NoPlanCapturedMessage(wantedQueryId, hoursBack), notice.AsHints()), cancellationToken);
+        return await DarlingServerOfflineNote.EmptyAsync(postgres, serverId, serverName, end, McpHelpers.Status("empty", NoPlanCapturedMessage(wantedQueryId, hoursBack), notice.AsHints()), cancellationToken, start);
     }
 
     /// <summary>

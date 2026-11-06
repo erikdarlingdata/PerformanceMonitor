@@ -162,7 +162,7 @@ public sealed class DarlingMcpTrendTools
                     : McpHelpers.Status(
                         "unavailable",
                         $"No memory stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — the memory_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_memory_stats will be equally empty until it does.", emptyNotice.AsHints());
-                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, memoryAnswer, cancellationToken);
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, memoryAnswer, cancellationToken, now.AddHours(-hours_back));
             }
 
             /* Joined from the memory-grant series (#3548), SUM(granted_memory_mb) across pools per snapshot — the
@@ -375,7 +375,7 @@ public sealed class DarlingMcpTrendTools
                             ? TrendPayloads.FileIoScopeEmptyMessage(resolved.DisplayName, scope, hours_back)
                             : FileIoChosenDatabasesEmptyMessage(resolved.DisplayName, hours_back),
                         echo,
-                        emptyNotice.AsHints()), cancellationToken);
+                        emptyNotice.AsHints()), cancellationToken, start);
                 }
 
                 /* #7167: as get_memory_trend: a cut window does not claim to be quiet, and an offline server answers unavailable. */
@@ -390,7 +390,7 @@ public sealed class DarlingMcpTrendTools
                     : McpHelpers.StatusForDatabase(
                         "unavailable",
                         $"No file I/O stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — the file_io_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_file_io_stats will be equally empty until it does.", echo, emptyNotice.AsHints());
-                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, fileIoAnswer, cancellationToken);
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, fileIoAnswer, cancellationToken, start);
             }
 
             var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, TrendPayloads.LinesFor(series.Count), budget, out var bucketMinutes);
@@ -483,7 +483,7 @@ public sealed class DarlingMcpTrendTools
                         $"{history.Source} tier over the last {hours_back} hours. This means nothing was recorded " +
                         "for that query_hash in that window in the tier searched — confirm the hash and database " +
                         "with get_top_queries_by_cpu before concluding the query did not run.",
-                        emptyNotice.AsHints()), cancellationToken);
+                        emptyNotice.AsHints()), cancellationToken, now.AddHours(-hours_back));
             }
 
             /* The hourly rollup keeps executions, CPU and elapsed and nothing else. Those columns arrive as
@@ -872,7 +872,7 @@ public sealed class DarlingMcpTrendTools
                     return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, EmptyStatus(
                         "empty",
                         $"The requested window ends before {floor:o}, the oldest hour the corrected Query Store rollup has materialized. Query Store history older than that is not summarized yet, so this window is empty even though rows were collected. To fill it in, an operator runs PerformanceMonitor.Darling.Service.exe --backfill-rollups.",
-                        disclosure, databases), cancellationToken);
+                        disclosure, databases), cancellationToken, startUtc);
                 }
 
                 var everSampled = await DarlingTrendReader.HasAnyQueryStoreStatAsync(postgres, resolved.ServerId, cancellationToken);
@@ -906,10 +906,10 @@ public sealed class DarlingMcpTrendTools
                     return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, EmptyStatus(
                         "empty",
                         $"No Query Store samples were recorded for {ScopedServer(resolved.DisplayName, databases)} between {head:o} — the oldest hour the corrected rollup has materialized — and the end of the window. This server HAS been sampled before, so that stretch is genuinely quiet; the part of the window before {head:o} is unserved rather than quiet (the rollup has not materialized it and this read no longer ranks the raw slab for it, #2736) — run --backfill-rollups to materialize it. Widening hours_back finds newer samples only; it cannot reach the unserved head.",
-                        disclosure, databases), cancellationToken);
+                        disclosure, databases), cancellationToken, startUtc);
                 }
 
-                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, EmptyStatus("empty", QuietWindowMessage(ScopedServer(resolved.DisplayName, databases), hours_back, "Query Store"), disclosure, databases), cancellationToken);
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, EmptyStatus("empty", QuietWindowMessage(ScopedServer(resolved.DisplayName, databases), hours_back, "Query Store"), disclosure, databases), cancellationToken, startUtc);
             }
 
             return SerializeTrend(resolved.DisplayName, hours_back, points, disclosure,
@@ -1278,7 +1278,7 @@ public sealed class DarlingMcpTrendTools
         await DarlingServerOfflineNote.EmptyAsync(
             postgres, serverId, serverName, windowEndUtc,
             await EmptyRoutedTrendCoreAsync(rawProbe, postgres, serverId, serverName, probeServerName, hours_back, startUtc, windowEndUtc, route, what, collectorName, checkThis, bucket, databases, cancellationToken),
-            cancellationToken);
+            cancellationToken, startUtc);
 
     private static async Task<string> EmptyRoutedTrendCoreAsync(
         Task<bool> rawProbe, NpgsqlDataSource postgres, int serverId, string serverName, string probeServerName, int hours_back,

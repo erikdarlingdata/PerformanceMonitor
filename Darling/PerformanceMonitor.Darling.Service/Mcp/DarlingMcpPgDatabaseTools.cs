@@ -401,7 +401,7 @@ public sealed class DarlingMcpPgDatabaseTools
                     effective_start = notice.EffectiveStart,
                     window_truncated = notice.WindowTruncated,
                     truncation_note = notice.TruncationNote,
-                }), cancellationToken);
+                }), cancellationToken, start);
         }
 
         if (samplesInWindow == 1)

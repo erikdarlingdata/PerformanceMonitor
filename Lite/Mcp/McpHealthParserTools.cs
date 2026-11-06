@@ -89,7 +89,7 @@ public sealed class McpHealthParserTools
             var lastCapturedAt = await dataService.GetLastSystemHealthCaptureAsync(resolved.ServerId);
             if (rows.Count == 0)
                 return await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.SpServerDiagnosticsEvent,
-                    "none carried a SYSTEM component result with a timestamp (the other four sp_server_diagnostics components feed the sibling reads)", capturedInWindow: null, lastCapturedAt));
+                    "none carried a SYSTEM component result with a timestamp (the other four sp_server_diagnostics components feed the sibling reads)", capturedInWindow: null, lastCapturedAt), windowEnd.AddHours(-hours_back));
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
 
@@ -160,7 +160,7 @@ public sealed class McpHealthParserTools
             if (rows.Count == 0)
                 return McpHelpers.WithDatabase(await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.ErrorReportedEvent,
                     $"none was a significant severe error (severity {SystemHealthSignificance.SevereErrorMinSeverity}+ and off the benign connection-reset list)"
-                        + McpDatabaseSelection.ForChosen(database is null ? null : new[] { database }), capturedInWindow: null, lastCapturedAt)), database)!;
+                        + McpDatabaseSelection.ForChosen(database is null ? null : new[] { database }), capturedInWindow: null, lastCapturedAt), windowEnd.AddHours(-hours_back)), database)!;
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
 
@@ -214,7 +214,7 @@ public sealed class McpHealthParserTools
             var lastCapturedAt = await dataService.GetLastSystemHealthCaptureAsync(resolved.ServerId);
             if (rows.Count == 0)
                 return await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.SpServerDiagnosticsEvent,
-                    "none was an IO_SUBSYSTEM component result in the WARNING state", capturedInWindow: null, lastCapturedAt));
+                    "none was an IO_SUBSYSTEM component result in the WARNING state", capturedInWindow: null, lastCapturedAt), windowEnd.AddHours(-hours_back));
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
 
@@ -269,7 +269,7 @@ public sealed class McpHealthParserTools
             var hostOs = await dataService.GetHostOsVersionAsync(resolved.ServerId);
             if (rows.Count == 0)
                 return SystemHealthHostCpu.WithNote(await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.SchedulerMonitorEvent,
-                    "none was a significant scheduler-monitor sample (SQL CPU, other-process CPU, or memory utilization outside the warning thresholds)", capturedInWindow: null, lastCapturedAt)), hostOs)!;
+                    "none was a significant scheduler-monitor sample (SQL CPU, other-process CPU, or memory utilization outside the warning thresholds)", capturedInWindow: null, lastCapturedAt), windowEnd.AddHours(-hours_back)), hostOs)!;
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
 
@@ -323,7 +323,7 @@ public sealed class McpHealthParserTools
             var lastCapturedAt = await dataService.GetLastSystemHealthCaptureAsync(resolved.ServerId);
             if (rows.Count == 0)
                 return await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.SpServerDiagnosticsEvent,
-                    "none was a RESOURCE component result carrying a low-memory (RESOURCE_MEMPHYSICAL_LOW) notification", capturedInWindow: null, lastCapturedAt));
+                    "none was a RESOURCE component result carrying a low-memory (RESOURCE_MEMPHYSICAL_LOW) notification", capturedInWindow: null, lastCapturedAt), windowEnd.AddHours(-hours_back));
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
 
@@ -401,7 +401,7 @@ public sealed class McpHealthParserTools
             var lastCapturedAt = await dataService.GetLastSystemHealthCaptureAsync(resolved.ServerId);
             if (rows.Count == 0)
                 return await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.SpServerDiagnosticsEvent,
-                    $"none was a QUERY_PROCESSING component result in the WARNING state with at least {SystemHealthSignificance.CpuTaskMinPendingTasks} pending tasks", capturedInWindow: null, lastCapturedAt));
+                    $"none was a QUERY_PROCESSING component result in the WARNING state with at least {SystemHealthSignificance.CpuTaskMinPendingTasks} pending tasks", capturedInWindow: null, lastCapturedAt), windowEnd.AddHours(-hours_back));
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
 
@@ -458,7 +458,7 @@ public sealed class McpHealthParserTools
             var lastCapturedAt = await dataService.GetLastSystemHealthCaptureAsync(resolved.ServerId);
             if (rows.Count == 0)
                 return await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.MemoryBrokerEvent,
-                    "none carried a SHRINK notification (STABLE and GROW broker adjustments are routine; notification_counts shows what the window held)", capturedInWindow: null, lastCapturedAt, notificationCounts));
+                    "none carried a SHRINK notification (STABLE and GROW broker adjustments are routine; notification_counts shows what the window held)", capturedInWindow: null, lastCapturedAt, notificationCounts), windowEnd.AddHours(-hours_back));
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
 
@@ -520,7 +520,7 @@ public sealed class McpHealthParserTools
             var lastCapturedAt = await dataService.GetLastSystemHealthCaptureAsync(resolved.ServerId);
             if (rows.Count == 0)
                 return await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.MemoryNodeOomEvent,
-                    "none shredded to a memory-node OOM record (this category is ungated, so a captured OOM event that parsed would be here)", capturedInWindow: null, lastCapturedAt));
+                    "none shredded to a memory-node OOM record (this category is ungated, so a captured OOM event that parsed would be here)", capturedInWindow: null, lastCapturedAt), windowEnd.AddHours(-hours_back));
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
 
@@ -607,7 +607,7 @@ public sealed class McpHealthParserTools
                 */
                 return await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.WaitInfoEvent,
                     $"none was significant (needs a real session, a non-BACKUP statement, at least {SystemHealthSignificance.SignificantWaitMinDurationMs} ms, and a wait type off the idle list)",
-                    capturedInWindow: captured, lastCapturedAt));
+                    capturedInWindow: captured, lastCapturedAt), windowEnd.AddHours(-hours_back));
             }
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
@@ -713,7 +713,7 @@ public sealed class McpHealthParserTools
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice.WindowTruncated, notice.EffectiveStart,
-                    factual: $"{captured} {eventType} event(s) were captured for {serverName} in the last {hoursBack} hour(s) and {noneQualifiedBecause}",
+                    factual: $"{captured.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)} {eventType} event(s) were captured for {serverName} in the last {hoursBack} hour(s) and {noneQualifiedBecause}",
                     coveredClaim: ". Events ARE being captured, so this is the healthy answer for this read rather than missing data."),
                 sourceObserved: true, lastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: captured,
                 hints: notice.AsHints(), notificationCounts: notificationCounts);

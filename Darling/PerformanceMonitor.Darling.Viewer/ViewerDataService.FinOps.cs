@@ -91,6 +91,12 @@ public sealed class MemoryGrantEfficiencyRow
 public sealed class TopResourceConsumerRow
 {
     public string DatabaseName { get; set; } = "";
+    /// <summary>#7725: true for a database the server no longer lists (its figures are real and keep the row). The grid shows "(dropped)".
+    /// Private set, so a reflection walk over the public setters does not see it; <see cref="MarkDropped"/> sets it.</summary>
+    public bool IsDropped { get; private set; }
+    public void MarkDropped(bool dropped) => IsDropped = dropped;
+    /// <summary>#7725: what the grid's database cell shows: the name, with " (dropped)" after a database the server no longer lists.</summary>
+    public string DatabaseDisplay => PerformanceMonitor.Common.DroppedDatabaseMark.Display(DatabaseName, IsDropped);
     public long CpuTimeMs { get; set; }
     public long ExecutionCount { get; set; }
     public decimal IoTotalMb { get; set; }
@@ -256,6 +262,12 @@ public sealed class UtilizationEfficiencyRow
 public sealed class DatabaseResourceUsageRow
 {
     public string DatabaseName { get; set; } = "";
+    /// <summary>#7725: true for a database the server no longer lists (its figures are real and keep the row). The grid shows "(dropped)".
+    /// Private set, so the golden fixture's reflection walk (public setters only) does not see it; <see cref="MarkDropped"/> sets it.</summary>
+    public bool IsDropped { get; private set; }
+    public void MarkDropped(bool dropped) => IsDropped = dropped;
+    /// <summary>#7725: what the grid's database cell shows: the name, with " (dropped)" after a database the server no longer lists.</summary>
+    public string DatabaseDisplay => PerformanceMonitor.Common.DroppedDatabaseMark.Display(DatabaseName, IsDropped);
     public long CpuTimeMs { get; set; }
     public long LogicalReads { get; set; }
     public long PhysicalReads { get; set; }
@@ -806,8 +818,12 @@ public sealed class HighImpactQueryRow
     /// <summary>How many databases the row's figures are summed across (#7695). <see cref="DatabaseName"/> is the one with the most CPU.</summary>
     public int DatabaseCount { get; set; } = 1;
 
-    /// <summary>The Database cell: the name, then "+ N more" when the figures span several databases.</summary>
-    public string DatabaseDisplay => HighImpactDatabaseText.Cell(DatabaseName, DatabaseCount);
+    /// <summary>#7725: true when <see cref="DatabaseName"/> is a database the server no longer lists. Private set, so a reflection walk over the public setters does not see it; <see cref="MarkDropped"/> sets it.</summary>
+    public bool IsDropped { get; private set; }
+    public void MarkDropped(bool dropped) => IsDropped = dropped;
+
+    /// <summary>The Database cell: the name (with " (dropped)" when the server no longer lists it), then "+ N more" when the figures span several databases.</summary>
+    public string DatabaseDisplay => HighImpactDatabaseText.Cell(PerformanceMonitor.Common.DroppedDatabaseMark.Display(DatabaseName, IsDropped), DatabaseCount);
 
     /// <summary>The cell's tooltip, null when one database is in the total.</summary>
     public string? DatabaseTooltip => HighImpactDatabaseText.Tooltip(DatabaseCount);

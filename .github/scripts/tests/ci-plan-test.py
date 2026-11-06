@@ -573,6 +573,103 @@ with open(out_path, encoding="utf-8") as fh:
     written = dict(ln.split("=", 1) for ln in fh.read().splitlines())
 check("main: output file", (written["areas"], written["run"], written["legs"]), ("docs-only", "true", "0"))
 
+# --- CI scripts only (#7743) ------------------------------------------------------------------------------------
+# A change to files under .github/scripts that no area knows runs the script tests, the build and the Guard classes of both suites,
+# not every class. One of the selection or leg scripts also adds a last leg that runs the classes the map selects for a sample diff.
+sc_cls = {"darling": d_cls, "lite": {**l_cls, "LG": {"Stage=Guard"}}}
+sc_cat = {**cc_cat, "classes": sc_cls, "lite_weights": {**cc_cat["lite_weights"], "LG": 60}}
+SCRIPT = ".github/scripts/ci-map-helper.py"          # a script that is no trigger
+TRIGGER = ".github/scripts/ci-select.py"
+SAMPLE = getattr(cp, "SELF_TEST_SAMPLE", "Darling/README.md")
+MAXC = getattr(cp, "SELF_TEST_MAX_CLASSES", 150)
+
+
+def scripts_run(files, map_=None, error="", cat=sc_cat, event="pull_request", draft=False, fetched=None):
+    def lazy():
+        if fetched is not None:
+            fetched.append(1)
+        return map_, error
+    try:
+        return cp.plan(event, "dev", "feature/x", [], files, rules, cat, draft=draft, self_test_map=lazy, now=NOW)
+    except TypeError:  # a plan without the scripts area (dev's) has no such input: its answer is what the checks measure
+        return cp.plan(event, "dev", "feature/x", [], files, rules, cat, draft=draft)
+
+
+sc_map = make_map()
+sc_map["text_patterns"] = {"D3": [SAMPLE], "L2": [SAMPLE]}      # the classes that read the sample document as text
+r = scripts_run([SCRIPT])
+check("scripts: a script is its own area, not every area", (r.get("areas", ""), r.get("darling_scope", ""), r.get("lite_scope", "")), ("classes", "classes", "classes"))
+check("scripts: the Guard classes of both suites", (r.get("darling_classes", ""), r.get("lite_classes", "")), ("D1", "LG"))
+check("scripts: the build runs, the script tests run", (r.get("build", ""), r.get("script_tests", "")), ("true", "true"))
+check("scripts: no self-test leg for a script that decides no selection", (r.get("self_test_darling", ""), r.get("self_test_lite", ""), r.get("self_test_note", ""), r.get("legs", "")), ("", "", "", "1"))
+check("scripts: the why line names the rule", "CI scripts only: script tests, build and Guard." in r.get("why", ""), True)
+r = scripts_run([TRIGGER], sc_map)
+check("scripts: a selection script adds the self-test leg, the last one", (r.get("legs", ""), r.get("legs_json", "")), ("2", "[1,2]"))
+check("scripts: the self-test classes are the map's for the sample", (r.get("self_test_darling", ""), r.get("self_test_lite", "")), ("D3", "L2"))
+check("scripts: the main classes are still the Guard classes", (r.get("darling_classes", ""), r.get("lite_classes", "")), ("D1", "LG"))
+check("scripts: the why line names the rule with the map-selected leg",
+      "CI scripts only: script tests, build, Guard, and one map-selected leg." in r.get("why", ""), True)
+check("scripts: the note names the sample and the map's age", (SAMPLE in r.get("self_test_note", ""), "6.0 hours old" in r.get("self_test_note", "")), (True, True))
+check("scripts: a script of the run itself is a trigger too",
+      [scripts_run([".github/scripts/" + n], sc_map).get("legs", "") for n in ("ci-plan.py", "run-ci-leg.ps1", "test-map.py", "ci-map-replay.py")], ["2"] * 4)
+check("scripts: a test file is no trigger", scripts_run([".github/scripts/tests/ci-plan-test.py"], sc_map).get("legs", ""), "1")
+check("scripts: documentation beside the script", scripts_run(["README.md", TRIGGER], sc_map).get("areas", ""), "classes")
+check("scripts: a draft gets the same plan", scripts_run([TRIGGER], sc_map, draft=True).get("self_test_darling", ""), "D3")
+fetched = []
+scripts_run([SCRIPT], fetched=fetched)
+scripts_run([SERVICE], fetched=fetched)
+check("scripts: the map is fetched only for a self-test leg", fetched, [])
+scripts_run([TRIGGER], sc_map, fetched=fetched)
+check("scripts: the map is fetched for a self-test leg", fetched, [1])
+# A script together with a file of any other area is the old rule: every area.
+r = scripts_run([TRIGGER, SERVICE], sc_map)
+check("scripts: with a product file it is every area", (r.get("areas", ""), r.get("darling_scope", ""), r.get("script_tests", "")), ("all", "full", "false"))
+check("scripts: with a path no area knows it is every area", scripts_run([TRIGGER, "no-such-area/odd.bin"], sc_map).get("areas", ""), "all")
+check("scripts: a dev push is every area", scripts_run([TRIGGER], sc_map, event="push").get("areas", ""), "all")
+check("scripts: no Guard class in the catalog is every area", scripts_run([TRIGGER], sc_map, cat={**cc_cat, "classes": {"darling": {"D3": set()}, "lite": l_cls}}).get("areas"), "all")
+# The self-test leg never fails for the map: the Guard classes run instead, and the note says why.
+for label, kw, word in (("a missing map", {"map_": None, "error": "no nightly run has a test-map artifact"}, "no nightly run has a test-map artifact"),
+                        ("a map nobody gave", {"map_": None}, "no test map was given"),
+                        ("an old map", {"map_": make_map(built="2026-11-03T11:00:00Z")}, "older than 2 days"),
+                        ("a broken map", {"map_": {"schema": 1, "files": 5, "classes": 7}}, "map")):
+    r = scripts_run([TRIGGER], **kw)
+    check(f"scripts: {label} runs the Guard classes in the last leg", (r.get("self_test_darling", ""), r.get("self_test_lite", ""), r.get("legs", "")), ("D1", "LG", "2"))
+    check(f"scripts: {label}: the note says why", ("instead of a map-selected list" in r.get("self_test_note", ""), word in r.get("self_test_note", "")), (True, True))
+no_hit = make_map()
+no_hit["text_patterns"] = {}
+check("scripts: a sample that selects no class runs the Guard classes", "selected no class" in scripts_run([TRIGGER], no_hit).get("self_test_note", ""), True)
+many = make_map()
+for i in range(MAXC + 1):
+    many["classes"]["darling"][f"Many{i}"] = {"own": fid(DT + "D3Tests.cs"), "files": [], "seconds": 1.0}
+    many["text_patterns"][f"Many{i}"] = [SAMPLE]
+many_cat = {**sc_cat, "classes": {**sc_cls, "darling": {**d_cls, **{f"Many{i}": set() for i in range(MAXC + 1)}}}}
+check("scripts: a sample that selects too many classes runs the Guard classes",
+      f"more than {MAXC}" in scripts_run([TRIGGER], many, cat=many_cat).get("self_test_note", ""), True)
+# write_leg_extras: the files run-ci-leg.ps1 reads.
+if not hasattr(cp, "write_leg_extras"):
+    failures.append("leg extras: ci-plan.py has no write_leg_extras")
+    print("\n".join(failures))
+    sys.exit(1)
+extras = os.path.join(tmp, "extras")
+r = scripts_run([TRIGGER], sc_map)
+cp.write_leg_extras(extras, r)
+with open(os.path.join(extras, "script-tests.txt"), encoding="utf-8") as fh:
+    listed_tests = fh.read().splitlines()
+check("leg extras: the script tests are every .py of the tests folder",
+      (listed_tests == sorted(listed_tests), all(t.startswith(".github/scripts/tests/") and t.endswith(".py") for t in listed_tests),
+       ".github/scripts/tests/ci-plan-test.py" in listed_tests), (True, True, True))
+with open(os.path.join(extras, "self-test-darling-classes.txt"), encoding="utf-8") as fh:
+    check("leg extras: the self-test Darling list", fh.read(), "D3\n")
+with open(os.path.join(extras, "self-test.txt"), encoding="utf-8") as fh:
+    check("leg extras: the note", SAMPLE in fh.read(), True)
+check("leg extras: the self-test Lite list", os.path.exists(os.path.join(extras, "self-test-lite-classes.txt")), True)
+r = scripts_run([SCRIPT])
+cp.write_leg_extras(os.path.join(tmp, "e2"), r)
+check("leg extras: no self-test leg writes the script tests and no self-test file",
+      (os.path.exists(os.path.join(tmp, "e2", "script-tests.txt")), os.path.exists(os.path.join(tmp, "e2", "self-test.txt"))), (True, False))
+cp.write_leg_extras(os.path.join(tmp, "e3"), run([SERVICE]))
+check("leg extras: an ordinary plan writes none", os.path.exists(os.path.join(tmp, "e3")), False)
+
 # --- the real filters, three stable paths ----------------------------------------------------------------------
 live = cs.Rules()
 check("real filters: README.md is docs-only", cp.classify(live, "pull_request", "dev", ["README.md"])["areas"], "docs-only")
@@ -580,6 +677,13 @@ check("real filters: Darling file is the Darling suite",
       cp.classify(live, "pull_request", "dev", ["Darling/PerformanceMonitor.Darling.Service/X.cs"])["darling_scope"], "full")
 check("real filters: a stray path runs everything",
       cp.classify(live, "pull_request", "dev", ["no-such-area/odd.bin"])["areas"], "all")
+check("real filters: a CI script alone is the scripts area, not every area",
+      cp.classify(live, "pull_request", "dev", [".github/scripts/ci-plan.py", ".github/scripts/tests/ci-plan-test.py"], sc_cat)["areas"], "classes")
+for wf in (".github/workflows/pr.yml", ".github/workflows/build.yml"):
+    check(f"real filters: {wf} with a CI script keeps the rule, every area",
+          cp.classify(live, "pull_request", "dev", [".github/scripts/ci-plan.py", wf], sc_cat)["areas"], "all")
+check("real filters: a workflow file alone is every area",
+      cp.classify(live, "pull_request", "dev", [".github/workflows/pr.yml"], sc_cat)["areas"], "all")
 
 if failures:
     print("\n".join(failures))

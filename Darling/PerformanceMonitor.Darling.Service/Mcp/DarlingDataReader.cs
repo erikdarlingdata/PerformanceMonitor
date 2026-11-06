@@ -1089,9 +1089,10 @@ internal static class DarlingDataReader
     /// the text lookup reads <c>query_stats</c> plus <c>query_text_dim</c> for the newest row only, which resolves the #1767 payload dimension — the plan
     /// tools read it the same way. $1 server_id, $2/$3 window (naive UTC), $4 top, $5 database filter (NULL = all),
     /// $6 lifetime max_dop floor (0 = no parallelism filter; #3541 A13).
-    /// $7 the candidate limit for pass 1 (#5313: top + 5 first, larger when the WAITFOR trim leaves a short page).
+    /// $7 the candidate limit for pass 1 (#5313: top + 5 first, larger when the WAITFOR trim leaves a short page),
+    /// $8 the databases to leave out (#7725: the ones the server dropped, ranked after the listed ones by a second read; NULL = none).
     /// </summary>
-    public const string TopQueriesSql = $"""
+    public static readonly string TopQueriesSql = $"""
         WITH winners AS MATERIALIZED (
             /* #5226 pass 1 of 2: rank every group of the window on NARROW columns. The wide row (forty
                aggregates and the distinct-text count) forces a sort of wide rows when it shares the
@@ -1113,6 +1114,7 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+           {DatabaseFilter.ExcludeClause("database_name", 8)}
             /*TAG:hash:query_hash*/
             /* #4394: excludes zero-interval rows (sample_interval_seconds = 0) through
                TimescaleSupport.IntervalHonestSourceFilter, the same filter the hourly successors
@@ -1349,7 +1351,7 @@ internal static class DarlingDataReader
     /// <c>query_hash</c> in a rolled-up row is one member of the group, exactly as <c>query_text</c> already
     /// is when <c>distinct_texts &gt; 1</c> — <c>distinct_query_hashes</c> is what says so.</para>
     /// </summary>
-    public const string TopQueriesByHostObjectSql = $"""
+    public static readonly string TopQueriesByHostObjectSql = $"""
         WITH winners AS MATERIALIZED (
             /* #5226 pass 1 of 2: rank every group of the window on NARROW columns. The wide row (forty
                aggregates and the distinct-text count) forces a sort of wide rows when it shares the
@@ -1371,6 +1373,7 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+           {DatabaseFilter.ExcludeClause("database_name", 8)}
             /*TAG:hash:query_hash*/
             /* #4394: same first-collection exclusion as TopQueriesSql — see its note. */
             AND   {TimescaleSupport.IntervalHonestSourceFilter}
@@ -1587,13 +1590,13 @@ internal static class DarlingDataReader
     /// call time — never a literal relation name. $1 server_id, $2/$3 window (naive UTC; $3 is EXCLUSIVE — a
     /// bucket is stamped at its START, so the bucket that begins at $3 lies after the window and is not read),
     /// $4 top, $5 database
-    /// filter (NULL = all), $6 the candidate limit (#5313: top + 5 first, larger on a refill round), $7 the materialization
-    /// ceiling (naive UTC), bound only when the ceiling is known.
-    /// <c>$CEIL$</c> becomes <c>AND f.bucket &lt; $7</c> or nothing. <c>$IOSUMS$</c> (#5329) is the three reads/writes
+    /// filter (NULL = all), $6 the candidate limit (#5313: top + 5 first, larger on a refill round), $7 the databases to leave out
+    /// (#7725: the ones the server dropped; NULL = none), $8 the materialization ceiling (naive UTC), bound only when the ceiling is known.
+    /// <c>$CEIL$</c> becomes <c>AND f.bucket &lt; $8</c> or nothing. <c>$IOSUMS$</c> (#5329) is the three reads/writes
     /// sums on <c>query_stats_io_hourly</c> and typed NULLs on the stitched relation. <c>min_dop</c> and host-object grouping need columns only raw carries, so
-    /// a read that sets either never reaches this const (it is forced to raw) and it takes no $6 or $7.
+    /// a read that sets either never reaches this const (it is forced to raw) and it takes no $6, $7 or $8.
     /// </summary>
-    public const string TopQueriesHourlySql = """
+    public static readonly string TopQueriesHourlySql = $"""
         WITH ranked AS MATERIALIZED (
             SELECT
                 database_name,
@@ -1610,6 +1613,7 @@ internal static class DarlingDataReader
             AND   bucket >= $2
             AND   bucket < $3$CEIL$
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+           {DatabaseFilter.ExcludeClause("database_name", 7)}
             /*TAG:hash:query_hash*/
             GROUP BY database_name, query_hash
             HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
@@ -1944,6 +1948,8 @@ internal static class DarlingDataReader
         AddDatabases(command, databases);
         AddInt(command, minMaxDop);
         AddInt(command, candidates);
+        /* #7725: $8, the databases this ranking leaves out (NULL = none), in the ranking pass of both raw statements. */
+        command.Parameters.Add(databases.ExcludeParameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -2056,7 +2062,7 @@ internal static class DarlingDataReader
         var sql = TopRankings.Apply(TopQueriesHourlySql, ranking, hourly: true, io: io)
             .Replace(TopQueriesHourlyFromPlaceholder, fromClause, StringComparison.Ordinal)
             .Replace(TopQueriesHourlyIoSumsPlaceholder, io ? TopRankings.HourlyIoSums : TopRankings.HourlyNoIoSums, StringComparison.Ordinal)
-            .Replace(CeilingPlaceholder, ceiling is null ? "" : CeilingClause(7), StringComparison.Ordinal);
+            .Replace(CeilingPlaceholder, ceiling is null ? "" : CeilingClause(8), StringComparison.Ordinal);
         sql = QueryTagReadJoin.Apply(sql, serverId, tags);
 
         var firstBucketTask = coverage.GetHourlyFirstBucketAsync(
@@ -2066,7 +2072,7 @@ internal static class DarlingDataReader
         try
         {
         /* #5313: the WAITFOR trim can leave the page short; TopFill asks again with a larger $6 while more
-           candidates exist, under its bound. $6 is the candidate limit, $7 the ceiling when there is one. */
+           candidates exist, under its bound. $6 is the candidate limit, $7 the databases left out (#7725), $8 the ceiling when there is one. */
         rows = await TopFill.RunAsync(top, async candidates =>
         {
             var page = new List<TopQueryRow>();
@@ -2077,6 +2083,8 @@ internal static class DarlingDataReader
             AddInt(command, top);
             AddDatabases(command, databases);
             AddInt(command, candidates);
+            /* #7725: $7, the databases this ranking leaves out (NULL = none); the ceiling, when there is one, is $8. */
+            command.Parameters.Add(databases.ExcludeParameter());
             if (ceiling is not null)
             {
                 AddTimestamp(command, ceiling.Value);

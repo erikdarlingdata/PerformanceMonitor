@@ -11,6 +11,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage.FinOps;
@@ -40,7 +41,7 @@ public sealed partial class DarlingMcpFinOpsTools
             .ToList();
 
     private static async Task<string> ReadDatabaseResourcesAsync(
-        NpgsqlDataSource postgres, (int ServerId, string ServerName, string DisplayName) resolved, int hoursBack, int limit, CancellationToken ct)
+        NpgsqlDataSource postgres, (int ServerId, string ServerName, string DisplayName) resolved, int hoursBack, int limit, CancellationToken ct, ILogger? logger = null)
     {
         /* The cutoff is taken before the rollup probe, the viewer's order. */
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
@@ -60,7 +61,7 @@ public sealed partial class DarlingMcpFinOpsTools
             /* #7010: the window-floor notice of the two tables the view windows (the not_collected answer above stays bare). */
             var noRows = await ViewWindowNoticeAsync(postgres, resolved.ServerName, hoursBack, ["query_stats", "file_io_stats"], "query_stats and file_io_stats", true, ct);
             return await DarlingMcpWindowNotice.FinishEmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, DateTime.UtcNow, McpHelpers.Status("empty",
-                    $"No query statistics or file I/O were collected for this server in the last {hoursBack} hours, so there is no per-database usage to show.", noRows.AsHints()), noRows, ct);
+                    $"No query statistics or file I/O were collected for this server in the last {hoursBack} hours, so there is no per-database usage to show.", noRows.AsHints()), noRows, ct, cutoff);
         }
 
         var ordered = OrderDatabaseRows(rows);
@@ -68,7 +69,9 @@ public sealed partial class DarlingMcpFinOpsTools
             postgres, resolved.ServerId, rollups, coverage, cutoff, McpCommandDeadlines.ReadSeconds, limit, ct);
 
         var notice = await ViewWindowNoticeAsync(postgres, resolved.ServerName, hoursBack, ["query_stats", "file_io_stats"], "query_stats and file_io_stats", false, ct);
-        return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
+        /* #7725: a database the server no longer lists keeps its row (the figures are real) and is marked database_dropped, so the page can say so. */
+        var dropped = await CurrentDatabaseScope.ReadDroppedAsync(postgres, resolved.ServerId, windowStartUtc: cutoff, logger: logger, cancellationToken: ct);
+        var payload = JsonSerializer.SerializeToNode(new
         {
             server = resolved.DisplayName,
             view = DatabaseResourcesView,
@@ -81,7 +84,9 @@ public sealed partial class DarlingMcpFinOpsTools
             rows = ordered.Take(MaxDatabaseRows).Select(DatabaseResourcesRow).ToList(),
             top_by_total = byTotal.Select(TopByTotalRow).ToList(),
             top_by_avg = byAvg.Select(TopByAvgRow).ToList(),
-        }, McpHelpers.JsonOptions), notice);
+        }, McpHelpers.JsonOptions)!.AsObject();
+        DroppedDatabaseRows.MarkByName(payload, dropped, "rows", "top_by_total", "top_by_avg");
+        return DarlingMcpWindowNotice.Finish(payload.ToJsonString(McpHelpers.JsonOptions), notice);
     }
 
     /// <summary>One database-resources row in the wire shape: snake_case keys, no cost fields.</summary>

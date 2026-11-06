@@ -33,6 +33,11 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed class ViewerQueryStatsRow : QueryTagRowBase
 {
     public string DatabaseName { get; set; } = "";
+    /// <summary>#7725: true for a row from a database the server no longer lists. The ranking puts the databases the server still lists
+    /// first and fills what the limit leaves from the dropped ones, which carry this mark (the Top Procedures grid's rule).</summary>
+    public bool IsDropped { get; set; }
+    /// <summary>#7725: what the grid's database cell shows: the name, with " (dropped)" after a database the server no longer lists.</summary>
+    public string DatabaseDisplay => DroppedDatabaseMark.Display(DatabaseName, IsDropped);
     public string QueryHash { get; set; } = "";
     public DateTime? LastExecutionTime { get; set; }
     public DateTime? CreationTime { get; set; }
@@ -150,9 +155,10 @@ public sealed partial class ViewerDataService
     /// for this row", which is what the on-demand fetch can act on; it has never promised the fetch will
     /// find content, since a digest can outlive the dimension row the GC pruned.
     /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 top, $5 database filter, $6 the candidate
-    /// limit (#5313: top + 5 first, larger on a refill round).
+    /// limit (#5313: top + 5 first, larger on a refill round), $7 the databases to leave out (#7725: the ones the server dropped; NULL
+    /// leaves out none).
     /// </summary>
-    public const string TopQueriesSql = """
+    public static readonly string TopQueriesSql = $"""
         WITH ranked AS MATERIALIZED (
             SELECT
                 database_name,
@@ -214,6 +220,7 @@ public sealed partial class ViewerDataService
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+           {DatabaseFilter.ExcludeClause("database_name", 7)}
             /*TAG:hash:query_hash*/
             GROUP BY database_name, query_hash, host_object_name
             HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
@@ -419,21 +426,49 @@ public sealed partial class ViewerDataService
     private async Task<ViewerRoutedRead<ViewerQueryStatsRow>> GetTopQueriesByCpuRoutedUntaggedAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int top, IReadOnlyList<string>? databaseNames, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
+        /* #7725 (the Top Procedures grid's order): with no database chosen, the databases the server still lists rank first, with the
+           dropped ones excluded in the statement ($7 raw, $6 hourly), so a dropped database's rows never push out a listed row. What the
+           limit leaves is filled from the dropped databases, ranked the same way and marked IsDropped (the grid shows "(dropped)"). A
+           database the user names is read as asked, and an unknown set (no recent snapshot) leaves out nothing. The window is anchored
+           as the Procedures read anchors it. */
+        var now = DateTime.UtcNow;
+        var databases = await CurrentDatabaseScope.NarrowAsync(
+            _dataSource, serverId, DatabaseFilter.Of(databaseNames), nowUtc: now, asOfUtc: endUtc < now ? endUtc : null,
+            windowStartUtc: startUtc, logger: ViewerStoreLogger.Instance, cancellationToken: cancellationToken);
+        var leftOut = DatabasesLeftOut.Distinct(databases.ExcludedNames);
+
         var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
         var routedTier = RetentionTierRouter.Resolve(
-            DateTime.UtcNow, startUtc, rollups.QueryGrainHourly, dailyAvailable: false,
+            now, startUtc, rollups.QueryGrainHourly, dailyAvailable: false,
             coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
         if (routedTier == RetentionTier.Daily)
         {
             routedTier = RetentionTier.Hourly;
         }
 
-        if (routedTier == RetentionTier.Hourly)
+        var read = routedTier == RetentionTier.Hourly
+            ? await GetTopQueriesByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, top, databaseNames, databases, tags, cancellationToken)
+            : new ViewerRoutedRead<ViewerQueryStatsRow>(await GetTopQueriesByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, databases, tags, cancellationToken), "raw", null);
+
+        if (leftOut is { Count: > 0 } && read.Rows.Count < top)
         {
-            return await GetTopQueriesByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, top, databaseNames, tags, cancellationToken);
+            var fillTop = top - read.Rows.Count;
+            var leftOutNames = leftOut.ToList();
+            var fill = routedTier == RetentionTier.Hourly
+                ? (await GetTopQueriesByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, fillTop, leftOutNames, DatabaseFilter.All, tags, cancellationToken)).Rows
+                : await GetTopQueriesByCpuRawAsync(serverId, startUtc, endUtc, fillTop, leftOutNames, DatabaseFilter.All, tags, cancellationToken);
+            if (fill.Count > 0)
+            {
+                foreach (var row in fill)
+                {
+                    row.IsDropped = true;
+                }
+
+                read = read with { Rows = [.. read.Rows, .. fill] };
+            }
         }
 
-        return new ViewerRoutedRead<ViewerQueryStatsRow>(await GetTopQueriesByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, tags, cancellationToken), "raw", null);
+        return read;
     }
 
     /// <summary>#4231 stage 3: the hourly-rollup arm — builds its FROM clause ONLY through
@@ -442,7 +477,7 @@ public sealed partial class ViewerDataService
     /// <c>query_text</c> with a follow-up lookup mirroring <see cref="DarlingDataReader"/>'s MCP twin.</summary>
     private async Task<ViewerRoutedRead<ViewerQueryStatsRow>> GetTopQueriesByCpuHourlyAsync(
         RollupAvailability rollups, RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc, int top,
-        IReadOnlyList<string>? databaseNames, QueryTagFilter? tags, CancellationToken cancellationToken)
+        IReadOnlyList<string>? databaseNames, DatabaseFilter databases, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
         /* #5329: when the io hourly rollup reaches the window's start, read it instead of the interval rollup (it
            carries every column the interval one does) and fill reads, physical reads and writes from its three sums.
@@ -471,6 +506,7 @@ public sealed partial class ViewerDataService
                 AddServerWindowParameters(command, serverId, startUtc, endUtc);
                 command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = top });
                 command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+                command.Parameters.Add(databases.ExcludeParameter());
                 AddHourlyCeilingParameter(command, ceiling);
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                 while (await reader.ReadAsync(cancellationToken))
@@ -584,7 +620,7 @@ public sealed partial class ViewerDataService
 
     /// <summary>The hourly-rollup arm's SQL over <paramref name="fromClause"/>. A rollup bucket is stamped at
     /// its START, so the window end is EXCLUSIVE (<c>bucket &lt; $3</c>), and (#5329) a known materialization
-    /// <paramref name="ceiling"/> adds <c>bucket &lt; $6</c> (see <see cref="HourlyCeilingSql"/>): a range whose To is 14:00 sums the
+    /// <paramref name="ceiling"/> adds <c>bucket &lt; $7</c> (see <see cref="HourlyCeilingSql"/>; $6 is the dropped-database exclusion, #7725): a range whose To is 14:00 sums the
     /// hours up to 13:00-14:00 and does not add the 14:00-15:00 hour that only begins at the end. (The raw arm
     /// stamps a sample when it was taken, so it keeps <c>&lt;=</c> on <c>collection_time</c>.) Split out so a
     /// test can read the text.</summary>
@@ -598,8 +634,8 @@ public sealed partial class ViewerDataService
         FROM {fromClause}
         WHERE server_id = $1
         AND   bucket >= $2
-        AND   bucket < $3{HourlyCeilingSql(ceiling)}
-        AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        AND   bucket < $3{HourlyCeilingSql(ceiling, 7)}
+        AND   ($5::text[] IS NULL OR database_name = ANY($5)){DatabaseFilter.ExcludeClause("database_name", 6)}
         /*TAG:hash:query_hash*/
         GROUP BY database_name, query_hash
         HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
@@ -610,7 +646,7 @@ public sealed partial class ViewerDataService
     /// <summary>The Raw-tier read, unchanged — what <see cref="GetTopQueriesByCpuAsync"/> ran before #4231
     /// stage 3 added the hourly arm.</summary>
     private async Task<List<ViewerQueryStatsRow>> GetTopQueriesByCpuRawAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, int top, IReadOnlyList<string>? databaseNames, QueryTagFilter? tags, CancellationToken cancellationToken)
+        int serverId, DateTime startUtc, DateTime endUtc, int top, IReadOnlyList<string>? databaseNames, DatabaseFilter databases, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
         /* #5313: the WAITFOR trim can leave the page short; TopFill asks again with a larger candidate limit ($6)
            while more candidates exist, under its bound. */
@@ -625,6 +661,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = top });
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = candidates });
+        command.Parameters.Add(databases.ExcludeParameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

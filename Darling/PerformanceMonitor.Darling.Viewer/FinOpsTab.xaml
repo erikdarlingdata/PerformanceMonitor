@@ -445,7 +445,7 @@
                                     <GroupBox Grid.Column="0" Header="Top Databases by Total CPU" Margin="0,0,5,0" Foreground="{DynamicResource ForegroundBrush}">
                                         <DataGrid x:Name="FinOpsTopTotalGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" MinHeight="40" MaxHeight="200">
                                             <DataGrid.Columns>
-                                                <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="*"/>
+                                                <DataGridTextColumn Header="Database" Binding="{Binding DatabaseDisplay}" SortMemberPath="DatabaseName" Width="*"/>
                                                 <DataGridTextColumn Header="CPU %" Binding="{Binding PctCpu, StringFormat=N1}" Width="60" ElementStyle="{StaticResource NumericCell}"/>
                                                 <DataGridTextColumn Header="IO %" Binding="{Binding PctIo, StringFormat=N1}" Width="55" ElementStyle="{StaticResource NumericCell}"/>
                                                 <DataGridTextColumn Header="CPU (ms)" Binding="{Binding CpuTimeMs, StringFormat=N0}" Width="80" ElementStyle="{StaticResource NumericCell}"/>
@@ -456,7 +456,7 @@
                                     <GroupBox Grid.Column="1" Header="Top Databases by Avg CPU / Execution" Margin="5,0,0,0" Foreground="{DynamicResource ForegroundBrush}">
                                         <DataGrid x:Name="FinOpsTopAvgGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" MinHeight="40" MaxHeight="200">
                                             <DataGrid.Columns>
-                                                <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="*"/>
+                                                <DataGridTextColumn Header="Database" Binding="{Binding DatabaseDisplay}" SortMemberPath="DatabaseName" Width="*"/>
                                                 <DataGridTextColumn Header="Avg CPU (ms)" Binding="{Binding AvgCpuMs, StringFormat=N2}" Width="95" ElementStyle="{StaticResource NumericCell}"/>
                                                 <DataGridTextColumn Header="Avg IO (MB)" Binding="{Binding AvgIoMb, StringFormat=N2}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
                                                 <DataGridTextColumn Header="Execs" Binding="{Binding ExecutionCount, StringFormat=N0}" Width="70" ElementStyle="{StaticResource NumericCell}"/>
@@ -512,7 +512,7 @@
                         <Grid Grid.Row="1" Margin="10,0,10,10">
                             <DataGrid x:Name="FinOpsDatabaseResourcesDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" HorizontalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Binding="{Binding DatabaseName}" Width="180"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding DatabaseDisplay}" SortMemberPath="DatabaseName" Width="180"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding CpuTimeMs, StringFormat=N0}" Width="120" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CpuTimeMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="CPU Time (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding PctCpuShare, StringFormat=N1}" Width="70" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PctCpuShare" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="CPU %" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding LogicalReads, StringFormat=N0}" Width="120" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LogicalReads" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Logical Reads" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
