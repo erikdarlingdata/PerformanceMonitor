@@ -531,7 +531,7 @@
                                           RowStyle="{StaticResource DefaultRowStyle}"
                               LoadingRow="MarkedGrid_LoadingRow">
                                     <DataGrid.Columns>
-                                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="*"/>
+                                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseDisplay}" SortMemberPath="DatabaseName" Width="*"/>
                                         <DataGridTextColumn Header="CPU %" Binding="{Binding PctCpu, StringFormat='{}{0:N1}'}" Width="70">
                                             <DataGridTextColumn.ElementStyle>
                                                 <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
@@ -567,7 +567,7 @@
                                           RowStyle="{StaticResource DefaultRowStyle}"
                               LoadingRow="MarkedGrid_LoadingRow">
                                     <DataGrid.Columns>
-                                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="*"/>
+                                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseDisplay}" SortMemberPath="DatabaseName" Width="*"/>
                                         <DataGridTextColumn Header="Avg CPU (ms)" Binding="{Binding AvgCpuMs, StringFormat='{}{0:N2}'}" Width="110">
                                             <DataGridTextColumn.ElementStyle>
                                                 <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
@@ -686,7 +686,7 @@
                               RowStyle="{StaticResource DefaultRowStyle}"
                               LoadingRow="MarkedGrid_LoadingRow">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Binding="{Binding DatabaseName}" Width="180">
+                            <DataGridTextColumn Binding="{Binding DatabaseDisplay}" SortMemberPath="DatabaseName" Width="180">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/>
