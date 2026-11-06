@@ -640,7 +640,10 @@ function rankedSlicer(kind, cmp) {
     const host = slicer.node.parentNode || slicer.node;
     host.style.display = "none";
   };
-  readToolWithinKeptHistory(strip.tool, strip.params, signal).then((res) => {
+  /* #7941: a bucketed strip reads the same trend the tab's full-width chart draws (get_query_duration_trend, get_procedure_duration_trend), so it
+     asks for the chart's plot budget (#7661). The two requests are then the same path, and apiGetJoined shares one answer between them instead of
+     the tool running twice per paint. */
+  readToolWithinKeptHistory(strip.tool, strip.params, signal, strip.bucketed ? { plotPx: estimatedPlotPx() } : undefined).then((res) => {
     if (res.kind === "empty") return hideEmpty();
     if (res.kind !== "data" || !res.data) return;
     const rows = strip.rows(res.data);

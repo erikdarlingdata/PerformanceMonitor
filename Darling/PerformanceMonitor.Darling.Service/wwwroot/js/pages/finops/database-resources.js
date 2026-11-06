@@ -17,6 +17,9 @@ import { finopsWindowControl } from "./window.js";
 // The default window.
 const HOURS = 24;
 
+// #7922: the chosen window per server, kept here so the 60 s rebuild of the tab does not put it back to 24 hours.
+const chosenHours = new Map();
+
 const COLUMNS = [
   { key: "database_name", label: "Database", name: true },
   { key: "cpu_time_ms", label: "CPU", format: "ms" },
@@ -47,6 +50,7 @@ export const tab = {
     let seq = 0;
     const load = async (hours) => {
       const mine = ++seq;
+      chosenHours.set(server, hours);
       mount(body, loadingStrip());
       try {
         const res = await readTool("get_finops", { server, view: "database_resources", hours }, ctx && ctx.signal);
@@ -63,9 +67,10 @@ export const tab = {
         if (mine === seq && e?.name !== "AbortError") mount(body, errorStrip("Could not render this tab: " + (e && e.message ? e.message : String(e))));
       }
     };
-    const win = finopsWindowControl({ hours: HOURS, onChange: (hours) => load(hours) });
+    const start = chosenHours.get(server) ?? HOURS;
+    const win = finopsWindowControl({ hours: start, onChange: (hours) => load(hours) });
     const root = el("div", {}, [win.node, body]);
-    load(HOURS);
+    load(start);
     return root;
   },
 };

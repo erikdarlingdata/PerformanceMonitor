@@ -361,4 +361,19 @@ public sealed class TimeSlicerBehaviourTests
         Assert.True(reach.GetProperty("longAgain").GetBoolean());
         Assert.False(reach.GetProperty("outside").GetBoolean());
     }
+
+    /// <summary>#7931: a window that ends at :40 of a minute. A selection ending at the window end is kept there, not rounded up past it: clampSlice
+    /// answers the window end, and a drag to the right edge reads with that end as <c>as_of</c>, names it in the readout and draws the box inside the track.</summary>
+    [Fact]
+    public void ADragToTheRightEdge_StopsAtTheWindowEnd()
+    {
+        var edge = Page().GetProperty("edge");
+        var windowEnd = edge.GetProperty("windowEnd").GetString();
+        Assert.Equal(windowEnd, edge.GetProperty("clampedEnd").GetString());
+        Assert.True(edge.GetProperty("clampedStartMinute").GetBoolean(), "the start still rounds to a whole minute");
+        Assert.Equal(("6", windowEnd), Ask(edge.GetProperty("queries")));
+        Assert.Contains(edge.GetProperty("endText").GetString()!, edge.GetProperty("readout").GetString());
+        Assert.True(edge.GetProperty("boxRight").GetDouble() <= 100, "the selection box ends inside the track, at " + edge.GetProperty("boxRight").GetDouble() + "%");
+        Assert.Equal("100", edge.GetProperty("endValueNow").GetString());
+    }
 }

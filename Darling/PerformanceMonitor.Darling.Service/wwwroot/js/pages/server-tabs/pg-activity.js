@@ -55,7 +55,7 @@ export const PG_BLOCKING_STATS = [
 export const PG_DATABASE_STATS = [
   { key: "database_count", label: "Databases active", format: "int" },
   { key: "total_temp_files", label: "Temp files", format: "int" },
-  { key: "total_temp_bytes", label: "Temp bytes", format: "int" },
+  { key: "total_temp_bytes", label: "Temp bytes", format: "bytes" },
   { key: "top_spiller", label: "Biggest spiller", format: "text", small: true },
   { key: "total_deadlocks", label: "Deadlocks", format: "int" },
   { key: "cache_hit_pct", label: "Cache hit %", format: "num2" },
@@ -390,8 +390,8 @@ export const PG_BLOCKING_CYCLE_COLUMNS = [
 export const PG_DATABASE_COLUMNS = [
   { key: "database", label: "Database" },
   { key: "temp_files", label: "Temp Files", format: "int" },
-  { key: "temp_bytes", label: "Temp Bytes", format: "int" },
-  { key: "avg_temp_file_bytes", label: "Avg Temp File (bytes)", format: "int" },
+  { key: "temp_bytes", label: "Temp Bytes", format: "bytes" },
+  { key: "avg_temp_file_bytes", label: "Avg Temp File", format: "bytes" },
   /* #7410: each row used to carry three paragraphs that read the same on every database. The cell shows the verdict word and the
      paragraph opens on a click (the same pattern as the bloat grid), and the header tooltip says what the column means once. */
   detailColumn("spill_finding", "Spills", spillWord, "Whether sorts and hashes spilled to temp files in this window, and how big the files were. Click a verdict for the cause and the usual fix."),
