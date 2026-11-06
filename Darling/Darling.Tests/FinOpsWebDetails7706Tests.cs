@@ -115,11 +115,11 @@ public sealed class FinOpsWebDetails7706Tests
 
         Assert.Equal(
             "2 databases have no row here: this server holds a secondary copy of them in an availability group. Check the primary replica for their persistent version store.",
-            DarlingMcpPvsTools.SecondaryWithoutRowNote(secondary, withRows, DatabaseFilter.All));
-        Assert.StartsWith("1 database has no row here:", DarlingMcpPvsTools.SecondaryWithoutRowNote(secondary, withRows, DatabaseFilter.One("AgDb")), StringComparison.Ordinal);
+            PvsSecondaryNote.WithoutRow(secondary, withRows, DatabaseFilter.All));
+        Assert.StartsWith("1 database has no row here:", PvsSecondaryNote.WithoutRow(secondary, withRows, DatabaseFilter.One("AgDb")), StringComparison.Ordinal);
         // A secondary copy that does have a row is not named, and a filter that leaves the secondary out says nothing.
-        Assert.Null(DarlingMcpPvsTools.SecondaryWithoutRowNote(secondary, ["AgDb", "OtherAg"], DatabaseFilter.All));
-        Assert.Null(DarlingMcpPvsTools.SecondaryWithoutRowNote(secondary, withRows, DatabaseFilter.One("master")));
-        Assert.Null(DarlingMcpPvsTools.SecondaryWithoutRowNote(Array.Empty<string>(), withRows, DatabaseFilter.All));
+        Assert.Null(PvsSecondaryNote.WithoutRow(secondary, ["AgDb", "OtherAg"], DatabaseFilter.All));
+        Assert.Null(PvsSecondaryNote.WithoutRow(secondary, withRows, DatabaseFilter.One("master")));
+        Assert.Null(PvsSecondaryNote.WithoutRow(Array.Empty<string>(), withRows, DatabaseFilter.All));
     }
 }

@@ -8,9 +8,12 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -115,6 +118,26 @@ ORDER BY lower(p.database_name), p.database_name, p.collection_time";
         }
 
         return items;
+    }
+
+    /// <summary>
+    /// #7706: the latest PVS rows plus the one-sentence note for a database this node holds only as an availability group secondary copy
+    /// and that has no row here (<see cref="PvsSecondaryNote"/>, the sentence <c>get_pvs_stats</c> carries as <c>secondary_replica_note</c>
+    /// and the web page shows). The note is null when there are no rows, as on the web page, and fails open: stale or missing snapshots,
+    /// a standalone server and Azure SQL Database give no note.
+    /// </summary>
+    public async Task<(List<PvsStatsRow> Rows, string? SecondaryNote)> GetPvsStatsLatestWithNoteAsync(
+        int serverId, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+    {
+        var rows = await GetPvsStatsLatestAsync(serverId, databaseNames, cancellationToken);
+        if (rows.Count == 0)
+        {
+            return (rows, null);
+        }
+
+        var secondary = await PgSecondaryReplicaScope.ReadAsync(_dataSource, serverId, DateTime.UtcNow, logger: null, cancellationToken);
+        var filter = databaseNames is { Count: > 0 } ? DatabaseFilter.Of(databaseNames) : DatabaseFilter.All;
+        return (rows, PvsSecondaryNote.WithoutRow(secondary, rows.Select(r => r.DatabaseName), filter));
     }
 
     public async Task<List<PvsStatsRow>> GetPvsStatsLatestAsync(int serverId, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
