@@ -777,8 +777,12 @@ public partial class FinOpsTab : UserControl
         try
         {
             var pvsFilter = SelectedDatabaseFilter();
-            var data = await Task.Run(() => _dataService.GetPvsStatsLatestAsync(serverId, pvsFilter));
+            var (data, secondaryNote) = await Task.Run(() => _dataService.GetPvsStatsLatestWithNoteAsync(serverId, pvsFilter));
             if (_loads.Superseded(nameof(LoadPvsStatsAsync), gen)) return;
+
+            /* #7706: a secondary copy has no PVS row; the same sentence get_pvs_stats carries as secondary_replica_note. */
+            PvsSecondaryNoteText.Text = secondaryNote ?? "";
+            PvsSecondaryNoteText.Visibility = secondaryNote is null ? Visibility.Collapsed : Visibility.Visible;
 
             _pvsStatsFilterMgr!.UpdateData(data);
 

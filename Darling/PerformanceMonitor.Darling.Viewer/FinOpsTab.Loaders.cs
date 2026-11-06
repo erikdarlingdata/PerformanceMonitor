@@ -441,8 +441,11 @@ public partial class FinOpsTab
 
     private async Task LoadFinOpsPvsStatsAsync()
     {
-        var data = await _dataService.GetPvsStatsLatestAsync(_server.ServerId, SelectedDatabaseFilter);
+        var (data, secondaryNote) = await _dataService.GetPvsStatsLatestWithNoteAsync(_server.ServerId, SelectedDatabaseFilter);
 
+        /* #7706: a database held only as an availability group secondary copy has no row here; the strip says so, as the web page does. */
+        FinOpsPvsSecondaryNote.Text = secondaryNote ?? "";
+        FinOpsPvsSecondaryNote.Visibility = secondaryNote is null ? Visibility.Collapsed : Visibility.Visible;
         _finopsPvsStatsFilterMgr!.UpdateData(data);
         FinOpsNoPvsStatsMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         FinOpsPvsCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";

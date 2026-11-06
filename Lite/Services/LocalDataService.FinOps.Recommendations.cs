@@ -823,11 +823,8 @@ GROUP BY database_name
 HAVING SUM(delta_reads) > 1000";
             ioCmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             ioCmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
-
-            var lowLatencyDbs = new List<(string Name, decimal AvgReadMs, decimal AvgWriteMs)>();
-            var storageMin = DateTime.MaxValue;
-            var storageMax = DateTime.MinValue;
-            long storageSamples = 0;
+            /* #7706: the qualifying test and both sentences are StorageTierFigures', the one definition Darling's rule calls too. */
+            var ioRows = new List<StorageTierIo>();
             using var ioReader = await ioCmd.ExecuteReaderAsync();
             while (await ioReader.ReadAsync())
             {
@@ -838,42 +835,26 @@ HAVING SUM(delta_reads) > 1000";
                     continue;
                 }
 
-                var totalReads = ioReader.IsDBNull(1) ? 0L : ToInt64(ioReader.GetValue(1));
-                var totalStallRead = ioReader.IsDBNull(2) ? 0L : ToInt64(ioReader.GetValue(2));
-                var totalWrites = ioReader.IsDBNull(3) ? 0L : ToInt64(ioReader.GetValue(3));
-                var totalStallWrite = ioReader.IsDBNull(4) ? 0L : ToInt64(ioReader.GetValue(4));
-
-                var avgReadMs = totalReads > 0 ? (decimal)totalStallRead / totalReads : 0m;
-                var avgWriteMs = totalWrites > 0 ? (decimal)totalStallWrite / totalWrites : 0m;
-
-                if (avgReadMs < 5m && avgWriteMs < 3m)
-                {
-                    lowLatencyDbs.Add((dbName, avgReadMs, avgWriteMs));
-                    storageSamples += ioReader.IsDBNull(7) ? 0L : ToInt64(ioReader.GetValue(7));
-                    if (!ioReader.IsDBNull(5) && !ioReader.IsDBNull(6))
-                    {
-                        var first = Convert.ToDateTime(ioReader.GetValue(5));
-                        var last = Convert.ToDateTime(ioReader.GetValue(6));
-                        if (first < storageMin) storageMin = first;
-                        if (last > storageMax) storageMax = last;
-                    }
-                }
+                ioRows.Add(new StorageTierIo(
+                    dbName,
+                    ioReader.IsDBNull(1) ? 0L : ToInt64(ioReader.GetValue(1)),
+                    ioReader.IsDBNull(2) ? 0L : ToInt64(ioReader.GetValue(2)),
+                    ioReader.IsDBNull(3) ? 0L : ToInt64(ioReader.GetValue(3)),
+                    ioReader.IsDBNull(4) ? 0L : ToInt64(ioReader.GetValue(4)),
+                    ioReader.IsDBNull(5) ? null : Convert.ToDateTime(ioReader.GetValue(5)),
+                    ioReader.IsDBNull(6) ? null : Convert.ToDateTime(ioReader.GetValue(6)),
+                    ioReader.IsDBNull(7) ? 0L : ToInt64(ioReader.GetValue(7))));
             }
 
-            if (lowLatencyDbs.Count > 0)
+            if (StorageTierFigures.Evaluate(ioRows) is { } storageTier)
             {
-                var storageWindow = RightSizingWindow.Describe(storageSamples, storageMax > storageMin ? storageMax - storageMin : TimeSpan.Zero);
-                var detail = string.Join("; ", lowLatencyDbs.Take(10)
-                    .Select(d => $"{d.Name} (read {d.AvgReadMs:N1}ms, write {d.AvgWriteMs:N1}ms)"));
                 recommendations.Add(new RecommendationRow
                 {
                     Category = "Storage",
                     Severity = "Low",
                     Confidence = "Medium",
-                    Finding = $"{lowLatencyDbs.Count} {(lowLatencyDbs.Count == 1 ? "database" : "databases")} with low IO latency, so standard storage may suffice",
-                    Detail = $"These databases have avg read latency under 5ms and write under 3ms across {storageWindow}: {detail}" +
-                             (lowLatencyDbs.Count > 10 ? $" and {lowLatencyDbs.Count - 10} more" : "") +
-                             ". Premium/high-performance storage may not be needed."
+                    Finding = storageTier.Finding,
+                    Detail = storageTier.Detail
                 });
             }
         }
@@ -1000,7 +981,7 @@ AND   sqlserver_cpu_utilization IS NOT NULL";
     /// a clean bill.</summary>
     internal static string IdleDatabasesEmptyText(bool hasCoverage) => hasCoverage
         ? "No idle databases detected"
-        : "Idle databases cannot be judged yet: query stats do not cover each of the last 7 days";
+        : "Idle databases cannot be judged yet: query stats do not cover each of the last 7 days.";
 
     /// <summary>
     /// True when the server's query stats cover a full 7 days: BOTH the oldest sample is at or before now minus 7 days, AND each of

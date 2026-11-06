@@ -58,6 +58,52 @@ public sealed class DarlingRetentionTests
         }
     }
 
+    /// <summary>
+    /// Every collector a statement text store names as a referrer has a <see cref="CollectorScheduleDefaults"/> row, so a
+    /// retention raised on that collector alone reaches the store's prune horizon.
+    /// <see cref="DarlingRetention.WidestEffectiveRetentionDays"/> skips a name with no schedule row, so a misspelled or
+    /// stale entry in <see cref="PgStatementText.ReferencingCollectors"/> or
+    /// <see cref="QueryStoreTextStore.ReferencingCollectors"/> would silently leave that collector's raised retention out of
+    /// the horizon, and its text would go while its facts stay. Each name is raised on its own, far above every schedule
+    /// default and the baseline floor, so the widest figure can reach the raise only through that name.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(TextStoreReferencingCollectors))]
+    public void TextStoreHorizon_ReachesARetentionRaisedOnEveryReferencingCollector(string textStore, string raisedCollector)
+    {
+        const int raisedDays = 400;
+        var referencing = textStore == PgStatementText.TableName
+            ? PgStatementText.ReferencingCollectors
+            : QueryStoreTextStore.ReferencingCollectors;
+
+        var widest = DarlingRetention.WidestEffectiveRetentionDays(
+            referencing,
+            name => string.Equals(name, raisedCollector, StringComparison.Ordinal)
+                ? raisedDays
+                : CollectorScheduleDefaults.All.TryGetValue(name, out var schedule)
+                    ? schedule.RetentionDays
+                    : DarlingRetention.DataRetentionBaseDays);
+
+        Assert.True(widest >= raisedDays,
+            $"'{raisedCollector}' raised to {raisedDays} days left the {textStore} horizon at {widest}: the name has no CollectorScheduleDefaults row, so WidestEffectiveRetentionDays skipped it");
+    }
+
+    public static TheoryData<string, string> TextStoreReferencingCollectors()
+    {
+        var data = new TheoryData<string, string>();
+        foreach (var name in PgStatementText.ReferencingCollectors)
+        {
+            data.Add(PgStatementText.TableName, name);
+        }
+
+        foreach (var name in QueryStoreTextStore.ReferencingCollectors)
+        {
+            data.Add(QueryStoreTextStore.TableName, name);
+        }
+
+        return data;
+    }
+
     [Fact]
     public void DeleteSql_BatchesOnEachDefinitionsOwnTimeColumn()
     {
@@ -1193,7 +1239,7 @@ WHERE hypertable_name = 'wait_stats'
         Assert.Contains("livenessTouchedTablePruneRowCap", mapBody, StringComparison.Ordinal);
         Assert.DoesNotContain("adaptiveRowCapTimeColumn", mapBody, StringComparison.Ordinal);
 
-        var textAt = source.IndexOf("var queryTextCutoff = utcNow.AddDays(", StringComparison.Ordinal);
+        var textAt = source.IndexOf("var queryTextDeleted = await PurgeOneAsync(", StringComparison.Ordinal);
         Assert.True(textAt >= 0, "the query text purge call moved");
         var textBody = source[textAt..Math.Min(source.Length, textAt + 500)];
         Assert.Contains("UnorderedRowCappedDeleteSql(", textBody, StringComparison.Ordinal);
