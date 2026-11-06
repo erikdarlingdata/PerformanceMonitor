@@ -180,7 +180,9 @@ public sealed class PgStatementShapeTests
         PgOwnStatement.Mark("SELECT 'pm7697;lit' FROM pm7697_lit; SELECT $q$x;y$q$ FROM pm7697_dq");
         Assert.True(PgOwnStatement.IsServiceStatementText("SELECT $1 FROM pm7697_lit"));
         Assert.True(PgOwnStatement.IsServiceStatementText("SELECT $1 FROM pm7697_dq"));
-        Assert.False(PgOwnStatement.IsServiceStatementText("SELECT $1"));
+        Assert.Equal(
+            new[] { PgStatementShape.Key("SELECT $1 FROM pm7697_lit"), PgStatementShape.Key("SELECT $1 FROM pm7697_dq") },
+            PgStatementShape.Keys("SELECT 'pm7697;lit' FROM pm7697_lit; SELECT $q$x;y$q$ FROM pm7697_dq"));
 
         /* The same text again is a no-op: still recognized, nothing else becomes so. */
         PgOwnStatement.Mark("SELECT pm7697_ms_a FROM t1 WHERE id = 7; SELECT pm7697_ms_b, 2 FROM t2");
