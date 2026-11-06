@@ -194,7 +194,7 @@ public sealed class FinOpsRecommendationsCharacterizationTests
 
             Assert.NotNull(rec);
             AssertRow(rec!, "Storage", "Medium", "High",
-                "7 uncompressed object(s) >= 1GB (17.5GB total)",
+                "7 uncompressed objects over 1 GB (17.5 GB total)",
                 "Large uncompressed tables/indexes: dbo.t_big_b (5.0GB); dbo.t_top_h (4.0GB); dbo.t_mid_d (3.0GB); dbo.t_low_i (2.0GB); dbo.t_half_j (1.5GB) and 2 more" +
                 ". Consider PAGE or ROW compression to reduce storage and improve I/O.", null);
         });
@@ -215,7 +215,7 @@ public sealed class FinOpsRecommendationsCharacterizationTests
             Assert.Equal("Storage", rec!.Category);
             Assert.Equal(severity, rec.Severity);
             Assert.Equal("High", rec.Confidence);
-            Assert.Equal($"1 uncompressed object(s) >= 1GB ({totalGb}GB total)", rec.Finding);
+            Assert.Equal($"1 uncompressed object over 1 GB ({totalGb} GB total)", rec.Finding);
             Assert.Equal($"Large uncompressed tables/indexes: dbo.t_edge_a ({totalGb}GB). Consider PAGE or ROW compression to reduce storage and improve I/O.", rec.Detail);
             Assert.Null(rec.EstMonthlySavings);
         });
