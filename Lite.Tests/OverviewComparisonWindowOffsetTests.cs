@@ -244,7 +244,7 @@ public sealed class OverviewComparisonWindowOffsetTests
     public void TheComparisonCallSites_UseTheTabsOwnClock_AndTheDayCount()
     {
         var refresh = CodeOnly(File.ReadAllText(ControlsFile("ServerTab.Refresh.cs")));
-        var overview = MethodBody(refresh, "private async System.Threading.Tasks.Task RefreshOverviewAsync(");
+        var overview = MethodBody(refresh, "private async System.Threading.Tasks.Task<string?> RefreshOverviewAsync(");
 
         Assert.Contains("CorrelatedTimelineLanesControl.GetOverviewComparisonRange(", overview, StringComparison.Ordinal);
         Assert.Contains("var clock = _serverClock;", overview, StringComparison.Ordinal);
