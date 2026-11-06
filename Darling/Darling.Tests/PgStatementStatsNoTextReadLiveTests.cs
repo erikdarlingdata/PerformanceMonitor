@@ -50,12 +50,6 @@ public sealed class PgStatementStatsNoTextReadLiveTests
         /* pg_stat_statements is cluster-wide: the entries of every database are read through this one. */
         await ExecAsync(target.ConnectionString, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements", ct);
 
-        /* A statement of this database's own, so the collector has at least one entry to return for it. */
-        for (var run = 0; run < 3; run++)
-        {
-            await ExecAsync(target.ConnectionString, "SELECT 778300 + 1 AS pm7783_no_text_read", ct);
-        }
-
         await using var connection = new NpgsqlConnection(target.ConnectionString);
         await connection.OpenAsync(ct);
 
@@ -80,25 +74,64 @@ public sealed class PgStatementStatsNoTextReadLiveTests
         var call = Assert.Single(calls);
         Assert.EndsWith("pg_stat_statements(false)", call, StringComparison.Ordinal);
 
-        List<PgStatementStatsCollector.Row> rows;
-        await using (var command = new NpgsqlCommand(shipped, connection))
-        await using (var reader = await command.ExecuteReaderAsync(ct))
+        /* #4981: the view is cluster-wide, and another live class may run a full pg_stat_statements_reset() beside this one
+           (PgStatementsDeallocLiveTests records the same race). A reset between the collector's read and the view's would
+           empty the view of the keys the collector returned. So each attempt brackets the seed and both reads with
+           pg_stat_statements_info.stats_reset, through the collector's own existence-gated epoch read, and a moved
+           epoch voids the attempt. Where the info view is absent (extension below 1.9) the epoch is NULL on both ends,
+           which is the one unchanging epoch such a server has. */
+        var ofTarget = new List<PgStatementStatsCollector.Row>();
+        var viewKeys = new HashSet<(long, long, long, bool)>();
+        var before = string.Empty;
+        var after = string.Empty;
+        for (var attempt = 0; attempt < 5; attempt++)
         {
-            rows = await PgStatementStatsCollector.Instance.ReadAsync(reader, context, ct);
+            before = await StatsResetEpochAsync(connection, ct);
+
+            /* A statement of this database's own, so the collector has at least one entry to return for it. */
+            for (var run = 0; run < 3; run++)
+            {
+                await ExecAsync(target.ConnectionString, "SELECT 778300 + 1 AS pm7783_no_text_read", ct);
+            }
+
+            List<PgStatementStatsCollector.Row> rows;
+            await using (var command = new NpgsqlCommand(shipped, connection))
+            await using (var reader = await command.ExecuteReaderAsync(ct))
+            {
+                rows = await PgStatementStatsCollector.Instance.ReadAsync(reader, context, ct);
+            }
+
+            ofTarget = rows.Where(r => r.DatabaseId == targetOid).ToList();
+
+            /* The view, read after the collector: entries are only ever added or evicted under pressure, so every key the
+               collector returned for this database is still in the view. The same keys from a text-free read and the view. */
+            viewKeys = await ViewKeysAsync(connection, context.PgExtensionSchema("pg_stat_statements"), targetOid, ct);
+            after = await StatsResetEpochAsync(connection, ct);
+            if (before == after)
+            {
+                break;
+            }
         }
 
-        var ofTarget = rows.Where(r => r.DatabaseId == targetOid).ToList();
+        /* Five resets in a row is not noise. */
+        Assert.Equal(before, after);
         Assert.NotEmpty(ofTarget);
         Assert.All(ofTarget, r =>
         {
             Assert.True(r.Calls > 0, $"queryid {r.QueryId}: calls {r.Calls}");
             Assert.Equal(target.DatabaseName, r.DatabaseName);
         });
-
-        /* The view, read after the collector: entries are only ever added or evicted under pressure, so every key the
-           collector returned for this database is still in the view. The same keys from a text-free read and the view. */
-        var viewKeys = await ViewKeysAsync(connection, context.PgExtensionSchema("pg_stat_statements"), targetOid, ct);
         Assert.All(ofTarget, r => Assert.Contains((r.QueryId, r.DatabaseId, r.UserId, r.TopLevel), viewKeys));
+    }
+
+    /// <summary>
+    /// The stamp of the last <c>pg_stat_statements_reset()</c>, through the collector's own read of
+    /// <c>pg_stat_statements_info.stats_reset</c>: NULL, as an empty string, where the info view is absent.
+    /// </summary>
+    private static async Task<string> StatsResetEpochAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT " + PgStatementStatsCollector.StatementsEpochSql + "::text", connection);
+        return await command.ExecuteScalarAsync(ct) is string epoch ? epoch : string.Empty;
     }
 
     private static async Task<List<string>> FunctionScanCallsAsync(NpgsqlConnection connection, string sql, string functionName, CancellationToken ct)
