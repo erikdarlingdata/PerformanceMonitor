@@ -105,6 +105,19 @@ internal static class DarlingTlsStore
         WebTlsStoreConfig store,
         DateTimeOffset nowUtc,
         string section)
+        => SelectAll(candidates, store, nowUtc, section)[0];
+
+    /// <summary>
+    /// <see cref="Select"/>'s whole answer (#7865): every certificate that qualifies, in the order to try them. A
+    /// thumbprint names one certificate, so the list holds that one and the loader never falls back from an exact pin.
+    /// A subject lists every qualifying certificate newest first, by the rule <see cref="Select"/> documents, so the
+    /// loader can serve the next one when the newest one's key cannot be opened. Never empty: nothing qualifying throws.
+    /// </summary>
+    internal static IReadOnlyList<X509Certificate2> SelectAll(
+        IReadOnlyList<X509Certificate2> candidates,
+        WebTlsStoreConfig store,
+        DateTimeOffset nowUtc,
+        string section)
     {
         ArgumentNullException.ThrowIfNull(candidates);
         ArgumentNullException.ThrowIfNull(store);
@@ -114,7 +127,7 @@ internal static class DarlingTlsStore
         var setting = $"{section}.network.tls.store";
 
         return !string.IsNullOrWhiteSpace(store.Thumbprint)
-            ? SelectByThumbprint(candidates, store.Thumbprint, where, $"{setting}.thumbprint")
+            ? [SelectByThumbprint(candidates, store.Thumbprint, where, $"{setting}.thumbprint")]
             : SelectBySubject(candidates, store.Subject!.Trim(), nowUtc, where, setting);
     }
 
@@ -153,15 +166,39 @@ internal static class DarlingTlsStore
         return matches[0];
     }
 
-    private static X509Certificate2 SelectBySubject(
+    private static List<X509Certificate2> SelectBySubject(
         IReadOnlyList<X509Certificate2> candidates, string dnsName, DateTimeOffset nowUtc, string where, string setting)
     {
-        var named = candidates.Where(c => DarlingListenerTls.SanCoversDnsName(c, dnsName)).ToList();
+        /* #7865: the whole store is read, and it is shared. One unrelated certificate with a corrupt Subject
+           Alternative Name makes the SAN reader throw CryptographicException, and that must not stop the operator's
+           own certificate from being found. A SAN that cannot be read does not carry the name; it is counted so the
+           refusal can say so. Only the SAN read is guarded, and only for CryptographicException. */
+        var named = new List<X509Certificate2>();
+        var unreadableSan = 0;
+        foreach (var candidate in candidates)
+        {
+            try
+            {
+                if (DarlingListenerTls.SanCoversDnsName(candidate, dnsName))
+                {
+                    named.Add(candidate);
+                }
+            }
+            catch (CryptographicException)
+            {
+                unreadableSan++;
+            }
+        }
+
+        var unreadableNote = unreadableSan == 0
+            ? string.Empty
+            : $" {unreadableSan} certificate(s) in the {where} store have a Subject Alternative Name that could not be read and were skipped.";
+
         if (named.Count == 0)
         {
             throw new InvalidOperationException(
                 $"{setting}.subject '{dnsName}' matches no certificate in the {where} store — "
-                + "the name must be a dNSName in the certificate's Subject Alternative Name.");
+                + "the name must be a dNSName in the certificate's Subject Alternative Name." + unreadableNote);
         }
 
         var qualifying = new List<X509Certificate2>();
@@ -195,14 +232,14 @@ internal static class DarlingTlsStore
             throw new InvalidOperationException(
                 $"{setting}.subject '{dnsName}' matches {named.Count} certificate(s) in the {where} store but none can be served "
                 + $"(expired: {expired}, not yet valid: {notYetValid}, no Server Authentication usage: {noUsage}, "
-                + $"no private key: {noKey}).");
+                + $"no private key: {noKey})." + unreadableNote);
         }
 
         return qualifying
             .OrderByDescending(c => c.NotBefore.ToUniversalTime())
             .ThenByDescending(c => c.NotAfter.ToUniversalTime())
             .ThenBy(c => c.Thumbprint, StringComparer.Ordinal)
-            .First();
+            .ToList();
     }
 
     /// <summary>True when the certificate lists the Server Authentication extended key usage. A certificate with no
@@ -289,7 +326,7 @@ internal static class DarlingTlsStore
         => Load(store, section, ReadStore, ProbePrivateKey, ServiceAccount, DateTimeOffset.UtcNow);
 
     /// <summary>
-    /// Reads the store, selects the certificate, proves its key opens. Every seam is a parameter so a test supplies
+    /// Reads the store, selects the certificates, serves the first whose key opens (#7865). Every seam is a parameter so a test supplies
     /// self-signed certificates, a key that will not open, and a clock. Throws
     /// <see cref="InvalidOperationException"/> on every failure and disposes everything it read before it does; on
     /// success every certificate but the selected one is disposed and the selected one is the caller's.
@@ -323,24 +360,58 @@ internal static class DarlingTlsStore
         X509Certificate2? chosen = null;
         try
         {
-            chosen = Select(all, store, nowUtc, section);
+            var tool = location == StoreLocation.LocalMachine ? "certlm.msc" : "certmgr.msc";
 
-            var failure = probeKey(chosen);
-            if (failure is not null)
+            /* #7865: subject mode tries the qualifying certificates newest first and serves the first whose key
+               opens. A thumbprint is one entry, so an exact pin never falls back. */
+            var ordered = SelectAll(all, store, nowUtc, section);
+            Exception? newestFailure = null;
+            var skipped = 0;
+            foreach (var candidate in ordered)
             {
-                var tool = location == StoreLocation.LocalMachine ? "certlm.msc" : "certmgr.msc";
-                var account = serviceAccount();
-                throw new InvalidOperationException(
-                    $"{section}.network.tls.store: the private key of certificate {chosen.Thumbprint} "
-                    + $"(subject {chosen.Subject}) could not be opened by the service account {account} ({failure.Message}). "
-                    + $"Give {account} Read on the key: {tool} > the certificate > All Tasks > Manage Private Keys > "
-                    + $"add {account} with Read, or from an elevated prompt run: "
-                    + DarlingTlsKeyAccess.GrantCommandFor(chosen.Thumbprint, location, name, account)
-                    + ", then restart the service.",
-                    failure);
+                var failure = probeKey(candidate);
+                if (failure is null)
+                {
+                    chosen = candidate;
+                    break;
+                }
+
+                newestFailure ??= failure;
+                skipped++;
             }
 
-            return new DarlingWebTls.LoadedCertificate(chosen, new X509Certificate2Collection());
+            if (chosen is null)
+            {
+                /* No key opens: the refusal this loader always gave, for the newest certificate. */
+                var newest = ordered[0];
+                var account = serviceAccount();
+                throw new InvalidOperationException(
+                    $"{section}.network.tls.store: the private key of certificate {newest.Thumbprint} "
+                    + $"(subject {newest.Subject}) could not be opened by the service account {account} ({newestFailure!.Message}). "
+                    + $"Give {account} Read on the key: {tool} > the certificate > All Tasks > Manage Private Keys > "
+                    + $"add {account} with Read, or from an elevated prompt run: "
+                    + DarlingTlsKeyAccess.GrantCommandFor(newest.Thumbprint, location, name, account)
+                    + ", then restart the service.",
+                    newestFailure);
+            }
+
+            string? fallbackNote = null;
+            if (skipped > 0)
+            {
+                var newer = ordered[0];
+                var account = serviceAccount();
+                fallbackNote =
+                    $"{section}.network.tls.store: the private key of the newer certificate {newer.Thumbprint} "
+                    + $"(subject {newer.Subject}, valid from {newer.NotBefore.ToUniversalTime():u}) could not be opened by the service account "
+                    + $"{account} ({newestFailure!.Message})"
+                    + (skipped > 1 ? $", and {skipped - 1} other newer certificate(s) failed the same way" : string.Empty)
+                    + $". Serving the older certificate {chosen.Thumbprint} until it expires on {chosen.NotAfter.ToUniversalTime():u}. "
+                    + $"Give {account} Read on the newer key before then: {tool} > the certificate > All Tasks > Manage Private Keys, or from an elevated prompt run: "
+                    + DarlingTlsKeyAccess.GrantCommandFor(newer.Thumbprint, location, name, account)
+                    + ", then restart the service.";
+            }
+
+            return new DarlingWebTls.LoadedCertificate(chosen, new X509Certificate2Collection(), fallbackNote);
         }
         catch
         {

@@ -422,6 +422,28 @@ public sealed class DarlingTlsStoreTests
             Now);
 
         Assert.Equal(older, loaded.Leaf.Thumbprint);
+
+        var note = loaded.FallbackNote;
+        Assert.NotNull(note);
+        Assert.Contains($"newer certificate {newer}", note, StringComparison.Ordinal);
+        Assert.Contains("subject CN=darling-store-test", note, StringComparison.Ordinal);
+        Assert.Contains($"valid from {Now.AddDays(-5).UtcDateTime:u}", note, StringComparison.Ordinal);
+        Assert.Contains($"Serving the older certificate {older} until it expires on {Now.AddDays(60).UtcDateTime:u}", note, StringComparison.Ordinal);
+        Assert.Contains($"--grant-cert-key-access {newer}", note, StringComparison.Ordinal);
+        Assert.Contains("Keyset does not exist", note, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Load_Subject_TheNewestKeyOpens_HasNoFallbackNote()
+    {
+        var all = new List<X509Certificate2> { Make(Name, Now.AddDays(-30), Now.AddDays(60)), Make(Name, Now.AddDays(-5), Now.AddDays(90)) };
+        var newer = all[1].Thumbprint;
+
+        using var loaded = DarlingTlsStore.Load(
+            new WebTlsStoreConfig { Subject = Name }, "web", (_, _) => all, _ => null, () => FallbackAccount, Now);
+
+        Assert.Equal(newer, loaded.Leaf.Thumbprint);
+        Assert.Null(loaded.FallbackNote);
     }
 
     [Fact]

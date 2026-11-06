@@ -227,7 +227,7 @@ A certificate enrolled from an internal CA usually sits in the Windows certifica
 Give exactly one form: `store`, a PKCS#12 bundle or a PEM pair. A `store` block next to `pfxPath`, `certPath` or `keyPath` is refused, and so is one with both `thumbprint` and `subject` or with neither. `LocalMachine` is what almost every install wants, because a service account with no loaded profile has no useful `CurrentUser` store. The service opens the store read-only and never changes it.
 
 - **`thumbprint`** names one exact certificate. Spaces and case do not matter, so you can paste it from the certificate snap-in. A thumbprint that matches nothing, or matches two certificates, is refused, and so is a certificate with no private key. The certificate's dates are judged by the same check the file forms use, so an expired one is refused and still raises the expiry alert.
-- **`subject`** is a DNS name. The service serves the newest certificate, by start date, that meets four rules. It is valid now. It has the Server Authentication usage. It has a private key. It lists the name as a DNS name in its Subject Alternative Name. A wildcard name such as `*.example.com` counts for one label. The common name never counts. When nothing qualifies, the Critical line says how many certificates carried the name and why each was skipped.
+- **`subject`** is a DNS name. The service serves the newest certificate, by start date, that meets four rules. It is valid now. It has the Server Authentication usage. It has a private key. It lists the name as a DNS name in its Subject Alternative Name. A wildcard name such as `*.example.com` counts for one label. The common name never counts. When nothing qualifies, the Critical line says how many certificates carried the name and why each was skipped. A certificate in the store whose Subject Alternative Name cannot be read is skipped as if it did not carry the name, and the refusal counts it. One damaged certificate in a shared store does not stop the service from finding yours. When the newest qualifying certificate's private key cannot be opened by the service account, the service tries the next newest, and serves the first whose key opens. See "When the newest certificate's key cannot be opened" below. A `thumbprint` never falls back.
 
 #### Give the service account Read on the key
 
@@ -252,6 +252,16 @@ The command follows these rules:
 - If an explicit Deny entry on the account covers Read, it stops and tells you to remove the Deny first.
 - When it succeeds, it names the account and the certificate's subject and thumbprint. It tells you to restart the service.
 - It works on CNG keys and on legacy CAPI RSA keys. It does not handle a key on a smart card or a hardware module.
+- `--store-location CurrentUser` grants on the key of a certificate in the store of the account that runs the command, which is the elevated operator. A service that runs under its own account reads that account's `CurrentUser` store, never the operator's, so the grant does nothing for it. Use `CurrentUser` only when the service runs as the same account that runs the command, for example a service you moved to your own account. Every other install wants the default, `LocalMachine`.
+
+#### When the newest certificate's key cannot be opened
+
+An Active Directory autoenrollment renewal usually brings a new key, and the service account has Read on the old key only. With `subject`, the service does not go loopback-only for that. It serves the next newest certificate that meets the same four rules and whose key it can open, and logs one Warning. The Warning names the newer certificate (thumbprint, subject and start date), says the service serves the older one until it expires, and gives the `--grant-cert-key-access` command for the newer one. Run that command and restart the service before the older certificate expires.
+
+- The service serves the older certificate only for as long as the newer key is out of reach. Restart after the grant and it picks the newest again.
+- The expiry alerts read the certificate that is served, so they warn before the older one expires.
+- When no matching certificate's key opens, nothing changes: the endpoint goes loopback-only and the Critical line names the newest certificate.
+- A `thumbprint` is an exact pin. Its key failure never falls back to another certificate.
 
 #### Renewal needs a restart
 
@@ -272,11 +282,11 @@ Each of these keeps the endpoint loopback-only and logs one Critical line. None 
 - Two certificates share the thumbprint.
 - The certificate has no private key.
 - The certificate is expired or not valid yet.
-- The private key cannot be opened.
+- The private key cannot be opened. With `subject`, this is only when no matching certificate's key opens.
 
 For the last one, the line names the service account and the fix. The fix is the `certlm.msc` steps above, or the `--grant-cert-key-access` command with the account filled in.
 
-The `--configure-network` status line reads `TLS: on (certificate store, LocalMachine\My, <thumbprint>)`. When you chose `subject`, it reads `newest valid for <name>` in place of the thumbprint.
+The `--configure-network` status line reads `TLS: on (certificate store, LocalMachine\My, <thumbprint>)`. When you chose `subject`, it reads `newest valid for <name>` in place of the thumbprint. The line reads `darling.json` and does not open the store, so it never names the certificate that is actually served. After a fallback, the service log has the Warning that names it.
 
 ## Front door to store connections
 
