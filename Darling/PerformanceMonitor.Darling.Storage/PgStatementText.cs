@@ -433,6 +433,17 @@ WHERE EXCLUDED.last_seen >= pg_statement_text.last_seen";
     public const int PruneMarginDays = 2;
 
     /// <summary>
+    /// The collectors whose fact rows carry a <c>queryid</c> this table resolves to text: the store readers join each of their
+    /// tables to this one. The prune horizon is the widest effective retention among them
+    /// (<c>DarlingRetention.WidestEffectiveRetentionDays</c>), so a retention raised on any one of them keeps the text its
+    /// facts point at for as long as those facts live.
+    /// </summary>
+    public static readonly IReadOnlyList<string> ReferencingCollectors = new[]
+    {
+        "pg_statement_stats", "pg_kernel_stats", "pg_plan_capture", "pg_predicate_stats", "pg_session_states", "pg_wait_sampling",
+    };
+
+    /// <summary>
     /// Retires text whose statements have all aged out: an index range scan on <see cref="LastSeenColumn"/>,
     /// time-sliced like every sibling purge so one sweep cannot take an unbounded lock.
     ///

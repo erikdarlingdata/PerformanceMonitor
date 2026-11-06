@@ -396,6 +396,7 @@ export function gridTable(rows, desc) {
   const filterBar = desc.filter === false ? null : gridFilter(desc, cols, head, tbody);
   const table = el("table", { class: "data" }, [el("thead", {}, [head]), tbody]);
   const wrap = el("div", { class: "table-wrap" }, filterBar ? [filterBar, table] : [table]);
+  pinIdentityColumn(wrap, table, head, tbody, cols);
   const picker = columnPicker(desc, cols, head, tbody);
   /* #5701: `data-grid` names the grid for the web UI smoke check. A tools-less, picker-less grid is the bare wrapper, which
      carries the hook itself so the check finds every grid the same way. */
@@ -406,6 +407,22 @@ export function gridTable(rows, desc) {
   }
   if (desc.tools === false) return el("div", { class: "grid-box", "data-grid": gridName }, [picker, wrap]);
   return el("div", { class: "grid-box", "data-grid": gridName }, picker ? [picker, gridTools(desc, cols, tbody), wrap] : [gridTools(desc, cols, tbody), wrap]);
+}
+
+/* #7729: a grid wider than its box (Database Configuration 3456 px in 1189, High Impact 2160 in 1204) scrolled sideways to figures with no row name
+   beside them. The first column that names the row (`name: true`, or `pin: true` where the name is drawn by a render) sticks to the left edge
+   while the box scrolls. Only a grid that overflows takes it (the box gets `pin-first` while it does), so a grid that fits is as it was.
+   Where there is no ResizeObserver (a test's fake DOM) nothing is pinned. */
+function pinIdentityColumn(wrap, table, head, tbody, cols) {
+  if (typeof ResizeObserver !== "function") return;
+  const at = cols.findIndex((c) => c.pin === true || c.name === true);
+  if (at < 0) return;
+  head.children[at].classList.add("pin-col");
+  Array.from(tbody.children).forEach((tr) => { if (tr.children[at]) tr.children[at].classList.add("pin-col"); });
+  const sync = () => wrap.classList[wrap.scrollWidth > wrap.clientWidth + 1 ? "add" : "remove"]("pin-first");
+  const watch = new ResizeObserver(sync);
+  watch.observe(wrap);
+  watch.observe(table);
 }
 
 /* Column groups (#4843). A descriptor with `groups: ["Memory detail", ...]` and `defaultGroups: [...]` marks wide
@@ -1432,6 +1449,22 @@ export function visibleStats(stats, data) {
   });
 }
 
+/* #7729: the stat grid is auto-fit, so each row fills with as many 150 px tiles as fit and the rest wrap: 15 tiles at 1536 px ran 7, 7 and 1, with
+   Buffer pool alone on a third row. Once the grid is laid out, the column count is the fewest columns that keep the same number of rows
+   (15 tiles, at most 7 across: 3 rows, so 5 across). It follows the width, so 1280 and 2560 px each balance on their own. A grid that fits on one
+   row keeps one column a tile. Where there is no ResizeObserver (a test's fake DOM) the CSS auto-fit stays. */
+function balanceTiles(grid, count) {
+  if (count < 3 || typeof ResizeObserver !== "function") return;
+  new ResizeObserver(() => {
+    const width = grid.clientWidth;
+    if (!width) return;
+    const gap = parseFloat(getComputedStyle(grid).columnGap) || 12;
+    const across = Math.max(1, Math.floor((width + gap) / (150 + gap)));
+    const rows = Math.ceil(count / across);
+    grid.style.gridTemplateColumns = "repeat(" + Math.ceil(count / rows) + ", minmax(0, 1fr))";
+  }).observe(grid);
+}
+
 /* stat: desc = { stats:[{key,label,format,small?,sev?,nullKey?}], emptyText? } over the tool's top-level object. A stat
    descriptor may carry a PRE-COMPUTED severity (`sev`/`severity`, e.g. "Critical") — colored here from that hint
    only (R1: the browser never re-derives a band); absent the hint the value keeps the default color. `nullKey` is
@@ -1483,11 +1516,12 @@ function vizStat(data, desc) {
   const sentences = shown.filter((s) => s.sentence && getPath(data, s.key) != null && getPath(data, s.key) !== "");
   if (!sentences.length) {
     const tiles = el("div", { class: "stats" }, shown.map(tile));
+    balanceTiles(tiles, shown.length);
     return cutNotes.length ? el("div", {}, [tiles, ...cutNotes]) : tiles;
   }
   const rest = shown.filter((s) => !s.sentence);
   return el("div", { class: "stat-block" }, [
-    ...sentences.map((s) => el("p", { class: "stat-sentence", text: String(getPath(data, s.key)) })),
+    ...sentences.map((s) => el("p", { class: "stat-sentence", text: s.localizeText ? localizeIsoText(String(getPath(data, s.key)), s.localizeMinutes ? { minutes: true, since: s.sinceKey ? getPath(data, s.sinceKey) : null } : undefined) : String(getPath(data, s.key)) })),
     rest.length ? el("div", { class: "stats natural" }, rest.map(tile)) : null,
     ...cutNotes,
   ]);
@@ -1649,7 +1683,15 @@ function vizBandlist(data, desc) {
     "div",
     { class: "bandlist" },
     rows.map((r) => {
-      const band = getPath(r, desc.bandKey);
+      let band = getPath(r, desc.bandKey);
+      let bandLabel = getPath(r, desc.bandLabelKey) || band;
+      /* #7729: a row listed only for tiles that no band reads (`advisoryKey`, the fleet's advisory_tiles) is not Healthy: this list's dot and
+         pill say Attention, in the Warning colours. The server's band and the strip counts are the service's and stay as they are. */
+      const advisory = desc.advisoryKey ? getPath(r, desc.advisoryKey) : null;
+      if (band === "Healthy" && Array.isArray(advisory) && advisory.length) {
+        band = "Warning";
+        bandLabel = "Attention";
+      }
       const props = { class: "row " + bandClass(band) };
       if (desc.navKey) {
         const target = getPath(r, desc.navKey);
@@ -1659,7 +1701,7 @@ function vizBandlist(data, desc) {
         el("span", { class: "dot " + bandClass(band) }),
         el("span", { class: "primary", text: getPath(r, desc.primaryKey) }),
         desc.reasonKey ? el("span", { class: "reason", text: getPath(r, desc.reasonKey) }) : null,
-        band ? el("span", { class: "badge " + bandClass(band), text: getPath(r, desc.bandLabelKey) || band }) : null,
+        band ? el("span", { class: "badge " + bandClass(band), text: bandLabel }) : null,
       ]);
     })
   );

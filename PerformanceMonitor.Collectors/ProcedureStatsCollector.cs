@@ -1029,6 +1029,11 @@ EXECUTE sys.sp_executesql @sql, N'" + declarations + "', " + arguments + ";",
         var physReads = deltas.PeekBaselines(serverId, PhysReadsGroup);
         var spills = deltas.PeekBaselines(serverId, SpillsGroup);
 
+        /* Every fetched key, captured before the loop below or WritePayload advances any of them, so a store write that fails
+           before the rows are stored can hand the baselines back (DeltaBaselineRollbackRows). */
+        var rows = new DeltaBaselineRollbackRows<Row>(context, BaselineGroups);
+        rows.CaptureKeys(fetched.Select(DeltaKey));
+
         var kept = new List<(Row Row, long Rank)>(fetched.Count);
         foreach (var row in fetched)
         {
@@ -1063,12 +1068,16 @@ EXECUTE sys.sp_executesql @sql, N'" + declarations + "', " + arguments + ";",
         }
 
         /* OrderBy is stable, so a full tie (same rank, same handle) keeps the DMV's order. */
-        return kept
+        rows.AddRange(kept
             .OrderByDescending(k => k.Rank)
             .ThenBy(k => k.Row.PlanHandle, StringComparer.Ordinal)
             .Select(k => k.Row)
-            .ToList();
+            );
+        return rows;
     }
+
+    /* The seven delta groups the read and WritePayload advance for each row. */
+    private static readonly string[] BaselineGroups = { ExecGroup, WorkerGroup, ElapsedGroup, ReadsGroup, WritesGroup, PhysReadsGroup, SpillsGroup };
 
     /// <summary>The delta key: plan_handle to prevent cross-contamination when multiple plans exist for the
     /// same object; the db.schema.object fallback and the seven group names are the parity contract.</summary>

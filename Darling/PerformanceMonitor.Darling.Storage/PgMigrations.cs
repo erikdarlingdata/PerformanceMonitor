@@ -2444,7 +2444,7 @@ END $do$;";
     /// idempotent. <b>No Lite twin:</b> Lite keeps the text inline and the collector drops the monitor's own row there.
     /// </summary>
     private static readonly string V219Sql =
-        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreSelfKeys.CreateSql + "\n" + QueryStoreSelfKeys.TriggerSql;
+        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreSelfKeys.CreateSql + "\n" + QueryStoreSelfKeys.MarkerOnlyTriggerSql;
 
     /// <summary>
     /// V220 (#6798): <c>idx_job_history_job_success</c> on <c>collect.job_history (server_id, job_id, run_datetime DESC) INCLUDE
@@ -2614,6 +2614,18 @@ ALTER TABLE config.config_alert_settings
     private const string V247Sql = @"
 ALTER TABLE config.config_monitored_servers
     ADD COLUMN IF NOT EXISTS xe_session_databases text[] NOT NULL DEFAULT '{}'::text[];";
+
+    /// <summary>
+    /// V248 (#7730): the key trigger of <c>collect.query_store_text</c> now also keys the old statements that builds before #7463 sent
+    /// with no marker (<see cref="SqlServerOwnStatement"/>), so a new text of one gets its key, and the backfill runs again for the
+    /// text stored earlier: the state row is deleted (<see cref="QueryStoreSelfKeys.ReopenBackfillSql"/>), <c>RunDelayedAsync</c> keys the
+    /// old rows in the background after start, and the reads use the text probe until it has. <b>No full-table scan here.</b> The
+    /// function is replaced and both triggers are created again (the rung's <c>WHEN</c> clause carries the new test), which takes a SHARE
+    /// ROW EXCLUSIVE lock on the text table, so the lock timeout is V219's. Every statement is idempotent. <b>No Lite twin of the
+    /// rung:</b> Lite has no key table.
+    /// </summary>
+    private static readonly string V248Sql =
+        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreSelfKeys.TriggerSql + "\n" + QueryStoreSelfKeys.ReopenBackfillSql;
 
     /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
@@ -3120,6 +3132,7 @@ $rung$;";
         new Migration(245, "database-protection-thresholds", V245Sql),
         new Migration(246, "query-store-corrected-hourly-hash-index", V246Sql),
         new Migration(247, "xe-session-databases", V247Sql),
+        new Migration(248, "query-store-self-keys-old-statements", V248Sql),
     };
 
     /// <summary>

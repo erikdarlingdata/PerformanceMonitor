@@ -177,7 +177,8 @@ ORDER BY bucket";
 
         /* #7256: a window that starts after the newest archived row ranks on the hot table alone, and each candidate's latest row and text
            come from it too. Only a candidate with no text in the hot table opens the archive (see the end of the round). */
-        return await ReadWindowSkippingEmptyArchiveAsync("query_store_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
+        /* #7776: the floor is a day below the window, as the slicer's is: the window is placed by interval start, and a row's collection can trail it. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_store_stats", "collection_time", startTime.AddDays(-1), ReadAsync, CancellationToken.None);
 
         async Task<List<QueryStoreRow>> ReadAsync(string relation)
         {
@@ -238,8 +239,15 @@ WITH latest AS (
             ) AS rn
         FROM v_query_store_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3" + dbClause + executionTypeClause + @"
+        /* #7776: the window is the interval's own start, the expression the slicer's bars are keyed on (#1892), so a slice's rows are
+           the intervals its bars draw: collection_time trails the interval's start by up to its length, which showed an interval
+           collected inside the slice but started before it (no bar) and dropped the slice's last interval, collected after its end.
+           Legacy rows have no interval start and keep collection_time. The collection_time bounds are the slicer read's pruning
+           bounds (see GetQueryStoreSlicerDataAsync for the reasoning), not filters. */
+        AND   COALESCE(interval_start_time_utc, collection_time) >= $2
+        AND   COALESCE(interval_start_time_utc, collection_time) <= $3
+        AND   collection_time >= $2 - INTERVAL '1 day'
+        AND   collection_time <= $3 + INTERVAL '30 days'" + dbClause + executionTypeClause + @"
     ) w
     WHERE rn = 1
 ),
@@ -260,8 +268,11 @@ deduped AS (
     FROM v_query_store_stats
     INNER JOIN latest ON latest.latest_id = collection_id AND latest.latest_time = collection_time
     WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3" + dbClause + executionTypeClause + @"
+    /* #7776: the same window as the ranking above; the join on (id, time) already picks the winning snapshots, so this only has to keep them. */
+    AND   COALESCE(interval_start_time_utc, collection_time) >= $2
+    AND   COALESCE(interval_start_time_utc, collection_time) <= $3
+    AND   collection_time >= $2 - INTERVAL '1 day'
+    AND   collection_time <= $3 + INTERVAL '30 days'" + dbClause + executionTypeClause + @"
 ),
 ranked AS (
     SELECT

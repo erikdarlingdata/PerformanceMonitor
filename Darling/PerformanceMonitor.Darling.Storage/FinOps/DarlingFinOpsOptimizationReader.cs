@@ -103,7 +103,7 @@ ORDER BY ds.total_size_mb DESC";
     /// the last 7 UTC days) that idle cannot be judged yet. An empty grid after a collection gap must not read as a clean bill.</summary>
     public static string IdleDatabasesEmptyText(bool hasCoverage) => hasCoverage
         ? "No idle databases detected"
-        : "Idle databases cannot be judged yet: query stats do not cover each of the last 7 days";
+        : "Idle databases cannot be judged yet: query stats do not cover each of the last 7 days.";
 
     /// <summary>
     /// The oldest query-stats sample, and the number of distinct COMPLETE UTC days in [$2, $3) that hold one. The advice text claims

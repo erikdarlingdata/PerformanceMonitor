@@ -216,7 +216,6 @@ export const DASHBOARD_TEMPLATES = [
             columns: [
               { key: "deadlock_time", label: "Deadlock Time", format: "time" },
               { key: "victim_sql_text", label: "Victim SQL", wrap: true },
-              { key: "victim_process_id", label: "Victim" },
               { key: "process_summary", label: "Processes", wrap: true },
             ],
           },
@@ -389,7 +388,7 @@ export const DASHBOARD_TEMPLATES = [
             rowsKey: "trace_flags",
             emptyText: "No trace flags are enabled on this server.",
             columns: [
-              { key: "trace_flag", label: "Flag", format: "int" },
+              { key: "trace_flag", label: "Flag", format: "id" },
               { key: "enabled", label: "Enabled", format: "bool" },
               { key: "is_global", label: "Global", format: "bool" },
             ],

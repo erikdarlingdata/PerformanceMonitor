@@ -470,17 +470,21 @@ internal static class ComposeStoreAvailability
     /// series × buckets (the bound topN LIMIT lives in its rank CTE, not on the rows). A Ranked panel's
     /// LIMIT is the user's own topN — hitting it is the request being honored, not truncation — and
     /// Scalar is a single row.</para>
+    ///
+    /// <para>#7729: <paramref name="firstBucketUtc"/> is the earliest bucket the capped rows hold, so the sentence says where the data starts: the chart's axis
+    /// still runs over the whole window, and a reader cannot tell from it that its left part was cut. Null when the rows carry no readable bucket.</para>
     /// </summary>
-    internal static string? BuildRowCapNotice(PanelMode mode, int rowCount)
+    internal static string? BuildRowCapNotice(PanelMode mode, int rowCount, DateTime? firstBucketUtc = null)
     {
         if (mode is not (PanelMode.TimeSeries or PanelMode.RankedTimeSeries) || rowCount < ComposeLimits.HardRowCap)
         {
             return null;
         }
 
+        var from = firstBucketUtc is { } first ? string.Create(CultureInfo.InvariantCulture, $", from {first:yyyy-MM-dd HH:mm} UTC") : string.Empty;
         return string.Create(
             CultureInfo.InvariantCulture,
-            $"row cap reached — showing the most recent {ComposeLimits.HardRowCap:N0} buckets of the window, not the whole of it. Coarsen the time bucket or narrow the group-by to fit the window into fewer rows.");
+            $"Row cap reached. This panel shows the most recent {ComposeLimits.HardRowCap:N0} buckets of the window{from}, not the whole of it. Coarsen the time bucket or narrow the group-by to fit the window into fewer rows.");
     }
 
     /// <summary>

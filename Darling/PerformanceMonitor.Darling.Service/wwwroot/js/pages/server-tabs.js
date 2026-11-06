@@ -68,12 +68,12 @@ import { slicedPanel, DEADLOCKS_EMPTY_TEXT, COUNT_SERIES, BLOCKING_REPORT_SERIES
 import { SERVER_CHANGE_COLUMNS, DB_CHANGE_COLUMNS, TRACE_FLAG_CHANGE_COLUMNS } from "./server-tabs/sql-changes.js";
 import { SERVER_CONFIG_COLUMNS, DB_CONFIG_COLUMNS, scopedConfigPanel, QS_HEALTH_COLUMNS, TRACE_FLAG_COLUMNS, AUDIT_COLUMNS, identityCapacityPanels, AGENT_ALERT_SPECS, DATABASE_PROTECTION_SPECS } from "./server-tabs/sql-config.js";
 import { SCHEDULER_STATS, CPU_SERIES } from "./server-tabs/sql-cpu.js";
-import { HEALTH_CPU_SERIES, HEALTH_ENTRY_COLUMNS, SEVERE_ERROR_COLUMNS, SCHEDULER_ISSUE_COLUMNS, IO_ISSUE_COLUMNS, CPU_TASK_COLUMNS, MEMORY_CONDITION_COLUMNS, MEMORY_CONDITION_GROUPS, MEMORY_BROKER_COLUMNS, SIGNIFICANT_WAIT_COLUMNS, MEMORY_OOM_COLUMNS, MEMORY_OOM_GROUPS, DEFAULT_TRACE_COLUMNS } from "./server-tabs/sql-events.js";
+import { HEALTH_CPU_SERIES, HEALTH_ENTRY_COLUMNS, SEVERE_ERROR_COLUMNS, SCHEDULER_ISSUE_COLUMNS, IO_ISSUE_COLUMNS, CPU_TASK_COLUMNS, MEMORY_CONDITION_COLUMNS, MEMORY_CONDITION_GROUPS, MEMORY_BROKER_COLUMNS, SIGNIFICANT_WAIT_COLUMNS, MEMORY_OOM_COLUMNS, MEMORY_OOM_GROUPS, DEFAULT_TRACE_COLUMNS, defaultTraceByEventNote } from "./server-tabs/sql-events.js";
 import { pickCollector, collectionLogPanel } from "./server-tabs/sql-health.js";
 import { fileIoPanel, TEMPDB_SERIES, FILE_IO_COLUMNS, DB_SIZE_COLUMNS, TABLE_SIZE_COLUMNS, PVS_COLUMNS } from "./server-tabs/sql-io.js";
 import { MEMORY_STATS, PLAN_CACHE_STATS, MEMORY_SERIES, CLERK_COLUMNS, GRANT_WINDOW_COLUMNS, SEMAPHORE_WINDOW_COLUMNS, GRANT_COLUMNS, SEMAPHORE_COLUMNS, memoryClerksTrendPanel, memoryPressurePanels, CACHE_TYPE_COLUMNS } from "./server-tabs/sql-memory.js";
 import { overviewStripsPanel, dailySummaryPanels, OVERVIEW_STATS } from "./server-tabs/sql-overview.js";
-import { topQueriesPanel, tagFilteredCard, slicedTagCard, DURATION_SERIES, EXECUTION_RATE_SERIES, activeQueriesPanel, QUERY_STORE_REGRESSION_GROUPS, QUERY_STORE_REGRESSION_COLUMNS, QUERY_HEATMAP_COLUMNS, QUERY_STORE_COLUMNS, QS_CLUTTER_COLUMNS, QS_OVERHEAD_WAIT_COLUMNS, QS_CLERK_STATS, LONG_QUERY_GROUPS, LONG_QUERY_COLUMNS, PLAN_CORRECTION_GROUPS, PLAN_CORRECTION_COLUMNS, AUTO_TUNING_COLUMNS } from "./server-tabs/sql-queries.js";
+import { topQueriesPanel, tagFilteredCard, slicedTagCard, DURATION_SERIES, EXECUTION_RATE_SERIES, activeQueriesPanel, QUERY_STORE_REGRESSION_GROUPS, orderRegressionRows, qsWaitsWithDelta, QUERY_STORE_REGRESSION_COLUMNS, QUERY_HEATMAP_COLUMNS, QUERY_STORE_COLUMNS, QS_CLUTTER_COLUMNS, QS_OVERHEAD_WAIT_COLUMNS, QS_CLERK_STATS, LONG_QUERY_GROUPS, LONG_QUERY_COLUMNS, PLAN_CORRECTION_GROUPS, PLAN_CORRECTION_COLUMNS, AUTO_TUNING_COLUMNS } from "./server-tabs/sql-queries.js";
 import { waitsPanel, waitingTasksPanel, LATCH_COLUMNS, SPINLOCK_COLUMNS, namedTrendPanel } from "./server-tabs/sql-waits.js";
 export { serverTrendPanel, seriesTrendPanel } from "./server-tabs/shared.js";
 export { perfmonPanel, drawPerfmonTrends, sessionStatsTrendPanel } from "./server-tabs/sql-activity.js";
@@ -697,7 +697,10 @@ export const SERVER_TABS = [
         /* #6654: the read leaves out databases the server dropped; the note names them (drawn on an empty answer too, panels.js). */
         "databases_left_out_note",
         null,
-        QUERY_STORE_REGRESSION_GROUPS
+        QUERY_STORE_REGRESSION_GROUPS,
+        null, null, null, false, null, false,
+        /* #7729: severity first, then the duration added. */
+        { orderRows: orderRegressionRows }
       ),
       /* #3797: the clutter view. ONE fetch, three panels — the per-database rows, the per-server QDS wait
          block and the per-server memory clerk — because the read composes four arms over two raw hypertables
@@ -735,6 +738,8 @@ export const SERVER_TABS = [
           rowsKey: "qs_overhead.wait_stats.included",
           floorKey: "window",
           columns: QS_OVERHEAD_WAIT_COLUMNS,
+          /* #7729: a wait with no delta in the window is left out, so the empty sentence prints when none has one. */
+          orderRows: qsWaitsWithDelta,
           noteKey: "qs_overhead.wait_stats.excluded_note",
           noteQuiet: true,
           noteShort: "Query Store's idle sleep waits are left out of this table on purpose. It lists only the waits that cost something, and it is not the whole of Query Store's cost.",
@@ -1100,11 +1105,15 @@ export const SERVER_TABS = [
       tablePanel(
         "Default Trace",
         "get_default_trace_events",
-        { server, hours: ctx.hours, limit: 100 },
+        /* #7729: 100 rows cut a 105-event window and one event filled all 100 of a 143-event one. 1000 is the read's ceiling, and the note
+           under the heading counts every event in the window, so the page still says what a capped window left out. */
+        { server, hours: ctx.hours, limit: 1000 },
         "events",
         DEFAULT_TRACE_COLUMNS,
         ctx.label,
-        "No significant default trace events in this window."
+        "No significant default trace events in this window.",
+        2, null, null, null, null, null, null, false, null, false,
+        { noteFrom: defaultTraceByEventNote, noteQuiet: true }
       ),
     ],
   },
@@ -1348,7 +1357,7 @@ export const POSTGRES_TABS = [
         },
         {
           title: "Extension Install Census",
-          subtitle: "one row per extension created anywhere on this server; NO row limit touches this",
+          subtitle: "One row per extension on this server",
           viz: "table",
           rowsKey: "install_census",
           columns: PG_EXTENSION_CENSUS_COLUMNS,
@@ -1558,14 +1567,15 @@ export const POSTGRES_TABS = [
          The "check the error log" panel. Newest 50 across every family; the MCP read carries the family and
          severity filters, and total_events on its payload is the window's count, so the panel note says
          which of the two this grid is. */
-      tablePanel(
+      /* #7726: the tool's empty text is written for an MCP client (setting names, locale, facet names). The page says one sentence that names the panel holding the answer, as Deadlocks above does (#7548). */
+      tablePanelPlain(
         "Log Events",
         "get_pg_log_events",
         { server, hours: ctx.hours, limit: 50 },
         "events",
         PG_LOG_EVENT_COLUMNS,
         ctx.label + ", newest 50 across every family, statements never stored",
-        "No classified log event was stored in this window. That is the healthy answer for the error and lock-wait families - and it is also what a target with the relevant log_* setting off looks like (log_connections, log_lock_waits, log_temp_files, log_autovacuum_min_duration), or one whose log cannot be read, is not stamped UTC, or is not written in English: the Plan Capture Readiness panel above reads the same file and reports those three."
+        "No log event in this window. If you expected one, Plan Capture Readiness above shows whether the server log can be read."
       ),
       /* #2663 the regression read: what ONE execution of the busiest statement cost, interval by interval.
          The statement grid above ranks by total time across the window, which hides a step change - a query

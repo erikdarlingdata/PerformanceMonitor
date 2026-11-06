@@ -29,7 +29,6 @@ const COLUMNS = [
 ];
 
 function noticeText(n) {
-  if (n === 0) return "No recommendations.";
   return n + (n === 1 ? " recommendation" : " recommendations") + ", High severity first.";
 }
 
@@ -52,7 +51,7 @@ export const tab = {
         const data = res.data || {};
         const rows = (data.recommendations || []).map(displayRow);
         const skipped = data.skipped_checks || [];
-        const parts = [captionStrip(noticeText(rows.length))];
+        const parts = rows.length ? [captionStrip(noticeText(rows.length))] : [];
         if (data.monthly_cost_usd == null) parts.push(noticeStrip("Monthly cost not set for this server, so savings estimates are blank."));
         /* Databases this server holds only as an availability group secondary copy are left to the primary's findings (#5558). */
         if (data.secondary_replica_note) parts.push(noticeStrip(data.secondary_replica_note));
