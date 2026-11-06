@@ -269,9 +269,12 @@ public sealed class StaTestThreadTests
             Assert.True(
                 Regex.IsMatch(timedOut.Message, @"WPF's render engine \(wpfgfx\w*\) was (already|not yet) loaded when the body began"),
                 timedOut.Message);
-            /* The render thread is found by the wpfgfx frames on its stack, so its sentence always carries one. */
+            /* The render thread is found by the wpfgfx frames on its stack, so a sentence that names one carries such a frame. Whether one is found
+               depends on where that thread was at the sample's instant and on how far its stack could be unwound, so a sample that found none says
+               so instead, and either sentence is the probe's answer. */
             Assert.True(
-                Regex.IsMatch(timedOut.Message, @"WPF's render thread \(native id \d+, .*?\) was at: [^\r\n]*?wpfgfx"),
+                Regex.IsMatch(timedOut.Message, @"WPF's render thread \(native id \d+, .*?\) was at: [^\r\n]*?wpfgfx")
+                || timedOut.Message.Contains("No other thread in the process had a wpfgfx frame on its stack at the sample", StringComparison.Ordinal),
                 timedOut.Message);
         }
         finally
@@ -309,6 +312,30 @@ public sealed class StaTestThreadTests
         }
         finally
         {
+            host.Shutdown();
+        }
+    }
+
+    /// <summary>
+    /// #7600: the start-up runs on the host's thread before its first body, and a test that shortens the hang guard shortens only what a body may
+    /// take. A fresh host with a 1 ms hang guard, which no start-up can meet, must still fail inside its body, naming this test and not the start-up.
+    /// </summary>
+    [Fact]
+    public void TheRenderEngineStartUp_IsNotChargedToTheBodysHangGuard_SoAShortGuardFailsInTheBody()
+    {
+        var host = new StaHost { HangGuard = TimeSpan.FromMilliseconds(1) };
+        using var release = new ManualResetEventSlim();
+        try
+        {
+            var timedOut = Assert.Throws<TimeoutException>(() => host.Run(() => release.Wait()));
+
+            Assert.StartsWith("WPF test body did not return within 1 ms", timedOut.Message);
+            Assert.Contains(nameof(TheRenderEngineStartUp_IsNotChargedToTheBodysHangGuard_SoAShortGuardFailsInTheBody), timedOut.Message);
+            Assert.Contains(nameof(TheRenderEngineStartUp_IsNotChargedToTheBodysHangGuard_SoAShortGuardFailsInTheBody), host.StuckTest);
+        }
+        finally
+        {
+            release.Set();
             host.Shutdown();
         }
     }
