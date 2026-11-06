@@ -1301,6 +1301,48 @@ try {
       await settle(30);
       return { reportNoticeShown, noticeAtInherit, noticeAtInvestigate, noticeAtOff, writes: requests.filter((r) => r.method === "PUT").map((r) => ({ method: r.method, url: r.url, body: r.body })) };
     },
+    /* #7952: Edit on route 7, Severity changed, Save: the service answers 409 (the route was changed elsewhere) and from then on the routes
+       read carries the newer modified_at_utc. Returns, after the refusal, the strips and the Save button's label; after the Save on screen is
+       pressed once more, the expected_modified_at of every PUT so far; and after Edit then Save, the PUTs and the strips. A PUT whose
+       expected_modified_at is the newer version answers 200. */
+    routeConflict: async () => {
+      state.canEdit = true;
+      const older = "2026-01-01T00:00:00.1234567Z";
+      const newer = "2026-02-02T00:00:00.7654321Z";
+      let saves = 0;
+      const route = () => ({ route_id: 7, metric_match: "blocking", match_kind: "exact_metric", family: "performance", configured_channels: [], smtp_recipients: [],
+        enabled: true, modified_at_utc: saves === 0 ? older : newer, scope_server_id: null, scope_tag_id: null, agent_level: null, agent_max_per_hour: 10,
+        agent_max_per_day: 50, agent_lease_minutes: 30, agent_expiry_minutes: 120, send_resolutions: null, fallback_route_id: null, severities: "critical", report_notice: "off" });
+      state.responder = (method, url, sent) => {
+        if (method === "GET" && url === "/api/read/get_notification_routes") return { status: 200, body: { routes: [route()] } };
+        if (method === "GET" && url === "/api/agent-setup/access") return { status: 200, body: { can_edit_routes: true, can_edit_profiles: true } };
+        if (method === "PUT" && url === "/api/notification-routes/7") {
+          saves++;
+          if (sent.expected_modified_at !== newer) return { status: 409, body: { error: "This route was changed or removed since you opened it. Reload it and make the change again." } };
+          return { status: 200, body: { status: "updated", route_id: 7 } };
+        }
+        return { status: 404, body: { error: "no such request " + url } };
+      };
+      const strips = () => all(main, (n) => n.classList.contains("strip")).map((n) => n.className + "|" + n.textContent);
+      const saveLabel = () => byAttr(main, "data-action", "save-route").map((n) => n.textContent);
+      const puts = () => requests.filter((r) => r.method === "PUT").map((r) => r.body.expected_modified_at);
+      await mountPage("routes");
+      await fire(byAttr(main, "data-action", "edit-route")[0], "click");
+      await settle(30);
+      await typeInto(field("severities"), "warning");
+      await fire(byAttr(main, "data-action", "save-route")[0], "click");
+      await settle(30);
+      const afterRefusal = { strips: strips(), saveLabel: saveLabel(), puts: puts() };
+      await fire(byAttr(main, "data-action", "save-route")[0], "click");
+      await settle(30);
+      const afterSecondPress = { saveLabel: saveLabel(), puts: puts() };
+      await fire(byAttr(main, "data-action", "edit-route")[0], "click");
+      await settle(30);
+      await typeInto(field("severities"), "warning");
+      await fire(byAttr(main, "data-action", "save-route")[0], "click");
+      await settle(30);
+      return { afterRefusal, afterSecondPress, afterEditAndSave: { strips: strips(), saveLabel: saveLabel(), puts: puts() } };
+    },
     /* #7611: the Database Protection ages on the Settings tab. The param is "<seat>" or "<seat>/<hours>,<minutes>,<hours>": the seat is
        `editor` or `readonly`, and the boxes are typed over with the values and Save is clicked. The reply says what the rows and boxes
        showed before, what was sent, and what the page said after. A save under the bounds answers 200; the service's own refusal is
