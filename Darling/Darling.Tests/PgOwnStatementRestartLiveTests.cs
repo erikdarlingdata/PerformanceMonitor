@@ -37,6 +37,12 @@ public sealed class PgOwnStatementRestartLiveTests
     private const string SensitiveRole = "pm7697_sens";
     private const string AppRole = "pm7697_app";
 
+    /// <summary>#7842: the name the planted pair's statement carries, and the literal in it that the filter's pattern names once the
+    /// text is not normalized (a quoted name ending in that word).</summary>
+    private const string SiblingProbeName = "pm7842_sibling_probe";
+
+    private const string SiblingLiteral = "pm7842_sibling_password";
+
     /// <summary>The column-statistics collector's statement: a daily collector, the example in the issue.</summary>
     private static readonly string CollectorText = PgColumnStatsCollector.QueryText;
 
@@ -117,15 +123,41 @@ public sealed class PgOwnStatementRestartLiveTests
     public async Task ASensitiveStatement_IsNotACandidate_AndItsRawTextDoesNotCrossTheWire()
     {
         await using var fixture = await Fixture.CreateAsync();
+        /* #7842: pg_stat_statements is cluster-wide, so the fetch returns every statement the other classes ran on this cluster, and
+           the withheld rows among them are not this test's. One queryid can have entries whose texts differ: an entry created without
+           a parse of its own keeps the statement's raw text, while its sibling in another database holds the normalized text. The
+           picked (costliest) entry's text then names the filter's pattern and the row is withheld, and the sibling, which does not
+           name it, is a candidate. Plant such a pair first so every run meets that row, and then judge only this test's statements. */
+        var siblingQueryIds = await fixture.PlantWithheldRowWithACleanSiblingAsync();
         await fixture.ExecOnTargetAsync(
             "DO $do$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + SensitiveRole + "') THEN CREATE ROLE " + SensitiveRole + " NOLOGIN; END IF; END $do$");
         /* Unmarked, under the service's own login: both are candidates by every test but the sensitive one. */
         await fixture.ExecOnTargetAsync("ALTER ROLE " + SensitiveRole + " PASSWORD 'pm7697-secret-value'");
         await fixture.RunUnmarkedAsync("SELECT count(*) AS pm7697_ordinary FROM pg_catalog.pg_class WHERE relpages > 7697");
 
-        var rows = await fixture.FetchRawAsync();
-        var sensitive = rows.Where(r => r.QueryText == PgSensitiveStatementFilter.PlaceholderText).ToList();
+        List<RawRow> rows;
+        try
+        {
+            rows = await fixture.FetchRawAsync();
+        }
+        finally
+        {
+            await fixture.ForgetAsync(siblingQueryIds);
+        }
+
+        /* The planted row: withheld, and it carries its clean sibling, never the raw text of the entry that was withheld. */
+        var sibling = Assert.Single(rows, r => siblingQueryIds.Contains(r.QueryId));
+        Assert.Equal(PgSensitiveStatementFilter.PlaceholderText, sibling.QueryText);
+        Assert.NotNull(sibling.Candidates);
+        Assert.Contains(SiblingProbeName, sibling.Candidates, StringComparison.Ordinal);
+        Assert.DoesNotContain(SiblingLiteral, sibling.Candidates, StringComparison.Ordinal);
+
+        /* This test's own statement, found by its text in this database: withheld, and not a candidate. */
+        var ownQueryIds = await fixture.QueryIdsContainingAsync("ALTER ROLE " + SensitiveRole);
+        Assert.NotEmpty(ownQueryIds);
+        var sensitive = rows.Where(r => ownQueryIds.Contains(r.QueryId)).ToList();
         Assert.NotEmpty(sensitive);
+        Assert.All(sensitive, r => Assert.Equal(PgSensitiveStatementFilter.PlaceholderText, r.QueryText));
         Assert.All(sensitive, r => Assert.Null(r.Candidates));
         Assert.DoesNotContain(rows, r => r.Candidates is not null && r.Candidates.Contains("ALTER ROLE", StringComparison.OrdinalIgnoreCase));
         /* An ordinary unmarked entry of the login still is one. */
@@ -235,6 +267,59 @@ public sealed class PgOwnStatementRestartLiveTests
         {
             await using var marked = PostgresTargetProvider.Instance.CreateCommand(new CollectorQuery(sql), _target, 60);
             await marked.ExecuteNonQueryAsync(Ct);
+        }
+
+        private static string SiblingStatement(string seconds) =>
+            "SELECT pg_sleep(" + seconds + "), '" + SiblingLiteral + "' AS " + SiblingProbeName;
+
+        /// <summary>
+        /// #7842: one queryid with two entries of the service's login. In the target database the statement was prepared, the database's
+        /// entries were reset, and the statement was then executed, so its entry (the costlier one: five sleeps) is created with the
+        /// statement's raw text, which names the filter's pattern. The same statement run once in the store's database leaves the
+        /// normalized text, which does not. Returns the queryid the target database's entry has.
+        /// </summary>
+        public async Task<List<long>> PlantWithheldRowWithACleanSiblingAsync()
+        {
+            await ExecOnTargetAsync("PREPARE pm7842_p AS " + SiblingStatement("0.05"));
+            await ExecOnTargetAsync("SELECT pg_stat_statements_reset(0, (SELECT oid FROM pg_database WHERE datname = current_database()), 0)");
+            for (var i = 0; i < 5; i++)
+            {
+                await ExecOnTargetAsync("EXECUTE pm7842_p");
+            }
+
+            await DarlingMcpTestData.ExecAsync(_store, Ct, SiblingStatement("0.001"));
+            var queryIds = await QueryIdsContainingAsync(SiblingProbeName);
+            Assert.NotEmpty(queryIds);
+            return queryIds;
+        }
+
+        /// <summary>Takes the planted entries out of the cluster-wide view, in every database, so no other class's fetch meets them.</summary>
+        public async Task ForgetAsync(List<long> queryIds)
+        {
+            foreach (var queryId in queryIds)
+            {
+                await DarlingMcpTestData.ExecAsync(_target, Ct, "SELECT pg_stat_statements_reset(0, 0, $1)", queryId);
+            }
+        }
+
+        /// <summary>The queryids of this database's entries whose text contains <paramref name="fragment"/>: the test's own statements,
+        /// apart from the cluster's other statements the view also holds.</summary>
+        public async Task<List<long>> QueryIdsContainingAsync(string fragment)
+        {
+            await using var command = new NpgsqlCommand(
+                @"SELECT DISTINCT s.queryid FROM pg_stat_statements AS s
+WHERE position($1 in s.query) > 0 AND s.queryid IS NOT NULL
+AND s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())",
+                _target);
+            command.Parameters.AddWithValue(fragment);
+            var queryIds = new List<long>();
+            await using var reader = await command.ExecuteReaderAsync(Ct);
+            while (await reader.ReadAsync(Ct))
+            {
+                queryIds.Add(reader.GetInt64(0));
+            }
+
+            return queryIds;
         }
 
         /// <summary>The entry the collector's text created under the service's login.</summary>
