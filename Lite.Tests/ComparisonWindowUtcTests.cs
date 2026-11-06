@@ -64,6 +64,31 @@ public sealed class ComparisonWindowUtcTests
         Assert.Null(ServerTab.ShiftComparisonRange(-1, currentStartUtc, currentEndUtc));
     }
 
+    /// <summary>A window longer than the shift (seven days compared with Yesterday, thirty days compared with Last
+    /// week) ends its baseline where the current window starts, so the two periods never share a sample. A straight
+    /// shift overlapped the window by all but one day of it, and the grid compared the window mostly with itself.</summary>
+    [Fact]
+    public void ShiftComparisonRange_OnAWindowLongerThanTheShift_EndsWhereTheCurrentWindowStarts()
+    {
+        var endUtc = new DateTime(2026, 3, 10, 17, 0, 0, DateTimeKind.Unspecified);
+
+        var sevenDays = endUtc.AddDays(-7);
+        var yesterday = ServerTab.ShiftComparisonRange(1, sevenDays, endUtc);
+        Assert.NotNull(yesterday);
+        Assert.Equal(sevenDays.AddDays(-1), yesterday!.Value.From);
+        Assert.Equal(sevenDays, yesterday.Value.To);
+
+        var thirtyDays = endUtc.AddDays(-30);
+        var lastWeek = ServerTab.ShiftComparisonRange(2, thirtyDays, endUtc);
+        Assert.NotNull(lastWeek);
+        Assert.Equal(thirtyDays.AddDays(-7), lastWeek!.Value.From);
+        Assert.Equal(thirtyDays, lastWeek.Value.To);
+
+        /* A window no longer than the shift is still the straight shift. */
+        var eightHours = endUtc.AddHours(-8);
+        Assert.Equal((eightHours.AddDays(-1), endUtc.AddDays(-1)), ServerTab.ShiftComparisonRange(1, eightHours, endUtc));
+    }
+
     /// <summary>
     /// #4284 ruling item 6's source pin: every Refresh...ComparisonAsync call site passes a UTC bound -- never
     /// the server-local fromServer/toServer a slicer drag produces, nor a cStart built from fromDate in
