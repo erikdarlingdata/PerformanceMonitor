@@ -256,6 +256,9 @@ public sealed class DarlingWebHostService : BackgroundService
 
                     /* #5506 part 3: reads.maxHeavyReads is file-only and read when the host starts. */
                     _readAdmission?.Configure(config.Reads.MaxHeavyReads);
+
+                    /* #7674: file-only, and get_store_metrics (served here) reads it from process start. */
+                    QueryTextTrigramIndexTracker.Shared.Configure(config.QueryTextTrigramIndexEnabled);
                 }
                 catch (Exception ex)
                 {

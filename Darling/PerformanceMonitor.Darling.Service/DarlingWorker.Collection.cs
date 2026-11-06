@@ -276,6 +276,16 @@ public sealed partial class DarlingWorker
            (QueryStoreSelfKeys explains the gate). Once per start, a no-op once the state row exists, and it never throws. */
         var queryStoreSelfKeys = QueryStoreSelfKeys.RunDelayedAsync(postgres, _logger, QueryStoreBackgroundIndexes.StartDelay, stoppingToken);
 
+        /* #7674: the opt-in trigram index on the plan-cache text. Off by default; when on it is built CONCURRENTLY in this background
+           task QueryTextTrigramIndex.StartDelay after start (a build is a whole-table read), and when off an existing one is dropped at
+           once. Never inside a migration rung, never awaited on the startup path, and RunAsync never throws. A failed build drops its
+           leftover and waits longer before each retry; a login that cannot create pg_trgm is reported by get_store_metrics and not asked
+           again. Drained with the other background work. */
+        var queryTextTrigramIndex = QueryTextTrigramIndex.RunAsync(
+            postgres, config.QueryTextTrigramIndexEnabled, QueryTextTrigramIndexTracker.Shared, _logger,
+            config.QueryTextTrigramIndexEnabled ? QueryTextTrigramIndex.StartDelay : TimeSpan.Zero,
+            QueryTextTrigramIndex.PassInterval, stoppingToken);
+
         /* #4957: one rollup-coverage probe in the background RollupCoverageWarmup.ServiceStartDelay after start, so
            the first MCP or web call finds each rollup's floor already measured and does not wait ~10 s on the
            large stores for the oldest compressed chunk's min(bucket). Launched after migrations, never awaited on
@@ -2085,6 +2095,9 @@ public sealed partial class DarlingWorker
 
         /* And the self-statement key backfill (#6750), which absorbs its own failures. */
         await queryStoreSelfKeys;
+
+        /* And the trigram index pass (#7674): shutdown cancels a build in progress, and the next start drops its leftover. */
+        await queryTextTrigramIndex;
 
         /* And the rollup-coverage warm (#4957), which also absorbs its own failures. */
         await rollupCoverageWarm;

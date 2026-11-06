@@ -900,6 +900,11 @@ public sealed class DarlingMcpHostService : BackgroundService
                store column defers to. */
             DarlingFileLevelAlertSettings.Publish(config.Analysis);
 
+            /* #7674: the trigram index option, file-only. This host answers get_store_metrics and the all-servers find_queries_by_text before the
+               worker has migrated the store (or when it never does), so it sets the shared tracker from its own load too: the same value from
+               whichever host loads first. */
+            QueryTextTrigramIndexTracker.Shared.Configure(config.QueryTextTrigramIndexEnabled);
+
             if (peerPublish.Refused)
             {
                 foreach (var problem in peerPublish.RefusedProblems)

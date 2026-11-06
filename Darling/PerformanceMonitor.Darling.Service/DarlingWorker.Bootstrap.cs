@@ -105,6 +105,10 @@ public sealed partial class DarlingWorker
                 configPath = DarlingConfig.ResolveConfigPath();
                 config = DarlingConfig.Load();
                 _analyzerConfig = config.Analyzer ?? PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default;
+                /* #7674: the trigram index option is read by get_store_metrics and by the all-servers find_queries_by_text refusal from process
+                   start, long before the migrations finish (and for good when they fail). Set it the moment the file loads, not when the
+                   background pass starts, or a valid index reads as "option off, being dropped" while the option is on. */
+                QueryTextTrigramIndexTracker.Shared.Configure(config.QueryTextTrigramIndexEnabled);
                 _logger.LogInformation("Loaded configuration from {Path}: {ServerCount} server(s)", configPath, config.Servers.Count);
                 break;
             }

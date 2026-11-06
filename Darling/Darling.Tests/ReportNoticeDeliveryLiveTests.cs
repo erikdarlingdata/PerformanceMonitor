@@ -403,9 +403,12 @@ public sealed class ReportNoticeDeliveryLiveTests
             var request = await ReportedAsync(store, connection, 1, "all", "real", "cause", ct);
             var logger = new CaptureLogger();
 
-            /* The real sender, to a closed local port: the service and the pass share one logger, so a second log line would show. */
-            var service = new WebhookAlertService(new DarlingAlertSettings(new DarlingConfig()), DarlingAlertDeliverer.Branding, logger);
-            var delivery = new InvestigationEventDelivery(store, () => [Route(1, slack: "http://127.0.0.1:1/hook")], new QuietSends(), null, logger,
+            /* The real sender, to a closed local port: the service and the pass share one logger, so a second log line would show.
+               The service's settings carry the route the pass sends through, as the worker's do, so the failure is counted
+               under that route's entry. */
+            var routes = new[] { Route(1, slack: "http://127.0.0.1:1/hook") };
+            var service = new WebhookAlertService(new DarlingAlertSettings(new DarlingConfig { NotificationRoutes = routes }), DarlingAlertDeliverer.Branding, logger);
+            var delivery = new InvestigationEventDelivery(store, () => routes, new QuietSends(), null, logger,
                 () => _now, service, new Settings(), McpDataDetail.Full, () => "https://dash.example");
 
             Assert.Equal(0, (await delivery.RunOnceAsync(ct)).Notices);
@@ -413,7 +416,7 @@ public sealed class ReportNoticeDeliveryLiveTests
             var line = Assert.Single(logger.Problems);
             Assert.Contains(request.ToString(), line, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("Slack", line, StringComparison.Ordinal);
-            var failure = Assert.Single(service.GetChannelFailureCounts(), c => c.Channel == "Slack");
+            var failure = Assert.Single(service.GetChannelFailureCounts(), c => c.Channel == "Slack" && c.RouteId == 1);
             Assert.Equal(1, failure.ConsecutiveFailures);
         });
     }

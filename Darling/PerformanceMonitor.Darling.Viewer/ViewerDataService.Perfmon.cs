@@ -84,7 +84,7 @@ public sealed partial class ViewerDataService
     /// NULL and so does a mixed-type family, and both fall to the name proxy in the chart — the MIN/MAX
     /// equality is what stops a mixed sum (the wait-statistics object's instances are a rate, a gauge and
     /// an average under one counter name) from being classified by whichever instance's id happened to
-    /// sort first. Byte-identical to Lite's expressions.</para>
+    /// sort first. The type expression and the artifact-filtered per-object arms (<c>NOT is_artifact</c>, #4476) match Lite's batched <c>GetPerfmonTrendsByCountersAsync</c> and bucketed <c>GetPerfmonBucketsAsync</c> reads; Lite's single-counter <c>GetPerfmonTrendAsync</c> omits the <c>NOT is_artifact</c> filter (#4476).</para>
     /// <para>
     /// #4234: the per-collection SUM above, BUCKETED — the per-collection read this replaced kept every row,
     /// up to 102,012 for 12 counters over 7 days (the issue's measured number). Wraps the unchanged
