@@ -184,7 +184,7 @@ public static class ProcedureStatsTotalsWriter
             logger?.LogWarning(
                 ex,
                 "Procedure totals gap fill (#5638) failed for server {ServerName} ({ServerId}): the collections after {GapAfter:o} and before {GapBefore:o} " +
-                "were not totalled, so they stay out of the duration trend (as before the fix). The batch continues and its own totals row becomes the new anchor; " +
+                "were not totalled, so they stay out of the duration trend (as before the fix). The batch tries to continue (it fails if the savepoint rollback fails too) and its own totals row becomes the new anchor; " +
                 "once this batch commits the gap is not retried, by a later batch of this cycle or of any other.",
                 serverName, serverId, anchor, stamp);
 
