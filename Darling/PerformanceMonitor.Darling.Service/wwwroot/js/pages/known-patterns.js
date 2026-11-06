@@ -152,6 +152,11 @@ export const deleteEntry = (id) => send("DELETE", "/api/known-patterns/" + encod
 /* Module scope: survives the 60 s re-render. `live` is the mounted page; `form` is the open form's state. */
 let live = null;
 let form = null;
+/* #7958: true while a save is out. A second click on Save does nothing until the answer arrives, and the Save button is disabled for
+   the write, so a double click on a new entry creates one entry, not two. */
+let busy = false;
+/* The open form's Save button, disabled while a save is out. */
+let saveButton = null;
 /* The registered servers, {id, label}, for the picker and the Scope column. */
 let servers = [];
 
@@ -297,6 +302,8 @@ function formNode() {
     counter.textContent = c.text;
     counter.className = c.over ? "mute-rules-field-error" : "meta";
   });
+  saveButton = el("button", { class: "btn primary", type: "button", text: "Save", onClick: submit });
+  saveButton.disabled = busy;
   return el("div", { class: "card mute-form" }, [
     el("h3", { text: form.mode === "create" ? "New known pattern" : "Edit known pattern" }),
     el("div", { class: "meta", text: "An alert that matches ALL filled fields shows this note. Blank fields match anything." }),
@@ -309,20 +316,30 @@ function formNode() {
     labelled("Note (required, " + MAX_NOTE + " characters at most)", note, counter),
     labelled("Expires (local time; blank = never)", textInput("expires_at_utc", "Expires", "datetime-local")),
     el("div", { class: "form-actions" }, [
-      el("button", { class: "btn primary", type: "button", text: "Save", onClick: submit }),
+      saveButton,
       el("button", { class: "btn", type: "button", text: "Cancel", onClick: closeForm }),
     ]),
   ]);
 }
 
 async function submit() {
-  form.banner = null;
-  const body = formToBody(form.values, browserZoneOrBlank());
-  const res = form.mode === "create" ? await createEntry(body) : await replaceEntry(form.id, body);
+  if (busy || !form) return;
+  const f = form;
+  busy = true;
+  if (saveButton) saveButton.disabled = true;
+  let res;
+  try {
+    f.banner = null;
+    const body = formToBody(f.values, browserZoneOrBlank());
+    res = f.mode === "create" ? await createEntry(body) : await replaceEntry(f.id, body);
+  } finally {
+    busy = false;
+    if (saveButton) saveButton.disabled = false;
+  }
   if (res.kind === "ok") {
     closeForm();
     return refreshList(live);
   }
-  form.banner = res.message;
+  f.banner = res.message;
   drawForm();
 }
