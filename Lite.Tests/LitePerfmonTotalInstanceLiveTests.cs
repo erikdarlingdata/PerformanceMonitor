@@ -22,9 +22,11 @@ namespace PerformanceMonitorLite.Tests;
 /// Lite's twin of Darling's <c>PerfmonTotalInstanceLiveTests</c>: a perfmon counter whose instances include
 /// <c>_Total</c> (Transactions/sec on the Databases object) is plotted from its <c>_Total</c> row alone, because
 /// that row already is the sum of the other instances and adding them again doubles every point, while a counter
-/// with no <c>_Total</c> row (Page life expectancy per Buffer Node) still sums every instance. Pinned against an
-/// embedded DuckDB through all three Lite perfmon trend reads: the single-counter chart read, the batched chart
-/// read and the MCP's bucketed read.
+/// with no <c>_Total</c> row (Page life expectancy per Buffer Node) still sums every instance. The choice is made
+/// per object: a counter name that two objects share (Transaction Delay on the Database Replica and Database
+/// Mirroring objects, #7416) takes the <c>_Total</c> row of the object that has one and the instance sum of the
+/// object that does not, then adds the two. Pinned against an embedded DuckDB through all three Lite perfmon
+/// trend reads: the single-counter chart read, the batched chart read and the MCP's bucketed read.
 /// </summary>
 [Collection("server-time-helper")]
 public sealed class LitePerfmonTotalInstanceLiveTests : IClassFixture<SharedDuckDbFixture>, IDisposable
@@ -33,6 +35,7 @@ public sealed class LitePerfmonTotalInstanceLiveTests : IClassFixture<SharedDuck
     private const string ServerName = "lite-perfmon-total-instance-e2e";
     private const string TransactionsPerSec = "Transactions/sec";
     private const string PageLifeExpectancy = "Page life expectancy";
+    private const string TransactionDelay = "Transaction Delay";
 
     private readonly DuckDbInitializer _duckDb;
     private readonly LocalDataService _dataService;
@@ -110,6 +113,49 @@ public sealed class LitePerfmonTotalInstanceLiveTests : IClassFixture<SharedDuck
         var pleBuckets = await _dataService.GetPerfmonBucketsAsync(ServerId, PageLifeExpectancy, hoursBack: 1, asOfUtc: endUtc, bucketMinutes: 1);
         Assert.Equal(3, pleBuckets.Points.Count);
         Assert.All(pleBuckets.Points, p => Assert.Equal(1200, p.MaxValue));
+    }
+
+    /// <summary>One counter name on two objects, only one of which carries <c>_Total</c>: the point is that
+    /// object's <c>_Total</c> plus the other object's instance sum. A choice made per counter name would see
+    /// the one <c>_Total</c> row and drop the second object's rows altogether.</summary>
+    [Fact]
+    public async Task ACounterSharedByTwoObjects_TakesTheTotalOfTheOneThatHasIt_AndSumsTheOther()
+    {
+        var t0 = new DateTime(2026, 3, 15, 9, 0, 0);
+        var times = Enumerable.Range(0, 3).Select(i => t0.AddMinutes(i)).ToArray();
+
+        foreach (var at in times)
+        {
+            /* Transaction Delay is a gauge (no delta, no interval). The Database Replica object carries _Total = 100
+               beside the two databases it totals, 60 and 40; the Database Mirroring object carries two databases,
+               30 and 20, and no _Total. The point is 100 + 50 = 150. Summing every row reads 250; taking the one
+               _Total row for the whole counter name reads 100. */
+            await PlantAsync(at, "SQLServer:Database Replica", TransactionDelay, "_Total", 100, null, null, PerfmonCounterTypes.PerfCounterLargeRawCount);
+            await PlantAsync(at, "SQLServer:Database Replica", TransactionDelay, "tenant_a", 60, null, null, PerfmonCounterTypes.PerfCounterLargeRawCount);
+            await PlantAsync(at, "SQLServer:Database Replica", TransactionDelay, "tenant_b", 40, null, null, PerfmonCounterTypes.PerfCounterLargeRawCount);
+            await PlantAsync(at, "SQLServer:Database Mirroring", TransactionDelay, "tenant_c", 30, null, null, PerfmonCounterTypes.PerfCounterLargeRawCount);
+            await PlantAsync(at, "SQLServer:Database Mirroring", TransactionDelay, "tenant_d", 20, null, null, PerfmonCounterTypes.PerfCounterLargeRawCount);
+        }
+
+        var startUtc = times[0].AddMinutes(-1);
+        var endUtc = times[^1].AddMinutes(1);
+
+        var single = await _dataService.GetPerfmonTrendAsync(ServerId, TransactionDelay, fromDate: startUtc, toDate: endUtc);
+        Assert.Equal(3, single.Count);
+        Assert.All(single, p => Assert.Equal(150, p.Value));
+        /* A gauge's rows store no delta, and the sum across objects keeps that NULL rather than making a 0. */
+        Assert.All(single, p => Assert.Null(p.DeltaValue));
+
+        var trends = await _dataService.GetPerfmonTrendsByCountersAsync(
+            ServerId, new List<string> { TransactionDelay }, fromDate: startUtc, toDate: endUtc);
+        Assert.True(trends.TryGetValue(TransactionDelay, out var delay), "Transaction Delay did not plot at all");
+        Assert.Equal(3, delay!.Count);
+        Assert.All(delay, p => Assert.Equal(150, p.Value));
+        Assert.All(delay, p => Assert.Null(p.DeltaValue));
+
+        var buckets = await _dataService.GetPerfmonBucketsAsync(ServerId, TransactionDelay, hoursBack: 1, asOfUtc: endUtc, bucketMinutes: 1);
+        Assert.Equal(3, buckets.Points.Count);
+        Assert.All(buckets.Points, p => Assert.Equal(150, p.MaxValue));
     }
 
     /* ---- seeding ---------------------------------------------------------------------------------------- */

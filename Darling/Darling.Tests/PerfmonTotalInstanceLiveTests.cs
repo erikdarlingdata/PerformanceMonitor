@@ -24,10 +24,12 @@ namespace Darling.Tests;
 /// A perfmon counter whose instances include <c>_Total</c> (the Databases and Locks objects: Transactions/sec,
 /// Log Flushes/sec, Lock Requests/sec and the rest) is plotted from its <c>_Total</c> row alone, because
 /// <c>_Total</c> already is the sum of the other instances and adding them again doubles every point. A counter
-/// with no <c>_Total</c> row (the Buffer Node object's per-node instances) still sums every instance. Pinned
-/// against a live store through both Darling perfmon trend reads: the Viewer's batched chart read
-/// (<see cref="ViewerDataService.GetPerfmonTrendsByCountersAsync"/>) and the MCP's bucketed read
-/// (<see cref="DarlingTrendReader.GetPerfmonBucketsAsync"/>).
+/// with no <c>_Total</c> row (the Buffer Node object's per-node instances) still sums every instance. The choice
+/// is made per object: a counter name that two objects share (Transaction Delay on the Database Replica and
+/// Database Mirroring objects, #7416) takes the <c>_Total</c> row of the object that has one and the instance sum
+/// of the object that does not, then adds the two. Pinned against a live store through both Darling perfmon
+/// trend reads: the Viewer's batched chart read (<see cref="ViewerDataService.GetPerfmonTrendsByCountersAsync"/>)
+/// and the MCP's bucketed read (<see cref="DarlingTrendReader.GetPerfmonBucketsAsync"/>).
 /// </summary>
 [Collection("live-postgres")]
 public sealed class PerfmonTotalInstanceLiveTests
@@ -36,6 +38,7 @@ public sealed class PerfmonTotalInstanceLiveTests
     private const string ServerName = "perfmon-total-instance-e2e";
     private const string TransactionsPerSec = "Transactions/sec";
     private const string PageLifeExpectancy = "Page life expectancy";
+    private const string TransactionDelay = "Transaction Delay";
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -103,6 +106,78 @@ public sealed class PerfmonTotalInstanceLiveTests
                 var ple = await DarlingTrendReader.GetPerfmonBucketsAsync(postgres, ServerId, PageLifeExpectancy, startUtc, endUtc, bucketMinutes: 1, ct);
                 Assert.Equal(3, ple.Points.Count);
                 Assert.All(ple.Points, p => Assert.Equal(1200, p.MaxValue));
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteRowsAsync(cleanup, cleanupCt);
+                using var servers = new NpgsqlCommand("DELETE FROM servers WHERE server_id = $1", cleanup);
+                servers.Parameters.AddWithValue(ServerId);
+                await servers.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>One counter name on two objects, only one of which carries <c>_Total</c>: the point is that
+    /// object's <c>_Total</c> plus the other object's instance sum. A choice made per counter name would see
+    /// the one <c>_Total</c> row and drop the second object's rows altogether.</summary>
+    [Fact]
+    public async Task ACounterSharedByTwoObjects_TakesTheTotalOfTheOneThatHasIt_AndSumsTheOther_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the perfmon _Total round trip.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            var t0 = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-10);
+            var times = Enumerable.Range(0, 3).Select(i => t0.AddMinutes(i)).ToArray();
+
+            foreach (var at in times)
+            {
+                /* Transaction Delay is a gauge (no delta, no interval). The Database Replica object carries _Total
+                   = 100 beside the two databases it totals, 60 and 40; the Database Mirroring object carries two
+                   databases, 30 and 20, and no _Total. The point is 100 + 50 = 150. Summing every row reads 250;
+                   taking the one _Total row for the whole counter name reads 100. */
+                await PlantAsync(connection, ct, at, "SQLServer:Database Replica", TransactionDelay, "_Total", 100, null, null, PerfmonCounterTypes.PerfCounterLargeRawCount);
+                await PlantAsync(connection, ct, at, "SQLServer:Database Replica", TransactionDelay, "tenant_a", 60, null, null, PerfmonCounterTypes.PerfCounterLargeRawCount);
+                await PlantAsync(connection, ct, at, "SQLServer:Database Replica", TransactionDelay, "tenant_b", 40, null, null, PerfmonCounterTypes.PerfCounterLargeRawCount);
+                await PlantAsync(connection, ct, at, "SQLServer:Database Mirroring", TransactionDelay, "tenant_c", 30, null, null, PerfmonCounterTypes.PerfCounterLargeRawCount);
+                await PlantAsync(connection, ct, at, "SQLServer:Database Mirroring", TransactionDelay, "tenant_d", 20, null, null, PerfmonCounterTypes.PerfCounterLargeRawCount);
+            }
+
+            var startUtc = times[0].AddMinutes(-1);
+            var endUtc = times[^1].AddMinutes(1);
+
+            await using (var viewer = new ViewerDataService(cs!))
+            {
+                var trends = await viewer.GetPerfmonTrendsByCountersAsync(
+                    ServerId, new List<string> { TransactionDelay }, startUtc, endUtc, ct);
+
+                Assert.True(trends.TryGetValue(TransactionDelay, out var delay), "Transaction Delay did not plot at all");
+                Assert.Equal(3, delay!.Count);
+                Assert.All(delay, p => Assert.Equal(150, p.Value));
+                /* A gauge's rows store no delta, and the sum across objects keeps that NULL rather than making a 0. */
+                Assert.All(delay, p => Assert.Null(p.DeltaValue));
+            }
+
+            await using (var postgres = NpgsqlDataSource.Create(cs!))
+            {
+                var delay = await DarlingTrendReader.GetPerfmonBucketsAsync(postgres, ServerId, TransactionDelay, startUtc, endUtc, bucketMinutes: 1, ct);
+                Assert.Equal(3, delay.Points.Count);
+                Assert.All(delay.Points, p => Assert.Equal(150, p.MaxValue));
             }
 
             bodySucceeded = true;
