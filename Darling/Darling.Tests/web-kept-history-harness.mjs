@@ -597,6 +597,19 @@ Object.assign(scenarios, {
     found = { err, hours: ctx.hours, label: ctx.label, custom: ctx.custom === true, reads: fetches.slice(before), rows: cpu.data.samples.length };
     return [];
   },
+  // #7932: a picked range whose end has not arrived (today's date alone, a date-box end later today) is read live up to now, so the page
+  // context, the label and the chart window end at now too; the range key still names the picked pair, so a tab switch matches it.
+  pickerFutureEnd: async () => {
+    answer = (url) => (url.pathname === "/api/fleet" ? data({ cards: [] }) : data({ samples: cpuRows }));
+    await customServerPage("SRV1");
+    const start = NOW - 6 * 3600000;
+    const end = NOW + 6 * 3600000;
+    const err = modules.server.holdSpec("SRV1", modules.timeRange.fixedSpec(start, end), NOW);
+    const ctx = modules.server.rangeContext(NOW);
+    const axis = modules.util.windowFromHours(ctx.hours);
+    found = { err, hours: ctx.hours, label: ctx.label, endMs: ctx.endMs, axisEnd: axis ? axis.windowEnd : null, rangeKey: ctx.rangeKey, now: NOW, pickedKey: "custom:" + start + "-" + end };
+    return [];
+  },
   // Every preset and calendar period the picker offers, held for a server in the browser's zone (the scenario name carries it).
   pickerPresetsLocal: async () => {
     answer = (url) => (url.pathname === "/api/fleet" ? data({ cards: [] }) : data({ samples: cpuRows }));

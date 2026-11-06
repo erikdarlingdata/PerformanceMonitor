@@ -257,17 +257,20 @@ export function rangeContext(nowMs = Date.now()) {
          The range stays held (the next tab may take all of it), and reachNoteText says what happened (#5562 review r1 M4). */
       const cut = tabReachRefusal(resolved.range.spanMs, reach) != null;
       const range = cut ? { ...resolved.range, startMs: resolved.range.endMs - reach * HOUR_MS, spanMs: reach * HOUR_MS } : resolved.range;
+      /* #7932: the window is the read's, not the picked pair's. A fixed range whose end has not arrived (today's date alone, a date-box end later
+         today) is read live up to now, so its `live` and `endMs` come from readWindow: the charts, the slicer, the label and the held range all
+         end where the read did. The range key below still names the picked pair. */
       const w = readWindow(range, nowMs);
-      setActiveRange({ server: current.server, hours: w.hours, startMs: range.startMs, endMs: range.endMs, asOf: w.asOf });
+      setActiveRange({ server: current.server, hours: w.hours, startMs: range.startMs, endMs: w.endMs, asOf: w.asOf });
       /* Totals and rankings are read over whole hours back from the end, so they can begin earlier than the picked start:
          when the span is not a whole number of hours the label says where they begin. */
       const aggregateFrom = w.endMs - w.hours * HOUR_MS;
       const rounded = aggregateFrom < range.startMs ? "; totals and rankings aggregate from " + localTime(new Date(aggregateFrom).toISOString()) : "";
-      const times = localTime(new Date(range.startMs).toISOString()) + " to " + (range.live ? "now" : localTime(new Date(range.endMs).toISOString()));
+      const times = localTime(new Date(range.startMs).toISOString()) + " to " + (w.live ? "now" : localTime(new Date(w.endMs).toISOString()));
       const picked = custom.spec.kind === "relative" || custom.spec.kind === "calendar" ? specName(custom.spec).toLowerCase() : "custom";
       const named = cut ? "last " + reachText(reach) + " of " + picked : picked;
       /* #6301: the exact pair and a key that changes when the range does, for the time slicer on the Top Queries and Top Procedures cards. */
-      const endMs = range.live ? nowMs : range.endMs;
+      const endMs = w.live ? nowMs : w.endMs;
       /* The key names the range the reader PICKED (resolved.range), not this tab's cut of it: tabs with different reach must share one key, or
          a tab switch would drop the narrowing (the held window is clamped to each tab's reach instead). */
       const pickedRange = resolved.range;

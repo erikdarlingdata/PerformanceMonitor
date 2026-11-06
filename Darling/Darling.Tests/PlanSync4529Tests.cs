@@ -67,9 +67,9 @@ public sealed class PlanSync4529Tests
           <CursorPlan CursorName="c" CursorActualType="{{CURSOR_TYPE}}" CursorRequestedType="{{CURSOR_TYPE}}" CursorConcurrency="Optimistic" ForwardOnly="0">
             <Operation OperationType="Fetch">
               <QueryPlan CachedPlanSize="16" CompileTime="1" CompileCPU="1" CompileMemory="104">
-                <RelOp NodeId="0" PhysicalOp="Table Scan" LogicalOp="Table Scan" EstimateRows="100" EstimateIO="0" EstimateCPU="0" AvgRowSize="9" EstimatedTotalSubtreeCost="1" TableCardinality="1000" Parallel="0" EstimateRebinds="0" EstimateRewinds="0" EstimatedExecutionMode="Row">
+                <RelOp NodeId="0" PhysicalOp="Table Scan" LogicalOp="Table Scan" EstimateRows="100" EstimateIO="0" EstimateCPU="0" AvgRowSize="9" EstimatedTotalSubtreeCost="1" TableCardinality="1000000" Parallel="0" EstimateRebinds="0" EstimateRewinds="0" EstimatedExecutionMode="Row">
                   <OutputList/>
-                  <RunTimeInformation><RunTimeCountersPerThread Thread="0" ActualRows="10" ActualExecutions="1" ActualRowsRead="1000" ActualExecutionMode="Row"/></RunTimeInformation>
+                  <RunTimeInformation><RunTimeCountersPerThread Thread="0" ActualRows="10" ActualExecutions="1" ActualRowsRead="1000000" ActualExecutionMode="Row"/></RunTimeInformation>
                   <TableScan>
                     <DefinedValues/>
                     <Predicate>

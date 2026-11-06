@@ -46,6 +46,8 @@ const jsDir = process.argv[2];
 const scenario = process.argv[3];
 
 const writes = [];
+/* How many times the page has read get_known_patterns. */
+let listReads = 0;
 let canEdit = true;
 let entries = [];
 let writeReply = (req) => ({ status: 200, body: { status: "created", id: 1 } });
@@ -56,13 +58,14 @@ globalThis.fetch = async (url, init) => {
   if (init && init.method && init.method !== "GET") {
     const req = init.body ? JSON.parse(init.body) : null;
     writes.push({ method: init.method, url: u, contentType: init.headers["Content-Type"], req });
-    const r = writeReply(req, init.method);
+    /* A reply may be a promise, so a scenario can hold the service's answer back and look at the page in between. */
+    const r = await writeReply(req, init.method);
     return { status: r.status, ok: r.status < 300, text: async () => JSON.stringify(r.body) };
   }
   let body = {};
   if (u.startsWith("/api/session")) body = { can_edit: canEdit };
   else if (u.startsWith("/api/admin/servers")) body = { servers: [{ server_id: 7, server_name: "srv-a", display_name: "Server A" }, { server_id: 9, server_name: "srv-b" }] };
-  else if (u.includes("/get_known_patterns")) body = { entries_returned: entries.length, known_patterns: entries };
+  else if (u.includes("/get_known_patterns")) { listReads++; body = { entries_returned: entries.length, known_patterns: entries }; }
   return { status: 200, ok: true, text: async () => JSON.stringify(body) };
 };
 
@@ -111,6 +114,85 @@ try {
       out.formClosed = !field(main, "note");
       out.rows = bodyRows(main).length;
       out.expiresIsUtcIso = /^2030-01-0[12]T\d\d:\d\d:00\.000Z$/.test(writes[0].req.expires_at_utc);
+    },
+    /* #7958: two clicks on Save before the service has answered the first. One POST goes out, the button is disabled while it is
+       out, and the form closes on the answer. Then a save the service refuses: the redrawn form's Save is enabled again. */
+    async doubleSave() {
+      let release;
+      const gate = new Promise((r) => (release = r));
+      writeReply = async () => { await gate; return { status: 200, body: { status: "created", id: 1 } }; };
+      const main = newMain(); await page.renderKnownPatterns(main);
+      button(main, "New known pattern").fire("click");
+      type(main, "note", "Nightly backup runs here.");
+      const save = button(main, "Save");
+      save.fire("click");
+      save.fire("click");
+      await tick();
+      out.postsBeforeReply = writes.length;
+      out.disabledWhileOut = save.disabled === true;
+      entries = [entry({ note: "Nightly backup runs here." })];
+      release();
+      await tick();
+      out.postsAfterReply = writes.length;
+      out.formClosed = !field(main, "note");
+      out.rows = bodyRows(main).length;
+      writeReply = () => ({ status: 400, body: { status: "invalid", error: "A known pattern needs a note: what the operator knows about it." } });
+      button(main, "New known pattern").fire("click");
+      button(main, "Save").fire("click");
+      await tick();
+      out.refusalShown = !!role(main, "refusal");
+      out.enabledAfterRefusal = button(main, "Save").disabled !== true;
+      out.writesInAll = writes.length;
+    },
+    /* #7989: Save, then Cancel while the service has not answered, then New known pattern with its own text. The first save's answer
+       belongs to the cancelled form: the new form stays open as drawn, with its text, its Save is enabled, and the list is re-read once. */
+    async cancelDuringSave() {
+      let release;
+      writeReply = async () => { await new Promise((r) => (release = r)); return { status: 200, body: { status: "created", id: 1 } }; };
+      const main = newMain(); await page.renderKnownPatterns(main);
+      const readsAtStart = listReads;
+      button(main, "New known pattern").fire("click");
+      type(main, "note", "First entry.");
+      button(main, "Save").fire("click");
+      await tick();
+      button(main, "Cancel").fire("click");
+      button(main, "New known pattern").fire("click");
+      type(main, "note", "Second entry.");
+      const second = field(main, "note");
+      entries = [entry({ note: "First entry." })];
+      release();
+      await tick();
+      out.secondFormOpen = !!field(main, "note");
+      out.secondFormRedrawn = field(main, "note") !== second;
+      out.secondTyped = field(main, "note") ? field(main, "note").value : null;
+      out.secondSaveEnabled = !!button(main, "Save") && button(main, "Save").disabled !== true;
+      out.listReads = listReads - readsAtStart;
+      out.rows = bodyRows(main).length;
+      out.writes = writes.length;
+    },
+    /* #7989: the same sequence with a save the service refuses. The refusal belongs to the cancelled form, so the new form is not
+       redrawn and shows no refusal, its Save is enabled, and the list is not re-read. */
+    async cancelDuringRefusedSave() {
+      let release;
+      writeReply = async () => { await new Promise((r) => (release = r)); return { status: 400, body: { status: "invalid", error: "A known pattern needs a note: what the operator knows about it." } }; };
+      const main = newMain(); await page.renderKnownPatterns(main);
+      const readsAtStart = listReads;
+      button(main, "New known pattern").fire("click");
+      type(main, "metric_name", "High CPU");
+      button(main, "Save").fire("click");
+      await tick();
+      button(main, "Cancel").fire("click");
+      button(main, "New known pattern").fire("click");
+      type(main, "note", "Second entry.");
+      const second = field(main, "note");
+      release();
+      await tick();
+      out.secondFormRedrawn = field(main, "note") !== second;
+      out.secondTyped = field(main, "note") ? field(main, "note").value : null;
+      out.refusalShown = !!role(main, "refusal");
+      out.secondSaveEnabled = !!button(main, "Save") && button(main, "Save").disabled !== true;
+      out.listReads = listReads - readsAtStart;
+      out.writes = writes.length;
     },
     async anyScope() {
       const main = newMain(); await page.renderKnownPatterns(main);
@@ -184,9 +266,17 @@ try {
     async pure() {
       out.timeOnlyZone = page.formToBody({ time_of_day: "02:00", time_zone: "", note: "n" }, "Europe/Paris");
       out.noTimeNoZone = page.formToBody({ time_zone: "Europe/Paris", window_minutes: "30", note: "n" }, "Europe/Paris");
+      out.negativeServer = page.formToBody({ server_id: "-1714925380", note: "n" }, "UTC");
       out.interpret400 = page.interpretWrite(400, { status: "invalid", error: "The refusal." });
       out.interpret404 = page.interpretWrite(404, { status: "not_found" }).kind;
       out.interpret403 = page.interpretWrite(403, {}).kind;
+      /* A stamp the store returns without a zone suffix is UTC: it reads as the same instant as its suffixed twin, in the expiry box
+         and in the expired test, and a blank or unreadable one is no expiry. */
+      out.bareLocalInput = page.isoToLocalInput("2030-01-02T03:04:00.0000000");
+      out.suffixedLocalInput = page.isoToLocalInput("2030-01-02T03:04:00Z");
+      out.unreadableLocalInput = page.isoToLocalInput("not a time");
+      const at = Date.UTC(2030, 0, 2, 3, 4, 0);
+      out.bareExpired = { atTheInstant: page.isExpired({ expires_at_utc: "2030-01-02T03:04:00" }, at), aMinuteBefore: page.isExpired({ expires_at_utc: "2030-01-02T03:04:00" }, at - 60000), noExpiry: page.isExpired({ expires_at_utc: null }, at), unreadable: page.isExpired({ expires_at_utc: "not a time" }, at) };
     },
   };
   await scenarios[scenario]();
