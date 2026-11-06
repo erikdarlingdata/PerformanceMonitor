@@ -590,6 +590,29 @@ try {
     };
   };
 
+  /* #7949: the scope pickers. The fleet read lists enabled servers only (Alpha 3, tag 2); the Servers read lists every server, so server 7
+     is a disabled one only that read knows. "unreadable" fails both reads, as a refused or failed read does as the tab paints. "serversFail" fails only
+     the Servers read and "fleetFails" only the fleet read. */
+  const scopeSetup = (mode, extra) => {
+    const serversFail = mode === "unreadable" || mode === "serversFail";
+    const fleetFails = mode === "unreadable" || mode === "fleetFails";
+    state.canEdit = true;
+    state.servers = [server(3, "Alpha"), server(7, "Bravo", { status: "Disabled" })];
+    state.listReply = serversFail ? () => ({ status: 500, body: { error: "read failed" } }) : null;
+    state.responder = (method, url, body) => {
+      if (method === "GET" && url === "/api/agent-setup/access") return { status: 200, body: { can_edit_routes: true, can_edit_profiles: true } };
+      if (method === "GET" && url === "/api/fleet") return fleetFails ? { status: 429, body: { error: "slow down" } } : { status: 200, body: { cards: [{ server_id: 3, display_name: "Alpha" }], tags: [{ id: 2, name: "prod" }] } };
+      return extra(method, url, body) || { status: 404, body: { error: "no such request " + url } };
+    };
+  };
+  /* A browser reads a select as "" when its value matches no option; the fake node keeps whatever was assigned, so after the page paints the
+     select is read the way the browser would. */
+  const asBrowser = (select) => {
+    if (!all(select, (n) => n.tag === "option").some((o) => o.attrs.value === select.value)) select.value = "";
+    return select;
+  };
+  const optionValues = (select) => all(select, (n) => n.tag === "option").map((o) => o.attrs.value + "|" + o.textContent);
+
   const scenarios = {
     /* T1: what a seat sees by what its session probe said: "readonly", "probefailed" (an HTTP error), "probedropped" (a transport
        failure) or "editor". The list carries a row without a server_id, which never gets an Edit button. */
@@ -1252,8 +1275,8 @@ try {
       const answers = {
         approved: () => { pending = pending.filter((n) => n.note_id !== 7); return { status: 200, body: { status: "approved", note_id: 7 } }; },
         gone: () => { pending = pending.filter((n) => n.note_id !== 7); return { status: 404, body: { error: "That note is not pending: it was already decided, or it is gone." } }; },
-        refused: () => ({ status: 403, body: { error: "Deciding a note needs a store login with the admin role." } }),
-        signin: () => ({ status: 403, body: { error: "Sign in to the web as an admin to make this change, or use the Viewer." } }),
+        refused: () => ({ status: 403, body: { error: "This dashboard's store login has no write access, so it cannot decide notes. Decide them in the Viewer app.", reason: "store_refused" } }),
+        signin: () => ({ status: 403, body: { error: "Sign in to the web as an admin to make this change, or use the Viewer.", reason: "sign_in_required" } }),
         broken: () => ({ status: 500, body: { error: "The store did not answer." } }),
       };
       state.responder = (method, url) => {
@@ -1591,6 +1614,57 @@ try {
       await mountPage("servers");
       const strip = all(main, (n) => n.classList.contains("strip") && /servers?\. /.test(n.textContent))[0];
       return { className: strip ? strip.className : null, text: strip ? strip.textContent : null };
+    },
+    /* #7949: Edit then Save on a route scoped to server 7 (disabled, so not in the fleet read). Returns what the Applies to box offered and showed,
+       what the tab said about the lists, and the write. Param: "disabled" (both reads work), "unreadable" (both fail), "serversFail" or "fleetFails" (one fails). */
+    routeScope: async (param) => {
+      const route = { route_id: 7, metric_match: "blocking", match_kind: "exact_metric", family: "performance", configured_channels: [], smtp_recipients: [],
+        enabled: true, modified_at_utc: "2026-01-01T00:00:00.1234567Z", scope_server_id: 7, scope_tag_id: null, agent_level: null, agent_max_per_hour: 10,
+        agent_max_per_day: 50, agent_lease_minutes: 30, agent_expiry_minutes: 120, send_resolutions: null, fallback_route_id: null, severities: "critical", report_notice: "off" };
+      scopeSetup(param, (method, url) => {
+        if (method === "GET" && url === "/api/read/get_notification_routes") return { status: 200, body: { routes: [route] } };
+        if (method === "PUT" && url === "/api/notification-routes/7") return { status: 200, body: { status: "updated", route_id: 7 } };
+        return null;
+      });
+      await mountPage("routes");
+      await fire(byAttr(main, "data-action", "edit-route")[0], "click");
+      await settle(30);
+      const scope = asBrowser(field("scope"));
+      const shown = scope.value;
+      const options = optionValues(scope);
+      const notes = all(main, (n) => n.classList.contains("strip")).map((n) => n.textContent).filter((t) => /could not be read/.test(t));
+      await fire(byAttr(main, "data-action", "save-route")[0], "click");
+      await settle(30);
+      return { shown, options, notes, writes: requests.filter((r) => r.method === "PUT").map((r) => r.body) };
+    },
+    /* #7949: the Environment Profiles tab with a profile for server 7. The picker is set to server 7 and Save is pressed with the text cleared
+       (a removal). Returns the picker's options, whether it holds server 7, and the write. */
+    profileScope: async (param) => {
+      scopeSetup(param, (method, url) => {
+        if (method === "GET" && url === "/api/environment-profiles") {
+          return { status: 200, body: { can_edit: true, max_length: 4000, profiles: [{ scope_server_id: 7, scope_tag_id: null, profile_text: "Retired in March", modified_at_utc: "2026-01-01T00:00:00Z" }] } };
+        }
+        if (method === "PUT" && url === "/api/environment-profiles") return { status: 200, body: { status: "removed" } };
+        return null;
+      });
+      await mountPage("profiles");
+      const scope = field("profile-scope");
+      const options = optionValues(scope);
+      const hasServer7 = options.some((o) => o.startsWith("s7|"));
+      if (hasServer7) {
+        await typeInto(scope, "s7");
+        await typeInto(byAttr(main, "data-field", "profile-text")[0], "");
+        await fire(byAttr(main, "data-action", "save-profile")[0], "click");
+        await settle(30);
+      }
+      const listed = all(main, (n) => n.tag === "td").map((n) => n.textContent).filter((t) => t.startsWith("Server:"));
+      const notes = all(main, (n) => n.classList.contains("strip")).map((n) => n.textContent).filter((t) => /could not be read/.test(t));
+      return { options, hasServer7, listed, notes, writes: requests.filter((r) => r.method === "PUT").map((r) => r.body) };
+    },
+    /* #7949: what the scope pickers (routes, profiles and the People grant box all read it) are built from. */
+    scopes: async (param) => {
+      scopeSetup(param, () => null);
+      return await page.readScopes();
     },
     pure: async () => {
       const request = JSON.parse(await readStdin());

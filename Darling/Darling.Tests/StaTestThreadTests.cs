@@ -341,6 +341,57 @@ public sealed class StaTestThreadTests
         Assert.Equal(9, StaTestThread.Run(() => 9));
     }
 
+    /// <summary>
+    /// #7968: a CI body spent 34 s building and showing a window, then began a 30 s wait for idle. The wait's limit passed after the hang guard (60 s then, 180 s now)
+    /// did, so the guard stranded the shared thread instead of the wait failing its own test. The wait is now cut to what the guard has left.
+    /// </summary>
+    [Fact]
+    public void AWaitForIdleThatBeginsLateInTheGuardsBudget_IsCutToWhatTheGuardHasLeft_AndTheThreadIsFreed()
+    {
+        var host = new StaHost { HangGuard = TimeSpan.FromSeconds(4) };
+        var stop = false;
+        try
+        {
+            var thrown = Assert.Throws<TimeoutException>(() => host.Run(() =>
+            {
+                host.Step("slow work before the wait");
+                TestWait.Elapse(TimeSpan.FromSeconds(1));
+                var dispatcher = Dispatcher.CurrentDispatcher;
+                Action again = null!;
+                /* A dispatcher that never reaches idle: each operation queues the next one ahead of it. */
+                again = () =>
+                {
+                    if (!stop)
+                    {
+                        dispatcher.BeginInvoke(DispatcherPriority.Render, again);
+                    }
+                };
+                again();
+                try
+                {
+                    /* The 30 s a Settle asks for, with 3 s of the 4 s guard left. */
+                    StaTestThread.WaitForIdle(dispatcher, StaTestThread.IdleLimit);
+                }
+                finally
+                {
+                    stop = true;
+                }
+            }));
+
+            Assert.Contains("did not reach application idle within", thrown.Message);
+            Assert.Contains("cut from 30000 ms", thrown.Message);
+            Assert.DoesNotContain("WPF test body did not return", thrown.Message);
+
+            /* The wait failed inside the body, so the guard never stranded the thread: the next body runs, it is not refused. */
+            Assert.Equal(9, host.Run(() => 9));
+        }
+        finally
+        {
+            stop = true;
+            host.Shutdown();
+        }
+    }
+
     [Fact]
     public void AfterABody_TheDispatcherIsDrained_AndAWindowItLeftOpenIsClosed()
     {

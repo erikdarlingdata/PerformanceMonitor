@@ -140,16 +140,31 @@ public sealed partial class ViewerDataService
                     delta_execution_count
                 FROM base
             ),
-            ranked AS (
+            hashed AS (
                 SELECT
                     time_bin,
                     bucket_index,
                     query_hash,
                     query_text,
                     query_text_digest,
-                    COUNT(*) OVER (PARTITION BY time_bin, bucket_index) AS query_count,
-                    ROW_NUMBER() OVER (PARTITION BY time_bin, bucket_index ORDER BY delta_execution_count DESC) AS rn
+                    delta_execution_count,
+                    ROW_NUMBER() OVER (PARTITION BY time_bin, bucket_index, query_hash ORDER BY delta_execution_count DESC) AS hash_rn
                 FROM binned
+            ),
+            ranked AS (
+                /* #7881: query_count is DISTINCT query_hash in the cell, as the tool says, not the sample rows (one per collection x
+                   plan x handle, so a steady query counted once per collection). PostgreSQL has no COUNT(DISTINCT) window, so the first
+                   row of each hash in the cell counts 1. A NULL hash is one group, so a cell never reads as 0 queries. One scan of the
+                   same base read, so it uses the same query_stats index as before. */
+                SELECT
+                    time_bin,
+                    bucket_index,
+                    query_hash,
+                    query_text,
+                    query_text_digest,
+                    SUM(CASE WHEN hash_rn = 1 THEN 1 ELSE 0 END) OVER (PARTITION BY time_bin, bucket_index) AS query_count,
+                    ROW_NUMBER() OVER (PARTITION BY time_bin, bucket_index ORDER BY delta_execution_count DESC) AS rn
+                FROM hashed
             )
             SELECT
                 time_bin,

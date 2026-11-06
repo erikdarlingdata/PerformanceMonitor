@@ -8215,6 +8215,51 @@ AND   j.hypertable_name = '{relation}'";
     }
 
     /// <summary>
+    /// #7961: the full coverage measure for one raw relation, on the clock the caller passes, so the raw purge
+    /// trigger can start each rollup's hole scan at the same horizon floor the measure judged it within
+    /// (<see cref="RawPurgeHoleScanFrom"/>). A relation that is not coverage-gated is Covered, as in
+    /// <see cref="IsRawTierDropSafeAsync"/>.
+    /// </summary>
+    internal static async Task<RetentionCoverageMeasure> MeasureRawTierCoverageAsync(
+        NpgsqlConnection connection, string relation, DateTime utcNow, CancellationToken cancellationToken)
+    {
+        foreach (var (tierRelation, timeColumn, coverage) in RawTierCoverage)
+        {
+            if (string.Equals(tierRelation, relation, StringComparison.Ordinal))
+            {
+                return await MeasureRetentionCoverageAsync(connection, tierRelation, timeColumn, coverage, utcNow, cancellationToken);
+            }
+        }
+
+        return new RetentionCoverageMeasure(RetentionCoverage.Covered, Array.Empty<string>(), Array.Empty<HorizonCoveredConsumer>());
+    }
+
+    /// <summary>
+    /// #7961: where the raw purge's hole scan of <paramref name="view"/> starts. A rollup the coverage measure
+    /// judged only within its own armed retention (<paramref name="horizonCovered"/>, the #7114 rule) drops its
+    /// buckets older than that retention on its own, and its own gate, measured Covered in the same measure,
+    /// says its consumers already hold them. A bucket it no longer has below that horizon is therefore not a
+    /// hole the raw purge must wait for, and scanning it would hold the raw table for good, because no repair
+    /// or backfill can keep a bucket the rollup's own retention keeps dropping. Its scan starts at the bucket
+    /// that holds now - R + one bucket width, the bucket the measure's gap check starts at. Every other rollup
+    /// is scanned from <paramref name="dropFrom"/>, as before.
+    /// </summary>
+    internal static DateTime RawPurgeHoleScanFrom(
+        DateTime dropFrom, string view, TimeSpan bucketWidth, IReadOnlyList<HorizonCoveredConsumer> horizonCovered, DateTime utcNow)
+    {
+        foreach (var consumer in horizonCovered)
+        {
+            if (string.Equals(consumer.Consumer, view, StringComparison.Ordinal))
+            {
+                var floor = AlignDown(utcNow - TimeSpan.FromSeconds(consumer.DropAfterSeconds) + bucketWidth, bucketWidth);
+                return floor > dropFrom ? DateTime.SpecifyKind(floor, dropFrom.Kind) : dropFrom;
+            }
+        }
+
+        return dropFrom;
+    }
+
+    /// <summary>
     /// What a coverage probe was able to CONCLUDE — the distinction #1877 turns on.
     ///
     /// <para>Arming needs only "safe or not", and this was a bool for that reason. Re-holding needs more: an
@@ -8263,6 +8308,12 @@ AND   j.hypertable_name = '{relation}'";
     /// does not hold, and those rows pass its horizon within one bucket width (a day for a daily tier). Before
     /// this rule a held source that outlived its consumer's own retention stayed Short forever: the consumer
     /// trimmed itself to now - R on every run while the held source's oldest row never moved.</para>
+    ///
+    /// <para><b>A source gap at the horizon (#7961).</b> When the source has no rows across the consumer's
+    /// horizon (a store outage), the consumer's own run trims it to the first bucket after the gap, which can be
+    /// days past now - R + one bucket width. It still covers the slot when the source holds no row from the
+    /// bucket that holds now - R + one bucket width up to the consumer's oldest bucket: every source row inside
+    /// its horizon is then a row it holds. One source row in that span is Short, as before.</para>
     ///
     /// <para>The horizon rule also needs the consumer's OWN gate to be Covered on this same measure (its entry in
     /// <see cref="RetentionPolicies"/>, measured with the same "now"). A consumer whose own gate is Short or
@@ -8394,6 +8445,10 @@ AND   j.scheduled";
                reader closes, because each needs that consumer's own gate measured on this connection. */
             var horizonCandidates = new List<(int Slot, HorizonCoveredConsumer Consumer)>();
 
+            /* #7961: the slots whose consumer starts past its own horizon floor, checked for a source row in
+               between after this reader closes. */
+            var gapCandidates = new List<(int Slot, DateTime Floor, DateTime CoverageOldest, HorizonCoveredConsumer Consumer)>();
+
             /* Column 0 is the shared, unfiltered source_oldest (the empty-store check above). From column
                1 the shape is pairs — (source_oldest_i, coverage_oldest_i) — one pair per coverage relation,
                #4300/#4423's per-slot floor: each slot is judged against its OWN filtered source row, not
@@ -8431,9 +8486,17 @@ AND   j.scheduled";
                 /* #7114: short of the source, but not of what its own armed retention keeps. The rows below its
                    oldest bucket are rows it drops anyway (see the summary for the one-bucket slack), as long as
                    that retention stays armed, which the check after this loop decides. */
-                if (horizonFloors.TryGetValue(coverageRelations[i], out var horizon) && coverageOldest <= horizon.Floor)
+                if (horizonFloors.TryGetValue(coverageRelations[i], out var horizon))
                 {
-                    horizonCandidates.Add((i, horizon.Consumer));
+                    if (coverageOldest <= horizon.Floor)
+                    {
+                        horizonCandidates.Add((i, horizon.Consumer));
+                    }
+                    else
+                    {
+                        gapCandidates.Add((i, horizon.Floor, coverageOldest, horizon.Consumer));
+                    }
+
                     continue;
                 }
 
@@ -8441,6 +8504,32 @@ AND   j.scheduled";
             }
 
             await reader.CloseAsync();
+
+            /* #7961: the consumer starts later than its own horizon floor. That is a shortfall only when the
+               source holds a row inside the consumer's horizon that the consumer has no bucket for. After a store
+               outage the source has no rows across the gap, so the consumer's own retention trims it to the first
+               bucket after the gap, which can be days past now - R + one bucket width while it still holds every
+               row the source has inside its horizon. The check starts at the bucket that holds the horizon floor,
+               the same bucket the raw purge's hole scan starts at (RawPurgeHoleScanFrom), so the gate and the
+               scan judge the same rows. Any source row in [that bucket, the consumer's oldest bucket) is Short. */
+            foreach (var (slot, floor, coverageOldest, consumer) in gapCandidates)
+            {
+                var slotFilter = CoverageSlotSourceFilter(relation, coverageRelations[slot]);
+                var slotFilterAnd = slotFilter.Length == 0 ? string.Empty : $" AND ({slotFilter})";
+                using var gapRead = new NpgsqlCommand(
+                    $"SELECT EXISTS (SELECT 1 FROM collect.{relation} WHERE {sourceTimeColumn} >= $1 AND {sourceTimeColumn} < $2{slotFilterAnd})",
+                    connection) { CommandTimeout = SetupTimeoutSeconds };
+                gapRead.Parameters.AddWithValue(AlignDown(floor, widths[consumer.Consumer]));
+                gapRead.Parameters.AddWithValue(DateTime.SpecifyKind(coverageOldest, DateTimeKind.Unspecified));
+                if (await gapRead.ExecuteScalarAsync(cancellationToken) is false)
+                {
+                    horizonCandidates.Add((slot, consumer));
+                }
+                else
+                {
+                    slotShort[slot] = true;
+                }
+            }
 
             /* #7114 (review of #7115): the horizon rule holds only while the consumer's own retention keeps
                running, and the sweep goes source-first, so it can hold that consumer later in this same pass

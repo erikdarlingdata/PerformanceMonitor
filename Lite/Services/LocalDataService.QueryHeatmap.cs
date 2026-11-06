@@ -123,7 +123,7 @@ binned AS (
 SELECT
     time_bin,
     bucket_index,
-    COUNT(*) AS query_count,
+    COUNT(DISTINCT COALESCE(query_hash, '')) AS query_count, /* #7881: distinct queries, not sample rows; a NULL hash is one group */
     ARG_MAX(query_hash, delta_execution_count) AS top_query_hash,
     ARG_MAX(query_preview, delta_execution_count) AS top_query_text
 FROM binned
