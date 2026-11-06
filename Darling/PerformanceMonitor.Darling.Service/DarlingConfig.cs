@@ -2253,7 +2253,7 @@ public sealed class WebNetworkConfig
 
 /// <summary>
 /// One named web dashboard access token (#7735), the twin of <see cref="McpTokenEntry"/>: a <see cref="Name"/> (1 to 64 of
-/// <c>A-Za-z0-9._:-</c>), the token itself (<see cref="EncryptedToken"/> or <see cref="Token"/>, the same rules as <c>web.network</c>'s),
+/// <c>A-Za-z0-9._:-</c>, and not a name a built-in writer stamps as itself: <c>Hosting.DarlingWebTokenSet.ReservedNames</c>), the token itself (<see cref="EncryptedToken"/> or <see cref="Token"/>, the same rules as <c>web.network</c>'s),
 /// and a <see cref="Role"/>: <c>reader</c> (the read-only seat) or <c>operator</c> (the edit seat), the <c>mcp.tokens</c> words and only
 /// those. There is no <c>agent</c> seat on the web. The name is what the log and the <c>updated_by</c> stamp record; the value is never logged.
 /// </summary>

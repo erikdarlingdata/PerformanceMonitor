@@ -73,24 +73,23 @@ internal sealed class DarlingWebTokenSet
     internal Entry? Find(string? name) =>
         name is null ? null : Named.FirstOrDefault(e => string.Equals(e.Name, name, StringComparison.Ordinal));
 
-    /// <summary>True when <paramref name="name"/> is a valid token name: 1 to 64 of <c>A-Za-z0-9._:-</c>, the <c>mcp.tokens</c> rule.</summary>
-    internal static bool IsValidName(string? name)
+    /// <summary>True when <paramref name="name"/> is a valid web token name: the <c>mcp.tokens</c> rule (<see cref="Mcp.DarlingMcpTokenSet.IsValidName"/>,
+    /// 1 to 64 of <c>A-Za-z0-9._:-</c> and not an MCP placeholder) and not one of <see cref="ReservedNames"/>.</summary>
+    internal static bool IsValidName(string? name) => Mcp.DarlingMcpTokenSet.IsValidName(name) && !IsReservedName(name);
+
+    /// <summary>The names a web token may not have, beyond the <c>mcp.tokens</c> placeholders: a token's name is the <c>updated_by</c> stamp and
+    /// the <c>person:</c> journal actor of its writes, and these four are the names the dashboard's shared token (<c>web</c>), the MCP
+    /// surface (<c>mcp</c>), the command line (<c>cli</c>) and the Viewer (<c>viewer</c>) stamp on the same columns as themselves. A token
+    /// so named would make a person's edits read as a surface's.</summary>
+    internal static readonly string[] ReservedNames =
     {
-        if (string.IsNullOrEmpty(name) || name.Length > 64)
-        {
-            return false;
-        }
+        DarlingWebEndpoints.WebEditorPrincipal, DarlingWebEndpoints.McpEditorPrincipal, DarlingServiceConnectionTest.RequestedBy, "viewer",
+    };
 
-        foreach (var c in name)
-        {
-            if (!(char.IsAsciiLetterOrDigit(c) || c is '.' or '_' or ':' or '-'))
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
+    /// <summary>True when <paramref name="name"/> is reserved, compared ignoring case: one of <see cref="ReservedNames"/> or one of the
+    /// <c>mcp.tokens</c> placeholders (<see cref="Mcp.DarlingMcpTokenSet.IsReservedName"/>).</summary>
+    internal static bool IsReservedName(string? name) =>
+        name is not null && (ReservedNames.Contains(name, StringComparer.OrdinalIgnoreCase) || Mcp.DarlingMcpTokenSet.IsReservedName(name));
 
     /// <summary>
     /// What is wrong with <c>web.network.tokens</c>, one sentence per problem, never a token value. <paramref name="resolve"/> reads an
@@ -119,6 +118,14 @@ internal sealed class DarlingWebTokenSet
             var label = "web.network.tokens[" + i.ToString(System.Globalization.CultureInfo.InvariantCulture) + "]";
             if (entry is null)
             {
+                continue;
+            }
+
+            if (IsReservedName(entry.Name))
+            {
+                problems.Add(label + " is named " + entry.Name + ", which is reserved: web, mcp, cli and viewer (in any case) are the names the " +
+                    "dashboard, the MCP surface, the command line and the Viewer stamp their own writes with, and invalid and unclaimed are the " +
+                    "mcp.tokens placeholders. A token so named would make a person's edits read as one of those. Rename the token. The token is not served.");
                 continue;
             }
 
