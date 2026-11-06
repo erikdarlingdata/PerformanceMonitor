@@ -312,7 +312,9 @@ internal static class DarlingTrendReader
 
     /// <summary>
     /// A single counter's value + per-interval delta trend — Lite's <c>GetPerfmonTrendAsync</c> / the
-    /// viewer's perfmon read: SUM the counter's instances per collection. Postgres <c>SUM(bigint)</c> is
+    /// viewer's perfmon read: SUM the counter's instances per collection, or take the <c>_Total</c> instance alone
+    /// when the counter has one (the Databases and Locks objects), since that row already is the sum of the others
+    /// and adding them again doubled every point. Postgres <c>SUM(bigint)</c> is
     /// numeric, so both SUMs CAST back to bigint for the typed GetInt64 reader (the viewer's PerfmonTrendsSql
     /// makes the same cast). $1 server_id, $2 counter_name, $3/$4 window (naive UTC).
     /// <para>The interval is MAX, not SUM, and that distinction is load-bearing. cntr_value and
@@ -362,8 +364,12 @@ internal static class DarlingTrendReader
         return $$"""
             SELECT
                 collection_time,
-                CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS cntr_value,
-                CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS delta_cntr_value,
+                CASE WHEN bool_or(instance_name = '_Total')
+                     THEN CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total') AS bigint)
+                     ELSE CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) END AS cntr_value,
+                CASE WHEN bool_or(instance_name = '_Total')
+                     THEN CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total') AS bigint)
+                     ELSE CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) END AS delta_cntr_value,
                 CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds,
                 CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
                 COUNT(*) FILTER (WHERE is_artifact) AS artifacts
@@ -374,11 +380,13 @@ internal static class DarlingTrendReader
                     delta_cntr_value,
                     sample_interval_seconds,
                     cntr_type,
+                    instance_name,
                     {{isArtifact}} AS is_artifact
                 FROM (
                     SELECT
                         collection_time,
                         object_name,
+                        instance_name,
                         cntr_value,
                         delta_cntr_value,
                         sample_interval_seconds,
@@ -398,6 +406,7 @@ internal static class DarlingTrendReader
                     SELECT
                         collection_time,
                         object_name,
+                        instance_name,
                         cntr_value,
                         delta_cntr_value,
                         sample_interval_seconds,

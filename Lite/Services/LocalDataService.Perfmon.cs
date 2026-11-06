@@ -145,8 +145,12 @@ ORDER BY lower(counter_name), counter_name";
         command.CommandText = @"
 SELECT
     collection_time,
-    SUM(cntr_value) AS cntr_value,
-    SUM(delta_cntr_value) AS delta_cntr_value,
+    CASE WHEN bool_or(instance_name = '_Total')
+         THEN SUM(cntr_value) FILTER (WHERE instance_name = '_Total')
+         ELSE SUM(cntr_value) END AS cntr_value,
+    CASE WHEN bool_or(instance_name = '_Total')
+         THEN SUM(delta_cntr_value) FILTER (WHERE instance_name = '_Total')
+         ELSE SUM(delta_cntr_value) END AS delta_cntr_value,
     MAX(sample_interval_seconds) AS sample_interval_seconds,
     CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type
 FROM v_perfmon_stats
@@ -225,8 +229,12 @@ FROM (
     SELECT
         counter_name,
         collection_time,
-        CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS BIGINT) AS cntr_value,
-        CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS BIGINT) AS delta_cntr_value,
+        CASE WHEN bool_or(instance_name = '_Total')
+             THEN CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total') AS BIGINT)
+             ELSE CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS BIGINT) END AS cntr_value,
+        CASE WHEN bool_or(instance_name = '_Total')
+             THEN CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total') AS BIGINT)
+             ELSE CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS BIGINT) END AS delta_cntr_value,
         CAST(MAX(sample_interval_seconds) AS BIGINT) AS sample_interval_seconds,
         CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
         COUNT(*) FILTER (WHERE is_artifact) AS artifacts
@@ -238,12 +246,14 @@ FROM (
             delta_cntr_value,
             sample_interval_seconds,
             cntr_type,
+            instance_name,
             {isArtifact} AS is_artifact
         FROM (
             SELECT
                 counter_name,
                 collection_time,
                 object_name,
+                instance_name,
                 cntr_value,
                 delta_cntr_value,
                 sample_interval_seconds,

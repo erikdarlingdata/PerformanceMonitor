@@ -814,11 +814,13 @@ WITH flagged AS
         delta_cntr_value,
         sample_interval_seconds,
         cntr_type,
+        instance_name,
         {isArtifact} AS is_artifact
     FROM (
         SELECT
             collection_time,
             object_name,
+            instance_name,
             cntr_value,
             delta_cntr_value,
             sample_interval_seconds,
@@ -838,6 +840,7 @@ WITH flagged AS
         SELECT
             collection_time,
             object_name,
+            instance_name,
             cntr_value,
             delta_cntr_value,
             sample_interval_seconds,
@@ -856,8 +859,12 @@ collections AS
 (
     SELECT
         collection_time,
-        SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS cntr_value,
-        SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS delta_cntr_value,
+        CASE WHEN bool_or(instance_name = '_Total')
+             THEN SUM(cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total')
+             ELSE SUM(cntr_value) FILTER (WHERE NOT is_artifact) END AS cntr_value,
+        CASE WHEN bool_or(instance_name = '_Total')
+             THEN SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total')
+             ELSE SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) END AS delta_cntr_value,
         MAX(sample_interval_seconds) AS sample_interval_seconds,
         CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
         COUNT(*) FILTER (WHERE is_artifact) AS artifacts

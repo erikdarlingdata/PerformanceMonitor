@@ -126,6 +126,10 @@ public sealed partial class ViewerDataService
     /// row measured 12 counters over 7 days at 2.3-2.4s against ~800ms unwindowed, because the sort touched
     /// rows that could never be an artifact and pushed the planner off its index scan onto a parallel seq scan.
     /// Same shape as the MCP twin's <c>PerfmonTrendSql</c>.</para>
+    /// <para>A counter whose instances include <c>_Total</c> (the Databases and Locks objects) takes that row alone
+    /// for the per-collection value and delta: <c>_Total</c> already is the sum of the other instances, and adding
+    /// them again doubled every point. A counter with no <c>_Total</c> row sums every instance, as before. The
+    /// interval, the type rule and the artifact count still read every row.</para>
     /// $1 server_id, $2/$3 window (naive UTC), $4.. counter names, last $ the bucket width in minutes.
     /// </summary>
     public static string PerfmonTrendsSql(int counterCount)
@@ -150,8 +154,12 @@ public sealed partial class ViewerDataService
                 SELECT
                     counter_name,
                     collection_time,
-                    CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS cntr_value,
-                    CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS delta_cntr_value,
+                    CASE WHEN bool_or(instance_name = '_Total')
+                         THEN CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total') AS bigint)
+                         ELSE CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) END AS cntr_value,
+                    CASE WHEN bool_or(instance_name = '_Total')
+                         THEN CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total') AS bigint)
+                         ELSE CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) END AS delta_cntr_value,
                     CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds,
                     CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
                     COUNT(*) FILTER (WHERE is_artifact) AS artifacts
@@ -163,6 +171,7 @@ public sealed partial class ViewerDataService
                         delta_cntr_value,
                         sample_interval_seconds,
                         cntr_type,
+                        instance_name,
                         false AS is_artifact
                     FROM v_perfmon_stats
                     WHERE server_id = $1
@@ -180,12 +189,14 @@ public sealed partial class ViewerDataService
                         delta_cntr_value,
                         sample_interval_seconds,
                         cntr_type,
+                        instance_name,
                         {{isArtifact}} AS is_artifact
                     FROM (
                         SELECT
                             counter_name,
                             collection_time,
                             object_name,
+                            instance_name,
                             cntr_value,
                             delta_cntr_value,
                             sample_interval_seconds,
