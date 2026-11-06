@@ -352,14 +352,18 @@ public sealed class WebRangeKeptHistoryBehaviourTests
         Assert.Equal(3, Regex.Matches(editor, Regex.Escape("await readToolWithinKeptHistory(p.read, cleanParams(p.params));")).Count);
     }
 
-    /// <summary>#7945: a time_bucket stamp is the bucket's start, so the bucket that starts at the range's end lies outside the range and is
-    /// cut; a sample stamped at the end is inside it and kept.</summary>
+    /// <summary>#7945: a trend read's rows are bucket starts whatever name the stamp carries (get_cpu_utilization stamps its buckets under
+    /// sample_time, the trends under time or collection_time, system_health under event_time, the heatmap under time_bucket), so the bucket that
+    /// starts at the range's end lies outside the range and is cut. A read of instants keeps the one stamped at the end.</summary>
     [Fact]
-    public void TheCustomRange_CutsTheBucketThatStartsAtItsEnd_AndKeepsTheSampleAtItsEnd()
+    public void TheCustomRange_CutsTheBucketThatStartsAtItsEnd_AndKeepsTheInstantAtItsEnd()
     {
         if (!TryRun("customBucketEdge", out var r)) return;
         var found = r.GetProperty("found");
-        Assert.Equal(2, found.GetProperty("bucketRows").GetInt32());
-        Assert.Equal(3, found.GetProperty("sampleRows").GetInt32());
+        foreach (var read in new[] { "get_cpu_utilization", "get_wait_trend", "get_lock_wait_trend", "get_health_parser_system_health", "get_query_heatmap" })
+        {
+            Assert.True(found.GetProperty(read).GetInt32() == 2, read + " kept " + found.GetProperty(read).GetInt32() + " of 3 buckets; the one that starts at the range's end is outside it");
+        }
+        Assert.Equal(3, found.GetProperty("get_memory_pressure_events").GetInt32());
     }
 }
