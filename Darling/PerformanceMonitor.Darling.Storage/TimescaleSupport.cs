@@ -3901,12 +3901,15 @@ WITH NO DATA";
     /// THE HOURLY REFRESH GRID (#3012, re-derived at #3174) — stated as a method, because a table of
     /// minutes cannot be re-derived by the next reader and a method can.
     ///
-    /// <para><b>The grid is three bands, read left to right across the hour.</b> First the LIGHT refreshes,
+    /// <para><b>The grid is four bands, read left to right across the hour.</b> First the LIGHT refreshes,
     /// one per minute, <see cref="LightRefreshStepMinutes"/> apart. Then <see cref="CompressionPhaseGuardMinutes"/>
     /// of clear, so the last of them has finished. Then the HEAVIEST refresh's window,
     /// <see cref="HeaviestRefreshWindowMinutes"/> wide, which no other refresh starts inside. Then the
-    /// compression band, <see cref="CompressionPhaseBandMinutes"/> wide, which is the rest of the hour.
-    /// Every boundary is derived from a measurement or from the catalog; nothing here is a chosen minute.</para>
+    /// compression band, <see cref="CompressionPhaseBandMinutes"/> wide. Then the TAIL (#8053): the hourly
+    /// refreshes built from another hourly refresh, one per minute in the hour's last
+    /// <see cref="HierarchicalHourlyRefreshCount"/> minutes, after every parent's slot and window have closed.
+    /// Every boundary is derived from a measurement, from the catalog or from the definitions; nothing here is
+    /// a chosen minute.</para>
     ///
     /// <para><b>Why the shape changed, and why no step change could have done it.</b> The old grid was a
     /// uniform <c>index % slots * step</c>, so a view's minute — and therefore whether it collided with
@@ -3972,11 +3975,12 @@ WITH NO DATA";
     public const int LightRefreshStepMinutes = 1;
 
     /// <summary>
-    /// The hourly refresh policies that are not <see cref="HeaviestHourlyRefreshView"/> — the ones that share
-    /// the light band, counted from <see cref="HourlyRefreshPhaseOrder"/> rather than written down so
-    /// registering an aggregate moves the grid instead of leaving a stale count beside it.
+    /// The hourly refresh policies that are neither <see cref="HeaviestHourlyRefreshView"/> nor on the hour's
+    /// tail (<see cref="HierarchicalHourlyRefreshCount"/>, #8053) — the ones that share the light band, counted
+    /// from <see cref="HourlyRefreshPhaseOrder"/> rather than written down so registering an aggregate moves the
+    /// grid instead of leaving a stale count beside it.
     /// </summary>
-    public static int LightHourlyRefreshCount => HourlyRefreshPhaseOrder.Count - 1;
+    public static int LightHourlyRefreshCount => HourlyRefreshPhaseOrder.Count - 1 - HierarchicalHourlyRefreshCount;
 
     /// <summary>
     /// How many minutes of the hour the light band SPANS — the distance from the first light refresh's
@@ -4010,13 +4014,15 @@ WITH NO DATA";
         LightBandSpanMinutes + CompressionPhaseGuardMinutes;
 
     /// <summary>
-    /// The heaviest hourly refresh's window: what the hour has LEFT once the light band, its guard and the
-    /// compression band are each at the width their own measurement asks for.
+    /// The heaviest hourly refresh's window: what the hour has LEFT once the light band, its guard, the
+    /// compression band and the tail are each at the width their own measurement asks for.
     ///
     /// <para><b>A remainder rather than a choice, and that is what settles where the hour's spare minutes
     /// go.</b> The light band's width follows from how many policies there are, the guard's from
-    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/>, and the compression band's from the catalog
-    /// (<see cref="CompressionPhaseBandMinutes"/>). None of those has anything to gain from an extra minute —
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/>, the compression band's from the catalog
+    /// (<see cref="CompressionPhaseBandMinutes"/>), and the tail's from the definitions
+    /// (<see cref="HierarchicalHourlyRefreshCount"/>, #8053; a tail member is a minute the light band gave up,
+    /// so the tail does not move this window). None of those has anything to gain from an extra minute —
     /// a guard that already clears the light ceiling clears it no better at seven minutes than at four, and
     /// the compression band spreads the same hypertables at the same
     /// <see cref="CompressionPhaseMaxPerMinute"/> anywhere from 24 minutes wide to 27. This window does gain:
@@ -4033,7 +4039,7 @@ WITH NO DATA";
     /// a longer cadence for this one aggregate; it is not a wider window, because there is none to take.</para>
     /// </summary>
     public static int HeaviestRefreshWindowMinutes =>
-        MinutesInHourlyCadence - HeaviestRefreshStartMinute - CompressionPhaseBandMinutes;
+        MinutesInHourlyCadence - HeaviestRefreshStartMinute - CompressionPhaseBandMinutes - HierarchicalHourlyRefreshCount;
 
     /// <summary>
     /// One refresh slot as a percent of the hourly cadence — the value #2136's Store Job Over Cadence warning
@@ -4241,6 +4247,111 @@ WITH NO DATA";
             .ToHashSet(StringComparer.Ordinal);
 
     /// <summary>
+    /// #8053: the hourly aggregates whose source is ANOTHER hourly aggregate on this grid — recovered from each
+    /// shipped CREATE's <c>FROM collect.&lt;relation&gt;</c> (<see cref="RefreshSourceRelationFor"/>), the way
+    /// the cost class is recovered from its GROUP BY, so a hierarchical hourly registered tomorrow is placed by
+    /// the same rule without a second list to keep. Today that is <see cref="QueryStoreStatsCorrectedHourlyView"/>,
+    /// built from <see cref="HeaviestHourlyRefreshView"/>.
+    ///
+    /// <para><b>Why these are answered by identity rather than given a light-band position.</b> Both relations
+    /// of such a pair are <c>materialized_only</c>, so the child sees only what its parent has materialized. A
+    /// child whose minute comes BEFORE its parent's materializes the newest complete bucket empty; the parent's
+    /// refresh then invalidates that bucket in the child, and the child's next run, an hour later, materializes
+    /// it again with data. Every bucket reaches the child an hour late and costs it two passes. The grid's
+    /// minutes are fixed (every hourly policy carries an <c>initial_start</c>), so the order inside the hour is
+    /// the product's to choose, and a hierarchical child has to come after its parent's slot AND its parent's
+    /// window — after the heaviest refresh's whole window when the parent is the heaviest, as it is today.</para>
+    ///
+    /// <para><b>Where they go: the TAIL of the hour, after the compression band</b>
+    /// (<see cref="HierarchicalRefreshTailStartMinute"/>). A slot anywhere else past the parent costs the hour
+    /// its own minute PLUS a <see cref="CompressionPhaseGuardMinutes"/> guard, which the hour can only pay out of
+    /// <see cref="HeaviestRefreshWindowMinutes"/>. A tail slot's one-sided guard wraps round onto the first
+    /// minutes of the next hour's light band, which the compression grid already excludes, so a tail member
+    /// costs exactly its one minute, and that minute comes out of the light band the member left rather than out
+    /// of the heaviest refresh's window. The one thing the wrap-around asks of the light band is that its first
+    /// positions hold no unbounded-cardinality member (<see cref="UnboundedLightBandOffset"/>).</para>
+    ///
+    /// <para>Declared after <see cref="HourlyRefreshDefinitions"/> and before <see cref="CompressionPhaseMinutes"/>,
+    /// for the same static-initializer reason as <see cref="UnboundedCardinalityRefreshViews"/>.</para>
+    /// </summary>
+    private static readonly HashSet<string> HierarchicalHourlyRefreshViews =
+        HourlyRefreshDefinitions
+            .Where(definition => HourlyRefreshDefinitions.Any(parent =>
+                string.Equals(parent.View, RefreshSourceRelationFor(definition.CreateSql), StringComparison.Ordinal)))
+            .Select(definition => definition.View)
+            .ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The relation a continuous aggregate's CREATE selects <c>FROM</c>, as the bare name inside the
+    /// <c>collect</c> schema, or null when the text names none. Reads the FIRST <c>FROM collect.</c>, which in
+    /// every shipped definition is the aggregate's own source; a definition that joined a second relation
+    /// would still name its source first.
+    /// </summary>
+    internal static string? RefreshSourceRelationFor(string createSql)
+    {
+        if (createSql is null)
+        {
+            throw new ArgumentNullException(nameof(createSql));
+        }
+
+        const string marker = "FROM collect.";
+        var start = createSql.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (start < 0)
+        {
+            return null;
+        }
+
+        start += marker.Length;
+        var end = start;
+        while (end < createSql.Length && (char.IsLetterOrDigit(createSql[end]) || createSql[end] == '_'))
+        {
+            end++;
+        }
+
+        return end > start ? createSql[start..end] : null;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="view"/> is an hourly aggregate built from another hourly aggregate on this grid
+    /// (#8053). Throws for a view that is not a registered hourly aggregate, for
+    /// <see cref="IsUnboundedCardinalityRefresh"/>'s reason.
+    /// </summary>
+    public static bool IsHierarchicalHourlyRefresh(string view)
+    {
+        if (!HourlyRefreshDefinitions.Any(definition =>
+                string.Equals(definition.View, view, StringComparison.Ordinal)))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(view),
+                view,
+                "not a registered hourly continuous aggregate — whether it is built from another hourly aggregate cannot be recovered from a CREATE that TimescaleSupport.HourlyRefreshDefinitions does not hold");
+        }
+
+        return HierarchicalHourlyRefreshViews.Contains(view);
+    }
+
+    /// <summary>How many hourly refreshes take the hour's tail (#8053) — the width of that band, counted from
+    /// the definitions rather than written down.</summary>
+    public static int HierarchicalHourlyRefreshCount => HierarchicalHourlyRefreshViews.Count;
+
+    /// <summary>
+    /// The first minute of the hour's tail band (#8053): the hierarchical hourly refreshes take the last
+    /// <see cref="HierarchicalHourlyRefreshCount"/> minutes of the hour, one per minute in registry order, after
+    /// the compression band. 60 when there is none, which no view is then given.
+    /// </summary>
+    public static int HierarchicalRefreshTailStartMinute => MinutesInHourlyCadence - HierarchicalHourlyRefreshCount;
+
+    /// <summary>
+    /// The light-band position the FIRST unbounded-cardinality member takes (#8053). Zero while no refresh is on
+    /// the tail. With a tail, the last tail member starts one minute before the hour and its guard reaches
+    /// <see cref="UnboundedLightRefreshSeparationIndexes"/> minus one positions into the band, so the unbounded
+    /// members start past that and the band's first positions go to deployment-bounded members — the same
+    /// separation the band keeps between two unbounded members, applied across the hour boundary.
+    /// </summary>
+    public static int UnboundedLightBandOffset =>
+        HierarchicalHourlyRefreshCount == 0 ? 0 : UnboundedLightRefreshSeparationIndexes - 1;
+
+    /// <summary>
     /// THE RULE, over one CREATE — whether its group key reaches a
     /// <see cref="PerStatementGroupingColumns"/> column.
     ///
@@ -4337,10 +4448,12 @@ WITH NO DATA";
     /// <summary>
     /// Which position in the light band the <paramref name="ordinal"/>-th unbounded-cardinality light
     /// refresh takes, counting unbounded members only and from zero — exactly the shape a bounded member's
-    /// own position has, with the separation in place of the step.
+    /// own position has, with the separation in place of the step, starting
+    /// <see cref="UnboundedLightBandOffset"/> positions in so the first of them is a separation past the
+    /// hour's tail (#8053).
     /// </summary>
     public static int LightBandIndexForUnboundedRefresh(int ordinal) =>
-        ordinal * UnboundedLightRefreshSeparationIndexes;
+        UnboundedLightBandOffset + (ordinal * UnboundedLightRefreshSeparationIndexes);
 
     /// <summary>
     /// Whether the light band still holds <paramref name="count"/> unbounded-cardinality members once each
@@ -4398,8 +4511,9 @@ WITH NO DATA";
     ///
     /// <para><b>INJECTIVE, and that is the whole of the contention guarantee.</b>
     /// <see cref="HeaviestHourlyRefreshView"/> is answered by IDENTITY, not by position, and gets
-    /// <see cref="HeaviestRefreshStartMinute"/> alone. Every other view gets its own minute in the light
-    /// band. There is no modulus anywhere, so two policies cannot share a residue — the map has no
+    /// <see cref="HeaviestRefreshStartMinute"/> alone; so is every hourly built from another hourly, which
+    /// gets its own minute on the hour's tail (<see cref="HierarchicalRefreshTailStartMinute"/>, #8053). Every
+    /// other view gets its own minute in the light band. There is no modulus anywhere, so two policies cannot share a residue — the map has no
     /// collisions to have, at any list length the band can hold, in any order, with anything inserted
     /// anywhere. That is what makes contention structurally impossible instead of a property of where a view
     /// happens to sit in a list, which is the state #3174 replaced.</para>
@@ -4485,11 +4599,16 @@ WITH NO DATA";
             throw new ArgumentNullException(nameof(order));
         }
 
+        /* #8053: a hierarchical hourly (built from another hourly on the grid) is answered by identity like the
+           heaviest refresh, with a minute on the hour's tail, so it is neither a light member nor one of the
+           unbounded members the band separates. */
         var lightCount = order.Count(candidate =>
-            !string.Equals(candidate, HeaviestHourlyRefreshView, StringComparison.Ordinal));
+            !string.Equals(candidate, HeaviestHourlyRefreshView, StringComparison.Ordinal)
+            && !HierarchicalHourlyRefreshViews.Contains(candidate));
 
         var unboundedCount = order.Count(candidate =>
             !string.Equals(candidate, HeaviestHourlyRefreshView, StringComparison.Ordinal)
+            && !HierarchicalHourlyRefreshViews.Contains(candidate)
             && UnboundedCardinalityRefreshViews.Contains(candidate));
 
         /* When the band cannot hold them separated, every light member takes a consecutive position —
@@ -4513,12 +4632,15 @@ WITH NO DATA";
 
         var unboundedOrdinal = 0;
         var boundedOrdinal = 0;
+        var hierarchicalOrdinal = 0;
 
         foreach (var candidate in order)
         {
             var heaviest = string.Equals(candidate, HeaviestHourlyRefreshView, StringComparison.Ordinal);
+            var hierarchical = !heaviest && HierarchicalHourlyRefreshViews.Contains(candidate);
             var unbounded = separates
                 && !heaviest
+                && !hierarchical
                 && UnboundedCardinalityRefreshViews.Contains(candidate);
 
             if (string.Equals(candidate, view, StringComparison.Ordinal))
@@ -4528,6 +4650,11 @@ WITH NO DATA";
                     return HeaviestRefreshStartMinute;
                 }
 
+                if (hierarchical)
+                {
+                    return HierarchicalRefreshTailStartMinute + hierarchicalOrdinal;
+                }
+
                 var index = unbounded
                     ? unboundedIndexes[unboundedOrdinal]
                     : boundedIndexes[boundedOrdinal];
@@ -4535,7 +4662,11 @@ WITH NO DATA";
                 return index * LightRefreshStepMinutes;
             }
 
-            if (unbounded)
+            if (hierarchical)
+            {
+                hierarchicalOrdinal++;
+            }
+            else if (unbounded)
             {
                 unboundedOrdinal++;
             }
@@ -5588,7 +5719,8 @@ WITH NO DATA";
     public static int GuardAndWindowSharedMinutes =>
         MinutesInHourlyCadence
         - LightBandSpanMinutes
-        - CompressionPhaseBandMinutes;
+        - CompressionPhaseBandMinutes
+        - HierarchicalHourlyRefreshCount;
 
     /// <summary>
     /// The watch line a guard of <paramref name="guardMinutes"/> would leave — the same chain
@@ -5632,7 +5764,7 @@ WITH NO DATA";
     /// </summary>
     public static int RefreshSlotWarningSecondsForLightBandAndGuard(
         int lightBandSpanMinutes, int guardMinutes) =>
-        (MinutesInHourlyCadence - lightBandSpanMinutes - CompressionPhaseBandMinutes - guardMinutes) * 60
+        (MinutesInHourlyCadence - lightBandSpanMinutes - CompressionPhaseBandMinutes - HierarchicalHourlyRefreshCount - guardMinutes) * 60
         * WindowWatchLeadNumerator / WindowWatchLeadDenominator;
 
     /// <summary>
