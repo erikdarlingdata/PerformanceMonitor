@@ -187,8 +187,10 @@ export const tab = {
             : "No lock-wait rows recorded. Index and object stats are collected daily.",
           noteKey: "optimized_locking_note",
           /* `note` is the read's truncation sentence ("TRUNCATED: more than N indexes ...") when the 200-row cap
-             cuts the list, and a "Complete: ..." sentence otherwise, so a capped page never looks like the whole. */
-          moreNoteKeys: ["note", "separately_monitored_note"],
+             cuts the list, and a "Complete: ..." sentence otherwise. The page draws it only when the list was cut, so a capped
+             page never looks like the whole and a complete one carries no strip (#7690); the MCP reply keeps both. */
+          moreNoteKeys: ["separately_monitored_note"],
+          noteFrom: (data) => (data && data.truncated === true ? data.note : null),
           span: 2,
           onRow: (row, tr) => {
             if (!row || !row.table_name) return;

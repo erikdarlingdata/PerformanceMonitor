@@ -61,7 +61,7 @@
         "Category": "Storage",
         "Severity": "Low",
         "Confidence": "High",
-        "Finding": "1 uncompressed object(s) >= 1GB (2.0GB total)",
+        "Finding": "1 uncompressed object over 1 GB (2.0 GB total)",
         "Detail": "Large uncompressed tables/indexes: SalesA.dbo.T1 (2.0GB). Consider PAGE or ROW compression to reduce storage and improve I/O.",
         "EstMonthlySavings": null
       },
@@ -151,7 +151,7 @@
         "Category": "Storage",
         "Severity": "Low",
         "Confidence": "High",
-        "Finding": "1 uncompressed object(s) >= 1GB (2.0GB total)",
+        "Finding": "1 uncompressed object over 1 GB (2.0 GB total)",
         "Detail": "Large uncompressed tables/indexes: SalesA.dbo.T1 (2.0GB). Consider PAGE or ROW compression to reduce storage and improve I/O.",
         "EstMonthlySavings": null
       },

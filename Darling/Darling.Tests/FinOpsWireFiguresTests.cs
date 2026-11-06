@@ -89,6 +89,8 @@ public sealed class FinOpsWireFiguresTests
     [InlineData("  Windows Server 2022\r\n", "Windows Server 2022")]
     [InlineData("\n", "")]
     [InlineData(null, "")]
+    // #7699 item 3: a SQL Server 2016 row stored with the end of @@VERSION is cut to the product name.
+    [InlineData("Windows Server 2016 Datacenter 10.0 <X64> (Build 14393: ) (Hypervisor)\n", "Windows Server 2016 Datacenter")]
     public void HostOsVersion_ComesBackTrimmed(string? raw, string expected)
     {
         Assert.Equal(expected, DarlingFinOpsInventoryReader.CleanHostOsVersion(raw));
