@@ -57,6 +57,13 @@ public partial class MainWindow : Window
     private ViewerDataService? _dataService;
     private DispatcherTimer? _refreshTimer;
     private bool _storeUnavailable;
+
+    /// <summary>True while the message is up because the server-list reload failed: the one failure the refresh tick
+    /// retries, since a later successful list read proves the store is back.</summary>
+    private bool _serverListReadFailed;
+
+    /// <summary>Single-flight guard for the tick's retry of the server-list read.</summary>
+    private bool _storeRetryInFlight;
     private DispatcherTimer? _overviewTimer;
     private bool _refreshInFlight;
     private bool _refreshRequested;
@@ -583,6 +590,7 @@ public partial class MainWindow : Window
 
         _refreshTimer = new DispatcherTimer { Interval = _refreshInterval };
         _refreshTimer.Tick += OnRefreshTimerTick;
+        _refreshTimer.Tick += OnStoreRetryTick;
         _refreshTimer.Start();
 
         /* The Overview keeps its own timer so it refreshes when it is the visible tab and the aggregate timer
@@ -687,6 +695,21 @@ public partial class MainWindow : Window
         }
 
         await RefreshVisibleAsync();
+    }
+
+    /// <summary>
+    /// The refresh timer's second handler: while the full-window message is up because the server-list reload failed,
+    /// retry that read, so the shell comes back when the store does instead of staying locked until a restart. It is
+    /// its own handler because <see cref="OnRefreshTimerTick"/> makes no store read while the message is up (#4648),
+    /// and that guard has to stay the tick's first statement. The server-list read is the one read that can take the
+    /// message down; <see cref="StoreUnavailableShell.RetryServerListOnTick"/> is the rule for when it is retried.
+    /// </summary>
+    private void OnStoreRetryTick(object? sender, EventArgs e)
+    {
+        if (StoreUnavailableShell.RetryServerListOnTick(_storeUnavailable, _serverListReadFailed, _storeRetryInFlight))
+        {
+            _ = RetryServerListAsync();
+        }
     }
 
     private async void OnOverviewTimerTick(object? sender, EventArgs e)
@@ -1156,6 +1179,13 @@ public partial class MainWindow : Window
                once. Stamp the viewer's favorite pins (matched by server id) and sort favorites-first. */
             var servers = ApplyFavoritesAndSort(await _dataService.GetManagedServersAsync());
 
+            /* The read succeeded, so a message put up by an earlier failed reload no longer describes the store. */
+            _serverListReadFailed = false;
+            if (_storeUnavailable)
+            {
+                ClearStoreUnavailable();
+            }
+
             /* Read the servers to keep AFTER the await: a sidebar or picker change made while the list loads is
                the user's latest choice, and the reload keeps it. */
             var previousSelection = (ServerList.SelectedItem as FleetServerRow)?.Server.ServerId;
@@ -1229,6 +1259,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            _serverListReadFailed = true;
             ShowConnectionFailure($"Cannot read the Darling store: {ex.Message}");
         }
     }
@@ -2504,6 +2535,35 @@ public partial class MainWindow : Window
         _storeUnavailable = true;
         ApplyStoreUnavailableShell();
         StatusText.Text = "";
+    }
+
+    /// <summary>Takes the full-window message down and re-enables the store-dependent shell, after a server-list read
+    /// that succeeded while the message was up.</summary>
+    private void ClearStoreUnavailable()
+    {
+        _storeUnavailable = false;
+        ApplyStoreUnavailableShell();
+    }
+
+    /// <summary>The retry of the server-list read while the message is up for that read's failure. Single-flight: the
+    /// guard is tested and claimed here, ahead of the await, so a tick that fires while a retry is still running drops.
+    /// A failed retry re-shows the message and the next tick tries again.</summary>
+    private async Task RetryServerListAsync()
+    {
+        if (_storeRetryInFlight)
+        {
+            return;
+        }
+
+        _storeRetryInFlight = true;
+        try
+        {
+            await LoadServersAsync(preserveSelection: true);
+        }
+        finally
+        {
+            _storeRetryInFlight = false;
+        }
     }
 
     /// <summary>

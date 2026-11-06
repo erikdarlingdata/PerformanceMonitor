@@ -61,7 +61,10 @@ public static class OverviewCardView
     /// fleet, so the panel and the grid under it agree. With no search it is <see cref="FleetRollup.Build"/> over every
     /// card and the enabled fleet size. With one, it reduces only the matching cards and
     /// <see cref="FleetRollup.FilteredOfTotal"/> carries the enabled fleet size, so the subtitle reads "Monitoring 2 of
-    /// 9 enabled servers". The needs-attention toggle does not narrow it: the panel is the shortlist that toggle opens.
+    /// 9 enabled servers". The blocking and deadlock totals follow the search too: the fleet-wide <paramref name="totals"/>
+    /// read counts every server, so a narrowed panel sums the matching cards' own counts instead, and the totals
+    /// describe the same servers as the band counts beside them. The needs-attention toggle does not narrow it: the
+    /// panel is the shortlist that toggle opens.
     /// </summary>
     public static FleetRollup BuildRollup(
         IReadOnlyList<ServerSummaryItem> cards, FleetTotals totals, int registeredCount, string? search)
@@ -74,7 +77,14 @@ public static class OverviewCardView
         }
 
         var matched = cards.Where(c => ServerOverviewFilter.Matches(term, SearchFields(c))).ToList();
-        var rollup = FleetRollup.Build(matched, totals, totalServerCount: matched.Count);
+        /* Each card adds what the fleet-wide read adds for it: BlockingCountForBand is a SQL Server card's blocked
+           waits and a PostgreSQL card's captures that saw blocking, and null (no capture in the window) adds nothing. */
+        var matchedTotals = new FleetTotals
+        {
+            TotalBlockingEvents = matched.Sum(c => (long)(c.BlockingCountForBand ?? 0)),
+            TotalDeadlocks = matched.Sum(c => (long)c.DeadlockCount),
+        };
+        var rollup = FleetRollup.Build(matched, matchedTotals, totalServerCount: matched.Count);
         rollup.FilteredOfTotal = registeredCount;
         return rollup;
     }

@@ -145,4 +145,55 @@ public sealed class ViewerOverviewSearchTests
         Assert.Contains("ServerOverviewFilter.NoMatchText", lite, StringComparison.Ordinal);
         Assert.Contains("OverviewCardView.CountText(", CodeBehind, StringComparison.Ordinal);
     }
+
+    /// <summary>A search narrows every number on the roll-up panel from the same cards: the blocking and deadlock
+    /// totals come from the servers the search left, not from the fleet-wide read, so the totals and the band counts
+    /// under them describe the same servers. Each card adds the unit the fleet-wide read adds for it: a SQL Server
+    /// card its blocked waits, a PostgreSQL card its captures that saw blocking, and a PostgreSQL card with no capture
+    /// in the window nothing. Without a search the fleet-wide read still stands.</summary>
+    [Fact]
+    public void BuildRollup_WithASearch_TotalsOnlyTheMatchingCards()
+    {
+        var alpha = Card("alpha", 1, true, "Production");
+        alpha.BlockingCount = 5;
+        alpha.DeadlockCount = 2;
+        var beta = Card("beta", 2, true, "Dev");
+        beta.BlockingCount = 7;
+        beta.DeadlockCount = 3;
+        /* A PostgreSQL card's blocking is its captures that saw blocking; BlockingCount stays 0 on it. */
+        var gamma = Card("gamma", 3, true, "Production");
+        gamma.IsPostgres = true;
+        gamma.PgBlockingCapturesTotal = 60;
+        gamma.PgBlockingCapturesWithBlocking = 4;
+        gamma.DeadlockCount = 1;
+        /* A PostgreSQL card with no capture in the window has no blocking reading, and adds nothing. */
+        var delta = Card("delta", 4, true, "Dev");
+        delta.IsPostgres = true;
+        var cards = new List<ServerSummaryItem> { alpha, beta, gamma, delta };
+        var fleetWide = new FleetTotals { TotalBlockingEvents = 16, TotalDeadlocks = 6 };
+
+        var whole = OverviewCardView.BuildRollup(cards, fleetWide, registeredCount: 4, search: null);
+        Assert.Equal(16, whole.TotalBlockingEvents);
+        Assert.Equal(6, whole.TotalDeadlocks);
+
+        var narrowed = OverviewCardView.BuildRollup(cards, fleetWide, registeredCount: 4, search: "alpha");
+        Assert.Equal(1, narrowed.TotalServers);
+        Assert.Equal(5, narrowed.TotalBlockingEvents);
+        Assert.Equal(2, narrowed.TotalDeadlocks);
+
+        /* The Production tag spans a SQL Server card and a PostgreSQL card: 5 waits plus 4 captures. */
+        var production = OverviewCardView.BuildRollup(cards, fleetWide, registeredCount: 4, search: "production");
+        Assert.Equal(2, production.TotalServers);
+        Assert.Equal(9, production.TotalBlockingEvents);
+        Assert.Equal(3, production.TotalDeadlocks);
+
+        var dev = OverviewCardView.BuildRollup(cards, fleetWide, registeredCount: 4, search: "dev");
+        Assert.Equal(2, dev.TotalServers);
+        Assert.Equal(7, dev.TotalBlockingEvents);
+        Assert.Equal(3, dev.TotalDeadlocks);
+
+        var none = OverviewCardView.BuildRollup(cards, fleetWide, registeredCount: 4, search: "nothing-matches");
+        Assert.Equal(0, none.TotalBlockingEvents);
+        Assert.Equal(0, none.TotalDeadlocks);
+    }
 }

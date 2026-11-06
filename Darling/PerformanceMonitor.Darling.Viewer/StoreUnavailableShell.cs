@@ -33,4 +33,10 @@ internal static class StoreUnavailableShell
     /// <summary>The message covers the content column unless the Plan Viewer tab is the one showing.</summary>
     internal static bool OverlayVisible(bool storeUnavailable, bool planViewerShowing) =>
         storeUnavailable && !planViewerShowing;
+
+    /// <summary>Whether a refresh tick retries the server-list read while the message shows: only when that read is what
+    /// failed (a connect-path gate or a configuration failure is not cleared by a later list read), and one retry at a
+    /// time. A retry that succeeds clears the message; one that fails leaves it for the next tick.</summary>
+    internal static bool RetryServerListOnTick(bool storeUnavailable, bool serverListReadFailed, bool retryInFlight) =>
+        storeUnavailable && serverListReadFailed && !retryInFlight;
 }

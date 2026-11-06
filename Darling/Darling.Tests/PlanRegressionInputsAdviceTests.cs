@@ -99,7 +99,7 @@ public sealed class PlanRegressionInputsAdviceTests
             ["lead_regression_factor"] = 21.7,
         }));
 
-        Assert.Contains("(455 us vs 21 us of CPU per execution)", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("(455 µs vs 21 µs of CPU per execution)", advice.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("0 ms", advice.Investigation, StringComparison.Ordinal);
     }
 
