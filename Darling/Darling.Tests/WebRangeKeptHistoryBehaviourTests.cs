@@ -351,4 +351,15 @@ public sealed class WebRangeKeptHistoryBehaviourTests
         Assert.DoesNotMatch(new Regex(@"\breadTool\("), editor);
         Assert.Equal(3, Regex.Matches(editor, Regex.Escape("await readToolWithinKeptHistory(p.read, cleanParams(p.params));")).Count);
     }
+
+    /// <summary>#7945: a time_bucket stamp is the bucket's start, so the bucket that starts at the range's end lies outside the range and is
+    /// cut; a sample stamped at the end is inside it and kept.</summary>
+    [Fact]
+    public void TheCustomRange_CutsTheBucketThatStartsAtItsEnd_AndKeepsTheSampleAtItsEnd()
+    {
+        if (!TryRun("customBucketEdge", out var r)) return;
+        var found = r.GetProperty("found");
+        Assert.Equal(2, found.GetProperty("bucketRows").GetInt32());
+        Assert.Equal(3, found.GetProperty("sampleRows").GetInt32());
+    }
 }

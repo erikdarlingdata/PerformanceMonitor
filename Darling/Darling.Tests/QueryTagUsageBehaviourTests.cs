@@ -265,4 +265,14 @@ public sealed class QueryTagUsageBehaviourTests
         Assert.Contains("strip error", StripClasses(busy.GetProperty("stripsAfter")));
         Assert.False(busy.GetProperty("planCardAfter").GetBoolean());
     }
+
+    /// <summary>#7945: a small figure such as 0.04 executions keeps two significant digits instead of reading 0.0; a figure from 0.1 up keeps one
+    /// decimal, and a whole number prints whole.</summary>
+    [Fact]
+    public void ASmallFigure_KeepsTwoSignificantDigits_InsteadOfReadingZero()
+    {
+        var rows = Rows(Run().GetProperty("smallFigureRows"));
+        var tag = Assert.Single(rows, r => r[0] == "T");
+        Assert.Equal(new[] { "T", "0.04", "1,234.6", "7" }, tag);
+    }
 }

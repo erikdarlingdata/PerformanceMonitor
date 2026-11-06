@@ -224,4 +224,14 @@ public sealed class StatsHistoryBehaviourTests
         Assert.Contains("The earlier part has aged out of this tier, which keeps 90 days of data.", Note("oldQuery"));
         Assert.EndsWith("The earlier part has aged out of this tier.", Note("oldQueryNoDays"));
     }
+
+    /// <summary>#7945: a read that fails with no sentence of its own (a 500 with an empty body) says which path failed, through the shared
+    /// read path every page read takes, so the strip names the read and not just the status.</summary>
+    [Fact]
+    public void AFailedReadWithNoMessage_NamesThePathItAskedFor()
+    {
+        var r = Run("failedReadNamesPath");
+        var error = Assert.Single(r.GetProperty("error").EnumerateArray()).GetString()!;
+        Assert.StartsWith("The Darling service answered HTTP 500 for /api/read/get_procedure_duration_trend with no message.", error);
+    }
 }

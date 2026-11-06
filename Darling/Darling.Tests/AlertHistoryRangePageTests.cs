@@ -297,4 +297,14 @@ public sealed class AlertHistoryRangePageTests
         Assert.Contains(links, l => l.StartsWith("Mute this alert #/mute-rules?server_id=1&server_name=srv-a&metric_name=", StringComparison.Ordinal));
         Assert.Contains(links, l => l.StartsWith("Mute similar #/mute-rules?metric_name=", StringComparison.Ordinal));
     }
+
+    /// <summary>#7945: the line under the filters names the picked server the way the Server picker does, by its display name, not by the raw value.</summary>
+    [Fact]
+    public void TheFilterLine_NamesThePickedServer_ByThePickersLabel()
+    {
+        var r = Run("serverLabel");
+        Assert.Equal("Server A", r.GetProperty("optionLabel").GetString());
+        var meta = Assert.Single(r.GetProperty("meta").EnumerateArray()).GetString()!;
+        Assert.StartsWith("Server A · ", meta);
+    }
 }

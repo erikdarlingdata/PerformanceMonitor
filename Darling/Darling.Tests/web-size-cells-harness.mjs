@@ -40,6 +40,7 @@ const waits = await imp("pages/server-tabs/pg-waits.js");
 const mem = await imp("pages/server-tabs/sql-memory.js");
 const { READ_FIELDS } = await imp("read-fields.js");
 const dbSizes = await imp("pages/finops/database-sizes.js");
+const pg = await imp("pages/server-tabs/pg-activity.js");
 const versionStore = await imp("pages/finops/version-store.js");
 const utilization = await imp("pages/finops/utilization.js");
 const { DASHBOARD_TEMPLATES } = await imp("view-templates.js");
@@ -125,6 +126,11 @@ out.r2 = {
   finopsFree: cells(dbSizes.COLUMNS, [{ free_space_mb: 0.25 }], "Free"),
   finopsVolumeFree: cells(dbSizes.COLUMNS, [{ volume_free_mb: 0.5 }], "Volume free"),
   versionStoreData: cells(versionStore.COLUMNS, [{ database_data_size_mb: 4.5 }], "Database data size"),
+  /* #7945: the volume's total reads as its free space beside it does; a PostgreSQL byte column reads in bytes, not as a bare count. */
+  finopsVolumeTotal: cells(dbSizes.COLUMNS, [{ volume_total_mb: 500 }, { volume_total_mb: 80000 }], "Volume total"),
+  pgTempBytes: cells(pg.PG_DATABASE_COLUMNS, [{ database: "d", temp_bytes: 2 * 1024 * 1024, avg_temp_file_bytes: 1536 }], "Temp Bytes"),
+  pgAvgTempFile: cells(pg.PG_DATABASE_COLUMNS, [{ database: "d", temp_bytes: 2 * 1024 * 1024, avg_temp_file_bytes: 1536 }], "Avg Temp File"),
+  pgTotalTempBytesStat: util.applyFormat(pg.PG_DATABASE_STATS.find((s) => s.key === "total_temp_bytes").format, 1536),
 };
 /* The Available tiles of the two memory stat sets (the Utilization page and the Memory pressure dashboard template), each drawn through the stat viz.
    engine_edition 5 is an Azure SQL Database, where the same field is captioned "Available under limit". */

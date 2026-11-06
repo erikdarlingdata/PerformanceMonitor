@@ -60,6 +60,31 @@ public sealed class HostCpuUnknownTests
         Assert.Contains("SQL Server on Linux before 2025 CU1", root.GetProperty("host_cpu_note").GetString());
     }
 
+    /// <summary>#7945: the shown CPU parts add up to the shown total. Rounded on their own, 10.4 and 20.4 read 10 and 20 beside a total of 31
+    /// (30.8 rounded), and 10.6 and 20.6 read 11 and 21 beside 31. The total is the sum of the rounded parts, as the web's overview strip
+    /// computes it, so the three numbers a reader sees agree.</summary>
+    [Fact]
+    public void CpuUtilizationReply_ShownPartsAddUpToTheShownTotal()
+    {
+        var start = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var points = new List<CpuBucketPoint>
+        {
+            new(start, 10.4, 20.4, 30.8, 69.2, 12, 40, 5),
+            new(start.AddHours(1), 10.6, 20.6, 31.2, 68.8, 12, 40, 5),
+        };
+
+        using var doc = JsonDocument.Parse(TrendPayloads.CpuUtilization("srv", 2, points, 60, false, 500));
+        var samples = doc.RootElement.GetProperty("samples");
+
+        Assert.Equal(10, samples[0].GetProperty("sql_server_cpu").GetInt32());
+        Assert.Equal(20, samples[0].GetProperty("other_process_cpu").GetInt32());
+        Assert.Equal(30, samples[0].GetProperty("total_cpu").GetInt32());
+        foreach (var sample in samples.EnumerateArray())
+        {
+            Assert.Equal(sample.GetProperty("sql_server_cpu").GetInt32() + sample.GetProperty("other_process_cpu").GetInt32(), sample.GetProperty("total_cpu").GetInt32());
+        }
+    }
+
     [Fact]
     public void CpuUtilizationReply_WhenEveryBucketHasAHostFigure_HasNoHostNote()
     {

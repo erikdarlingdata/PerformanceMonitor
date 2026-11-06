@@ -677,6 +677,17 @@ Object.assign(scenarios, {
     found = { latchRows: lat.data.latches.length, seriesRows: cpu.data.samples.length };
     return [];
   },
+  // #7945: a time_bucket stamp is the bucket's start, so the bucket that starts at the range's end lies outside the range; a sample
+  // stamped at the end lies inside it.
+  customBucketEdge: async () => {
+    const stamps = [T0, new Date((Date.parse(T0) + Date.parse(T1)) / 2).toISOString(), T1];
+    answer = (url) => data(tool(url) === "get_wait_stats_trend" ? { buckets: stamps.map((s) => ({ time_bucket: s, v: 1 })) } : { samples: stamps.map((s) => ({ sample_time: s, v: 1 })) });
+    modules.util.setActiveRange({ server: "SRV1", hours: 4, startMs: Date.parse(T0), endMs: Date.parse(T1), asOf: T1 });
+    const buckets = await modules.util.readTool("get_wait_stats_trend", { server: "SRV1", hours: 4 });
+    const samples = await modules.util.readTool("get_cpu_utilization", { server: "SRV1", hours: 4 });
+    found = { bucketRows: buckets.data.buckets.length, sampleRows: samples.data.samples.length };
+    return [];
+  },
   // The label says where totals begin when the span is not whole hours.
   customRoundedLabel: async () => {
     answer = (url) => (url.pathname === "/api/fleet" ? data({ cards: [] }) : data({ samples: cpuRows }));
