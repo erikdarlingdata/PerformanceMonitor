@@ -49,7 +49,7 @@ public sealed class WaitStatsAbandonedWriteBaselineTests
         using var reader = table.CreateDataReader();
         var rows = await collector.ReadAsync(reader, context, CancellationToken.None);
 
-        var writer = new RecordingWriter();
+        var writer = new RecordingRowWriter();
         collector.WritePayload(rows.Single(), writer, context);
         return (rows, (long)writer.Values[4]!, (int)writer.Values[7]!);
     }
@@ -71,27 +71,5 @@ public sealed class WaitStatsAbandonedWriteBaselineTests
         var next = await RunAsync(deltas, T0.AddMinutes(2), 160);
         Assert.Equal(60, next.Delta);
         Assert.Equal(120, next.Interval);
-    }
-
-    private sealed class RecordingWriter : ICollectorRowWriter
-    {
-        public List<object?> Values { get; } = new();
-        private ICollectorRowWriter Add(object? v) { Values.Add(v); return this; }
-        public ICollectorRowWriter Value(string? value) => Add(value);
-        public ICollectorRowWriter Value(long value) => Add(value);
-        public ICollectorRowWriter Value(long? value) => Add(value);
-        public ICollectorRowWriter Value(int value) => Add(value);
-        public ICollectorRowWriter Value(int? value) => Add(value);
-        public ICollectorRowWriter Value(short value) => Add(value);
-        public ICollectorRowWriter Value(short? value) => Add(value);
-        public ICollectorRowWriter Value(double value) => Add(value);
-        public ICollectorRowWriter Value(double? value) => Add(value);
-        public ICollectorRowWriter Value(decimal value) => Add(value);
-        public ICollectorRowWriter Value(decimal? value) => Add(value);
-        public ICollectorRowWriter Value(bool value) => Add(value);
-        public ICollectorRowWriter Value(bool? value) => Add(value);
-        public ICollectorRowWriter Value(DateTime value) => Add(value);
-        public ICollectorRowWriter Value(DateTime? value) => Add(value);
-        public ICollectorRowWriter NullValue() => Add(null);
     }
 }
