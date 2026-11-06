@@ -150,11 +150,34 @@ internal static class TrendBuckets
     /// CPU/ACU pair (each with its own peak), the capacity trio and the six V136 host-memory columns.</summary>
     public const int PgCpuMaxPoints = 500;
 
+    /// <summary>Lite's <c>get_query_trend</c> (#7907): about 330 bytes a point, sixteen fields of one query's summed
+    /// deltas, weighted averages, DOP pair and plan facts.</summary>
+    public const int QueryTrendMaxPoints = 750;
+
     /// <summary>
     /// The fixed origin every bucketing read aligns to, as a SQL literal both dialects accept (PostgreSQL
     /// <c>date_bin</c>, DuckDB <c>time_bucket</c>). A midnight, so every ladder width lands on round clock times.
     /// </summary>
     public const string OriginSql = "TIMESTAMP '2000-01-01 00:00:00'";
+
+    /// <summary><see cref="OriginSql"/> as a value, for a read that buckets rows it has already fetched.</summary>
+    public static readonly DateTime Origin = new(2000, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
+
+    /// <summary>
+    /// The bucket <paramref name="at"/> falls in, as the SQL statements compute it: <c>time_bucket</c> /
+    /// <c>date_bin</c> of a <paramref name="bucketMinutes"/>-wide grid from <see cref="Origin"/>, then clamped to
+    /// <paramref name="windowStart"/> so the first bucket is stamped where the window starts (#7907). Kinds are
+    /// ignored in the arithmetic; the result carries <paramref name="at"/>'s kind, or <paramref name="windowStart"/>'s
+    /// when the clamp applies.
+    /// </summary>
+    public static DateTime BucketStart(DateTime at, int bucketMinutes, DateTime windowStart)
+    {
+        var width = TimeSpan.FromMinutes(bucketMinutes).Ticks;
+        var sinceOrigin = at.Ticks - Origin.Ticks;
+        var floored = sinceOrigin >= 0 ? sinceOrigin / width : -((-sinceOrigin + width - 1) / width);
+        var start = DateTime.SpecifyKind(Origin.AddTicks(floored * width), at.Kind);
+        return start < windowStart ? windowStart : start;
+    }
 
     /// <summary>The <c>bucket_minutes</c> parameter's description, shared VERBATIM by every bucketed trend on both
     /// SKUs, and short on purpose: descriptions are paid for on every turn (#3898), and the payload's
