@@ -217,25 +217,33 @@ internal static class DarlingObjectStatsReader
     /// <paramref name="databases"/> is <see cref="DatabaseFilter.All"/> for every database; otherwise the rows are
     /// the unused-first, largest-first top <paramref name="top"/> of the CHOSEN databases only (the cap applies after
     /// the filter, in SQL). The snapshot anchor stays the server's newest capture, so a filtered and an unfiltered
-    /// call read the same capture.
+    /// call read the same capture. Resolves that capture itself; a caller that also reads the match count resolves it
+    /// once and passes it to <see cref="GetIndexUsageAsync(NpgsqlDataSource,int,int,DatabaseFilter,DateTime,CancellationToken)"/>
+    /// and <see cref="GetIndexUsageMatchCountAsync(NpgsqlDataSource,int,DatabaseFilter,DateTime,CancellationToken)"/>, so
+    /// the two reads cannot straddle a capture landing between them.
     /// </summary>
     public static async Task<List<IndexUsageRow>> GetIndexUsageAsync(
         NpgsqlDataSource postgres, int serverId, int top, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
-        var rows = new List<IndexUsageRow>();
         var snapshotTime = await GetLatestIndexObjectStatsSnapshotTimeAsync(postgres, serverId, cancellationToken);
-        if (snapshotTime is null)
-        {
-            return rows;
-        }
+        return snapshotTime is null
+            ? []
+            : await GetIndexUsageAsync(postgres, serverId, top, databases, snapshotTime.Value, cancellationToken);
+    }
 
+    /// <summary>The rows of <see cref="IndexUsageSql"/> at <paramref name="snapshotTime"/>, a capture the caller resolved
+    /// through <see cref="GetLatestIndexObjectStatsSnapshotTimeAsync"/>.</summary>
+    public static async Task<List<IndexUsageRow>> GetIndexUsageAsync(
+        NpgsqlDataSource postgres, int serverId, int top, DatabaseFilter databases, DateTime snapshotTime, CancellationToken cancellationToken = default)
+    {
+        var rows = new List<IndexUsageRow>();
         var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
         await using var command = postgres.CreateCommand(IndexUsageSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         command.Parameters.Add(databases.Parameter());
         DarlingMcpReadParameters.AddInt(command, top);
-        DarlingMcpReadParameters.AddTimestamp(command, snapshotTime.Value);
+        DarlingMcpReadParameters.AddTimestamp(command, snapshotTime);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -275,22 +283,28 @@ internal static class DarlingObjectStatsReader
     /// #5245: <see cref="GetIndexUsageMatchCountAsync(NpgsqlDataSource,int,string,CancellationToken)"/> over a SET of
     /// databases: the count of the CHOSEN databases' rows, the population
     /// <see cref="GetIndexUsageAsync(NpgsqlDataSource,int,int,DatabaseFilter,CancellationToken)"/> pages over.
-    /// <see cref="DatabaseFilter.All"/> is the server-wide count.
+    /// <see cref="DatabaseFilter.All"/> is the server-wide count. Resolves the capture itself; a caller that also reads
+    /// the rows resolves it once and passes it to the <see cref="DateTime"/> overloads of both reads.
     /// </summary>
     public static async Task<long> GetIndexUsageMatchCountAsync(
         NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         var snapshotTime = await GetLatestIndexObjectStatsSnapshotTimeAsync(postgres, serverId, cancellationToken);
-        if (snapshotTime is null)
-        {
-            return 0;
-        }
+        return snapshotTime is null
+            ? 0
+            : await GetIndexUsageMatchCountAsync(postgres, serverId, databases, snapshotTime.Value, cancellationToken);
+    }
 
+    /// <summary>The count of <see cref="IndexUsageMatchCountSql"/> at <paramref name="snapshotTime"/>, a capture the caller
+    /// resolved through <see cref="GetLatestIndexObjectStatsSnapshotTimeAsync"/>.</summary>
+    public static async Task<long> GetIndexUsageMatchCountAsync(
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, DateTime snapshotTime, CancellationToken cancellationToken = default)
+    {
         await using var command = postgres.CreateCommand(IndexUsageMatchCountSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         command.Parameters.Add(databases.Parameter());
-        DarlingMcpReadParameters.AddTimestamp(command, snapshotTime.Value);
+        DarlingMcpReadParameters.AddTimestamp(command, snapshotTime);
 
         return await command.ExecuteScalarAsync(cancellationToken) is long count ? count : 0;
     }
