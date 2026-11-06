@@ -1672,6 +1672,7 @@ const NOTES_NOTE_EDITING =
   "is kept, marked rejected, and never goes into a brief. The text cannot be edited here.";
 const NOTES_NOTE_LISTED = "Notes an agent proposed that nobody has decided.";
 const NOTES_NOTE_READ_ONLY = "Notes an agent proposed that nobody has decided. This sign-in is read-only, so it cannot approve or reject them.";
+const NOTES_NOTE_UNCONFIRMED = "Notes an agent proposed that nobody has decided. Could not check whether this sign-in can approve or reject them. Reload the page to try again.";
 const NOTES_NOTE_EXPIRY =
   " A note stops reaching briefs when it expires (the Expires column), and an expired note is not listed.";
 const NOTE_NOT_PENDING = "That note is not pending: it was already decided, or it is gone.";
@@ -1866,7 +1867,7 @@ async function buildPending(body, generation) {
      not signed in sees the list and the sentence that says what to do. */
   const access = writeAccess(session);
   const canEdit = access === "yes";
-  nodes.push(captionStrip((canEdit ? NOTES_NOTE_EDITING : access === "off" ? NOTES_NOTE_LISTED : NOTES_NOTE_READ_ONLY) + NOTES_NOTE_EXPIRY));
+  nodes.push(captionStrip((canEdit ? NOTES_NOTE_EDITING : session.probe_failed === true ? NOTES_NOTE_UNCONFIRMED : access === "off" ? NOTES_NOTE_LISTED : NOTES_NOTE_READ_ONLY) + NOTES_NOTE_EXPIRY));
   if (access === "sign-in") nodes.push(captionStrip(SIGN_IN_SENTENCE));
   if (access === "off") nodes.push(captionStrip(adminListOnlyNote(session.managed_store === true, "this page lists the notes only", "To approve, reject or write a note", true)));
   if (canEdit) {
@@ -1907,6 +1908,7 @@ const OVERRIDES_NOTE_EDITING =
 const overridesNoteReadOnly = (managed, adminWritesOff) =>
   "This list shows each threshold that differs from the global value, for one server, one database or a server tag. " +
   adminListOnlyNote(managed, "this page lists them only", "To change an override", adminWritesOff);
+const OVERRIDES_NOTE_UNCONFIRMED = "This list shows each threshold that differs from the global value, for one server, one database or a server tag. Could not check whether this sign-in can change them. Reload the page to try again.";
 const OVERRIDE_DENIED = "Changing a threshold override needs";
 
 /** The rows of the overrides grid from the list read's body. `database` and `server_id` stay on the row for Edit and Remove. */
@@ -2072,7 +2074,7 @@ async function buildOverrides(body, generation) {
      the store login holds the write grant on this table. */
   const canEdit = session.can_edit === true && !!res.data && res.data.can_edit === true;
   const keys = Array.isArray(res.data && res.data.keys) ? res.data.keys : [];
-  nodes.push(captionStrip(canEdit ? OVERRIDES_NOTE_EDITING : overridesNoteReadOnly(session.managed_store === true, session.admin_writes_off === true)));
+  nodes.push(captionStrip(canEdit ? OVERRIDES_NOTE_EDITING : session.probe_failed === true ? OVERRIDES_NOTE_UNCONFIRMED : overridesNoteReadOnly(session.managed_store === true, session.admin_writes_off === true)));
   if (res.data && typeof res.data.note === "string" && res.data.note) nodes.push(noticeStrip(res.data.note));
   if (canEdit) nodes.push(overrideFormNode(Array.isArray(res.data.servers) ? res.data.servers : [], keys, res.data.tags));
   nodes.push(VIZ.table({ overrides: overrideRows(res.data) }, {

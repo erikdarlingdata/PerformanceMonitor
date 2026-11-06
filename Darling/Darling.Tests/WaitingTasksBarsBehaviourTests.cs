@@ -161,6 +161,21 @@ public sealed class WaitingTasksBarsBehaviourTests
         Assert.Equal("1", rows["Sales"]);
     }
 
+    /// <summary>
+    /// #7877: <c>blocked_count</c> is a bucket mean, so a database blocked in 2 of 5 collections is 0.4. The hover prints it to one decimal,
+    /// the way the other mean panels do: a whole-number format printed that as 0 and 1.5 as 2.
+    /// </summary>
+    [Fact]
+    public void BlockedSessions_AreBucketMeans_SoTheTooltipShowsOneDecimal()
+    {
+        var run = Run("mean");
+
+        var rows = run.GetProperty("tooltipRows").EnumerateArray()
+            .Select(r => r.EnumerateArray().Select(e => e.GetString()).ToArray()).ToDictionary(r => r[0]!, r => r[1]);
+        Assert.Equal("0.4", rows["Sales"]);
+        Assert.Equal("1.5", rows["Orders"]);
+    }
+
     [Fact]
     public void WaitingTasksGrid_ShowsThreadCount_BesideTheDuration()
     {

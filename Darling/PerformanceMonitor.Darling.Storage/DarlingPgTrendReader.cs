@@ -83,7 +83,10 @@ public static class DarlingPgTrendReader
                 collection_time,
                 SUM(sample_count)               AS samples,
                 MAX(profile_period_ms)          AS profile_period_ms,
-                MAX(backend_count)              AS backend_count
+                MAX(backend_count)              AS backend_count,
+                /* #7876: the milliseconds the service sampler was WATCHING in this collection (V133), one value per
+                   collection. NULL on the extension arm (it watches the whole interval) and on any pre-V133 row. */
+                MAX(sampled_ms)                 AS sampled_ms
             FROM pg_wait_sampling
             WHERE server_id = $1
             AND   event = $2
@@ -97,6 +100,7 @@ public static class DarlingPgTrendReader
                 samples,
                 profile_period_ms,
                 backend_count,
+                sampled_ms,
                 LAG(samples) OVER (ORDER BY collection_time) AS prev_samples,
                 extract(epoch FROM (collection_time - LAG(collection_time) OVER (ORDER BY collection_time))) AS interval_seconds
             FROM per_snapshot
@@ -109,10 +113,15 @@ public static class DarlingPgTrendReader
             /* END, not ELSE 0 (#3653; the reasoning is on IoTrendSql's rate arms). interval_seconds is a LAG
                over GROUPED collection times - NULL on the first snapshot, which the WHERE below drops, and
                positive on every other - so the NULL arm is unreachable today and is the honest spelling. */
+            /* #7876: the span divided by is the time actually WATCHED. The service sampler watches 30 one-second snapshots
+               of each 300 second cycle and stores sampled_ms = 30000, so dividing by the 300 second gap read the rate about
+               10x low and disagreed with analyze_server on the same rows. coalesce keeps the extension arm's and every pre-V133
+               row's whole-interval arithmetic. The > 0 guard also keeps a stored sampled_ms of 0 from dividing by zero. */
             CASE
-                WHEN interval_seconds > 0
+                WHEN coalesce(sampled_ms / 1000.0, interval_seconds) > 0
                 THEN (CASE WHEN samples < prev_samples THEN samples ELSE samples - prev_samples END)
-                     * coalesce(profile_period_ms, 0)::double precision / interval_seconds
+                     * coalesce(profile_period_ms, 0)::double precision
+                     / CAST(coalesce(sampled_ms / 1000.0, interval_seconds) AS double precision)
             END AS estimated_wait_ms_per_second,
             /* #7428: NULL, not the stored figure, on an interval with no samples. The extension's backend_count is a running
                total of distinct pids since the profile started, so it kept climbing through intervals where nothing waited. */
