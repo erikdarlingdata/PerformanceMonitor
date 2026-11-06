@@ -805,7 +805,8 @@ internal static class PgDisplay
     internal static StatementRow Statement(DarlingPgStatementReader.PgStatementRow row) => new()
     {
         QueryId = row.QueryId.ToString(CultureInfo.InvariantCulture),
-        DatabaseId = row.DatabaseId.ToString("N0", CultureInfo.CurrentCulture),
+        /* #7731: the name, else "database <id>" with no thousands separator on the id (an oid is an identifier, not a count). */
+        DatabaseId = row.DatabaseName ?? string.Create(CultureInfo.InvariantCulture, $"database {row.DatabaseId}"),
         Calls = Count(row.Calls),
         TotalExecTimeMs = Count(row.TotalExecTimeMs),
         AvgExecTimeMs = row.Calls <= 0

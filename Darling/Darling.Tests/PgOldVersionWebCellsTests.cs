@@ -73,6 +73,18 @@ public sealed class PgOldVersionWebCellsTests
         Assert.Equal("20", new string(reported.Where(char.IsDigit).ToArray()));
     }
 
+    /// <summary>#7731: the first column names the database, so one Query ID in two databases reads as two databases.</summary>
+    [Fact]
+    public void TheTopQueriesGrid_NamesTheDatabaseInItsFirstColumn()
+    {
+        var grid = RunHarness().GetProperty("topQueries");
+
+        Assert.True(grid.GetProperty("present").GetBoolean());
+        Assert.Equal("Database", grid.GetProperty("headers")[0].GetString());
+        Assert.Equal("appdb", Cell(grid, 0, "Database"));
+        Assert.Equal("database 16385", Cell(grid, 1, "Database"));
+    }
+
     [Fact]
     public void TheSampledWaitsGrid_DrawsADashForAnUnreportedQueryId_AndShowsNoStatementForQueryIdZero()
     {

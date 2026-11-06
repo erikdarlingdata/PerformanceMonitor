@@ -139,7 +139,9 @@ public sealed class PgStatementStatsCollector : PostgresCollectorDefinitionBase<
         /* #3540 (Darling V128): the measured seconds the three deltas accrued over — the minimum over the
            row's groups, so 0 means "no delta in this row is knowable". Computed beside the deltas in
            ReadAsync because that is where the calculator is called. */
-        int SampleIntervalSeconds);
+        int SampleIntervalSeconds,
+        /* #7731 (Darling V247): the database's name, from the pg_database join; NULL when the database was dropped between the two reads. */
+        string? DatabaseName);
 
     /* Column names DIFFER between PostgreSQL 16 and 17 and our fleet spans both, so the query is
        built per major rather than SELECT *-ed. Verified against live 16.11 and 17.7:
@@ -257,8 +259,13 @@ SELECT
     {statsReset}                       AS statements_stats_reset,
     {statsSince}                       AS stats_since,
     {targetNow}                        AS target_now,
-    {statsDealloc}                     AS stats_dealloc
+    {statsDealloc}                     AS stats_dealloc,
+    d.datname::text                    AS database_name
 FROM public.pg_stat_statements
+/* #7731: the database NAME beside dbid, ordinal 31, the same pg_database join PgKernelStatsCollector uses. LEFT, so a statement row whose database was dropped
+   still ships (with a NULL name) instead of vanishing with the database. */
+LEFT JOIN pg_catalog.pg_database AS d
+       ON d.oid = dbid
 WHERE calls > 0";
         }
 
@@ -294,8 +301,13 @@ SELECT
     {statsReset}                       AS statements_stats_reset,
     {statsSince}                       AS stats_since,
     {targetNow}                        AS target_now,
-    {statsDealloc}                     AS stats_dealloc
+    {statsDealloc}                     AS stats_dealloc,
+    d.datname::text                    AS database_name
 FROM aurora_stat_statements(false)
+/* #7731: the database NAME beside dbid, ordinal 31, the same pg_database join PgKernelStatsCollector uses. LEFT, so a statement row whose database was dropped
+   still ships (with a NULL name) instead of vanishing with the database. */
+LEFT JOIN pg_catalog.pg_database AS d
+       ON d.oid = dbid
 WHERE calls > 0";
     }
 
@@ -534,6 +546,8 @@ WHERE calls > 0";
            reset, gap re-baseline — the three cases the skip deliberately lets through) carried delta 0s
            that the per-statement duration trend divided by a LAG-derived span into 0.00 calls/sec. */
         new CollectorColumn("sample_interval_seconds", CollectorColumnType.Integer),
+        /* Appended LAST (Darling V247, #7731): the database name beside database_id, so a reader can say which database a (queryid, database_id) group is. */
+        new CollectorColumn("database_name", CollectorColumnType.Varchar),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -754,7 +768,8 @@ WHERE calls > 0";
                 DeltaCalls: deltaCalls,
                 DeltaTotalExecTimeMs: deltaTotalTime,
                 DeltaRows: deltaRows,
-                SampleIntervalSeconds: sampleIntervalSeconds));
+                SampleIntervalSeconds: sampleIntervalSeconds,
+                DatabaseName: reader.IsDBNull(31) ? null : reader.GetString(31)));
         }
 
         return rows;
@@ -799,6 +814,7 @@ WHERE calls > 0";
             .Value(row.DeltaCalls)
             .Value(row.DeltaTotalExecTimeMs)
             .Value(row.DeltaRows)
-            .Value(row.SampleIntervalSeconds);  /* sample_interval_seconds INTEGER — measured, 0 = unknowable */
+            .Value(row.SampleIntervalSeconds)  /* sample_interval_seconds INTEGER — measured, 0 = unknowable */
+            .Value(row.DatabaseName);
     }
 }

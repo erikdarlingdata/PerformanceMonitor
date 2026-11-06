@@ -57,7 +57,10 @@ public static class DarlingPgStatementReader
            the wait sampler's sleep): the entry's (user_id, database_id) is in the list the hourly text fetch stored for the
            queryid (PgOwnStatement). Per ENTRY, so the application's statement under another login is false even when it
            shares the queryid. False for a statement whose text has not been read yet. */
-        bool IsServiceStatement = false);
+        bool IsServiceStatement = false,
+        /* #7731: the database's name, or null when no snapshot in the window carried one (rows stored before V247). The reply and the grids then
+           say "database <id>"; the null is kept here so a caller never mistakes the placeholder for a real name. */
+        string? DatabaseName = null);
 
     /// <summary>
     /// One page of the top-queries read, plus the denominator its shares are taken over.
@@ -144,6 +147,9 @@ public static class DarlingPgStatementReader
             SELECT
                 queryid,
                 database_id,
+                /* #7731: carried raw with its sample time, so the aggregate can take the newest non-null name. NULL on a row an older build stored. */
+                database_name,
+                collection_time,
                 user_id,
                 delta_calls,
                 delta_total_exec_time_ms,
@@ -214,7 +220,12 @@ public static class DarlingPgStatementReader
             /* #7567: the service's own statement, decided per (user_id, database_id) ENTRY against the list the text fetch
                stored, over the entries that carried time in the window. Every one must be the service's, so a queryid the
                application also runs under another login is not flagged. */
-            {IsServiceStatementSql} AS is_service_statement
+            {IsServiceStatementSql} AS is_service_statement,
+            /* #7731: the database's NAME, a carried attribute and never part of the key: the newest non-null name stored for this
+               (queryid, database_id), so a rename shows the current name and a row from before the column existed still borrows the name a later
+               snapshot of the same database carries. NULL when none was ever stored; the reply says "database <id>" then. */
+            (array_agg(differenced.database_name ORDER BY differenced.collection_time DESC)
+                FILTER (WHERE differenced.database_name IS NOT NULL))[1] AS database_name
         FROM differenced
         LEFT JOIN collect.pg_statement_text AS t
                ON  t.server_id = $1
@@ -292,7 +303,8 @@ public static class DarlingPgStatementReader
                 reader.IsDBNull(13) ? null : reader.GetInt64(13),
                 /* #2219: null stays null — see PgStatementRow.QueryText for why an empty string would be a lie. */
                 reader.IsDBNull(14) ? null : reader.GetString(14),
-                !reader.IsDBNull(16) && reader.GetBoolean(16)));
+                !reader.IsDBNull(16) && reader.GetBoolean(16),
+                reader.IsDBNull(17) ? null : reader.GetString(17)));
         }
 
         return new PgTopQueriesPage(rows, windowTotalExecTimeMs);

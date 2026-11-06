@@ -2606,6 +2606,19 @@ ALTER TABLE config.config_alert_settings
     private static readonly string V246Sql = TimescaleSupport.CreateQueryStoreCorrectedHourlyHashIndexSql;
 
     /// <summary>
+    /// V247 (#7731): <c>collect.pg_statement_stats.database_name</c>, the name of the database the row's <c>dbid</c> belongs to, from the same
+    /// <c>pg_database</c> join the kernel stats collector uses. The Top Query Shapes read groups by <c>(queryid, database_id)</c>, so one statement in two
+    /// databases is two rows, and with a number alone nothing said why. One nullable <c>text</c>, no DEFAULT, no backfill, no scan of the table (V243's
+    /// shape): a row stored before this rung never knew the name, so NULL is the honest value and the reply says <c>database &lt;id&gt;</c> for it.
+    /// A catalog-only change, accepted on the compressed hypertable the way V128's identical <c>ALTER</c> on this table was. <b>Appended LAST</b>, the
+    /// position the collector's payload gives it, so a fresh store (the generated V1 table carries the column and this ALTER no-ops there) and an
+    /// upgraded one share one physical order. <c>pg_statement_stats</c> has no <c>v_</c> view, and no rollup or hourly tier reads it. An older build
+    /// writes its own column list, so the column stays NULL for the rows it writes.
+    /// </summary>
+    private const string V247Sql = @"
+ALTER TABLE collect.pg_statement_stats ADD COLUMN IF NOT EXISTS database_name text;";
+
+    /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
     /// <c>DatabaseProtectionCollector</c> every 60 minutes (Darling only). One row per database per pass: the raw times (UTC), the
     /// recovery model, the database state and replica role, a per-row platform label (native, platform_managed, native_only) and a state
@@ -3109,6 +3122,7 @@ $rung$;";
         new Migration(244, "server-connect-down-state", V244Sql),
         new Migration(245, "database-protection-thresholds", V245Sql),
         new Migration(246, "query-store-corrected-hourly-hash-index", V246Sql),
+        new Migration(247, "pg-statement-stats-database-name", V247Sql),
     };
 
     /// <summary>
