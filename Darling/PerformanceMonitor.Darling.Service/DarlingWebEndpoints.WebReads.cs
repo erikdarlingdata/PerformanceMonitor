@@ -194,9 +194,11 @@ public static partial class DarlingWebEndpoints
             ["get_collection_log"] = (c, pg, an) => OptionalDouble(c, "min_duration_ms", out var minDurationMs)
                 ? DarlingMcpDataTools.GetCollectionLog(pg, Server(c), Hours(c, 24), Rows(c, "limit", 200), AsOf(c), Str(c, "collector_name"), minDurationMs, status: Str(c, "status"), full_text: true, cancellationToken: c.RequestAborted)
                 : UnparseableParam("min_duration_ms"),
-            ["get_current_waits_trend"] = (c, pg, an) => DatabaseNames(c) is { } databases
-                ? DarlingMcpDataTools.GetCurrentWaitsTrend(pg, Server(c), Hours(c, 4), databases, AsOf(c), c.RequestAborted)
-                : DatabaseNamesRefusal(c),
+            ["get_current_waits_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
+                ? (DatabaseNames(c) is { } databases
+                    ? DarlingMcpDataTools.GetCurrentWaitsTrend(pg, Server(c), Hours(c, 4), databases, AsOf(c), bucketMinutes, ChartBudget(c), c.RequestAborted)
+                    : DatabaseNamesRefusal(c))
+                : UnparseableParam("bucket_minutes"),
             ["get_client_timeouts"] = (c, pg, an) => DarlingMcpClientTimeoutTools.GetClientTimeouts(pg, Server(c), Hours(c, 1), Rows(c, "limit", 20), AsOf(c), logger, c.RequestAborted),
             ["get_blocking_stats"] = (c, pg, an) => DatabaseNames(c) is { } databases
                 ? DarlingMcpDataTools.GetBlockingStats(pg, Server(c), Hours(c, 24), databases, AsOf(c), logger, c.RequestAborted)
