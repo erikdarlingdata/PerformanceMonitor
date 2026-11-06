@@ -1609,10 +1609,17 @@ public partial class DuckDbInitializer : IDisposable
                 }
             }
 
-            _logger?.LogError(ex, "Failed to back up old database {DatabasePath}; leaving it in place and not starting",
-                _databasePath);
+            /* When the export worked, a full Parquet copy of the data is in exportDir: say so, it is the way out if the
+               rename keeps failing. Each retried start writes another upgrade_<time> folder and nothing removes the old
+               ones (#7769), which is why the message names the folder. */
+            var copyNote = exported
+                ? $"A full copy of its data was written to {exportDir}. "
+                : "";
+            _logger?.LogError(ex, "Failed to back up old database {DatabasePath}; leaving it in place and not starting. " +
+                "Export succeeded: {Exported}, export folder: {ExportDir}", _databasePath, exported, exportDir);
             throw new InvalidOperationException(
                 $"Lite could not move the database file {_databasePath} aside to back it up before rebuilding it, so it was left in place and not deleted. " +
+                copyNote +
                 (walRestoreFailed ? $"Its write-ahead log is at {backupPath}.wal. " : "") +
                 $"Close any other copy of Lite, check that the folder allows renaming files, and start Lite again. ({ex.Message})", ex);
         }

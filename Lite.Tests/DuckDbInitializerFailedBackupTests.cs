@@ -1,6 +1,8 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
+using DuckDB.NET.Data;
 using PerformanceMonitorLite.Database;
 using Xunit;
 
@@ -61,6 +63,52 @@ public sealed class DuckDbInitializerFailedBackupTests : IDisposable
         Assert.Equal(DbText, File.ReadAllText(_dbPath));
         Assert.True(File.Exists(_walPath));
         Assert.Equal(WalText, File.ReadAllText(_walPath));
+    }
+
+    [Fact]
+    public async Task ExportSucceedingAndRenameFailing_KeepsTheFile_AndNamesTheFolderHoldingTheCopy()
+    {
+        var realDb = Path.Combine(_dir, "real.duckdb");
+        using (var conn = new DuckDBConnection($"Data Source={realDb}"))
+        {
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "CREATE TABLE history (id INTEGER); INSERT INTO history VALUES (1), (2), (3);";
+            cmd.ExecuteNonQuery();
+        }
+        var before = File.ReadAllBytes(realDb);
+
+        using var initializer = new DuckDbInitializer(realDb)
+        {
+            MoveFileForTests = (_, _) => throw new IOException("rename refused")
+        };
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => initializer.MigrateViaParquetAsync(_archive));
+
+        /* The export worked, so a copy of the data sits in the one upgrade_ folder and the message names it. */
+        var exportDir = Assert.Single(Directory.GetDirectories(_archive, "upgrade_*"));
+        Assert.NotEmpty(Directory.GetFiles(exportDir, "*.parquet"));
+        Assert.Contains(exportDir, ex.Message);
+        Assert.Contains(realDb, ex.Message);
+
+        /* The original file is where it was, byte for byte, and no backup was made. */
+        Assert.True(File.Exists(realDb));
+        Assert.Equal(before, File.ReadAllBytes(realDb));
+        Assert.False(File.Exists(realDb + ".wal"));
+        Assert.Empty(Directory.GetFiles(_dir, "real.duckdb.backup_*"));
+    }
+
+    [Fact]
+    public async Task ExportFailingAndRenameFailing_DoesNotPointAtAnExportFolder()
+    {
+        using var initializer = new DuckDbInitializer(_dbPath)
+        {
+            MoveFileForTests = (_, _) => throw new IOException("rename refused")
+        };
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => initializer.MigrateViaParquetAsync(_archive));
+
+        Assert.DoesNotContain("full copy of its data", ex.Message);
     }
 
     [Fact]
