@@ -1801,7 +1801,7 @@ public partial class MainWindow : Window
            cards' own #1426 banding. The totals use the SAME one-hour window the per-server cards use, so
            they reconcile with the sum of the card counts. A totals-read failure leaves the totals null, which the
            roll-up renders as unavailable rather than as zeros, and it does not blank the Overview — the band counts
-           and ranking still render from the cards. */
+           and ranking still render from the cards, and a searched panel sums the matched cards' own counts. */
         FleetTotals? totals;
         try
         {
@@ -1878,8 +1878,8 @@ public partial class MainWindow : Window
 
         /* D9: the roll-up above the grid (Needs Attention rows, band counts, "Monitoring N servers") follows the
            search too, so it never counts servers the grid just hid. Before the first refresh there is no fleet to
-           rebuild from; the refresh sets the count. The totals stay null when their read failed, and the roll-up
-           renders that as unavailable. */
+           rebuild from; the refresh sets the count. The totals stay null when their read failed: the roll-up renders
+           that as unavailable, or as the matched cards' own sums while a search narrows it. */
         if (_overviewRegisteredCount > 0)
         {
             ApplyFleetRollup(OverviewCardView.BuildRollup(_overviewCards, _overviewTotals, _overviewRegisteredCount, OverviewSearchBox?.Text));

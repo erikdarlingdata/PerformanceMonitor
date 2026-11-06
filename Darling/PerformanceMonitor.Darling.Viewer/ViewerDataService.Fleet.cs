@@ -396,7 +396,8 @@ public sealed class FleetRollup
     /// <summary>Fleet-wide deadlocks this window (from the cross-server SQL total).</summary>
     public long TotalDeadlocks { get; init; }
 
-    /// <summary>True when the cross-server totals read failed this refresh. <see cref="TotalBlockingEvents"/> and
+    /// <summary>True when this roll-up was built with no totals: the cross-server totals read failed this refresh and no
+    /// Overview search narrowed the panel to the cards' own sums. <see cref="TotalBlockingEvents"/> and
     /// <see cref="TotalDeadlocks"/> are then 0 by default, not by measurement, and the tiles say so instead of showing them.</summary>
     public bool TotalsUnavailable { get; init; }
 
