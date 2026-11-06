@@ -39,8 +39,10 @@ public static class Planner
 
     /// <summary>
     /// The whole-UTC-hour windows due for one family, oldest first. Fresh: [h, h+1) is due at h+1h15m. Query Store: due at
-    /// h+lag+15m, and lag 1 uses a 45-minute margin (h+1h45m). Fresh ignores the lag. At most <paramref name="maxWindows"/>
-    /// windows; a window whose end is older than now - maxAgeHours is a gap.
+    /// h+lag+15m, and lag 1 uses a 45-minute margin (h+1h45m). Fresh ignores the lag. The hours whose end is older than
+    /// now - maxAgeHours are ONE gap entry, returned first, which does not count toward <paramref name="maxWindows"/>;
+    /// at most <paramref name="maxWindows"/> exportable windows follow it. The cap covers only hours a run can still
+    /// export, so a run after an outage never spends its slots recording gaps while recoverable hours age out.
     /// </summary>
     public static IReadOnlyList<Window> DueWindows(string family, DateTime? lastTo, DateTime now, int maxWindows = 6, int maxAgeHours = 20, int lagHours = 3)
     {
@@ -51,9 +53,21 @@ public static class Planner
         var startTo = lastTo is { } lt ? lt.AddHours(1) : newestDueTo.AddHours(-(maxAgeHours - 1));
         var oldestAllowedTo = now.AddHours(-maxAgeHours);
         var windows = new List<Window>();
-        for (var to = startTo; to <= newestDueTo && windows.Count < maxWindows; to = to.AddHours(1))
+
+        var to = startTo;
+        DateTime? gapTo = null;
+        for (; to <= newestDueTo && to < oldestAllowedTo; to = to.AddHours(1))
         {
-            windows.Add(new Window(to.AddHours(-1), to, to < oldestAllowedTo));
+            gapTo = to;
+        }
+        if (gapTo is { } g)
+        {
+            windows.Add(new Window(startTo.AddHours(-1), g, true));
+        }
+
+        for (var exported = 0; to <= newestDueTo && exported < maxWindows; to = to.AddHours(1), exported++)
+        {
+            windows.Add(new Window(to.AddHours(-1), to, false));
         }
         return windows;
     }

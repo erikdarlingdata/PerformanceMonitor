@@ -2606,7 +2606,17 @@ ALTER TABLE config.config_alert_settings
     private static readonly string V246Sql = TimescaleSupport.CreateQueryStoreCorrectedHourlyHashIndexSql;
 
     /// <summary>
-    /// V247 (#7730): the key trigger of <c>collect.query_store_text</c> now also keys the old statements that builds before #7463 sent
+    /// V247 (#7639): <c>config.config_monitored_servers.xe_session_databases</c>, the per-server list of databases that get Extended Events
+    /// sessions on Azure SQL Database, <c>excluded_databases</c>'s shape (<c>text[] NOT NULL DEFAULT '{}'</c>). Empty means every database, so
+    /// an existing store keeps its behavior. Catalog-only add, idempotent, no backfill. The column is the probe's sentinel. An older build never
+    /// reads the column and gives every database a session, as it always did.
+    /// </summary>
+    private const string V247Sql = @"
+ALTER TABLE config.config_monitored_servers
+    ADD COLUMN IF NOT EXISTS xe_session_databases text[] NOT NULL DEFAULT '{}'::text[];";
+
+    /// <summary>
+    /// V248 (#7730): the key trigger of <c>collect.query_store_text</c> now also keys the old statements that builds before #7463 sent
     /// with no marker (<see cref="SqlServerOwnStatement"/>), so a new text of one gets its key, and the backfill runs again for the
     /// text stored earlier: the state row is deleted (<see cref="QueryStoreSelfKeys.ReopenBackfillSql"/>), <c>RunDelayedAsync</c> keys the
     /// old rows in the background after start, and the reads use the text probe until it has. <b>No full-table scan here.</b> The
@@ -2614,7 +2624,7 @@ ALTER TABLE config.config_alert_settings
     /// ROW EXCLUSIVE lock on the text table, so the lock timeout is V219's. Every statement is idempotent. <b>No Lite twin of the
     /// rung:</b> Lite has no key table.
     /// </summary>
-    private static readonly string V247Sql =
+    private static readonly string V248Sql =
         "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreSelfKeys.TriggerSql + "\n" + QueryStoreSelfKeys.ReopenBackfillSql;
 
     /// <summary>
@@ -3121,7 +3131,8 @@ $rung$;";
         new Migration(244, "server-connect-down-state", V244Sql),
         new Migration(245, "database-protection-thresholds", V245Sql),
         new Migration(246, "query-store-corrected-hourly-hash-index", V246Sql),
-        new Migration(247, "query-store-self-keys-old-statements", V247Sql),
+        new Migration(247, "xe-session-databases", V247Sql),
+        new Migration(248, "query-store-self-keys-old-statements", V248Sql),
     };
 
     /// <summary>

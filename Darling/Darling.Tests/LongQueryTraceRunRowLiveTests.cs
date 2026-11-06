@@ -37,7 +37,10 @@ public sealed class LongQueryTraceRunRowLiveTests
     /* #1776 own-store: the rows are keyed by distinctive fake server ids and removed in the cleanup. */
     private const int PermissionServerId = -537810;
     private const int OtherFaultServerId = -537811;
+    private const int DeadlockAzureServerId = -537812;
+    private const int DeadlockOnPremServerId = -537813;
     private const string Collector = "long_query_completions";
+    private const string DeadlockCollector = "deadlocks";
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -79,6 +82,89 @@ public sealed class LongQueryTraceRunRowLiveTests
             Assert.Equal(CollectorHealthClassifier.NoPermissions, longQuery.HealthStatus);
 
             GC.KeepAlive(worker);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, DeleteRowsAsync);
+        }
+    }
+
+    /// <summary>
+    /// #7639: the call site in <c>RunOneAsync</c> that hands the target's engine and the real read to the capture fault helper. A deadlock
+    /// run on an Azure SQL Database server whose create was refused everywhere still reads once (the master item's durable telemetry arm)
+    /// and then records SESSION_MISSING. On any other engine it does not read, and records the same row. This runs the real run and the
+    /// real run-row write, so an engine flag or a read that was not passed through fails here and not only in the helper's own tests.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ADeadlockRunAfterARefusedEnsure_ReadsOnlyOnAzureSqlDatabase_AndAlwaysWritesASessionMissingRow(bool azureSqlDatabase)
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock run-row test.");
+
+        var serverId = azureSqlDatabase ? DeadlockAzureServerId : DeadlockOnPremServerId;
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, serverId, "run-row-deadlock", ct);
+            await using var postgres = NpgsqlDataSource.Create(cs!);
+
+            var host = $"run-row-{Math.Abs(serverId)}";
+            var config = new MonitoredServer { Name = host, Host = host };
+            var runtime = new ServerRuntime
+            {
+                Config = config,
+                ConnectionString = $"Server=tcp:{host},1433;Initial Catalog=master;Encrypt=True",
+                Target = new CollectorTargetInfo { IsAzureSqlDb = azureSqlDatabase },
+                StorageName = host,
+                ServerId = serverId,
+            };
+            var server = new DarlingWorker.ServerLoopState { Config = config, Runtime = runtime };
+            server.CaptureEnsure.Deadlock = new DarlingXeSessions.XeEnsureFailure("The deadlock create was refused in every database.", IsPermission: false);
+
+            var runner = new DarlingCollectorRunner(
+                postgres,
+                new CollectorDeltaCalculator(),
+                databaseScope: (_, _) => new List<string>(),
+                separatelyMonitoredDatabases: _ => new List<string>(),
+                installId: () => "0a1b2c3d");
+
+            var reads = 0;
+            var worker = new DarlingWorker(
+                NullLogger<DarlingWorker>.Instance,
+                NullLoggerFactory.Instance,
+                new McpRuntimeState(),
+                new WebRuntimeState(),
+                new MonitoredServerRegistryState(),
+                new CollectorRuntimeState(),
+                new WebTlsCertificateState(),
+                new BaselineCache(),
+                new ReadLatencyAccumulator())
+            {
+                StoreForTests = postgres,
+                DispatchOverrideForTests = (_, _, _) =>
+                {
+                    reads++;
+                    return Task.FromResult(new CollectorRunResult(0, 0, 0, Array.Empty<CollectorMeasurement>()));
+                },
+            };
+
+            var effective = StoreConfigProvider.ResolveSchedule(DeadlockCollector, serverId, worker.ScheduleOverridesForTest);
+            await worker.RunOnLoadAsync(server, runner, DeadlockCollector, serverId, effective, ct);
+
+            Assert.Equal(azureSqlDatabase ? 1 : 0, reads);
+            var row = Assert.Single(await ReadRowsAsync(connection, serverId, ct, DeadlockCollector));
+            Assert.Equal("SESSION_MISSING", row.Status);
+            Assert.Contains("The deadlock create was refused in every database.", row.Message, StringComparison.Ordinal);
             bodySucceeded = true;
         }
         finally
@@ -180,12 +266,12 @@ public sealed class LongQueryTraceRunRowLiveTests
     }
 
     private static async Task<List<(string Status, string? Message)>> ReadRowsAsync(
-        NpgsqlConnection connection, int serverId, CancellationToken ct)
+        NpgsqlConnection connection, int serverId, CancellationToken ct, string collector = Collector)
     {
         using var command = new NpgsqlCommand(
             "SELECT status, error_message FROM collection_log WHERE server_id = $1 AND collector_name = $2", connection);
         command.Parameters.AddWithValue(serverId);
-        command.Parameters.AddWithValue(Collector);
+        command.Parameters.AddWithValue(collector);
         var rows = new List<(string, string?)>();
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -198,7 +284,7 @@ public sealed class LongQueryTraceRunRowLiveTests
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        foreach (var id in new[] { PermissionServerId, OtherFaultServerId })
+        foreach (var id in new[] { PermissionServerId, OtherFaultServerId, DeadlockAzureServerId, DeadlockOnPremServerId })
         {
             await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collection_log WHERE server_id = $1", id);
             await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", id);

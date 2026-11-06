@@ -251,6 +251,7 @@ public static partial class DarlingWebEndpoints
         "disable_server",
         "enable_server",
         "set_server_excluded_databases",
+        "set_server_xe_session_databases",
         "reload_config",
         /* #6227: the five collector schedule writes are MCP-only (the Viewer's schedule editor is the page for a person), and the
            get_collector_schedules read is for an agent checking its own change before and after; no page read mirrors it. */

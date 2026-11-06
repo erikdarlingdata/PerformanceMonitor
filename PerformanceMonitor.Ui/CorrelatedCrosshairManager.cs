@@ -136,6 +136,32 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         lane.BaselineUpper = upper;
         lane.MinAnomalyValue = minAnomalyValue;
         lane.IsEventBased = isEventBased;
+        lane.BaselineSteps = null;
+    }
+
+    /// <summary>
+    /// #7644: the stepped form of <see cref="SetLaneBaseline"/>. The tooltip's arrow judges the value against the step its X falls in;
+    /// an X in an hour with no step gets no arrow.
+    /// </summary>
+    public void SetLaneBaselineSteps(ScottPlot.WPF.WpfPlot chart, IReadOnlyList<BaselineBand.HourStep> steps,
+        double minAnomalyValue = 0, bool isEventBased = false)
+    {
+        var lane = _lanes.Find(l => l.Chart == chart);
+        if (lane == null) return;
+        lane.BaselineSteps = steps;
+        lane.BaselineLower = null;
+        lane.BaselineUpper = null;
+        lane.MinAnomalyValue = minAnomalyValue;
+        lane.IsEventBased = isEventBased;
+    }
+
+    /// <summary>The band that applies at <paramref name="xValue"/>: the lane's flat band, or the step the X falls in (none when its hour has no step).</summary>
+    private static (double? Upper, double? Lower) BandAt(LaneInfo lane, double xValue)
+    {
+        if (lane.BaselineSteps is null)
+            return (lane.BaselineUpper, lane.BaselineLower);
+        var step = BaselineBand.HourStep.At(lane.BaselineSteps, xValue);
+        return step is null ? (null, null) : (step.Upper, step.Lower);
     }
 
     /// <summary>
@@ -208,6 +234,7 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
             lane.VLine = null;
             lane.BaselineUpper = null;
             lane.BaselineLower = null;
+            lane.BaselineSteps = null;
             lane.MinAnomalyValue = 0;
         }
     }
@@ -332,7 +359,7 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
                     if (value.HasValue)
                     {
                         _tooltipText.Inlines.Add(new Run($"\n{series.Name}: {value.Value:N0} {unit}") { Foreground = DefaultBrush });
-                        var indicator = GetBaselineIndicator(lane, value.Value, seriesIndex);
+                        var indicator = GetBaselineIndicator(lane, value.Value, seriesIndex, xValue);
                         if (indicator != null)
                             _tooltipText.Inlines.Add(new Run($" {indicator.Value.Symbol}") { Foreground = indicator.Value.Brush });
                     }
@@ -372,7 +399,7 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
     private static string? SingleSeriesArrow(LaneInfo lane, DataSeries series, double value, double xValue)
         => BelowReadFloor(series, xValue)
             ? null
-            : BaselineArrowSymbol(lane.BaselineUpper, lane.BaselineLower, lane.MinAnomalyValue, lane.IsEventBased, 0, value);
+            : BandArrow(lane, xValue, 0, value);
 
     /// <summary>The ▲/▼ the tooltip shows for a single-series lane at <paramref name="xValue"/>, or null (the same decision the hover makes).</summary>
     internal string? HoverArrowAt(ScottPlot.WPF.WpfPlot chart, double xValue)
@@ -416,8 +443,14 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
 
     private record struct BaselineIndicator(string Symbol, SolidColorBrush Brush);
 
-    private static BaselineIndicator? GetBaselineIndicator(LaneInfo lane, double value, int seriesIndex)
-        => ToIndicator(BaselineArrowSymbol(lane.BaselineUpper, lane.BaselineLower, lane.MinAnomalyValue, lane.IsEventBased, seriesIndex, value));
+    private static BaselineIndicator? GetBaselineIndicator(LaneInfo lane, double value, int seriesIndex, double xValue)
+        => ToIndicator(BandArrow(lane, xValue, seriesIndex, value));
+
+    private static string? BandArrow(LaneInfo lane, double xValue, int seriesIndex, double value)
+    {
+        var (upper, lower) = BandAt(lane, xValue);
+        return BaselineArrowSymbol(upper, lower, lane.MinAnomalyValue, lane.IsEventBased, seriesIndex, value);
+    }
 
     private static BaselineIndicator? ToIndicator(string? symbol)
     {
@@ -526,6 +559,8 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         public List<DataSeries> Series { get; set; } = new();
         public double? BaselineUpper { get; set; }
         public double? BaselineLower { get; set; }
+        /// <summary>#7644: the stepped band, when the lane has one; the flat bounds above are then null.</summary>
+        public IReadOnlyList<BaselineBand.HourStep>? BaselineSteps { get; set; }
         public double MinAnomalyValue { get; set; }
         public bool IsEventBased { get; set; }
     }

@@ -81,7 +81,7 @@ public sealed class SwallowedItemFailureTests
         Assert.Contains("private static async Task<string?> ReconcileLongQueryCompletionsAzureAsync(", source, StringComparison.Ordinal);
 
         /* Scored only while enabling: the loop over the plan's create list counts, the drops do not. */
-        Assert.Contains("foreach (var databaseName in LongQueryTraceDatabases.Plan(enabled: true, Array.Empty<string>(), monitored, separatelyMonitored, keptElsewhere: Array.Empty<string>()).Create)\n        {\n            cancellationToken.ThrowIfCancellationRequested();\n            attempted++;", source, StringComparison.Ordinal);
+        Assert.Contains("foreach (var databaseName in narrowedCreates)\n        {\n            cancellationToken.ThrowIfCancellationRequested();\n            attempted++;", source, StringComparison.Ordinal);
         Assert.Contains("failed++;\n                failedDatabases.Add(databaseName);\n                CollectorFaultDatabase.Stamp(ex, databaseName);\n                firstFailure ??= ex;", source, StringComparison.Ordinal);
         Assert.Contains("LongQueryTraceDatabases.DropEachAsync(", source, StringComparison.Ordinal);
 
@@ -92,7 +92,7 @@ public sealed class SwallowedItemFailureTests
         /* Some refused: the shared composer, so the wording is the runners'. The first failure is worded as the per-database
            line words it, so a create or start refused on Azure carries the caps sentence (#4961). */
         Assert.Contains(
-            "var partialNote = EnumeratedCollectorDriver.BuildPartialFailureNote(failed, attempted, failedDatabases, firstFailure is null ? null : AlwaysOnXeSessions.DescribeFailure(firstFailure));",
+            "var partialNote = EnumeratedCollectorDriver.BuildPartialFailureNote(failed, attempted, failedDatabases, firstFailure is null ? null : AlwaysOnXeSessions.DescribeFailure(firstFailure))",
             source,
             StringComparison.Ordinal);
         Assert.Contains("return partialNote;", source, StringComparison.Ordinal);

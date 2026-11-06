@@ -32,7 +32,10 @@ public sealed class AdminWritesOffBehaviourTests
 
         Assert.Equal(0, page.GetProperty("saveButtons").GetInt32());
         Assert.Contains("overdue", page.GetProperty("rows").GetString() ?? "", StringComparison.OrdinalIgnoreCase);
-        Assert.Contains(Strings(page.GetProperty("strips")), t => t.Contains("this page lists the settings only", StringComparison.Ordinal) && t.Contains(SwitchSentence, StringComparison.Ordinal));
+        // #7558: the switch is named once, in the line under the Admin heading; the tab's own line says only what the page lists.
+        var strips = Strings(page.GetProperty("strips"));
+        Assert.Contains(strips, t => t.Contains("This page lists the settings only", StringComparison.Ordinal) && !t.Contains(SwitchSentence, StringComparison.Ordinal));
+        Assert.Single(strips, t => t.Contains(SwitchSentence, StringComparison.Ordinal));
     }
 
     [Fact]

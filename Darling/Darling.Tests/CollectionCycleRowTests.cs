@@ -678,6 +678,10 @@ public sealed class CollectionCycleReaderCensusTests
         ["PgMigrations.cs::V213Sql"] = "one-time, frozen DDL (adds read_source and re-creates the log view), never a reader",
         ["TimescaleSupport.cs::CreateCollectionHealthHourlySql"] = "the collection_health_hourly aggregate definition: it groups by collector_name, so the extra group is harmless, and a changed definition would force a drop and rebuild; the readers filter instead (CollectionHealthRollupSupport)",
         ["ViewerDataService.CollectionHealth.cs::RecentCollectionLogSql"] = "the Viewer's raw collection-log grid, by design",
+        /* #7616: both name the pg_blocking collector, through DarlingPgBlockingReader.PgBlockingCaptureFilter (one definition of a capture, aliased and not
+           copied, #3684), so the scan cannot see the collector_name predicate in the statement text. The cycle row has another collector name and never matches. */
+        ["DarlingPgBlockingReader.cs::PgBlockingCaptureLogWhere"] = "filters on collector_name = 'pg_blocking' through PgBlockingCaptureFilter, the one definition of a capture",
+        ["ViewerDataService.Fleet.cs::FleetTotalsSql"] = "its pg_blocking arm filters on collector_name = 'pg_blocking' through DarlingPgBlockingReader.PgBlockingCaptureFilter",
     };
 
     private static readonly Regex ReadStart = new(@"\bFROM\s+(?:collect\.)?(?:v_)?collection_log\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);

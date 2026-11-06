@@ -185,13 +185,12 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             var memoryTask = _dataService.GetMemoryTrendAsync(_serverId, startUtc, endUtc);
             var fileIoTask = _dataService.GetFileIoOverviewLatencyTrendAsync(_serverId, startUtc, endUtc);
 
-            // Fetch baselines for band rendering — chart-unit-matched metrics. referenceTime stays UTC
-            // (the baseline buckets key on hour-of-day / day-of-week of the naive-UTC store timestamps).
-            var referenceTime = fromDate ?? DateTime.UtcNow.AddHours(-hoursBack);
-            var cpuBaselineTask = _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.Cpu, referenceTime);
-            var waitBaselineTask = _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.WaitMsPerSec, referenceTime);
-            var ioBaselineTask = _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.IoLatency, referenceTime);
-            var blockingBaselineTask = _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.BlockingPerMinute, referenceTime);
+            // Fetch baselines for band rendering — chart-unit-matched metrics. #7644: each lane's band is one step per local
+            // hour of the window (the web Overview's shape), and each point is judged against its own hour's step.
+            var cpuBaselineTask = _dataService.GetBaselineStepsForLaneAsync(_serverId, MetricNames.Cpu, startUtc, endUtc);
+            var waitBaselineTask = _dataService.GetBaselineStepsForLaneAsync(_serverId, MetricNames.WaitMsPerSec, startUtc, endUtc);
+            var ioBaselineTask = _dataService.GetBaselineStepsForLaneAsync(_serverId, MetricNames.IoLatencyChart, startUtc, endUtc);
+            var blockingBaselineTask = _dataService.GetBaselineStepsForLaneAsync(_serverId, MetricNames.BlockingPerMinute, startUtc, endUtc);
 
             try
             {
@@ -316,7 +315,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     }
 
     internal void UpdateBlockingLane(List<(double Time, double Value)> blockingData,
-        List<(double Time, double Value)> deadlockData, BaselineBucket? baseline = null, double windowSpanDays = 0,
+        List<(double Time, double Value)> deadlockData, IReadOnlyList<PerformanceMonitor.Ui.BaselineBand.HourStep>? baseline = null, double windowSpanDays = 0,
         string blockingUnit = PerformanceMonitor.Ui.BlockingTrendLabels.ReportsUnit)
     {
         ClearChart(BlockingChart);
@@ -350,19 +349,11 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         double maxCount = 0;
 
         // Baseline band for blocking: added before the bars so it paints behind them (#7433)
-        if (baseline != null && baseline.SampleCount > 0 && baseline.EffectiveStdDev > 0)
+        if (baseline is { Count: > 0 })
         {
-            var upper = baseline.Mean + 2 * baseline.EffectiveStdDev;
-            var lower = Math.Max(0, baseline.Mean - 2 * baseline.EffectiveStdDev);
+            _crosshairManager?.SetLaneBaselineSteps(BlockingChart, baseline, isEventBased: true);
 
-            _crosshairManager?.SetLaneBaseline(BlockingChart, lower, upper, isEventBased: true);
-
-            PerformanceMonitor.Ui.BaselineBand.Add(BlockingChart.Plot, lower, upper, ChartPalette.AccentColor("BaselineBlocking"));
-
-            var meanLine = BlockingChart.Plot.Add.HorizontalLine(baseline.Mean);
-            meanLine.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("BaselineBlocking")).WithAlpha(60);
-            meanLine.LinePattern = ScottPlot.LinePattern.Dashed;
-            meanLine.LineWidth = 1;
+            PerformanceMonitor.Ui.BaselineBand.AddSteps(BlockingChart.Plot, baseline, ChartPalette.AccentColor("BaselineBlocking"));
         }
 
         // Blocking bars — red
@@ -416,7 +407,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     internal void UpdateCpuLane(
         List<(double Time, double Value)> sqlData,
         List<(double Time, double Value)> totalData,
-        BaselineBucket? baseline = null)
+        IReadOnlyList<PerformanceMonitor.Ui.BaselineBand.HourStep>? baseline = null)
     {
         ClearChart(CpuChart);
         ApplyTheme(CpuChart);
@@ -437,25 +428,18 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         _crosshairManager?.AddLaneSeries(CpuChart, "Total", "%", totalTimes, totalValues);
 
         // Baseline band — applies to SQL CPU (what the baseline was computed on)
-        if (baseline != null && baseline.SampleCount > 0 && baseline.EffectiveStdDev > 0)
+        if (baseline is { Count: > 0 })
         {
-            var upper = baseline.Mean + 2 * baseline.EffectiveStdDev;
-            var lower = Math.Max(0, baseline.Mean - 2 * baseline.EffectiveStdDev);
+            _crosshairManager?.SetLaneBaselineSteps(CpuChart, baseline, 10);
 
-            _crosshairManager?.SetLaneBaseline(CpuChart, lower, upper, 10);
+            PerformanceMonitor.Ui.BaselineBand.AddSteps(CpuChart.Plot, baseline, ChartPalette.AccentColor("BaselineCpu"));
 
-            PerformanceMonitor.Ui.BaselineBand.Add(CpuChart.Plot, lower, upper, ChartPalette.AccentColor("BaselineCpu"));
-
-            var meanLine = CpuChart.Plot.Add.HorizontalLine(baseline.Mean);
-            meanLine.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("BaselineCpu")).WithAlpha(60);
-            meanLine.LinePattern = ScottPlot.LinePattern.Dashed;
-            meanLine.LineWidth = 1;
-
-            // Anomaly markers on SQL series only
+            // Anomaly markers on SQL series only. #7644: each point is judged against its own hour's step, and a point in an hour with no step is not marked.
             var anomalyIndices = new List<int>();
             for (int i = 0; i < sqlValues.Length; i++)
             {
-                if ((sqlValues[i] > upper && sqlValues[i] >= 10) || sqlValues[i] < lower)
+                var step = PerformanceMonitor.Ui.BaselineBand.HourStep.At(baseline, sqlTimes[i]);
+                if (step is not null && ((sqlValues[i] > step.Upper && sqlValues[i] >= 10) || sqlValues[i] < step.Lower))
                     anomalyIndices.Add(i);
             }
 
@@ -508,7 +492,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
     internal void UpdateLane(ScottPlot.WPF.WpfPlot chart, string title,
         List<(double Time, double Value)> data, string colorHex,
-        double? yMin = null, double? yMax = null, BaselineBucket? baseline = null,
+        double? yMin = null, double? yMax = null, IReadOnlyList<PerformanceMonitor.Ui.BaselineBand.HourStep>? baseline = null,
         double minAnomalyValue = 0, IReadOnlyList<long>? pointReads = null, long minPointReads = 0)
     {
         ClearChart(chart);
@@ -524,27 +508,23 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         var values = data.Select(d => d.Value).ToArray();
 
         // Render baseline band FIRST (behind the data line)
-        if (baseline != null && baseline.SampleCount > 0 && baseline.EffectiveStdDev > 0)
+        if (baseline is { Count: > 0 })
         {
-            var upper = baseline.Mean + 2 * baseline.EffectiveStdDev;
-            var lower = Math.Max(0, baseline.Mean - 2 * baseline.EffectiveStdDev);
+            _crosshairManager?.SetLaneBaselineSteps(chart, baseline, minAnomalyValue);
 
-            _crosshairManager?.SetLaneBaseline(chart, lower, upper, minAnomalyValue);
+            PerformanceMonitor.Ui.BaselineBand.AddSteps(chart.Plot, baseline, colorHex);
 
-            PerformanceMonitor.Ui.BaselineBand.Add(chart.Plot, lower, upper, colorHex);
-
-            var meanLine = chart.Plot.Add.HorizontalLine(baseline.Mean);
-            meanLine.Color = ScottPlot.Color.FromHex(colorHex).WithAlpha(60);
-            meanLine.LinePattern = ScottPlot.LinePattern.Dashed;
-            meanLine.LineWidth = 1;
-
-            // Highlight anomalous points (outside ± 2σ band AND above absolute minimum)
+            // Highlight anomalous points (outside ± 2σ band AND above absolute minimum). #7644: each point is judged against its own
+            // hour's step, and a point in an hour with no step is not marked.
             var anomalyIndices = new List<int>();
             for (int i = 0; i < values.Length; i++)
             {
+                var step = PerformanceMonitor.Ui.BaselineBand.HourStep.At(baseline, times[i]);
+                if (step is null)
+                    continue;
                 /* #7624: a lane with a read floor (I/O) marks only a point whose reads reach it, as the web strip does. */
                 var reads = pointReads != null && i < pointReads.Count ? pointReads[i] : 0;
-                if (OverviewIoReadFloor.IsAnomaly(values[i], upper, lower, minAnomalyValue, reads, pointReads == null ? 0 : minPointReads))
+                if (OverviewIoReadFloor.IsAnomaly(values[i], step.Upper, step.Lower, minAnomalyValue, reads, pointReads == null ? 0 : minPointReads))
                     anomalyIndices.Add(i);
             }
 

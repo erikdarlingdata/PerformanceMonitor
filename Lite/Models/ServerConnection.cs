@@ -162,6 +162,17 @@ public class ServerConnection : INotifyPropertyChanged
     public System.Collections.Generic.List<string> ExcludedDatabases { get; set; } = new();
 
     /// <summary>
+    /// #7639: on Azure SQL Database, the databases that get Extended Events sessions (deadlock, blocked process, client
+    /// timeout, long query completions), each a database-scoped session that Azure caps per pool. Empty = every database,
+    /// which is how it worked before this setting. When set, only these get a session; <see cref="ExcludedDatabases"/> still
+    /// applies and wins. A server-scoped session on a box SQL Server covers every database and ignores this. A session this
+    /// install made in a database left off the list is left in place, never dropped. The ownerless legacy long-query session
+    /// is dropped in every database. Saved in servers.json; an older file
+    /// without the field loads it as empty.
+    /// </summary>
+    public System.Collections.Generic.List<string> XeSessionDatabases { get; set; } = new();
+
+    /// <summary>
     /// #1319: the per-server global database FILTER (display-only). When non-empty, database-scoped
     /// views (query grids, blocking, per-DB config, trends/slicers/heatmap) show only these databases;
     /// empty = "All" (today's behavior). Distinct from <see cref="ExcludedDatabases"/>, which is

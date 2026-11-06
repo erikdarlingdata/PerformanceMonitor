@@ -690,7 +690,8 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains("GRANT INSERT, DELETE ON config.config_monitored_servers TO mcp;", sql, StringComparison.Ordinal);
 
         /* The UPDATE is column by column (#5452): every column but the AWS role and external ID, which change through the edit function. */
-        Assert.Contains($"GRANT UPDATE ({DarlingManagedRoles.McpMonitoredServerUpdateColumns})", sql, StringComparison.Ordinal);
+        Assert.Contains($"GRANT UPDATE ({DarlingManagedRoles.McpMonitoredServerBaseUpdateColumns})", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT UPDATE (xe_session_databases) ON config.config_monitored_servers TO mcp;", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("GRANT INSERT, UPDATE, DELETE ON config.config_monitored_servers", sql, StringComparison.Ordinal);
 
         /* Still NARROW: no schema-wide config write for mcp, and NO ALTER DEFAULT PRIVILEGES names mcp (either

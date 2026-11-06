@@ -17,7 +17,7 @@
    Self-contained: admin.js hands this file its helpers, so a change here never touches that file's tab code. */
 
 import { VIZ } from "../panels.js";
-import { el, mount, errorStrip, noticeStrip, listOnlyNote, apiGet, apiWrite } from "../util.js";
+import { el, mount, errorStrip, noticeStrip, captionStrip, adminListOnlyNote, apiGet, apiWrite } from "../util.js";
 
 /** The capabilities a grant gives, in the order the picker lists them, with their words. */
 export const CAPABILITIES = [
@@ -133,7 +133,7 @@ export function peopleOutcome(res) {
   return { message: "Nothing was changed. The service answered " + res.status + "." + (said ? " " + said : ""), isError: true };
 }
 
-const listOnly = (managed, adminWritesOff) => listOnlyNote(managed, "this page lists people only", "To add or change a person", adminWritesOff);
+const listOnly = (managed, adminWritesOff) => adminListOnlyNote(managed, "this page lists people only", "To add or change a person", adminWritesOff);
 const CAN_DECIDE =
   "The people the service knows, the sign-ins that map to each one, and what each one may do. A grant names what the person may do and where: " +
   "one server, one tag, or all servers. An approve grant lets that person approve the actions an agent proposes, only for the kinds and the scope it names. The other grants are not read yet. " +
@@ -224,7 +224,7 @@ export async function buildPeople(body, generation, ctx) {
     const session = await ctx.getSession();
     notice = listOnly(session.managed_store === true, session.admin_writes_off === true);
   }
-  nodes.push(noticeStrip(notice));
+  nodes.push(captionStrip(notice));
   nodes.push(keyPanel(key));
   const people = data.people;
   if (canDecide) {

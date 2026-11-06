@@ -1005,6 +1005,26 @@ WHERE server_id = $1";
         await ExecuteWriteAsync(command, cancellationToken);
     }
 
+    /// <summary>One server's "Databases that get Extended Events sessions" list (#7639, V247); empty when none is set or the server is gone.</summary>
+    public async Task<List<string>> GetMonitoredServerXeSessionDatabasesAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        var stored = await MonitoredServerXeSessionDatabases.ReadAsync(_dataSource, serverId, cancellationToken);
+        return stored?.ToList() ?? new List<string>();
+    }
+
+    /// <summary>Rewrites a server's "Databases that get Extended Events sessions" list (#7639, V247). Empty means every database.</summary>
+    public async Task SetMonitoredServerXeSessionDatabasesAsync(int serverId, IEnumerable<string> databases, CancellationToken cancellationToken = default)
+    {
+        var names = MonitoredServerExclusions.Prepare(databases);
+        if (MonitoredServerXeSessionDatabases.Refusal(names) is string refusal)
+        {
+            throw new InvalidOperationException(refusal);
+        }
+
+        await using var command = MonitoredServerXeSessionDatabases.CreateSetCommand(_dataSource, serverId, names, ViewerCommandDeadlines.CurrentInteractiveReadSeconds);
+        await ExecuteWriteAsync(command, cancellationToken);
+    }
+
     /// <summary>Binds the 21 upsert/insert parameters ($1..$21) from a row (created_at/modified_at are server-side).</summary>
     private static void BindMonitoredServer(NpgsqlCommand command, MonitoredServerRow row)
     {

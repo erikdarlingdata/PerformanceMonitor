@@ -84,6 +84,9 @@ public static class DarlingXeSessions
 
         public string? BlockedProcessPartialNote { get; set; }
 
+        /// <summary>#7639: the same for the client-timeout (attention) session, the counterpart of Lite's client-timeout run note.</summary>
+        public string? AttentionPartialNote { get; set; }
+
         /// <summary>
         /// True when the deadlock ensure of an on-premises, Managed Instance or RDS server failed with a transient error (a timeout, a
         /// dropped connection). That is not a fault for the run: the session may well be running, so the run reads it as it did before
@@ -388,12 +391,17 @@ public static class DarlingXeSessions
         var deadlockTally = new CaptureTally();
         var blockedTally = new CaptureTally();
 
+        /* #7639: the client-timeout create per database too, for the run note Lite's client-timeout run carries. Its PERMISSIONS fault
+           below keeps its own rule (every database denied). */
+        var attentionTally = new CaptureTally();
+
         /* #5640 (H2): the databases where the client-timeout create was refused for permission, against the databases it was tried
            in. The run records PERMISSIONS only when EVERY database refused it; a refusal in some leaves the survivors' read real. */
         var attentionTried = 0;
         AttentionEnsureFault? attentionDenied = null;
         var attentionDeniedIn = 0;
         List<string> databases;
+        var listMatchesNone = false;
         try
         {
             /* No #3477 scope here, deliberately: this list provisions the always-on SESSIONS for two
@@ -406,6 +414,13 @@ public static class DarlingXeSessions
             databases = runner.AzureDatabaseListOverrideForTests is { } listOverride
                 ? await listOverride(server, cancellationToken)
                 : await runner.GetAzureDatabaseListAsync(server, databaseScope: null, cancellationToken);
+
+            /* #7639: the server's "Databases that get Extended Events sessions" list narrows the creates, after the excluded databases
+               (the list above already leaves those out, so they win). Empty = every database. A database left off is never attempted, so
+               it is neither refused nor in any run note, and a per-install session already there is left alone. */
+            var beforeTheList = databases;
+            databases = XeSessionDatabaseList.Apply(databases, server.Config.XeSessionDatabases).ToList();
+            listMatchesNone = XeSessionDatabaseList.MatchesNone(beforeTheList, server.Config.XeSessionDatabases, databases);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -455,6 +470,7 @@ public static class DarlingXeSessions
                     attentionTried++;
                     var denied = await DarlingAlwaysOnXeSessions.EnsureAsync(
                         database, runner, server, databaseName, AlwaysOnXeSessionKind.Attention, "client timeout", logger, cancellationToken);
+                    attentionTally.Record(databaseName, denied);
                     if (denied is { IsPermission: true })
                     {
                         attentionDenied ??= new AttentionEnsureFault(denied.Message);
@@ -471,6 +487,10 @@ public static class DarlingXeSessions
                 var unreached = new XeEnsureFailure($"The database could not be reached to create its XE sessions: {ex.Message}", IsPermission: false);
                 deadlockTally.Record(databaseName, unreached);
                 blockedTally.Record(databaseName, unreached);
+                if (attentionEnabled)
+                {
+                    attentionTally.Record(databaseName, unreached);
+                }
             }
             finally
             {
@@ -483,6 +503,18 @@ public static class DarlingXeSessions
         {
             (outcome.Deadlock, outcome.DeadlockPartialNote) = deadlockTally.Result();
             (outcome.BlockedProcess, outcome.BlockedProcessPartialNote) = blockedTally.Result();
+
+            /* Only the note is kept: a client-timeout create refused everywhere is the PERMISSIONS fault returned below, or no fault at all. */
+            outcome.AttentionPartialNote = attentionTally.Result().PartialNote;
+
+            /* A list that names no database the server has attempts nothing and refuses nothing, so the tallies are empty. The two
+               runs say so in their note instead of recording SUCCESS with no rows and no reason. */
+            if (listMatchesNone)
+            {
+                outcome.DeadlockPartialNote = XeSessionDatabaseList.MatchesNoDatabaseNote;
+                outcome.BlockedProcessPartialNote = XeSessionDatabaseList.MatchesNoDatabaseNote;
+                outcome.AttentionPartialNote = attentionEnabled ? XeSessionDatabaseList.MatchesNoDatabaseNote : null;
+            }
         }
 
         return attentionTried > 0 && attentionDeniedIn == attentionTried ? attentionDenied : null;
@@ -1456,7 +1488,13 @@ SELECT /* PerformanceMonitorDarling */
         var legacyBeforeCreate = new HashSet<string>(legacyDatabases, StringComparer.OrdinalIgnoreCase);
         var created = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var databaseName in LongQueryTraceDatabases.Plan(enabled: true, Array.Empty<string>(), monitored, separatelyMonitored, keptElsewhere: Array.Empty<string>()).Create)
+        /* #7639: the "Databases that get Extended Events sessions" list narrows the creates only. The monitored set the drop reads stays whole, so a
+           session this install made in a database left off the list is kept, not dropped. The ownerless legacy session is not governed by the list:
+           its drop below reaches every listed database, left off or not, because it holds an Azure session slot that nothing owns. */
+        var plannedCreates = LongQueryTraceDatabases.Plan(enabled: true, Array.Empty<string>(), monitored, separatelyMonitored, keptElsewhere: Array.Empty<string>()).Create;
+        var narrowedCreates = XeSessionDatabaseList.Apply(plannedCreates, server.Config.XeSessionDatabases);
+
+        foreach (var databaseName in narrowedCreates)
         {
             cancellationToken.ThrowIfCancellationRequested();
             attempted++;
@@ -1559,7 +1597,8 @@ SELECT /* PerformanceMonitorDarling */
            #2623 composer, so this loss is worded exactly as the runners word theirs; null when nothing
            failed, which is the ordinary sweep. The first failure is worded as the per-database line above words it, so a
            create or start refused on Azure SQL Database carries the caps sentence in the note too (#4961). */
-        var partialNote = EnumeratedCollectorDriver.BuildPartialFailureNote(failed, attempted, failedDatabases, firstFailure is null ? null : AlwaysOnXeSessions.DescribeFailure(firstFailure));
+        var partialNote = EnumeratedCollectorDriver.BuildPartialFailureNote(failed, attempted, failedDatabases, firstFailure is null ? null : AlwaysOnXeSessions.DescribeFailure(firstFailure))
+            ?? (XeSessionDatabaseList.MatchesNone(plannedCreates, server.Config.XeSessionDatabases, narrowedCreates) ? XeSessionDatabaseList.MatchesNoDatabaseNote : null);
 
         /* The worker's hourly pass while the trace is on stops here: it brings back a session dropped from outside,
            and leaves the drop side to a connect, a change of the state key, or an attempt after the cap. */

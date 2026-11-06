@@ -185,6 +185,8 @@ public static class DarlingManagedRoles
                 "server_id", "name", "host", "database", "auth", "username", "encrypt_mode",
                 "trust_server_certificate", "read_only_intent", "multi_subnet_failover",
                 "excluded_databases", "monthly_cost_usd", "capture_plans", "is_enabled",
+                /* V247 (#7639): database names, non-secret like excluded_databases. */
+                "xe_session_databases",
                 "created_at", "modified_at", "alert_delivery_mode_override",
                 /* V68. Non-secret: which engine a target is, and its port, are exactly as sensitive as its
                    host — which is already readable. The fail-closed design is why they have to be named at
@@ -1791,8 +1793,20 @@ REVOKE UPDATE ON {config}.config_monitored_servers FROM {mcp};
 -- The role and external ID of a server are set only through the edit function (and an INSERT): mcp's UPDATE
 -- names every other column of the table and leaves out aws_role_arn, aws_external_id and the generated
 -- aws_external_id_set. A column added to the table later is added to this list.
-GRANT UPDATE ({McpMonitoredServerUpdateColumns})
+GRANT UPDATE ({McpMonitoredServerBaseUpdateColumns})
    ON {config}.config_monitored_servers TO {mcp};
+-- V247 (#7639): the databases that get Extended Events sessions are a column that set_server_xe_session_databases writes with a plain UPDATE (edit_server
+-- refuses it), so mcp updates it directly like the others. Its own statement, guarded on the column, so a store below V247 still commits the rest of the script.
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = pg_catalog.to_regclass('{config}.config_monitored_servers')
+                AND attname = 'xe_session_databases' AND NOT attisdropped) THEN
+      EXECUTE $v247u$
+GRANT UPDATE (xe_session_databases) ON {config}.config_monitored_servers TO {mcp};
+$v247u$;
+   END IF;
+END $$;
 
 -- 10. Custom-alert resolve-on-delete privileged write (#3334). The recovery/resolution row a caller-initiated
 --     rule DELETE writes (CustomAlertEvaluator.WriteTeardownResolutionAsync) lands in config.config_alert_log,
@@ -3821,7 +3835,10 @@ REVOKE ALL ON FUNCTION {config}.request_mcp_command(text, integer, integer, text
     // NOT IN (...) beside the column-set check) instead. query_store_replica (#6254) is one: never add it here, a direct UPDATE
     // would skip the edit core.
     /// <summary>The columns of <c>config.config_monitored_servers</c> the <c>mcp</c> login may UPDATE directly (#5452): every column except the AWS role, the external ID, the generated external-ID flag and <c>query_store_replica</c> (#6254), which change only through <c>config.edit_monitored_server</c>. <c>tools/provision-roles.sql</c> carries the same list.</summary>
-    internal const string McpMonitoredServerUpdateColumns =
+    internal const string McpMonitoredServerUpdateColumns = McpMonitoredServerBaseUpdateColumns + ", xe_session_databases";
+
+    /// <summary>The columns of <see cref="McpMonitoredServerUpdateColumns"/> granted in the one main <c>GRANT UPDATE</c>. <c>xe_session_databases</c> (V247, #7639) is left out and granted in its own statement guarded on the column, in this batch and in <c>tools/provision-roles.sql</c>, so a store below V247 still commits the rest.</summary>
+    internal const string McpMonitoredServerBaseUpdateColumns =
         "server_id, name, host, database, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, capture_plans, is_enabled, created_at, modified_at, alert_delivery_mode_override, engine, port, plan_force_bot_enabled, remediation_username, remediation_encrypted_password";
 
     /// <summary>The argument types of <c>config.edit_monitored_server</c> (#5240, 18 since #6254), in order. The one place the signature is

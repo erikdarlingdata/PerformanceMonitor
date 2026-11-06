@@ -94,12 +94,12 @@ CREATE TABLE IF NOT EXISTS collect.query_store_self_keys_state (
 
     /// <summary>
     /// V219's trigger as it shipped: the marker test alone. V219 keeps running this text, so a migration that already ran is never
-    /// edited (V247 replaces the function with <see cref="TriggerSql"/>, which also recognizes the old statements, #7730).
+    /// edited (V248 replaces the function with <see cref="TriggerSql"/>, which also recognizes the old statements, #7730).
     /// </summary>
     public static readonly string MarkerOnlyTriggerSql = BuildTriggerSql(QueryStoreSelfStatement.SelfOfText);
 
     /// <summary>
-    /// V247 (#7730): reopens the backfill. The state row is deleted, so <see cref="ReadyAsync"/> answers false until
+    /// V248 (#7730): reopens the backfill. The state row is deleted, so <see cref="ReadyAsync"/> answers false until
     /// <see cref="RunDelayedAsync"/> has run <see cref="BackfillAsync"/> again, which now also keys the old statements stored earlier
     /// (<see cref="SqlServerOwnStatement"/>). The reads use the text probe meanwhile, as they do on a store that was never backfilled.
     /// The backfill tolerates the keys that already exist (<c>ON CONFLICT DO NOTHING</c>, <see cref="BackfillSql"/>) and its stamp is

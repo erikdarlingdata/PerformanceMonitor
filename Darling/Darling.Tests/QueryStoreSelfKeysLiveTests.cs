@@ -263,7 +263,7 @@ public sealed class QueryStoreSelfKeysLiveTests
 
     /// <summary>
     /// #7730: an old statement (no marker, <see cref="SqlServerOwnStatement"/>) gets its key from the trigger when it is stored, and from
-    /// the reopened backfill when it was stored earlier. V247 deletes the state row, so the gate is closed until the backfill has run and the
+    /// the reopened backfill when it was stored earlier. V248 deletes the state row, so the gate is closed until the backfill has run and the
     /// reads (the marker-only text probe meanwhile) still list it; once the backfill has keyed it, both Regressions reads and both Query Store
     /// top reads hide it.
     /// </summary>
@@ -291,10 +291,10 @@ public sealed class QueryStoreSelfKeysLiveTests
             await insert.ExecuteNonQueryAsync(ct);
         }
 
-        /* V247's trigger keys the old text as it lands (and only that text). */
+        /* V248's trigger keys the old text as it lands (and only that text). */
         Assert.Equal([Own], await KeyIdsAsync(rig.Connection, ct));
 
-        /* The text stored before the rung: no key, and the gate reopened (V247 deletes the state row). */
+        /* The text stored before the rung: no key, and the gate reopened (V248 deletes the state row). */
         await using (var reset = new NpgsqlCommand("DELETE FROM collect.query_store_self_keys; " + QueryStoreSelfKeys.ReopenBackfillSql, rig.Connection))
         {
             await reset.ExecuteNonQueryAsync(ct);

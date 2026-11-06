@@ -155,12 +155,19 @@ public static class LongQueryTraceDatabases
         IEnumerable<string>? databaseScope,
         IEnumerable<string>? excludedDatabases,
         IEnumerable<string> separatelyMonitoredDatabases,
-        IEnumerable<string> coOwners)
+        IEnumerable<string> coOwners,
+        IEnumerable<string>? xeSessionDatabases = null)
     {
         var owned = JoinNames(separatelyMonitoredDatabases);
         var others = string.Join(CoOwnerSeparator, coOwners.Distinct(StringComparer.Ordinal).OrderBy(owner => owner, StringComparer.Ordinal));
+
+        /* #7639: the "Databases that get Extended Events sessions" list narrows the creates, so a change to it must run the
+           reconcile again. Part of the key only while it is set, so a registration without the list keeps the key it had. */
+        var xeList = xeSessionDatabases is null ? string.Empty : JoinNames(xeSessionDatabases);
         return enabled
-            ? string.Join(PartSeparator, "on", JoinNames(databaseScope), JoinNames(excludedDatabases), owned, others)
+            ? (xeList.Length == 0
+                ? string.Join(PartSeparator, "on", JoinNames(databaseScope), JoinNames(excludedDatabases), owned, others)
+                : string.Join(PartSeparator, "on", JoinNames(databaseScope), JoinNames(excludedDatabases), owned, others, "xe", xeList))
             : string.Join(PartSeparator, "off", owned, others);
     }
 

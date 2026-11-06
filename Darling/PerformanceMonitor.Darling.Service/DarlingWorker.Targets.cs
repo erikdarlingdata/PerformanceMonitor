@@ -2955,12 +2955,9 @@ LIMIT 1";
                the read joined an absent session and returned zero rows, and the run recorded SUCCESS. */
             if (CaptureEnsureFaultFor(collectorName, server) is { } captureFault)
             {
-                if (captureFault.IsPermission)
-                {
-                    throw new DarlingXeSessionDeniedException(captureFault.Message);
-                }
-
-                throw new DarlingXeSessionMissingException(captureFault.Message);
+                await RaiseCaptureEnsureFaultAsync(
+                    collectorName, runtime.Target.IsAzureSqlDb, captureFault,
+                    () => run(runner, runtime, cancellationToken), _logger, server.Config.DisplayName);
             }
 
             var result = await run(runner, runtime, cancellationToken);

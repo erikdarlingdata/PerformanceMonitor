@@ -102,9 +102,11 @@ internal static class DarlingAlwaysOnXeSessions
 
             /* #5640 (H2): the client-timeout session's permission denial, for the run to record as PERMISSIONS. Any other failure of
                that session leaves it absent and its read records SESSION_MISSING. #6893: the deadlock and blocked-process sessions
-               carry every failure, classified the same way. */
-            return kind == AlwaysOnXeSessionKind.Attention
-                ? DarlingXeSessions.AttentionFaultFor(ex) is { } attentionFault ? new DarlingXeSessions.XeEnsureFailure(attentionFault.Message, IsPermission: true) : null
+               carry every failure, classified the same way. #7639: the client-timeout session's other failures are carried too (as
+               not a permission), so the caller can name the databases that refused it in the run note, as Lite does; the caller's
+               PERMISSIONS rule still looks at IsPermission alone. */
+            return kind == AlwaysOnXeSessionKind.Attention && DarlingXeSessions.AttentionFaultFor(ex) is { } attentionFault
+                ? new DarlingXeSessions.XeEnsureFailure(attentionFault.Message, IsPermission: true)
                 : DarlingXeSessions.CaptureFaultFor(ex, captureName);
         }
     }

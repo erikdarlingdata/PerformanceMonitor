@@ -338,6 +338,7 @@ public class PostgresTargetConfigTests
             ("EncryptMode", "encrypt_mode"),
             ("MultiSubnetFailover", "multi_subnet_failover"),
             ("ExcludedDatabases", "excluded_databases"),
+            ("XeSessionDatabases", "xe_session_databases"),
             ("MonthlyCostUsd", "monthly_cost_usd"),
             ("AlertDeliveryModeOverride", "alert_delivery_mode_override"),
             /* #2218. The one entry whose property name deliberately does not resemble its column: the
