@@ -41,8 +41,10 @@ using Xunit;
 /// <para>
 /// <b>Render engine start-up (#7600).</b> The first WPF body of a process pays WPF's render engine start-up (5 to 12 s on a green CI leg, 61 to
 /// 126 s on the stalled ones, the thread waiting in <c>wpfgfx_cor3!MilComposition_SyncFlush</c> for the render thread), and every later WPF test
-/// is fast. So the thread shows and closes one window before its first body, under the same hang guard: a start-up that overruns it is named as
-/// the start-up, not as whichever test came first, and later tests are refused until it returns. Its duration goes to the leg's log.
+/// is fast. So the thread shows and closes one window before its first body, under a guard of its own (<see cref="StaHost.StartUpGuard"/>) and
+/// never under a test's hang guard, so a host whose test shortens <see cref="HangGuard"/> to 300 ms still measures only its body: a start-up that
+/// overruns its guard is named as the start-up, not as whichever test came first, and later tests are refused until it returns. Its duration goes
+/// to the leg's log.
 /// </para>
 /// <para>
 /// <b>Where it stuck (#6216).</b> .NET Core cannot capture another thread's stack, so the timeout message carries what can be read from
@@ -180,6 +182,13 @@ internal sealed class StaHost
 {
     internal TimeSpan HangGuard { get; set; } = TimeSpan.FromSeconds(180);
 
+    /// <summary>
+    /// #7600: how long the render engine start-up ahead of the first body may take before the calling test fails naming the start-up. Separate from
+    /// <see cref="HangGuard"/>, which a host's own test shortens to prove the guard on a body: the start-up costs seconds on a cold runner, so a body
+    /// guard of 300 ms must never have to cover it. Settable so a test can force the overrun.
+    /// </summary>
+    internal TimeSpan StartUpGuard { get; set; } = TimeSpan.FromSeconds(180);
+
     /* A SemaphoreSlim, not a Monitor: a test may be async, so the releasing thread is not promised to be the taking one. */
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly object _startLock = new();
@@ -297,7 +306,7 @@ internal sealed class StaHost
     internal void Shutdown() =>
         (_dispatcher ?? (_starting is { IsCompletedSuccessfully: true } started ? started.Result : null))?.BeginInvokeShutdown(DispatcherPriority.Send);
 
-    private string GuardText() => HangGuard < TimeSpan.FromSeconds(1) ? $"{HangGuard.TotalMilliseconds:0} ms" : $"{HangGuard.TotalSeconds:0} s";
+    private static string GuardText(TimeSpan guard) => guard < TimeSpan.FromSeconds(1) ? $"{guard.TotalMilliseconds:0} ms" : $"{guard.TotalSeconds:0} s";
 
     private void RunCore(Func<Task> body)
     {
@@ -330,7 +339,7 @@ internal sealed class StaHost
                 }
 
                 throw new TimeoutException(
-                    $"WPF test body did not return within {GuardText()}: {name}. The shared STA test thread is stuck inside it, "
+                    $"WPF test body did not return within {GuardText(HangGuard)}: {name}. The shared STA test thread is stuck inside it, "
                     + "so every WPF test that starts while it is still inside fails at once naming this test (#5602). "
                     + DescribeStuckBody(opsAtStart, engineLoadedAtStart));
             }
@@ -564,7 +573,8 @@ internal sealed class StaHost
 
             var loadedBefore = StaThreadProbe.RenderEngineLoaded();
             var starting = _starting ??= StartThread();
-            if (!starting.Wait(HangGuard))
+            /* #7600: the wait is bounded by StartUpGuard, not HangGuard, so a host whose test shortened the hang guard measures only its body. */
+            if (!starting.Wait(StartUpGuard))
             {
                 /* #7600: the start-up is refused to later tests the way a stuck body is, and the refusal lifts the same way once it has returned. */
                 lock (_stuckLock)
@@ -574,7 +584,7 @@ internal sealed class StaHost
                 }
 
                 throw new TimeoutException(
-                    $"WPF's render engine did not start within {GuardText()}: the shared STA test thread shows and closes one window before its first test body, "
+                    $"WPF's render engine did not start within {GuardText(StartUpGuard)}: the shared STA test thread shows and closes one window before its first test body, "
                     + "so the engine's start-up is paid once per process and outside every test's hang guard (#7600). It has not returned, and this test did not run. "
                     + DescribeStuckBody(0, loadedBefore));
             }

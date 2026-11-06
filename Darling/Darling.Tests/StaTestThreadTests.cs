@@ -287,23 +287,25 @@ public sealed class StaTestThreadTests
     /// <summary>
     /// #7600: in every leg's result file the first WPF body of the process pays WPF's render engine start-up (5 to 12 s on a green leg, 61 to
     /// 126 s on the five stalled ones), and every later WPF test is fast. That cost landed inside whichever test's hang guard came first. The
-    /// host now starts the engine once per process, on the shared thread before its first body, bounded by the hang guard: a start-up that
-    /// overruns it is named as the start-up, not as the test, and bodies run once it has finished, each beginning with the engine loaded.
+    /// host starts the engine once per process, on the shared thread before its first body, bounded by a start-up guard of its own and by no
+    /// test's hang guard: a start-up that overruns it is named as the start-up, not as the test, and bodies run once it has finished, each
+    /// beginning with the engine loaded.
     /// </summary>
     [Fact]
     public void TheRenderEngineIsStartedBeforeTheFirstBody_AndAStartUpThatOverrunsTheGuard_IsNamedAsItself()
     {
-        /* A guard no window can be shown and closed within, so the start-up overruns it and the first call names the start-up, not this body. */
-        var host = new StaHost { HangGuard = TimeSpan.FromMilliseconds(1) };
+        /* A start-up guard no window can be shown and closed within, so the start-up overruns it and the first call names the start-up, not this
+           body, whose own hang guard stays at its default. */
+        var host = new StaHost { StartUpGuard = TimeSpan.FromMilliseconds(1) };
         try
         {
             var ran = false;
             var timedOut = Assert.Throws<TimeoutException>(() => host.Run(() => ran = true));
             Assert.False(ran);
             Assert.StartsWith("WPF's render engine did not start within 1 ms", timedOut.Message);
+            Assert.Contains("render engine start-up", host.StuckTest);
 
             /* Once the start-up has finished the host runs bodies again, and each begins with the engine already loaded. */
-            host.HangGuard = TimeSpan.FromSeconds(60);
             var loadedAtBodyStart = false;
             Assert.True(
                 SpinWait.SpinUntil(() => RunsAfterRefusals(host, () => loadedAtBodyStart = RenderEngineIsLoaded()), TimeSpan.FromSeconds(60)),
