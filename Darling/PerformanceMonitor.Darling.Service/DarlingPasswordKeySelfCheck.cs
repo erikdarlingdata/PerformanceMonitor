@@ -20,11 +20,13 @@ namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
 /// The hidden <c>--self-check-password-key &lt;vector-path&gt;</c> verb (#5366): runs the real password key code in a
-/// fresh temporary directory and exits non-zero on any failure. The Linux build job runs it inside the built image,
+/// fresh temporary directory and exits non-zero on any failure. The Linux store workflow runs it inside the built image,
 /// because the test project runs on Windows and so never reaches the Unix owner, link-count and file-identity calls.
 ///
-/// <para>Three groups of checks. The key file: generate it, read the mode, owner and link count back, reload it to the
-/// same key id, and see a wider mode and a second name each refused. The file identity: a file and its hard link give
+/// <para>Four groups of checks. The key file: generate it, read the mode, owner and link count back, reload it to the
+/// same key id, and see a wider mode and a second name each refused. The external key (#8006): the <c>passwordKey</c>
+/// loader reads one key to the same key id from a base64 file, a PEM file, a Kubernetes-style <c>..data</c> link chain
+/// and an environment variable, and refuses a PKCS#1 PEM, a 2048-bit key and a literal. The file identity: a file and its hard link give
 /// one identity and two files give two. The vector: a sealed value made on another platform opens here to the expected
 /// text, and stops opening when a bound field changes. A check that cannot be made counts as a failure, never as a
 /// pass.</para>
@@ -79,6 +81,7 @@ internal static class DarlingPasswordKeySelfCheck
         {
             work = Directory.CreateTempSubdirectory("password-key-self-check-").FullName;
             Report("key file", Guarded(() => OperatingSystem.IsWindows() ? "not run on Windows" : CheckKeyFile(Path.Combine(work, "keys"))));
+            Report("external key", Guarded(() => OperatingSystem.IsWindows() ? "not run on Windows" : CheckExternalKey(Path.Combine(work, "external"))));
             Report("file identity", Guarded(() => CheckFileIdentity(Path.Combine(work, "identity"))));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -94,7 +97,7 @@ internal static class DarlingPasswordKeySelfCheck
 
         if (failures > 0)
         {
-            error.WriteLine($"The password key self-check failed ({failures} of 3 checks).");
+            error.WriteLine($"The password key self-check failed ({failures} of 4 checks).");
             return 1;
         }
 
@@ -271,6 +274,227 @@ internal static class DarlingPasswordKeySelfCheck
         return load.Untrusted && load.Refusal is not null
             ? null
             : $"the key file was not refused as untrusted {when}";
+    }
+
+    /// <summary>The variable the env: case sets for the length of the check and clears after. It names no setting the
+    /// service reads, so it can never stand in for a real key.</summary>
+    private const string ExternalKeyVariable = "DARLING_SELF_CHECK_PASSWORD_KEY";
+
+    /// <summary>The <c>passwordKey</c> source (#8006) on this Unix system: one generated key loads to the same key id from
+    /// a base64 file, a PEM file, a Kubernetes-style secret mount (a link to <c>..data/password-key</c>, where
+    /// <c>..data</c> links to a timestamped directory holding the file at mode 440) and an environment variable with
+    /// whitespace around the base64; a PKCS#1 PEM, a 2048-bit key and a literal are each refused. Returns null when all
+    /// of it held, otherwise the first thing that did not.</summary>
+    [UnsupportedOSPlatform("windows")]
+    internal static string? CheckExternalKey(string directory)
+    {
+        var logger = NullLogger.Instance;
+        Directory.CreateDirectory(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+        byte[]? pkcs8 = null;
+        char[]? base64 = null;
+        try
+        {
+            pkcs8 = NewKeyBytes();
+            var keyId = KeyIdOf(pkcs8);
+            base64 = ToBase64Chars(pkcs8);
+
+            var base64File = Path.Combine(directory, "password-key.b64");
+            WriteKeyText(base64File, base64);
+            var failure = ExternalMustLoad("file:" + base64File, keyId, logger, "a base64 file");
+            if (failure is not null)
+            {
+                return failure;
+            }
+
+            var pemFile = Path.Combine(directory, "password-key.pem");
+            var pem = PemEncoding.Write("PRIVATE KEY", pkcs8);
+            try
+            {
+                WriteKeyText(pemFile, pem);
+            }
+            finally
+            {
+                Array.Clear(pem);
+            }
+
+            failure = ExternalMustLoad("file:" + pemFile, keyId, logger, "a PEM file");
+            if (failure is not null)
+            {
+                return failure;
+            }
+
+            /* The layout the kubelet gives a secret volume: the name the pod sees is a link through ..data, which is itself
+               a link the kubelet swaps atomically to a new timestamped directory on every update. */
+            var mount = Path.Combine(directory, "k8s");
+            var version = "..2026_01_01_00_00_00.000000001";
+            Directory.CreateDirectory(Path.Combine(mount, version));
+            var realFile = Path.Combine(mount, version, "password-key");
+            WriteKeyText(realFile, base64);
+            File.SetUnixFileMode(realFile, UnixFileMode.UserRead | UnixFileMode.GroupRead);
+            Directory.CreateSymbolicLink(Path.Combine(mount, "..data"), version);
+            File.CreateSymbolicLink(Path.Combine(mount, "password-key"), Path.Combine("..data", "password-key"));
+            failure = ExternalMustLoad("file:" + Path.Combine(mount, "password-key"), keyId, logger, "a secret mount link");
+            if (failure is not null)
+            {
+                return failure;
+            }
+
+            try
+            {
+                Environment.SetEnvironmentVariable(ExternalKeyVariable, " " + new string(base64) + "\n");
+                failure = ExternalMustLoad("env:" + ExternalKeyVariable, keyId, logger, "an environment variable");
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(ExternalKeyVariable, null);
+            }
+
+            if (failure is not null)
+            {
+                return failure;
+            }
+
+            failure = CheckPkcs1Refused(pkcs8, Path.Combine(directory, "pkcs1.pem"), logger);
+            if (failure is not null)
+            {
+                return failure;
+            }
+
+            failure = CheckSmallKeyRefused(Path.Combine(directory, "rsa-2048.b64"), logger);
+            if (failure is not null)
+            {
+                return failure;
+            }
+
+            var literal = DarlingPasswordKeySource.LoadFromSetting(new string(base64), credentialsDirectory: null, logger);
+            return ExternalMustBeRefused(literal, "a literal");
+        }
+        finally
+        {
+            if (pkcs8 is not null)
+            {
+                CryptographicOperations.ZeroMemory(pkcs8);
+            }
+
+            if (base64 is not null)
+            {
+                Array.Clear(base64);
+            }
+        }
+    }
+
+    [UnsupportedOSPlatform("windows")]
+    private static string? CheckPkcs1Refused(byte[] pkcs8, string path, Microsoft.Extensions.Logging.ILogger logger)
+    {
+        using (var rsa = RSA.Create())
+        {
+            rsa.ImportPkcs8PrivateKey(pkcs8, out _);
+            var pkcs1 = rsa.ExportRSAPrivateKey();
+            char[]? pem = null;
+            try
+            {
+                pem = PemEncoding.Write("RSA PRIVATE KEY", pkcs1);
+                WriteKeyText(path, pem);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(pkcs1);
+                if (pem is not null)
+                {
+                    Array.Clear(pem);
+                }
+            }
+        }
+
+        return ExternalMustBeRefused(DarlingPasswordKeySource.LoadFromSetting("file:" + path, credentialsDirectory: null, logger), "a PKCS#1 PEM");
+    }
+
+    [UnsupportedOSPlatform("windows")]
+    private static string? CheckSmallKeyRefused(string path, Microsoft.Extensions.Logging.ILogger logger)
+    {
+        using (var rsa = RSA.Create(2048))
+        {
+            var der = rsa.ExportPkcs8PrivateKey();
+            char[]? text = null;
+            try
+            {
+                text = ToBase64Chars(der);
+                WriteKeyText(path, text);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(der);
+                if (text is not null)
+                {
+                    Array.Clear(text);
+                }
+            }
+        }
+
+        return ExternalMustBeRefused(DarlingPasswordKeySource.LoadFromSetting("file:" + path, credentialsDirectory: null, logger), "a 2048-bit key");
+    }
+
+    private static string? ExternalMustLoad(string reference, string keyId, Microsoft.Extensions.Logging.ILogger logger, string from)
+    {
+        var load = DarlingPasswordKeySource.LoadFromSetting(reference, credentialsDirectory: null, logger);
+        if (load.Pkcs8 is null)
+        {
+            return $"passwordKey did not read the key from {from}: " + (load.Refusal ?? "no key came back");
+        }
+
+        try
+        {
+            return load.Untrusted || load.Refusal is not null || KeyIdOf(load.Pkcs8) != keyId
+                ? $"passwordKey did not load the same key id from {from}"
+                : null;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(load.Pkcs8);
+        }
+    }
+
+    private static string? ExternalMustBeRefused(PasswordKeyFileLoad load, string what)
+    {
+        if (load.Pkcs8 is not null)
+        {
+            CryptographicOperations.ZeroMemory(load.Pkcs8);
+            return $"passwordKey read {what}";
+        }
+
+        return load.Untrusted && load.Refusal is not null
+            ? null
+            : $"passwordKey did not refuse {what} as untrusted";
+    }
+
+    private static char[] ToBase64Chars(byte[] bytes)
+    {
+        var chars = new char[(bytes.Length + 2) / 3 * 4];
+        Convert.ToBase64CharArray(bytes, 0, bytes.Length, chars, 0);
+        return chars;
+    }
+
+    /// <summary>Writes key text owner-only, through a byte buffer that is zeroed after, so no copy of the key is left in a
+    /// string.</summary>
+    [UnsupportedOSPlatform("windows")]
+    private static void WriteKeyText(string path, char[] text)
+    {
+        var bytes = System.Text.Encoding.ASCII.GetBytes(text);
+        try
+        {
+            using var stream = new FileStream(path, new FileStreamOptions
+            {
+                Mode = FileMode.CreateNew,
+                Access = FileAccess.Write,
+                UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite,
+            });
+            stream.Write(bytes);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(bytes);
+        }
     }
 
     /// <summary>The file identity: a file and its hard link give one identity, two files give two, and a missing path

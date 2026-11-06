@@ -18,7 +18,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #5366: the hidden <c>--self-check-password-key</c> verb. The Unix file checks (owner, link count, file identity) run only
-/// on Linux, in the Linux build job, so what is pinned here is what can be checked on any platform: the verb is reachable
+/// on Linux, in the Linux store workflow, so what is pinned here is what can be checked on any platform: the verb is reachable
 /// and stays out of the usage text, the sealed-value check opens the committed vector and fails closed on a changed
 /// vector, and the workflow step runs the verb from the built image with the vector mounted read-only.
 /// </summary>
@@ -162,24 +162,39 @@ public sealed class PasswordKeySelfCheckTests : IDisposable
         Assert.DoesNotContain("passed", output.ToString(), StringComparison.Ordinal);
     }
 
+    /// <summary>#8006: the step moved from build.yml, where the Linux image job became release-only (#6656) and the step
+    /// was skipped on every run, to the Linux store workflow, which runs on a pull request touching the key code and nightly.
+    /// The step has no condition of its own, so nothing skips it inside the job.</summary>
     [Fact]
-    public void The_Linux_build_job_runs_the_verb_in_the_image_with_the_vector_mounted_read_only()
+    public void The_Linux_store_workflow_runs_the_verb_in_the_image_with_the_vector_mounted_read_only()
     {
-        var workflow = ReadRepoFileLf(".github", "workflows", "build.yml");
-        var start = workflow.IndexOf("\n  darling-linux:", StringComparison.Ordinal);
-        Assert.True(start >= 0, "the darling-linux job was not found");
-        var next = workflow.IndexOf("\n  darling-", start + 10, StringComparison.Ordinal);
-        var job = next < 0 ? workflow[start..] : workflow[start..next];
+        var workflow = ReadRepoFileLf(".github", "workflows", "darling-linux-store.yml");
+        var start = workflow.IndexOf("\n  linux-store:", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the linux-store job was not found");
+        var job = workflow[start..];
 
         var step = job.IndexOf("--self-check-password-key", StringComparison.Ordinal);
-        Assert.True(step >= 0, "the darling-linux job does not run --self-check-password-key");
+        Assert.True(step >= 0, "the linux-store job does not run --self-check-password-key");
         var window = job[Math.Max(0, step - 900)..Math.Min(job.Length, step + 300)];
         Assert.Contains("docker run", window, StringComparison.Ordinal);
         Assert.Contains("linux-self-check-vector.json", window, StringComparison.Ordinal);
         Assert.Contains(":ro", window, StringComparison.Ordinal);
-        Assert.Contains("performancemonitor-darling:pr", window, StringComparison.Ordinal);
+        Assert.Contains("\"${DARLING_IMAGE}\"", window, StringComparison.Ordinal);
         Assert.DoesNotContain("continue-on-error", window, StringComparison.Ordinal);
         Assert.DoesNotContain("|| true", window, StringComparison.Ordinal);
+        Assert.DoesNotMatch(@"(?m)^\s*if:", window);
+
+        var trigger = workflow.IndexOf("\n  pull_request:", StringComparison.Ordinal);
+        Assert.True(trigger >= 0, "the pull_request trigger was not found");
+        var triggerEnd = workflow.IndexOf("\npermissions:", trigger, StringComparison.Ordinal);
+        Assert.True(triggerEnd > trigger, "the end of the pull_request trigger was not found");
+        var paths = workflow[trigger..triggerEnd];
+        Assert.Contains("paths:", paths, StringComparison.Ordinal);
+        Assert.Contains("DarlingPasswordKey", paths, StringComparison.Ordinal);
+        Assert.Contains("DarlingSecretSource.cs", paths, StringComparison.Ordinal);
+        Assert.Contains("Fixtures/PasswordSeal", paths, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("--self-check-password-key", ReadRepoFileLf(".github", "workflows", "build.yml"), StringComparison.Ordinal);
     }
 
     private static JsonObject Vector() => JsonNode.Parse(File.ReadAllText(VectorPath))!.AsObject();
