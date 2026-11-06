@@ -157,7 +157,11 @@ internal static class DarlingWebThresholdOverrides
             case "cleared":
                 return (200, answer);
             case "precondition":
-                return (403, new JsonObject { ["error"] = RefusedMessage(managedStore, adminWritesOff) });
+                return (403, new JsonObject
+                {
+                    ["error"] = RefusedMessage(managedStore, adminWritesOff),
+                    ["reason"] = DarlingWebStoreWrites.RefusalReason.ForStore(adminWritesOff),
+                });
             case "refused":
             case "invalid":
                 return (400, new JsonObject

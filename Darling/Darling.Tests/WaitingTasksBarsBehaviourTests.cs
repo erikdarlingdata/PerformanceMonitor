@@ -176,6 +176,20 @@ public sealed class WaitingTasksBarsBehaviourTests
         Assert.Equal("1.5", rows["Orders"]);
     }
 
+    /// <summary>
+    /// #7974: the mean is over every collection that ran in the bucket, so a database blocked in 1 of 60 collections is 0.017. A one-decimal
+    /// format printed that as "0.0", the same as a database that never blocked.
+    /// </summary>
+    [Fact]
+    public void BlockedSessions_ASporadicDatabase_ReadsItsSmallNonzeroMean_NeverZero()
+    {
+        var run = Run("mean");
+
+        var rows = run.GetProperty("tooltipRows").EnumerateArray()
+            .Select(r => r.EnumerateArray().Select(e => e.GetString()).ToArray()).ToDictionary(r => r[0]!, r => r[1]);
+        Assert.Equal("0.017", rows["Billing"]);
+    }
+
     [Fact]
     public void WaitingTasksGrid_ShowsThreadCount_BesideTheDuration()
     {

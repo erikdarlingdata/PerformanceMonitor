@@ -72,7 +72,8 @@ public static partial class ParameterCard
     /// <summary>
     /// The annotation lines the card shows below the table (or in place of the table when there are no
     /// parameters at all), in PerformanceStudio's order: the no-parameters/local-variables state OR the
-    /// all-compiled-null cause (OPTIMIZE FOR UNKNOWN vs. OPTION(RECOMPILE)) followed by unresolved
+    /// all-compiled-null cause (OPTIMIZE FOR UNKNOWN, OPTION(RECOMPILE), or neither in the statement, in
+    /// which case the plan simply did not capture the values) followed by unresolved
     /// variables. <paramref name="maskedStatementText"/> must already have comments and string literals
     /// blanked (<see cref="PlanAnalyzer.MaskCommentsAndLiterals"/>, #4524's masked-text read) so a hint
     /// spelled inside a comment or a literal doesn't count as code.
@@ -105,13 +106,22 @@ public static partial class ParameterCard
             var hasOptimizeForUnknown = statementText.Contains("OPTIMIZE", StringComparison.OrdinalIgnoreCase)
                 && PlanRegex.IsMatch(OptimizeForUnknownRegExp(), maskedStatementText, "OPTIMIZE FOR UNKNOWN in the parameter card");
 
+            /* #7898: RECOMPILE is named only when the statement carries it. Compiled values are also absent
+               when the plan was captured without them, and the card says so rather than naming a hint the
+               statement does not have. */
+            var hasRecompile = maskedStatementText.Contains("RECOMPILE", StringComparison.OrdinalIgnoreCase);
+
             annotations.Add(hasOptimizeForUnknown
                 ? new ParameterCardAnnotation(
                     "OPTIMIZE FOR UNKNOWN \u2014 optimizer used average density estimates instead of sniffed values",
                     ParameterCardAnnotationTone.Accent)
-                : new ParameterCardAnnotation(
-                    "OPTION(RECOMPILE) \u2014 parameter values embedded as literals, not sniffed",
-                    ParameterCardAnnotationTone.Warning));
+                : hasRecompile
+                    ? new ParameterCardAnnotation(
+                        "OPTION(RECOMPILE) \u2014 parameter values embedded as literals, not sniffed",
+                        ParameterCardAnnotationTone.Warning)
+                    : new ParameterCardAnnotation(
+                        "Parameter values not captured in the plan \u2014 no compiled values, so the values the optimizer sniffed are not known",
+                        ParameterCardAnnotationTone.Warning));
         }
 
         if (unresolvedVariables.Count > 0)
