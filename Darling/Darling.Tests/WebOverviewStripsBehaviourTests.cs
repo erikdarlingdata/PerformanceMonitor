@@ -476,4 +476,42 @@ public sealed class WebOverviewStripsBehaviourTests
         Assert.Equal(0, r.GetProperty("floorThirtyMinute").GetProperty("short").GetInt32());
         Assert.Equal(1, r.GetProperty("floorThirtyMinute").GetProperty("enough").GetInt32());
     }
+
+    /// <summary>
+    /// #7921: the blocking strip has two reads. When one fails and the other answers points, the strip draws the points and names the failed
+    /// read in its header, so the missing series is not read as "no blocking". With both answering, the header carries no such note.
+    /// </summary>
+    [Fact]
+    public void TheBlockingStrip_NamesAFailedRead_InItsHeader_WhenTheOtherSeriesHasPoints()
+    {
+        var r = Run("failedread");
+
+        var blockingFailed = r.GetProperty("blockingFailed");
+        Assert.Equal(1, blockingFailed.GetProperty("bars").GetInt32());
+        Assert.Empty(blockingFailed.GetProperty("none").EnumerateArray());
+        Assert.Contains("The blocking trend read timed out.", blockingFailed.GetProperty("header").GetString());
+        var deadlocksFailed = r.GetProperty("deadlocksFailed");
+        Assert.Equal(2, deadlocksFailed.GetProperty("bars").GetInt32());
+        Assert.Contains("The deadlock trend read timed out.", deadlocksFailed.GetProperty("header").GetString());
+        var both = r.GetProperty("bothAnswered");
+        Assert.Equal(3, both.GetProperty("bars").GetInt32());
+        Assert.Equal("Blocking (per min)", both.GetProperty("header").GetString());
+    }
+
+    /// <summary>
+    /// #7921: one of the six reads fails and the other five answer empty. The page names the failed read instead of saying only that there are
+    /// no samples, which is what a server with nothing collected says. Every read empty keeps that sentence alone, and every read failed keeps the first error alone.
+    /// </summary>
+    [Fact]
+    public void AnEmptyOverview_WithAFailedRead_NamesTheFailure_InsteadOfOnlyNoSamples()
+    {
+        var r = Run("mixedempty");
+
+        static (string kind, string text)[] Strips(JsonElement list) => list.EnumerateArray().Select(s => (s.GetProperty("kind").GetString()!, s.GetProperty("text").GetString()!)).ToArray();
+        var oneFailed = Strips(r.GetProperty("oneFailed"));
+        Assert.Contains(oneFailed, s => s.kind == "strip error" && s.text.Contains("The get_blocking_trend read timed out."));
+        Assert.DoesNotContain(oneFailed, s => s.text == "No overview samples in this window.");
+        Assert.Equal(new[] { ("strip empty", "No overview samples in this window.") }, Strips(r.GetProperty("allEmpty")));
+        Assert.Equal(new[] { ("strip error", "The get_cpu_utilization read timed out.") }, Strips(r.GetProperty("allFailed")));
+    }
 }
