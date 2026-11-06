@@ -63,8 +63,8 @@ public sealed class EmptyAnswerDatabaseEchoTests
         Assert.Contains("[\"database_name\"] = databases.Describe()", body, StringComparison.Ordinal);
 
         var calls = Regex.Matches(source, @"EmptyStatus\(\s*""(empty|unavailable)""", RegexOptions.Singleline).Count;
-        /* #7167: an offline server's empty answer is wrapped in DarlingServerOfflineNote.EmptyAsync(..., EmptyStatus(..., disclosure, databases), cancellationToken), so the call ends on the filter or on the wrapper's closing. */
-        var withFilter = Regex.Matches(source, @"disclosure, databases\)(?:, cancellationToken\))?;", RegexOptions.Singleline).Count;
+        /* #7167: an offline server's empty answer is wrapped in DarlingServerOfflineNote.EmptyAsync(..., EmptyStatus(..., disclosure, databases), cancellationToken, windowStart), so the call ends on the filter or on the wrapper's closing (#7724: its last argument is the window start). */
+        var withFilter = Regex.Matches(source, @"disclosure, databases\)(?:, cancellationToken(?:, startUtc)?\))?;", RegexOptions.Singleline).Count;
         Assert.True(calls >= 8, $"expected the trend tools' eight empty answers, found {calls}");
         Assert.Equal(calls, withFilter);
     }

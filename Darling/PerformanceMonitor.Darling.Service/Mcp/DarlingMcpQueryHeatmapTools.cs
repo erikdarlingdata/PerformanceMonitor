@@ -150,7 +150,7 @@ public sealed class DarlingMcpQueryHeatmapTools
                 return await DarlingServerOfflineNote.EmptyAsync(
                     postgres, resolved.ServerId, resolved.DisplayName, end,
                     await EmptyAsync(postgres, resolved.DisplayName, resolved.ServerId, start, end, hours_back, notice, databaseFilter, cancellationToken: cancellationToken),
-                    cancellationToken);
+                    cancellationToken, start);
 
             var truncated = rows.Count > limit;
             var cells = rows.Take(limit).ToList();

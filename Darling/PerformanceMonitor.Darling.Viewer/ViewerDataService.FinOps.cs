@@ -256,6 +256,12 @@ public sealed class UtilizationEfficiencyRow
 public sealed class DatabaseResourceUsageRow
 {
     public string DatabaseName { get; set; } = "";
+    /// <summary>#7725: true for a database the server no longer lists (its figures are real and keep the row). The grid shows "(dropped)".
+    /// Private set, so the golden fixture's reflection walk (public setters only) does not see it; <see cref="MarkDropped"/> sets it.</summary>
+    public bool IsDropped { get; private set; }
+    public void MarkDropped(bool dropped) => IsDropped = dropped;
+    /// <summary>#7725: what the grid's database cell shows: the name, with " (dropped)" after a database the server no longer lists.</summary>
+    public string DatabaseDisplay => PerformanceMonitor.Common.DroppedDatabaseMark.Display(DatabaseName, IsDropped);
     public long CpuTimeMs { get; set; }
     public long LogicalReads { get; set; }
     public long PhysicalReads { get; set; }

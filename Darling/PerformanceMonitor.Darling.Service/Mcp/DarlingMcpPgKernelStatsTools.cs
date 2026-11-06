@@ -97,7 +97,7 @@ public sealed class DarlingMcpPgKernelStatsTools
                         $"No per-query OS resource usage for {resolved.DisplayName} in the last "
                         + $"{hours_back} hour(s). These are per-interval deltas, so a single collection "
                         + "has nothing to difference against and the window fills on the second one.",
-                        emptyNotice.AsHints()), cancellationToken);
+                        emptyNotice.AsHints()), cancellationToken, emptyStart);
             }
 
             /* #4966: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote).

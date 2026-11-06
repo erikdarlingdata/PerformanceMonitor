@@ -34,7 +34,7 @@ globalThis.location = { hash: "#/server/a/vacuum" };
 
 const root = process.argv[2];
 const { panelEmptyStrip, VIZ } = await import(pathToFileURL(root + "/panels.js").href);
-const { applyFormat } = await import(pathToFileURL(root + "/util.js").href);
+const { applyFormat, emptyMessageText } = await import(pathToFileURL(root + "/util.js").href);
 const { fanout } = await import(pathToFileURL(root + "/pages/server-tabs/shared.js").href);
 
 const longMessage =
@@ -133,6 +133,16 @@ const table = (title, extra) => ({ title, viz: "table", emptyText: "Nothing for 
 const fanoutMessage = "No rows came back for this read in the window.";
 const emptyReply = { status: "empty", message: fanoutMessage, hints: null };
 out.fanoutThreeEmpty = await runFanout([table("A"), table("B"), table("C")], emptyReply);
+/* #7724: an offline server whose window holds collection answers unavailable with collected_through. Every panel over that read prints the one sentence, in local time,
+   and none points at another panel. The red strip at the top of the page keeps the outage reason. */
+const throughAt = "2026-11-05T16:50:56Z";
+const throughSentence = "Nothing was recorded through the last collection at " + throughAt + ". Nothing after that is known.";
+/* The service's message is the offline lead and then the sentence; collected_through_note is the sentence alone, and the page prints that alone. */
+const throughMessage = "SQL1 is offline: the store has had no successful collection from it since 2026-11-05 16:50 UTC, so nothing is arriving to read. " + throughSentence;
+const throughBody = { status: "unavailable", message: throughMessage, collected_through: throughAt, collected_through_note: throughSentence };
+out.throughLocal = new Date(throughAt).toLocaleString();
+out.fanoutCollectedThrough = await runFanout([table("A"), table("B"), table("C")], throughBody);
+out.panelCollectedThrough = describe(panelEmptyStrip({}, { kind: "empty", status: "unavailable", message: emptyMessageText(throughBody), hints: null, data: throughBody }));
 /* A panel with its own agreed sentence (emptyWins) does not say the read's message, so it neither stands in for it nor is it shortened. */
 out.fanoutEmptyWinsFirst = await runFanout([table("A", { emptyWins: true }), table("B"), table("C")], emptyReply);
 out.fanoutEmptyWinsBetween = await runFanout([table("A"), table("B", { emptyWins: true }), table("C")], emptyReply);

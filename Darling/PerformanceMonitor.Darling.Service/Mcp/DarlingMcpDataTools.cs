@@ -315,7 +315,7 @@ public sealed class DarlingMcpDataTools
                     : McpHelpers.Status(
                         "unavailable",
                         $"No wait stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — nothing has been stored for this server at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled.",
-                        emptyNotice.AsHints()), cancellationToken);
+                        emptyNotice.AsHints()), cancellationToken, now.AddHours(-hours_back));
             }
 
             var notice = await TableNoticeAsync(postgres, "wait_stats", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: false, cancellationToken);
@@ -389,7 +389,7 @@ public sealed class DarlingMcpDataTools
                    the window floor under hints (merged into the collected_wait_types hint); not_collected is permanent and carries none. */
                 var missNotice = await TableNoticeAsync(postgres, "wait_stats", resolved.ServerName, start, now, emptyAnswer: true, cancellationToken);
                 /* #7167: an empty miss from an offline server answers unavailable, as the get_pg_* reads do. */
-                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, WithWindowHints(miss, missNotice), cancellationToken);
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, WithWindowHints(miss, missNotice), cancellationToken, start);
             }
 
             var waitNotice = await TableNoticeAsync(postgres, "wait_stats", resolved.ServerName, start, now, emptyAnswer: false, cancellationToken);
@@ -744,7 +744,7 @@ public sealed class DarlingMcpDataTools
 
     /* ═══════════════════════════ query performance ═══════════════════════════ */
 
-    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive cached queries from sys.dm_exec_query_stats, ranked by CPU over a window ending at as_of. Filters (database_name, parallel_only, min_dop) apply before the top-N cap: filter_applied names the floor in force, and an empty page under it is the window's real answer, not a miss. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start says where the answer begins. Row cap is top (not limit). <<GUIDE>> On tier_used=hourly, min/max_cpu_ms and min/max_elapsed_ms are null, as are the columns the rollup does not carry (see precision_note), and parallel_only/min_dop/group_by=host_object keep the read on raw. Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spilled pages (total_spills counts 8 KB pages written to tempdb, not spill events), and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means only rows predating the text dimension). 'host_object' rolls all of a procedure's statements into one row — use it when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. Ad-hoc statements have no host object and stay grouped per hash in both modes. distinct_query_hashes reports how many hashes a row rolled up. Set group_by='host_object' to roll all of a procedure's statements into one row — necessary when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. detail='full' adds the desktop grid's remaining columns (last_execution_time, creation_time, physical-read, row, grant, spilled-page (8 KB pages) and thread min/max, total_clr_ms, plan_generation_num, worker_time_per_second), non-null only, raw tier only. Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled; confirm current parallelism with analyze_query_plan, which reads the actual plan." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
+    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive cached queries from sys.dm_exec_query_stats, ranked by CPU over a window ending at as_of. Filters (database_name, parallel_only, min_dop) apply before the top-N cap: filter_applied names the floor in force, and an empty page under it is the window's real answer, not a miss. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start says where the answer begins. Row cap is top (not limit). <<GUIDE>> On tier_used=hourly, min/max_cpu_ms and min/max_elapsed_ms are null, as are the columns the rollup does not carry (see precision_note), and parallel_only/min_dop/group_by=host_object keep the read on raw. Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spilled pages (total_spills counts 8 KB pages written to tempdb, not spill events), and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means only rows predating the text dimension). 'host_object' rolls all of a procedure's statements into one row — use it when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. Ad-hoc statements have no host object and stay grouped per hash in both modes. distinct_query_hashes reports how many hashes a row rolled up. Set group_by='host_object' to roll all of a procedure's statements into one row — necessary when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. detail='full' adds the desktop grid's remaining columns (last_execution_time, creation_time, physical-read, row, grant, spilled-page (8 KB pages) and thread min/max, total_clr_ms, plan_generation_num, worker_time_per_second), non-null only, raw tier only. Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled; confirm current parallelism with analyze_query_plan, which reads the actual plan. With no database_name, rows from a database the server no longer lists rank after the listed ones and carry database_dropped: true." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
     public static Task<string> GetTopQueriesByCpu(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -757,8 +757,9 @@ public sealed class DarlingMcpDataTools
         [Description(QueryTagReadJoin.TagParameterDescription)] string? tag = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("'summary' (default) or 'full': full adds the remaining desktop columns (grants, threads, extremes, times), omitting nulls.")] string detail = "summary",
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
-        => GetTopQueriesRanked(postgres, server_name, hours_back, top, database_name, parallel_only, min_dop, group_by, as_of, detail, order_by: null, cancellationToken, tag);
+        => GetTopQueriesRanked(postgres, server_name, hours_back, top, database_name, parallel_only, min_dop, group_by, as_of, detail, order_by: null, cancellationToken, tag, logger);
 
     /// <summary>
     /// #5226: the body of <see cref="GetTopQueriesByCpu"/> with the ranking choice the web page offers. The MCP tool
@@ -769,9 +770,9 @@ public sealed class DarlingMcpDataTools
     /// </summary>
     internal static Task<string> GetTopQueriesRanked(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, string? database_name, bool parallel_only, int min_dop,
-        string group_by, string? as_of, string detail, string? order_by, CancellationToken cancellationToken, string? tag = null) =>
+        string group_by, string? as_of, string detail, string? order_by, CancellationToken cancellationToken, string? tag = null, ILogger? logger = null) =>
         GetTopQueriesRanked(
-            postgres, server_name, hours_back, top, DatabaseFilter.One(database_name), parallel_only, min_dop, group_by, as_of, detail, order_by, cancellationToken, tag);
+            postgres, server_name, hours_back, top, DatabaseFilter.One(database_name), parallel_only, min_dop, group_by, as_of, detail, order_by, cancellationToken, tag, logger);
 
     /// <summary>
     /// #5245: <see cref="GetTopQueriesRanked(NpgsqlDataSource,string,int,int,string,bool,int,string,string,string,string,CancellationToken)"/>
@@ -781,7 +782,7 @@ public sealed class DarlingMcpDataTools
     /// </summary>
     internal static async Task<string> GetTopQueriesRanked(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, DatabaseFilter databases, bool parallel_only, int min_dop,
-        string group_by, string? as_of, string detail, string? order_by, CancellationToken cancellationToken, string? tag = null)
+        string group_by, string? as_of, string detail, string? order_by, CancellationToken cancellationToken, string? tag = null, ILogger? logger = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -846,9 +847,18 @@ public sealed class DarlingMcpDataTools
 
             var now = windowEnd;
             var requestedStart = now.AddHours(-hours_back);
+            /* #7725: as get_top_procedures_by_cpu: the databases the server still lists rank first (the narrowing is the one #5633 item 4 made),
+               and what the limit leaves is filled from the dropped databases, ranked the same way and marked database_dropped. `databases`
+               itself stays the caller's choice for the empty-page probes below. */
+            var rankedDatabases = await CurrentDatabaseScope.NarrowAsync(postgres, resolved.ServerId, databases,
+                asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : windowEnd, windowStartUtc: requestedStart, logger: logger, cancellationToken: cancellationToken);
+            var droppedDatabases = DatabasesLeftOut.Distinct(rankedDatabases.ExcludedNames);
             var routed = await DarlingDataReader.GetTopQueriesByCpuRoutedAsync(
-                postgres, resolved.ServerId, requestedStart, now, top, databases, rollUpByHostObject: rollUp, minMaxDop: minMaxDop, ranking: ranking, cancellationToken: cancellationToken, tags: tagFilter);
-            var rows = routed.Rows;
+                postgres, resolved.ServerId, requestedStart, now, top, rankedDatabases, rollUpByHostObject: rollUp, minMaxDop: minMaxDop, ranking: ranking, cancellationToken: cancellationToken, tags: tagFilter);
+            var rows = await DroppedDatabaseRows.FillAsync(routed.Rows, top, droppedDatabases,
+                async (leftOutFilter, fillTop) => (await DarlingDataReader.GetTopQueriesByCpuRoutedAsync(
+                    postgres, resolved.ServerId, requestedStart, now, fillTop, leftOutFilter, rollUpByHostObject: rollUp, minMaxDop: minMaxDop, ranking: ranking, cancellationToken: cancellationToken, tags: tagFilter)).Rows);
+            var droppedWithoutRows = DroppedDatabaseMark.WithoutRows(droppedDatabases, rows.Select(r => (string?)r.DatabaseName));
             var tierUsed = routed.Tier == RetentionTier.Hourly ? "hourly" : "raw";
 
             /* #4231 stage 3: hourly-routed rows have no host_object split and no per-row text dimension —
@@ -1009,7 +1019,7 @@ public sealed class DarlingMcpDataTools
 
             if (rows.Count == 0)
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now,
-                    WithWindowHints(await EmptyPageAsync(), DarlingMcpWindowNotice.Build(floor, requestedStart, "query_stats", emptyAnswer: true), ranFacts, requestedStart, "query_stats"), cancellationToken);
+                    WithWindowHints(await EmptyPageAsync(), DarlingMcpWindowNotice.Build(floor, requestedStart, "query_stats", emptyAnswer: true), ranFacts, requestedStart, "query_stats"), cancellationToken, requestedStart);
 
             /* #2320: what fraction of the box's measured CPU the RETURNED rows explain — numerator is
                the caller-visible ranking (post top-N, post filters), denominator is measured, and the
@@ -1122,12 +1132,17 @@ public sealed class DarlingMcpDataTools
                    panels carry), set only for a reads ranking, which can read raw alone, over a window past what raw keeps. Null
                    for every other ranking, so the MCP tools (CPU only) always send null. The web page draws it above the grid. */
                 retention_notice = routed.RetentionNotice,
+                /* #7725: disclosed, never silent (get_top_procedures_by_cpu's rule): the dropped databases this read left out and that have
+                   no row in the reply, in the same words. Null when every one of them got rows, or the read left none out. */
+                databases_left_out = DatabasesLeftOut.Named(droppedWithoutRows),
+                databases_left_out_note = DatabasesLeftOut.Note(droppedWithoutRows),
                 queries = result
             }, McpHelpers.JsonOptions)!.AsObject();
 
             /* #5984: the row's query tag, by its query_hash; an unmapped hash carries no `tag` member. */
             if (queriesPayload["queries"] is JsonArray queryRows)
             {
+                DroppedDatabaseMark.Mark(queryRows, rows.Select(r => (string?)r.DatabaseName).ToList(), droppedDatabases);
                 await QueryTagReadJoin.AttachAsync(postgres, resolved.ServerId, QueryTagReadJoin.HashKind, queryRows.OfType<JsonObject>(),
                     row => row["query_hash"]?.GetValue<string>(), cancellationToken);
             }
@@ -1226,7 +1241,7 @@ public sealed class DarlingMcpDataTools
         return node;
     }
 
-    [McpServerTool(Name = "get_top_procedures_by_cpu"), Description("Gets the most expensive stored procedures ranked by total CPU time over a window ending at as_of. Delta-based: requires ~30 minutes after adding a new server before data appears. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed (extremes_note flags a provably stale one); cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> On tier_used=hourly, min/max_cpu_ms and min/max_elapsed_ms are null, as are the columns the rollup does not carry (see precision_note). Shows execution counts, CPU/elapsed times, and I/O metrics. Delta-based: requires ~30 minutes after adding a new server before data appears." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
+    [McpServerTool(Name = "get_top_procedures_by_cpu"), Description("Gets the most expensive stored procedures ranked by total CPU time over a window ending at as_of. Delta-based: requires ~30 minutes after adding a new server before data appears. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed (extremes_note flags a provably stale one); cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> On tier_used=hourly, min/max_cpu_ms and min/max_elapsed_ms are null, as are the columns the rollup does not carry (see precision_note). Shows execution counts, CPU/elapsed times, and I/O metrics. Delta-based: requires ~30 minutes after adding a new server before data appears. With no database_name, rows from a database the server no longer lists rank after the listed ones and carry database_dropped: true." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
     public static Task<string> GetTopProceduresByCpu(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -1302,7 +1317,13 @@ public sealed class DarlingMcpDataTools
                still has, so "the collector recorded nothing" is never said over a window where it recorded rows in a dropped database. */
             var leftOut = DatabasesLeftOut.Distinct(databases.ExcludedNames);
             var routed = await DarlingDataReader.GetTopProceduresByCpuRoutedAsync(postgres, resolved.ServerId, requestedStart, now, top, databases, ranking, cancellationToken, tagFilter);
-            var rows = routed.Rows;
+            /* #7725: the databases the server still lists rank first; what the limit leaves is filled from the left-out databases, ranked the same
+               way and marked database_dropped, so a dropped database's rows never push out a listed row and the grid is not empty while the work is
+               on record. databases_left_out below then names only the databases with no row in the reply. */
+            var rows = await DroppedDatabaseRows.FillAsync(routed.Rows, top, leftOut,
+                async (leftOutFilter, fillTop) => (await DarlingDataReader.GetTopProceduresByCpuRoutedAsync(
+                    postgres, resolved.ServerId, requestedStart, now, fillTop, leftOutFilter, ranking, cancellationToken, tagFilter)).Rows);
+            var leftOutWithoutRows = DroppedDatabaseMark.WithoutRows(leftOut, rows.Select(r => (string?)r.DatabaseName));
             var tierUsed = routed.Tier == RetentionTier.Hourly ? "hourly" : "raw";
 
             /* #4231 stage 3b: hourly-routed rows have no object_type, sql_handle or plan_handle — stated once
@@ -1313,7 +1334,7 @@ public sealed class DarlingMcpDataTools
             if (rows.Count == 0 && tagFilter.Active)
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.WithDatabasesLeftOut(McpHelpers.Status(
                     "empty",
-                    $"No procedure on {resolved.DisplayName} in the last {hours_back} hour(s) carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking."), leftOut)!, cancellationToken);
+                    $"No procedure on {resolved.DisplayName} in the last {hours_back} hour(s) carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking."), leftOut)!, cancellationToken, requestedStart);
 
             if (rows.Count == 0)
             {
@@ -1335,8 +1356,12 @@ public sealed class DarlingMcpDataTools
                         : EmptyProcedureStatsStatus(
                             await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "procedure_stats", requestedStart, now, cancellationToken),
                             hours_back, leftOut?.Count ?? 0));
+                /* #7724: the collector's no-run answers (no baseline yet, or no successful run inside the window) are unavailable, which EmptyAsync
+                   below leaves alone. For a server that is offline by the SUCCESS-run rule the lead goes in front of them, so "check collection health"
+                   is not the first thing an 8-day-offline server's caller reads. An empty or not_collected page is not touched here. */
+                emptyPage = await DarlingServerOfflineNote.WithLeadAsync(emptyPage!, postgres, resolved.ServerId, resolved.DisplayName, cancellationToken, now);
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.WithDatabasesLeftOut(
-                    WithWindowHints(emptyPage!, DarlingMcpWindowNotice.Build(emptyFloor, requestedStart, "procedure_stats", emptyAnswer: true)), leftOut)!, cancellationToken);
+                    WithWindowHints(emptyPage!, DarlingMcpWindowNotice.Build(emptyFloor, requestedStart, "procedure_stats", emptyAnswer: true)), leftOut)!, cancellationToken, requestedStart);
             }
 
             /* #4231: what the raw tier actually held, beside what was asked for — same probe and disclosure as
@@ -1451,14 +1476,15 @@ public sealed class DarlingMcpDataTools
                 /* #5226: as on get_top_queries_by_cpu: the raw route's retention notice for a reads ranking past raw's reach. */
                 retention_notice = routed.RetentionNotice,
                 /* #5633 review (finding D): null when the read left no database out. */
-                databases_left_out = DatabasesLeftOut.Named(leftOut),
-                databases_left_out_note = DatabasesLeftOut.Note(leftOut),
+                databases_left_out = DatabasesLeftOut.Named(leftOutWithoutRows),
+                databases_left_out_note = DatabasesLeftOut.Note(leftOutWithoutRows),
                 procedures = result
             }, McpHelpers.JsonOptions)!.AsObject();
 
             /* #5984: the row's query tag, by its (database, schema, object) key; an unmapped procedure carries no `tag` member. */
             if (proceduresPayload["procedures"] is JsonArray procedureRows)
             {
+                DroppedDatabaseMark.Mark(procedureRows, rows.Select(r => (string?)r.DatabaseName).ToList(), leftOut);
                 await QueryTagReadJoin.AttachByKeysAsync(postgres, resolved.ServerId, QueryTagReadJoin.ObjectKind, procedureRows.OfType<JsonObject>().ToList(),
                     rows.Select(r => (string?)QueryTagReadJoin.ObjectKey(r.DatabaseName, r.SchemaName, r.ObjectName)).ToList(), cancellationToken);
             }
@@ -1731,7 +1757,7 @@ public sealed class DarlingMcpDataTools
             if (rows.Count == 0)
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, await DarlingRuntimePrecondition.WithQueryStoreNotWritingHintAsync(
                     /* #7010: the empty answer carries the window floor under hints (a null floor: the store holds no row in the window). */
-                    WithWindowHints(await EmptyAnswerAsync(), DarlingMcpWindowNotice.Build(coverageFloor, requestedStart, "query_store_stats", emptyAnswer: true), ranFacts, requestedStart, "query_store_stats"), postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken: cancellationToken), cancellationToken);
+                    WithWindowHints(await EmptyAnswerAsync(), DarlingMcpWindowNotice.Build(coverageFloor, requestedStart, "query_store_stats", emptyAnswer: true), ranFacts, requestedStart, "query_store_stats"), postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken: cancellationToken), cancellationToken, requestedStart);
 
             var approximate = read.DailyDaysUsed > 0 && read.DailySpan is not null;
             var result = rows.Select(r => new
@@ -3778,7 +3804,7 @@ ORDER BY server_name";
                         postgres, resolved.ServerId, resolved.DisplayName, "waiting_tasks", "waiting-task samples", cancellationToken);
                 if (healthyEmpty != null)
                 {
-                    return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, end, McpHelpers.Status("empty", healthyEmpty, emptyNotice.AsHints()), cancellationToken);
+                    return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, end, McpHelpers.Status("empty", healthyEmpty, emptyNotice.AsHints()), cancellationToken, start);
                 }
 
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, end, everCollected
@@ -3792,7 +3818,7 @@ ORDER BY server_name";
                     : McpHelpers.Status(
                         "unavailable",
                         $"No waiting-task samples have EVER been recorded for {resolved.DisplayName}, so this is NOT an all-clear — there is nothing to read. Check that collection is running for this server before concluding it was quiet.",
-                        emptyNotice.AsHints()), cancellationToken);
+                        emptyNotice.AsHints()), cancellationToken, start);
             }
 
             var notice = await TableNoticeAsync(postgres, "waiting_tasks", resolved.ServerName, start, end, emptyAnswer: false, cancellationToken);
@@ -3918,7 +3944,7 @@ ORDER BY server_name";
                         emptyNotice.AsHints())
                     : McpHelpers.Status(
                         "unavailable",
-                        $"The blocking collectors have NEVER run successfully for {resolved.DisplayName}, so this is NOT a clean bill of health — nothing looked. Blocked-process reports need the XE session running, or the DMV blocking snapshot collector enabled; check those before concluding this server does not block."), cancellationToken);
+                        $"The blocking collectors have NEVER run successfully for {resolved.DisplayName}, so this is NOT a clean bill of health — nothing looked. Blocked-process reports need the XE session running, or the DMV blocking snapshot collector enabled; check those before concluding this server does not block."), cancellationToken, start);
             }
 
             /* #4966: one notice for two separate series; see BlockingStatsNoticeAsync. */

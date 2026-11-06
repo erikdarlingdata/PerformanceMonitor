@@ -148,7 +148,7 @@ public sealed class DarlingMcpQueryStoreAbortsTools
                            "empty",
                            $"No Query Store rows for {resolved.DisplayName} in the {hours_back}-hour window searched"
                            + (truncated ? ", and the store does not hold the whole window (see effective_start)." : ". Query Store may be off for the target databases, or nothing ran."),
-                           scopeName, hints), cancellationToken);
+                           scopeName, hints), cancellationToken, requestedStart);
             }
 
             var queries = page.Select(r =>

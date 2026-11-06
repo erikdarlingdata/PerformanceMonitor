@@ -264,7 +264,7 @@ public sealed class McpWaitTools
                             : $"No waiting tasks captured in the specified time range{McpDatabaseSelection.ForChosen(new[] { database })}. "
                               + "The filter was applied in SQL over the whole window, so waiting tasks of other databases may well exist; drop it to see what the window holds."
                               + (include_monitor ? "" : " The monitor's own statements are left out. Pass include_monitor=true to include them."),
-                        notice.AsHints()));
+                        notice.AsHints()), requestedStart);
             }
 
             var truncated = rows.Count > limit;

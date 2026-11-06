@@ -177,7 +177,7 @@ public sealed class DarlingMcpBlockingTools
                     ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", $"No blocking events found in the specified time range{ForChosenDatabases(databases)}.",
                         (await DarlingMcpWindowNotice.ReadEventAsync(
                             () => DarlingMcpWindowNotice.Probe(postgres, BlockingPageSources, resolved.ServerName, windowStart, now, cancellationToken),
-                            null, windowStart, now, BlockingPageTables, emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken);
+                            null, windowStart, now, BlockingPageTables, emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken, windowStart);
 
             var scanTruncated = filtering && rows.Count > DarlingBlockingReader.FingerprintScanCeiling;
             if (scanTruncated) rows = rows.Take(DarlingBlockingReader.FingerprintScanCeiling).ToList();
@@ -429,7 +429,7 @@ public sealed class DarlingMcpBlockingTools
                     ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", "No deadlocks found in the specified time range.",
                         (await DarlingMcpWindowNotice.ReadEventAsync(
                             () => DarlingMcpWindowNotice.Probe(postgres, "deadlocks", resolved.ServerName, windowStart, now, cancellationToken),
-                            null, windowStart, now, "deadlocks", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken);
+                            null, windowStart, now, "deadlocks", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken, windowStart);
 
             var scanTruncated = filtering && rows.Count > DarlingBlockingReader.FingerprintScanCeiling;
             if (scanTruncated) rows = rows.Take(DarlingBlockingReader.FingerprintScanCeiling).ToList();
@@ -606,7 +606,7 @@ public sealed class DarlingMcpBlockingTools
                     ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", "No deadlock XML available in the specified time range.",
                         (await DarlingMcpWindowNotice.ReadEventAsync(
                             () => DarlingMcpWindowNotice.Probe(postgres, "deadlocks", resolved.ServerName, windowStart, now, cancellationToken),
-                            null, windowStart, now, "deadlocks", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken);
+                            null, windowStart, now, "deadlocks", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken, windowStart);
 
             var examined = candidates.Count;
             var keys = DarlingIncidentFingerprint.DeadlockKeys(
@@ -757,7 +757,7 @@ public sealed class DarlingMcpBlockingTools
                     ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", $"No blocked process report XML available in the specified time range{ForChosenDatabases(databases)}.",
                         (await DarlingMcpWindowNotice.ReadEventAsync(
                             () => DarlingMcpWindowNotice.Probe(postgres, "blocked_process_reports", resolved.ServerName, windowStart, now, cancellationToken),
-                            null, windowStart, now, "blocked_process_reports", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken);
+                            null, windowStart, now, "blocked_process_reports", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken, windowStart);
 
             /* #4966: the XE collector's coverage, earlier-of the oldest report shown (see get_deadlocks).
                #6180: "shown" is the reports the page SERVES, and the size target decides how many that is after this point, so the
@@ -893,10 +893,13 @@ public sealed class DarlingMcpBlockingTools
                 var emptyNotice = await DarlingMcpWindowNotice.ReadAsync(
                     () => DarlingMcpWindowNotice.Probe(postgres, BlockingPageSources, resolved.ServerName, start, now, cancellationToken),
                     start, now, BlockingPageTables, emptyAnswer: true, logger: logger, cancellationToken: cancellationToken);
-                return WithNullSource(await EmptyTrend(
-                    "blocking", resolved.DisplayName, hours_back, captures,
-                    () => DarlingBlockingTrendReader.HasAnyBlockingCollectorRunAsync(postgres, resolved.ServerId, cancellationToken),
-                    databases, emptyNotice));
+                /* #7724: an offline server's trend goes through the same offline check as the reads beside it, so a window that ends after the
+                   outage began is not called a genuine all-clear. An online server's answer is unchanged. */
+                return WithNullSource(await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now,
+                    await EmptyTrend(
+                        "blocking", resolved.DisplayName, hours_back, captures,
+                        () => DarlingBlockingTrendReader.HasAnyBlockingCollectorRunAsync(postgres, resolved.ServerId, cancellationToken),
+                        databases, emptyNotice), cancellationToken, start));
             }
 
             /* #7010: where the store's data starts for the window, as get_blocking writes it. The probe is skipped for a window of 90
@@ -962,13 +965,15 @@ public sealed class DarlingMcpBlockingTools
                 var emptyNotice = await DarlingMcpWindowNotice.ReadAsync(
                     () => DarlingMcpWindowNotice.Probe(postgres, "deadlocks", resolved.ServerName, start, now, cancellationToken),
                     start, now, "deadlocks", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken);
-                return await EmptyTrend(
-                    /* SINGULAR: the subject lands in "No {subject} was recorded", and "no deadlocks
-                       was recorded" is not a sentence. It also reads correctly in the other two,
-                       where it modifies the collector rather than the event. */
-                    "deadlock", resolved.DisplayName, hours_back, captures,
-                    () => DarlingBlockingTrendReader.HasAnyDeadlockCollectorRunAsync(postgres, resolved.ServerId, cancellationToken),
-                    window: emptyNotice);
+                /* #7724: through the offline check, as the blocking trend above. */
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now,
+                    await EmptyTrend(
+                        /* SINGULAR: the subject lands in "No {subject} was recorded", and "no deadlocks
+                           was recorded" is not a sentence. It also reads correctly in the other two,
+                           where it modifies the collector rather than the event. */
+                        "deadlock", resolved.DisplayName, hours_back, captures,
+                        () => DarlingBlockingTrendReader.HasAnyDeadlockCollectorRunAsync(postgres, resolved.ServerId, cancellationToken),
+                        window: emptyNotice), cancellationToken, start);
             }
 
             /* #7010: where the store's data starts for the window; a failed probe costs the three keys, never the trend. */
@@ -1066,7 +1071,7 @@ public sealed class DarlingMcpBlockingTools
                         emptyHints)
                     : McpHelpers.Status(
                         "unavailable",
-                        $"No wait stats have EVER been recorded for {resolved.DisplayName}, so this is NOT a report of a server without lock contention — nothing has been stored for it at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled.", emptyHints), cancellationToken);
+                        $"No wait stats have EVER been recorded for {resolved.DisplayName}, so this is NOT a report of a server without lock contention — nothing has been stored for it at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled.", emptyHints), cancellationToken, start);
             }
 
             /*
