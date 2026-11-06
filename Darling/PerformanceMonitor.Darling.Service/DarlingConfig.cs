@@ -204,6 +204,18 @@ public sealed class DarlingConfig
     public bool RawChunkIntervalReconcileEnabled { get; set; } = true;
 
     /// <summary>
+    /// Whether the service builds a <c>pg_trgm</c> GIN index on the plan-cache text (<c>collect.query_text_dim.query_text</c>, #7674).
+    /// Default FALSE: on a store the size of the largest field store the index is 3.1 GB (52% of the table), a build takes about 17
+    /// minutes and it adds about 0.5 ms to each written row. When true the service creates the <c>pg_trgm</c> extension if the store
+    /// login can, then builds the index with <c>CREATE INDEX CONCURRENTLY</c> in the background, never inside a migration rung and never
+    /// ahead of collection. When false the service drops the index if it exists. A failed build is dropped, reported by
+    /// <c>get_store_metrics</c> (<c>query_text_index</c>) and retried with a growing wait. A file-only knob (not seeded into the
+    /// control-plane store), so an edit takes effect on the next restart.
+    /// </summary>
+    [JsonPropertyName("queryTextTrigramIndexEnabled")]
+    public bool QueryTextTrigramIndexEnabled { get; set; }
+
+    /// <summary>
     /// #2862: how many collection cycles pass between plan-XML captures for <c>procedure_stats</c> — 1 is
     /// every cycle (the pre-#2862 collector, byte-identical), 4 is one cycle in four. Clamped to [1,60] on
     /// read. Only <c>procedure_stats</c> is gated; every other plan-capturing collector is untouched.

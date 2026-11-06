@@ -10,7 +10,10 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Notifications;
@@ -87,12 +90,13 @@ public sealed class WebhookChannelFailureNoticeTests
 
     private static int s_serverSequence;
 
-    /// <summary>Slack-only settings the test can change, which is how the user turns a channel off. Lite has no
-    /// routes, so <see cref="IAlertSettings.NotificationRoutes"/> is left at its empty default.</summary>
+    /// <summary>Slack-only settings the test can change, which is how the user turns a channel off. The routes are
+    /// empty unless a test sets them.</summary>
     private sealed class SlackSettings : IAlertSettings
     {
         public bool SlackWebhookEnabled { get; set; } = true;
         public string SlackWebhookUrl { get; set; } = "not-a-webhook-url";
+        public IReadOnlyList<NotificationRoute> NotificationRoutes { get; set; } = Array.Empty<NotificationRoute>();
 
         public bool SmtpEnabled => false;
         public string SmtpServer => "";
@@ -330,8 +334,9 @@ public sealed class WebhookChannelFailureNoticeTests
     }
 
     /// <summary>The window wires the check onto the status timer that runs the connection checks, reads the
-    /// counts from the webhook service it built, and decides with the shared policy. A WPF window cannot be
-    /// driven from a unit test, so this is pinned from source.</summary>
+    /// counts from the webhook service it built, and hands them with its memory to <see cref="WebhookChannelCheck"/>.
+    /// A WPF window cannot be driven from a unit test, so the wiring is pinned from source. The deciding is the
+    /// helper's, and the tests below drive it.</summary>
     [Fact]
     public void TheStatusTimer_RunsTheChannelCheck_RightAfterTheConnectionCheck()
     {
@@ -341,8 +346,177 @@ public sealed class WebhookChannelFailureNoticeTests
             "CheckConnectionsAndNotify();\r\n            CheckWebhookChannelsAndNotify();",
             window.Replace("\r\n", "\n").Replace("\n", "\r\n"), StringComparison.Ordinal);
         Assert.Contains("_webhookAlertService.GetChannelFailureCounts()", window, StringComparison.Ordinal);
-        Assert.Contains("WebhookChannelFailurePolicy.Decide(wasFailing, channel.ConsecutiveFailures, channel.Configured)", window, StringComparison.Ordinal);
+        Assert.Contains("WebhookChannelCheck.Look(_webhookAlertService.GetChannelFailureCounts(), _webhookChannelFailing)", window, StringComparison.Ordinal);
         Assert.Contains("WebhookChannelTrayNotice.For(", window, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The window's loop, as the helper it calls: three Slack destinations (the settings row's and two routes') are
+    /// remembered apart by Key. The failing route is announced once with its Label, the healthy destinations say
+    /// nothing, a later look at the same state says nothing again, and the route's destination going away closes it as
+    /// turned off, naming the route, and forgets it.
+    /// </summary>
+    [Fact]
+    public void TheWindowsLook_RemembersEachDestinationByKey_AndNamesTheRoute()
+    {
+        var memory = new Dictionary<string, bool>(StringComparer.Ordinal);
+        WebhookChannelFailureCount SettingsRow(int count) => new(NotificationRouter.SlackChannel, count, Configured: true);
+        WebhookChannelFailureCount Route(int id, int count, bool configured = true) => new(NotificationRouter.SlackChannel, count, configured, RouteId: id);
+
+        var first = WebhookChannelCheck.Look(new[] { SettingsRow(0), Route(1, 3), Route(2, 0) }, memory);
+
+        var failing = Assert.Single(first);
+        Assert.Equal(WebhookChannelNotice.Failing, failing.Notice);
+        Assert.Equal("Slack (route 1)", failing.Label);
+        Assert.Equal(3, failing.ConsecutiveFailures);
+        Assert.True(memory["Slack:route:1"]);
+        Assert.False(memory.ContainsKey("Slack"));
+        Assert.False(memory.ContainsKey("Slack:route:2"));
+
+        /* The same state, further along: an edge is not announced twice, and a delivery on route 2 is not route 1's recovery. */
+        Assert.Empty(WebhookChannelCheck.Look(new[] { SettingsRow(0), Route(1, 5), Route(2, 0) }, memory));
+        Assert.True(memory["Slack:route:1"]);
+
+        /* Route 1 is disabled: the service reports its destination once more, unconfigured, and the look closes it as turned off. */
+        var closed = WebhookChannelCheck.Look(new[] { SettingsRow(0), Route(1, 5, configured: false), Route(2, 0) }, memory);
+
+        var turnedOff = Assert.Single(closed);
+        Assert.Equal(WebhookChannelNotice.TurnedOff, turnedOff.Notice);
+        Assert.Equal("Slack (route 1)", turnedOff.Label);
+        Assert.False(memory.ContainsKey("Slack:route:1"));
+
+        /* Forgotten: the destination is no longer listed, and nothing is said about it again. */
+        Assert.Empty(WebhookChannelCheck.Look(new[] { SettingsRow(0), Route(2, 0) }, memory));
+        Assert.Empty(memory);
+    }
+
+    /// <summary>A destination that recovers is told so and forgotten, and the settings row's own destination is keyed
+    /// by the channel name alone, as it was before routes had entries of their own.</summary>
+    [Fact]
+    public void TheWindowsLook_ClosesARecoveredDestination_AndKeysTheSettingsRowByChannel()
+    {
+        var memory = new Dictionary<string, bool>(StringComparer.Ordinal);
+
+        var failing = Assert.Single(WebhookChannelCheck.Look(new[] { new WebhookChannelFailureCount(NotificationRouter.SlackChannel, 3, Configured: true) }, memory));
+        Assert.Equal(WebhookChannelNotice.Failing, failing.Notice);
+        Assert.Equal("Slack", failing.Label);
+        Assert.True(memory["Slack"]);
+
+        var recovered = Assert.Single(WebhookChannelCheck.Look(new[] { new WebhookChannelFailureCount(NotificationRouter.SlackChannel, 0, Configured: true) }, memory));
+        Assert.Equal(WebhookChannelNotice.Recovered, recovered.Notice);
+        Assert.Equal("Slack", recovered.Label);
+        Assert.Empty(memory);
+    }
+
+    /// <summary>
+    /// Lite shares the service, so two routes that point Slack at two destinations are counted apart here too: a
+    /// delivery to the healthy destination is not a recovery of the broken one, whose count climbs to the threshold
+    /// and is announced.
+    /// </summary>
+    [Fact]
+    public async Task TwoRoutesOnOneChannel_TheBrokenDestinationKeepsCounting_WhileTheOtherDelivers()
+    {
+        using var healthy = new OkEndpoint();
+        var settings = new SlackSettings
+        {
+            SlackWebhookEnabled = false,
+            SlackWebhookUrl = "",
+            NotificationRoutes = new[]
+            {
+                new NotificationRoute(RouteId: 1, MetricMatch: "High CPU", TeamsUrl: "", SlackUrl: "not-a-webhook-url", GenericUrl: "",
+                    PagerDutyRoutingKey: "", SmtpRecipients: "", Enabled: true),
+                new NotificationRoute(RouteId: 2, MetricMatch: "Spare Metric", TeamsUrl: "", SlackUrl: healthy.Url, GenericUrl: "",
+                    PagerDutyRoutingKey: "", SmtpRecipients: "", Enabled: true),
+            },
+        };
+        var webhooks = Service(settings);
+
+        /* A failure on route 1 and a delivery on route 2, three times over. Distinct servers, by name and id, so neither the
+           per-server cooldown a delivery stamps nor anything else stands between a destination and its next post. */
+        for (var i = 0; i < 3; i++)
+        {
+            var server = "SQL" + Interlocked.Increment(ref s_serverSequence);
+            Assert.Equal(AlertChannelOutcome.Failed, (await webhooks.TrySendWebhookAlertsAsync("High CPU", server, "97%", "90%", serverId: server)).Outcome);
+            Assert.Equal(AlertChannelOutcome.Delivered, (await webhooks.TrySendWebhookAlertsAsync("Spare Metric", server, "1", "0", serverId: server)).Outcome);
+        }
+
+        var slack = webhooks.GetChannelFailureCounts().Where(c => c.Channel == NotificationRouter.SlackChannel).ToList();
+        var broken = slack.OrderByDescending(c => c.ConsecutiveFailures).First();
+        Assert.Equal(3, broken.ConsecutiveFailures);
+        Assert.True(broken.Configured);
+        Assert.Contains(slack, c => c.ConsecutiveFailures == 0 && c.Configured);
+        Assert.Equal(WebhookChannelNotice.Failing, WebhookChannelFailurePolicy.Decide(false, broken.ConsecutiveFailures, broken.Configured));
+    }
+
+    /// <summary>A loopback endpoint that answers every post with 200, so a route pointed at it delivers.</summary>
+    private sealed class OkEndpoint : IDisposable
+    {
+        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+        private readonly CancellationTokenSource _stop = new();
+
+        public OkEndpoint()
+        {
+            _listener.Start();
+            Url = $"http://127.0.0.1:{((IPEndPoint)_listener.LocalEndpoint).Port}/hook";
+            _ = Task.Run(AcceptLoopAsync);
+        }
+
+        public string Url { get; }
+
+        private async Task AcceptLoopAsync()
+        {
+            try
+            {
+                while (!_stop.IsCancellationRequested)
+                {
+                    using var client = await _listener.AcceptTcpClientAsync(_stop.Token);
+                    using var stream = client.GetStream();
+                    await DrainRequestAsync(stream);
+                    await stream.WriteAsync(Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"), _stop.Token);
+                    await stream.FlushAsync(_stop.Token);
+                }
+            }
+            catch (OperationCanceledException) { /* Dispose */ }
+            catch (SocketException) { /* listener stopped */ }
+            catch (ObjectDisposedException) { /* listener stopped */ }
+        }
+
+        /// <summary>Reads the headers and the Content-Length body, so the whole request is accepted before the reply.</summary>
+        private static async Task DrainRequestAsync(NetworkStream stream)
+        {
+            var buffer = new byte[16 * 1024];
+            var received = new List<byte>();
+            int headerEnd;
+            while ((headerEnd = Encoding.ASCII.GetString(received.ToArray()).IndexOf("\r\n\r\n", StringComparison.Ordinal)) < 0)
+            {
+                var read = await stream.ReadAsync(buffer);
+                if (read == 0) return;
+                received.AddRange(new ArraySegment<byte>(buffer, 0, read));
+            }
+
+            var length = 0;
+            foreach (var line in Encoding.ASCII.GetString(received.ToArray(), 0, headerEnd).Split("\r\n"))
+            {
+                if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
+                {
+                    length = int.Parse(line["Content-Length:".Length..].Trim(), System.Globalization.CultureInfo.InvariantCulture);
+                }
+            }
+
+            while (received.Count - (headerEnd + 4) < length)
+            {
+                var read = await stream.ReadAsync(buffer);
+                if (read == 0) return;
+                received.AddRange(new ArraySegment<byte>(buffer, 0, read));
+            }
+        }
+
+        public void Dispose()
+        {
+            _stop.Cancel();
+            _listener.Stop();
+            _stop.Dispose();
+        }
     }
 
     private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")

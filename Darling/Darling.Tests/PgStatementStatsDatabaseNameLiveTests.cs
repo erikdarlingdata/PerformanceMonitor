@@ -74,6 +74,8 @@ public sealed class PgStatementStatsDatabaseNameLiveTests
         Assert.True(await DarlingCollectorRunner.ResolvePgExtensionSchemasAsync(
             context, PgStatementStatsCollector.Instance, connection, null, ct));
 
+        var before = await ReadDatabaseNamesAsync(connection, ct);
+
         List<PgStatementStatsCollector.Row> rows;
         await using (var command = new NpgsqlCommand(PgStatementStatsCollector.Instance.BuildQuery(context).Text, connection))
         await using (var reader = await command.ExecuteReaderAsync(ct))
@@ -81,15 +83,7 @@ public sealed class PgStatementStatsDatabaseNameLiveTests
             rows = await PgStatementStatsCollector.Instance.ReadAsync(reader, context, ct);
         }
 
-        var names = new Dictionary<long, string>();
-        await using (var catalog = new NpgsqlCommand("SELECT oid::bigint, datname::text FROM pg_catalog.pg_database", connection))
-        await using (var reader = await catalog.ExecuteReaderAsync(ct))
-        {
-            while (await reader.ReadAsync(ct))
-            {
-                names[reader.GetInt64(0)] = reader.GetString(1);
-            }
-        }
+        var after = await ReadDatabaseNamesAsync(connection, ct);
 
         var ofFirst = rows.Where(r => r.DatabaseId == firstOid).ToList();
         var ofSecond = rows.Where(r => r.DatabaseId == secondOid).ToList();
@@ -101,12 +95,32 @@ public sealed class PgStatementStatsDatabaseNameLiveTests
         /* The shared statement shape appears in both, with one queryid, so a join on the wrong column or an ordinal off by one cannot pass. */
         Assert.Contains(ofFirst.Select(r => r.QueryId), id => ofSecond.Any(s => s.QueryId == id));
 
-        /* Every collected row, in whatever database it ran, names the database its dbid points at. An entry left behind by a database
-           that was dropped since has no catalog row, so its name is NULL and the row still ships (the LEFT join). */
+        /* Every collected row names the database its dbid points at, as the catalog stood while the collector ran. Other classes create
+           and drop darling_scratch_* databases on this cluster while the test runs, and pg_stat_statements is cluster-wide, so a database
+           dropped during the test may still be named (it existed when the collector ran) or NULL (it was already gone, and the LEFT join
+           keeps its row). The catalog is read before and after the collector, and each row's name is checked against those reads (#7853). */
         Assert.All(rows, r =>
         {
-            names.TryGetValue(r.DatabaseId, out var expected);
-            Assert.Equal(expected, r.DatabaseName);
+            var inBefore = before.TryGetValue(r.DatabaseId, out var beforeName);
+            var inAfter = after.TryGetValue(r.DatabaseId, out var afterName);
+            if (inBefore && inAfter)
+            {
+                Assert.Equal(beforeName, r.DatabaseName);
+            }
+            else if (inBefore)
+            {
+                Assert.True(r.DatabaseName is null || r.DatabaseName == beforeName,
+                    $"dbid {r.DatabaseId} was dropped during the test: named '{r.DatabaseName}', expected its name or NULL");
+            }
+            else if (inAfter)
+            {
+                Assert.True(r.DatabaseName is null || r.DatabaseName == afterName,
+                    $"dbid {r.DatabaseId} was created during the test: named '{r.DatabaseName}', expected its name or NULL");
+            }
+            else
+            {
+                Assert.Null(r.DatabaseName);
+            }
         });
     }
 
@@ -125,5 +139,20 @@ public sealed class PgStatementStatsDatabaseNameLiveTests
         await using var command = new NpgsqlCommand("SELECT oid::bigint FROM pg_catalog.pg_database WHERE datname = $1", connection);
         command.Parameters.AddWithValue(database);
         return Convert.ToInt64(await command.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static async Task<Dictionary<long, string>> ReadDatabaseNamesAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var names = new Dictionary<long, string>();
+        await using (var catalog = new NpgsqlCommand("SELECT oid::bigint, datname::text FROM pg_catalog.pg_database", connection))
+        await using (var reader = await catalog.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                names[reader.GetInt64(0)] = reader.GetString(1);
+            }
+        }
+
+        return names;
     }
 }

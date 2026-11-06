@@ -213,7 +213,7 @@ public sealed class AzureSqlDatabaseOwnFiguresTests
         var zero = FactAdvice.Compose("CONFIG_MAXDOP", Facts(hardware, Config("CONFIG_MAXDOP", 0)))!;
         Assert.Contains(
             "Set MAXDOP to 4 — this server's cores-per-socket capped at 8 (cores per socket 4), the per-NUMA-node proxy; " +
-            "the SKU is irrelevant to the right value. The Apply button runs sp_configure + RECONFIGURE, an online metadata change.",
+            "the SKU is irrelevant to the right value. sp_configure + RECONFIGURE is an online metadata change.",
             zero.Remediation, StringComparison.Ordinal);
 
         var one = FactAdvice.Compose("CONFIG_MAXDOP", Facts(hardware, Config("CONFIG_MAXDOP", 1)))!;

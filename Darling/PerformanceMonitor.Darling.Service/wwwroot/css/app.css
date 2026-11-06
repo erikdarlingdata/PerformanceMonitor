@@ -375,6 +375,10 @@ a:hover { text-decoration: underline; }
 .panel-grid > .panel:has(> .panel-body > :is(.chart, .zoomable-chart)) { display: flex; flex-direction: column; }
 .panel-grid > .panel:has(> .panel-body > :is(.chart, .zoomable-chart)) > .panel-body { flex: 1; display: flex; flex-direction: column; }
 .panel-body > :is(.chart, .zoomable-chart) { margin-top: auto; }
+/* A panel whose body holds only its empty-state line (the Deadlock trend beside a drawn Blocked process report trend) is as tall as its row, so the
+   line is centred in the card and reads as a deliberate empty state at any width, not as a chart that failed to draw under a heading. */
+.panel-grid > .panel:has(> .panel-body > .strip.empty:only-child) { display: flex; flex-direction: column; }
+.panel-grid > .panel:has(> .panel-body > .strip.empty:only-child) > .panel-body { flex: 1; display: flex; flex-direction: column; justify-content: center; }
 /* #7534: span-solo is set by panel-layout.js on a span-1 panel with no span-1 partner on its row. */
 .panel.span-2, .panel.span-solo { grid-column: 1 / -1; }
 /* #6439: a sentence over a group of cards (the System Events counter charts) spans the full row; the slot stays empty (and takes no room) until a chart is drawn. */
@@ -1644,7 +1648,7 @@ table.data td.rec-text { min-width: 16rem; }
 .qh-grid .qh-cell { height: 22px; padding: 0; }
 .qh-grid .qh-corner, .qh-grid .qh-rowhead { width: var(--qh-head); box-sizing: border-box; } /* #7542: the one row-head width, also read by the table's min-width in query-heatmap.js */
 .qh-grid .qh-rowhead { position: sticky; left: 0; z-index: 1; background: var(--card); padding: 0 0.5rem 0 0; font-weight: normal; font-size: 0.7rem; color: var(--muted); text-align: right; white-space: nowrap; }
-.qh-grid .qh-tick { font-size: 0.65rem; color: var(--muted); font-weight: normal; text-align: left; white-space: nowrap; overflow: visible; }
+.qh-grid .qh-tick { font-size: 0.65rem; color: var(--muted); font-weight: normal; text-align: left; white-space: nowrap; overflow: hidden; } /* #7653: a label wider than its cell is clipped at the cell and never painted past the table, so .qh-wrap scrolls only when the cells themselves do not fit */
 .qh-empty { background: transparent; box-shadow: inset 0 0 0 1px rgba(168, 174, 186, 0.28); }
 .qh-band-1 { background: rgba(46, 174, 241, 0.20); }
 .qh-band-2 { background: rgba(46, 174, 241, 0.30); }
