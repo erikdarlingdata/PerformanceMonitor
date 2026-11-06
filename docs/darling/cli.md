@@ -45,7 +45,8 @@ Exit codes are numbers. The [exit code table](#exit-codes) below says what each 
 | `--set-collector-run-at` | Sets the time of day a daily collector starts. | no | either (1) | `0`, `1`, `2` | [Set the run time](collector-settings.md#set-the-time-of-day-a-daily-collector-runs---set-collector-run-at) |
 | `--set-collector-frequency` | Sets how often a collector runs, in minutes. | no | either (1) | `0`, `1`, `2` | [Collector settings](#collector-settings) |
 | `--set-collector-retention` | Sets how many days a collector keeps its data. | no | either (1) | `0`, `1`, `2` | [Collector settings](#collector-settings) |
-| `--reset-password-key` | Marks the current password key as replaced, so the next start makes a new one. | no | either (1) | `0`, `1`, `2` | [Make a new password key](collector-settings.md#make-a-new-password-key---reset-password-key) |
+| `--reset-password-key` | Marks the current password key as replaced, so the next start makes a new one. With `passwordKey` set, the service makes no key: the verb says to put a new key in the `passwordKey` source, then restart the service. | no | either (1) | `0`, `1`, `2` | [Make a new password key](collector-settings.md#make-a-new-password-key---reset-password-key) |
+| `--new-password-key` | Writes a new password key to a path where nothing exists, for a `passwordKey` secret. Prints the path and the key's fingerprint, never the key. | no | no | `0`, `1` | [Keeping the key outside the service](security.md#security--least-privilege-roles) |
 | `--drop-xe-sessions` | Drops the Extended Events sessions that Darling created on a server. | no | either (1) | `0`, `1`, `2` | [Drop the sessions](collector-settings.md#drop-the-extended-events-sessions-a-removed-server-left-behind---drop-xe-sessions) |
 | `--add-alert-source` | Creates a login for a system that sends alerts, and prints its connection string once. | no | either (1) | `0`, `1`, `2` | [Alert sources](agents-and-alert-sources.md#make-a-login-for-a-system-that-sends-alerts---add-alert-source-and-friends) |
 | `--rotate-alert-source` | Gives an alert source a new password and prints its connection string once. | no | either (1) | `0`, `1`, `2` | [Alert sources](agents-and-alert-sources.md#make-a-login-for-a-system-that-sends-alerts---add-alert-source-and-friends) |
@@ -71,7 +72,7 @@ Most verbs use two numbers:
 
 These verbs use only `0` and `1`:
 
-`--test-connection`, `--validate-config`, `--encrypt-password`, `--add-server`, `--grant-script`, `--print-viewer-connection`, `--export-viewer-config`, `--print-mcp-token`, `--print-web-token`, `--configure-network`, `--configure-firewall`, `--harden-files`, `--grant-cert-key-access`, `--enable-mcp`, `--disable-mcp`, `--enable-web`, `--disable-web`, `--backfill-rollups`, `--collapse-legacy-slices` and `--recompress-plan-dim`.
+`--test-connection`, `--validate-config`, `--encrypt-password`, `--add-server`, `--grant-script`, `--print-viewer-connection`, `--export-viewer-config`, `--print-mcp-token`, `--print-web-token`, `--configure-network`, `--configure-firewall`, `--harden-files`, `--grant-cert-key-access`, `--new-password-key`, `--enable-mcp`, `--disable-mcp`, `--enable-web`, `--disable-web`, `--backfill-rollups`, `--collapse-legacy-slices` and `--recompress-plan-dim`.
 
 `--help` and `--version` always exit `0`.
 

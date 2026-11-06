@@ -66,6 +66,8 @@ PerformanceMonitor.Darling.Service.exe --reset-password-key --config /etc/darlin
 
 It changes the store only, as the store owner, and never touches a key file. It prints how many saved passwords were sealed to the old key: restart the service, then enter those passwords again.
 
+With [`passwordKey`](configuration.md#passwordkey-string-optional) set in `darling.json`, the service never makes a key, so the verb ends with `Put a new password key in the passwordKey source (make one with --new-password-key), then restart the service.` and the number of saved passwords to enter again. Until the new key is in that source, a start with the old key gives the state `reset_pending` and publishes no key.
+
 ## Set the time of day a daily collector runs (`--set-collector-run-at`)
 
 A collector that runs once a day or less often, such as `index_object_stats`, can start at a time you choose. The verb writes the same row as the Viewer's Collector Schedules window. It takes a collector name and one of three values:
