@@ -70,7 +70,7 @@ globalThis.document = {
 globalThis.location = { hash: "#/server/A/cpu" };
 
 const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "chart-axis-")));
-let charts, util, compose, panels, findings;
+let charts, util, compose, panels, findings, shared, serverPage;
 try {
   fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
@@ -79,6 +79,8 @@ try {
   compose = await import(pathToFileURL(path.join(scratch, "compose.js")).href);
   panels = await import(pathToFileURL(path.join(scratch, "panels.js")).href);
   findings = await import(pathToFileURL(path.join(scratch, "pages", "analysis-findings.js")).href);
+  shared = await import(pathToFileURL(path.join(scratch, "pages", "server-tabs", "shared.js")).href);
+  serverPage = await import(pathToFileURL(path.join(scratch, "pages", "server.js")).href);
 } catch (e) {
   fs.rmSync(scratch, { recursive: true, force: true });
   throw e;
@@ -342,6 +344,28 @@ out.formatters = {
   intStep: [0, 0.2].map((v) => util.fmtInt(v, { step: 0.2 })),
   mapIndex: [5, 7].map(util.fmtMs),
   mb: [200, 1023, 1024, 2048].map((v) => util.fmtMb(v)),
+};
+
+/* #7726: the wiring, not just localizeIsoText. The real Server Connection descriptor drawn by the real stat viz, and the real server head
+   (the strip's dot, badge tooltip and sentence), each over a reply whose sentence has no seconds and whose own `since` has them. A descriptor
+   that lost its `sinceKey`, or a head that stopped passing `connect_down_since`, prints the bare minute instead of the tile's time. */
+const sinceSentence = "Server unreachable since 2026-11-05 16:52 UTC: refused.";
+const connectionPanel = panels.VIZ.stat({ server_connection: { message: sinceSentence, since: "2026-11-05T16:52:26.1230000", status: "Unreachable" } }, shared.SERVER_CONNECTION_PANEL);
+const connectionNoSince = panels.VIZ.stat({ server_connection: { message: sinceSentence, status: "Unreachable" } }, shared.SERVER_CONNECTION_PANEL);
+const headSlots = () => ({ title: new FakeNode("h1"), dot: new FakeNode("span"), badge: new FakeNode("span"), engine: new FakeNode("span"), why: new FakeNode("div") });
+function serverHead(card) {
+  const h = headSlots();
+  serverPage.fillServerHead(h.title, h.dot, h.badge, h.engine, h.why, card, sinceSentence);
+  return {
+    badgeTitle: find(h.badge, (n) => n.tag === "span" && n.attrs.title != null).map((n) => n.attrs.title)[0] ?? null,
+    reason: find(h.why, (n) => cls(n).includes("server-reason")).map((n) => n.textContent)[0] ?? null,
+  };
+}
+out.wiring = {
+  panelSentence: find(connectionPanel, (n) => cls(n).includes("stat-sentence")).map((n) => n.textContent)[0] ?? null,
+  panelSentenceNoSince: find(connectionNoSince, (n) => cls(n).includes("stat-sentence")).map((n) => n.textContent)[0] ?? null,
+  head: serverHead({ display_name: "SRV1", band: "red", status: "Unreachable", connect_down_since: "2026-11-05T16:52:26.1230000" }),
+  headNoSince: serverHead({ display_name: "SRV1", band: "red", status: "Unreachable" }),
 };
 
 /* #7586: the FinOps Version Store (PVS) tab's size trend, drawn by the real tab. Its read is answered by a stand-in fetch; the tab

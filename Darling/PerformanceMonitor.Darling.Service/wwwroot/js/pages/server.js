@@ -659,7 +659,7 @@ function loadServerCard(server, onCard) {
  * rendered by fleet.js's own metricBands so there is one implementation rather than two, the reason is the same
  * sentence the fleet page shows, and the engine is the token the store recorded. A server outside the ranking
  * gets the chips and no sentence, because inventing one here is the second derivation this comment refuses. */
-function fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason) {
+export function fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason) {
   if (!card) return;
 
   /* The title names the server the way the sidebar, the fleet cards and every other page do: by display name.

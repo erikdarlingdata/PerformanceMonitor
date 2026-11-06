@@ -1255,6 +1255,23 @@ public sealed class ConfigChangeAttributionTests
         Assert.DoesNotContain("`Sales.is_query_store_on`", advice.Investigation, StringComparison.Ordinal);
     }
 
+    /// <summary>#7726 item 7: the static configuration-change card, the one a finding stored before the composer shows,
+    /// names no tool in what a person reads. The tools ride in the card's next-tools list.</summary>
+    [Fact]
+    public void Compose_StaticConfigChangedCard_NamesNoTool_ButKeepsEveryFact()
+    {
+        var card = FactAdvice.Compose(ConfigChangeAttribution.FactKey, Array.Empty<Fact>().ToFactLookup())!;
+        var text = card.Headline + " " + card.Investigation + " " + card.Remediation;
+
+        foreach (var tool in new[] { "get_server_config_changes", "get_database_config_changes", "get_trace_flag_changes", "compare_analysis", "audit_config", "get_trace_flags" })
+            Assert.DoesNotContain(tool, text, StringComparison.Ordinal);
+
+        Assert.Contains("msg 15457", card.Investigation, StringComparison.Ordinal);
+        Assert.Contains("the four hours before the change with the four hours after it", card.Investigation, StringComparison.Ordinal);
+        Assert.Contains("not a causal test", card.Remediation, StringComparison.Ordinal);
+        Assert.Contains("If nothing moved, there is nothing to do.", card.Remediation, StringComparison.Ordinal);
+    }
+
     /// <summary>#7726 items 1 and 7: the memory pressure card names no tool in the sentence a person reads, and the
     /// single-use plans card cites no source file of the frozen Dashboard.</summary>
     [Fact]

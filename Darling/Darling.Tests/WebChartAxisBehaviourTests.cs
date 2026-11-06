@@ -329,6 +329,26 @@ public sealed class WebChartAxisBehaviourTests
             Strings(f.GetProperty("adviceSpans")));
     }
 
+    /// <summary>#7726: the real Server Connection descriptor (<c>sinceKey</c> and <c>localizeMinutes</c>) and the real server head
+    /// (<c>connect_down_since</c>) print the sentence's instant as the tile's local time, seconds included, and fall back to the local
+    /// minute when the reply carries no instant. A descriptor or head that dropped its wiring prints the bare minute and fails here.</summary>
+    [Fact]
+    public void TheServerConnectionPanelAndTheServerHead_PrintTheLocalTimeOfTheTile()
+    {
+        var all = Run();
+        var expected = Strings(all.GetProperty("formatters").GetProperty("localExpected"));
+        var w = all.GetProperty("wiring");
+        var withSeconds = $"Server unreachable since {expected[2]}: refused.";
+        var minuteOnly = $"Server unreachable since {expected[0]}: refused.";
+
+        Assert.Equal(withSeconds, w.GetProperty("panelSentence").GetString());
+        Assert.Equal(minuteOnly, w.GetProperty("panelSentenceNoSince").GetString());
+        Assert.Equal(withSeconds, w.GetProperty("head").GetProperty("badgeTitle").GetString());
+        Assert.Equal(withSeconds, w.GetProperty("head").GetProperty("reason").GetString());
+        Assert.Equal(minuteOnly, w.GetProperty("headNoSince").GetProperty("badgeTitle").GetString());
+        Assert.Equal(minuteOnly, w.GetProperty("headNoSince").GetProperty("reason").GetString());
+    }
+
     private static SystemHealthRecord Snapshot(DateTime at, long system, long sql) =>
         new() { EventTime = at, SystemCpuUtilization = system, SqlCpuUtilization = sql };
 
