@@ -418,7 +418,7 @@ async function renderWatchItems(box) {
       ], items)
     : emptyStrip(watchStateShown
         ? "No " + (SWEEP_WATCH_STATE_LABELS[watchStateShown] || watchStateShown).toLowerCase() + " watch items."
-        : "Nothing is open right now — no watch item is open or carried.");
+        : "No watch items are open or carried.");
 
   mount(box, [
     el("div", { class: "sweep-watch-head" }, [el("span", { class: "meta", text: label }), el("div", { class: "spacer" }), toggle]),
