@@ -101,26 +101,7 @@ public sealed class TrendCoveredRangesLiveTests
     {
         await RunAsync(async (postgres, now, ct) =>
         {
-            foreach (var collector in new[] { "blocked_process_report", "deadlocks" })
-            {
-                foreach (var m in new[] { 50, 40, 30, 20, 10, 2 })
-                {
-                    await LogRunAsync(postgres, collector, "SUCCESS", now.AddMinutes(-m), ct);
-                }
-            }
-
-            var eventTime = DarlingMcpTestData.Naive(now.AddMinutes(-25));
-            await using (var connection = await postgres.OpenConnectionAsync(ct))
-            {
-                await DarlingMcpTestData.ExecAsync(connection, ct,
-                    @"INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocked_spid, database_name)
-VALUES ($1,$2,$3,$4,$5,7000,60,444,'AppDb')",
-                    CollectionIdGenerator.Next(), eventTime.AddSeconds(30), ServerId, ServerName, eventTime);
-                await DarlingMcpTestData.ExecAsync(connection, ct,
-                    @"INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, victim_process_id, victim_sql_text, deadlock_graph_xml)
-VALUES ($1,$2,$3,$4,$5,'processX','select 1','<deadlock/>')",
-                    CollectionIdGenerator.Next(), eventTime.AddSeconds(30), ServerId, ServerName, eventTime);
-            }
+            await SeedRunsAndEventsAsync(postgres, now, ct);
 
             foreach (var reply in new[]
             {
@@ -138,6 +119,102 @@ VALUES ($1,$2,$3,$4,$5,'processX','select 1','<deadlock/>')",
                 Assert.Equal(now.AddMinutes(-2), TimeOf(range, "end"));
             }
         });
+    }
+
+    /// <summary>
+    /// An <c>as_of</c> window that ends between two runs less than the cap apart is covered up to its end, not up to the run before it:
+    /// the pair that crosses the window's end is kept and clipped. A pair whose gap is over the cap is still left out, however the window
+    /// ends. Runs every 10 minutes from 150 to 110 minutes back, then one 30 minutes back (80 minutes after the last).
+    /// </summary>
+    [Fact]
+    public async Task AWindowEndingBetweenTwoRuns_IsCoveredUpToItsEnd_UnlessTheGapIsOverTheCap()
+    {
+        await RunAsync(async (postgres, now, ct) =>
+        {
+            foreach (var m in new[] { 150, 140, 130, 120, 110, 30 })
+            {
+                await LogRunAsync(postgres, "blocked_process_report", "SUCCESS", now.AddMinutes(-m), ct);
+            }
+
+            var start = now.AddHours(-3);
+
+            /* Ends 5 minutes after the run at 130 back, 5 before the one at 120 back: the pair crosses the end. */
+            var crossing = await DarlingBlockingTrendReader.GetCoveredRangesAsync(postgres, ServerId, start, now.AddMinutes(-125), "blocked_process_report", ct);
+            var range = Assert.Single(crossing);
+            Assert.Equal(now.AddMinutes(-150), range.Start);
+            Assert.Equal(now.AddMinutes(-125), range.End);
+
+            /* Ends 40 minutes after the run at 110 back: the next run is 80 minutes on, over the cap, so the range stops at the run. */
+            var overCap = await DarlingBlockingTrendReader.GetCoveredRangesAsync(postgres, ServerId, start, now.AddMinutes(-70), "blocked_process_report", ct);
+            var stopped = Assert.Single(overCap);
+            Assert.Equal(now.AddMinutes(-150), stopped.Start);
+            Assert.Equal(now.AddMinutes(-110), stopped.End);
+
+            /* A window that ends now: nothing is past the newest run, so the time after it stays uncovered. */
+            var nowEnd = await DarlingBlockingTrendReader.GetCoveredRangesAsync(postgres, ServerId, now.AddMinutes(-60), now, "blocked_process_report", ct);
+            Assert.Empty(nowEnd);
+        });
+    }
+
+    /// <summary>A covered read that throws (a statement timeout, a read budget that ran out) costs the <c>covered</c> field only: both trends
+    /// answer with every existing field and no <c>covered</c>.</summary>
+    [Fact]
+    public async Task AFailingCoveredRead_LeavesTheCoveredFieldOut_AndKeepsEveryOtherField()
+    {
+        await RunAsync(async (postgres, now, ct) =>
+        {
+            await SeedRunsAndEventsAsync(postgres, now, ct);
+
+            DarlingBlockingTrendReader.TestOnlyCoveredRead = () => throw new TimeoutException("the covered read's deadline passed");
+            try
+            {
+                foreach (var reply in new[]
+                {
+                    await DarlingMcpBlockingTools.GetBlockingTrend(postgres, ServerName, 1, cancellationToken: ct),
+                    await DarlingMcpBlockingTools.GetDeadlockTrend(postgres, ServerName, 1, cancellationToken: ct),
+                })
+                {
+                    using var doc = JsonDocument.Parse(reply);
+                    var root = doc.RootElement;
+                    Assert.False(root.TryGetProperty("error", out _), reply);
+                    Assert.Equal(1, root.GetProperty("trend").GetArrayLength());
+                    Assert.Equal(ServerName, root.GetProperty("server").GetString());
+                    Assert.Equal(1, root.GetProperty("hours_back").GetInt32());
+                    Assert.True(root.TryGetProperty("effective_start", out _));
+                    Assert.True(root.TryGetProperty("window_truncated", out _));
+                    Assert.False(root.TryGetProperty("covered", out _), reply);
+                }
+            }
+            finally
+            {
+                DarlingBlockingTrendReader.TestOnlyCoveredRead = null;
+            }
+        });
+    }
+
+    /// <summary>Six runs of each collector from 50 to 2 minutes back, and one blocked-process report and one deadlock 25 minutes back.</summary>
+    private static async Task SeedRunsAndEventsAsync(NpgsqlDataSource postgres, DateTime now, CancellationToken ct)
+    {
+        foreach (var collector in new[] { "blocked_process_report", "deadlocks" })
+        {
+            foreach (var m in new[] { 50, 40, 30, 20, 10, 2 })
+            {
+                await LogRunAsync(postgres, collector, "SUCCESS", now.AddMinutes(-m), ct);
+            }
+        }
+
+        var eventTime = DarlingMcpTestData.Naive(now.AddMinutes(-25));
+        await using (var connection = await postgres.OpenConnectionAsync(ct))
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocked_spid, database_name)
+VALUES ($1,$2,$3,$4,$5,7000,60,444,'AppDb')",
+                CollectionIdGenerator.Next(), eventTime.AddSeconds(30), ServerId, ServerName, eventTime);
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, victim_process_id, victim_sql_text, deadlock_graph_xml)
+VALUES ($1,$2,$3,$4,$5,'processX','select 1','<deadlock/>')",
+                CollectionIdGenerator.Next(), eventTime.AddSeconds(30), ServerId, ServerName, eventTime);
+        }
     }
 
     private static DateTime TimeOf(JsonElement range, string name) =>

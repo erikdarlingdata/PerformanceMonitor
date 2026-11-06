@@ -908,22 +908,28 @@ public sealed class DarlingMcpBlockingTools
                 () => DarlingMcpWindowNotice.Probe(postgres, BlockingPageSources, resolved.ServerName, start, now, cancellationToken),
                 start, now, BlockingPageTables, logger: logger, cancellationToken: cancellationToken);
             /* #7850: the time the blocked-process-report collector's runs read, so the page draws a 0 only inside it. */
-            var covered = await DarlingBlockingTrendReader.GetCoveredRangesAsync(
-                postgres, resolved.ServerId, start, now, "blocked_process_report", cancellationToken);
-            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
+            var covered = await DarlingBlockingTrendReader.TryGetCoveredRangesAsync(
+                postgres, resolved.ServerId, resolved.DisplayName, start, now, "blocked_process_report", logger, cancellationToken);
+            var reply = new Dictionary<string, object?>
             {
-                server = resolved.DisplayName,
-                hours_back,
-                effective_start = notice.EffectiveStart,
-                window_truncated = notice.WindowTruncated,
-                truncation_note = notice.TruncationNote,
+                ["server"] = resolved.DisplayName,
+                ["hours_back"] = hours_back,
+                ["effective_start"] = notice.EffectiveStart,
+                ["window_truncated"] = notice.WindowTruncated,
+                ["truncation_note"] = notice.TruncationNote,
                 /* #5244: which databases the trend is limited to (null for all), and which collector answered: the blocked-process
                    reports, or the DMV snapshot when those have no rows for the chosen databases. One source per answer. */
-                database_name = databases.Describe(),
-                source = points[0].Source,
-                trend = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count }),
-                covered = CoveredJson(covered)
-            }, McpHelpers.JsonOptions), notice);
+                ["database_name"] = databases.Describe(),
+                ["source"] = points[0].Source,
+                ["trend"] = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count })
+            };
+            /* #7850: a covered read that failed leaves the field out, and the page keeps its whole-window fill. */
+            if (covered != null)
+            {
+                reply["covered"] = CoveredJson(covered);
+            }
+
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(reply, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -989,18 +995,24 @@ public sealed class DarlingMcpBlockingTools
                 () => DarlingMcpWindowNotice.Probe(postgres, "deadlocks", resolved.ServerName, start, now, cancellationToken),
                 start, now, "deadlocks", logger: logger, cancellationToken: cancellationToken);
             /* #7850: the time the deadlock collector's runs read, so the page draws a 0 only inside it. */
-            var covered = await DarlingBlockingTrendReader.GetCoveredRangesAsync(
-                postgres, resolved.ServerId, start, now, "deadlocks", cancellationToken);
-            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
+            var covered = await DarlingBlockingTrendReader.TryGetCoveredRangesAsync(
+                postgres, resolved.ServerId, resolved.DisplayName, start, now, "deadlocks", logger, cancellationToken);
+            var reply = new Dictionary<string, object?>
             {
-                server = resolved.DisplayName,
-                hours_back,
-                effective_start = notice.EffectiveStart,
-                window_truncated = notice.WindowTruncated,
-                truncation_note = notice.TruncationNote,
-                trend = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count }),
-                covered = CoveredJson(covered)
-            }, McpHelpers.JsonOptions), notice);
+                ["server"] = resolved.DisplayName,
+                ["hours_back"] = hours_back,
+                ["effective_start"] = notice.EffectiveStart,
+                ["window_truncated"] = notice.WindowTruncated,
+                ["truncation_note"] = notice.TruncationNote,
+                ["trend"] = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count })
+            };
+            /* #7850: a covered read that failed leaves the field out, and the page keeps its whole-window fill. */
+            if (covered != null)
+            {
+                reply["covered"] = CoveredJson(covered);
+            }
+
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(reply, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

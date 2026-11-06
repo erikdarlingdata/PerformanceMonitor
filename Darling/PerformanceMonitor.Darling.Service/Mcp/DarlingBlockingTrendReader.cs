@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
@@ -304,12 +305,14 @@ internal static class DarlingBlockingTrendReader
     /// for the same question (<c>ObservedQuietGaps.GapFloorMinutes</c>); a collector scheduled less often than that is never
     /// covered, which leaves its trend unfilled, the pre-#7839 look, never a false 0.</para>
     /// </summary>
-    public const int CoveredGapCapMinutes = 60;
+    public const int CoveredGapCapMinutes = (int)ObservedQuietGaps.GapFloorMinutes;
 
     /// <summary>
     /// Each consecutive pair of one collector's SUCCESS runs no further apart than <see cref="CoveredGapCapMinutes"/>, for the
-    /// pairs whose later run falls in the window. The lookback of one cap before the window start brings in the run that began
-    /// the first pair. $1 server_id, $2/$3 window (naive UTC), $4 collector name, $5 the cap in minutes. Only the SUCCESS rows of
+    /// pairs that overlap the window. The lookback of one cap before the window start brings in the run that began the first
+    /// pair, and the look-ahead of one cap past the window end brings in the run that ended the last one, so a pair that crosses
+    /// either edge is kept and <see cref="MergeCovered"/> clips it (an <c>as_of</c> window ending between two runs is covered up
+    /// to its end). A window that ends now has no run past it, so the time after the newest run stays uncovered. $1 server_id, $2/$3 window (naive UTC), $4 collector name, $5 the cap in minutes. Only the SUCCESS rows of
     /// the one collector: a run that failed read nothing, and the other blocking collector (the DMV snapshot) is a sample, not
     /// the report source this trend's zero fill depends on.
     /// </summary>
@@ -323,10 +326,11 @@ internal static class DarlingBlockingTrendReader
             AND   collector_name = $4
             AND   status = 'SUCCESS'
             AND   collection_time >= $2 - ($5 * INTERVAL '1 minute')
-            AND   collection_time <= $3
+            AND   collection_time <= $3 + ($5 * INTERVAL '1 minute')
         ) runs
         WHERE prev_time IS NOT NULL
         AND   run_time >= $2
+        AND   prev_time <= $3
         AND   run_time - prev_time <= $5 * INTERVAL '1 minute'
         ORDER BY run_time
         """;
@@ -383,6 +387,39 @@ internal static class DarlingBlockingTrendReader
         }
 
         return MergeCovered(pairs, startUtc, endUtc);
+    }
+
+    /// <summary>A test's stand-in for the covered read, per async flow (null: the store is asked).</summary>
+    private static readonly System.Threading.AsyncLocal<Func<Task<List<CoveredRange>>>?> s_testOnlyCoveredRead = new();
+
+    /// <summary>Test seam: while set, <see cref="TryGetCoveredRangesAsync"/> runs this instead of the store read.</summary>
+    internal static Func<Task<List<CoveredRange>>>? TestOnlyCoveredRead
+    {
+        get => s_testOnlyCoveredRead.Value;
+        set => s_testOnlyCoveredRead.Value = value;
+    }
+
+    /// <summary>
+    /// <see cref="GetCoveredRangesAsync"/> for a trend reply (#7850): a covered read that fails (a statement timeout, a read budget
+    /// that ran out) returns null and logs once, and the caller leaves the <c>covered</c> field out, so the page keeps its
+    /// whole-window fill and the trend still answers. The caller's own cancellation is not swallowed.
+    /// </summary>
+    internal static async Task<List<CoveredRange>?> TryGetCoveredRangesAsync(
+        NpgsqlDataSource postgres, int serverId, string serverName, DateTime startUtc, DateTime endUtc, string collectorName,
+        ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var testOnly = TestOnlyCoveredRead;
+            return testOnly != null
+                ? await testOnly()
+                : await GetCoveredRangesAsync(postgres, serverId, startUtc, endUtc, collectorName, cancellationToken);
+        }
+        catch (Exception ex) when (!(ex is OperationCanceledException && cancellationToken.IsCancellationRequested))
+        {
+            logger?.LogWarning(ex, "The covered-time read of {Collector} for {Server} failed; the trend goes without its covered list.", collectorName, serverName);
+            return null;
+        }
     }
 
     /* ───────────────── the denominator an empty trend needs ───────────────── */
