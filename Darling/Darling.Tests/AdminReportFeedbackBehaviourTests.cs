@@ -197,4 +197,20 @@ public sealed class AdminReportFeedbackBehaviourTests
 
         Assert.Equal(expectedClass, page.GetProperty("className").GetString());
     }
+
+    // #7953: the re-read after a record runs under a new render generation, so a poll that drew while the PUT was in flight does not make
+    // it return early. The new line is on the page as soon as the answer lands, with one list read for it and no further poll.
+    [Fact]
+    public void ARecordWhosePutOutlivesAPoll_StillReadsTheListAgain_AndShowsTheNewLine()
+    {
+        var page = AdminServerEditBehaviourTests.Run("feedbackPoll");
+
+        var afterPoll = page.GetProperty("afterPoll");
+        Assert.Empty(Strings(afterPoll.GetProperty("lines")));
+        var afterAnswer = page.GetProperty("afterAnswer");
+        Assert.Equal(1, page.GetProperty("writes").GetInt32());
+        Assert.Equal(afterPoll.GetProperty("reads").GetInt32() + 1, afterAnswer.GetProperty("reads").GetInt32());
+        Assert.Contains(Strings(afterAnswer.GetProperty("lines")), l => l.Contains("web: wrong", System.StringComparison.Ordinal) && l.Contains("never a real block", System.StringComparison.Ordinal));
+        Assert.Equal("Feedback recorded.", Assert.Single(Strings(afterAnswer.GetProperty("status"))));
+    }
 }

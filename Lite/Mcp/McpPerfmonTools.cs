@@ -11,13 +11,13 @@ namespace PerformanceMonitorLite.Mcp;
 public sealed class McpPerfmonTools
 {
     [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
-    [McpServerTool(Name = "get_perfmon_stats"), Description("Gets the latest SQL Server performance counter values (batch requests/sec, compilations/sec, deadlocks/sec, and more). LATEST IS A TIME: the newest snapshot, not a window; captured_at is when it was collected; use get_perfmon_trend for history. counter_kind: gauge = value IS the reading, delta_value null; rate = value is cumulative, delta_value its per-interval change, per_second that change per second (null when unknowable); other = a non-rate per-interval change; null counter_kind predates the column, classify by name (ends in /sec = rate). <<GUIDE>> Gets the latest SQL Server performance counter values: batch requests/sec, compilations/sec, deadlocks/sec, and more. Provides throughput context to distinguish a busy server from a sick one. Use counter_name or instance_name to filter results. LATEST IS A TIME: this reads the newest counter snapshot, not a window, and captured_at is the instant it was collected; use get_perfmon_trend for a counter over time. Each row carries counter_kind from the stored cntr_type: 'gauge' means value IS the reading (a level such as Total Server Memory (KB); delta_value is null because a level has no delta), 'rate' means value is a cumulative count (a running total, not a rate), delta_value is its change over the last collection interval, and per_second is that change divided by the interval's seconds: the counter's rate, the figure to report for it, and null when no delta was knowable (a first collection, a counter reset or a restart), 'other' means an average/fraction numerator whose delta_value is a per-interval change and not a rate; null counter_kind is a row written before the type was stored — classify it by name (a counter whose name ends in /sec is a rate, and carries per_second).")]
+    [McpServerTool(Name = "get_perfmon_stats"), Description("Gets the latest SQL Server performance counter values (batch requests/sec, compilations/sec, deadlocks/sec, and more). LATEST IS A TIME: the newest snapshot, not a window; captured_at is when it was collected; use get_perfmon_trend for history. counter_kind: gauge = value IS the reading, delta_value null; rate = value is cumulative, delta_value its per-interval change, per_second that change per second (null when unknowable); other = a non-rate per-interval change; null counter_kind predates the column, classify by name (ends in /sec = rate). <<GUIDE>> Gets the latest SQL Server performance counter values: batch requests/sec, compilations/sec, deadlocks/sec, and more. Provides throughput context to distinguish a busy server from a sick one. Use counter_name or instance_name to filter results: each matches the whole name first, ignoring case, and falls back to a case-insensitive substring match only when no name equals it, so 'Transactions/sec' returns that one counter and not Write Transactions/sec beside it, while a partial name still finds its counters. LATEST IS A TIME: this reads the newest counter snapshot, not a window, and captured_at is the instant it was collected; use get_perfmon_trend for a counter over time. Each row carries counter_kind from the stored cntr_type: 'gauge' means value IS the reading (a level such as Total Server Memory (KB); delta_value is null because a level has no delta), 'rate' means value is a cumulative count (a running total, not a rate), delta_value is its change over the last collection interval, and per_second is that change divided by the interval's seconds: the counter's rate, the figure to report for it, and null when no delta was knowable (a first collection, a counter reset or a restart), 'other' means an average/fraction numerator whose delta_value is a per-interval change and not a rate; null counter_kind is a row written before the type was stored — classify it by name (a counter whose name ends in /sec is a rate, and carries per_second).")]
     public static async Task<string> GetPerfmonStats(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Filter to a specific counter name, e.g. 'Batch Requests/sec'.")] string? counter_name = null,
-        [Description("Filter to a specific instance name, e.g. a database name.")] string? instance_name = null)
+        [Description("Filter to one counter name, e.g. 'Batch Requests/sec': the whole name, ignoring case; a case-insensitive substring match only when no counter has that exact name.")] string? counter_name = null,
+        [Description("Filter to one instance name, e.g. a database name: the whole name, ignoring case; a case-insensitive substring match only when no instance has that exact name.")] string? instance_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -31,11 +31,10 @@ public sealed class McpPerfmonTools
                     ?? McpHelpers.Status("unavailable", "No perfmon stats available.");
             }
 
-            IEnumerable<PerfmonRow> filtered = rows;
-            if (!string.IsNullOrEmpty(counter_name))
-                filtered = filtered.Where(r => r.CounterName != null && r.CounterName.Contains(counter_name, StringComparison.OrdinalIgnoreCase));
-            if (!string.IsNullOrEmpty(instance_name))
-                filtered = filtered.Where(r => r.InstanceName != null && r.InstanceName.Contains(instance_name, StringComparison.OrdinalIgnoreCase));
+            /* #7903: the whole name first, ignoring case; a substring match only when no name equals the filter, so one
+               counter's name does not take its longer neighbours. The shared helper is Darling's twin's too. */
+            var filtered = McpHelpers.FilterByNameExactThenContains(rows, r => r.CounterName, counter_name);
+            filtered = McpHelpers.FilterByNameExactThenContains(filtered, r => r.InstanceName, instance_name);
 
             /* One row per counter, built by the shared TrendPayloads.PerfmonLatestRow that Darling's
                DarlingMcpDataTools calls too: counter_kind is the stored type's three-way reading (v62, #3653 A7),

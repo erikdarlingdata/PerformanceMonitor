@@ -151,15 +151,15 @@ public sealed class QueryStatsCappedRowsReadersLiveTests
     });
 
     [Fact]
-    public Task Heatmap_CountsTheStoredRows_AndSaysItIsNotEveryStatement() => RunAsync(async (postgres, ct) =>
+    public Task Heatmap_CountsEachStoredStatementOncePerCell_AndSaysItIsNotEveryStatement() => RunAsync(async (postgres, ct) =>
     {
         await SeedAsync(postgres, ct);
         using var doc = JsonDocument.Parse(await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(
             postgres, ServerName, 4, "cpu", null, 60, 100, AsOf, false, null, ct));
         var root = doc.RootElement;
 
-        /* 6 + 3 + 6 stored rows. A statement missing from three runs adds three cells' worth fewer, not zero. */
-        Assert.Equal(15, root.GetProperty("cells").EnumerateArray().Sum(c => c.GetProperty("query_count").GetInt64()));
+        /* #7881: a cell counts distinct statements, so HEAVY, MID and OTHER count once each, however many runs stored them. */
+        Assert.Equal(3, root.GetProperty("cells").EnumerateArray().Sum(c => c.GetProperty("query_count").GetInt64()));
         Assert.Equal(QueryStatsCoverage.StoredRowsNote, root.GetProperty("coverage_note").GetString());
     });
 }

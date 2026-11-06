@@ -302,11 +302,24 @@ public sealed class WebChartAxisBehaviourTests
     {
         var f = Run().GetProperty("formatters");
         Assert.Equal(new[] { "400 µs", "2 ms", "999 ms", "1.5 s" }, Strings(f.GetProperty("msNoStep")));
-        Assert.Equal("1%", f.GetProperty("pctNoStep").GetString());
+        Assert.Equal("0.6%", f.GetProperty("pctNoStep").GetString());
         Assert.Equal(new[] { "5 ms", "7 ms" }, Strings(f.GetProperty("mapIndex")));
         Assert.Equal(new[] { "200 MB", "1,023 MB", "1.0 GB", "2.0 GB" }, Strings(f.GetProperty("mb")));
         Assert.Equal(new[] { "0.0 ms", "0.2 ms", "0.4 ms" }, Strings(f.GetProperty("msStep")));
         Assert.Equal(new[] { "1.00 s", "1.05 s", "1.10 s" }, Strings(f.GetProperty("msSeconds")));
+    }
+
+    /// <summary>#7945: a cell or tooltip value that rounds up to the next unit's base reads in that unit (999.6 ms is 1.0 s, not 1,000 ms;
+    /// 1,023.6 MB is 1.0 GB), while a value that rounds short of it stays put. A percent under 1 keeps one significant digit, so 0.46% reads
+    /// 0.5% and not 0%; a true 0 reads 0%.</summary>
+    [Fact]
+    public void ACellAtAUnitEdge_StepsUpAUnit_AndASmallPercentKeepsADigit()
+    {
+        var f = Run().GetProperty("formatters");
+        Assert.Equal(new[] { "1.0 s", "1.0 min", "1.0 h", "999 ms" }, Strings(f.GetProperty("msEdge")));
+        Assert.Equal(new[] { "1.0 GB", "1,023 MB" }, Strings(f.GetProperty("mbEdge")));
+        Assert.Equal(new[] { "1.0 KB", "1.0 MB", "1.0 GB", "1,023 B" }, Strings(f.GetProperty("bytesEdge")));
+        Assert.Equal(new[] { "0.5%", "0.04%", "0%", "13%", "-0.5%" }, Strings(f.GetProperty("pctSmall")));
     }
 
     /// <summary>#7726: Top Queries printed "0 ms" for an average of 0.03 ms over 1.5 million runs. A positive figure under 1 ms in a

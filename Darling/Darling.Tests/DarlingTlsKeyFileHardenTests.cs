@@ -23,7 +23,11 @@ namespace Darling.Tests;
 /// protected, with SYSTEM and Administrators full control and the service account read only. A key outside it is
 /// reported and never changed. A path that is not fully qualified on a drive letter is skipped. Every case here sits in a
 /// folder that grants Users read by inheritance, which is what a default install folder (and a drive-root folder) does.
+/// <para>In the <c>darling-config-env</c> collection (it runs alone) because these tests swap the service account with
+/// <see cref="DarlingFileSecurity.HardenForAccount"/>, a static the whole test process shares: run beside the key-file
+/// tests, a swapped account makes their directories untrusted (#8042).</para>
 /// </summary>
+[Collection("darling-config-env")]
 public class DarlingTlsKeyFileHardenTests
 {
     private static readonly SecurityIdentifier Users = new(WellKnownSidType.BuiltinUsersSid, null);

@@ -235,13 +235,14 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
     /// Produces a single BLOCKING_EVENTS fact with event count, rate, and details.
     /// Value is the busiest 4-hour sub-window's events per hour (#3871), the PG collector's shape
     /// exactly — see <c>PgFactCollector.CollectBlockingFactsAsync</c> for the grain argument (the same
-    /// storm must not grade CRITICAL on a 4-hour pass and Information on a 24-hour one) and for why the
-    /// divisor is <c>min(4, observed hours)</c> (#3538 A2's observed-time rule, and the ≤4-hour
-    /// degeneracy). DuckDB's 3-arg <c>time_bucket</c> takes the same window-start origin PG's
-    /// <c>date_bin</c> does. <c>events_per_hour</c> stays published as whole-window context.
+    /// storm must not grade CRITICAL on a 4-hour pass and Information on a 24-hour one). Each bucket
+    /// divides by its OWN covered hours (#7895, <see cref="FactCollectorHelpers.PeakBucketRate"/>): its
+    /// span clipped to the window end, never more than the window's observed hours (#3538 A2's
+    /// observed-time rule), never under one hour, and the peak is the highest rate rather than the
+    /// biggest count.
+    /// DuckDB's 3-arg <c>time_bucket</c> takes the same window-start origin PG's <c>date_bin</c> does.
+    /// <c>events_per_hour</c> stays published as whole-window context.
     /// </summary>
-    private const double PeakWindowHours = 4.0;
-
     private async Task CollectBlockingFactsAsync(AnalysisContext context, List<Fact> facts)
     {
         if (context.ObservedDurationMs <= 0) return;
@@ -271,7 +272,7 @@ reports AS (
     FROM waits
 ),
 buckets AS (
-    SELECT COUNT(*) AS bucket_event_count
+    SELECT bucket_start, COUNT(*) AS bucket_event_count
     FROM reports
     GROUP BY bucket_start
 )
@@ -281,7 +282,11 @@ SELECT
     MAX(wait_time_ms) AS max_wait_time_ms,
     COUNT(DISTINCT blocking_spid) AS distinct_head_blockers,
     COUNT(CASE WHEN blocking_status = 'sleeping' THEN 1 END) AS sleeping_blocker_count,
-    (SELECT COALESCE(MAX(bucket_event_count), 0) FROM buckets) AS peak_4h_event_count
+    /* #7895: the busiest FULL bucket, and the clipped tail bucket with its own span, so each is rated by its covered
+       hours (FactCollectorHelpers.PeakBucketRate). With the window-start origin only the last bucket can be short. */
+    (SELECT COALESCE(MAX(bucket_event_count), 0) FROM buckets WHERE bucket_start + INTERVAL '4 hours' <= $3) AS peak_full_bucket_count,
+    (SELECT COALESCE(MAX(bucket_event_count), 0) FROM buckets WHERE bucket_start + INTERVAL '4 hours' > $3) AS tail_bucket_count,
+    (SELECT COALESCE(MAX(date_diff('second', bucket_start, $3)) / 3600.0, 0) FROM buckets WHERE bucket_start + INTERVAL '4 hours' > $3) AS tail_bucket_hours
 FROM reports").Replace("{SCOPE}", scopeFilter);
 
         command.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
@@ -299,12 +304,15 @@ FROM reports").Replace("{SCOPE}", scopeFilter);
         var maxWaitTimeMs = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
         var distinctHeadBlockers = reader.IsDBNull(3) ? 0L : ToInt64(reader.GetValue(3));
         var sleepingBlockerCount = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
-        var peakEventCount = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
+        var peakFullBucketCount = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
+        var tailBucketCount = reader.IsDBNull(6) ? 0L : ToInt64(reader.GetValue(6));
+        var tailBucketHours = reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7));
 
         var periodHours = context.PeriodDurationMs / 3_600_000.0;
         var observedHours = context.ObservedDurationMs / 3_600_000.0;
         var eventsPerHour = eventCount / observedHours;
-        var peakEventsPerHour = peakEventCount / Math.Min(PeakWindowHours, observedHours);
+        var (peakEventsPerHour, peakEventCount, peakCoveredHours) =
+            FactCollectorHelpers.PeakBucketRate(peakFullBucketCount, tailBucketCount, tailBucketHours, context);
 
         facts.Add(new Fact
         {
@@ -318,6 +326,7 @@ FROM reports").Replace("{SCOPE}", scopeFilter);
                 ["events_per_hour"] = eventsPerHour,
                 ["events_per_hour_peak_4h"] = peakEventsPerHour,
                 ["peak_4h_event_count"] = peakEventCount,
+                ["peak_4h_covered_hours"] = peakCoveredHours,
                 ["avg_wait_time_ms"] = avgWaitTimeMs,
                 ["max_wait_time_ms"] = maxWaitTimeMs,
                 ["distinct_head_blockers"] = distinctHeadBlockers,
@@ -331,9 +340,14 @@ FROM reports").Replace("{SCOPE}", scopeFilter);
     /// <summary>
     /// Collects deadlock facts from v_deadlocks, counting each stored deadlock once.
     /// Produces a single DEADLOCKS fact with count and rate.
-    /// Value is deadlocks per OBSERVED hour (see <see cref="CollectBlockingFactsAsync"/> — same divisor,
-    /// same reason, #3538 A2). <c>period_hours</c> nominal, <c>observed_hours</c> the divisor; an
-    /// unobserved window emits no fact.
+    /// Value is the busiest ONE-HOUR bucket's deadlocks (#7893), the server-hour grain the scorer's (5, 20) pair
+    /// was measured on, so the same storm grades the same on a 4-hour pass and a 24-hour read; the whole-window
+    /// average dilutes a one-hour burst by however much quiet surrounds it. Buckets take the window-start origin
+    /// (DuckDB's 3-arg <c>time_bucket</c>, as the blocking peak does), and a one-hour bucket's rate per hour is its
+    /// count: one hour is also the floor the blocking peak's covered hours never drop under, so no coverage
+    /// scaling applies at this grain. <c>deadlocks_per_hour</c> stays published as the whole-window context, per
+    /// OBSERVED hour (#3538 A2). <c>period_hours</c> nominal, <c>observed_hours</c> its divisor; an unobserved
+    /// window emits no fact.
     /// </summary>
     private async Task CollectDeadlockFactsAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -344,17 +358,25 @@ FROM reports").Replace("{SCOPE}", scopeFilter);
         await connection.OpenAsync(context.CancellationToken);
 
         long deadlockCount;
+        long peakHourCount;
         if (context.SeparatelyMonitoredDatabases is { Count: > 0 } scopeList)
         {
-            deadlockCount = await SeparatelyMonitoredScope.CountDeadlocksAsync(
+            (deadlockCount, peakHourCount) = await SeparatelyMonitoredScope.CountDeadlocksAndPeakHourAsync(
                 connection, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
                 inclusiveEnd: true, scopeList, context.CancellationToken);
         }
         else
         {
             using var command = connection.CreateCommand();
+            /* #7893: the busiest one-hour bucket beside the window's count, each stored identity counted once in
+               both (a copy keeps its first copy's deadlock_time, so copies share a bucket). */
             command.CommandText = @"
-SELECT " + StoredEventCopies.DeadlockDistinctCount + @" AS deadlock_count
+SELECT " + StoredEventCopies.DeadlockDistinctCount + @" AS deadlock_count,
+    (SELECT COALESCE(MAX(n), 0)
+     FROM (SELECT " + StoredEventCopies.DeadlockDistinctCount + @" AS n
+           FROM v_deadlocks AS dl
+           WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3
+           GROUP BY time_bucket(INTERVAL '1 hour', deadlock_time, $2)) AS hours) AS peak_1h_deadlock_count
 FROM v_deadlocks AS dl
 WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3";
 
@@ -365,6 +387,7 @@ WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3";
             using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
             deadlockCount = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
+            peakHourCount = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
         }
 
         if (deadlockCount <= 0) return;
@@ -372,17 +395,20 @@ WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3";
         var periodHours = context.PeriodDurationMs / 3_600_000.0;
         var observedHours = context.ObservedDurationMs / 3_600_000.0;
         var deadlocksPerHour = deadlockCount / observedHours;
+        var peakDeadlocksPerHour = (double)peakHourCount;
 
         facts.Add(new Fact
         {
             Source = "blocking",
             Key = "DEADLOCKS",
-            Value = deadlocksPerHour,
+            Value = peakDeadlocksPerHour,
             ServerId = context.ServerId,
             Metadata = new Dictionary<string, double>
             {
                 ["deadlock_count"] = deadlockCount,
                 ["deadlocks_per_hour"] = deadlocksPerHour,
+                ["deadlocks_per_hour_peak_1h"] = peakDeadlocksPerHour,
+                ["peak_1h_deadlock_count"] = peakHourCount,
                 ["period_hours"] = periodHours,
                 ["observed_hours"] = observedHours
             }

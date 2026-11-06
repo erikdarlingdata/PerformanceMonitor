@@ -121,4 +121,13 @@ public sealed class WebMemoryGrantChartBehaviourTests
         Assert.Empty(r.GetProperty("charts").EnumerateArray());
         Assert.Equal(2, r.GetProperty("errors").GetArrayLength());
     }
+
+    /// <summary>#7945: the activity chart's points are bucket means of counts (waiters, grantees), so a mean of 0.4 waiters is a real figure.
+    /// Its tooltip prints 0.4 and 2.5 as they are, and a whole count still prints whole.</summary>
+    [Fact]
+    public void AnActivityTooltip_PrintsABucketMeanUnderOne_NotZero()
+    {
+        var activity = Run("series").GetProperty("charts")[1];
+        Assert.Equal(new[] { "0.4", "2.5", "3" }, activity.GetProperty("tooltip").EnumerateArray().Select(t => t.GetString()));
+    }
 }

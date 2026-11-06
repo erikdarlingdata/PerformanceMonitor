@@ -60,7 +60,7 @@ export const COLUMNS = [
   { key: "recovery_model", label: "Recovery model" },
   { key: "vlf_count", label: "VLF count", format: "int" },
   { key: "volume_mount_point", label: "Volume" },
-  { key: "volume_total_mb", label: "Volume total", format: "mb" },
+  { key: "volume_total_mb", label: "Volume total", format: "mbfit" },
   { key: "volume_free_mb", label: "Volume free", format: "mbfit" },
   { key: "monthly_cost_usd", label: "Monthly cost ($)", format: "num2", hideWhenEmpty: true },
   { key: "size_note", label: "Note", wrap: true, hideWhenEmpty: true },

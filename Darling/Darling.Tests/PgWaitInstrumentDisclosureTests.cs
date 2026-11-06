@@ -84,7 +84,9 @@ public sealed class PgWaitInstrumentDisclosureTests
 
         var foreign = Build(new DarlingPgWaitSamplingReader.WaitInstrumentState("kernel_traced", T0));
         Assert.Equal("unknown", foreign.GetProperty("instrument").GetString());
-        Assert.Contains("profile_period_ms", foreign.GetProperty("instrument_note").GetString(), StringComparison.Ordinal);
+        /* #7903: the note names the figure the rows carry (estimated_wait_ms), not a per-row period they do not carry. */
+        Assert.Contains("estimated_wait_ms", foreign.GetProperty("instrument_note").GetString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("profile_period_ms", foreign.GetProperty("instrument_note").GetString(), StringComparison.Ordinal);
     }
 
     [Fact]
