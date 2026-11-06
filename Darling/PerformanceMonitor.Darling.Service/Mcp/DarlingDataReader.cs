@@ -79,9 +79,6 @@ internal static class DarlingDataReader
     /* #2484: the two series behind the viewer's Current Waits tab. Both read waiting_tasks, which the
        snapshot reads already expose row-by-row -- get_waiting_tasks answers "what is waiting now" and
        never "was it worse an hour ago", which is the question that decides whether anything is wrong. */
-    public sealed record WaitingTaskTrendRow(DateTime CollectionTime, string WaitType, long TotalWaitMs);
-
-    public sealed record BlockedSessionTrendRow(DateTime CollectionTime, string DatabaseName, long BlockedCount);
 
     /*
         One row of the RAW per-run collection log, as opposed to the CollectorHealth rollup above.
@@ -4757,27 +4754,51 @@ FROM config.config_collector_schedules";
     }
 
     /// <summary>
-    /// Waiting-task total wait duration per wait type per collection, for one server over an explicit
-    /// window. The viewer's Current Waits reader verbatim. Grouped on <c>rtrim(wait_type)</c>, so a wait stored
-    /// with and without the trailing space the collector trimmed from #4884 on is one series under the clean name.
-    /// $1 server_id, $2 start, $3 end (naive UTC).
+    /// Waiting-task total wait duration per wait type, bucketed (#7877, #7904). The inner CTE keeps the per-collection total
+    /// exactly as the un-bucketed read computed it (the wait type's summed duration in ONE collection); the outer read averages
+    /// those per-collection totals over the bucket, keeps the largest as the peak and counts the collections, so a wide bucket
+    /// never reads as a bigger wait than one collection. Grouped on <c>rtrim(wait_type)</c>, so a wait stored with and without the
+    /// trailing space the collector trimmed from #4884 on is one series under the clean name.
+    /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 bucket width minutes. The first bucket is clamped to $2.
     /// </summary>
-    public const string WaitingTaskTrendSql = """
+    public const string WaitingTaskTrendSql = $$"""
+        WITH per_collection AS
+        (
+            SELECT
+                collection_time,
+                rtrim(wait_type) AS wait_type,
+                CAST(SUM(wait_duration_ms) AS bigint) AS total_wait_ms
+            FROM waiting_tasks
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   wait_type IS NOT NULL
+            GROUP BY
+                collection_time,
+                rtrim(wait_type)
+        )
         SELECT
-            collection_time,
-            rtrim(wait_type) AS wait_type,
-            CAST(SUM(wait_duration_ms) AS bigint) AS total_wait_ms
+            GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
+            wait_type,
+            CAST(ROUND(AVG(total_wait_ms)) AS bigint) AS avg_wait_ms,
+            MAX(total_wait_ms) AS peak_wait_ms,
+            COUNT(*) AS collection_count
+        FROM per_collection
+        GROUP BY
+            1, wait_type
+        ORDER BY
+            1, wait_type
+        """;
+
+    /// <summary>How many wait types the window holds: the series count the bucket width is sized for (#7904). Same filters as <see cref="WaitingTaskTrendSql"/>.
+    /// $1 server_id, $2 start, $3 end (naive UTC).</summary>
+    public const string WaitingTaskSeriesCountSql = """
+        SELECT COUNT(DISTINCT rtrim(wait_type))
         FROM waiting_tasks
         WHERE server_id = $1
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   wait_type IS NOT NULL
-        GROUP BY
-            collection_time,
-            rtrim(wait_type)
-        ORDER BY
-            collection_time,
-            rtrim(wait_type)
         """;
 
     /// <summary>
@@ -4803,24 +4824,39 @@ FROM config.config_collector_schedules";
         return await command.ExecuteScalarAsync(cancellationToken) is not null;
     }
 
-    /// <summary>Runs <see cref="WaitingTaskTrendSql"/>.</summary>
-    public static async Task<List<WaitingTaskTrendRow>> GetWaitingTaskTrendAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+    /// <summary>Runs <see cref="WaitingTaskSeriesCountSql"/>.</summary>
+    public static async Task<int> CountWaitingTaskSeriesAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(WaitingTaskSeriesCountSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddInt(command, serverId);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken) ?? 0);
+    }
+
+    /// <summary>Runs <see cref="WaitingTaskTrendSql"/> at <paramref name="bucketMinutes"/>.</summary>
+    public static async Task<List<CurrentWaitsWaitPoint>> GetWaitingTaskTrendAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int bucketMinutes,
         CancellationToken cancellationToken = default)
     {
-        var rows = new List<WaitingTaskTrendRow>();
+        var rows = new List<CurrentWaitsWaitPoint>();
         await using var command = postgres.CreateCommand(WaitingTaskTrendSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
+        AddInt(command, bucketMinutes);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new WaitingTaskTrendRow(
+            rows.Add(new CurrentWaitsWaitPoint(
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
-                reader.IsDBNull(2) ? 0 : reader.GetInt64(2)));
+                reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                reader.GetInt64(4)));
         }
 
         return rows;
@@ -4839,10 +4875,41 @@ FROM config.config_collector_schedules";
     /// and several are the same statement text).</para>
     /// </summary>
     public static readonly string BlockedSessionTrendSql = $$"""
+        WITH per_collection AS
+        (
+            SELECT
+                collection_time,
+                database_name,
+                COUNT(DISTINCT session_id) AS blocked_count
+            FROM waiting_tasks
+            WHERE server_id = $1
+            AND   blocking_session_id > 0
+            AND   blocking_session_id <> session_id
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   database_name IS NOT NULL
+            {{DatabaseFilter.All.Clause("database_name", 4)}}
+            GROUP BY
+                collection_time,
+                database_name
+        )
         SELECT
-            collection_time,
+            GREATEST(date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
             database_name,
-            COUNT(DISTINCT session_id) AS blocked_count
+            CAST(AVG(blocked_count) AS double precision) AS avg_blocked_count,
+            MAX(blocked_count) AS peak_blocked_count,
+            COUNT(*) AS collection_count
+        FROM per_collection
+        GROUP BY
+            1, database_name
+        ORDER BY
+            1, database_name
+        """;
+
+    /// <summary>How many databases have blocked sessions in the window under the same filter: the blocked series' share of the series count the
+    /// bucket width is sized for (#7904). $1 server_id, $2 start, $3 end (naive UTC), $4 the databases.</summary>
+    public static readonly string BlockedSessionSeriesCountSql = $$"""
+        SELECT COUNT(DISTINCT database_name)
         FROM waiting_tasks
         WHERE server_id = $1
         AND   blocking_session_id > 0
@@ -4851,42 +4918,48 @@ FROM config.config_collector_schedules";
         AND   collection_time <= $3
         AND   database_name IS NOT NULL
         {{DatabaseFilter.All.Clause("database_name", 4)}}
-        GROUP BY
-            collection_time,
-            database_name
-        ORDER BY
-            collection_time,
-            database_name
         """;
 
-    /// <summary>Runs <see cref="BlockedSessionTrendSql"/> for one database (a blank name is every database).</summary>
-    public static Task<List<BlockedSessionTrendRow>> GetBlockedSessionTrendAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
-        string? databaseName = null, CancellationToken cancellationToken = default) =>
-        GetBlockedSessionTrendAsync(postgres, serverId, startUtc, endUtc, DatabaseFilter.One(databaseName), cancellationToken);
+    /// <summary>Runs <see cref="BlockedSessionSeriesCountSql"/>.</summary>
+    public static async Task<int> CountBlockedSessionSeriesAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DatabaseFilter databases,
+        CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(BlockedSessionSeriesCountSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddInt(command, serverId);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        AddDatabases(command, databases);
+        return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken) ?? 0);
+    }
 
     /// <summary>
     /// <see cref="BlockedSessionTrendSql"/> over a SET of databases (#5244): <paramref name="databases"/> empty
-    /// (<see cref="DatabaseFilter.All"/>) is every database, otherwise only the named databases' blocked sessions are counted.
+    /// (<see cref="DatabaseFilter.All"/>) is every database, otherwise only the named databases' blocked sessions are counted,
+    /// bucketed to <paramref name="bucketMinutes"/> (#7877, #7904).
     /// </summary>
-    public static async Task<List<BlockedSessionTrendRow>> GetBlockedSessionTrendAsync(
+    public static async Task<List<CurrentWaitsBlockedPoint>> GetBlockedSessionTrendAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
-        DatabaseFilter databases, CancellationToken cancellationToken = default)
+        DatabaseFilter databases, int bucketMinutes, CancellationToken cancellationToken = default)
     {
-        var rows = new List<BlockedSessionTrendRow>();
+        var rows = new List<CurrentWaitsBlockedPoint>();
         await using var command = postgres.CreateCommand(BlockedSessionTrendSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
         AddDatabases(command, databases);
+        AddInt(command, bucketMinutes);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new BlockedSessionTrendRow(
+            rows.Add(new CurrentWaitsBlockedPoint(
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
-                reader.IsDBNull(2) ? 0 : reader.GetInt64(2)));
+                reader.IsDBNull(2) ? 0 : reader.GetDouble(2),
+                reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                reader.GetInt64(4)));
         }
 
         return rows;

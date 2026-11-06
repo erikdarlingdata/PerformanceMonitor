@@ -181,20 +181,20 @@ public sealed class WaitsDatabaseFilterLiveTests
             var start = seed.End.AddHours(-1);
 
             /* Blocked sessions in the seed: A has two (51, 52), C has one (70), B none. */
-            var ac = await DarlingDataReader.GetBlockedSessionTrendAsync(postgres, ServerId, start, seed.End, DatabaseFilter.Of([DbA, DbC]), ct);
-            Assert.Equal(new[] { (DbA, 2L), (DbC, 1L) }, ac.Select(r => (r.DatabaseName, r.BlockedCount)).OrderBy(r => r.DatabaseName).ToArray());
+            var ac = await DarlingDataReader.GetBlockedSessionTrendAsync(postgres, ServerId, start, seed.End, DatabaseFilter.Of([DbA, DbC]), 1, ct);
+            Assert.Equal(new[] { (DbA, 2L), (DbC, 1L) }, ac.Select(r => (r.DatabaseName, r.PeakBlockedCount)).OrderBy(r => r.DatabaseName).ToArray());
 
-            var ab = await DarlingDataReader.GetBlockedSessionTrendAsync(postgres, ServerId, start, seed.End, DatabaseFilter.Of([DbA, DbB]), ct);
-            Assert.Equal(new[] { (DbA, 2L) }, ab.Select(r => (r.DatabaseName, r.BlockedCount)).ToArray());
+            var ab = await DarlingDataReader.GetBlockedSessionTrendAsync(postgres, ServerId, start, seed.End, DatabaseFilter.Of([DbA, DbB]), 1, ct);
+            Assert.Equal(new[] { (DbA, 2L) }, ab.Select(r => (r.DatabaseName, r.PeakBlockedCount)).ToArray());
 
-            var all = await DarlingDataReader.GetBlockedSessionTrendAsync(postgres, ServerId, start, seed.End, DatabaseFilter.All, ct);
+            var all = await DarlingDataReader.GetBlockedSessionTrendAsync(postgres, ServerId, start, seed.End, DatabaseFilter.All, 1, ct);
             Assert.Equal(2, all.Count);
 
-            /* The string overload: one name narrows, null and whitespace read every database, exactly as before. */
-            var oneString = await DarlingDataReader.GetBlockedSessionTrendAsync(postgres, ServerId, start, seed.End, DbC, ct);
-            Assert.Equal(new[] { (DbC, 1L) }, oneString.Select(r => (r.DatabaseName, r.BlockedCount)).ToArray());
-            Assert.Equal(2, (await DarlingDataReader.GetBlockedSessionTrendAsync(postgres, ServerId, start, seed.End, null, ct)).Count);
-            Assert.Equal(2, (await DarlingDataReader.GetBlockedSessionTrendAsync(postgres, ServerId, start, seed.End, "   ", ct)).Count);
+            /* One name narrows, null and whitespace read every database. */
+            var oneName = await DarlingDataReader.GetBlockedSessionTrendAsync(postgres, ServerId, start, seed.End, DatabaseFilter.One(DbC), 1, ct);
+            Assert.Equal(new[] { (DbC, 1L) }, oneName.Select(r => (r.DatabaseName, r.PeakBlockedCount)).ToArray());
+            Assert.Equal(2, (await DarlingDataReader.GetBlockedSessionTrendAsync(postgres, ServerId, start, seed.End, DatabaseFilter.One(null), 1, ct)).Count);
+            Assert.Equal(2, (await DarlingDataReader.GetBlockedSessionTrendAsync(postgres, ServerId, start, seed.End, DatabaseFilter.One("   "), 1, ct)).Count);
 
             bodySucceeded = true;
         }
@@ -239,10 +239,10 @@ public sealed class WaitsDatabaseFilterLiveTests
             Assert.Equal(waitTypes, WaitTypes(bOnly));
 
             /* The public method (a string name) passes the one-name filter through; no name echoes null and reads all. */
-            var publicOne = JsonDocument.Parse(await DarlingMcpDataTools.GetCurrentWaitsTrend(postgres, ServerName, 1, DbC, asOf, ct)).RootElement;
+            var publicOne = JsonDocument.Parse(await DarlingMcpDataTools.GetCurrentWaitsTrend(postgres, ServerName, 1, DbC, asOf, cancellationToken: ct)).RootElement;
             Assert.Equal(DbC, publicOne.GetProperty("database_name").GetString());
             Assert.Equal(new[] { DbC }, BlockedDatabases(publicOne));
-            var publicAll = JsonDocument.Parse(await DarlingMcpDataTools.GetCurrentWaitsTrend(postgres, ServerName, 1, null, asOf, ct)).RootElement;
+            var publicAll = JsonDocument.Parse(await DarlingMcpDataTools.GetCurrentWaitsTrend(postgres, ServerName, 1, (string?)null, asOf, cancellationToken: ct)).RootElement;
             Assert.Equal(JsonValueKind.Null, publicAll.GetProperty("database_name").ValueKind);
             Assert.Equal(new[] { DbA, DbC }, BlockedDatabases(publicAll));
 
