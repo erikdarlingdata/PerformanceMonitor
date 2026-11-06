@@ -1517,11 +1517,23 @@ public partial class DuckDbInitializer : IDisposable
             || message.Contains("being used by another process");
     }
 
+    /* Test seam (#7769): a test replaces the file move to make the backup rename fail. Production leaves it null
+       and the move is File.Move. */
+    internal Action<string, string>? MoveFileForTests { get; set; }
+
+    private void MoveFile(string source, string destination)
+    {
+        if (MoveFileForTests is { } move)
+            move(source, destination);
+        else
+            File.Move(source, destination);
+    }
+
     /// <summary>
     /// Exports all tables from the old database to Parquet, deletes the database, and reimports.
     /// Uses DuckDB's EXPORT DATABASE which writes one Parquet file per table.
     /// </summary>
-    private async Task MigrateViaParquetAsync(string archivePath)
+    internal async Task MigrateViaParquetAsync(string archivePath)
     {
         var exportDir = Path.Combine(archivePath, $"upgrade_{DateTime.Now:yyyyMMdd_HHmmss}");
         Directory.CreateDirectory(exportDir);
@@ -1559,13 +1571,13 @@ public partial class DuckDbInitializer : IDisposable
         try
         {
             /* DuckDB may have .wal files too */
-            File.Move(_databasePath, backupPath);
+            MoveFile(_databasePath, backupPath);
             _logger?.LogInformation("Backed up old database to {BackupPath}", backupPath);
 
             var walPath = _databasePath + ".wal";
             if (File.Exists(walPath))
             {
-                File.Move(walPath, backupPath + ".wal");
+                MoveFile(walPath, backupPath + ".wal");
             }
         }
         catch (Exception ex)
