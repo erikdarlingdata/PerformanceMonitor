@@ -353,7 +353,7 @@ public sealed class RepeatLogNoiseTests
 
         var runOne = typeof(DarlingWorker).GetMethod("RunOneAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
         var rows = await (Task<int>)runOne.Invoke(
-            worker, [server, runner, Collector, null, TestContext.Current.CancellationToken, false, null, null])!;
+            worker, [server, runner, Collector, null, TestContext.Current.CancellationToken, false, null, null, null])!;
         Assert.Equal(3, rows);
 
         /* The run succeeded, so the same failure coming back within the day is a new sighting. */
@@ -377,7 +377,7 @@ public sealed class RepeatLogNoiseTests
 
         var runOne = typeof(DarlingWorker).GetMethod("RunOneAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
         await (Task<int>)runOne.Invoke(
-            worker, [server, runner, Collector, null, TestContext.Current.CancellationToken, false, null, null])!;
+            worker, [server, runner, Collector, null, TestContext.Current.CancellationToken, false, null, null, null])!;
 
         worker.LogPostgresFault("pg-a", Collector, "EXTENSION_MISSING", "42P01", "x");
         Assert.Equal(1, log.Count("EXTENSION_MISSING"));
