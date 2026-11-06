@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, mount, clear } from "./util.js";
+import { el, mount, clear, errorStrip } from "./util.js";
 import { SOLO } from "./panel-layout.js";
 
 /* The auto-refresh keeps what is on screen (#6933). A poll used to clear the page and draw a "Loading..." strip, so every
@@ -120,7 +120,10 @@ export function showAround(container, key, keep, before) {
 export function noteRefreshError(box, message, at = 0) {
   const prior = Array.from(box.children).find(isRefreshError);
   if (prior) box.removeChild(prior);
-  const notice = el("div", { class: "strip error refresh-error", role: "alert" }, ["Could not refresh, showing the previous data. " + message]);
+  /* #7943: a red strip, drawn through errorStrip so it counts (util.js readErrorCount): a poll that failed does not move the footer's
+     Updated time, on this page as on one whose failed panel drew its own red strip. */
+  const notice = errorStrip("Could not refresh, showing the previous data. " + message);
+  notice.className += " refresh-error";
   box.insertBefore(notice, Array.from(box.children)[at] || null);
 }
 

@@ -32,6 +32,7 @@ import { relativeSpec, specName } from "../time-range.js";
 import { mutePrefillParams } from "../mute-context.js";
 import { orderServers } from "../server-order.js";
 import { getSession } from "../views-api.js";
+import { noteRefreshError } from "../refresh-in-place.js";
 
 /* #3169: the state-carrying notification_type values, derived from the one shared map rather than listed a
    second time. The status label already carries each of them, so the channel chip beside it must not repeat
@@ -934,6 +935,14 @@ async function refreshAlerts(state) {
   const res = req.error ? { kind: "error", message: "This range cannot be read yet: " + req.error } : await readTool("get_alert_history", req.params);
   if (seq !== state.seq) return;
   state.meta.textContent = (choices.server ? choices.server : "fleet-wide") + " · " + windowLabel();
+  /* #7943: a poll whose read failed while a table is on screen keeps the table, its rows and their opened Detail lines, and says so
+     above it (noteRefreshError, as a panel does); the next poll that answers reconciles the same rows and clears the notice. The error
+     strip takes the table's place only when nothing is on screen: the first load, or a page whose last answer was empty or an error.
+     An empty answer is a real answer and replaces the table. */
+  if (res.kind === "error" && state.tbody) {
+    noteRefreshError(state.noticeBox, res.message);
+    return;
+  }
   mount(state.noticeBox, []);
   if (res.kind === "error" || res.kind === "empty") {
     state.alerts = [];
