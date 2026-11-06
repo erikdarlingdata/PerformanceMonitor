@@ -27,7 +27,8 @@ namespace PerformanceMonitor.Collectors;
 /// reports <b>peak memory per statement</b>, which is the closest thing PostgreSQL has to SQL Server's
 /// memory-grant data; core PostgreSQL has no grant concept at all.</para>
 /// <para>#2625: it reads BOTH sources. On Aurora it reads <c>aurora_stat_statements(false)</c>; on any
-/// other PostgreSQL it reads the vanilla <c>pg_stat_statements</c> view and reports the Aurora-only
+/// other PostgreSQL it reads the vanilla <c>pg_stat_statements(false)</c> function (#7783: the view behind
+/// it is <c>pg_stat_statements(true)</c>, and showtext loads the whole query-text file) and reports the Aurora-only
 /// columns as NULL. One collector, one table, chosen at query-build time — because the Aurora function
 /// is <c>pg_stat_statements</c> plus columns, so the vanilla read is a strict subset rather than a
 /// different measurement, and splitting it in two would have meant two tables, two readers, two panels
@@ -261,7 +262,11 @@ SELECT
     {targetNow}                        AS target_now,
     {statsDealloc}                     AS stats_dealloc,
     d.datname::text                    AS database_name
-FROM public.pg_stat_statements
+/* #7783: the function with showtext off, not the view. The view is SELECT * FROM pg_stat_statements(true), and showtext = true
+   loads the whole query-text file from disk on every call whether or not query is selected; this read selects no text (the
+   hourly statement-text fetch does). The function has taken showtext since pg_stat_statements 1.2, so every layout this
+   collector reads has it. The same choice the Aurora flavor makes with aurora_stat_statements(false). */
+FROM public.pg_stat_statements(false)
 /* #7731: the database NAME beside dbid, ordinal 31, the same pg_database join PgKernelStatsCollector uses. LEFT, so a statement row whose database was dropped
    still ships (with a NULL name) instead of vanishing with the database. */
 LEFT JOIN pg_catalog.pg_database AS d
