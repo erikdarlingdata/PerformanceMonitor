@@ -20,16 +20,28 @@
  */
 
 import { el, mount, loadingStrip, errorStrip, emptyStrip, relTime, storeHash } from "../util.js";
+import { holdsPage, keepScroll, showPage, showRefreshError } from "../refresh-in-place.js";
 import * as api from "../alerts-api.js";
 
 /** The scalar operator's human symbol for a condition chip (mirrors CustomAlertRuleDefinition.OpSymbol); the range
  *  ops (between/outside, #3351) render their band instead — see describeCondition. */
 const OP_SYMBOLS = { gt: ">", ge: "≥", lt: "<", le: "≤" };
 
+/* #7927: the key the list page is held under (refresh-in-place.js), so the 60 s poll can tell that the list on screen is its own. */
+const LIST_KEY = "alert-rules";
+
+/* #7927: each card's chips by rule id, with the version they were read at. The metric, condition and scope come from the rule's full
+   definition, which the list payload does not carry, so a card whose version is unchanged draws its chips from here instead of
+   reading the rule again on every poll. A poll over N unchanged rules costs the list and the templates reads only. */
+const chipCache = new Map();
+
 /* ─────────────────────────── list page ─────────────────────────── */
 
-export async function renderAlertRuleList(main) {
-  mount(main, [listHead(false, []), loadingStrip("Loading alert rules…")]);
+export async function renderAlertRuleList(main, opts) {
+  /* #7927: the poll over the list on screen leaves it there while the list is read again, so an open "New from template" menu stays
+     open; a "Loading alert rules…" strip in its place would close it. When the new list arrives only the cards are redrawn. */
+  const inPlace = holdsPage(main, LIST_KEY, !!(opts && opts.poll === true));
+  if (!inPlace) mount(main, [listHead(false, []), loadingStrip("Loading alert rules…")]);
 
   /* The templates read rides along with the session + list; a failed templates read is not fatal (the New-from-
      template menu just says it is unavailable — every other affordance still works). */
@@ -37,22 +49,46 @@ export async function renderAlertRuleList(main) {
   const canEdit = !!session.can_edit;
 
   if (res.kind === "error") {
-    mount(main, [listHead(canEdit, templates), errorStrip(res.message)]);
+    if (inPlace && showRefreshError(main, LIST_KEY, res.message)) return;
+    showPage(main, LIST_KEY, [listHead(canEdit, templates), errorStrip(res.message)]);
     return;
   }
 
   const rules = Array.isArray(res.data) ? res.data : [];
+  if (inPlace && holdsPage(main, LIST_KEY, true) && swapCards(main, rules)) return;
+
   const nodes = [listHead(canEdit, templates)];
 
   /* Empty list -> a real first-run hero that sells the feature, not a bare strip. */
   if (!rules.length) {
     nodes.push(firstRunHero(canEdit, templates));
-    mount(main, nodes);
+    showPage(main, LIST_KEY, nodes);
     return;
   }
 
   nodes.push(el("div", { class: "view-cards" }, rules.map((r) => ruleCard(r))));
-  mount(main, nodes);
+  showPage(main, LIST_KEY, nodes);
+}
+
+/* #7927: the poll's redraw of a list that is on screen. The cards are replaced in one step, with the reader's scroll position kept,
+   and the head with its template menu stays as it is; an earlier poll's failure notice comes down. False when the page is not a list
+   of cards (the first-run hero) and rules now exist, or when it is one and no rules are left: the caller draws the whole page. A
+   hero over a store that still has no rules stays as it is. */
+function swapCards(main, rules) {
+  const children = () => Array.from(main.children || []);
+  const live = children().find((n) => hasClass(n, "view-cards"));
+  if (!live) return !rules.length;
+  if (!rules.length) return false;
+  keepScroll(() => {
+    const stale = children().find((n) => hasClass(n, "refresh-error"));
+    if (stale) main.removeChild(stale);
+    main.replaceChild(el("div", { class: "view-cards" }, rules.map((r) => ruleCard(r))), live);
+  });
+  return true;
+}
+
+function hasClass(n, name) {
+  return typeof n.className === "string" && (" " + n.className + " ").includes(" " + name + " ");
 }
 
 /** The starter templates for the "New from template" menu, or [] on any failure (every caller handles empty). */
@@ -149,27 +185,34 @@ function ruleCard(r) {
     expiry ? el("div", { class: "vc-meta", text: expiry }) : null,
     el("div", { class: "vc-meta", text: meta }),
   ]);
-  enrichCard(r.id, chips);
+  enrichCard(r.id, r.version, chips);
   return card;
 }
 
 /* Fill a card's chips from the rule's full definition (metric / condition / scope) — fetched per card and filled in
-   progressively; a failed/empty fetch just leaves the (display:none-when-empty) chip row absent. */
-async function enrichCard(id, chips) {
+   progressively; a failed/empty fetch just leaves the (display:none-when-empty) chip row absent. The chips a read gave
+   are kept by rule id and version (#7927), so a card whose version the list still reports draws them without a read. */
+async function enrichCard(id, version, chips) {
+  const kept = chipCache.get(String(id));
+  if (kept && kept.version === version) {
+    mount(chips, kept.chips.map((c) => el("span", { class: c.cls, text: c.text })));
+    return;
+  }
   const res = await api.getAlertRule(id);
   if (res.kind !== "data" || !res.data) return;
   const def = res.data.definition || {};
-  const nodes = [];
+  const texts = [];
 
   const metricChip = describeMetric(def.metric);
-  if (metricChip) nodes.push(el("span", { class: "vc-chip", text: metricChip }));
+  if (metricChip) texts.push({ cls: "vc-chip", text: metricChip });
 
   const condChip = describeCondition(def.predicate);
-  if (condChip) nodes.push(el("span", { class: "vc-chip count", text: condChip }));
+  if (condChip) texts.push({ cls: "vc-chip count", text: condChip });
 
-  nodes.push(el("span", { class: "vc-chip", text: describeScope(def.scope) }));
+  texts.push({ cls: "vc-chip", text: describeScope(def.scope) });
 
-  mount(chips, nodes);
+  chipCache.set(String(id), { version, chips: texts });
+  mount(chips, texts.map((c) => el("span", { class: c.cls, text: c.text })));
 }
 
 /** A compact metric label from a definition's metric ("max cpu_utilization" / a ratio's key), or null. */
