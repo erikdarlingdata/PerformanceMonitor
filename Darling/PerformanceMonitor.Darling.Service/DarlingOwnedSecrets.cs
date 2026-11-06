@@ -251,7 +251,7 @@ public static class DarlingOwnedSecrets
     }
 
     /// <summary>The path with every symbolic link followed (capped; null on a cycle or an unresolvable path).</summary>
-    private static string? RealPath(string path)
+    internal static string? RealPath(string path)
     {
         try
         {
@@ -308,7 +308,9 @@ public static class DarlingOwnedSecrets
         }
     }
 
-    private static bool Covers(string directory, string path)
+    /// <summary>True when <paramref name="path"/> is <paramref name="directory"/> or under it, compared with the owned set's case
+    /// rule (<see cref="PathComparison"/>).</summary>
+    internal static bool Covers(string directory, string path)
     {
         var dir = Path.TrimEndingDirectorySeparator(directory);
         if (path.Equals(dir, PathComparison) || path.Equals(directory, PathComparison))

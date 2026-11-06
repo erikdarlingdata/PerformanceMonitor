@@ -413,6 +413,128 @@ public sealed class DarlingPasswordKeySourceTests
         }
     }
 
+    /// <summary>
+    /// A <c>file:</c> path that reaches the credentials directory through a link is refused like the direct path: a
+    /// link to the key file in it, and a link to the directory itself. The text of neither path is inside the
+    /// directory, so only the real path, or the file's identity, can see it.
+    /// </summary>
+    [Fact]
+    public void APathThatReachesTheCredentialsDirectoryThroughALink_IsRefused()
+    {
+        var (pkcs8, _) = NewKey();
+        var dir = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var credentials = Path.Combine(dir, DarlingLogHashKeyFile.BringYourOwnDirectoryName);
+            Directory.CreateDirectory(credentials);
+            var keyPath = Path.Combine(credentials, DarlingPasswordKeyFile.FileName);
+            /* A usable key, so the refusal can only be the directory's. */
+            File.WriteAllText(keyPath, Convert.ToBase64String(pkcs8));
+            var outside = Directory.CreateDirectory(Path.Combine(dir, "outside")).FullName;
+            var fileLink = Path.Combine(outside, "link");
+            var directoryLink = Path.Combine(outside, "credentials-link");
+            try
+            {
+                File.CreateSymbolicLink(fileLink, keyPath);
+                Directory.CreateSymbolicLink(directoryLink, credentials);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                Assert.Skip($"cannot create a symlink on this machine ({ex.Message}) - needs Developer Mode or elevation");
+            }
+
+            foreach (var path in new[] { fileLink, Path.Combine(directoryLink, DarlingPasswordKeyFile.FileName) })
+            {
+                var load = DarlingPasswordKeySource.LoadFromSetting("file:" + path, credentials, NullLogger.Instance);
+
+                AssertRefused(load, "file:" + path, Convert.ToBase64String(pkcs8));
+                Assert.Contains(path, load.Refusal, StringComparison.Ordinal);
+                Assert.Contains("secret mount outside the credentials directory", load.Refusal, StringComparison.Ordinal);
+            }
+
+            /* A copy outside, with the same text, is a different file and loads. */
+            var copy = Path.Combine(outside, "copy");
+            File.Copy(keyPath, copy);
+            var copied = DarlingPasswordKeySource.LoadFromSetting("file:" + copy, credentials, NullLogger.Instance);
+            Assert.Null(copied.Refusal);
+            CryptographicOperations.ZeroMemory(copied.Pkcs8!);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(pkcs8);
+            /* The links go first, each itself and never what it points at, so the recursive delete never walks one. */
+            var outsideLinks = Path.Combine(dir, "outside");
+            if (Directory.Exists(Path.Combine(outsideLinks, "credentials-link")))
+            {
+                Directory.Delete(Path.Combine(outsideLinks, "credentials-link"), recursive: false);
+            }
+
+            File.Delete(Path.Combine(outsideLinks, "link"));
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// The Windows forms of the same thing, which need no privilege to make: a junction to the credentials directory
+    /// (followed by the real-path comparison) and a hard link to the key file (the same file by identity, though no
+    /// link is followed to reach it).
+    /// </summary>
+    [Fact]
+    public void OnWindows_AJunctionToTheCredentialsDirectory_AndAHardLinkToTheKey_AreRefused()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Junctions and CreateHardLinkW are Windows'.");
+
+        var (pkcs8, _) = NewKey();
+        var dir = Directory.CreateTempSubdirectory().FullName;
+        var junction = Path.Combine(dir, "credentials-junction");
+        try
+        {
+            var credentials = Path.Combine(dir, DarlingLogHashKeyFile.BringYourOwnDirectoryName);
+            Directory.CreateDirectory(credentials);
+            var keyPath = Path.Combine(credentials, DarlingPasswordKeyFile.FileName);
+            File.WriteAllText(keyPath, Convert.ToBase64String(pkcs8));
+            var hardLink = Path.Combine(dir, "hard-link");
+            Assert.True(CreateHardLinkW(hardLink, keyPath, IntPtr.Zero), "the hard link was not created");
+
+            using (var mklink = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", $"/c mklink /J \"{junction}\" \"{credentials}\"")
+            {
+                CreateNoWindow = true,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+            })!)
+            {
+                mklink.StandardOutput.ReadToEnd();
+                mklink.WaitForExit();
+            }
+
+            Assert.SkipUnless(Directory.Exists(junction), "A junction could not be created here.");
+
+            foreach (var path in new[] { Path.Combine(junction, DarlingPasswordKeyFile.FileName), hardLink })
+            {
+                var load = DarlingPasswordKeySource.LoadFromSetting("file:" + path, credentials, NullLogger.Instance);
+
+                AssertRefused(load, "file:" + path, Convert.ToBase64String(pkcs8));
+                Assert.Contains(path, load.Refusal, StringComparison.Ordinal);
+                Assert.Contains("secret mount outside the credentials directory", load.Refusal, StringComparison.Ordinal);
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(pkcs8);
+            /* The junction goes first, itself and never its target, so the recursive delete never walks it. */
+            if (Directory.Exists(junction))
+            {
+                Directory.Delete(junction, recursive: false);
+            }
+
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool CreateHardLinkW(string lpFileName, string lpExistingFileName, IntPtr lpSecurityAttributes);
+
     [Theory]
     [InlineData("directory")]
     [InlineData("empty file")]

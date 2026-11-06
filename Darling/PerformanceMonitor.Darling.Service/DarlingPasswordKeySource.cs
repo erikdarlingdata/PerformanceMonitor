@@ -8,6 +8,7 @@
 
 using System;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -338,9 +339,57 @@ public static class DarlingPasswordKeySource
     }
 
     /// <summary>True when <paramref name="path"/> is <paramref name="directory"/> or anything under it, however either is
+    /// written (<see cref="IsInsideAsWritten"/>) or however it is reached (<see cref="ReachesThroughALink"/>).</summary>
+    private static bool IsInside(string path, string directory) =>
+        IsInsideAsWritten(path, directory) || ReachesThroughALink(path, directory);
+
+    /// <summary>
+    /// True when the file <paramref name="path"/> names is in <paramref name="directory"/> by what is on disk rather than
+    /// by its text: its real path (every link followed, <see cref="DarlingOwnedSecrets.RealPath"/>) is under the
+    /// directory's real path, or it IS the key file there, by volume and file ID (<see cref="FileIdentity"/>), which also
+    /// sees a hard link, a Windows short name and a case variant. Such a key would otherwise be accepted, and then the
+    /// leftover-file note and the open-directory guard would treat the file in use as a stray to delete or rename.
+    /// Never throws: anything that cannot be resolved counts as not inside, which leaves the text comparison's answer.
+    /// </summary>
+    private static bool ReachesThroughALink(string path, string directory)
+    {
+        try
+        {
+            var real = DarlingOwnedSecrets.RealPath(path);
+            var realDirectory = DarlingOwnedSecrets.RealPath(directory);
+            if (real is not null && realDirectory is not null && DarlingOwnedSecrets.Covers(realDirectory, real))
+            {
+                return true;
+            }
+
+            if (FileIdentity.Of(path) is not { } id)
+            {
+                return false;
+            }
+
+            /* Both names, whatever this platform writes: either file in the directory is one the service manages. */
+            foreach (var name in new[] { DarlingPasswordKeyFile.UnixFileName, DarlingPasswordKeyFile.WindowsFileName })
+            {
+                if (FileIdentity.Of(Path.Combine(directory, name)) is { } keyFile && keyFile == id)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException
+                                       or DllNotFoundException or EntryPointNotFoundException or MarshalDirectiveException)
+        {
+            /* A target that cannot be examined falls back to the text comparison; reading it next reports why it fails. */
+            return false;
+        }
+    }
+
+    /// <summary>True when <paramref name="path"/> is <paramref name="directory"/> or anything under it, however either is
     /// written: both go through <see cref="Path.GetFullPath(string)"/> (which resolves <c>..</c>) and lose a trailing
     /// separator, and Windows compares without case, as its file system does.</summary>
-    private static bool IsInside(string path, string directory)
+    private static bool IsInsideAsWritten(string path, string directory)
     {
         var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
