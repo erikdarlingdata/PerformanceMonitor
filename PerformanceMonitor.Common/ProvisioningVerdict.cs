@@ -271,9 +271,10 @@ public static class ProvisioningVerdict
 
         if (maxGrantWaiters > 0 || grantTimeouts > 0 || forcedGrants > 0)
         {
+            static string Counted(long n, string noun) => $"{n} {noun}{(n == 1 ? "" : "s")}";
             return "Queries could not get the workspace memory they asked for: peak "
-                + $"{maxGrantWaiters} grant waiter(s), {grantTimeouts} grant timeout(s), "
-                + $"{forcedGrants} forced grant(s). This server may need more memory.";
+                + $"{Counted(maxGrantWaiters, "grant waiter")}, {Counted(grantTimeouts, "grant timeout")}, "
+                + $"{Counted(forcedGrants, "forced grant")}. This server may need more memory.";
         }
 
         if (maxWorkers > 0 && currentWorkers is int inUse && inUse / (double)maxWorkers > HighWorkerRatio)
