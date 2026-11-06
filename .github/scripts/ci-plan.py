@@ -24,6 +24,10 @@ changed file list. Outputs, as `key=value` lines (stdout, and $GITHUB_OUTPUT whe
   legs_json        [1, 2, ..., N], for the test job's matrix
   actionlint       true when a workflow file changed
   check_web_js     true when a dashboard JavaScript file changed
+  script_tests     true when leg 1 runs the Python script tests of .github/scripts/tests (#7743): a change to the CI scripts only
+  self_test_darling, self_test_lite, self_test_note
+                   the map-selected self-test leg's class lists and a sentence on where they came from (#7743; empty unless the
+                   change touches a selection or leg script). With --class-lists-dir they are files, see write_leg_extras.
   pg_old_targets   true when a pull request changed a file the old-PostgreSQL-target job covers (#6985, PG_OLD_TARGET_PATHS); never on a push, the nightly runs it
 
 The pattern sets are NOT copied here. The areas come from ci-select.py's Rules, which reads the docs allowlist and the
@@ -57,6 +61,15 @@ Rules, in order:
      a new product file, a constant or enum of a shared project), the diff could not be read, no class is selected, or a class
      list is longer than the runner's environment variable allows. There is no drift rule: a changed or new test file is
      always picked, and a dev push still runs everything. The map is never a reason for a red run.
+  9. CI scripts only (#7743): every changed file is documentation or under .github/scripts/ and no area knows it (a script
+     that Darling.Tests parses, like run-darling-pg-shard.ps1, is a Darling file and keeps its area). The areas are
+     classes: the Darling and Lite Stage=Guard classes, the build, and the Python script tests of .github/scripts/tests
+     (leg 1 runs them). When the change touches ci-select.py, ci-plan.py, run-ci-leg.ps1, test-map.py or ci-map-replay.py
+     the plan adds ONE leg (the last) that runs a map-selected class list end to end: the classes the nightly map selects for
+     the fixed sample diff SELF_TEST_SAMPLE, read by run-ci-leg.ps1 from a file with the #6734 check. A missing, old or
+     unreadable map, or a sample that selects nothing or too many classes, makes that leg run the Guard classes instead and
+     say why; it never fails for the map. A scripts file together with a file of any other area is rule 5 as before, and so
+     is a workflow file (.github/workflows/*, which build.yml's root filter knows).
 
 Standard library only. Run: python -I .github/scripts/ci-plan.py --event pull_request --base dev --files-file FILE
 """
@@ -68,6 +81,7 @@ import json
 import math
 import os
 import re
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -115,6 +129,18 @@ PG_OLD_TARGET_PATHS = (
 # #7728: a ready pull request picks its classes from the newest nightly test map, and only while the map is at most this old.
 # The nightly builds one at 06:00 and one at 14:00 UTC, so a healthy map is at most about 16 hours old.
 MAP_MAX_AGE_HOURS = 48
+# #7743: the CI scripts area. A change to files under this tree that no other area knows runs the script tests, the build and the
+# Guard classes (rule 9). SCRIPT_TESTS_DIR holds the Python tests leg 1 runs.
+SCRIPTS_TREE = ".github/scripts/"
+SCRIPT_TESTS_DIR = ".github/scripts/tests/"
+# The scripts that decide which classes a leg runs. A change to one adds the map-selected self-test leg.
+SELF_TEST_TRIGGERS = tuple(SCRIPTS_TREE + n for n in ("ci-select.py", "ci-plan.py", "run-ci-leg.ps1", "test-map.py", "ci-map-replay.py"))
+# The fixed sample diff of the self-test leg: one documentation file, so map_select takes its documentation path and picks only the
+# classes that read Darling/README.md as text (measured on the map of 2026-10-20: 18 Darling and 1 Lite). A product file is no
+# sample: any non-documentation change selects every whole-tree reader (904 Darling and 272 Lite classes on that map, whichever file).
+SELF_TEST_SAMPLE = "Darling/README.md"
+# A sample that selects more than this many classes (a whole-tree reader that now reads the README) is no longer one leg.
+SELF_TEST_MAX_CLASSES = 150
 # The test trees a changed class file may sit in for the changed-classes plan (#6734).
 TEST_TREES = {"darling": "Darling/Darling.Tests/", "lite": "Lite.Tests/"}
 
@@ -223,6 +249,47 @@ def draft_picks(files: "list[str]", catalog: "dict | None", darling_scope: str, 
     return (picks, "", added) if any(picks.values()) else (None, "no class is selected", 0)
 
 
+def scripts_only_picks(catalog: "dict | None") -> "dict[str, list[str]] | None":
+    """The Stage=Guard classes of both suites that hold a test, for a change to the CI scripts only (#7743). The Lite Guard classes
+    count: CiSelect*GuardTests, the C# tests of these scripts, live in Lite.Tests. None when the catalog holds no Darling Guard class."""
+    classes = (catalog or {}).get("classes") or {}
+    picks = {s: _real(catalog, s, [c for c, t in classes.get(s, {}).items() if "Stage=Guard" in t and _CS.NO_TESTS_TRAIT not in t])
+             for s in ("darling", "lite")}
+    return picks if picks["darling"] else None
+
+
+def self_test_picks(rules, catalog: dict, test_map: object, error: str = "", now=None) -> "tuple[dict[str, list[str]], str]":
+    """(picks, note) of the map-selected self-test leg (#7743): the classes the nightly map selects for SELF_TEST_SAMPLE, run from a
+    file through run-ci-leg.ps1 as a ready pull request's classes are. Any trouble (no map, an old or unreadable one, a sample that
+    selects nothing or more than SELF_TEST_MAX_CLASSES) gives the Guard classes instead, and the note says why. Never raises."""
+    guard = scripts_only_picks(catalog) or {"darling": [], "lite": []}
+
+    def instead(why: str) -> "tuple[dict[str, list[str]], str]":
+        return guard, f"The self-test leg runs the Guard classes instead of a map-selected list: {why}."
+
+    if not isinstance(test_map, dict):
+        return instead(error or "no test map was given")
+    try:
+        sel = _CS.map_select(test_map, [SELF_TEST_SAMPLE], [], catalog["classes"], event="pull_request", base_ref="dev", now=now,
+                             max_age_days=MAP_MAX_AGE_HOURS / 24.0, listed=catalog.get("listed"), **_CS.selection_args(rules))
+        if sel["full"]:
+            return instead(f"{sel['reason']} ({_map_age({'map': test_map, 'now': now})})")
+        picks = {}
+        for suite in ("darling", "lite"):
+            runs = {c for c, t in catalog["classes"].get(suite, {}).items() if _CS.NO_TESTS_TRAIT not in t}
+            names = list(dict.fromkeys(c for c in sel["selected"].get(suite, []) if c in runs))
+            picks[suite] = _real(catalog, suite, names, test_map["classes"].get(suite, {}))
+        total = len(picks["darling"]) + len(picks["lite"])
+        if total == 0:
+            return instead(f"the sample diff {SELF_TEST_SAMPLE} selected no class")
+        if total > SELF_TEST_MAX_CLASSES:
+            return instead(f"the sample diff {SELF_TEST_SAMPLE} selected {total} classes, more than {SELF_TEST_MAX_CLASSES}")
+        return picks, (f"The self-test leg runs the {len(picks['darling'])} Darling and {len(picks['lite'])} Lite classes the nightly "
+                       f"test map selects for {SELF_TEST_SAMPLE} ({_map_age({'map': test_map, 'now': now})}).")
+    except Exception as exc:  # the map is never a reason for a red run
+        return instead(f"the map selection failed ({type(exc).__name__}: {str(exc)[:80]})")
+
+
 def _map_age(selection: dict) -> str:
     """The map's build time and age for a `why` line, or a word on why there is none."""
     test_map = selection.get("map")
@@ -288,7 +355,19 @@ def classify(rules, event: str, base: str, files: "list[str]", catalog: "dict | 
         return {**everything, "reason": f"{len(files)} files may be a cut-off list, so every area runs."}
     odd = unknown_paths(rules, files)
     if odd:
-        return {**everything, "reason": f"no area knows {odd[0]}, so every area runs."}
+        docs = set(rules._hits(rules.build["docs"], files))
+        # #7743: documentation plus files under .github/scripts/ that no area knows is the CI scripts area. Any other mix keeps the rule.
+        if not all(f.startswith(SCRIPTS_TREE) for f in odd) or any(f not in docs and f not in odd for f in files):
+            return {**everything, "reason": f"no area knows {odd[0]}, so every area runs."}
+        picks = scripts_only_picks(catalog if catalog is not None else load_catalog())
+        if picks is None:
+            return {**everything, "reason": f"{odd[0]} is a CI script, but the catalog has no Guard class to run, so every area runs."}
+        self_test = any(f in SELF_TEST_TRIGGERS for f in odd)
+        return {"areas": "classes", "darling_scope": "classes" if picks["darling"] else "none",
+                "lite_scope": "classes" if picks["lite"] else "none",
+                "darling_classes": picks["darling"], "lite_classes": picks["lite"], "scripts_only": True, "self_test": self_test,
+                "reason": "CI scripts only: script tests, build, Guard, and one map-selected leg." if self_test
+                          else "CI scripts only: script tests, build and Guard."}
 
     a = rules.areas(files)
     area_names = ("root", "core", "lite", "darling")
@@ -444,12 +523,16 @@ def leg_count(test_minutes: float, event: str = "pull_request") -> int:
 # ---------------------------------------------------------------------------------------------------------
 def plan(event: str, base: str, head_ref: str, labels: "list[str]", files: "list[str]",
          rules, catalog: "dict | None" = None, draft: bool = False, selection: "dict | None" = None,
-         named: "dict[str, list[str]] | None" = None, named_error: str = "") -> "dict[str, str]":
+         named: "dict[str, list[str]] | None" = None, named_error: str = "",
+         self_test_map: "Callable[[], tuple[object, str]] | None" = None, now=None) -> "dict[str, str]":
+    """self_test_map: a function answering (the parsed nightly map or None, why there is none) for the self-test leg of a CI scripts
+    change (#7743); it is called only then. None uses the map of `selection`. now: the clock, for tests."""
     outcome, why = gate(event, head_ref, labels)
     out = {"run": "true" if outcome == "run" else "false", "outcome": outcome, "why": why,
            "areas": "none", "darling_scope": "none", "lite_scope": "none", "build": "false",
            "darling_classes": "", "lite_classes": "", "test_minutes": "0", "legs": "0", "legs_json": "[]",
-           "actionlint": "false", "check_web_js": "false", "pg_old_targets": "false"}
+           "actionlint": "false", "check_web_js": "false", "pg_old_targets": "false",
+           "script_tests": "false", "self_test_darling": "", "self_test_lite": "", "self_test_note": ""}
     if outcome != "run":
         return out
 
@@ -474,6 +557,20 @@ def plan(event: str, base: str, head_ref: str, labels: "list[str]", files: "list
             # know) can still leave one empty: the runners let such a leg pass under -Areas classes, and the other legs run every class.
             sizes = [len(_selected(catalog["classes"][s], c[f"{s}_scope"], "", picks[s])) for s in ("darling", "lite") if picks[s]]
             n = max(1, min([n] + sizes))
+        if c.get("scripts_only"):
+            out["script_tests"] = "true"
+            if c.get("self_test"):
+                if self_test_map is not None:
+                    test_map, map_error = self_test_map()
+                else:
+                    test_map, map_error = (selection or {}).get("map"), (selection or {}).get("error", "")
+                st, note = self_test_picks(rules, catalog, test_map, map_error, now)
+                out.update(self_test_darling=",".join(st["darling"]), self_test_lite=",".join(st["lite"]), self_test_note=note)
+                out["why"] += " " + note
+                # One more leg, the last: run-ci-leg.ps1 finds it by the self-test files beside the class lists.
+                s_d, s_l = estimate(catalog, "classes", "classes", st)
+                total += s_d + s_l
+                n += 1
         out["test_minutes"] = f"{total:.1f}"
         out["legs"] = str(n)
         out["legs_json"] = json.dumps(list(range(1, n + 1)), separators=(",", ":"))
@@ -486,7 +583,8 @@ def _all_docs(rules, files: "list[str]") -> bool:
 
 
 def _may_narrow(files: "list[str]") -> bool:
-    return any(f.endswith(".cs") and f.startswith(tuple(TEST_TREES.values())) for f in files)
+    """True when the plan may need the class catalog: a test class file changed, or a CI script (#7743)."""
+    return any(f.endswith(".cs") and f.startswith(tuple(TEST_TREES.values())) or f.startswith(SCRIPTS_TREE) for f in files)
 
 
 def _bool(v: bool) -> str:
@@ -539,7 +637,58 @@ def build_selection(map_path: str, map_error: str, root: str = ROOT) -> dict:
     return out
 
 
-CLASS_LIST_KEYS = ("darling_classes", "lite_classes")
+CLASS_LIST_KEYS = ("darling_classes", "lite_classes", "self_test_darling", "self_test_lite", "self_test_note")
+
+
+def fetch_nightly_map(dest: str) -> "tuple[str, str]":
+    """(path, error): the newest nightly test map, fetched as pr.yml's "Fetch the newest nightly test map" step does. That step skips
+    a draft, and a CI scripts change needs the map for its self-test leg whatever the draft state (#7743), so the plan fetches it
+    itself, only then. Needs GITHUB_REPOSITORY and GH_TOKEN (the plan step has both). Never raises."""
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    if not repo or not os.environ.get("GH_TOKEN"):
+        return "", "GITHUB_REPOSITORY or GH_TOKEN is not set, so the nightly test map was not fetched"
+
+    def gh(*args: str) -> "subprocess.CompletedProcess[str]":
+        return subprocess.run(["gh", *args], capture_output=True, text=True, timeout=120, check=False)
+
+    try:
+        listing = gh("run", "list", "--repo", repo, "--workflow", "nightly.yml", "--branch", "dev", "--status", "success",
+                     "--limit", "5", "--json", "databaseId", "--jq", ".[].databaseId")
+        ids = listing.stdout.split()
+        if not ids:
+            return "", f"the nightly run list could not be read: {listing.stderr[:200].strip()}"
+        os.makedirs(dest, exist_ok=True)
+        error = "no successful nightly run on dev has a test-map artifact"
+        for run_id in ids:
+            got = gh("run", "download", run_id, "--repo", repo, "--name", "test-map", "--dir", dest)
+            path = os.path.join(dest, "test-map.json.gz")
+            if got.returncode == 0 and os.path.isfile(path) and os.path.getsize(path) > 0:
+                return path, ""
+            error = f"the test-map artifact of nightly run {run_id} could not be downloaded: {got.stderr[:200].strip()}"
+        return "", error
+    except Exception as exc:  # the map is never a reason for a red run
+        return "", f"the nightly test map could not be fetched ({type(exc).__name__})"
+
+
+def write_leg_extras(directory: str, out: "dict[str, str]", root: str = ROOT) -> None:
+    """Beside the class lists, the files the legs of a CI scripts change read (#7743): script-tests.txt (the Python tests leg 1
+    runs, one repo path a line); and, when the plan added the self-test leg, self-test.txt (its note) with
+    self-test-darling-classes.txt and self-test-lite-classes.txt (an empty list writes no file). run-ci-leg.ps1 finds the self-test
+    leg by self-test.txt: the last leg runs those lists, the others cut the class lists over one leg fewer."""
+    if out.get("script_tests") == "true":
+        tests = sorted(f for f in os.listdir(os.path.join(root, *SCRIPT_TESTS_DIR.strip("/").split("/"))) if f.endswith(".py"))
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, "script-tests.txt"), "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("\n".join(SCRIPT_TESTS_DIR + t for t in tests) + "\n")
+    if out.get("self_test_note"):
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, "self-test.txt"), "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(out["self_test_note"] + "\n")
+        for suite in ("darling", "lite"):
+            names = [x for x in out.get(f"self_test_{suite}", "").split(",") if x]
+            if names:
+                with open(os.path.join(directory, f"self-test-{suite}-classes.txt"), "w", encoding="utf-8", newline="\n") as fh:
+                    fh.write("\n".join(names) + "\n")
 
 
 def write_class_lists(directory: str, out: "dict[str, str]") -> "list[str]":
@@ -595,12 +744,23 @@ def main(argv: "list[str]") -> int:
             named, _path_only = _CS.classes_naming_files(files)
         except Exception as exc:
             named_error = f"the scan for test classes that name a changed file failed ({type(exc).__name__}: {str(exc)[:80]})"
+    def self_test_map() -> "tuple[object, str]":
+        # The map the ready-pull-request step downloaded, or else one fetched here (a draft skips that step, #7743).
+        if selection is not None and isinstance(selection.get("map"), dict):
+            return selection["map"], ""
+        path, error = (args.map, args.map_error) if args.map and os.path.isfile(args.map) else fetch_nightly_map("test-map-download")
+        if not path:
+            return None, error or args.map_error
+        loaded = _CS.load_map(path)
+        return (loaded, "") if isinstance(loaded, dict) else (None, "the downloaded test map cannot be read")
+
     out = plan(args.event, args.base, args.head_ref, parse_labels(args.labels), files,
-               _CS.Rules(), draft=draft, selection=selection, named=named, named_error=named_error)
+               _CS.Rules(), draft=draft, selection=selection, named=named, named_error=named_error, self_test_map=self_test_map)
     lines = [f"{k}={v}" for k, v in out.items()]
     if args.class_lists_dir is not None:
         lines = [f"{k}={v}" for k, v in out.items() if k not in CLASS_LIST_KEYS]
         lines += write_class_lists(args.class_lists_dir, out)
+        write_leg_extras(args.class_lists_dir, out)
     print("\n".join(lines))
     if out["legs"] != "0":
         print(f"legs: {out['legs']} chosen ({out['test_minutes']} weighted test minutes)")
