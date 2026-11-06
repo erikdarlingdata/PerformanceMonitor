@@ -1301,6 +1301,35 @@ try {
       await settle(30);
       return { reportNoticeShown, noticeAtInherit, noticeAtInvestigate, noticeAtOff, writes: requests.filter((r) => r.method === "PUT").map((r) => ({ method: r.method, url: r.url, body: r.body })) };
     },
+    /* #7656: the Bot channel box on the Routes tab. Edit on route 7 (stored with the bot channel C0123ABCDEF), type the param into the box,
+       Save: returns what the box showed before, the strips the page drew after, and the writes it sent. A channel id is sent trimmed as
+       slack_bot_channel; a channel name is refused by the form with the one sentence and no write goes out. */
+    routeBotChannel: async (param) => {
+      state.canEdit = true;
+      const route = { route_id: 7, metric_match: "blocking", match_kind: "exact_metric", family: "performance", configured_channels: [], smtp_recipients: [],
+        enabled: true, modified_at_utc: "2026-01-01T00:00:00.1234567Z", scope_server_id: null, scope_tag_id: null, agent_level: 1, agent_max_per_hour: 10,
+        agent_max_per_day: 50, agent_lease_minutes: 30, agent_expiry_minutes: 120, send_resolutions: null, fallback_route_id: null, severities: "both", report_notice: "off",
+        action_approval: "required", approval_single_person: false, slack_bot_channel: "C0123ABCDEF" };
+      state.responder = (method, url) => {
+        if (method === "GET" && url === "/api/read/get_notification_routes") return { status: 200, body: { routes: [route] } };
+        if (method === "GET" && url === "/api/agent-setup/access") return { status: 200, body: { can_edit_routes: true, can_edit_profiles: true } };
+        if (method === "PUT" && url === "/api/notification-routes/7") return { status: 200, body: { status: "updated", route_id: 7 } };
+        return { status: 404, body: { error: "no such request " + url } };
+      };
+      await mountPage("routes");
+      await fire(byAttr(main, "data-action", "edit-route")[0], "click");
+      await settle(30);
+      const box = field("botChannel");
+      const botChannelShown = box ? box.value : null;
+      if (box) await typeInto(box, param === undefined ? "" : param);
+      await fire(byAttr(main, "data-action", "save-route")[0], "click");
+      await settle(30);
+      return {
+        botChannelShown,
+        strips: all(main, (n) => n.classList.contains("strip")).map((n) => n.textContent),
+        writes: requests.filter((r) => r.method === "PUT").map((r) => ({ method: r.method, url: r.url, body: r.body })),
+      };
+    },
     /* #7611: the Database Protection ages on the Settings tab. The param is "<seat>" or "<seat>/<hours>,<minutes>,<hours>": the seat is
        `editor` or `readonly`, and the boxes are typed over with the values and Save is clicked. The reply says what the rows and boxes
        showed before, what was sent, and what the page said after. A save under the bounds answers 200; the service's own refusal is
