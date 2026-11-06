@@ -70,7 +70,7 @@ globalThis.document = {
 globalThis.location = { hash: "#/server/A/cpu" };
 
 const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "chart-axis-")));
-let charts, util, compose, panels;
+let charts, util, compose, panels, findings;
 try {
   fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
@@ -78,6 +78,7 @@ try {
   util = await import(pathToFileURL(path.join(scratch, "util.js")).href);
   compose = await import(pathToFileURL(path.join(scratch, "compose.js")).href);
   panels = await import(pathToFileURL(path.join(scratch, "panels.js")).href);
+  findings = await import(pathToFileURL(path.join(scratch, "pages", "analysis-findings.js")).href);
 } catch (e) {
   fs.rmSync(scratch, { recursive: true, force: true });
   throw e;
@@ -319,6 +320,16 @@ out.composed = {
 };
 out.formatters = {
   msNoStep: [0.4, 1.6, 999, 1500].map((v) => util.fmtMs(v)),
+  /* #7726: a positive figure under 1 ms is whole microseconds; zero stays "0 ms"; 0.9996 rounds to 1000 us and reads "1 ms". */
+  msMicro: [0.03235, 0.0254, 0.0003, 0.5, 0.9996, 0].map((v) => util.fmtMs(v)),
+  /* #7726: a trace flag is an identifier, copied into DBCC TRACEON, so the id format prints 3895 with no separator. */
+  traceFlag: [3895, 1117, 12345].map((v) => util.applyFormat("id", v)),
+  /* #7726: the unreachable-since sentence has no seconds ("2026-11-05 16:52 UTC"); the page prints it in local time, as the retry time beside it. */
+  localSentence: util.localizeIsoText("Server unreachable since 2026-11-05 16:52 UTC: refused. Next retry at 2026-11-05 17:51:35 UTC."),
+  localExpected: [new Date("2026-11-05T16:52:00Z").toLocaleString(undefined, { year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" }),new Date("2026-11-05T17:51:35Z").toLocaleString()],
+  noZoneKept: util.localizeIsoText("saw 2026-11-05 16:52 here and 2026-11-05T16:52 there"),
+  /* #7726: backtick spans in advice text become code elements whose text is the span as text (never markup). */
+  adviceSpans: findings.adviceNodes("Set `max server memory` (see `sp_configure 'max server memory (MB)', 1000`) and a stray ` tick <b>x</b>.").map((n) => (typeof n === "string" ? "t:" + n : n.tag + ":" + n.text)),
   msStep: [0, 0.2, 0.4].map((v) => util.fmtMs(v, { step: 0.2 })),
   msSeconds: [1000, 1050, 1100].map((v) => util.fmtMs(v, { step: 50 })),
   pctStep: [0, 0.5, 1].map((v) => util.fmtPct(v, { step: 0.5 })),

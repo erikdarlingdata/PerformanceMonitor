@@ -289,12 +289,37 @@ public sealed class WebChartAxisBehaviourTests
     public void AFormatterWithoutAStep_ReadsAsBefore()
     {
         var f = Run().GetProperty("formatters");
-        Assert.Equal(new[] { "0 ms", "2 ms", "999 ms", "1.5 s" }, Strings(f.GetProperty("msNoStep")));
+        Assert.Equal(new[] { "400 µs", "2 ms", "999 ms", "1.5 s" }, Strings(f.GetProperty("msNoStep")));
         Assert.Equal("1%", f.GetProperty("pctNoStep").GetString());
         Assert.Equal(new[] { "5 ms", "7 ms" }, Strings(f.GetProperty("mapIndex")));
         Assert.Equal(new[] { "200 MB", "1,023 MB", "1.0 GB", "2.0 GB" }, Strings(f.GetProperty("mb")));
         Assert.Equal(new[] { "0.0 ms", "0.2 ms", "0.4 ms" }, Strings(f.GetProperty("msStep")));
         Assert.Equal(new[] { "1.00 s", "1.05 s", "1.10 s" }, Strings(f.GetProperty("msSeconds")));
+    }
+
+    /// <summary>#7726: Top Queries printed "0 ms" for an average of 0.03 ms over 1.5 million runs. A positive figure under 1 ms in a
+    /// cell is now whole microseconds, exactly zero stays "0 ms", and a trace flag prints with no thousands separator.</summary>
+    [Fact]
+    public void ASubMillisecondCell_PrintsMicroseconds_AndATraceFlagHasNoSeparator()
+    {
+        var f = Run().GetProperty("formatters");
+        Assert.Equal(new[] { "32 µs", "25 µs", "1 µs", "500 µs", "1 ms", "0 ms" }, Strings(f.GetProperty("msMicro")));
+        Assert.Equal(new[] { "3895", "1117", "12345" }, Strings(f.GetProperty("traceFlag")));
+    }
+
+    /// <summary>#7726: the unreachable-since sentence has no seconds and printed UTC on the page; it is now rewritten to local time like the
+    /// retry time beside it (a stamp with no seconds and no zone is left alone), and a backtick span in advice text is drawn as a code element
+    /// whose content stays text.</summary>
+    [Fact]
+    public void TheUnreachableSentenceIsLocal_AndAdviceBackticksBecomeCode()
+    {
+        var f = Run().GetProperty("formatters");
+        var expected = Strings(f.GetProperty("localExpected"));
+        Assert.Equal($"Server unreachable since {expected[0]}: refused. Next retry at {expected[1]}.", f.GetProperty("localSentence").GetString());
+        Assert.Equal("saw 2026-11-05 16:52 here and 2026-11-05T16:52 there", f.GetProperty("noZoneKept").GetString());
+        Assert.Equal(
+            new[] { "t:Set ", "code:max server memory", "t: (see ", "code:sp_configure 'max server memory (MB)', 1000", "t:) and a stray ` tick <b>x</b>." },
+            Strings(f.GetProperty("adviceSpans")));
     }
 
     private static SystemHealthRecord Snapshot(DateTime at, long system, long sql) =>

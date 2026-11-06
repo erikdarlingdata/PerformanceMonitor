@@ -47,7 +47,7 @@
 
 import { keepScroll, refreshGridInPlace, replaceNodes } from "../refresh-in-place.js";
 import { keepLonePanelsWide } from "../panel-layout.js";
-import { el, mount, apiGet, apiGetFleet, setChartDataStart, onPageLeave, bandClass, loadingStrip, noticeStrip, setActiveRange, setActiveDatabaseFilter, localTime, storeHash, clampTileDetails } from "../util.js";
+import { el, mount, apiGet, apiGetFleet, setChartDataStart, onPageLeave, bandClass, loadingStrip, noticeStrip, setActiveRange, setActiveDatabaseFilter, localTime, localizeIsoText, storeHash, clampTileDetails } from "../util.js";
 import { getDatabaseFilter } from "../viewer-local.js";
 import { databaseFilterControl, databaseFilterUnavailable, closeDatabaseFilter } from "./database-filter.js";
 import { setPanelSignal } from "../panels.js";
@@ -671,7 +671,7 @@ function fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason
   dot.className = "dot " + bandClass(card.band);
   mount(
     badgeSlot,
-    el("span", { class: "badge " + bandClass(card.band), text: card.status || card.band, title: reason || null })
+    el("span", { class: "badge " + bandClass(card.band), text: card.status || card.band, title: reason ? localizeIsoText(reason) : null })
   );
 
   /* The engine badge is the answer to "why does this server have six tabs and that one twelve". Only a card
@@ -683,7 +683,7 @@ function fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason
   }
 
   mount(whySlot, [
-    reason ? el("div", { class: "server-reason " + bandClass(card.band), text: reason }) : null,
+    reason ? el("div", { class: "server-reason " + bandClass(card.band), text: localizeIsoText(reason) }) : null,
     /* current.server is the server this render drew (set at the top of renderServer), so a redraw of the same server keeps its open tiles. */
     clampTileDetails(metricBands(card), undefined, openTilesFor(current.server)),
   ]);
