@@ -108,6 +108,24 @@ public sealed class QueryStoreIntervalWideGateTests
     }
 
     [Fact]
+    public void Clause3_WholeTableFloorBelowTheHorizon_IsRaisedToIt_SoAMatureServerKeepsRaw()
+    {
+        /* #7746: UpsertSql copies first_execution_time from raw with no lower bound, and raw takes it from the monitored server's clock,
+           so one server whose clock runs behind holds rows below the purge's horizon (appliedThrough - WideHorizonDays) until the next
+           purge. Such a row is no purge edge. A mature server on a plain store (raw keeps 30 days, so 3a cannot pass) with a 14-day
+           window: its own floor, ten days back, refuses 3b, and the whole-table floor is raised to the horizon, so it refuses too.
+           Taken as read, the skewed floor would send the window to the table and drop days 10 to 14 of it. */
+        var end = WindowEnd;
+        var start = end.AddDays(-14);
+        var mature = end.AddDays(-10);
+        Assert.False(Rule(windowStart: start, tableFloor: mature, appliedThrough: end));
+        Assert.False(Rule(windowStart: start, tableFloor: mature, appliedThrough: end, tableFloorAllServers: end.AddDays(-20)));
+        Assert.False(Rule(windowStart: start, tableFloor: mature, appliedThrough: end, tableFloorAllServers: end.AddDays(-QueryStoreIntervalPartitions.WideHorizonDays).AddMinutes(-1)));
+        /* The clamp only raises: a young server still passes on a whole-table floor at the horizon, which is past the margin. */
+        Assert.True(Rule(tableFloor: WindowStart.AddHours(-6), tableFloorAllServers: WindowEnd.AddDays(-QueryStoreIntervalPartitions.WideHorizonDays)));
+    }
+
+    [Fact]
     public void Clause3_RawFloorAtOrAboveTableFloorPlusMargin_ReadsTheTable_EvenOutsideTheMargin()
     {
         /* The table floor sits 12h under the window start, short of the purge-edge margin, so only 3a can pass. */
