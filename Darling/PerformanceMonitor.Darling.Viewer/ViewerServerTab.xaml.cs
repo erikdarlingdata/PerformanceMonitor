@@ -573,7 +573,10 @@ public partial class ViewerServerTab : UserControl
            window: hours-back for a preset, or the custom From/To when the user picked a custom range
            (the lanes bound their own X-axis to it). Replaces wave-4's CPU-trend + wait-category charts. */
         var (fromDate, toDate) = GetOverviewCustomRange();
-        await OverviewLanes.RefreshAsync(GetWindowHoursBack(), fromDate, toDate);
+        var failedReads = await OverviewLanes.RefreshAsync(GetWindowHoursBack(), fromDate, toDate);
+        /* A lane that did not read is drawn as failed, and the tab is not refreshed: the status line names the reads instead. */
+        if (failedReads is not null)
+            throw new InvalidOperationException(failedReads);
     }
 
     /* LoadHealthAsync now lives in ViewerServerTab.CollectionHealth.cs (W1i moved it there with the

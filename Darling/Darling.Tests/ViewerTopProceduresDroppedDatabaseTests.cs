@@ -172,8 +172,20 @@ public sealed class ViewerTopProceduresDroppedDatabaseTests
     public void LeftOutText_WithRows_NamesTheDatabasesAndSaysHowToReadThem()
     {
         var text = DatabasesLeftOut.ProcedureBanner(Dropped, 3, null, 24)!;
-        Assert.Contains("Left out: zz_a, zz_b.", text, StringComparison.Ordinal);
-        Assert.Contains("left out of this read", text, StringComparison.Ordinal);
+        Assert.Equal("2 databases were left out because the server no longer lists them. They were dropped or detached: zz_a, zz_b.", text);
+        /* #7538: a window has no database_name argument, so the banner does not tell its reader to name one. */
+        Assert.DoesNotContain("database_name", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LeftOutText_StatesTheCountOnce_OnAnEmptyPageAndOnAPageWithRows()
+    {
+        var facts = new CollectorRunFacts(10, 4, DateTime.UtcNow, null);
+        foreach (var text in new[] { DatabasesLeftOut.ProcedureBanner(Dropped, 0, facts, 24)!, DatabasesLeftOut.ProcedureBanner(Dropped, 3, null, 24)! })
+        {
+            Assert.Single(System.Text.RegularExpressions.Regex.Matches(text, "left out"));
+            Assert.DoesNotContain("database_name", text, StringComparison.Ordinal);
+        }
     }
 
     [Fact]
@@ -182,8 +194,7 @@ public sealed class ViewerTopProceduresDroppedDatabaseTests
         var facts = new CollectorRunFacts(10, 4, DateTime.UtcNow, null);
         var text = DatabasesLeftOut.ProcedureBanner(Dropped, 0, facts, 24)!;
         Assert.Contains("No procedure ran in the last 24h in a database this server still has", text, StringComparison.Ordinal);
-        Assert.Contains("2 database(s) the server no longer lists were left out of this read", text, StringComparison.Ordinal);
+        Assert.EndsWith("2 databases were left out because the server no longer lists them. They were dropped or detached: zz_a, zz_b.", text, StringComparison.Ordinal);
         Assert.DoesNotContain("databases_left_out", text, StringComparison.Ordinal);
-        Assert.Contains("Left out: zz_a, zz_b.", text, StringComparison.Ordinal);
     }
 }

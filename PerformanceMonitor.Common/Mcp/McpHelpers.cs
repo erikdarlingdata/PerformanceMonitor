@@ -1282,7 +1282,7 @@ internal static class McpHelpers
 
     /// <summary>
     /// #5633 review (finding D): <paramref name="statusJson"/> (an envelope another helper built) with the databases the read
-    /// left out beside it: <see cref="DatabasesLeftOut.NamesKey"/> (the names, capped) and
+    /// left out beside it: <see cref="DatabasesLeftOut.NamesKey"/> (the names, capped), <see cref="DatabasesLeftOut.CountKey"/> (how many in all) and
     /// <see cref="DatabasesLeftOut.NoteKey"/>. Null in, null out; an envelope returned unchanged
     /// when nothing was left out or when it already carries the key.
     /// </summary>
@@ -1301,6 +1301,7 @@ internal static class McpHelpers
 
         node[DatabasesLeftOut.NamesKey] =
             JsonSerializer.SerializeToNode(DatabasesLeftOut.Named(leftOut), JsonOptions);
+        node[DatabasesLeftOut.CountKey] = DatabasesLeftOut.Count(leftOut);
         node[DatabasesLeftOut.NoteKey] = DatabasesLeftOut.Note(leftOut);
         return node.ToJsonString(JsonOptions);
     }

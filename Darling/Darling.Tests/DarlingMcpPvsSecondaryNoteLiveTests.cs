@@ -135,4 +135,51 @@ VALUES ($1,$2,$3,$4,$5,9,TRUE,10,1000)",
             PvsSecondaryNote.WithoutRow(new[] { "AgDb" }, Array.Empty<string>(), new[] { "AgDb" }),
             NoteOf(await DarlingMcpPvsTools.GetPvsStats(postgres, ServerName, 0, "AgDb", ct)));
     }
+
+    private static Task SetMajorVersionAsync(NpgsqlConnection connection, int major, CancellationToken ct) =>
+        DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET sql_major_version = $1 WHERE server_id = $2", major, ServerId);
+
+    [Fact]
+    public async Task ASql2017Secondary_SaysTheVersionHasNoPvs_AndNeverTellsYouToCheckThePrimary()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), BaseSkip);
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection) = await OpenAsync(baseConnectionString!, ct);
+        await using var _s = scratch;
+        await using var _c = connection;
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        /* #7822: SQL Server 2017 has no persistent version store, so no database has a row and the primary has none either. */
+        await SetMajorVersionAsync(connection, 14, ct);
+        await SeedAgAsync(connection, "SECONDARY", TimeSpan.FromMinutes(2), ct, "AgDb");
+
+        foreach (var database in new string?[] { null, "AgDb" })
+        {
+            var reply = await DarlingMcpPvsTools.GetPvsStats(postgres, ServerName, 0, database, ct);
+            Assert.Equal("empty", StatusOf(reply));
+            using var doc = JsonDocument.Parse(reply);
+            Assert.Contains("no persistent version store", doc.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.Null(NoteOf(reply));
+        }
+    }
+
+    [Fact]
+    public async Task ASql2019SecondaryWithNoPvsRowsAtAll_KeepsTheNoteOnTheNoRowsReply()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), BaseSkip);
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection) = await OpenAsync(baseConnectionString!, ct);
+        await using var _s = scratch;
+        await using var _c = connection;
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await SetMajorVersionAsync(connection, 15, ct);
+        await SeedAgAsync(connection, "SECONDARY", TimeSpan.FromMinutes(2), ct, "AgDb");
+
+        var reply = await DarlingMcpPvsTools.GetPvsStats(postgres, ServerName, 0, null, ct);
+        Assert.Equal("empty", StatusOf(reply));
+        Assert.Equal(PvsSecondaryNote.WithoutRow(new[] { "AgDb" }, Array.Empty<string>()), NoteOf(reply));
+    }
 }

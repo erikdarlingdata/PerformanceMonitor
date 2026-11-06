@@ -919,10 +919,10 @@
                                     <TextBlock Text="Last hour:" FontSize="11" FontWeight="SemiBold"
                                                Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,10,0" VerticalAlignment="Center"/>
                                     <TextBlock FontSize="11" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,16,0" VerticalAlignment="Center"
-                                               Text="{Binding TotalBlockingEvents, StringFormat='Blocking events: {0}'}"
+                                               Text="{Binding TotalBlockingText}"
                                                ToolTip="{Binding TotalBlockingDetail}"/>
                                     <TextBlock FontSize="11" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,16,0" VerticalAlignment="Center"
-                                               Text="{Binding TotalDeadlocks, StringFormat='Deadlocks: {0}'}"
+                                               Text="{Binding TotalDeadlocksText}"
                                                ToolTip="{Binding DeadlockCoverageTooltip}"/>
                                     <!-- #3029: how much of the fleet the deadlock total beside it actually
                                          read. v_deadlocks is the SQL Server extended-event capture and
