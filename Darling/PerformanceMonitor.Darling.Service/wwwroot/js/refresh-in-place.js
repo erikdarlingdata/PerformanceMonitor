@@ -293,6 +293,9 @@ export function whenSettled(nodes, done) {
     obs.disconnect();
     done();
   });
-  nodes.forEach((n) => obs.observe(n, { childList: true, subtree: true }));
+  /* #7934: a panel that does not apply to this server (hideWhenNotCollected) settles by hiding itself: it sets `hidden` and
+     `style.display` and leaves its loading strip in place, so the attributes are watched too. Children alone would miss it when it
+     is the last panel to answer, and the swap would never run. */
+  nodes.forEach((n) => obs.observe(n, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden", "style"] }));
   return () => obs.disconnect();
 }
