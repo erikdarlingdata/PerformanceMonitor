@@ -21,6 +21,8 @@ namespace Darling.Tests;
 /// whitespace removed, so changed whitespace still matches and a text that differs by one token does not. The collector's drop and
 /// the key trigger's test must agree on every one of these, so the Postgres test is run over the same texts.
 /// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. The one live test reaches DARLING_TEST_PG only to CREATE and DROP its
+   own database through ScratchPostgres and works entirely inside it. */
 public sealed class SqlServerOwnStatementTests
 {
     private static string Respace(string text) =>
