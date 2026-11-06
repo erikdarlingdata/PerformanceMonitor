@@ -6,6 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using PerformanceMonitor.Common;
+
 namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>
@@ -26,6 +28,11 @@ namespace PerformanceMonitor.Darling.Storage;
 /// time. With fewer than two SUCCESS runs in the window there is no earlier run for a row to belong to, and every row is
 /// current. A run whose log write was skipped only makes the rule keep a row, never drop one.</para>
 ///
+/// <para><b>Runs that skipped a database do not count.</b> The per-database autovacuum collector logs SUCCESS when some
+/// databases failed to read and records the loss only in the run's note. A run with that note is not a capture: counting
+/// it would call every table of the skipped database cleared. A database that fails every cycle therefore leaves fewer
+/// than two eligible runs, and every row is current.</para>
+///
 /// <para>The window end is the caller's <c>$3</c>, so an as-of read judges "current" at that instant, not at the clock.
 /// $1 server_id, $2/$3 window (naive UTC): the same parameters every reader here binds.</para>
 /// </summary>
@@ -42,9 +49,14 @@ public static class PgCurrentCapture
                 AND   collector_name = '
         """;
 
-    private const string Tail = """
+    /* A run that recorded the partial-database-failure note still logs SUCCESS, but it did not read every database, so a
+       row missing from it proves nothing for the databases it skipped. Such a run is not a capture for this rule. The LIKE
+       is built from the writer's own marker (the one CollectionHealthRollupSupport.PartialFailureRunPredicateSql uses), so a
+       reworded note moves the writer and this rule together. The three server-level collectors never write the note. */
+    private const string Tail = $"""
         '
                 AND   status = 'SUCCESS'
+                AND   (error_message IS NULL OR error_message NOT LIKE '%{PartialDatabaseFailureNote.Marker}%')
                 AND   collection_time >= $2
                 AND   collection_time <= $3
                 ORDER BY collection_time DESC

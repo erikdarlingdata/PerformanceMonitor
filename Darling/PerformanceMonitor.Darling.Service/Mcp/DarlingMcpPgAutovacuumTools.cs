@@ -124,10 +124,10 @@ public sealed class DarlingMcpPgAutovacuumTools
             }).ToList();
             var clearedNote = cleared.Count == 0
                 ? null
-                : $"{cleared.Count} table(s) had a stored sample in the window but are absent from the collector's newest run "
+                : $"{cleared.Count} table(s) had a stored sample in the window but are not in the collector's newest complete capture "
                   + $"(its last capture was {allFetched[0].LatestCaptureAt:yyyy-MM-dd HH:mm:ss} UTC), which stores a table only "
-                  + "while it has pending work, so they were vacuumed or analyzed clean (or dropped) since. They are not graded, "
-                  + "ranked or counted. last_measured_at is the sample they were last seen in; the list holds only the tables "
+                  + "while it has pending work. They may have been vacuumed or analyzed clean, dropped, or fallen out of scope; "
+                  + "the store cannot tell which. They are not graded, ranked or counted. last_measured_at is the sample they were last seen in; the list holds only the tables "
                   + "this page read reached.";
 
             if (rows.Count == 0)
@@ -158,8 +158,8 @@ public sealed class DarlingMcpPgAutovacuumTools
                         emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
                         factual: cleared.Count > 0
                             ? "No table on this server has dead tuples, pending analyze work, inserts since its last vacuum, or "
-                                + "autovacuum disabled in the collector's newest run; the tables in cleared_tables had it earlier "
-                                + "in the window and were cleared since"
+                                + "autovacuum disabled in the collector's newest complete capture; the tables in cleared_tables had it earlier "
+                                + "in the window and are not in that capture"
                             : "No table on this server has dead tuples, pending analyze work, inserts since "
                             + "its last vacuum, or autovacuum disabled in the captures the store holds for the window",
                         coveredClaim: ". The collector records only tables with "

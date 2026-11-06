@@ -53,10 +53,10 @@ public sealed class DarlingPgStaleStateLiveTests
             "INSERT INTO pg_xmin_horizon (collection_id, collection_time, server_id, server_name, source, xmin_age, holder, detail, is_winner) VALUES ($1, $2, $3, $4, $5, $6, $7, 'detail', $8)",
             CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), Id(name), name, source, age, holder, winner);
 
-    private static Task SeedTable(NpgsqlConnection c, string name, DateTime at, string table, long dead) =>
+    private static Task SeedTable(NpgsqlConnection c, string name, DateTime at, string table, long dead, string database = "appdb") =>
         Exec(c,
-            "INSERT INTO pg_autovacuum_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, table_name, live_tuples, dead_tuples, vacuum_threshold, mods_since_analyze, analyze_threshold, inserts_since_vacuum, insert_vacuum_threshold, autovacuum_disabled, total_bytes, autovacuum_count) VALUES ($1, $2, $3, $4, 'appdb', 'public', $5, 10000, $6, 1000, 0, 500, 0, 1000, FALSE, 1000000, 1)",
-            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), Id(name), name, table, dead);
+            "INSERT INTO pg_autovacuum_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, table_name, live_tuples, dead_tuples, vacuum_threshold, mods_since_analyze, analyze_threshold, inserts_since_vacuum, insert_vacuum_threshold, autovacuum_disabled, total_bytes, autovacuum_count) VALUES ($1, $2, $3, $4, $7, 'public', $5, 10000, $6, 1000, 0, 500, 0, 1000, FALSE, 1000000, 1)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), Id(name), name, table, dead, database);
 
     private static Task SeedSlot(NpgsqlConnection c, string name, DateTime at, string slot, long retained) =>
         Exec(c,
@@ -191,6 +191,34 @@ public sealed class DarlingPgStaleStateLiveTests
 
             Assert.Equal("public.big", root.GetProperty("worst_table").GetString());
             Assert.Equal("critical_far_past_threshold", root.GetProperty("worst_severity").GetString());
+            Assert.Empty(root.GetProperty("cleared_tables").EnumerateArray());
+        });
+    }
+
+    [Fact]
+    public async Task Autovacuum_ADatabaseSkippedOnTheNewestRun_IsNotCalledClearedAndStaysGraded_AgainstDevPostgres()
+    {
+        const string Name = "pg7878-autovac-partial";
+        await RunAsync(Name, "pg_autovacuum_stats", "pg_autovacuum_stats", async (c, ds, end) =>
+        {
+            /* An older full run read both databases. The newest run logs SUCCESS but its database read for "otherdb" failed: it carries
+               the partial-failure note and stored rows for "appdb" only. "otherdb" was not vacuumed clean, it was not read. */
+            await SeedTable(c, Name, end.AddHours(-2), "orders", 40000, "otherdb");
+            await SeedTable(c, Name, end.AddHours(-2), "small", 1500, "appdb");
+            await Run(c, Name, "pg_autovacuum_stats", end.AddHours(-2));
+            await SeedTable(c, Name, end.AddMinutes(-5), "small", 1500, "appdb");
+            await Run(c, Name, "pg_autovacuum_stats", end.AddMinutes(-5));
+            await Exec(c,
+                "UPDATE collection_log SET error_message = $1 WHERE server_id = $2 AND collector_name = 'pg_autovacuum_stats' AND collection_time = $3",
+                EnumeratedCollectorDriver.BuildPartialFailureNote(1, 2, ["otherdb"], "canceling statement due to statement timeout"),
+                Id(Name), DarlingMcpTestData.Naive(end.AddMinutes(-5).AddSeconds(5)));
+
+            var root = WindowFloorLiveHarness.Parse(await DarlingMcpPgAutovacuumTools.GetPgAutovacuumHealth(ds, Name, 24, as_of: AsOf(end)));
+
+            Assert.Equal("tables_with_pending_maintenance", root.GetProperty("status").GetString());
+            Assert.Equal("public.orders", root.GetProperty("worst_table").GetString());
+            Assert.Equal(2, root.GetProperty("past_threshold_count").GetInt32());
+            Assert.Equal(["public.orders", "public.small"], Names(root, "tables", "table_name").Order().ToArray());
             Assert.Empty(root.GetProperty("cleared_tables").EnumerateArray());
         });
     }
