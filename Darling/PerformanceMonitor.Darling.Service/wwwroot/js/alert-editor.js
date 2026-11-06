@@ -96,7 +96,7 @@ export async function renderAlertEditor(main, id, templateKey) {
       alertBackHead(),
       emptyStrip(
         session.probe_failed
-          ? "Couldn't confirm your session, so the editor is read-only for now. Reload the page to author a rule."
+          ? "Couldn't confirm your session yet, so the editor is not available. Reload the page to try again."
           : "Your account has read-only access, so the alert-rule editor is read-only."
       ),
     ]);
