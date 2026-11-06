@@ -67,7 +67,8 @@ public class PlanFeatureExtractorTests
         Assert.Equal("0xE451D88319CC70FF", row.QueryHash);
         Assert.Equal("COND WITH QUERY", row.StatementType);
         Assert.Equal(5, row.OperatorCount);
-        Assert.Equal(2, row.WarningCount);
+        // #7899: one table variable (@hits) read by one operator is one finding, not a statement warning plus an operator warning.
+        Assert.Equal(1, row.WarningCount);
         Assert.All(result.Warnings, w => Assert.Equal("Table Variable", w.WarningType));
     }
 
@@ -89,7 +90,8 @@ public class PlanFeatureExtractorTests
         var result = PlanFeatureExtractor.Extract("digest-module-warnings", ReadFixture("module_plan.sqlplan"));
 
         var second = result.Features.Single(f => f.StatementOrdinal == 2);
-        Assert.Equal(3, second.WarningCount);
+        // #7899: the table variable in this plan is one finding, no longer a statement warning plus an operator warning.
+        Assert.Equal(2, second.WarningCount);
         Assert.Contains(result.Warnings, w => w.StatementOrdinal == 2 && w.WarningType == "Bare Scan");
     }
 
@@ -102,7 +104,8 @@ public class PlanFeatureExtractorTests
         Assert.Single(result.Features);
         Assert.Equal("ok", result.Features[0].ExtractionStatus);
         Assert.Equal("DECLARE CURSOR", result.Features[0].StatementType);
-        Assert.Equal(4, result.Features[0].WarningCount);
+        // #7899: the table variable in this plan is one finding, no longer a statement warning plus an operator warning.
+        Assert.Equal(3, result.Features[0].WarningCount);
         Assert.Contains(result.Warnings, w => w.WarningType == "Cursor Missing LOCAL");
         Assert.Contains(result.Warnings, w => w.WarningType == "Bare Scan");
     }

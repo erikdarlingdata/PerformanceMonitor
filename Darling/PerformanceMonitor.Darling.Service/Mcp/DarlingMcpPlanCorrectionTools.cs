@@ -139,9 +139,8 @@ public sealed class DarlingMcpPlanCorrectionTools
                     ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.StatusForDatabase("empty",
                         !databaseFilter.IsAll
                             ? $"No plan correction data found{DarlingMcpBlockingTools.ForChosenDatabases(databaseFilter)}."
-                            : "No plan correction data collected for this server. The collector runs against SQL Server 2017+ " +
-                        "(sys.dm_db_tuning_recommendations); a server that has never produced a row here either predates " +
-                        "that or has no databases with Query Store on.",
+                            /* #7813: the version decides the sentence, read from the registry the way the PVS tool reads it. */
+                            : PerformanceMonitor.Collectors.PlanCorrectionCollector.NoRowsMessage(await DarlingMcpPvsTools.ReadTargetAsync(postgres, resolved.ServerId, cancellationToken)),
                         databaseFilter.Describe(), /* #5244 review L2: the echo rides on an empty answer too */
                         notice.AsHints()), cancellationToken, windowStart);
             }
