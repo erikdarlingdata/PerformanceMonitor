@@ -1435,14 +1435,15 @@ public sealed class McpHealthTools
         }
     }
 
-    [McpServerTool(Name = "get_current_waits_trend"), Description("Gets the two Current Waits series over time for a server: waiting-task total wait duration per wait type per collection, and blocked-session counts per database per collection. get_waiting_tasks answers 'what is waiting right now' and can never say whether it is worse than an hour ago — this is that question. Read the two series together: a wait-type spike with no blocked sessions is a resource wait, the same spike with them is contention.")]
+    [McpServerTool(Name = "get_current_waits_trend"), Description("Gets the two Current Waits series over time for a server: waiting-task total wait duration per wait type, and blocked-session counts per database, in time buckets. Each point is the figure of ONE collection averaged over the collections in its bucket (with the largest single collection as peak_* and the collection_count), so a wider bucket never reads as a bigger wait. get_waiting_tasks answers 'what is waiting right now' and can never say whether it is worse than an hour ago — this is that question. Read the two series together: a wait-type spike with no blocked sessions is a resource wait, the same spike with them is contention.")]
     public static async Task<string> GetCurrentWaitsTrend(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 4. No upper bound (this read exists to look further back than the 168-hour reads allow); a negative or zero value is refused rather than read as its absolute value.")] int hours_back = 4,
         [Description("Limit the blocked-session series to one database. Omit for all databases.")] string? database_name = null,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -1456,13 +1457,27 @@ public sealed class McpHealthTools
         var anchorError = McpHelpers.ValidateUncappedWindow(hours_back, as_of, out var windowEnd);
         if (anchorError != null) return anchorError;
 
+        /* An unusable width is refused before anything is read; the cap waits for the series count, as get_file_io_trend does. */
+        var widthError = TrendBuckets.ValidateWidth(bucket_minutes);
+        if (widthError != null) return widthError;
+
         try
         {
             var hours = hours_back;
             var filter = string.IsNullOrWhiteSpace(database_name) ? null : new[] { database_name };
 
-            var waits = await dataService.GetWaitingTaskTrendAsync(resolved.ServerId, hours, asOfUtc: windowEnd);
-            var blocked = await dataService.GetBlockedSessionTrendAsync(resolved.ServerId, hours, databaseNames: filter, asOfUtc: windowEnd);
+            /* #7877: bucketed and sized as get_wait_trend is (TrendBuckets.WaitMaxPoints), for the wait types plus the databases the window holds.
+               The desktop chart's readers (GetWaitingTaskTrendAsync, GetBlockedSessionTrendAsync) are not this read: the first SUMS a bucket. */
+            var budget = TrendBudget.Mcp(TrendBuckets.WaitMaxPoints);
+            var seriesCount = await dataService.CountCurrentWaitsSeriesAsync(resolved.ServerId, hours, asOfUtc: windowEnd, databaseNames: filter);
+            var bucketError = TrendBuckets.Resolve(
+                hours, bucket_minutes, Math.Max(1, seriesCount), budget, out var bucketMinutes,
+                "Narrow hours_back, move as_of, or filter database_name to read this.");
+            if (bucketError != null) return bucketError;
+            var overTarget = TrendBuckets.PointsOverTarget(hours, bucketMinutes, Math.Max(1, seriesCount), budget.AutoFor(Math.Max(1, seriesCount)), bucket_minutes is not null);
+
+            var waits = await dataService.GetCurrentWaitsWaitPointsAsync(resolved.ServerId, hours, asOfUtc: windowEnd, bucketMinutes: bucketMinutes);
+            var blocked = await dataService.GetCurrentWaitsBlockedPointsAsync(resolved.ServerId, hours, asOfUtc: windowEnd, databaseNames: filter, bucketMinutes: bucketMinutes);
 
             if (waits.Count == 0 && blocked.Count == 0)
             {
@@ -1500,24 +1515,15 @@ public sealed class McpHealthTools
                     dataService, QueryWindowRelation.WaitingTasks, resolved.ServerId, windowEnd.AddHours(-hours), windowEnd, "waiting_tasks");
             }
 
-            return await McpQueryTools.WithDataWindowNoticeAsync(JsonSerializer.Serialize(new
+            var head = new Dictionary<string, object?>
             {
-                server = resolved.DisplayName,
-                hours_back = hours,
-                database_name = filter?[0],
-                waiting_tasks = waits.Select(w => new
-                {
-                    collection_time = w.CollectionTime.ToString("o"),
-                    wait_type = w.WaitType,
-                    total_wait_ms = w.TotalWaitMs,
-                }),
-                blocked_sessions = blocked.Select(b => new
-                {
-                    collection_time = b.CollectionTime.ToString("o"),
-                    database_name = b.DatabaseName,
-                    blocked_count = b.BlockedCount,
-                }),
-            }, McpHelpers.JsonOptions),
+                ["server"] = resolved.DisplayName,
+                ["hours_back"] = hours,
+                ["database_name"] = filter?[0],
+            };
+            /* One builder for both SKUs' envelope (TrendPayloads), so the keys and the meaning of each figure cannot drift. */
+            return await McpQueryTools.WithDataWindowNoticeAsync(
+                TrendPayloads.CurrentWaitsTrend(head, waits, blocked, bucketMinutes, bucket_minutes is not null, budget.AutoPoints, overTarget),
                 dataService, QueryWindowRelation.WaitingTasks, resolved.ServerId, windowEnd.AddHours(-hours), windowEnd, "waiting_tasks");
         }
         catch (Exception ex)

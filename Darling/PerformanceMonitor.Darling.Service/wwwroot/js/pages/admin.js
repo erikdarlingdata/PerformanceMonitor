@@ -1295,13 +1295,14 @@ async function buildRoutes(body, generation) {
   if (generation !== renderGeneration) return;
   const sourceRoutes = Array.isArray(res.data && res.data.routes) ? res.data.routes : [];
   const rows = routeRows(res.data).map((row, i) => ({ ...row, agent_use: routeUseText(sourceRoutes[i]) }));
-  const scopes = access.routes ? await readScopes() : { servers: [], tags: [] };
+  const scopes = access.routes ? await readScopes() : { servers: [], tags: [], complete: true };
   if (generation !== renderGeneration) return;
   const options = {
     canEdit: access.routes,
     routes: sourceRoutes,
     servers: scopes.servers,
     tags: scopes.tags,
+    scopesComplete: scopes.complete,
     repaint: () => (shownTab === "routes" && shownBody ? startBuilder("routes", shownBody, ++renderGeneration) : undefined),
   };
   /* A failed signing read leaves the strip out; the routes below are the page. */
@@ -1319,13 +1320,22 @@ async function buildRoutes(body, generation) {
   ]);
 }
 
-/** The servers and tags the scope pickers offer, from the fleet read: [{id, name}]. */
-async function readScopes() {
-  const res = await apiGetFleet();
-  const d = res && res.kind !== "error" ? res.data || {} : {};
+/** The servers and tags the scope pickers offer: [{id, name, disabled}] and [{id, name}]. #7949: the servers come from the Servers tab's read, which
+    lists every configured server with its enabled state, so a disabled server is still in a picker and its name says so. The fleet read lists
+    enabled servers only; it is the tags' source and the servers' fallback. `complete` is false when either read failed, so a tab can say that a
+    scope may be missing from the list. */
+export async function readScopes() {
+  const [fleet, list] = await Promise.all([apiGetFleet(), apiGet("/api/admin/servers")]);
+  const fleetRead = !!fleet && fleet.kind === "data";
+  const d = fleetRead ? fleet.data || {} : {};
+  const listed = list && list.kind === "data" && list.data && Array.isArray(list.data.servers) ? list.data.servers : null;
+  const rows = listed
+    ? listed.filter((s) => Number.isInteger(s.server_id)).map((s) => ({ id: s.server_id, name: s.display_name || s.server_name || "server " + s.server_id, disabled: s.status === "Disabled" }))
+    : (Array.isArray(d.cards) ? d.cards : []).filter((c) => Number.isInteger(c.server_id)).map((c) => ({ id: c.server_id, name: c.display_name || "server " + c.server_id, disabled: false }));
   return {
-    servers: (Array.isArray(d.cards) ? d.cards : []).filter((c) => Number.isInteger(c.server_id)).map((c) => ({ id: c.server_id, name: c.display_name || "server " + c.server_id })),
+    servers: rows.map((s) => ({ id: s.id, name: s.disabled ? s.name + " (disabled)" : s.name, disabled: s.disabled })),
     tags: (Array.isArray(d.tags) ? d.tags : []).filter((t) => Number.isInteger(t.id)).map((t) => ({ id: t.id, name: t.name || "tag " + t.id })),
+    complete: listed !== null && fleetRead,
   };
 }
 
@@ -1672,6 +1682,7 @@ const NOTES_NOTE_EDITING =
   "is kept, marked rejected, and never goes into a brief. The text cannot be edited here.";
 const NOTES_NOTE_LISTED = "Notes an agent proposed that nobody has decided.";
 const NOTES_NOTE_READ_ONLY = "Notes an agent proposed that nobody has decided. This sign-in is read-only, so it cannot approve or reject them.";
+const NOTES_NOTE_UNCONFIRMED = "Notes an agent proposed that nobody has decided. Could not check whether this sign-in can approve or reject them. Reload the page to try again.";
 const NOTES_NOTE_EXPIRY =
   " A note stops reaching briefs when it expires (the Expires column), and an expired note is not listed.";
 const NOTE_NOT_PENDING = "That note is not pending: it was already decided, or it is gone.";
@@ -1857,7 +1868,7 @@ async function buildPending(body, generation) {
      not signed in sees the list and the sentence that says what to do. */
   const access = writeAccess(session);
   const canEdit = access === "yes";
-  nodes.push(captionStrip((canEdit ? NOTES_NOTE_EDITING : access === "off" ? NOTES_NOTE_LISTED : NOTES_NOTE_READ_ONLY) + NOTES_NOTE_EXPIRY));
+  nodes.push(captionStrip((canEdit ? NOTES_NOTE_EDITING : session.probe_failed === true ? NOTES_NOTE_UNCONFIRMED : access === "off" ? NOTES_NOTE_LISTED : NOTES_NOTE_READ_ONLY) + NOTES_NOTE_EXPIRY));
   if (access === "sign-in") nodes.push(captionStrip(SIGN_IN_SENTENCE));
   if (access === "off") nodes.push(captionStrip(adminListOnlyNote(session.managed_store === true, "this page lists the notes only", "To approve, reject or write a note", true)));
   if (canEdit) {
@@ -1898,6 +1909,7 @@ const OVERRIDES_NOTE_EDITING =
 const overridesNoteReadOnly = (managed, adminWritesOff) =>
   "This list shows each threshold that differs from the global value, for one server, one database or a server tag. " +
   adminListOnlyNote(managed, "this page lists them only", "To change an override", adminWritesOff);
+const OVERRIDES_NOTE_UNCONFIRMED = "This list shows each threshold that differs from the global value, for one server, one database or a server tag. Could not check whether this sign-in can change them. Reload the page to try again.";
 const OVERRIDE_DENIED = "Changing a threshold override needs";
 
 /** The rows of the overrides grid from the list read's body. `database` and `server_id` stay on the row for Edit and Remove. */
@@ -2064,7 +2076,7 @@ async function buildOverrides(body, generation) {
      the store login holds the write grant on this table. */
   const canEdit = session.can_edit === true && !!res.data && res.data.can_edit === true;
   const keys = Array.isArray(res.data && res.data.keys) ? res.data.keys : [];
-  nodes.push(captionStrip(canEdit ? OVERRIDES_NOTE_EDITING : overridesNoteReadOnly(session.managed_store === true, session.admin_writes_off === true)));
+  nodes.push(captionStrip(canEdit ? OVERRIDES_NOTE_EDITING : session.probe_failed === true ? OVERRIDES_NOTE_UNCONFIRMED : overridesNoteReadOnly(session.managed_store === true, session.admin_writes_off === true)));
   if (res.data && typeof res.data.note === "string" && res.data.note) nodes.push(noticeStrip(res.data.note));
   if (canEdit) nodes.push(overrideFormNode(Array.isArray(res.data.servers) ? res.data.servers : [], keys, res.data.tags));
   nodes.push(VIZ.table({ overrides: overrideRows(res.data) }, {
