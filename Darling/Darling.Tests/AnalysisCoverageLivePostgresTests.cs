@@ -744,16 +744,93 @@ public sealed class AnalysisCoverageLivePostgresTests
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
         }
-
-        static AnalysisContext Context(DateTime start, DateTime end) => new()
-        {
-            ServerId = ServerId,
-            ServerName = ServerName,
-            TimeRangeStart = start,
-            TimeRangeEnd = end,
-            ServerUtcOffset = TimeSpan.Zero
-        };
     }
+
+    /// <summary>
+    /// #7893 on the real store with the peak and the count apart: twelve deadlocks inside one hour and three inside
+    /// another. On the scoped path the busy hour mixes rows kept by their database name with rows kept by their graph,
+    /// so the two arms are bucketed together, and rows wholly inside the separately monitored database are neither
+    /// counted nor bucketed. The unscoped read of the same rows counts every one and finds the same busiest hour.
+    /// Lite's <c>DeadlockPeakHourTests</c> is the twin.
+    /// </summary>
+    [Fact]
+    public async Task TwelveDeadlocksInOneHourAndThreeInAnother_PeakIsTwelve_AndTheCountIsFifteen_OnBothPaths()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock bucketing test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await RegisterServerAsync(connection, ct);
+
+            var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+            var dayStart = windowEnd.AddHours(-24);
+
+            /* Full coverage: a wait sample every fifteen minutes across the day. */
+            for (var i = 0; i <= 96; i++)
+                await PlantWaitAsync(connection, dayStart.AddMinutes(15 * i), "CXPACKET", i == 0 ? 0L : 1_000L, ct);
+
+            /* The busy hour: seven rows the database name alone keeps, and five whose graph has to be read. */
+            var busy = dayStart.AddHours(6);
+            for (var i = 0; i < 7; i++)
+                await PlantDeadlockAsync(connection, busy.AddMinutes(4 * i), "AppDb", "<deadlock/>", ct);
+            for (var i = 0; i < 5; i++)
+                await PlantDeadlockAsync(connection, busy.AddMinutes(30 + (4 * i)), null, Graph("AppDb", "SeparateDb"), ct);
+
+            /* The quiet hour: three master-stamped rows whose graph keeps them, and four wholly inside the separately
+               monitored database, which the scoped path drops. */
+            var quiet = dayStart.AddHours(20);
+            for (var i = 0; i < 3; i++)
+                await PlantDeadlockAsync(connection, quiet.AddMinutes(5 * i), "master", Graph("AppDb"), ct);
+            for (var i = 0; i < 4; i++)
+                await PlantDeadlockAsync(connection, quiet.AddMinutes(30 + (5 * i)), "SeparateDb", Graph("SeparateDb"), ct);
+
+            var collector = new PgFactCollector(postgres);
+
+            var scoped = Context(dayStart, windowEnd);
+            scoped.SeparatelyMonitoredDatabases = ["SeparateDb"];
+            var scopedFact = Assert.Single(await collector.CollectFactsAsync(scoped), f => f.Key == "DEADLOCKS");
+            Assert.Equal(15.0, scopedFact.Metadata["deadlock_count"], precision: 6);
+            Assert.Equal(12.0, scopedFact.Value, precision: 6);
+            Assert.Equal(12.0, scopedFact.Metadata["peak_1h_deadlock_count"], precision: 6);
+
+            var all = Assert.Single(await collector.CollectFactsAsync(Context(dayStart, windowEnd)), f => f.Key == "DEADLOCKS");
+            Assert.Equal(19.0, all.Metadata["deadlock_count"], precision: 6);
+            Assert.Equal(12.0, all.Value, precision: 6);
+            Assert.Equal(12.0, all.Metadata["peak_1h_deadlock_count"], precision: 6);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>The deadlock tests' analysis window, with no server offset so the planted times are the window's own.</summary>
+    private static AnalysisContext Context(DateTime start, DateTime end) => new()
+    {
+        ServerId = ServerId,
+        ServerName = ServerName,
+        TimeRangeStart = start,
+        TimeRangeEnd = end,
+        ServerUtcOffset = TimeSpan.Zero
+    };
+
+    private static string Graph(params string[] databases) =>
+        "<deadlock><victim-list/><process-list>"
+        + string.Concat(databases.Select((d, i) => $"<process id=\"p{i}\" currentdbname=\"{d}\"/>"))
+        + "</process-list></deadlock>";
 
     private static void AssertNothingCompared(JsonElement root)
     {
@@ -819,16 +896,24 @@ VALUES ($1, $2, $3, $4, $2, 12000, 60, $5, 'suspended', 'AppDb')", connection);
     }
 
     /// <summary>One deadlock of the application database, which is never a separately monitored one here.</summary>
-    private static async Task PlantDeadlockAsync(NpgsqlConnection connection, DateTime at, CancellationToken ct)
+    private static Task PlantDeadlockAsync(NpgsqlConnection connection, DateTime at, CancellationToken ct) =>
+        PlantDeadlockAsync(connection, at, "AppDb", "<deadlock/>", ct);
+
+    /// <summary>One deadlock stamped with <paramref name="database"/> (null leaves the column NULL) and carrying
+    /// <paramref name="graphXml"/>: the scoped path keeps a row by its name when the name proves it is outside the
+    /// separately monitored databases, and otherwise by its graph.</summary>
+    private static async Task PlantDeadlockAsync(NpgsqlConnection connection, DateTime at, string? database, string graphXml, CancellationToken ct)
     {
         using var command = new NpgsqlCommand(@"
 INSERT INTO deadlocks
     (deadlock_id, collection_time, server_id, server_name, deadlock_time, deadlock_graph_xml, database_name)
-VALUES ($1, $2, $3, $4, $2, '<deadlock/>', 'AppDb')", connection);
+VALUES ($1, $2, $3, $4, $2, $5, $6)", connection);
         command.Parameters.AddWithValue(CollectionIdGenerator.Next());
         command.Parameters.AddWithValue(at);
         command.Parameters.AddWithValue(ServerId);
         command.Parameters.AddWithValue(ServerName);
+        command.Parameters.AddWithValue(graphXml);
+        command.Parameters.AddWithValue((object?)database ?? DBNull.Value);
         await command.ExecuteNonQueryAsync(ct);
     }
 
