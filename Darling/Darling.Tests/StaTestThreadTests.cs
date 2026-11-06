@@ -243,6 +243,105 @@ public sealed class StaTestThreadTests
         }
     }
 
+    /// <summary>
+    /// #7600: the three stalls of 11-06 all had the shared thread parked in <c>wpfgfx_cor3!MilComposition_SyncFlush</c>, the UI thread waiting
+    /// for WPF's render thread, in bodies that were one TextBlock or one small window, each early in a fresh test process. The message says
+    /// whether WPF's render engine was already loaded when the body began (the body that loads it pays the engine's start-up) and reads the
+    /// render thread's own stack, so the next stall names what that thread waited on.
+    /// </summary>
+    [Fact]
+    public void TheHangGuardsMessage_SaysWhetherTheRenderEngineWasLoaded_AndNamesTheRenderThreadsWait()
+    {
+        var host = new StaHost { HangGuard = TimeSpan.FromMilliseconds(300) };
+        using var release = new ManualResetEventSlim();
+        try
+        {
+            var timedOut = Assert.Throws<TimeoutException>(() => host.Run(() =>
+            {
+                /* Showing a window starts WPF's render engine and its render thread when nothing in the process has yet. */
+                var window = new Window { Width = 50, Height = 50, ShowInTaskbar = false };
+                window.Show();
+                host.Step("waiting with a window shown");
+                release.Wait();
+                window.Close();
+            }));
+
+            Assert.True(
+                Regex.IsMatch(timedOut.Message, @"WPF's render engine \(wpfgfx\w*\) was (already|not yet) loaded when the body began"),
+                timedOut.Message);
+            /* The render thread is found by the wpfgfx frames on its stack, so a sentence that names one carries such a frame. Whether one is found
+               depends on where that thread was at the sample's instant and on how far its stack could be unwound, so a sample that found none says
+               so instead, and either sentence is the probe's answer. */
+            Assert.True(
+                Regex.IsMatch(timedOut.Message, @"WPF's render thread \(native id \d+, .*?\) was at: [^\r\n]*?wpfgfx")
+                || timedOut.Message.Contains("No other thread in the process had a wpfgfx frame on its stack at the sample", StringComparison.Ordinal),
+                timedOut.Message);
+        }
+        finally
+        {
+            release.Set();
+            host.Shutdown();
+        }
+    }
+
+    /// <summary>
+    /// #7600: in every leg's result file the first WPF body of the process pays WPF's render engine start-up (5 to 12 s on a green leg, 61 to
+    /// 126 s on the five stalled ones), and every later WPF test is fast. That cost landed inside whichever test's hang guard came first. The
+    /// host starts the engine once per process, on the shared thread before its first body, bounded by a start-up guard of its own and by no
+    /// test's hang guard: a start-up that overruns it is named as the start-up, not as the test, and bodies run once it has finished, each
+    /// beginning with the engine loaded.
+    /// </summary>
+    [Fact]
+    public void TheRenderEngineIsStartedBeforeTheFirstBody_AndAStartUpThatOverrunsTheGuard_IsNamedAsItself()
+    {
+        /* A start-up guard no window can be shown and closed within, so the start-up overruns it and the first call names the start-up, not this
+           body, whose own hang guard stays at its default. */
+        var host = new StaHost { StartUpGuard = TimeSpan.FromMilliseconds(1) };
+        try
+        {
+            var ran = false;
+            var timedOut = Assert.Throws<TimeoutException>(() => host.Run(() => ran = true));
+            Assert.False(ran);
+            Assert.StartsWith("WPF's render engine did not start within 1 ms", timedOut.Message);
+            Assert.Contains("render engine start-up", host.StuckTest);
+
+            /* Once the start-up has finished the host runs bodies again, and each begins with the engine already loaded. */
+            var loadedAtBodyStart = false;
+            Assert.True(
+                SpinWait.SpinUntil(() => RunsAfterRefusals(host, () => loadedAtBodyStart = RenderEngineIsLoaded()), TimeSpan.FromSeconds(60)),
+                "once the engine's start-up has finished, the next body must run instead of being refused");
+            Assert.True(loadedAtBodyStart, "the first body ran before WPF's render engine was loaded");
+        }
+        finally
+        {
+            host.Shutdown();
+        }
+    }
+
+    /// <summary>
+    /// #7600: the start-up runs on the host's thread before its first body, and a test that shortens the hang guard shortens only what a body may
+    /// take. A fresh host with a 1 ms hang guard, which no start-up can meet, must still fail inside its body, naming this test and not the start-up.
+    /// </summary>
+    [Fact]
+    public void TheRenderEngineStartUp_IsNotChargedToTheBodysHangGuard_SoAShortGuardFailsInTheBody()
+    {
+        var host = new StaHost { HangGuard = TimeSpan.FromMilliseconds(1) };
+        using var release = new ManualResetEventSlim();
+        try
+        {
+            var timedOut = Assert.Throws<TimeoutException>(() => host.Run(() => release.Wait()));
+
+            Assert.StartsWith("WPF test body did not return within 1 ms", timedOut.Message);
+            Assert.Contains(nameof(TheRenderEngineStartUp_IsNotChargedToTheBodysHangGuard_SoAShortGuardFailsInTheBody), timedOut.Message);
+            Assert.Contains(nameof(TheRenderEngineStartUp_IsNotChargedToTheBodysHangGuard_SoAShortGuardFailsInTheBody), host.StuckTest);
+        }
+        finally
+        {
+            release.Set();
+            host.Shutdown();
+        }
+    }
+
     [Fact]
     public void TheHangGuardsMessage_SaysABodyThatSpinsInOneCall_WasUsingTheCpu()
     {
@@ -341,6 +440,57 @@ public sealed class StaTestThreadTests
         Assert.Equal(9, StaTestThread.Run(() => 9));
     }
 
+    /// <summary>
+    /// #7968: a CI body spent 34 s building and showing a window, then began a 30 s wait for idle. The wait's limit passed after the hang guard (60 s then, 180 s now)
+    /// did, so the guard stranded the shared thread instead of the wait failing its own test. The wait is now cut to what the guard has left.
+    /// </summary>
+    [Fact]
+    public void AWaitForIdleThatBeginsLateInTheGuardsBudget_IsCutToWhatTheGuardHasLeft_AndTheThreadIsFreed()
+    {
+        var host = new StaHost { HangGuard = TimeSpan.FromSeconds(4) };
+        var stop = false;
+        try
+        {
+            var thrown = Assert.Throws<TimeoutException>(() => host.Run(() =>
+            {
+                host.Step("slow work before the wait");
+                TestWait.Elapse(TimeSpan.FromSeconds(1));
+                var dispatcher = Dispatcher.CurrentDispatcher;
+                Action again = null!;
+                /* A dispatcher that never reaches idle: each operation queues the next one ahead of it. */
+                again = () =>
+                {
+                    if (!stop)
+                    {
+                        dispatcher.BeginInvoke(DispatcherPriority.Render, again);
+                    }
+                };
+                again();
+                try
+                {
+                    /* The 30 s a Settle asks for, with 3 s of the 4 s guard left. */
+                    StaTestThread.WaitForIdle(dispatcher, StaTestThread.IdleLimit);
+                }
+                finally
+                {
+                    stop = true;
+                }
+            }));
+
+            Assert.Contains("did not reach application idle within", thrown.Message);
+            Assert.Contains("cut from 30000 ms", thrown.Message);
+            Assert.DoesNotContain("WPF test body did not return", thrown.Message);
+
+            /* The wait failed inside the body, so the guard never stranded the thread: the next body runs, it is not refused. */
+            Assert.Equal(9, host.Run(() => 9));
+        }
+        finally
+        {
+            stop = true;
+            host.Shutdown();
+        }
+    }
+
     [Fact]
     public void AfterABody_TheDispatcherIsDrained_AndAWindowItLeftOpenIsClosed()
     {
@@ -397,6 +547,13 @@ public sealed class StaTestThreadTests
 
         await caller.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         Assert.True(ran.IsSet);
+    }
+
+    /// <summary>Whether WPF's native render engine is in the process. It loads with the first MediaContext, so this is what a started engine looks like from outside the harness.</summary>
+    private static bool RenderEngineIsLoaded()
+    {
+        using var process = System.Diagnostics.Process.GetCurrentProcess();
+        return process.Modules.Cast<System.Diagnostics.ProcessModule>().Any(m => m.ModuleName.StartsWith("wpfgfx", StringComparison.OrdinalIgnoreCase));
     }
 
     private static (int Id, ApartmentState Apartment, bool Background) Describe() =>

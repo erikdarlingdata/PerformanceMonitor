@@ -411,6 +411,19 @@ public sealed class AlertNotebookEndpointTests
         Assert.Equal(near, matched!.AlertTime);
     }
 
+    /// <summary>#7918: the envelope says whether the matched row is dismissed, so the page can show the card as a
+    /// dismissed firing rather than as a live one.</summary>
+    [Fact]
+    public void AlertRowNode_CarriesTheRowsDismissedFlag()
+    {
+        var fired = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+        var dismissedRow = Row(fired, "High CPU") with { Dismissed = true };
+        var liveRow = Row(fired, "High CPU");
+
+        Assert.True((bool?)AlertNotebookEndpoint.AlertRowNode(dismissedRow, null)["dismissed"]);
+        Assert.False((bool?)AlertNotebookEndpoint.AlertRowNode(liveRow, null)["dismissed"]);
+    }
+
     /* ═══════════════════════════ pure: StatusFromHistory (#4366 review F1/F2/F4) ═══════════════════════════ */
 
     /// <summary>F1: a resolution 40 minutes after <c>at</c> (past the old +15m read's edge) is now visible and

@@ -82,6 +82,8 @@ const scenarios = {
   displayNameOnly: { cells: [header, panel("Lock modes", "pie")], opts: { alert: { ...alert, server_name: "Orders (display name)" }, catalog, server: "Orders (display name)" } },
   // No alert row and no server on the link: nothing to scope a chart to.
   noServer: { cells: [header, panel("Lock modes", "pie")], opts: { alert: null, catalog } },
+  // The link's firing was dismissed: the card says so, beside the alert's own facts.
+  dismissed: { cells: [header], opts: { alert: { ...alert, dismissed: true }, catalog, scopeServer: "SRV1" } },
   // A cell kind the page has no renderer for must say so.
   unknownKind: { cells: [header, { type: "sparkline", title: "Mystery cell" }], opts: { alert, catalog } },
   // Three panels that cannot start a load, then a read: if a bad panel held its limiter slot the read never draws.
