@@ -95,6 +95,25 @@ public sealed class QueryStoreRegressionsWindowSplitTests : IClassFixture<Shared
         Assert.False(hasRecent);
     }
 
+    /// <summary>#7875, Darling's rule (#6750): the store's data starts after the window start, and one interval last ran before it but was
+    /// collected after it (a new install's first collection). The baseline has a row but holds no hours, so it counts as empty, as Darling's
+    /// does: its 5 timeouts are not compared with the 5 recent ones (that comparison has no rate to make), the query is listed for timeouts
+    /// as against an empty baseline, and the baseline's per-hour rate stays null.</summary>
+    [Fact]
+    public async Task ABaselineThatHoldsNoHours_CountsAsEmpty_AndTheRecentTimeoutsAreListed()
+    {
+        var (asOf, start) = Window();
+        await SeedAsync(start.AddMinutes(10), start.AddMinutes(-5), 5, 1000, intervalId: 1, queryId: 4, executionType: "Aborted");
+        await SeedAsync(start.AddMinutes(20), start.AddMinutes(20), 5, 1000, intervalId: 2, queryId: 4, executionType: "Aborted");
+
+        var row = Assert.Single(await ReadAsync(asOf));
+
+        Assert.Equal(4, row.QueryId);
+        Assert.Equal("timeouts", row.RegressionReason);
+        Assert.Equal(5, row.Aborted.RecentCount);
+        Assert.Null(row.Aborted.BaselinePerHour);
+    }
+
     private static (DateTime AsOf, DateTime Start) Window()
     {
         var asOf = DateTime.SpecifyKind(new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
@@ -104,7 +123,7 @@ public sealed class QueryStoreRegressionsWindowSplitTests : IClassFixture<Shared
     private Task<System.Collections.Generic.List<QueryStoreRegressionRow>> ReadAsync(DateTime asOf) =>
         new LocalDataService(_duckDb).GetQueryStoreRegressionsAsync(_serverId, hoursBack: 2, maxRows: 50, asOfUtc: asOf);
 
-    private async Task SeedAsync(DateTime collectionTime, DateTime lastExecutionTime, long executions, long avgCpuUs, long intervalId, long queryId)
+    private async Task SeedAsync(DateTime collectionTime, DateTime lastExecutionTime, long executions, long avgCpuUs, long intervalId, long queryId, string executionType = "Regular")
     {
         using var readLock = _duckDb.AcquireReadLock();
         if (_seedConn is null)
@@ -119,7 +138,7 @@ INSERT INTO query_store_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id,
      execution_type_desc, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads,
      runtime_stats_interval_id, query_text, last_execution_time)
-VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $8, $9, $9, 100, $10, 'SELECT * FROM dbo.Widgets', $11)";
+VALUES ($1, $2, $3, $4, $5, $6, $7, $12, $8, $9, $9, 100, $10, 'SELECT * FROM dbo.Widgets', $11)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
         cmd.Parameters.Add(new DuckDBParameter { Value = collectionTime });
         cmd.Parameters.Add(new DuckDBParameter { Value = _serverId });
@@ -131,6 +150,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $8, $9, $9, 100, $10, 'SELECT * F
         cmd.Parameters.Add(new DuckDBParameter { Value = avgCpuUs });
         cmd.Parameters.Add(new DuckDBParameter { Value = intervalId });
         cmd.Parameters.Add(new DuckDBParameter { Value = lastExecutionTime });
+        cmd.Parameters.Add(new DuckDBParameter { Value = executionType });
         await cmd.ExecuteNonQueryAsync();
     }
 }
