@@ -592,7 +592,7 @@ public sealed class FleetRollup
                the coverage to qualify, and "read all N servers" would vouch for a number nothing read. */
             if (TotalsUnavailable)
             {
-                return "Deadlock coverage: unavailable — the fleet totals read failed";
+                return "Deadlock coverage: unavailable (the fleet totals read failed)";
             }
 
             return DeadlockCoverage.ServersRead >= total
