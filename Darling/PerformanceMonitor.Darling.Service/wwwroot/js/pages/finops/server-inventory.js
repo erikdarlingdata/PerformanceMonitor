@@ -63,7 +63,13 @@ const COLUMNS = [
 /* #7562: where the host info view does not exist the collector falls back to the end of @@VERSION, "Windows Server 2016 Datacenter 10.0 <X64> (Build 14393: ) (Hypervisor)".
    The name is what comes before the version number and the platform tag. */
 export function shortHostOs(text) {
-  return typeof text === "string" ? text.replace(/\s+\d+(\.\d+)+\s*<[^>]*>.*$/, "") : text;
+  if (typeof text !== "string") return text;
+  /* #7699: the same cut as HostOsText.Clean, which the read applies first: at the architecture mark, the kernel version number before it
+     dropped, and a "Windows NT 6.3" value keeps its number (it is all the name there is). */
+  const arch = text.indexOf(" <");
+  if (arch < 0) return text;
+  const head = text.slice(0, arch).trimEnd();
+  return head.startsWith("Windows NT") ? head : head.replace(/(?<=\S)\s+\d+\.\d+$/, "");
 }
 
 function displayRow(r, legend) {

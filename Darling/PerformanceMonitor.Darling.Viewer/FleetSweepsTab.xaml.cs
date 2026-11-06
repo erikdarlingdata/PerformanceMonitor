@@ -204,7 +204,7 @@ public partial class FleetSweepsTab : UserControl
             WatchLabel.Text = closed ? "Closed watch items" : "Open right now (open + carried)";
             NoWatchMessage.Text = closed
                 ? "No closed watch items."
-                : "Nothing is open right now — no watch item is open or carried.";
+                : "No watch items are open or carried.";
             NoWatchMessage.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         }
         catch (Exception ex)
