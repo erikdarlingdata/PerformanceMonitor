@@ -1527,7 +1527,10 @@ async function buildFeedback(body, generation) {
   const data = res.data || {};
   const requests = Array.isArray(data.requests) ? data.requests : [];
   const families = Array.isArray(data.families) ? data.families : [];
-  const rerender = () => buildFeedback(body, generation);
+  /* #7953: the re-read after a feedback write runs under a new render generation, as every other tab's repaint does. The generation this
+     card was built under is stale once the 60 s poll has drawn, and a re-read under it would return at buildFeedback's first line and
+     draw nothing, leaving "No feedback yet." beside "Feedback recorded." until the next poll. */
+  const rerender = () => (shownTab === "feedback" && shownBody ? startBuilder("feedback", shownBody, ++renderGeneration) : undefined);
   const canRecord = session.can_edit === true && data.can_record === true;
   const nodes = [captionStrip(FEEDBACK_NOTE)];
   if (data.can_record !== true) nodes.push(captionStrip(feedbackListOnly(session.managed_store === true, session.admin_writes_off === true)));
