@@ -291,14 +291,10 @@ public sealed class FleetSweepCadenceKnobRungTests
     /* ─────────────────────── the seam actually reaches the schedule ─────────────────────── */
 
     /// <summary>
-    /// The worker's launch gate reads the sweep's OWN switch and the CLAMPED cadence — and deliberately
-    /// not the alert master switch, which is passed to the engine as a FACT for the document's mute
-    /// header and the would-have-paged derivation, never consulted as a gate. That asymmetry is the
-    /// muted-mode contract in one line: master-off silences delivery, it does not blind the report
-    /// surface.
+    /// The worker's launch gate reads the sweep's OWN switch and the CLAMPED cadence.
     /// </summary>
     [Fact]
-    public void TheWorkerGatesOnTheSweepsOwnSwitch_AndClampsTheCadence_AndTheMasterSwitchIsDataNotAGate()
+    public void TheWorkerGatesOnTheSweepsOwnSwitch_AndClampsTheCadence()
     {
         var worker = RepoFile.ReadRepoFile(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
