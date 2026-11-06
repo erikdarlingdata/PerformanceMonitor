@@ -340,9 +340,14 @@ FROM reports").Replace("{SCOPE}", scopeFilter);
     /// <summary>
     /// Collects deadlock facts from v_deadlocks, counting each stored deadlock once.
     /// Produces a single DEADLOCKS fact with count and rate.
-    /// Value is deadlocks per OBSERVED hour (see <see cref="CollectBlockingFactsAsync"/> — same divisor,
-    /// same reason, #3538 A2). <c>period_hours</c> nominal, <c>observed_hours</c> the divisor; an
-    /// unobserved window emits no fact.
+    /// Value is the busiest ONE-HOUR bucket's deadlocks (#7893), the server-hour grain the scorer's (5, 20) pair
+    /// was measured on, so the same storm grades the same on a 4-hour pass and a 24-hour read; the whole-window
+    /// average dilutes a one-hour burst by however much quiet surrounds it. Buckets take the window-start origin
+    /// (DuckDB's 3-arg <c>time_bucket</c>, as the blocking peak does), and a one-hour bucket's rate per hour is its
+    /// count: one hour is also the floor the blocking peak's covered hours never drop under, so no coverage
+    /// scaling applies at this grain. <c>deadlocks_per_hour</c> stays published as the whole-window context, per
+    /// OBSERVED hour (#3538 A2). <c>period_hours</c> nominal, <c>observed_hours</c> its divisor; an unobserved
+    /// window emits no fact.
     /// </summary>
     private async Task CollectDeadlockFactsAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -353,17 +358,25 @@ FROM reports").Replace("{SCOPE}", scopeFilter);
         await connection.OpenAsync(context.CancellationToken);
 
         long deadlockCount;
+        long peakHourCount;
         if (context.SeparatelyMonitoredDatabases is { Count: > 0 } scopeList)
         {
-            deadlockCount = await SeparatelyMonitoredScope.CountDeadlocksAsync(
+            (deadlockCount, peakHourCount) = await SeparatelyMonitoredScope.CountDeadlocksAndPeakHourAsync(
                 connection, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
                 inclusiveEnd: true, scopeList, context.CancellationToken);
         }
         else
         {
             using var command = connection.CreateCommand();
+            /* #7893: the busiest one-hour bucket beside the window's count, each stored identity counted once in
+               both (a copy keeps its first copy's deadlock_time, so copies share a bucket). */
             command.CommandText = @"
-SELECT " + StoredEventCopies.DeadlockDistinctCount + @" AS deadlock_count
+SELECT " + StoredEventCopies.DeadlockDistinctCount + @" AS deadlock_count,
+    (SELECT COALESCE(MAX(n), 0)
+     FROM (SELECT " + StoredEventCopies.DeadlockDistinctCount + @" AS n
+           FROM v_deadlocks AS dl
+           WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3
+           GROUP BY time_bucket(INTERVAL '1 hour', deadlock_time, $2)) AS hours) AS peak_1h_deadlock_count
 FROM v_deadlocks AS dl
 WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3";
 
@@ -374,6 +387,7 @@ WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3";
             using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
             deadlockCount = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
+            peakHourCount = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
         }
 
         if (deadlockCount <= 0) return;
@@ -381,17 +395,20 @@ WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3";
         var periodHours = context.PeriodDurationMs / 3_600_000.0;
         var observedHours = context.ObservedDurationMs / 3_600_000.0;
         var deadlocksPerHour = deadlockCount / observedHours;
+        var peakDeadlocksPerHour = (double)peakHourCount;
 
         facts.Add(new Fact
         {
             Source = "blocking",
             Key = "DEADLOCKS",
-            Value = deadlocksPerHour,
+            Value = peakDeadlocksPerHour,
             ServerId = context.ServerId,
             Metadata = new Dictionary<string, double>
             {
                 ["deadlock_count"] = deadlockCount,
                 ["deadlocks_per_hour"] = deadlocksPerHour,
+                ["deadlocks_per_hour_peak_1h"] = peakDeadlocksPerHour,
+                ["peak_1h_deadlock_count"] = peakHourCount,
                 ["period_hours"] = periodHours,
                 ["observed_hours"] = observedHours
             }
