@@ -416,8 +416,14 @@ public sealed class AnalysisNotificationService : IDisposable
                     if (_cooldowns.ContainsKey(seedKey))
                         continue;
                     var lastPersisted = await _sender.GetLastDeliveredPageUtcAsync(serverId, FindingMessageFormatter.MetricName(m));
+                    /* #8012: the page bucket is keyed on the story's hash, and the hash is the path, so a story that
+                       LOSES a leaf (a fact falling off the chain, or an upgrade that moved an edge's bar) has a hash
+                       with no bucket and no page row and would page as new, though it is less evidence than the
+                       path already heard. A wider path of the same server and root with a delivered page row seeds
+                       this bucket the same way a same-hash row does. A longer path or a different root finds
+                       nothing here and still pages (#3712). */
                     if (!lastPersisted.HasValue && _getStoredFindings is not null && m.Severity >= CriticalSeverityCutoff)
-                        _ = await _getStoredFindings(m.ServerId);
+                        lastPersisted = await LastWiderPathPageUtcAsync(serverId, m);
                     if (lastPersisted.HasValue)
                     {
                         /* #4732: a persisted notification time ahead of the clock (it stepped back across the restart)
@@ -813,6 +819,49 @@ public sealed class AnalysisNotificationService : IDisposable
     /// a StoryPathHash (hex), so the two namespaces can never collide.
     /// </summary>
     private const string DigestBucketPrefix = "digest|";
+
+    /// <summary>
+    /// The newest delivered page time of any WIDER path of the same server and root as <paramref name="m"/> (#8012),
+    /// or null. Wider means its fact keys are a strict superset of <paramref name="m"/>'s: the same story with
+    /// more corroboration, already heard. The stored paths come from <c>getStoredFindings</c>, whose rows carry
+    /// only the rendered path, so both sides are split on the join string the engine uses. A read or a page-row
+    /// lookup that throws returns null (the story pages, as it did before this seam): a held story that pages
+    /// once more costs one extra page, a swallowed page costs the operator the finding.
+    /// </summary>
+    private async Task<DateTime?> LastWiderPathPageUtcAsync(string serverId, AnalysisFinding m)
+    {
+        if (string.IsNullOrEmpty(m.RootFactKey))
+            return null;
+        try
+        {
+            var keys = m.StoryPath.Split(StoryPathSeparator, StringSplitOptions.RemoveEmptyEntries);
+            var stored = await _getStoredFindings!(m.ServerId).ConfigureAwait(false);
+            DateTime? newest = null;
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var candidate in stored)
+            {
+                if (candidate.RootFactKey != m.RootFactKey
+                    || candidate.StoryPathHash == m.StoryPathHash
+                    || !seen.Add(candidate.StoryPathHash))
+                    continue;
+                var candidateKeys = candidate.StoryPath.Split(StoryPathSeparator, StringSplitOptions.RemoveEmptyEntries);
+                if (candidateKeys.Length <= keys.Length || !keys.All(k => candidateKeys.Contains(k)))
+                    continue;
+                var page = await _sender.GetLastDeliveredPageUtcAsync(serverId, FindingMessageFormatter.MetricName(candidate));
+                if (page.HasValue && (newest is null || page.Value > newest.Value))
+                    newest = page;
+            }
+            return newest;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"AnalysisNotificationService: wider-path lookup failed for {FindingMessageFormatter.MetricName(m)}: {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>The join string of a rendered story path (InferenceEngine.BuildStory).</summary>
+    private const string StoryPathSeparator = " → ";
 
     /// <summary>
     /// The batch/cooldown grouping token for a finding: its incident id, or its StoryPathHash when the
