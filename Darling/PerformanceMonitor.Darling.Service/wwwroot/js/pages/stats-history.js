@@ -20,7 +20,7 @@
  * An open panel is kept at module scope under its row's key, so the page's 60 s rebuild draws it again without a second read. The
  * entry remembers the window it was read for, and a rebuild under a different window reads it again. Every string is drawn as text.
  */
-import { el, readTool, fmtMs, fmtInt, tickDecimals, wholeWindowFromHours, widenedWindowNote, activeRangeStamp, chartNoteText, trendHeadNote } from "../util.js";
+import { el, readTool, fmtMs, fmtInt, fmtRate, tickDecimals, wholeWindowFromHours, widenedWindowNote, activeRangeStamp, chartNoteText, trendHeadNote } from "../util.js";
 import { estimatedPlotPx } from "../trend-points.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../charts.js";
 import { dockPanelUnderRow, undockPanel } from "../plan-row.js";
@@ -94,6 +94,9 @@ function strip(cls, text) {
   return el("div", { class: "strip " + cls, text });
 }
 
+/* Whether a formatter call is for an axis tick (the chart passes { step }) rather than a tooltip, which passes the value alone. */
+const hasStep = (o) => !!o && typeof o === "object" && isFinite(o.step) && o.step > 0;
+
 function chartFor(kind, key, data, hours, axis, metric) {
   if (kind === "procedures") {
     const m = PROCEDURE_METRICS.find((x) => x.value === metric) || PROCEDURE_METRICS[0];
@@ -103,13 +106,15 @@ function chartFor(kind, key, data, hours, axis, metric) {
         xKey: "time",
         series: [{ key: m.value, label: m.label, color: SERIES_COLORS[0] }],
         /* #7586: a duration reads in the unit of the axis's largest tick, as the grid prints it, with no caption (every tick carries its unit).
-           #7587: the other measures take their decimals from the tick step, so a small range keeps its own gridlines. */
+           #7587: the other measures take their decimals from the tick step, so a small range keeps its own gridlines.
+           #7933: a tooltip gets no step, so the rate measures print it with fmtRate, which keeps two significant digits below 1: one 50 ms run
+           in a five-minute bucket reads 0.17 ms/s and a once-an-hour procedure 0.00028 a second, never 0. Only a true 0 reads 0. */
         formatValue:
           m.unit === "ms"
             ? fmtMs
             : m.value === "executions_per_second"
-              ? (v, o) => Number(v).toFixed(Math.max(3, tickDecimals(o && o.step)))
-              : (v, o) => fmtInt(v, o) + " " + m.unit,
+              ? (v, o) => (hasStep(o) ? Number(v).toFixed(Math.max(3, tickDecimals(o.step))) : fmtRate(v))
+              : (v, o) => (hasStep(o) ? fmtInt(v, o) : fmtRate(v)) + " " + m.unit,
         unit: m.unit === "ms" ? null : m.unit,
         sizeUnit: m.unit === "ms" ? "ms" : null,
         ...(axis || {}),

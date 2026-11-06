@@ -1492,7 +1492,7 @@ public partial class ServerTab : UserControl
             ? _lastHeatmapResult.BucketLabels[row]
             : "?";
 
-        var tipText = $"{time}  |  {bucketLabel}  |  {count:N0} queries";
+        var tipText = $"{time}  |  {bucketLabel}  |  {QueryHeatmapCellText.CountText(count)}";
         if (cell != null && !string.IsNullOrEmpty(cell.TopQueryText))
         {
             // Single line, collapse whitespace, truncate

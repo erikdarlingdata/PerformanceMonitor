@@ -318,6 +318,7 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
             var refused = await Send("PUT", $"/api/investigation-notes/{firstId}/approve", "application/json");
             Assert.Equal(403, refused.Status);
             Assert.Equal(DarlingWebEndpoints.InvestigationWriteSignInMessage, (string)refused.Body!["error"]!);
+            Assert.Equal("sign_in_required", (string)refused.Body["reason"]!);
             Assert.Equal("2", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_notes WHERE state = 'pending'", ct));
         }, arm: AdminArmShape.Refused, managedStore: true, seat: new PerformanceMonitor.Darling.Service.Hosting.DarlingWebSeat("viewer-person", false));
     }
@@ -333,6 +334,7 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
             Assert.Equal(403, refused.Status);
             Assert.Equal(DarlingWebEndpoints.NoteDecisionRefusedMessage(true, adminWritesOff: true), (string)refused.Body!["error"]!);
             Assert.Contains("web.allowAdminWrites", (string)refused.Body["error"]!, StringComparison.Ordinal);
+            Assert.Equal("admin_writes_off", (string)refused.Body["reason"]!);
             Assert.Equal("2", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_notes WHERE state = 'pending'", ct));
         }, managedStore: true, seat: new PerformanceMonitor.Darling.Service.Hosting.DarlingWebSeat("alice", true));
     }
@@ -366,6 +368,7 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
                 var answer = await Send("PUT", route, "application/json");
                 Assert.Equal(403, answer.Status);
                 Assert.Equal(DarlingWebEndpoints.NoteDecisionRefusedMessage(false), (string)answer.Body!["error"]!);
+                Assert.Equal("store_refused", (string)answer.Body["reason"]!);
             }
 
             Assert.Equal("pending|pending", await ScalarAsync(owner,

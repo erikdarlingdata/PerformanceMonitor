@@ -304,15 +304,15 @@ public sealed class TimeRangeSpec : IEquatable<TimeRangeSpec>
         return true;
     }
 
+    /// <summary>The whole minutes in a span, floored (#7940): the one minute count a length is named, identified and measured by, so "7.5 minutes" is
+    /// 7 minutes in its name, its id and its length text alike, and the id reads back as the range the name says.</summary>
+    private static long WholeMinutes(TimeSpan span)
+        => span < TimeSpan.Zero ? 0 : (long)Math.Floor(span.TotalMinutes);
+
     /// <summary>The length of a span as the picker words it: "3d" for three days and some hours, "7h 1m" under a day, "45m". Floors; a day or more drops the hours.</summary>
     public static string FormatLength(TimeSpan span)
     {
-        if (span < TimeSpan.Zero)
-        {
-            span = TimeSpan.Zero;
-        }
-
-        var totalMinutes = (long)Math.Floor(span.TotalMinutes);
+        var totalMinutes = WholeMinutes(span);
         if (totalMinutes >= 1440)
         {
             return (totalMinutes / 1440).ToString(CultureInfo.InvariantCulture) + "d";
@@ -376,7 +376,7 @@ public sealed class TimeRangeSpec : IEquatable<TimeRangeSpec>
             return ((long)span.TotalHours).ToString(CultureInfo.InvariantCulture) + "h";
         }
 
-        return ((long)Math.Round(span.TotalMinutes)).ToString(CultureInfo.InvariantCulture) + "m";
+        return WholeMinutes(span).ToString(CultureInfo.InvariantCulture) + "m";
     }
 
     private static string PastLength(TimeSpan span)
@@ -405,7 +405,7 @@ public sealed class TimeRangeSpec : IEquatable<TimeRangeSpec>
         }
         else
         {
-            count = (long)Math.Round(span.TotalMinutes);
+            count = WholeMinutes(span);
             unit = "minute";
         }
 
