@@ -24,7 +24,7 @@ namespace PerformanceMonitorLite.Mcp;
 public sealed class McpPvsTools
 {
     [McpServerTool(Name = "get_pvs_stats"), Description(
-        "ADR PVS state per database: size, % of database, aborted-txn count, cleaner times (a start with no end = mid-run). LATEST IS A TIME: the newest snapshot, not a window; as_of is when it was taken. trend_hours_back (0 = off) looks back from now, not from as_of, over the top-5 databases by current size. Cleaner times are de-skewed to UTC, like as_of. pct_of_database is null only if PVS size is unmeasured (pvs_measured false) or database size is missing or 0 (pct_of_database_reason says why); else measured 0 MB = 0.00. No rows: not_collected if this engine can't collect PVS, else empty. <<GUIDE>> Gets the Accelerated Database Recovery (ADR) persistent version store state per database: PVS size and percent-of-database, online-index version store size, aborted transaction count, version-cleaner run state (a start time without an end time means the cleaner is mid-run), and the oldest active/aborted transaction ids. Use when a database's size is growing without table growth, when ADR cleanup looks stuck, or alongside the PVS pressure alert. A large PVS is pinned by long-running or aborted transactions; the id gap shows how far cleanup is behind. Optionally returns the size trend for the top-5 databases over a window. Every timestamp here is UTC, the four cleaner times included - the DMV reports those in the monitored server's local clock and this read de-skews them - so a cleaner time compares directly against as_of. pvs_measured says whether the DMV reported a size for that database at all; a measured 0 MB is published as pvs_size_mb 0 and pct_of_database 0.00 (the healthy, fully-cleaned state), and pct_of_database is null only when the numerator was not measured or the denominator is absent or zero, with pct_of_database_reason saying which. secondary_replica_note is on the reply that has database rows (null when there is nothing to say) and on the empty reply (present only when there is something to say), so a database filter that picks only secondary copies still gets it. It has a sentence only when this server holds a secondary copy, in an availability group, of a database that has no row in this snapshot and is among the databases chosen. It then says how many: the DMV reports no row for a secondary copy here, so check the primary replica for its persistent version store.")]
+        "ADR PVS state per database: size, % of database, aborted-txn count, cleaner times (a start with no end = mid-run). LATEST IS A TIME: the newest snapshot, not a window; as_of is when it was taken. trend_hours_back (0 = off) looks back from now, not from as_of, over the top-5 databases by current size. Cleaner times are de-skewed to UTC, like as_of. pct_of_database is null only if PVS size is unmeasured (pvs_measured false) or database size is missing or 0 (pct_of_database_reason says why); else measured 0 MB = 0.00. No rows: not_collected if this engine can't collect PVS, else empty. <<GUIDE>> Gets the Accelerated Database Recovery (ADR) persistent version store state per database: PVS size and percent-of-database, online-index version store size, aborted transaction count, version-cleaner run state (a start time without an end time means the cleaner is mid-run), and the oldest active/aborted transaction ids. Use when a database's size is growing without table growth, when ADR cleanup looks stuck, or alongside the PVS pressure alert. A large PVS is pinned by long-running or aborted transactions; the id gap shows how far cleanup is behind. Optionally returns the size trend for the top-5 databases over a window. Every timestamp here is UTC, the four cleaner times included - the DMV reports those in the monitored server's local clock and this read de-skews them - so a cleaner time compares directly against as_of. pvs_measured says whether the DMV reported a size for that database at all; a measured 0 MB is published as pvs_size_mb 0 and pct_of_database 0.00 (the healthy, fully-cleaned state), and pct_of_database is null only when the numerator was not measured or the denominator is absent or zero, with pct_of_database_reason saying which. secondary_replica_note is on the reply that has database rows (null when there is nothing to say) and on the empty reply (present only when there is something to say), so a database filter that picks only secondary copies still gets it. It has a sentence only when this server holds a secondary copy, in an availability group, of a database that has no row in this snapshot and is among the databases chosen. It is not added when this server's SQL Server version has no persistent version store (before 2019), where the primary has none either, and never on a not_collected reply. It then says how many: the DMV reports no row for a secondary copy here, so check the primary replica for its persistent version store.")]
     public static async Task<string> GetPvsStats(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -56,12 +56,16 @@ public sealed class McpPvsTools
             /* #5244: database_name appended LAST (H1). A blank is "no filter"; any other value is kept exactly (no trim). The filter is on the
                newest snapshot's ROWS (as_of is the server's), and the trend's top five are the top five of the chosen database. */
             var names = string.IsNullOrWhiteSpace(database_name) ? null : new[] { database_name };
-            var (rows, secondaryNote) = await dataService.GetPvsStatsLatestWithNoteAsync(resolved.ServerId, names);
+            /* #7822: the secondary note only for a server whose version has a persistent version store (before SQL Server 2019 no database has a
+               row and the primary has none either), and never on a not_collected reply. The read hands back the unfiltered newest snapshot it
+               had to read for a filter that matched nothing, so the probe below does not read it again. */
+            var (rows, secondaryNote, serverRows) = await dataService.ReadPvsStatsLatestAsync(
+                resolved.ServerId, names, McpEngineCapability.PvsVersionHasStore(serverManager, resolved.ServerId));
             if (rows.Count == 0)
             {
                 /* A filter that matches no database at the newest snapshot is an answer about the chosen database, not about the
                    server's PVS collection: the probe is the same newest-snapshot read, unfiltered. */
-                if (names != null && await dataService.GetPvsStatsLatestAsync(resolved.ServerId) is { Count: > 0 } serverRows)
+                if (serverRows is { Count: > 0 })
                 {
                     return McpHelpers.WithSecondaryReplicaNote(McpHelpers.StatusForDatabase("empty",
                         $"No PVS rows for {McpDatabaseSelection.Scope(names)} on {resolved.DisplayName} in the snapshot taken at "
@@ -72,11 +76,13 @@ public sealed class McpPvsTools
                 }
 
                 /* #5244: every answer shape says which database it was limited to (null for every database). */
+                var notCollected = McpHelpers.WithDatabase(
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "pvs_stats", awsRdsKind: AwsRdsKind.None),
+                    McpDatabaseSelection.Describe(names));
+                if (notCollected != null) return notCollected;
+
                 return McpHelpers.WithSecondaryReplicaNote(
-                    McpHelpers.WithDatabase(
-                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "pvs_stats", awsRdsKind: AwsRdsKind.None),
-                           McpDatabaseSelection.Describe(names))
-                    ?? McpHelpers.StatusForDatabase("empty",
+                    McpHelpers.StatusForDatabase("empty",
                         McpEngineCapability.PvsNoRowsMessage(serverManager, resolved.ServerId),
                         McpDatabaseSelection.Describe(names)),
                     secondaryNote)!;

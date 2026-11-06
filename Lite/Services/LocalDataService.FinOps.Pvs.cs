@@ -164,19 +164,37 @@ ORDER BY lower(p.database_name), p.database_name, p.collection_time";
     public async Task<(List<PvsStatsRow> Rows, string? SecondaryNote)> GetPvsStatsLatestWithNoteAsync(
         int serverId, IReadOnlyList<string>? databaseNames = null)
     {
+        var read = await ReadPvsStatsLatestAsync(serverId, databaseNames);
+        return (read.Rows, read.SecondaryNote);
+    }
+
+    /// <summary>
+    /// #7822: <see cref="GetPvsStatsLatestWithNoteAsync"/> with the unfiltered newest snapshot it had to read handed back, so the MCP tool's
+    /// "the snapshot holds other databases" probe does not read it a second time. <paramref name="secondaryNoteApplies"/> is false for a
+    /// server whose SQL Server version has no persistent version store (before 2019), where no database has a row and the primary has none
+    /// either: no note is built and the replica scope is not read.
+    /// </summary>
+    /// <returns><c>UnfilteredRows</c> is the server's newest snapshot with every database, and is read only when a filter matched nothing in
+    /// it (null otherwise).</returns>
+    public async Task<PvsLatestRead> ReadPvsStatsLatestAsync(
+        int serverId, IReadOnlyList<string>? databaseNames = null, bool secondaryNoteApplies = true)
+    {
         var rows = await GetPvsStatsLatestAsync(serverId, databaseNames);
 
         /* The anchor is the snapshot the rows came from. A filter that matched none of the newest snapshot has no row to read it from, so
-           the unfiltered newest snapshot supplies it (the same read the tool's "other databases" probe makes). */
+           the unfiltered newest snapshot supplies it (and the tool's "other databases" probe reuses it). */
         DateTime? snapshot = rows.Count > 0 ? rows[0].CollectionTime : null;
+        List<PvsStatsRow>? unfiltered = null;
         if (snapshot is null && databaseNames is { Count: > 0 })
         {
-            var all = await GetPvsStatsLatestAsync(serverId);
-            if (all.Count > 0) snapshot = all[0].CollectionTime;
+            unfiltered = await GetPvsStatsLatestAsync(serverId);
+            if (unfiltered.Count > 0) snapshot = unfiltered[0].CollectionTime;
         }
 
+        if (!secondaryNoteApplies) return new PvsLatestRead(rows, null, unfiltered);
+
         var secondary = await SecondaryReplicaScope.ReadAsync(_duckDb, serverId, PvsSecondaryNote.ScopeTimeUtc(snapshot), System.Threading.CancellationToken.None);
-        return (rows, PvsSecondaryNote.WithoutRow(secondary, rows.Select(r => r.DatabaseName), databaseNames));
+        return new PvsLatestRead(rows, PvsSecondaryNote.WithoutRow(secondary, rows.Select(r => r.DatabaseName), databaseNames), unfiltered);
     }
 
     /// <summary>
@@ -360,3 +378,6 @@ public class PvsStatsRow
 /// <see cref="PvsSizeMb"/> is null for an UNMEASURED collection (#3653) — the DMV reported no size that
 /// pass — never coerced to 0.</summary>
 public sealed record PvsTrendPoint(string DatabaseName, DateTime CollectionTime, double? PvsSizeMb, double? PctOfDatabase);
+
+/// <summary>#7822: the latest PVS rows, the secondary replica note, and the server's unfiltered newest snapshot when a filter matched nothing in it (else null).</summary>
+public sealed record PvsLatestRead(List<PvsStatsRow> Rows, string? SecondaryNote, List<PvsStatsRow>? UnfilteredRows);

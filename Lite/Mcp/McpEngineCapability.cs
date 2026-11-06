@@ -197,7 +197,7 @@ internal static class McpEngineCapability
     /// (SQL Server before 2019) or has just not completed a cycle. The version is read the way <see cref="AwsRdsKindOf"/> finds the
     /// server; a server that is not found or was never checked has no version (0, assumed newest) and gets the second sentence.
     /// </summary>
-    public static string PvsNoRowsMessage(ServerManager serverManager, int storageServerId)
+    public static CollectorTargetInfo PvsTarget(ServerManager serverManager, int storageServerId)
     {
         var target = new CollectorTargetInfo();
         foreach (var server in serverManager.GetEnabledServers())
@@ -215,8 +215,16 @@ internal static class McpEngineCapability
             }
         }
 
-        return PvsStatsCollector.NoRowsMessage(target);
+        return target;
     }
+
+    /// <summary>The empty sentence of get_pvs_stats for this server: no persistent version store before SQL Server 2019, or no collection cycle yet.</summary>
+    public static string PvsNoRowsMessage(ServerManager serverManager, int storageServerId) =>
+        PvsStatsCollector.NoRowsMessage(PvsTarget(serverManager, storageServerId));
+
+    /// <summary>#7822: whether this server's SQL Server version has a persistent version store (2019+, or an unknown version, which is assumed newest).</summary>
+    public static bool PvsVersionHasStore(ServerManager serverManager, int storageServerId) =>
+        PvsStatsCollector.Instance.AppliesTo(PvsTarget(serverManager, storageServerId));
 
     /// <summary>
     /// #6178: the <c>not_collected</c> envelope for a read that covers every registered server and found nothing, when
