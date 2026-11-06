@@ -1479,11 +1479,12 @@ export const HEAVIEST_COLUMNS = [
 
 /* ─────────────────────────── PostgreSQL stat descriptors ─────────────────────────── */
 
-/* Severity reaches these tiles as the read's own token: `ok`, `warning`, `critical`, or one with its reason after it
-   (`critical_far_past_threshold`, `warning_inactive_and_growing`). The token stays in the tool reply, so an agent reading
-   the tool and the CSV read the same word; the tile prints it as a plain word from this one map (#7655), as the Category
-   column of Analysis Findings prints its plain name (#7486). The three severity levels are the words the other severity
-   tiles and columns use, and a reason follows its level in words. */
+/* Severity reaches these tiles, and the Severity column of the grids under them (pg-vacuum.js, pg-replication.js), as the
+   read's own token: `ok`, `warning`, `critical`, or one with its reason after it (`critical_far_past_threshold`,
+   `warning_inactive_and_growing`). The token stays in the tool reply, so an agent reading the tool reads the read's word;
+   the tiles and grids print it as a plain word from this one map (#7655), as the Category column of Analysis Findings
+   prints its plain name (#7486), so a tile and the grid under it name one severity one way. The three severity levels are
+   the words the other severity tiles and columns use, and a reason follows its level in words. */
 const PG_SEVERITY_WORDS = { ok: "Healthy", warning: "Warning", critical: "Critical" };
 export function pgSeverityWord(token) {
   if (token == null || token === "") return null;
