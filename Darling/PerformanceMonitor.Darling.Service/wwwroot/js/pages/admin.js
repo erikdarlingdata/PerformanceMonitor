@@ -2134,17 +2134,28 @@ function onHashChange() {
   if (!showsServers(routeHash())) closeEdit();
 }
 
-export function renderAdmin(main, tabId) {
+/* #7951: true while the focused element is a box a person types in or picks from (an input, a textarea or a select) inside `root`. */
+function typingInside(root) {
+  const focused = document.activeElement;
+  return !!focused && !!root && root.contains(focused) && ["INPUT", "TEXTAREA", "SELECT"].includes(String(focused.tagName).toUpperCase());
+}
+
+/** `opts.poll` is true when the 60 s poll (or the Refresh button) re-renders the page; a hashchange and the first paint carry no opts. */
+export function renderAdmin(main, tabId, opts) {
   if (!hashWatched) {
     hashWatched = true;
     window.addEventListener("hashchange", onHashChange);
   }
   const tab = findTab(tabId);
   activeTab = tab.id;
-  const generation = ++renderGeneration;
   /* A repaint of the tab already on screen keeps the body it drew, so the page does not collapse and lose its scroll
      position while the read is in flight; the loading strip is only for the first draw of a tab. */
   const sameTab = !!shownBody && shownTab === tab.id;
+  /* #7951: every tab but Servers mounts new nodes on each draw, so a box being typed in would be a new node and the caret, an open
+     list and an IME composition would be lost. While a form box inside the tab body has the focus, the poll's tick leaves the tab as it
+     is; the next tick draws from the then-current state. A hashchange, a save's repaint and the first paint are not polls and still draw. */
+  if (opts && opts.poll === true && sameTab && shownBody.parentNode === main && typingInside(shownBody)) return;
+  const generation = ++renderGeneration;
   if (!sameTab) {
     /* Arriving at a tab other than the one on screen discards an open edit form (its password is cleared first) and the
        Servers tab's page state. The one thing kept is the answer of a save that landed while the Servers tab was off screen:

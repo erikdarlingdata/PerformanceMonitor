@@ -45,15 +45,26 @@ function statusLine(out) {
   return el("div", { class: out.isError ? "strip error" : "strip notice", role: out.isError ? "alert" : "status", "data-field": "database-protection-status", text: out.message });
 }
 
+/* #7951: the boxes' text while a person types ({ [group]: text }), kept here so a redraw of the Settings tab (the 60 s poll, a save's
+   repaint) draws the typed text and not the saved values. Null while nothing has been typed since the last read; a successful save
+   clears it, so the repaint shows what was saved. */
+let protectionDraft = null;
+
 /** The editor, for a signed-in admin. `data` is the whole get_alert_settings read; each box starts at the saved value (the built-in value
     when the read does not carry the group). `repaint` redraws the Settings tab after a save so the saved values show. */
 export function databaseProtectionEditor(data, repaint) {
   const d = data && typeof data === "object" ? data : {};
   const boxes = {};
+  const read = () => {
+    const texts = {};
+    for (const age of DATABASE_PROTECTION_AGES) texts[age.group] = boxes[age.group].value;
+    return texts;
+  };
   const rows = DATABASE_PROTECTION_AGES.map((age) => {
     const saved = d[age.group] && typeof d[age.group] === "object" ? d[age.group][age.field] : undefined;
     const box = el("input", { type: "text", class: "tag-input", "data-field": "database-protection-" + age.group, inputmode: "numeric", size: "6" });
-    box.value = String(Number.isInteger(saved) ? saved : age.fallback);
+    box.value = protectionDraft && typeof protectionDraft[age.group] === "string" ? protectionDraft[age.group] : String(Number.isInteger(saved) ? saved : age.fallback);
+    box.addEventListener("input", () => { protectionDraft = read(); });
     boxes[age.group] = box;
     return el("label", { class: "tag-field" }, [
       el("span", { class: "mute-label", text: age.label + " (" + age.unit + ", " + age.min + " to " + age.max + "):" }), box,
@@ -66,9 +77,7 @@ export function databaseProtectionEditor(data, repaint) {
     class: "btn primary", type: "button", text: "Save", "data-action": "save-database-protection",
     onClick: async () => {
       if (busy) return;
-      const texts = {};
-      for (const age of DATABASE_PROTECTION_AGES) texts[age.group] = boxes[age.group].value;
-      const checked = databaseProtectionPayload(texts);
+      const checked = databaseProtectionPayload(read());
       if (checked.error) {
         result.replaceChildren(statusLine({ message: checked.error, isError: true }));
         return;
@@ -81,6 +90,7 @@ export function databaseProtectionEditor(data, repaint) {
         out = { message: "Could not save the settings: " + (e && e.message ? e.message : String(e)), isError: true };
       }
       busy = false;
+      if (out.isError === false) protectionDraft = null;
       if (out.isError === false && repaint) return repaint();
       result.replaceChildren(statusLine(out));
     },

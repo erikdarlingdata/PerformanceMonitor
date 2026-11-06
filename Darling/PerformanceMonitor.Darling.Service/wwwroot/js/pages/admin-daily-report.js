@@ -50,25 +50,40 @@ export function previewNodes(res) {
   return nodes;
 }
 
+/* #7951: the Preview, kept across a redraw of the Settings tab (the 60 s poll, a save's repaint): whether its read is in flight, the
+   nodes its last answer drew, and the box on the page now. A redraw shows the result (or the building strip) in its new box, and a read
+   that answers after a redraw lands in the box on the page, not in the one taken off it. */
+const preview = { busy: false, nodes: null, box: null };
+const buildingStrip = () => el("div", { class: "strip empty", text: "Building the preview..." });
+
 /** The Preview button and the box it draws into. A read (get_daily_health_report), so it works with or without the right to save.
     `getBusy`/`setBusy` let the editor's Save and Preview share one in-flight flag. */
 function previewControls(getBusy, setBusy) {
   const previewBox = el("div", { "data-field": "daily-report-preview-box" });
-  const preview = el("button", {
+  preview.box = previewBox;
+  if (preview.busy) previewBox.replaceChildren(buildingStrip());
+  else if (preview.nodes) previewBox.replaceChildren(...preview.nodes);
+  const button = el("button", {
     class: "btn", type: "button", text: "Preview", "data-action": "preview-daily-report",
     onClick: async () => {
-      if (getBusy()) return;
+      if (getBusy() || preview.busy) return;
       setBusy(true);
-      previewBox.replaceChildren(el("div", { class: "strip empty", text: "Building the preview..." }));
+      preview.busy = true;
+      preview.nodes = null;
+      preview.box.replaceChildren(buildingStrip());
+      let nodes;
       try {
-        previewBox.replaceChildren(...previewNodes(await readTool("get_daily_health_report", {})));
+        nodes = previewNodes(await readTool("get_daily_health_report", {}));
       } catch (e) {
-        previewBox.replaceChildren(statusLine({ message: "Could not build the preview: " + (e && e.message ? e.message : String(e)), isError: true }));
+        nodes = [statusLine({ message: "Could not build the preview: " + (e && e.message ? e.message : String(e)), isError: true })];
       }
+      preview.busy = false;
+      preview.nodes = nodes;
+      preview.box.replaceChildren(...nodes);
       setBusy(false);
     },
   });
-  return { preview, previewBox };
+  return { preview: button, previewBox };
 }
 
 /** #7700: the preview alone, for a can-edit seat whose service refuses writes (web.allowAdminWrites off). Preview only reads, so it
@@ -82,26 +97,41 @@ export function dailyReportPreviewOnly() {
   ]);
 }
 
+/* #7951: what the editor's boxes hold while a person types ({ enabled, send_at, time_zone, title }), kept here so a redraw of the
+   Settings tab draws the typed values and not the saved ones. Null while nothing has been typed since the last read; a successful save
+   clears it, so the repaint shows what was saved. */
+let reportDraft = null;
+
 /** The editor, for a signed-in admin. `group` is the read's daily_report group (or undefined on a service that predates it);
     `repaint` redraws the Settings tab after a save so the saved values show. */
 export function dailyReportEditor(group, repaint) {
   const g = group && typeof group === "object" ? group : {};
+  const saved = {
+    enabled: g.enabled === true,
+    send_at: typeof g.send_at === "string" ? g.send_at : "07:00",
+    /* A report that is off and has no zone yet starts at the browser's zone, since the person setting it up is most likely in the
+       zone they want the report in. A saved zone, or a saved blank on a report that is already on, is left as it is. */
+    time_zone: typeof g.time_zone === "string" ? g.time_zone : (g.enabled === true ? "" : browserZoneOrBlank()),
+    title: typeof g.title === "string" ? g.title : "",
+  };
+  const values = reportDraft || saved;
   const enabled = el("input", { type: "checkbox", "data-field": "daily-report-enabled" });
-  enabled.checked = g.enabled === true;
+  enabled.checked = values.enabled === true;
   const sendAt = el("input", { type: "time", class: "tag-input", "data-field": "daily-report-send-at", step: "60" });
-  sendAt.value = typeof g.send_at === "string" ? g.send_at : "07:00";
+  sendAt.value = values.send_at;
   const zone = el("input", {
     type: "text", class: "tag-input", "data-field": "daily-report-time-zone", maxlength: "64",
     placeholder: "Blank uses the service host's time zone",
   });
-  /* A report that is off and has no zone yet starts at the browser's zone, since the person setting it up is most likely in the
-     zone they want the report in. A saved zone, or a saved blank on a report that is already on, is left as it is. */
-  zone.value = typeof g.time_zone === "string" ? g.time_zone : (g.enabled === true ? "" : browserZoneOrBlank());
+  zone.value = values.time_zone;
   const title = el("input", {
     type: "text", class: "tag-input", "data-field": "daily-report-title", maxlength: "100",
     placeholder: "Daily Health Report",
   });
-  title.value = typeof g.title === "string" ? g.title : "";
+  title.value = values.title;
+  const read = () => ({ enabled: enabled.checked, send_at: sendAt.value, time_zone: zone.value, title: title.value });
+  const sync = () => { reportDraft = read(); };
+  for (const c of [enabled, sendAt, zone, title]) c.addEventListener("input", sync);
 
   const result = el("div", { "data-field": "daily-report-result" });
   let busy = false;
@@ -109,17 +139,17 @@ export function dailyReportEditor(group, repaint) {
   const save = el("button", {
     class: "btn primary", type: "button", text: "Save", "data-action": "save-daily-report",
     onClick: async () => {
-      if (busy) return;
+      if (busy || preview.busy) return;
       busy = true;
       let out;
       try {
-        const res = await apiWrite("PUT", "/api/alert-settings/daily-report",
-          dailyReportPayload({ enabled: enabled.checked, send_at: sendAt.value, time_zone: zone.value, title: title.value }));
+        const res = await apiWrite("PUT", "/api/alert-settings/daily-report", dailyReportPayload(read()));
         out = dailyReportOutcome(res);
       } catch (e) {
         out = { message: "Could not save the settings: " + (e && e.message ? e.message : String(e)), isError: true };
       }
       busy = false;
+      if (out.isError === false) reportDraft = null;
       if (out.isError === false && repaint) return repaint();
       result.replaceChildren(statusLine(out));
     },
