@@ -974,11 +974,11 @@ export const SWEEP_STATS = [
    then the same facts as tiles. The collector rows beside it are not relabelled. */
 export const SERVER_CONNECTION_PANEL = {
   title: "Server Connection",
-  subtitle: "the service's own connect",
+  subtitle: "the service's own connection",
   viz: "stat",
   emptyText: "Connected: the service's last connect to this server succeeded.",
   stats: [
-    { key: "server_connection.message", label: "Connection", format: "text", sentence: true, localizeText: true },
+    { key: "server_connection.message", label: "Connection", format: "text", sentence: true, localizeText: true, localizeMinutes: true, sinceKey: "server_connection.since" },
     { key: "server_connection.status", label: "Collection", format: "status", small: true },
     { key: "server_connection.since", label: "Unreachable since", format: "time", small: true },
     { key: "server_connection.next_connect_attempt", label: "Next retry", format: "time", small: true },

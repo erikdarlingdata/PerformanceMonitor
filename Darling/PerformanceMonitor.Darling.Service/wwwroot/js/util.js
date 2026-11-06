@@ -443,20 +443,29 @@ export function chartNote(data, kind) {
  * in local time. The separator is a "T" or a space and the fraction is 0-7 digits. A "T" stamp with no zone is UTC, as
  * parseUtc reads it everywhere; a space-separated one is rewritten ONLY with a "Z" or " UTC" after it, because the same
  * shape without one is a monitored server's own wall clock ("2026-09-27 21:32:43 (server clock)") and shifting it would
- * state the wrong hour. A stamp with no seconds ("2026-11-05 16:52 UTC") is rewritten the same way, and only with a zone after it.
- * Text with no such stamp, and a non-string, come back as given.
+ * state the wrong hour. Text with no such stamp, and a non-string, come back as given.
+ *
+ * #7726: a stamp with no seconds ("2026-11-05 16:52 UTC", the unreachable-since sentence) is left alone unless the caller passes
+ * `opts.minutes`, so every other sentence keeps the server's own text. Only the Server Connection sentence and the red strip under
+ * the server name opt in. Such a stamp is shifted only with a zone after it. `opts.since` is the reply's own instant for the same
+ * moment (it has the seconds): a stamp in that same UTC minute prints that instant, seconds included, so the sentence, the strip
+ * and the tile beside it show the same time. Any other no-seconds stamp prints without seconds, never with an invented ":00".
  */
-export function localizeIsoText(text) {
+export function localizeIsoText(text, opts) {
   if (typeof text !== "string") return text;
+  const minutes = !!(opts && opts.minutes);
+  const exact = minutes && opts.since ? parseUtc(opts.since) : null;
   return text.replace(/(\d{4}-\d\d-\d\d)([T ])(\d\d:\d\d(?::\d\d)?)(?:\.(\d{1,7}))?(Z(?![A-Za-z])| UTC(?![A-Za-z])|[+-]\d\d:?\d\d)?/g, (m, date, sep, hm, frac, zone) => {
     if (sep === " " && !zone) return m;
-    /* #7726: "2026-11-05 16:52 UTC" (the unreachable-since sentence) has no seconds. A stamp with no seconds is shifted only with a zone after it. */
-    if (hm.length === 5 && !zone) return m;
-    const time = hm.length === 5 ? hm + ":00" : hm;
+    const noSeconds = hm.length === 5;
+    if (noSeconds && (!minutes || !zone)) return m;
+    const time = noSeconds ? hm + ":00" : hm;
     const iso = date + "T" + time + (frac ? "." + frac.slice(0, 3).padEnd(3, "0") : "") + (zone === " UTC" ? "Z" : zone || "");
     const d = parseUtc(iso);
-    /* A stamp written without seconds is shown without them, so it does not claim ":00" beside a tile that holds the real seconds. */
-    return d ? (hm.length === 5 ? d.toLocaleString(undefined, { year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" }) : d.toLocaleString()) : m;
+    if (!d) return m;
+    if (!noSeconds) return d.toLocaleString();
+    if (exact && Math.floor(exact.getTime() / 60000) === Math.floor(d.getTime() / 60000)) return exact.toLocaleString();
+    return d.toLocaleString(undefined, { year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" });
   });
 }
 

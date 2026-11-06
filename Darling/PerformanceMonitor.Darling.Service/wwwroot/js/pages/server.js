@@ -668,10 +668,12 @@ function fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason
      in the heading. */
   if (card.display_name) title.textContent = card.display_name;
 
+  /* #7726: the unreachable-since reason has no seconds; the card's connect_down_since has them, so the strip prints the tile's own time. */
+  const sinceOpts = { minutes: true, since: card.connect_down_since || null };
   dot.className = "dot " + bandClass(card.band);
   mount(
     badgeSlot,
-    el("span", { class: "badge " + bandClass(card.band), text: card.status || card.band, title: reason ? localizeIsoText(reason) : null })
+    el("span", { class: "badge " + bandClass(card.band), text: card.status || card.band, title: reason ? localizeIsoText(reason, sinceOpts) : null })
   );
 
   /* The engine badge is the answer to "why does this server have six tabs and that one twelve". Only a card
@@ -683,7 +685,7 @@ function fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason
   }
 
   mount(whySlot, [
-    reason ? el("div", { class: "server-reason " + bandClass(card.band), text: localizeIsoText(reason) }) : null,
+    reason ? el("div", { class: "server-reason " + bandClass(card.band), text: localizeIsoText(reason, sinceOpts) }) : null,
     /* current.server is the server this render drew (set at the top of renderServer), so a redraw of the same server keeps its open tiles. */
     clampTileDetails(metricBands(card), undefined, openTilesFor(current.server)),
   ]);

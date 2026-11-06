@@ -778,12 +778,14 @@ public static class FactAdvice
             {
                 case ConfigChangeAttribution.ChangeFamily.DatabaseConfig:
                 {
-                    var db = $"`{change.DatabaseName}`";
+                    /* #7726 item 7: the setting and the database in words, the same words the "no matching line" list uses (UndatedSettingText),
+                       not the store key ("`Sales` recovery_model FULL → SIMPLE"). */
+                    var phrase = UndatedSettingText(change);
                     described.Add(change.OldText is null && change.NewText is not null
-                        ? $"{db} {change.Setting} set to {change.NewText}"
+                        ? $"{phrase} set to {change.NewText}"
                         : change.OldText is not null && change.NewText is null
-                            ? $"{db} {change.Setting} cleared (was {change.OldText})"
-                            : $"{db} {change.Setting} {change.OldText ?? "(none)"} → {change.NewText ?? "(none)"}");
+                            ? $"{phrase} cleared (was {change.OldText})"
+                            : $"{phrase} changed from {change.OldText ?? "(none)"} to {change.NewText ?? "(none)"}");
                     break;
                 }
                 case ConfigChangeAttribution.ChangeFamily.TraceFlags:
@@ -949,20 +951,21 @@ public static class FactAdvice
                         : $"{family}: {subject} — {Plural(moved.Count, "metric")} moved beyond band after it";
 
         // ── remediation: the history read(s) of the families present, the compare, and each family's grader ──
+        /* #7726 item 7: the reads are named as what a person looks at, not by tool name: the tools ride in the card's next-tools list. */
         var historyTools = new List<string>(3);
-        if (hasServer) historyTools.Add("`get_server_config_changes`");
-        if (hasDatabase) historyTools.Add("`get_database_config_changes`");
-        if (hasTraceFlags) historyTools.Add("`get_trace_flag_changes`");
+        if (hasServer) historyTools.Add("the server configuration history");
+        if (hasDatabase) historyTools.Add("the database configuration history");
+        if (hasTraceFlags) historyTools.Add("the trace flag history");
         var graders = new List<string>(3);
-        if (hasServer) graders.Add("`audit_config` grades the new value against guidance");
-        if (hasDatabase) graders.Add("the standing `DB_CONFIG` advisory grades the database options this engine has an opinion on (auto-shrink, auto-close, RCSI, auto-stats, page verify)");
-        if (hasTraceFlags) graders.Add("`get_trace_flags` lists what is on now");
+        if (hasServer) graders.Add("the configuration audit grades the new value against guidance");
+        if (hasDatabase) graders.Add("the standing database configuration advisory grades the database options this engine has an opinion on (auto-shrink, auto-close, RCSI, auto-stats, page verify)");
+        if (hasTraceFlags) graders.Add("the trace flag list shows what is on now");
         var rem =
             "This is an attribution, not an accusation: one window against one window cannot show that a change CAUSED anything " +
             "(DB time on an unchanged server routinely varies severalfold day to day), and a metric that moved may have moved for " +
             "reasons of its own. Read it as a pointer. If something moved the wrong way and stays moved on later passes, the " +
             $"{(mixed ? "changes are" : "setting is")} the first suspect: {string.Join(" / ", historyTools)} {(historyTools.Count == 1 ? "lists" : "list")} the change with its old and new values, " +
-            "`compare_analysis` reruns the compare over any pair of windows (a wider one, or the same hour yesterday), and " +
+            "a compare over another pair of windows (a wider one, or the same hour yesterday) reruns the before and after, and " +
             $"{string.Join("; ", graders)}. If nothing moved, there is nothing to do; the card recurs " +
             "on each pass while the change sits inside the analysis window and stops on its own.";
 

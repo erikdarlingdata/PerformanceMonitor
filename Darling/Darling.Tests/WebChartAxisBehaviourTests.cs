@@ -315,7 +315,14 @@ public sealed class WebChartAxisBehaviourTests
     {
         var f = Run().GetProperty("formatters");
         var expected = Strings(f.GetProperty("localExpected"));
+        // Opted in, no instant from the reply: the minute prints as the minute, never with an invented ":00".
         Assert.Equal($"Server unreachable since {expected[0]}: refused. Next retry at {expected[1]}.", f.GetProperty("localSentence").GetString());
+        // Opted in with the reply's own since in the same minute: the sentence prints the tile's time, seconds included.
+        Assert.Equal($"Server unreachable since {expected[2]}: refused.", f.GetProperty("localWithSince").GetString());
+        // A since in another minute is not the sentence's instant: the sentence keeps its own minute.
+        Assert.Equal($"Server unreachable since {expected[0]}: refused.", f.GetProperty("localOtherMinute").GetString());
+        // Every caller that did not opt in keeps the server's own UTC text for the no-seconds stamp.
+        Assert.Equal($"{f.GetProperty("unreachable").GetString()!.Replace("2026-11-05 17:51:35 UTC", expected[1])}", f.GetProperty("localDefault").GetString());
         Assert.Equal("saw 2026-11-05 16:52 here and 2026-11-05T16:52 there", f.GetProperty("noZoneKept").GetString());
         Assert.Equal(
             new[] { "t:Set ", "code:max server memory", "t: (see ", "code:sp_configure 'max server memory (MB)', 1000", "t:) and a stray ` tick <b>x</b>." },

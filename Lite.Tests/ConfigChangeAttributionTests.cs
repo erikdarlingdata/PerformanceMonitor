@@ -350,8 +350,8 @@ public sealed class ConfigChangeAttributionTests
         Assert.Contains("PAGEIOLATCH_SH +50% (worse); CPU_SQL_PERCENT", advice.Investigation, StringComparison.Ordinal);
         Assert.Contains("times its usual variation below normal (better)", advice.Investigation, StringComparison.Ordinal);
         Assert.Contains("not an accusation", advice.Remediation, StringComparison.Ordinal);
-        Assert.Contains("get_server_config_changes", advice.Remediation, StringComparison.Ordinal);
-        Assert.Contains("compare_analysis", advice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("the server configuration history lists the change", advice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("a compare over another pair of windows", advice.Remediation, StringComparison.Ordinal);
 
         /* Frozen at analysis time, recovered at read time — the same block. */
         var story = Assert.Single(new InferenceEngine(new RelationshipGraph()).BuildStories([fact]));
@@ -1282,15 +1282,15 @@ public sealed class ConfigChangeAttributionTests
 
         var advice = FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { fact }.ToFactLookup())!;
 
-        Assert.StartsWith($"Database configuration changed: `{Db}` recovery_model FULL → SIMPLE — 1 metric moved beyond band after it", advice.Headline, StringComparison.Ordinal);
-        Assert.Contains($"`{Db}` recovery_model FULL → SIMPLE — first observed by the configuration snapshot at 2026-09-18 14:00 UTC.", advice.Investigation, StringComparison.Ordinal);
+        Assert.StartsWith($"Database configuration changed: the recovery model of `{Db}` changed from FULL to SIMPLE — 1 metric moved beyond band after it", advice.Headline, StringComparison.Ordinal);
+        Assert.Contains($"the recovery model of `{Db}` changed from FULL to SIMPLE — first observed by the configuration snapshot at 2026-09-18 14:00 UTC.", advice.Investigation, StringComparison.Ordinal);
         Assert.Contains("landed somewhere in the 23 h since the previous snapshot", advice.Investigation, StringComparison.Ordinal);
         Assert.Contains("WRITELOG", advice.Investigation, StringComparison.Ordinal);
         Assert.Contains("(better)", advice.Investigation, StringComparison.Ordinal);
-        Assert.Contains("`get_database_config_changes` lists the change", advice.Remediation, StringComparison.Ordinal);
-        Assert.Contains("`DB_CONFIG` advisory", advice.Remediation, StringComparison.Ordinal);
-        Assert.DoesNotContain("get_server_config_changes", advice.Remediation, StringComparison.Ordinal);
-        Assert.DoesNotContain("audit_config", advice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("the database configuration history lists the change", advice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("standing database configuration advisory", advice.Remediation, StringComparison.Ordinal);
+        Assert.DoesNotContain("the server configuration history", advice.Remediation, StringComparison.Ordinal);
+        Assert.DoesNotContain("the configuration audit", advice.Remediation, StringComparison.Ordinal);
         Assert.DoesNotContain("Server configuration", advice.Headline, StringComparison.Ordinal);
 
         /* NULL on one side reads as set / cleared, not as "(none) →". */
@@ -1299,7 +1299,7 @@ public sealed class ConfigChangeAttributionTests
             T0.AddHours(-4), T0.AddHours(1)));
         var setAdvice = FactAdvice.Compose(ConfigChangeAttribution.FactKey,
             new[] { ConfigChangeAttribution.BuildFact(1, setEvt, 0, ConfigChangeAttribution.WindowsFor(T0, T0.AddHours(4)), null, null, null) }.ToFactLookup())!;
-        Assert.Contains($"`{Db}` collation_name cleared (was X), `{Db}` delayed_durability set to FORCED", setAdvice.Investigation, StringComparison.Ordinal);
+        Assert.Contains($"the collation of `{Db}` cleared (was X), the delayed durability of `{Db}` set to FORCED", setAdvice.Investigation, StringComparison.Ordinal);
         Assert.Contains("2 database settings changed together", setAdvice.Headline, StringComparison.Ordinal);
 
         /* Frozen and read back, like every other family. */
@@ -1327,9 +1327,9 @@ public sealed class ConfigChangeAttributionTests
         Assert.StartsWith("Trace flags changed: 2 trace flags changed together — nothing moved beyond band", traceAdvice.Headline, StringComparison.Ordinal);
         Assert.Contains("trace flag 1222 disabled (was GLOBAL), trace flag 4199 enabled (GLOBAL) — first observed by the configuration snapshot at", traceAdvice.Investigation, StringComparison.Ordinal);
         Assert.Contains("No metric in the compare moved beyond its dispersion band", traceAdvice.Investigation, StringComparison.Ordinal);
-        Assert.Contains("`get_trace_flag_changes` lists the change", traceAdvice.Remediation, StringComparison.Ordinal);
-        Assert.Contains("`get_trace_flags` lists what is on now", traceAdvice.Remediation, StringComparison.Ordinal);
-        Assert.DoesNotContain("audit_config", traceAdvice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("the trace flag history lists the change", traceAdvice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("the trace flag list shows what is on now", traceAdvice.Remediation, StringComparison.Ordinal);
+        Assert.DoesNotContain("the configuration audit", traceAdvice.Remediation, StringComparison.Ordinal);
 
         var single = ConfigChangeAttribution.BuildFact(1,
             Assert.Single(TraceFlagEvents([new(T0.AddHours(-2), 3226, true, true, false), new(T0, 3226, true, true, false), new(T0, 4199, true, true, false)], T0.AddHours(-4), T0.AddHours(1))),
@@ -1343,8 +1343,8 @@ public sealed class ConfigChangeAttributionTests
         var foldedAdvice = FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { foldedFact }.ToFactLookup())!;
         Assert.StartsWith("Configuration changed: 3 configuration changes observed together — nothing moved beyond band", foldedAdvice.Headline, StringComparison.Ordinal);
         Assert.Contains($"`{Maxdop}` 0 → 8, trace flag 1222 disabled (was GLOBAL), trace flag 4199 enabled (GLOBAL) — first observed", foldedAdvice.Investigation, StringComparison.Ordinal);
-        Assert.Contains("the changes are the first suspect: `get_server_config_changes` / `get_trace_flag_changes` list the change", foldedAdvice.Remediation, StringComparison.Ordinal);
-        Assert.Contains("`audit_config` grades the new value against guidance; `get_trace_flags` lists what is on now", foldedAdvice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("the changes are the first suspect: the server configuration history / the trace flag history list the change", foldedAdvice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("the configuration audit grades the new value against guidance; the trace flag list shows what is on now", foldedAdvice.Remediation, StringComparison.Ordinal);
         Assert.DoesNotContain("earlier configuration change", foldedAdvice.Investigation, StringComparison.Ordinal);
     }
 

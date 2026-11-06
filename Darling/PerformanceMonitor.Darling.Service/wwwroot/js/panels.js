@@ -1486,7 +1486,7 @@ function vizStat(data, desc) {
   }
   const rest = shown.filter((s) => !s.sentence);
   return el("div", { class: "stat-block" }, [
-    ...sentences.map((s) => el("p", { class: "stat-sentence", text: s.localizeText ? localizeIsoText(String(getPath(data, s.key))) : String(getPath(data, s.key)) })),
+    ...sentences.map((s) => el("p", { class: "stat-sentence", text: s.localizeText ? localizeIsoText(String(getPath(data, s.key)), s.localizeMinutes ? { minutes: true, since: s.sinceKey ? getPath(data, s.sinceKey) : null } : undefined) : String(getPath(data, s.key)) })),
     rest.length ? el("div", { class: "stats natural" }, rest.map(tile)) : null,
     ...cutNotes,
   ]);
