@@ -1,7 +1,7 @@
 /* Runs the web viewer's shipped pages/overview-strips.js (the Overview's five stacked strips, #6291) against a stand-in DOM and
    prints what one scenario drew as one line of JSON. WebOverviewStripsBehaviourTests starts it as
        node web-overview-strips-harness.mjs <path to wwwroot/js> <scenario>
-   Scenarios: crosshair, zoom, empty, baselines, firstload, localtime. */
+   Scenarios: crosshair, zoom, empty, baselines, firstload, localtime, failedread, mixedempty. */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -444,5 +444,55 @@ if (scenario === "crosshair") {
   out.waits = { lines: find(g("waits"), (n) => n.tag === "polyline").length, text: none_("waits") };
   out.blocking = { bars: find(g("blocking"), (n) => n.tag === "rect").length, text: none_("blocking") };
   out.memoryLines = find(g("memory"), (n) => n.tag === "polyline").length;
+} else if (scenario === "failedread") {
+  /* #7921: the blocking strip has two reads. When one fails and the other answers points, the strip draws the points and says in its header
+     which read failed, so the missing series is not read as "no blocking". With both answering there is no such note. */
+  const blocking = (over) => {
+    const drawn = strips.drawStrips(strips.buildStrips({ ...reads, ...over }), domain, 1000, null);
+    const g = find(drawn.node, (n) => n.attrs["data-strip"] === "blocking")[0];
+    return {
+      bars: find(g, (n) => n.tag === "rect").length,
+      none: find(g, (n) => n.attrs.class === "strip-none").map((n) => n.textContent),
+      header: find(g, (n) => n.attrs.class === "strip-title")[0].textContent,
+    };
+  };
+  /* The blocking strip with a null blocking baseline lane, so applyBaselines gives it the "not enough history" note. The right-anchored note and a
+     header that names a failed read sit on one baseline, so the note is not drawn beside an error. Counts the note's text nodes (the tspans share its class). */
+  const blockingWithBaseline = (over) => {
+    const window = { windowStart: T0, windowEnd: T0 + 60 * MIN };
+    const list = strips.applyBaselines(strips.buildStrips({ ...reads, ...over }), { kind: "data", data: { baselines: { blocking: null } } }, window, {});
+    const note = list.find((s) => s.key === "blocking").baselineNote;
+    const g = find(strips.drawStrips(list, domain, 1000, null).node, (n) => n.attrs["data-strip"] === "blocking")[0];
+    return {
+      note,
+      noteTexts: find(g, (n) => n.tag === "text" && n.attrs.class === "strip-baseline-note").length,
+      errorTspans: find(g, (n) => n.attrs.class === "strip-baseline-note strip-error-note").length,
+      header: find(g, (n) => n.attrs.class === "strip-title")[0].textContent,
+    };
+  };
+  out.blockingFailed = blocking({ blocking: { kind: "error", message: "The blocking trend read timed out." }, deadlocks: data({ trend: [{ time: iso(12), count: 1 }] }) });
+  out.deadlocksFailed = blocking({ deadlocks: { kind: "error", message: "The deadlock trend read timed out." } });
+  out.bothAnswered = blocking({ deadlocks: data({ trend: [{ time: iso(12), count: 1 }] }) });
+  out.failedWithBaselineNote = blockingWithBaseline({ blocking: { kind: "error", message: "The blocking trend read timed out." }, deadlocks: data({ trend: [{ time: iso(12), count: 1 }] }) });
+  out.answeredWithBaselineNote = blockingWithBaseline({ deadlocks: data({ trend: [{ time: iso(12), count: 1 }] }) });
+} else if (scenario === "mixedempty") {
+  /* #7921: one of the six reads fails and the other five answer empty. The page names the failed read instead of only "No overview samples in this
+     window", which is what a server with nothing collected says. With every read empty it says that sentence alone, and with every read failed
+     the first error alone. */
+  const fill = async (failing, failAll) => {
+    globalThis.fetch = async (url) => {
+      const tool = String(url).split("/api/read/")[1].split("?")[0];
+      if (tool === "get_overview_baselines") return { status: 200, ok: true, text: async () => JSON.stringify({ status: "empty", message: "No baselines." }) };
+      if (failAll || tool === failing) return { status: 500, ok: false, text: async () => JSON.stringify({ error: "The " + tool + " read timed out." }) };
+      return { status: 200, ok: true, text: async () => JSON.stringify({ status: "empty", message: "Nothing in this window." }) };
+    };
+    const body = document.createElement("div");
+    strips.fillOverviewStrips(body, "A", { hours: 1, label: "1h", signal: null });
+    await new Promise((r) => setTimeout(r, 50));
+    return find(body, (n) => typeof n.className === "string" && n.className.startsWith("strip")).map((n) => ({ kind: n.className, text: n.textContent }));
+  };
+  out.oneFailed = await fill("get_blocking_trend", false);
+  out.allEmpty = await fill(null, false);
+  out.allFailed = await fill(null, true);
 }
 console.log(JSON.stringify(out));
