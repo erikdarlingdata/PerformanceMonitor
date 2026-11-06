@@ -87,7 +87,12 @@ public sealed class CollectorRunEmptyReasonTests
         Assert.DoesNotContain("recorded nothing for it", message, StringComparison.Ordinal);
         Assert.DoesNotContain("matches this request", message, StringComparison.Ordinal);
         Assert.Contains("No procedure ran in the last 24h in a database this server still has", message, StringComparison.Ordinal);
-        Assert.Contains("3 database(s) the server no longer lists", message, StringComparison.Ordinal);
+        Assert.Contains("3 database(s) the server no longer lists were left out", message, StringComparison.Ordinal);
+        /* #7726 item 4: the verb follows the count. */
+        var one = new CollectorRunFacts(2, 30, Last, 0).ProcedureStatsEmpty(24, 1).Message;
+        Assert.Contains("1 database(s) the server no longer lists was left out", one, StringComparison.Ordinal);
+        var two = new CollectorRunFacts(2, 30, Last, 0).ProcedureStatsEmpty(24, 2).Message;
+        Assert.Contains("2 database(s) the server no longer lists were left out", two, StringComparison.Ordinal);
         Assert.Equal(new CollectorRunFacts(2, 0, Last, 0).ProcedureStatsEmpty(24).Message, new CollectorRunFacts(2, 0, Last, 0).ProcedureStatsEmpty(24, 3).Message);
         Assert.Equal(new CollectorRunFacts(1, 1, Last, 0).ProcedureStatsEmpty(24).Message, new CollectorRunFacts(1, 1, Last, 0).ProcedureStatsEmpty(24, 3).Message);
     }

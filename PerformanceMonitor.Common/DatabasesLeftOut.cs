@@ -49,6 +49,9 @@ public static class DatabasesLeftOut
     public static IReadOnlyList<string>? Named(IReadOnlyList<string>? all)
         => all is null || all.Count == 0 ? null : all.Count <= MaxNamed ? all : all.Take(MaxNamed).ToList();
 
+    /// <summary>#7726 item 4: "was" for one database, "were" for any other count, for the sentences that say how many databases were left out.</summary>
+    public static string WasOrWere(int count) => count == 1 ? "was" : "were";
+
     /// <summary>The one note beside the names, or null when none were left out.</summary>
     public static string? Note(IReadOnlyList<string>? all)
     {

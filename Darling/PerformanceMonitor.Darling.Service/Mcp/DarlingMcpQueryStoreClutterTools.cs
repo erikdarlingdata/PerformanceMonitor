@@ -200,7 +200,7 @@ public sealed class DarlingMcpQueryStoreClutterTools
                     : leftOut is not null
                         ? McpHelpers.StatusForDatabase(
                             "empty",
-                            $"No Query Store rows in the {hours_back}-hour window for a database this server still has. {leftOut.Count} database(s) the server no longer lists were left out of this read (see databases_left_out).",
+                            $"No Query Store rows in the {hours_back}-hour window for a database this server still has. {leftOut.Count} database(s) the server no longer lists {DatabasesLeftOut.WasOrWere(leftOut.Count)} left out of this read (see databases_left_out).",
                             databaseFilter.Describe(), noRows.AsHints())
                         : McpHelpers.StatusForDatabase(
                             "unavailable",

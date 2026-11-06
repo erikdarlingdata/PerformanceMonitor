@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, ticksCarryUnit, noteStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, applyDataSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, captionStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceSpan, applySourceSubtitle, setQueryWaitFilter, waitIsLinked, fmtPlain } from "../../util.js";
+import { el, ticksCarryUnit, noteStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, leftOutStrip, applyDataSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, captionStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceSpan, applySourceSubtitle, setQueryWaitFilter, waitIsLinked, fmtPlain } from "../../util.js";
 import { renderPanel, panelEmptyStrip, emptyHeadline, setPanelSignal, getPanelSignal, VIZ } from "../../panels.js";
 import { estimatedPlotPx } from "../../trend-points.js";
 import { SNAPSHOT_LIST_CAP, snapshotTruncatedNote } from "../active-snapshots.js";
@@ -169,7 +169,7 @@ export function fanout(read, params, specs, intro = null) {
         if (!saidEmpty && emptyHeadline(spec, res) === res.message) saidBy = spec.title;
         saidEmpty = saidEmpty || emptyHeadline(spec, res) === res.message;
         /* #7552: the pointer names the panel that says why. */
-        return mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), repeats ? emptyStrip("Empty for the same reason as " + (saidBy || "the panel that says why") + ".") : panelEmptyStrip(spec, res)]);
+        return mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), leftOutStrip(res.data, spec), repeats ? emptyStrip("Empty for the same reason as " + (saidBy || "the panel that says why") + ".") : panelEmptyStrip(spec, res)]);
       }
       try {
         /* #2802: a fanout spec carries no `params` of its own (the window lives on the shared fetch above), so
@@ -194,7 +194,7 @@ export function fanout(read, params, specs, intro = null) {
         applySourceSubtitle(shells[i].panel, res.data, spec);
         /* #7660: a note the page composes from the answer and draws under the panel's picture (the Skipped Cycles sentence). */
         const below = typeof spec.noteBelowFrom === "function" ? spec.noteBelowFrom(res.data) : null;
-        mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), typeof note === "string" && note.trim() ? noteStrip(spec, note, res.data) : null, rendered, typeof below === "string" && below.trim() ? noteStrip(null, below) : null]);
+        mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), typeof note === "string" && note.trim() ? noteStrip(spec, note, res.data) : null, leftOutStrip(res.data, spec), rendered, typeof below === "string" && below.trim() ? noteStrip(null, below) : null]);
       } catch (e) {
         mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
       }

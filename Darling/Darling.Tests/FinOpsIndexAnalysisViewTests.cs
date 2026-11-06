@@ -241,7 +241,10 @@ public sealed class FinOpsIndexAnalysisViewTests
         using var doc = JsonDocument.Parse(json);
         var message = doc.RootElement.GetProperty("message").GetString()!;
         Assert.DoesNotContain("collected for this server yet", message, StringComparison.Ordinal);
-        Assert.Contains("1 database(s) the server no longer lists", message, StringComparison.Ordinal);
+        Assert.Contains("1 database(s) the server no longer lists was left out", message, StringComparison.Ordinal);
+        /* #7726 item 4: the verb follows the count. */
+        using var two = JsonDocument.Parse(DarlingMcpFinOpsTools.BuildIndexAnalysisPayload("srv", none, 10, null, false, null, null, databasesLeftOut: 2));
+        Assert.Contains("2 database(s) the server no longer lists were left out", two.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
 
         using var named = JsonDocument.Parse(McpHelpers.WithDatabasesLeftOut(json, new[] { "GoneDb" })!);
         Assert.Equal("GoneDb", named.RootElement.GetProperty("databases_left_out")[0].GetString());

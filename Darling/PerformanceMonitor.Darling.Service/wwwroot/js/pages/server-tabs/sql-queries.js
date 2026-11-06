@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, readToolWithinKeptHistory, keptWindowStrip, mount, truncate, loadingStrip, readErrorStrip, emptyStrip, plainEmptyStrip, disclosure, noticeStrip, chartNoteText, trendHeadNote, fmtInt, fmtMs, localTime, windowFromHours, queryWaitFilter, setQueryWaitFilter } from "../../util.js";
+import { el, readToolWithinKeptHistory, keptWindowStrip, mount, truncate, loadingStrip, readErrorStrip, emptyStrip, plainEmptyStrip, disclosure, noticeStrip, leftOutNoteStrip, chartNoteText, trendHeadNote, fmtInt, fmtMs, localTime, windowFromHours, queryWaitFilter, setQueryWaitFilter } from "../../util.js";
 import { setPanelSignal, getPanelSignal, VIZ } from "../../panels.js";
 import { activeQueriesSnapshotSlot, SNAPSHOT_ROW_CAP } from "../active-snapshots.js";
 import { activeQueriesLiveBar } from "../active-live.js";
@@ -66,7 +66,7 @@ function topQueriesCard(server, ctx, ranking, picker, w = ctx, onRow = null) {
     if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     /* #7552: the same plain sentence the CPU tab shows for a window with snapshots and no measured change, with the tool's paragraph behind "More detail". */
-    if (res.kind === "empty") return mount(body, [keptWindowStrip(res), plainEmptyStrip(res)]);
+    if (res.kind === "empty") return mount(body, [keptWindowStrip(res), leftOutNoteStrip(res.data), plainEmptyStrip(res)]);
 
     const queries = res.data.queries || [];
     const parts = [
@@ -89,6 +89,9 @@ function topQueriesCard(server, ctx, ranking, picker, w = ctx, onRow = null) {
     if (typeof res.data.truncation_note === "string" && res.data.truncation_note.trim()) {
       parts.unshift(noticeStrip(res.data.truncation_note));
     }
+    /* #7538, #7651, #7745: a read that left out databases the server no longer lists names them, as the plain tables do. */
+    const leftOut = leftOutNoteStrip(res.data);
+    if (leftOut) parts.splice(typeof res.data.truncation_note === "string" && res.data.truncation_note.trim() ? 1 : 0, 0, leftOut);
     const kept = keptWindowStrip(res);
     if (kept) parts.unshift(kept);
 

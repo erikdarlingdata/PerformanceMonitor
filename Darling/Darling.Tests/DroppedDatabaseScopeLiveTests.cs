@@ -238,6 +238,8 @@ VALUES ($1, $2, $3, 'procedure_stats', $4, 100, 'SUCCESS', NULL, 1, 80, 20)",
         using var clutter = JsonDocument.Parse(await DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(dataSource, serverName, 24, 20, false, null, null, cancellationToken: ct));
         Assert.Equal("empty", clutter.RootElement.GetProperty("status").GetString());
         Assert.DoesNotContain("OFF everywhere", clutter.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        /* #7726 item 4: one database was left out, not "were". */
+        Assert.Contains("1 database(s) the server no longer lists was left out", clutter.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
         Assert.Equal(new[] { "GoneDb" }, LeftOut(clutter.RootElement));
 
         /* #7725: GoneDb ran a procedure in the window. The page used to be empty (the dropped database was only named); it now carries the row,

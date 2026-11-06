@@ -113,6 +113,24 @@ public sealed class WebPartialWindowBehaviourTests
         Assert.Null(S(r, "leftOutBlank"));
     }
 
+    /// <summary>#7538, #7651: the strip names the databases from the reply's list, in the page's own words (no <c>database_name</c>
+    /// pointer), says "was" for one, and counts the rest when the reply says there are more than it lists.</summary>
+    [Fact]
+    public void ALeftOutStrip_NamesTheDatabases_AndCountsTheRest()
+    {
+        var r = Run();
+        Assert.Equal(
+            "3 databases were left out because the server no longer lists them. They were dropped or detached: a_old, b_old, c_old.",
+            S(r, "leftOutNames"));
+        Assert.Equal(
+            "1 database was left out because the server no longer lists it. It was dropped or detached: only_one.",
+            S(r, "leftOutOne"));
+        var more = S(r, "leftOutMoreNames");
+        Assert.StartsWith("83 databases were left out because the server no longer lists them.", more);
+        Assert.EndsWith("db19, db20, and 63 more.", more);
+        Assert.DoesNotContain("database_name", more);
+    }
+
     [Fact]
     public void TheServersOwnNote_IsNotDrawnTwice()
     {
