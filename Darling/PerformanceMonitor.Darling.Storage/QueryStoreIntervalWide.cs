@@ -827,6 +827,20 @@ SELECT EXISTS
     public static readonly string IntervalStartFirstExecMarginSql =
         $"interval '{(long)Math.Ceiling(IntervalStartFirstExecMargin.TotalMinutes)} minutes'";
 
+    /// <summary>The expression an interval-start-placed Query Store read windows on (#7776, #7814): the interval's own start, which is
+    /// the expression the duration strip's bars are keyed on (#1892). Legacy rows have no interval start and keep <c>collection_time</c>.
+    /// The Viewer's grid and the MCP top and aborts reads place their window with it, so a window's rows are the intervals its bars draw.</summary>
+    public const string IntervalStartExpressionSql = "COALESCE(interval_start_time_utc, collection_time)";
+
+    /// <summary>The <c>collection_time</c> floor beside an interval-start-placed window on the raw Query Store reads (#7776, #7814): an
+    /// interval is collected after it starts, so the floor drops nothing, and the hour is clock-skew slack. It is chunk exclusion, not a filter.</summary>
+    public const string CollectionFloorSlackSql = "interval '1 hour'";
+
+    /// <summary>The <c>collection_time</c> ceiling beside an interval-start-placed window (#7776, #7814): a day of engine-maximum interval
+    /// length plus collector-outage allowance above the window end. It is chunk exclusion, not a filter, and keeps a historical window from
+    /// scanning to the present.</summary>
+    public const string CollectionCeilingSql = "interval '30 days'";
+
     /// <summary>True when the server's effective <c>query_store</c> cadence (null: the default) is at most
     /// <see cref="MaxBelowFloorCadence"/> and the largest gap between successive collections near the purge edge is
     /// too. An unknown gap (no collection-log rows there) is not allowed.</summary>

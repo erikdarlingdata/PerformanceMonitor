@@ -2611,7 +2611,7 @@ internal static class DarlingDataReader
     /// shared with <see cref="QueryStoreTopTableSql"/>, so the two reads cannot drift above <c>ranked</c>.
     /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 top, $5 database, $6 execution outcome.
     /// </summary>
-    private const string QueryStoreTopRawPrefix = """
+    private const string QueryStoreTopRawPrefix = $$"""
         WITH deduped AS (
             /* LOAD-BEARING (correctness, not just perf) — #1841. query_store_stats rows are CUMULATIVE
                per-Query-Store-interval snapshots, and the collector re-fetches the OPEN interval every
@@ -2634,8 +2634,19 @@ internal static class DarlingDataReader
                 ) AS rn
             FROM query_store_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
+            /* #7814: the window is the interval's own start, the expression the web duration strip's bars are keyed on
+               (get_query_store_duration_trend, #1892), so a window's rows are the intervals its bars draw. It was collection_time,
+               which trails the interval's start by up to its length: an interval collected inside the window but started before it
+               was returned with no bar, and the window's last interval, collected after its end, was missing. Legacy rows have no
+               interval start and keep collection_time. The collection_time bounds below are chunk exclusion, not filters, as in the
+               Viewer's read (#7776): the floor is implied by the predicate (an interval is collected after it starts; the hour is
+               clock-skew slack) and the ceiling is a day of engine-maximum interval plus collector-outage allowance. They keep
+               idx_query_store_stats_time (server_id, collection_time) and the hypertable's chunk pruning; the start predicate is a
+               residual filter on the rows they bring back. */
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} >= $2
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} <= $3
+            AND   collection_time >= $2 - {{QueryStoreIntervalWide.CollectionFloorSlackSql}}
+            AND   collection_time <= $3 + {{QueryStoreIntervalWide.CollectionCeilingSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
             /* Filtered HERE, before the ROW_NUMBER, not after it: execution_type_desc is in the partition,
                so dropping the other outcomes first cannot change which row wins any partition, and the window
@@ -2648,8 +2659,11 @@ internal static class DarlingDataReader
     /// The table read's head (#3953): <c>query_store_interval_wide</c> already holds the latest snapshot per
     /// interval — the raw prefix's ROW_NUMBER dedupe above, maintained as the table is written — so this reads
     /// it directly and sets <c>rn</c> to a literal 1 rather than computing a rank. $2 is the gate's <c>ReadStart</c>:
-    /// <c>max(window start, raw's chunk floor)</c> at and above the floor, where raw chunks drop whole and the table
-    /// returns exactly the raw read's own answer, and the exact below-floor start beneath it. $3 is bound the same way
+    /// <c>max(window start, raw's chunk floor)</c> at and above the floor, and the exact below-floor start beneath it.
+    /// The clamp is a <c>collection_time</c>, while the window is placed by the interval's start (#7814), so at the
+    /// clamp itself this read differs from raw's answer by the intervals that started before the floor and were collected
+    /// after it: raw still holds them and this read starts past them. They are the one interval straddling the floor,
+    /// which sits at the edge of what raw retains, so the table read answers for the window from the floor on. $3 is bound the same way
     /// raw's own $3 is (a plain lower bound, never NULL): the MCP surface has no concept of an open/preset end.
     /// $6 is repeated here, before this CTE's own GROUP BY-eligible rows reach <c>ranked</c>, mirroring the raw
     /// prefix's placement — <c>execution_type_desc</c> is a <c>ranked</c> GROUP BY key, not filtered again
@@ -2663,13 +2677,14 @@ internal static class DarlingDataReader
     /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> is that bound plus an hour (the argument is in
     /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>'s summary). A static readonly rather than a const
     /// because the interval literal is derived from that TimeSpan; <c>$$"""</c> keeps <c>$1</c> literal.</para>
-    /// <para><b>The upper bound (#5523).</b> <c>first_execution_time &lt;= $3 + </c>
-    /// <see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/> closes the range that
+    /// <para><b>The upper bound (#5523, #7814).</b> <c>first_execution_time &lt;= $3 + </c>
+    /// <see cref="QueryStoreIntervalWide.IntervalStartFirstExecMarginSql"/> closes the range that
     /// <c>ix_query_store_interval_wide_server_first_exec</c> scans. The floor alone ran from the window start to now, so
     /// a window that ended days ago walked every newer row of the server (109,362 blocks a call on a 43-server
-    /// store). The slack is twelve hours. It drops a row only when the monitored server's clock runs more than that ahead of
-    /// the service's, or a collection cycle runs longer than that (<see cref="QueryStoreIntervalWide.FirstExecUpperSlack"/>'s
-    /// summary).</para>
+    /// store). The window is placed by the interval's start (<c>COALESCE(interval_start_time_utc, collection_time)</c>,
+    /// #7814), so the margin is the start-placed one the duration trend's arm 1 uses: an interval that starts before $3 can
+    /// hold a first execution up to its own length (a day) after it. It was <see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/>
+    /// while the window was placed by <c>collection_time</c>.</para>
     /// </summary>
     private static readonly string QueryStoreTopTablePrefix = $$"""
         WITH deduped AS (
@@ -2678,10 +2693,13 @@ internal static class DarlingDataReader
                 1 AS rn
             FROM query_store_interval_wide
             WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
+            /* #7814: placed by the interval's start, as the raw read is (QueryStoreTopRawPrefix). The first_execution_time range
+               below is what ix_query_store_interval_wide_server_first_exec serves; this is a residual filter, and no collection_time
+               bound is added because none could drop a row here (an interval is collected after it starts). */
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} >= $2
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} <= $3
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
-            AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
+            AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
             AND   ($6::text IS NULL OR execution_type_desc = $6)
         ),
@@ -2862,6 +2880,12 @@ internal static class DarlingDataReader
     /// execution total, so both are one correctly rounded division of the same two numbers. $7 filters the unioned rows before
     /// the GROUP BY, where the table read puts it (<c>module_name</c> is part of the summary's key). The text lateral,
     /// the WAITFOR exclusion and the ordering are <see cref="QueryStoreTopTail"/>, shared with the table read.</para>
+    /// <para><b>The window's placement (#7814).</b> The raw read and the interval-table read place a window by the interval's
+    /// start (<c>COALESCE(interval_start_time_utc, collection_time)</c>). This read does not: its two edge arms and the days
+    /// summary stay on <c>collection_time</c> and whole UTC days. A continuous aggregate buckets on the one column it was built
+    /// on and cannot be re-bucketed on the interval start, and this read only runs when the window holds at least one whole
+    /// built UTC day inside <c>[ReadStart, end)</c>, so the offset is at the two outer edges and is under one interval
+    /// (an hour on the default cadence), small beside a window of a day or more.</para>
     /// <para><b>Approximate only through the summary's documented staleness</b>: a row written into a day after that day
     /// was built is missed, and a row whose <c>collection_time</c> moves into the next day is counted twice until the
     /// second pass. Those residuals, and why the summary has them, are in the V161 comment in <c>PgMigrations</c> and
