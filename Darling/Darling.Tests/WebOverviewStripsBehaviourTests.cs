@@ -175,6 +175,8 @@ public sealed class WebOverviewStripsBehaviourTests
         Assert.Equal(new[] { "SQL" }, r.GetProperty("series").EnumerateArray().Select(s => s.GetString()).ToArray());
         Assert.Equal(1, r.GetProperty("lines").GetInt32());
         Assert.Equal(new[] { "This server cannot report host CPU" }, r.GetProperty("notes").EnumerateArray().Select(s => s.GetString()).ToArray());
+        /* The note is read at 1280 px: it must not start where the title does, or the two draw over each other. */
+        Assert.Equal(0, r.GetProperty("sharedTextStarts").GetInt32());
         Assert.Equal(new[] { "SQL", "Total" }, r.GetProperty("measuredSeries").EnumerateArray().Select(s => s.GetString()).ToArray());
         Assert.Equal(0, r.GetProperty("measuredNotes").GetInt32());
     }
