@@ -136,13 +136,20 @@ public static class DailySummarySql
             GROUP BY 1
         ),
         mem AS (
-            SELECT date_trunc('day', collection_time) AS d,
-                   /* #7691: one event is one (second, notification), however many memory nodes reported it. */
-                   COUNT(DISTINCT concat(CAST(date_trunc('second', sample_time) AS VARCHAR), '|', memory_notification)) FILTER (WHERE memory_indicators_process >= 2 OR memory_indicators_system >= 2) AS pressure,
-                   COUNT(DISTINCT concat(CAST(date_trunc('second', sample_time) AS VARCHAR), '|', memory_notification)) FILTER (WHERE memory_indicators_process >= 3) AS critical
-            FROM v_memory_pressure_events
-            WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-            GROUP BY 1
+            /* #7691: one event is one (second, notification), however many memory nodes reported it. The distinct pairs come from one GROUP BY
+               (hashed), never from a DISTINCT aggregate, which PostgreSQL sorts. An event counts in a bar when any of its records meets the bar. */
+            SELECT ev.d,
+                   COUNT(*) FILTER (WHERE ev.pressured) AS pressure,
+                   COUNT(*) FILTER (WHERE ev.criticalp) AS critical
+            FROM (
+                SELECT date_trunc('day', collection_time) AS d,
+                       BOOL_OR(memory_indicators_process >= 2 OR memory_indicators_system >= 2) AS pressured,
+                       BOOL_OR(memory_indicators_process >= 3) AS criticalp
+                FROM v_memory_pressure_events
+                WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+                GROUP BY date_trunc('day', collection_time), date_trunc('second', sample_time), memory_notification
+            ) ev
+            GROUP BY ev.d
         ),
         alerts AS (
             /* Actionable alerts only: exclude dismissed rows and resolution/good-news notices, mirroring
