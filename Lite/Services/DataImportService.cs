@@ -51,10 +51,11 @@ public class DataImportService
     }
 
     /// <summary>
-    /// Attempts to open the old DuckDB in read-write mode to flush hot table data to parquet.
-    /// Returns true if successful, false if the database is locked.
+    /// Opens the old DuckDB in read-write mode to flush hot table data to parquet. <c>Failure</c> says why the open
+    /// failed, <see cref="DataImportOpenFailure.None"/> when it opened. <c>FailureMessage</c> is the user-facing text for a
+    /// failure no retry can fix, and null for a lock, which the caller handles with its retry prompt.
     /// </summary>
-    public static (bool Locked, int TablesFlushed) FlushOldDatabase(string folderPath)
+    public static (DataImportOpenFailure Failure, int TablesFlushed, string? FailureMessage) FlushOldDatabase(string folderPath)
     {
         var dbPath = Path.Combine(folderPath, "monitor.duckdb");
         var archivePath = Path.Combine(folderPath, "archive");
@@ -68,9 +69,10 @@ public class DataImportService
         }
         catch (Exception ex)
         {
-            AppLogger.Warn("DataImport", $"Could not open old database for flushing: {ex.Message}");
             connection?.Dispose();
-            return (true, 0);
+            var failure = DataImportOpenFailureClassifier.Classify(ex);
+            AppLogger.Warn("DataImport", $"Could not open old database for flushing ({failure}): {ex.Message}");
+            return (failure, 0, failure == DataImportOpenFailure.Locked ? null : DataImportOpenFailureClassifier.UserMessage(failure, ex));
         }
 
         try
@@ -129,7 +131,7 @@ public class DataImportService
             connection.Dispose();
         }
 
-        return (false, tablesFlushed);
+        return (DataImportOpenFailure.None, tablesFlushed, null);
     }
 
     /// <summary>
@@ -209,9 +211,11 @@ public class DataImportService
         {
             AppLogger.Info("DataImport", $"Starting import from {sourceFolder}");
 
-            /* Step 1: Flush old database */
-            var (locked, tablesFlushed) = FlushOldDatabase(sourceFolder);
-            while (locked)
+            /* Step 1: Flush old database. Only a lock earns the retry prompt: the previous Lite is still running, and
+               closing it frees the file. A storage-version mismatch or a corrupt file ends the import at once, naming
+               the cause, because no retry can change it. */
+            var (failure, tablesFlushed, failureMessage) = FlushOldDatabase(sourceFolder);
+            while (failure == DataImportOpenFailure.Locked)
             {
                 var retry = await tryLockOldDb(sourceFolder);
                 if (!retry)
@@ -219,7 +223,13 @@ public class DataImportService
                     AppLogger.Info("DataImport", "Import cancelled by user (database lock)");
                     return new ImportResult { Success = false, ErrorMessage = "Import cancelled." };
                 }
-                (locked, tablesFlushed) = FlushOldDatabase(sourceFolder);
+                (failure, tablesFlushed, failureMessage) = FlushOldDatabase(sourceFolder);
+            }
+
+            if (failure != DataImportOpenFailure.None)
+            {
+                AppLogger.Warn("DataImport", $"Import stopped: the old database could not be opened ({failure})");
+                return new ImportResult { Success = false, ErrorMessage = failureMessage };
             }
 
             AppLogger.Info("DataImport", $"Flushed {tablesFlushed} tables from old database");

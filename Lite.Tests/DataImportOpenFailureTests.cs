@@ -71,4 +71,36 @@ public sealed class DataImportOpenFailureTests : IDisposable
         Assert.DoesNotContain("lock", result.ErrorMessage, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("cancel", result.ErrorMessage, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Theory]
+    [InlineData("IO Error: Could not set lock on file \"C:/old/monitor.duckdb\": Conflicting lock is held in C:/old/Lite.exe (PID 4242)", DataImportOpenFailure.Locked)]
+    [InlineData("The process cannot access the file because it is being used by another process.", DataImportOpenFailure.Locked)]
+    [InlineData("IO Error: Trying to read a database file with version number 65, but we can only read version 64.", DataImportOpenFailure.StorageVersion)]
+    [InlineData("Serialization Error: Failed to deserialize: unknown field id 7", DataImportOpenFailure.StorageVersion)]
+    [InlineData("IO Error: The file \"C:/old/monitor.duckdb\" exists, but it is not a valid DuckDB database file!", DataImportOpenFailure.Other)]
+    [InlineData("IO Error: Checksum mismatch in block 12", DataImportOpenFailure.Other)]
+    public void Classify_TellsALockApartFromTheFailuresNoRetryCanFix(string message, DataImportOpenFailure expected)
+    {
+        Assert.Equal(expected, DataImportOpenFailureClassifier.Classify(new InvalidOperationException(message)));
+    }
+
+    [Fact]
+    public void Classify_ReadsAnInnerException()
+    {
+        var wrapped = new InvalidOperationException("open failed", new IOException("Could not set lock on file: Conflicting lock is held"));
+
+        Assert.Equal(DataImportOpenFailure.Locked, DataImportOpenFailureClassifier.Classify(wrapped));
+    }
+
+    [Theory]
+    [InlineData(DataImportOpenFailure.StorageVersion, "storage version")]
+    [InlineData(DataImportOpenFailure.Other, "corrupt")]
+    public void UserMessage_NamesTheCause_CarriesDuckDbsText_AndDoesNotBlameALock(DataImportOpenFailure failure, string cause)
+    {
+        var text = DataImportOpenFailureClassifier.UserMessage(failure, new InvalidOperationException("duckdb said so"));
+
+        Assert.Contains(cause, text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("duckdb said so", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("lock", text, StringComparison.OrdinalIgnoreCase);
+    }
 }
