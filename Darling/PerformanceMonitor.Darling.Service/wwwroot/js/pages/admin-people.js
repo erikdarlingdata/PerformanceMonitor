@@ -259,7 +259,11 @@ function detailPanel(p, canDecide, key, scopes, ctx) {
       field("Name:", input("rename", form.rename, { maxlength: "128" })),
       button({ text: "Rename", onClick: () => write("rename_person", { person_id: id, display_name: form.rename.trim() }, ctx) }),
       button({ text: p.enabled ? "Disable" : "Enable", "aria-label": (p.enabled ? "Disable " : "Enable ") + p.display_name,
-        onClick: () => write("set_person_enabled", { person_id: id, enabled: !p.enabled }, ctx) }),
+        onClick: () => {
+          /* #7954: disabling asks first and says what stops; enabling takes nothing away, so it does not. */
+          if (p.enabled && !window.confirm("Disable " + p.display_name + "? Nothing they press is accepted while they are disabled. Enable puts it back.")) return undefined;
+          return write("set_person_enabled", { person_id: id, enabled: !p.enabled }, ctx);
+        } }),
     ]));
   }
 
@@ -268,7 +272,10 @@ function detailPanel(p, canDecide, key, scopes, ctx) {
   parts.push(identities.length
     ? el("ul", {}, identities.map((i) => el("li", {}, [
       el("span", { text: identityText(i) + " " }),
-      canDecide ? button({ text: "Remove", "aria-label": "Remove " + identityText(i), onClick: () => write("remove_person_identity", { identity_id: i.identity_id }, ctx) }) : null,
+      canDecide ? button({ text: "Remove", "aria-label": "Remove " + identityText(i), onClick: () => (
+        /* #7954: a removal asks first and names the sign-in that goes. */
+        window.confirm("Remove the sign-in " + identityText(i) + " from " + p.display_name + "? It no longer maps to them until it is added again.")
+          ? write("remove_person_identity", { identity_id: i.identity_id }, ctx) : undefined) }) : null,
     ])))
     : el("p", { text: "No sign-in is linked." }));
   if (canDecide) {
@@ -292,7 +299,10 @@ function detailPanel(p, canDecide, key, scopes, ctx) {
   parts.push(grants.length
     ? el("ul", {}, grants.map((g) => el("li", {}, [
       el("span", { text: grantText(g) + " " }),
-      canDecide ? button({ text: "Remove", "aria-label": "Remove grant " + grantText(g), onClick: () => write("remove_person_grant", { grant_id: g.grant_id }, ctx) }) : null,
+      canDecide ? button({ text: "Remove", "aria-label": "Remove grant " + grantText(g), onClick: () => (
+        /* #7954: a removal asks first and names the grant that goes, so a misclick cannot take an approval right away in silence. */
+        window.confirm("Remove the grant \"" + grantText(g) + "\" from " + p.display_name + "? They lose what it lets them do until it is added again.")
+          ? write("remove_person_grant", { grant_id: g.grant_id }, ctx) : undefined) }) : null,
     ])))
     : el("p", { text: "No grant." }));
   if (canDecide) {
