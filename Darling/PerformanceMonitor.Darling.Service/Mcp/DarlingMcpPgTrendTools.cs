@@ -86,6 +86,12 @@ public sealed class DarlingMcpPgTrendTools
 
             var resets = points.Count(p => p.CounterReset);
 
+            /* #7876: which arm produced the figures, on the data path as well as the empty one. The same recorded token
+               get_pg_wait_sampling echoes, so a caller can tell a service-sampled rate (over the 30 watched seconds of
+               each cycle) from the extension's. */
+            var instrument = DarlingMcpPgWaitSamplingTools.InstrumentToken(
+                await DarlingPgWaitSamplingReader.GetWaitInstrumentAsync(postgres, resolved.ServerId, cancellationToken));
+
             /* #7010: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote). A window of
                90 minutes or less starts no probe; a failed probe costs the notice, never the series. */
             var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
@@ -105,11 +111,16 @@ public sealed class DarlingMcpPgTrendTools
                     : "as requested",
                 hours_back,
                 status = "wait_trend",
+                instrument,
                 point_count = points.Count,
                 counter_reset_count = resets,
-                note = "estimated_wait_ms_per_second is samples x the profiler's period, over the interval's "
-                     + "length - an estimate from a sampling profiler, not a measured duration, so the shape "
-                     + "over time is the finding rather than the absolute value. Per SECOND because "
+                note = "estimated_wait_ms_per_second is samples x the profiler's period, over the time the "
+                     + "profiler was watching - the interval's length on the pg_wait_sampling extension, and on "
+                     + "the service_sampled instrument the seconds each collection actually sampled (30 of every "
+                     + "300), the same denominator analyze_server uses. An estimate from a sampling profiler, not "
+                     + "a measured duration, so the shape over time is the finding rather than the absolute value. "
+                     + "The instrument key says which one produced these rows (unknown when no collection has "
+                     + "recorded it). Per SECOND because "
                      + "collection intervals are not uniform: a restart or a slow cycle stretches one, and a "
                      + "per-interval total would render that as a spike. backend_count is null on a point with no samples, "
                      + "because no backend waited on the event in that interval. On a point with samples it is the number of "
