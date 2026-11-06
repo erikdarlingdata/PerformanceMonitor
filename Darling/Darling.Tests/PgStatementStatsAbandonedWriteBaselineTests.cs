@@ -66,6 +66,41 @@ public sealed class PgStatementStatsAbandonedWriteBaselineTests
     }
 
     /// <summary>
+    /// What the real <c>WritePayload</c> hands the store for one row read from a result: <c>sample_interval_seconds</c> (ordinal 30) is
+    /// the interval the read measured, and <c>database_name</c> (ordinal 31, #7731) is the name the read carried for that row, in the
+    /// two positions the table's columns stand in. A row whose database had no name writes NULL there, not an empty string.
+    /// </summary>
+    [Fact]
+    public async Task TheWriter_StoresTheMeasuredIntervalAndTheDatabaseName_InTheLastTwoPayloadColumns()
+    {
+        var collector = CollectorCatalog.All.OfType<PgStatementStatsCollector>().Single();
+        var deltas = new CollectorDeltaCalculator();
+        await RunAsync(deltas, T0, (QueryA, 100, LongBefore), (QueryB, 100, LongBefore));
+
+        var context = DeltaFamilyAbandonedWriteBaselineTests.Context(deltas, T1);
+        using var table = PgMidReadFaultBaselineRollbackTests.StatementStatsTable(T1, (QueryA, 130, (DateTime?)LongBefore), (QueryB, 140, (DateTime?)LongBefore));
+        table.Rows[1]["database_name"] = DBNull.Value;
+        using var reader = table.CreateDataReader();
+        var rows = await collector.ReadAsync(reader, context, CancellationToken.None);
+
+        var stored = new Dictionary<long, RecordingRowWriter>();
+        foreach (var row in rows)
+        {
+            var writer = new RecordingRowWriter();
+            collector.WritePayload(row, writer, context);
+            stored[row.QueryId] = writer;
+        }
+
+        Assert.Equal(collector.PayloadColumns.Count, stored[QueryA].Values.Count);
+        Assert.Equal("sample_interval_seconds", collector.PayloadColumns[30].Name);
+        Assert.Equal("database_name", collector.PayloadColumns[31].Name);
+        Assert.Equal(60, stored[QueryA].Values[30]);
+        Assert.Equal("pm_database", stored[QueryA].Values[31]);
+        Assert.Equal(60, stored[QueryB].Values[30]);
+        Assert.Null(stored[QueryB].Values[31]);
+    }
+
+    /// <summary>
     /// Run one baselines the entry. Run two sees its calls fall, with a <c>stats_since</c> inside the gap since run one, so the
     /// restart is credited over that gap; its write is then abandoned and rolled back. Run three must place the same restart
     /// against the window that stood before run two: the whole count over the 120 s since run one, not (0, 0) against run two's

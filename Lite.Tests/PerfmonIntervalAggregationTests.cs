@@ -34,7 +34,9 @@ public sealed class PerfmonIntervalAggregationTests
     private const string ReadPath = "Lite/Services/LocalDataService.Perfmon.cs";
 
     /// <summary>Both trend reads — the single-counter one and its batched sibling — must take the interval
-    /// as MAX. Two occurrences, because a fix applied to only one of the pair is the likelier mistake.
+    /// as MAX, at both of their layers: per object, where the instance rows are summed, and per collection,
+    /// over the per-object rows (#7771). Four occurrences, two per read, because a fix applied to only one of
+    /// the pair, or at only one layer, is the likelier mistake.
     /// </summary>
     [Fact]
     public void BothPerfmonTrendReads_TakeTheIntervalAsMax()
@@ -42,7 +44,7 @@ public sealed class PerfmonIntervalAggregationTests
         var source = ParitySource.ReadFile(ReadPath);
 
         var max = CountOccurrences(source, "MAX(sample_interval_seconds)");
-        Assert.Equal(2, max);
+        Assert.Equal(4, max);
     }
 
     /// <summary>The failure mode itself: a summed interval across a collection's INSTANCE rows is the
@@ -65,21 +67,15 @@ public sealed class PerfmonIntervalAggregationTests
         Assert.DoesNotContain("SUM(sample_interval_seconds)", withoutTheBucketedSum, StringComparison.Ordinal);
     }
 
-    /// <summary>Guards the fix from being over-applied: the two columns that ARE additive must stay sums,
-    /// in both reads. A well-meant "make it consistent" edit that turned these into MAX would silently
-    /// report one instance's value as the whole counter.
-    /// <para>#4234: <c>delta_cntr_value</c> is 3, not 2 — the batched trend's bucketing adds one more SUM,
-    /// the outer GROUP BY <c>counter_name, bucket_start</c> summing each collection's already-summed delta
-    /// across the bucket's collections (the ruling's summed-deltas rate), same additive column, one layer
-    /// higher. <c>cntr_value</c> stays 2: that outer layer AVERAGES (the ruling's gauge rule), so it adds no
-    /// third SUM.</para></summary>
+    /// <summary>Guards the fix from being over-applied: the two columns that ARE additive are never taken as
+    /// MAX, in either read. A well-meant "make it consistent" edit that turned these into MAX would silently
+    /// report one instance's value as the whole counter. Which instance rows each read sums is pinned against
+    /// an embedded DuckDB in <c>LitePerfmonTotalInstanceLiveTests</c>, not against the statement text.</summary>
     [Fact]
     public void TheAdditiveColumnsStaySummed()
     {
         var source = ParitySource.ReadFile(ReadPath);
 
-        Assert.Equal(2, CountOccurrences(source, "SUM(cntr_value)"));
-        Assert.Equal(3, CountOccurrences(source, "SUM(delta_cntr_value)"));
         Assert.DoesNotContain("MAX(cntr_value)", source, StringComparison.Ordinal);
         Assert.DoesNotContain("MAX(delta_cntr_value)", source, StringComparison.Ordinal);
     }
