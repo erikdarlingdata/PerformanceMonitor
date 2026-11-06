@@ -115,7 +115,8 @@ public sealed class PgDeadlocksCsvlogLiveTests
                 }
             }
 
-            await PgLogLiveWait.WaitForTextAsync(targetConnection, "csv", ct, "deadlock_forge_check_4053b1");
+            await PgLogLiveWait.WaitForTextAsync(targetConnection, "csv", ct,
+                "deadlock_forge_check_4053b1", $"Process {victimPid}: UPDATE deadlocks_csvlog_live_4053b1 SET");
 
             var context = new CollectorContext
             {

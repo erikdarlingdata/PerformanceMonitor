@@ -161,7 +161,8 @@ public sealed class PgRaiseShapedRecordsLiveTests
 
             var (victimPid, pidA, pidB) = await ProvokeFunctionDeadlockAsync(target!, ct);
 
-            await PgLogLiveWait.WaitForTextAsync(targetConnection, "csv", ct, $"Process {victimPid} waits for");
+            await PgLogLiveWait.WaitForTextAsync(targetConnection, "csv", ct,
+                $"Process {victimPid} waits for", $"Process {victimPid}: SELECT upd_4058l(");
 
             var context = new CollectorContext
             {
