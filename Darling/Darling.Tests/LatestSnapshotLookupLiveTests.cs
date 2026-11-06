@@ -111,6 +111,48 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
             Assert.Null(await DarlingObjectStatsReader.GetIndexLockingDetailAsync(postgres, EmptyId, DatabaseFilter.One(Db), "dbo", "Orders", "IX_none", ct));
         });
 
+    /// <summary>
+    /// <c>get_index_usage</c> reads the rows and then the match count, and both come from ONE capture: the tool resolves
+    /// the newest snapshot once and binds it to both statements, so a capture that lands between the two reads changes
+    /// neither. A count that resolved its own snapshot would count the new capture against the old capture's rows and
+    /// report a truncation that never happened. The fixture plants a two-index capture a day old, inserts a five-index
+    /// capture the moment the tool's row statement completes (an Npgsql activity listener on the store's database, the way
+    /// <see cref="NpgsqlCommandCounter"/> counts), and reads the payload the tool built from the count that followed.
+    /// </summary>
+    [Fact]
+    public Task IndexUsageTool_CountsTheCaptureItReturned_WhenANewerOneLandsBetweenTheReads() =>
+        WithStoreAsync(async (connection, postgres, now, ct) =>
+        {
+            var older = now.AddDays(-1);
+            var newer = now.AddMinutes(5);
+            await SeedIndexAsync(connection, ct, FreshId, FreshName, older, 2, "IX_old_1");
+            await SeedIndexAsync(connection, ct, FreshId, FreshName, older, 3, "IX_old_2");
+
+            var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG")!;
+            using var landing = new NpgsqlCommandCompletionHook(connection.Database, ["AS classification", "FROM v_index_object_stats"], () =>
+            {
+                using var writer = new NpgsqlConnection(cs);
+                writer.Open();
+                for (var i = 1; i <= 5; i++)
+                    SeedIndex(writer, FreshId, FreshName, newer, 10 + i, "IX_new_" + i.ToString(CultureInfo.InvariantCulture));
+            });
+
+            var json = await DarlingMcpObjectStatsTools.GetIndexUsage(postgres, FreshName, DatabaseFilter.All, 50, ct);
+            Assert.True(landing.Fired, "the newer capture was never planted: the listener did not see the row statement complete on this database, so the test proved nothing");
+
+            using var payload = JsonDocument.Parse(json);
+            var root = payload.RootElement;
+            Assert.Equal(
+                new[] { "IX_old_1", "IX_old_2" },
+                root.GetProperty("indexes").EnumerateArray().Select(i => i.GetProperty("index_name").GetString()).Order().ToArray());
+            Assert.Equal(2, root.GetProperty("returned_index_count").GetInt32());
+            Assert.Equal(2L, root.GetProperty("matching_index_count").GetInt64());
+            Assert.False(root.GetProperty("truncated").GetBoolean());
+
+            /* The newer capture did land: a read after the tool returns is the five-index capture. */
+            Assert.Equal(5L, await DarlingObjectStatsReader.GetIndexUsageMatchCountAsync(postgres, FreshId, DatabaseFilter.All, ct));
+        });
+
     [Fact]
     public Task StorageGrowthIndexDetail_ReturnsOnlyTheDatabasesNewestSnapshot() =>
         WithStoreAsync(async (connection, postgres, now, ct) =>
@@ -432,13 +474,78 @@ VALUES (0, $1, $2, $3, $4, 5, 'ONLINE', false)",
     private static (int Id, string Name, DateTime[] Stamps)[] Seeded(DateTime now) =>
         [(FreshId, FreshName, FreshStamps(now)), (StaleId, StaleName, StaleStamps(now))];
 
+    private const string SeedIndexSql =
+        @"INSERT INTO index_object_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_id, table_name, index_id, index_name, index_type_desc, reserved_mb, used_mb, total_rows, user_seeks, user_scans, user_lookups, user_updates, row_lock_wait_count, row_lock_wait_in_ms, page_lock_wait_count, page_lock_wait_in_ms, index_lock_promotion_count, page_latch_wait_in_ms, page_io_latch_wait_in_ms)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)";
+
     /// <summary>One index per snapshot, named for its stamp, with nonzero lock waits so the locking read's contention filter keeps it.</summary>
     private static Task SeedIndexAsync(NpgsqlConnection connection, CancellationToken ct, int serverId, string serverName, DateTime stamp) =>
-        DarlingMcpTestData.ExecAsync(connection, ct,
-            @"INSERT INTO index_object_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_id, table_name, index_id, index_name, index_type_desc, reserved_mb, used_mb, total_rows, user_seeks, user_scans, user_lookups, user_updates, row_lock_wait_count, row_lock_wait_in_ms, page_lock_wait_count, page_lock_wait_in_ms, index_lock_promotion_count, page_latch_wait_in_ms, page_io_latch_wait_in_ms)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)",
-            CollectionIdGenerator.Next(), Naive(stamp), serverId, serverName, Db, "dbo", 100, "Orders", 2, Tag(stamp), "NONCLUSTERED",
-            90m, 85m, 500_000L, 500L, 10L, 20L, 300L, 40L, 12000L, 5L, 800L, 3L, 60L, 30L);
+        SeedIndexAsync(connection, ct, serverId, serverName, stamp, 2, Tag(stamp));
+
+    private static Task SeedIndexAsync(NpgsqlConnection connection, CancellationToken ct, int serverId, string serverName, DateTime stamp, int indexId, string indexName) =>
+        DarlingMcpTestData.ExecAsync(connection, ct, SeedIndexSql, SeedIndexValues(serverId, serverName, stamp, indexId, indexName));
+
+    /// <summary>The synchronous twin, for a seed planted from inside an Npgsql activity callback.</summary>
+    private static void SeedIndex(NpgsqlConnection connection, int serverId, string serverName, DateTime stamp, int indexId, string indexName)
+    {
+        using var command = new NpgsqlCommand(SeedIndexSql, connection);
+        foreach (var value in SeedIndexValues(serverId, serverName, stamp, indexId, indexName))
+            command.Parameters.AddWithValue(value);
+        command.ExecuteNonQuery();
+    }
+
+    private static object[] SeedIndexValues(int serverId, string serverName, DateTime stamp, int indexId, string indexName) =>
+        [CollectionIdGenerator.Next(), Naive(stamp), serverId, serverName, Db, "dbo", 100, "Orders", indexId, indexName, "NONCLUSTERED",
+         90m, 85m, 500_000L, 500L, 10L, 20L, 300L, 40L, 12000L, 5L, 800L, 3L, 60L, 30L];
+
+    /// <summary>
+    /// Runs one action the first time a command on the named database whose text carries every fragment completes
+    /// (Npgsql stops the command's activity when its reader closes), before the caller that ran the command gets control
+    /// back. The same process-wide listener and value-matched tags as <see cref="NpgsqlCommandCounter"/>.
+    /// </summary>
+    private sealed class NpgsqlCommandCompletionHook : IDisposable
+    {
+        private readonly string _databaseName;
+        private readonly string[] _fragments;
+        private readonly Action _onCompleted;
+        private readonly System.Diagnostics.ActivityListener _listener;
+        private int _fired;
+
+        public NpgsqlCommandCompletionHook(string databaseName, string[] fragments, Action onCompleted)
+        {
+            _databaseName = databaseName;
+            _fragments = fragments;
+            _onCompleted = onCompleted;
+            _listener = new System.Diagnostics.ActivityListener
+            {
+                ShouldListenTo = source => source.Name == "Npgsql",
+                Sample = (ref System.Diagnostics.ActivityCreationOptions<System.Diagnostics.ActivityContext> _) => System.Diagnostics.ActivitySamplingResult.AllDataAndRecorded,
+                ActivityStopped = OnStopped,
+            };
+            System.Diagnostics.ActivitySource.AddActivityListener(_listener);
+        }
+
+        public bool Fired => Volatile.Read(ref _fired) == 1;
+
+        private void OnStopped(System.Diagnostics.Activity activity)
+        {
+            var onThisDatabase = false;
+            var carriesTheText = false;
+            foreach (var tag in activity.TagObjects)
+            {
+                if (tag.Value is not string value)
+                    continue;
+                if (string.Equals(value, _databaseName, StringComparison.Ordinal))
+                    onThisDatabase = true;
+                else if (_fragments.All(fragment => value.Contains(fragment, StringComparison.Ordinal)))
+                    carriesTheText = true;
+            }
+            if (onThisDatabase && carriesTheText && Interlocked.Exchange(ref _fired, 1) == 0)
+                _onCompleted();
+        }
+
+        public void Dispose() => _listener.Dispose();
+    }
 
     private static async Task WithStoreAsync(Func<NpgsqlConnection, NpgsqlDataSource, DateTime, CancellationToken, Task> body)
     {
