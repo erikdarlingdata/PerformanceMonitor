@@ -480,7 +480,7 @@ export const READ_FIELDS = {
         { key: "pct_of_database", label: "% of DB", format: "num1" },
         { key: "database_data_size_mb", label: "Data size", format: "mbfit" },
         { key: "aborted_transaction_count", label: "Aborted txns", format: "int" },
-        { key: "oldest_active_transaction_id", label: "Oldest active txn" },
+        { key: "oldest_active_transaction_id", label: "Oldest active txn", format: "int" },
       ],
     },
   },

@@ -112,6 +112,25 @@ public sealed class ConfigAuditGuidanceTests
         Assert.Contains("'max server memory (MB)', 511", advice.Remediation, StringComparison.Ordinal);
     }
 
+    /// <summary>#7699 item 6: " of N MB physical RAM" read as if the unlimited default were the size of the server. A set cap keeps the
+    /// "of" wording; the unlimited default states the RAM as a fact about the server.</summary>
+    [Theory]
+    [InlineData(2147483647L, "max server memory is at its unlimited default, on a server with 2,000 MB of physical RAM.")]
+    [InlineData(51200L, "max server memory is set to 51,200 MB of 2,000 MB physical RAM.")]
+    public void MemoryPressureAdvice_StatesTheMaxMemoryAndRam_WithoutReadingTheDefaultAsTheServerSize(long cap, string expected)
+    {
+        var facts = new Dictionary<string, Fact>
+        {
+            ["MEMORY_TOTAL_PHYSICAL_MB"] = new() { Source = "memory", Key = "MEMORY_TOTAL_PHYSICAL_MB", Value = 2000 },
+            ["CONFIG_MAX_MEMORY_MB"] = new() { Source = "config", Key = "CONFIG_MAX_MEMORY_MB", Value = cap },
+        };
+
+        var advice = FactAdvice.Compose("PAGEIOLATCH_SH", facts)!;
+
+        Assert.Contains(expected, advice.Remediation, StringComparison.Ordinal);
+        Assert.DoesNotContain("default of", advice.Remediation, StringComparison.Ordinal);
+    }
+
     /// <summary>The above-guidance MAXDOP note names the figure it used, as the MAXDOP 0 warning does, including the vCores case.</summary>
     [Theory]
     [InlineData(false, "this server's cores-per-socket")]

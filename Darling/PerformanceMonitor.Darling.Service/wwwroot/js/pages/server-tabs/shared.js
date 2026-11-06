@@ -847,6 +847,8 @@ export function linePanel(title, read, params, rowsKey, xKey, series, opts = {})
     seamKey: opts.seamKey,
     /* #7692: the answer's field stating the bucket width (bucket_minutes), for a read with rows only where something ran; absent on every other line. */
     bucketKey: opts.bucketKey,
+    /* #7699: a function of the seam instant that returns the sentence drawn under the chart. */
+    seamCaption: opts.seamCaption,
     /* #5644 W16: wording that follows the collector that answered (see BLOCKING_BY_SOURCE); absent on every other line. */
     bySource: opts.bySource,
     /* The panel is not drawn when the server answers "not collected" (it does not apply to this kind of server). */
