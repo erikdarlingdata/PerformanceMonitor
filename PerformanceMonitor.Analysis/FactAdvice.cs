@@ -1724,7 +1724,8 @@ public static class FactAdvice
     }
 
     /// <summary>
-    /// QUERY_SPILLS composed: states the pages spilled, how many distinct queries spilled, then the
+    /// QUERY_SPILLS composed: states the pages spilled, how many distinct queries spilled, the rate per observed
+    /// hour the fact is graded on beside its two bars (#7884, when the fact carries its period), then the
     /// statistics/grant remediation and the current max-server-memory sentence. The value is the sum of
     /// <c>sys.dm_exec_query_stats.total_spills</c> deltas, and that column counts 8 KB PAGES written to
     /// tempdb, not spill events, so it is named as pages and megabytes (#5633 item 2), never as "spills".
@@ -1742,6 +1743,11 @@ public static class FactAdvice
         var inv = new StringBuilder($"{spilled} spilled to tempdb this window");
         if (distinct is > 0)
             inv.Append($", across {Plural(distinct.Value, "distinct query")}");
+        if (FactMeta(facts, "QUERY_SPILLS", "period_duration_ms") is > 0)
+        {
+            var perHour = Math.Round(total.Value / FactScorer.ObservedHours(facts["QUERY_SPILLS"]));
+            inv.Append($". About {SpilledPagesText(perHour)} per observed hour; the warning bar is {SpilledPagesText(FactScorer.QuerySpillsWarningPagesPerObservedHour)} an hour and the critical bar {SpilledPagesText(FactScorer.QuerySpillsCriticalPagesPerObservedHour)}");
+        }
         inv.Append(". A spill means a query's memory grant was too small for its sort or hash operation, so the overflow went to tempdb — disk-speed work in place of memory-speed.");
         inv.Append(NamedQueriesSentence(facts, "QUERY_SPILLS", "Most spilled", o => SpilledPagesText(o.Value)));
 

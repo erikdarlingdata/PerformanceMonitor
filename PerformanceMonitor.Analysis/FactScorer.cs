@@ -225,8 +225,9 @@ public class FactScorer
     }
 
     /// <summary>
-    /// The hours the collector actually observed inside the window a wait fact was summed over — the
-    /// divisor for the per-hour gates above (#3538 A7). Read from the fact's own metadata rather than
+    /// The hours the collector actually observed inside the window a fact was summed over — the divisor
+    /// for the per-hour wait gates above (#3538 A7) and for the QUERY_SPILLS pages-per-hour grade (#7884),
+    /// and what <c>FactAdvice</c> divides by to state that rate. Read from the fact's own metadata rather than
     /// from <see cref="AnalysisContext"/>, which the scorer never sees: every wait fact carries
     /// <c>period_duration_ms</c> (the nominal window) and, from a collector that stamps coverage (#3538
     /// A2), <c>coverage_fraction</c>; their product is the observed time (see
@@ -247,7 +248,7 @@ public class FactScorer
     /// artifact; the nominal reading is the pre-#3538 form — the least-sensitive honest one — and is pinned
     /// so the choice cannot silently flip.</para>
     /// </summary>
-    private static double ObservedHours(Fact fact)
+    internal static double ObservedHours(Fact fact)
     {
         var periodMs = fact.Metadata.GetValueOrDefault("period_duration_ms");
         if (periodMs <= 0) return 1.0;
@@ -522,8 +523,9 @@ public class FactScorer
     {
         return fact.Key switch
         {
-            // Spilled pages (8 KB each, sys.dm_exec_query_stats total_spills deltas): concerning at 100, critical at 1000 in the period
-            "QUERY_SPILLS" => ApplyThresholdFormula(fact.Value, 100, 1000),
+            // Spilled pages (8 KB each, sys.dm_exec_query_stats total_spills deltas) per OBSERVED hour (#7884), so the
+            // same spill rate scores the same at every hours_back; the pair sits at the fleet tail, see the constants.
+            "QUERY_SPILLS" => ApplyThresholdFormula(fact.Value / ObservedHours(fact), QuerySpillsWarningPagesPerObservedHour, QuerySpillsCriticalPagesPerObservedHour),
             // High DOP queries: concerning at 5, critical at 20 in the period
             "QUERY_HIGH_DOP" => ApplyThresholdFormula(fact.Value, 5, 20),
             // Parameter sensitivity: worst max/min worker-time ratio. Magnitude-driven —
@@ -829,6 +831,22 @@ public class FactScorer
     /// burst inside one hour of a longer window averages out (the per-sample-vs-window class, #3538 A8).
     /// </summary>
     private const double PagelatchUpMinWaitMsPerObservedHour = 10_000;
+
+    /// <summary>
+    /// QUERY_SPILLS (#7884): spilled 8 KB pages per OBSERVED hour at which the fact enters the warning ramp (0.5) and
+    /// at which it saturates (1.0). The fact's Value is the window's page total, so <see cref="ScoreQueryFact"/>
+    /// divides it by <see cref="ObservedHours"/> first; both producers stamp <c>period_duration_ms</c> and
+    /// <c>coverage_fraction</c> for that, the same way the wait facts do. The pair marks the tail of the fleet, not
+    /// its middle. Measured on a production fleet, spilled pages per observed hour run p50 17,000 (about 130 MB),
+    /// p90 57,000 (about 450 MB) and p99 173,000 (about 1.4 GB): the warning bar is the p90 and the critical bar the
+    /// p99, so about one server-hour in ten clears the warning bar and one in a hundred saturates. A warning bar at
+    /// the median was rejected because it would flag half of all server-hours, and a severity bar marks the tail.
+    /// A total-pages bar cannot do this job at any value: it scales with hours_back, so a 24 h read of an unchanged
+    /// server reads six times a 4 h one. What this cannot see: a burst of spills inside one hour of a long window
+    /// averages out (the per-sample-vs-window class, #3538 A8).
+    /// </summary>
+    internal const double QuerySpillsWarningPagesPerObservedHour = 57_000;
+    internal const double QuerySpillsCriticalPagesPerObservedHour = 173_000;
 
     // Layer-3 tuning-class severity ceiling (see ScoreAll). Parallelism/anomaly signals describe a tuning
     // opportunity, not an outage — their FINAL severity is capped here (bands are >= 1.5 CRITICAL) unless an
@@ -1783,7 +1801,7 @@ public class FactScorer
         {
             Description = "Query spills present — spills to disk on a nearly full volume",
             Boost = 0.2,
-            Predicate = facts => facts.TryGetValue("QUERY_SPILLS", out var s) && s.BaseSeverity > 0
+            Predicate = facts => facts.TryGetValue("QUERY_SPILLS", out var s) && ClearsRootBar(s)
         }
     ];
 
@@ -1874,7 +1892,7 @@ public class FactScorer
         {
             Description = "Query spills present — queries running with insufficient memory grants",
             Boost = 0.2,
-            Predicate = facts => facts.TryGetValue("QUERY_SPILLS", out var s) && s.BaseSeverity > 0
+            Predicate = facts => facts.TryGetValue("QUERY_SPILLS", out var s) && ClearsRootBar(s)
         }
     ];
 
