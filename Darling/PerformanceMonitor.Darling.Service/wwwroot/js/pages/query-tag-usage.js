@@ -97,6 +97,8 @@ function fmtFigure(v) {
   if (v == null) return "—";
   const n = Number(v);
   if (!isFinite(n)) return "—";
+  /* #7945: a figure under 0.1 keeps two significant digits (0.04), as fmtPlain does, so a small share never reads 0.0. */
+  if (!Number.isInteger(n) && Math.abs(n) < 0.1) return n.toLocaleString(undefined, { maximumSignificantDigits: 2 });
   return Number.isInteger(n) ? fmtInt(n) : fmtNum(n, 1);
 }
 

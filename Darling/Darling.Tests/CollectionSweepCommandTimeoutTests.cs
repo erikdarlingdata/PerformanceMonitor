@@ -167,8 +167,11 @@ public sealed class CollectionSweepCommandTimeoutTests
     /// budget.</para>
     /// </summary>
     /* 15 since #6351: UpsertServerAsync reads the identity it is about to overwrite and, on a changed identity, the other enabled
-       registrations holding it; both carry the sweep deadline like the upsert. */
-    private const int ExpectedSweepCommandSites = 15;
+       registrations holding it; both carry the sweep deadline like the upsert.
+       17 since #8013: PruneOrphanedQueryStoreDatabaseStateAsync resolves the newest database_states snapshot before its
+       deletes, with a windowed probe (NewestDatabaseStateWindowedProbeSql) and, when the window is empty, an unbounded one
+       (NewestDatabaseStateFallbackProbeSql); both are built on the borrowed store connection and carry the sweep deadline. */
+    private const int ExpectedSweepCommandSites = 17;
 
     /// <summary>The two COPY writers, counted for the same reason: the collector runner's, and RdsCopyWriter's.
     /// Five from #3601 until #7222, when the four RDS ingestors' character-identical copies became the one

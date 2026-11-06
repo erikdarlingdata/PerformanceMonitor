@@ -17,7 +17,7 @@
  * draws a line of zeros for time nobody sampled. The read's own empty or unavailable answer is that sentence.
  */
 
-import { el, readToolWithinKeptHistory, keptWindowStrip, mount, loadingStrip, readErrorStrip, emptyStrip, chartNote, chartNoteText, windowFromHours, fmtInt, fmtPlain, dbScopeChip } from "../util.js";
+import { el, readToolWithinKeptHistory, keptWindowStrip, mount, loadingStrip, readErrorStrip, emptyStrip, chartNote, chartNoteText, windowFromHours, fmtPlain, dbScopeChip } from "../util.js";
 import { zoomableLineChart, chartZoomScope, CATEGORICAL_COLORS } from "../charts.js";
 import { emptyHeadline } from "../panels.js";
 
@@ -131,7 +131,8 @@ export function memoryGrantChartPanels(server, ctx) {
           points,
           xKey: "collection_time",
           series,
-          formatValue: counts ? (v, o) => fmtInt(v, o) : (v, o) => fmtPlain(v, o) + " MB",
+          /* #7945: a count point is the bucket's mean, so a tooltip prints 0.4 waiters as 0.4, not 0; the ticks are whole numbers (integerTicks). */
+          formatValue: counts ? (v, o) => fmtPlain(v, o) : (v, o) => fmtPlain(v, o) + " MB",
           unit,
           integerTicks: counts,
           ...windowFromHours(res.keptHours || ctx.hours),

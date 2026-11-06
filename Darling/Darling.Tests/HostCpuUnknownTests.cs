@@ -60,6 +60,24 @@ public sealed class HostCpuUnknownTests
         Assert.Contains("SQL Server on Linux before 2025 CU1", root.GetProperty("host_cpu_note").GetString());
     }
 
+    /// <summary>#7945: a bucket's total_cpu is its own stored average, never the sum of the shown parts. sql_server_cpu is averaged over every sample
+    /// in the bucket; other_process_cpu, total_cpu and idle_cpu only over the samples that carry a host figure (#7682), so on a bucket where one of
+    /// three samples lacks it (40 / 15 / 65 / 35) the parts add to 55 while the total is 65, and 65 is what reads beside idle 35.</summary>
+    [Fact]
+    public void CpuUtilizationReply_OnAMixedBucket_KeepsTheStoredTotalBesideItsIdle()
+    {
+        var start = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var points = new List<CpuBucketPoint> { new(start, 40, 15, 65, 35, 60, 80, 3) };
+
+        using var doc = JsonDocument.Parse(TrendPayloads.CpuUtilization("srv", 2, points, 60, false, 500));
+        var sample = doc.RootElement.GetProperty("samples")[0];
+
+        Assert.Equal(40, sample.GetProperty("sql_server_cpu").GetInt32());
+        Assert.Equal(15, sample.GetProperty("other_process_cpu").GetInt32());
+        Assert.Equal(65, sample.GetProperty("total_cpu").GetInt32());
+        Assert.Equal(35, sample.GetProperty("idle_cpu").GetInt32());
+    }
+
     [Fact]
     public void CpuUtilizationReply_WhenEveryBucketHasAHostFigure_HasNoHostNote()
     {

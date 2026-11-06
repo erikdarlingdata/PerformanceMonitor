@@ -280,4 +280,10 @@ for (const [label, refusals] of [["busyOnce", 1], ["busyTwice", 2]]) {
   out.gridUntaggedAsk = readsOf("get_top_queries_by_cpu").at(-1);
   out.gridUntagged = gridRows();
 }
+/* #7945: a figure under 0.1 keeps two significant digits (0.04), one from 0.1 up keeps one decimal, and a whole number prints whole. */
+{
+  const figures = { executions: 0.04, cpu_ms: 1234.56, logical_reads: 7 };
+  const table = modules.page.sectionTable({ section: "plan_cache", total: figures, tag_rows: [{ tag_id: 1, tag: "T", path: "T", subtree: figures }] }, () => {});
+  out.smallFigureRows = all(table).filter((n) => n.tag === "tr").map((tr) => tr.children.map((td) => td.textContent));
+}
 console.log(JSON.stringify(out));

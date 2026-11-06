@@ -77,6 +77,31 @@ public sealed class SidebarSearchGroupTests
         Assert.True(r.GetProperty("none").GetProperty("empty").GetBoolean());
     }
 
+    /// <summary>#7984: a search for a tag's name finds the servers tagged under it, on the sidebar list and on the Fleet
+    /// page's own filter, the same rule as the desktop Overview and a custom alert rule on the tag. The walk up the
+    /// forest ends on a parent cycle, on a dangling parent, and on a chain far deeper than the tag rules allow.</summary>
+    [Fact]
+    public void TheSearch_MatchesTheTagsAboveAServersTags_AndTheWalkEnds()
+    {
+        if (!TryRun("parentTags", out var r)) return;
+
+        Assert.Equal(new[] { "ag-listener", "node-a" }, Strings(r.GetProperty("bulk")));
+        Assert.Equal(new[] { "ag-listener", "node-a" }, Strings(r.GetProperty("prod")));
+        Assert.Equal(new[] { "node-a" }, Strings(r.GetProperty("hosts")));
+        Assert.Equal(new[] { "standby" }, Strings(r.GetProperty("dr")));
+        Assert.Equal(new[] { "looped" }, Strings(r.GetProperty("cycle")));
+        Assert.Equal(new[] { "orphaned" }, Strings(r.GetProperty("dangling")));
+        Assert.Equal(new[] { "deep" }, Strings(r.GetProperty("deep199")));
+        Assert.Equal(new[] { "deep" }, Strings(r.GetProperty("deep150")));
+
+        /* Grouped, the matched servers sit under their own tags and the branch above them stays in the tree. */
+        Assert.Equal(
+            new[] { "G:PROD(0)@0", "G:BULK(0)@1", "G:HOSTS(1)@2", "S:node-a@3", "G:LISTENERS(1)@2", "S:ag-listener@3" },
+            Strings(r.GetProperty("grouped")));
+
+        Assert.Equal(new[] { "node-a", "ag-listener" }, Strings(r.GetProperty("fleetPage")));
+    }
+
     [Fact]
     public void TheGroupedList_IsFavourites_ThenTheTagTreeDepthFirst_ThenUntagged_AndAMultiTagServerAppearsUnderEach()
     {
@@ -231,12 +256,12 @@ public sealed class SidebarSearchGroupTests
         var sidebar = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "sidebar.js");
         var app = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "app.js");
 
-        Assert.Contains("import { buildTagGroups, cardMatches } from \"../fleet-groups.js\";", fleet, StringComparison.Ordinal);
+        Assert.Contains("import { buildTagGroups, cardMatches, tagAncestorNames } from \"../fleet-groups.js\";", fleet, StringComparison.Ordinal);
         Assert.DoesNotContain("function buildTagGroups(", fleet, StringComparison.Ordinal);
         Assert.DoesNotContain("function cardMatches(", fleet, StringComparison.Ordinal);
         Assert.Contains("export function buildTagGroups(", shared, StringComparison.Ordinal);
         Assert.Contains("export function cardMatches(", shared, StringComparison.Ordinal);
-        Assert.Contains("cardMatches(c, fleetFilter)", fleet, StringComparison.Ordinal);
+        Assert.Contains("cardMatches(c, fleetFilter, ancestors)", fleet, StringComparison.Ordinal);
 
         Assert.Contains("from \"./fleet-groups.js\"", sidebar, StringComparison.Ordinal);
         Assert.DoesNotContain("function cardMatches(", sidebar, StringComparison.Ordinal);

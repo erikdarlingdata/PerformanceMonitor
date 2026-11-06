@@ -98,6 +98,37 @@ public sealed class KnownPatternsPageBehaviourTests
         Assert.Equal(2, r.GetProperty("writesInAll").GetInt32());
     }
 
+    /// <summary>#7989: a save's answer acts on the form it was sent from. Save, Cancel, then New known pattern with its own text: when
+    /// the first save succeeds, the new form stays open as drawn with its text and its Save enabled, and the list is re-read once.</summary>
+    [Fact]
+    public void ASaveAnsweredAfterCancel_LeavesTheNewFormAsItIs_AndReReadsTheListOnce()
+    {
+        var r = Run("cancelDuringSave");
+
+        Assert.True(r.GetProperty("secondFormOpen").GetBoolean());
+        Assert.False(r.GetProperty("secondFormRedrawn").GetBoolean());
+        Assert.Equal("Second entry.", r.GetProperty("secondTyped").GetString());
+        Assert.True(r.GetProperty("secondSaveEnabled").GetBoolean());
+        Assert.Equal(1, r.GetProperty("listReads").GetInt32());
+        Assert.Equal(1, r.GetProperty("rows").GetInt32());
+        Assert.Equal(1, r.GetProperty("writes").GetInt32());
+    }
+
+    /// <summary>#7989: the same sequence with a save the service refuses. The refusal belongs to the cancelled form: the new form is not
+    /// redrawn and shows no refusal, its Save is enabled, and the list is not re-read.</summary>
+    [Fact]
+    public void ARefusedSaveAnsweredAfterCancel_DoesNotRedrawTheNewForm()
+    {
+        var r = Run("cancelDuringRefusedSave");
+
+        Assert.False(r.GetProperty("secondFormRedrawn").GetBoolean());
+        Assert.Equal("Second entry.", r.GetProperty("secondTyped").GetString());
+        Assert.False(r.GetProperty("refusalShown").GetBoolean());
+        Assert.True(r.GetProperty("secondSaveEnabled").GetBoolean());
+        Assert.Equal(0, r.GetProperty("listReads").GetInt32());
+        Assert.Equal(1, r.GetProperty("writes").GetInt32());
+    }
+
     [Fact]
     public void ABlankScope_SendsNulls_AndNoZoneOrWindowWithoutATimeOfDay()
     {
@@ -212,5 +243,15 @@ public sealed class KnownPatternsPageBehaviourTests
         Assert.False(expired.GetProperty("aMinuteBefore").GetBoolean());
         Assert.False(expired.GetProperty("noExpiry").GetBoolean());
         Assert.False(expired.GetProperty("unreadable").GetBoolean());
+    }
+
+    /* #7975: a server id is a 32-bit hash, negative for about half of all servers. A negative id typed or chosen on the form must be
+       sent as that server, not dropped to null (which saves the entry for every server). */
+    [Fact]
+    public void ANegativeServerId_IsSentAsThatServer_NotDroppedToEveryServer()
+    {
+        var body = Run("pure").GetProperty("negativeServer");
+
+        Assert.Equal(-1714925380, body.GetProperty("server_id").GetInt32());
     }
 }
