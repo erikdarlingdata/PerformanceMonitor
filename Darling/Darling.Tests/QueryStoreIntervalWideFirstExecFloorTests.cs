@@ -70,7 +70,7 @@ public sealed class QueryStoreIntervalWideFirstExecFloorTests
         /* The floor is inside the table CTE, beside the collection_time bound it accompanies, and $1 stayed
            literal through the raw string's interpolation. */
         var floor = sql.IndexOf(Floor("$2"), StringComparison.Ordinal);
-        var collectionBound = sql.IndexOf("COALESCE(interval_start_time_utc, collection_time) >= $2", StringComparison.Ordinal);
+        var collectionBound = sql.IndexOf("collection_time >= $2", StringComparison.Ordinal);
         Assert.True(collectionBound >= 0 && collectionBound < floor, "the floor follows the collection_time bound it accompanies");
         Assert.True(floor < sql.IndexOf("ranked AS", StringComparison.Ordinal));
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
@@ -87,7 +87,7 @@ public sealed class QueryStoreIntervalWideFirstExecFloorTests
         Assert.Single(Regex.Matches(sql, Regex.Escape(QueryStoreIntervalWide.PurgeEdgeMarginSql)));
 
         var floor = sql.IndexOf(Floor("$2"), StringComparison.Ordinal);
-        var collectionBound = sql.IndexOf("collection_time >= $2", StringComparison.Ordinal);
+        var collectionBound = sql.IndexOf("COALESCE(interval_start_time_utc, collection_time) >= $2", StringComparison.Ordinal);
         Assert.True(collectionBound >= 0 && collectionBound < floor, "the floor follows the collection_time bound it accompanies");
         Assert.True(floor < sql.IndexOf("ranked AS", StringComparison.Ordinal));
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);

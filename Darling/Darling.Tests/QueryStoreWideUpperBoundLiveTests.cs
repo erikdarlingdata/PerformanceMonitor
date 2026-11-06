@@ -124,10 +124,13 @@ public sealed class QueryStoreWideUpperBoundLiveTests
         /* ---- The Queries grid's table read: a closed end, and the open end a preset window binds as NULL. ---- */
         var gridNew = ViewerDataService.QueryStoreTopTableSql;
         var gridOld = Cut(gridNew, @"\s*AND\s+\(\$3::timestamp IS NULL OR first_execution_time <= \$3 \+ interval '\d+ minutes'\)");
-        /* #7776: the grid places an interval by its start, so its bound is the day-plus-an-hour start margin and row 11 (first execution 12 h 1 min
-           past the end, a legacy row) now falls inside it: the bound still drops a row past that margin, and nothing else. */
-        Assert.Equal(ExpectedTop.Append(11).OrderBy(q => q), await GridIdsAsync(connection, gridNew, W1, ct));
-        Assert.Equal(ExpectedTop.Append(11).OrderBy(q => q), await GridIdsAsync(connection, gridOld, W1, ct));
+        /* #7776: the grid places an interval by its start (seeded five minutes before its collection), so the window holds row 7 (collected a
+           minute past the end, started inside it) and not row 2 (collected at the start, started before it), and row 11 (first execution
+           12 h 1 min past the end) is inside the day-plus-an-hour start margin. No seeded row is past that margin, so cutting the bound out
+           changes nothing for the grid here. */
+        int[] expectedGrid = { 1, 3, 4, 5, 7, 9, 10, 11, 12, 13 };
+        Assert.Equal(expectedGrid, await GridIdsAsync(connection, gridNew, W1, ct));
+        Assert.Equal(expectedGrid, await GridIdsAsync(connection, gridOld, W1, ct));
         var openEndNew = await GridIdsAsync(connection, gridNew, null, ct);
         Assert.Equal(await GridIdsAsync(connection, gridOld, null, ct), openEndNew);
         Assert.Contains(8, openEndNew);
