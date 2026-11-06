@@ -1278,6 +1278,58 @@ try {
         status: byAttr(main, "data-note-status").map((n) => n.textContent),
       };
     },
+    /* #7954: the Admin writes that ask before they go. The param is "<target>/<answer>": the target is override (Remove on a threshold
+       override), switchOff or switchOn (the service-wide agent switch), undo (a non-plan agent change) or peopleIdentity, peopleGrant,
+       peopleDisable (the People tab with Ann's details open); the answer, no or yes, is what window.confirm answers, or for switchOn which
+       button of the Turn on panel is pressed. Returns the confirm sentences asked, every PUT sent (url, body), and whether the Turn on panel
+       was on the page after the first press and after the answer. */
+    confirmWrites: async (param) => {
+      const [target, answer] = param.split("/");
+      state.canEdit = true;
+      state.confirmAnswer = answer === "yes";
+      state.responder = (method, url) => {
+        if (method === "GET" && url === "/api/fleet") return { status: 200, body: { cards: [{ server_id: 1, display_name: "Alpha" }], tags: [] } };
+        if (method === "GET" && url === "/api/threshold-overrides") {
+          return { status: 200, body: { can_edit: true, servers: [{ server_name: "alpha" }], tags: [], keys: [{ key: "cpu_percent", min: 1, max: 100 }],
+            overrides: [{ server_id: 1, server_name: "alpha", tag_id: null, key: "cpu_percent", database: null, value: 95, global_value: 90, set_by: "person:ann", request_id: null, updated_at: "2026-10-01T00:00:00Z" }] } };
+        }
+        if (method === "GET" && url === "/api/agent-changes") {
+          return { status: 200, body: { enabled: target !== "switchOn", can_decide: true, refusals: [], changes: [{
+            called_id: "c-1", called_at_utc: "2026-10-01T00:00:00Z", server_name: "alpha", server_id: 1, kind: "module_recompile", tool: "recompile_module", actor: "agent-a",
+            reason: "stale plan", result: "done", result_detail: null, undone_at_utc: null, undone_by: null, muted_alerts: 0, force_review: null, can_undo: true }] } };
+        }
+        if (method === "GET" && url === "/api/people") {
+          return { status: 200, body: { can_decide: true, signed_in_admin: true, sign_in_key: "key-of-this-session", people: [{
+            person_id: 1, display_name: "Ann", enabled: true, updated_by: "person:bob", updated_at_utc: "2026-10-01T00:00:00Z",
+            identities: [{ identity_id: 11, kind: "web", external_id: "abcdefghijklmnop" }],
+            grants: [{ grant_id: 21, capability: "approve", kinds: ["kill_session"], scope: "all" }] }] } };
+        }
+        if (method === "PUT") return { status: 200, body: { status: "updated", message: "Done." } };
+        return { status: 404, body: { error: "no such request " + url } };
+      };
+      const tab = target === "override" ? "overrides" : target.startsWith("people") ? "people" : "agent-changes";
+      await mountPage(tab);
+      if (tab === "people") await clickText(main, "Open");
+      const confirmsBefore = confirms.length;
+      const puts = () => requests.filter((r) => r.method === "PUT").map((r) => ({ url: r.url, body: r.body }));
+      const panels = () => byAttr(main, "role", "alertdialog").length;
+      const press = async (label) => {
+        const b = byAttr(main, "aria-label", label).find((n) => n.tag === "button") || buttons(main, label)[0];
+        if (!b) throw new Error("no button " + label);
+        await fire(b, "click");
+        await settle(30);
+      };
+      const labels = {
+        override: "Remove cpu_percent for alpha", switchOff: "Turn off agent changes", undo: "Undo agent change c-1",
+        peopleIdentity: "Remove Web sign-in abcdefgh...", peopleGrant: "Remove grant Approve server actions (Kill sessions), All servers", peopleDisable: "Disable Ann",
+        switchOn: "Turn on agent changes",
+      };
+      await press(labels[target]);
+      const panelShown = panels();
+      /* With no panel on the page there is nothing to answer; the result then shows the first press alone. */
+      if (target === "switchOn" && panelShown) await press(answer === "yes" ? "Turn them on" : "Cancel");
+      return { confirms: confirms.slice(confirmsBefore), writes: puts(), panelShown, panelAfter: panels() };
+    },
     /* #7558: the Feedback tab with no reports in the window (param is the read's hours_back): returns the text the empty family table draws. */
     feedbackEmpty: async (hours) => {
       state.canEdit = false;
