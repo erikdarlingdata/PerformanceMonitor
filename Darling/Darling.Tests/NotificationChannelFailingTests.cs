@@ -243,6 +243,9 @@ public sealed class NotificationChannelFailingTests
 
     private const string TurnedOffTail = ": the Slack webhook channel was turned off (no destination is configured for it)";
 
+    /// <summary>The same resolution for a route's destination, which names the route (<see cref="SlackRoute"/> is route 1).</summary>
+    private const string RouteTurnedOffTail = ": the Slack (route 1) webhook channel was turned off (no destination is configured for it)";
+
     private static int s_serverSequence;
 
     /// <summary>Fails the Slack channel <paramref name="times"/> times against the endpoint the settings name.
@@ -401,7 +404,7 @@ public sealed class NotificationChannelFailingTests
 
     /// <summary>A route can carry a channel the parent settings do not (an only-pages-page setup), so a channel
     /// whose parent settings are empty but which an enabled route still carries is not turned off. Disabling
-    /// that route is what turns it off.</summary>
+    /// that route is what turns it off, and the resolution names the route whose destination it was.</summary>
     [Fact]
     public async Task AChannelWithEmptyParentSettings_ThatAnEnabledRouteCarries_IsNotTurnedOff()
     {
@@ -422,7 +425,7 @@ public sealed class NotificationChannelFailingTests
         await live.Evaluator.ApplyNotificationChannelsAsync(Ct);
 
         var resolved = Assert.Single(live.Rig.History.Records);
-        Assert.EndsWith(TurnedOffTail, resolved.DetailText, StringComparison.Ordinal);
+        Assert.EndsWith(RouteTurnedOffTail, resolved.DetailText, StringComparison.Ordinal);
     }
 
     /// <summary>The service's own read: a channel with no destination comes back with its current count and
