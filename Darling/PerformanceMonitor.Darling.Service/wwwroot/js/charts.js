@@ -24,6 +24,8 @@ import { focusSnapshotAt } from "./snapshot-pick.js";
 
 /* Re-exported so every existing import of the gap rule from charts.js keeps working (it moved to chart-gaps.js, #6291). */
 export { gapThresholdMs, splitAtGaps, bucketMsOf };
+/* One dash plus one gap of the overlay line's pattern (`.series-line-overlay` in app.css, 6 3), in viewBox units (#7668). */
+const OVERLAY_DASH_PERIOD = 9;
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -628,7 +630,11 @@ export function renderLineChart(spec) {
           const [cx, cy] = pts2[0].split(",");
           root.appendChild(svg("circle", { class: "series-dot", cx, cy, r: 4, fill: normalizeColor(series2.color) }));
         } else {
-          root.appendChild(svg("polyline", { class: "series-line series-line-overlay", "clip-path": clipAttr, points: pts2.join(" "), stroke: normalizeColor(series2.color) }));
+          /* #7668: the dash is the overlay's mark of being the other axis, and it only reads while a dash spans a few points. Points closer together than one
+             dash period (6 + 3, app.css) turn the dashes into a hatched block drawn over the first line, so such a run is drawn solid: its colour and its own
+             axis already set it apart. The spacing is the run's mean step in viewBox units, which are pixels here. */
+          const dense = (xs[run[run.length - 1]] - xs[run[0]]) / (run.length - 1) < OVERLAY_DASH_PERIOD;
+          root.appendChild(svg("polyline", { class: "series-line series-line-overlay", "clip-path": clipAttr, points: pts2.join(" "), stroke: normalizeColor(series2.color), ...(dense ? { style: "stroke-dasharray:none" } : {}) }));
         }
       }
     }
