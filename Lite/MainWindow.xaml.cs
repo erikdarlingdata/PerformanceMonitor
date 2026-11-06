@@ -323,6 +323,14 @@ public partial class MainWindow : Window
             // Initialize the DuckDB database
             await NotificationRouteCache.InitializeStoreThenConfigureAsync(() => _databaseInitializer.InitializeAsync(), _routeLoader);
 
+            /* #7812: a rebuild that left the new database without the old data says where the old file went. */
+            if (_databaseInitializer.RebuildOutcome is { } rebuild)
+            {
+                var notice = rebuild.Describe();
+                _ = Dispatcher.BeginInvoke(() =>
+                    MessageBox.Show(this, notice, "Lite started with an empty database", MessageBoxButton.OK, MessageBoxImage.Warning));
+            }
+
             /* The first run of the per-user record of confirmed server settings, before anything below connects: a user who
                used an earlier Lite gets bound the servers whose current host has rows in this store; a new user, and a
                server with only a saved password, confirms each one. A record that cannot be written is shown, not passed over. */

@@ -1521,6 +1521,10 @@ public partial class DuckDbInitializer : IDisposable
        and the move is File.Move. */
     internal Action<string, string>? MoveFileForTests { get; set; }
 
+    /// <summary>#7812: set when a rebuild left the new database without the old data, null otherwise. The window shows
+    /// it once after the database is open.</summary>
+    internal DatabaseRebuildOutcome? RebuildOutcome { get; private set; }
+
     private void MoveFile(string source, string destination)
     {
         if (MoveFileForTests is { } move)
@@ -1624,6 +1628,10 @@ public partial class DuckDbInitializer : IDisposable
                 $"Close any other copy of Lite, check that the folder allows renaming files, and start Lite again. ({ex.Message})", ex);
         }
 
+        /* The old file moved aside and nothing will be imported from it: record where it went (#7812). */
+        if (!exported)
+            RebuildOutcome = new DatabaseRebuildOutcome(backupPath, null);
+
         /* Step 3: If we exported successfully, import into the fresh database */
         if (exported)
         {
@@ -1644,6 +1652,7 @@ public partial class DuckDbInitializer : IDisposable
                 _logger?.LogWarning(ex, "Could not import Parquet data — starting with fresh tables. " +
                     "Parquet files preserved at {ExportDir} for manual recovery; the old database file is preserved at {BackupPath}.",
                     exportDir, backupPath);
+                RebuildOutcome = new DatabaseRebuildOutcome(backupPath, exportDir);
             }
         }
     }
