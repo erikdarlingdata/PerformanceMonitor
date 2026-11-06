@@ -960,7 +960,7 @@ missing AS
     FROM bounds
     CROSS JOIN cutoff
     CROSS JOIN clock
-    CROSS JOIN LATERAL generate_series(bounds.floor_hour, date_trunc('hour', clock.at - interval '" + BuildLagMinutes + " minutes'), interval '1 hour') AS g
+    CROSS JOIN LATERAL generate_series(bounds.floor_hour, date_trunc('hour', clock.at - interval '" + BuildLagMinutes + @" minutes'), interval '1 hour') AS g
     WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_compose_stamp_hours AS h WHERE h.hour = g)
 )
 SELECT p.hour, p.stale, p.blocked, p.failures, p.extended, p.backlog, p.fleet_only
