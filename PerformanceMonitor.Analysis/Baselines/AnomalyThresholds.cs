@@ -92,6 +92,27 @@ public static class AnomalyThresholds
     /// </summary>
     public const double DefaultEventRatioThreshold = 3.0;
 
+    /// <summary>
+    /// #7885: the fewest blocking events (blocked process reports, or DMV snapshot rows on the snapshot arm) an
+    /// analysis window must hold before <c>ANOMALY_BLOCKING_SPIKE</c> can fire, whatever the baseline says. The
+    /// gate bounds the numerator; the ratio arm beside it compares the window's per-hour rate with the bucket's
+    /// real mean.
+    /// </summary>
+    public const long BlockingSpikeMinEvents = 5;
+
+    /// <summary>#7885: the deadlock twin of <see cref="BlockingSpikeMinEvents"/>, for <c>ANOMALY_DEADLOCK_SPIKE</c>.</summary>
+    public const long DeadlockSpikeMinEvents = 3;
+
+    /// <summary>
+    /// #7885: the floor the spike ratio's divisor takes, in events per hour. It only keeps a zero from reaching
+    /// the division: a trustworthy bucket's mean is above zero (a measured zero is
+    /// <see cref="BaselineBucket.IsZeroHistory"/>, never trustworthy), and the smallest real mean, one event over
+    /// a month of covered days, is thousands of times larger, so the floor never alters a measured ratio. A floor
+    /// of one event an hour would turn "3x baseline" into "3 an hour" on every server whose mean sits under one,
+    /// which is most of them, and leave a mature store less sensitive than a young one.
+    /// </summary>
+    public const double EventBaselineRateEpsilon = 1e-6;
+
     // #1486 absolute-magnitude floors (the z-path sanity ceiling) so a z-score against a thin
     // baseline can't surface a trivial value; sigma display cap so a variance-collapsed baseline
     // can't render millions-of-sigma.
