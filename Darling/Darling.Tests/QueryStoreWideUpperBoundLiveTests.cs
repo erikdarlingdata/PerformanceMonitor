@@ -124,7 +124,9 @@ public sealed class QueryStoreWideUpperBoundLiveTests
         /* ---- The Queries grid's table read: a closed end, and the open end a preset window binds as NULL. ---- */
         var gridNew = ViewerDataService.QueryStoreTopTableSql;
         var gridOld = Cut(gridNew, @"\s*AND\s+\(\$3::timestamp IS NULL OR first_execution_time <= \$3 \+ interval '\d+ minutes'\)");
-        Assert.Equal(ExpectedTop, await GridIdsAsync(connection, gridNew, W1, ct));
+        /* #7776: the grid places an interval by its start, so its bound is the day-plus-an-hour start margin and row 11 (first execution 12 h 1 min
+           past the end, a legacy row) now falls inside it: the bound still drops a row past that margin, and nothing else. */
+        Assert.Equal(ExpectedTop.Append(11).OrderBy(q => q), await GridIdsAsync(connection, gridNew, W1, ct));
         Assert.Equal(ExpectedTop.Append(11).OrderBy(q => q), await GridIdsAsync(connection, gridOld, W1, ct));
         var openEndNew = await GridIdsAsync(connection, gridNew, null, ct);
         Assert.Equal(await GridIdsAsync(connection, gridOld, null, ct), openEndNew);

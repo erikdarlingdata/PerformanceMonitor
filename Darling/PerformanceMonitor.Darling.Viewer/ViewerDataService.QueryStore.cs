@@ -170,8 +170,18 @@ public sealed partial class ViewerDataService
                 ) AS rn
             FROM query_store_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
+            /* #7776: the window is the interval's own start, the expression the slicer's bars are keyed on (QueryStoreSlicerSql, #1892),
+               so a slice's grid rows are the intervals its bars draw. It was collection_time, which trails the interval by up to the
+               interval's length: an interval collected inside the slice but started before it showed here with no bar, and the slice's
+               last interval, collected after its end, was missing. Legacy rows have no interval start and keep collection_time.
+               The collection_time bounds below are chunk exclusion, not filters, with the slicer read's reasoning: the floor is implied
+               by the predicate (an interval is collected after it starts; the hour is clock-skew slack) and the ceiling is the
+               slicer's 30 days (a day of engine maximum interval, the rest collector-outage allowance). They keep the
+               (server_id, collection_time) index and the chunk pruning. */
+            AND   COALESCE(interval_start_time_utc, collection_time) >= $2
+            AND   COALESCE(interval_start_time_utc, collection_time) <= $3
+            AND   collection_time >= $2 - interval '1 hour'
+            AND   collection_time <= $3 + interval '30 days'
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
         ),
 
@@ -197,12 +207,13 @@ public sealed partial class ViewerDataService
     /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> is that bound plus an hour (the argument is in
     /// <see cref="QueryStoreIntervalWide.PurgeEdgeMarginSql"/>'s summary). A static readonly rather than a const
     /// because the interval literal is derived from that TimeSpan; <c>$$"""</c> keeps <c>$1</c> literal.</para>
-    /// <para><b>The upper bound (#5523).</b> A window with an end ($3 not NULL) also carries
-    /// <c>first_execution_time &lt;= $3 + </c><see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/>, so the
+    /// <para><b>The upper bound (#5523, #7776).</b> A window with an end ($3 not NULL) also carries
+    /// <c>first_execution_time &lt;= $3 + </c><see cref="QueryStoreIntervalWide.IntervalStartFirstExecMarginSql"/>, so the
     /// <c>(server_id, first_execution_time)</c> btree scans a range finite at both ends instead of everything newer than
-    /// the window start. An open end (NULL) reads to now, as before. It drops a row only for a monitored-server clock more
-    /// than the slack (twelve hours) ahead of the service's, or a collection cycle longer than that
-    /// (<see cref="QueryStoreIntervalWide.FirstExecUpperSlack"/>'s summary).</para>
+    /// the window start. An open end (NULL) reads to now, as before. The window is placed by the interval's start
+    /// (<c>COALESCE(interval_start_time_utc, collection_time)</c>, #7776), so the margin is the one the duration trend's start-placed
+    /// arm uses: an interval that starts before $3 can have a first execution up to its own length (a day) after it. It was
+    /// <see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/> while the window was placed by <c>collection_time</c>.</para>
     /// </summary>
     private static readonly string QueryStoreTopTablePrefix = $$"""
         WITH deduped AS (
@@ -211,10 +222,13 @@ public sealed partial class ViewerDataService
                 1 AS rn
             FROM query_store_interval_wide
             WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   ($3::timestamp IS NULL OR collection_time <= $3)
+            /* #7776: placed by the interval's start, as the raw read and the slicer's bars are (QueryStoreTopRawPrefix). The
+               first_execution_time range below is what the btree serves; this is a residual filter, and no collection_time
+               bound is added because none could drop a row here (an interval is collected after it starts). */
+            AND   COALESCE(interval_start_time_utc, collection_time) >= $2
+            AND   ($3::timestamp IS NULL OR COALESCE(interval_start_time_utc, collection_time) <= $3)
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
-            AND   ($3::timestamp IS NULL OR first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}})
+            AND   ($3::timestamp IS NULL OR first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}})
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
         ),
 
