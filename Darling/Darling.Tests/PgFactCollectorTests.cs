@@ -772,6 +772,118 @@ VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8, $9, 100, $10, $11)", connection);
         }
     }
 
+    /// <summary>
+    /// #7883 live fixture: running_jobs holds one row per running job per collection tick, so a job that
+    /// stays past its limit across five ticks writes five rows. The counts are jobs, not rows: one such job
+    /// reads 1 (value, running_long_count, running_count), and two long jobs plus one not-long job, each
+    /// seen on several ticks, read 2 long of 3 running. A job's second run (same job id, later start time)
+    /// is a different run and counts again.
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_RunningJobs_CountsDistinctJobRuns_NotCollectionRows_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live running-jobs distinct-count test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int oneJobServerId = TestServerId - 5; // own ids - this test cleans its own rows
+        const int manyJobsServerId = TestServerId - 6;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using (var cleanup = new NpgsqlCommand(
+            $"DELETE FROM running_jobs WHERE server_id IN ({oneJobServerId}, {manyJobsServerId});", connection))
+        {
+            await cleanup.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var collector = new PgFactCollector(postgres);
+
+        var bodySucceeded = false;
+        try
+        {
+            var windowEnd = TruncateToSeconds(DateTime.UtcNow);
+            var windowStart = windowEnd.AddHours(-1);
+            var newestTick = windowEnd.AddMinutes(-5);
+
+            /* One run observed on `ticks` consecutive five-minute ticks: same job id, same start time. */
+            async Task PlantRunAsync(int serverId, string jobName, string jobId, DateTime runStart, int ticks, bool isLong, decimal percentOfAverage)
+            {
+                for (var i = 0; i < ticks; i++)
+                {
+                    var tick = newestTick.AddMinutes(-5 * (ticks - 1 - i));
+                    var currentSeconds = (long)(tick - runStart).TotalSeconds;
+                    using var plant = new NpgsqlCommand(@"
+INSERT INTO running_jobs
+    (collection_time, server_id, server_name, job_name, job_id, job_enabled, start_time,
+     current_duration_seconds, avg_duration_seconds, p95_duration_seconds, successful_run_count,
+     is_running_long, percent_of_average)
+VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8, $9, 100, $10, $11)", connection);
+                    plant.Parameters.AddWithValue(tick);
+                    plant.Parameters.AddWithValue(serverId);
+                    plant.Parameters.AddWithValue("running-jobs-distinct-e2e");
+                    plant.Parameters.AddWithValue(jobName);
+                    plant.Parameters.AddWithValue(jobId);
+                    plant.Parameters.AddWithValue(runStart);
+                    plant.Parameters.AddWithValue(currentSeconds);
+                    plant.Parameters.AddWithValue(isLong ? currentSeconds / 3 : currentSeconds);
+                    plant.Parameters.AddWithValue(isLong ? currentSeconds / 2 : currentSeconds * 2);
+                    plant.Parameters.AddWithValue(isLong);
+                    plant.Parameters.AddWithValue(percentOfAverage);
+                    await plant.ExecuteNonQueryAsync(ct);
+                }
+            }
+
+            AnalysisContext Context(int serverId) => new()
+            {
+                ServerId = serverId,
+                ServerName = "running-jobs-distinct-e2e",
+                TimeRangeStart = windowStart,
+                TimeRangeEnd = windowEnd,
+                ServerUtcOffset = TimeSpan.Zero
+            };
+
+            var runStart = windowStart.AddMinutes(-90);
+
+            await PlantRunAsync(oneJobServerId, "Nightly Index Maintenance", "job-a", runStart, ticks: 5, isLong: true, percentOfAverage: 400.0m);
+
+            await PlantRunAsync(manyJobsServerId, "Nightly Index Maintenance", "job-a", runStart, ticks: 5, isLong: true, percentOfAverage: 400.0m);
+            await PlantRunAsync(manyJobsServerId, "Weekly CHECKDB", "job-b", runStart, ticks: 3, isLong: true, percentOfAverage: 250.0m);
+            await PlantRunAsync(manyJobsServerId, "Log Backup", "job-c", runStart, ticks: 4, isLong: false, percentOfAverage: 100.0m);
+
+            var one = Assert.Single(await collector.CollectFactsAsync(Context(oneJobServerId)), f => f.Key == "RUNNING_JOBS");
+            Assert.Equal(1, one.Value);
+            Assert.Equal(1, one.Metadata["running_long_count"]);
+            Assert.Equal(1, one.Metadata["running_count"]);
+            Assert.Equal("Nightly Index Maintenance", one.ObjectName);
+
+            var many = Assert.Single(await collector.CollectFactsAsync(Context(manyJobsServerId)), f => f.Key == "RUNNING_JOBS");
+            Assert.Equal(2, many.Value);
+            Assert.Equal(2, many.Metadata["running_long_count"]);
+            Assert.Equal(3, many.Metadata["running_count"]);
+
+            /* The same job id starting a new run later in the window is a second run. */
+            await PlantRunAsync(oneJobServerId, "Nightly Index Maintenance", "job-a", windowEnd.AddMinutes(-20), ticks: 1, isLong: true, percentOfAverage: 400.0m);
+            var again = Assert.Single(await collector.CollectFactsAsync(Context(oneJobServerId)), f => f.Key == "RUNNING_JOBS");
+            Assert.Equal(2, again.Value);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                using var command = new NpgsqlCommand(
+                    $"DELETE FROM running_jobs WHERE server_id IN ({oneJobServerId}, {manyJobsServerId});", cleanup);
+                await command.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
     private static DateTime TruncateToSeconds(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
 
