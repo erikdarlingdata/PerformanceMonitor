@@ -34,8 +34,10 @@ public sealed class SpikeBaselineFloorLiveTests
     private const int ServerId = -788501;
     private const string ServerName = "srv-7885";
 
-    private static DateTime Today => DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified);
-    private static DateTime WindowStart => Today.AddDays(-1).AddHours(12);
+    /// <summary>One clock read per test instance (#3676): the wait_stats row, the collection log, the planted events and the analysis
+    /// window all derive from it, so a run that crosses UTC midnight between the seeds and the detector still puts them on the same day.</summary>
+    private readonly DateTime _today = LiveClock.Now().Date;
+    private DateTime WindowStart => _today.AddDays(-1).AddHours(12);
 
     [Fact]
     public async Task FourDeadlocksInFourHours_AgainstATrustedFifthOfOneAnHour_Fire()
@@ -109,7 +111,7 @@ public sealed class SpikeBaselineFloorLiveTests
 
     /* ───────────────────────── plumbing ───────────────────────── */
 
-    private static async Task<(ScratchPostgres Scratch, NpgsqlConnection Connection)?> OpenAsync(CancellationToken ct)
+    private async Task<(ScratchPostgres Scratch, NpgsqlConnection Connection)?> OpenAsync(CancellationToken ct)
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         if (string.IsNullOrEmpty(baseConnectionString))
@@ -127,7 +129,7 @@ VALUES ($1, $2, $2, TRUE, 16, now()::timestamp, now()::timestamp)", ServerId, Se
         /* The detector skips every family on a server with no wait or CPU rows in the thirty days before the window. */
         await Exec(connection, ct,
             "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms) VALUES ($1, $2, $3, $4, 'PAGEIOLATCH_SH', 1, 1, 0)",
-            CollectionIdGenerator.Next(), Today.AddDays(-3), ServerId, ServerName);
+            CollectionIdGenerator.Next(), _today.AddDays(-3), ServerId, ServerName);
         return (scratch, connection);
     }
 
@@ -152,26 +154,26 @@ VALUES ($1, $2, $2, TRUE, 16, now()::timestamp, now()::timestamp)", ServerId, Se
 
     /// <summary>Thirty days of SUCCESS runs every quarter hour for the family's collector, ending at yesterday's midnight, and
     /// one event at 12:10 on six of those days. The baseline relations are the plain views a store without TimescaleDB has.</summary>
-    private static async Task SeedTrustedBaselineAsync(NpgsqlConnection connection, bool deadlocks, CancellationToken ct)
+    private async Task SeedTrustedBaselineAsync(NpgsqlConnection connection, bool deadlocks, CancellationToken ct)
     {
         await Exec(connection, ct, @"
 INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms)
 SELECT $1 + row_number() OVER (), $2, $3, $4, t, 100, 'SUCCESS', NULL, 1, 50, 50
 FROM generate_series($5::timestamp, $6::timestamp - interval '1 second', interval '15 minutes') AS t",
-            CollectionIdGenerator.Next() * 1000, ServerId, ServerName, deadlocks ? "deadlocks" : "blocked_process_report", Today.AddDays(-31), Today.AddDays(-1));
+            CollectionIdGenerator.Next() * 1000, ServerId, ServerName, deadlocks ? "deadlocks" : "blocked_process_report", _today.AddDays(-31), _today.AddDays(-1));
         for (var day = 2; day <= 7; day++)
-            await PlantAsync(connection, deadlocks, Today.AddDays(-1 - day).AddHours(12).AddMinutes(10), 100 + day, ct);
+            await PlantAsync(connection, deadlocks, _today.AddDays(-1 - day).AddHours(12).AddMinutes(10), 100 + day, ct);
         await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
     }
 
-    private static async Task SeedWindowAsync(NpgsqlConnection connection, bool deadlocks, int events, CancellationToken ct)
+    private async Task SeedWindowAsync(NpgsqlConnection connection, bool deadlocks, int events, CancellationToken ct)
     {
         for (var i = 0; i < events; i++)
             await PlantAsync(connection, deadlocks, WindowStart.AddMinutes(10 + i), 200 + i, ct);
     }
 
     /// <summary>Runs the real detector over the default four hour window from yesterday 12:00.</summary>
-    private static async Task<Fact?> SpikeAsync(NpgsqlConnection connection, string connectionString, string key, CancellationToken ct)
+    private async Task<Fact?> SpikeAsync(NpgsqlConnection connection, string connectionString, string key, CancellationToken ct)
     {
         var context = new AnalysisContext
         {
