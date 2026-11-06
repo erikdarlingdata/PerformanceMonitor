@@ -64,7 +64,7 @@ public static class OverviewCardView
     /// 9 servers". The needs-attention toggle does not narrow it: the panel is the shortlist that toggle opens.
     /// </summary>
     public static FleetRollup BuildRollup(
-        IReadOnlyList<ServerSummaryItem> cards, FleetTotals totals, int registeredCount, string? search)
+        IReadOnlyList<ServerSummaryItem> cards, FleetTotals? totals, int registeredCount, string? search)
     {
         ArgumentNullException.ThrowIfNull(cards);
 

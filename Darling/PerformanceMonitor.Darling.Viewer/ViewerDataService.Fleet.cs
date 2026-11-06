@@ -389,6 +389,20 @@ public sealed class FleetRollup
     /// <summary>Fleet-wide deadlocks this window (from the cross-server SQL total).</summary>
     public long TotalDeadlocks { get; init; }
 
+    /// <summary>True when the cross-server totals read failed this refresh. <see cref="TotalBlockingEvents"/> and
+    /// <see cref="TotalDeadlocks"/> are then 0 by default, not by measurement, and the tiles say so instead of showing them.</summary>
+    public bool TotalsUnavailable { get; init; }
+
+    /// <summary>The blocking tile's text: the count, or "unavailable" when the totals read failed.</summary>
+    public string TotalBlockingText => TotalsUnavailable
+        ? "Blocking events: unavailable"
+        : "Blocking events: " + TotalBlockingEvents.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>The deadlock tile's text: the count, or "unavailable" when the totals read failed.</summary>
+    public string TotalDeadlocksText => TotalsUnavailable
+        ? "Deadlocks: unavailable"
+        : "Deadlocks: " + TotalDeadlocks.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
     /// <summary>
     /// How much of the fleet <see cref="TotalDeadlocks"/> actually read a deadlock source for, with the
     /// causes named (#3029) — the shared <see cref="FleetDeadlockCoverage"/>, so this panel and the
@@ -541,7 +555,7 @@ public sealed class FleetRollup
     /// servers" beside a large count is good news about a bad number and must not be painted as part of the
     /// alarm.
     /// </summary>
-    public bool DeadlockCoverageIsPartial => DeadlockCoverage.ServersRead < DeadlockCoverage.ServersTotal;
+    public bool DeadlockCoverageIsPartial => TotalsUnavailable || DeadlockCoverage.ServersRead < DeadlockCoverage.ServersTotal;
 
     /// <summary>
     /// The coverage beside the deadlock total, in the "Label: value" shape the rest of that row already
@@ -563,6 +577,13 @@ public sealed class FleetRollup
         {
             var total = DeadlockCoverage.ServersTotal;
             var noun = total == 1 ? "server" : "servers";
+
+            /* The deadlock total beside this line is the fleet-totals read's answer. When that read failed there is no total for
+               the coverage to qualify, and "read all N servers" would vouch for a number nothing read. */
+            if (TotalsUnavailable)
+            {
+                return "Deadlock coverage: unavailable — the fleet totals read failed";
+            }
 
             return DeadlockCoverage.ServersRead >= total
                 ? $"Deadlock coverage: read all {total} {noun}"
@@ -629,7 +650,7 @@ public sealed class FleetRollup
     /// the Overview's "Total Servers" wobble cycle to cycle while the sidebar, sourced from the registry,
     /// never moved).</para>
     /// </summary>
-    public static FleetRollup Build(IReadOnlyList<ServerSummaryItem> summaries, FleetTotals totals, int worstCount = DefaultWorstCount, int? totalServerCount = null)
+    public static FleetRollup Build(IReadOnlyList<ServerSummaryItem> summaries, FleetTotals? totals, int worstCount = DefaultWorstCount, int? totalServerCount = null)
     {
         var registeredTotal = totalServerCount ?? summaries.Count;
         var unknown = Math.Max(0, registeredTotal - summaries.Count);
@@ -645,9 +666,10 @@ public sealed class FleetRollup
             {
                 TotalServers = registeredTotal,
                 UnknownCount = unknown,
-                TotalBlockingEvents = totals.TotalBlockingEvents,
+                TotalBlockingEvents = totals?.TotalBlockingEvents ?? 0,
                 TotalBlockingDetail = ServerHealthClassifier.BlockingTotalUnitsDetail(summaries.Any(s => !s.IsPostgres), summaries.Any(s => s.IsPostgres)),
-                TotalDeadlocks = totals.TotalDeadlocks,
+                TotalDeadlocks = totals?.TotalDeadlocks ?? 0,
+                TotalsUnavailable = totals is null,
                 DeadlockCoverage = deadlockCoverage,
             };
         }
@@ -706,9 +728,10 @@ public sealed class FleetRollup
             CriticalCount = critical,
             OfflineCount = offline,
             ServersWithCollectionFailures = failures,
-            TotalBlockingEvents = totals.TotalBlockingEvents,
+            TotalBlockingEvents = totals?.TotalBlockingEvents ?? 0,
             TotalBlockingDetail = ServerHealthClassifier.BlockingTotalUnitsDetail(summaries.Any(s => !s.IsPostgres), summaries.Any(s => s.IsPostgres)),
-            TotalDeadlocks = totals.TotalDeadlocks,
+            TotalDeadlocks = totals?.TotalDeadlocks ?? 0,
+            TotalsUnavailable = totals is null,
             DeadlockCoverage = deadlockCoverage,
             WorstServers = worst,
             AdditionalProblemCount = Math.Max(0, problems.Count - worst.Count),
