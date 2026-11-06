@@ -44,12 +44,14 @@ const brand = new FakeNode("div");
 byId["auto-refresh-toggle"] = new FakeNode("button");
 brand.appendChild(byId["auto-refresh-toggle"]);
 
+/* Every boot's start() adds its own visibilitychange listener; a scenario fires only the newest, the live module copy's. */
+const docListeners = {};
 globalThis.document = {
   createElement: (t) => new FakeNode(t), createElementNS: (_n, t) => new FakeNode(t),
   createTextNode: (t) => { const n = new FakeNode("#text"); n.textContent = String(t); return n; },
   createDocumentFragment: () => new FakeNode("#frag"),
   getElementById: (id) => byId[id] || null, querySelector: () => null, querySelectorAll: () => [],
-  addEventListener() {}, removeEventListener() {}, body: new FakeNode("body"), documentElement: new FakeNode("html"),
+  addEventListener(t, f) { (docListeners[t] ||= []).push(f); }, removeEventListener() {}, body: new FakeNode("body"), documentElement: new FakeNode("html"),
   cookie: "", hidden: false,
 };
 globalThis.Node = FakeNode;
@@ -263,6 +265,44 @@ out.next5m = await secondsToNextRead("5m");
   await advance(2);
   out.controlHiddenOnFinops = brand.find((x) => x.attrs.id === "page-refresh-control").hidden;
   out.intervalVisibilityOnFinops = brand.find((x) => x.attrs.id === "page-refresh-select").style.visibility;
+}
+
+// #7935: a refresh that is due for the page and the shell together (Resume, and a tab return while the page was due) re-renders the page
+// in the same pass as the shell's reads start, so the page's /api/fleet joins the sidebar's and the store is asked for one fleet roll-up.
+// The shell's reads count as page reads, so a page decided after they start waits a tick or more and then sends its own fleet read.
+{
+  const fleetReads = (from) => fetchLog.slice(from).filter((l) => l.includes("/api/fleet")).length;
+  // Resume: the toggle is a fresh node, so only this boot's click listener is on it.
+  byId["auto-refresh-toggle"] = new FakeNode("button");
+  await fresh("1m", "#/server/alpha");
+  await advance(2);
+  const toggle = byId["auto-refresh-toggle"];
+  toggle.dispatch("click"); await drain(); // paused
+  await advance(2);
+  const log0 = fetchLog.length; const r0 = renders;
+  toggle.dispatch("click"); await drain(); // resumed: one refresh now
+  out.resumeFleetReads = fleetReads(log0);
+  // The page's first read on this route is the fleet read, and its panel reads follow that answer: let the pass's fetches answer
+  // with no tick in between, so a render that started in the pass shows now and one that waited for a tick does not.
+  now += 1000; releaseDue(); await drain();
+  out.resumeRendersBeforeTick = renders - r0;
+  await advance(3);
+  out.resumeRendersAfter = renders - r0;
+  out.resumeFleetReadsAfter = fleetReads(log0);
+  // Tab return with the page due: hidden through a whole interval, then visible again.
+  await fresh("1m", "#/server/alpha");
+  await advance(2);
+  document.hidden = true;
+  await advance(70);
+  const log1 = fetchLog.length; const r1 = renders;
+  document.hidden = false;
+  docListeners.visibilitychange.at(-1)(); await drain();
+  out.returnFleetReads = fleetReads(log1);
+  now += 1000; releaseDue(); await drain();
+  out.returnRendersBeforeTick = renders - r1;
+  await advance(3);
+  out.returnRendersAfter = renders - r1;
+  out.returnFleetReadsAfter = fleetReads(log1);
 }
 
 console.log(JSON.stringify(out));
