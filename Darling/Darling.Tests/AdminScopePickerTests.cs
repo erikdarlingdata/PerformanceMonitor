@@ -90,4 +90,39 @@ public sealed class AdminScopePickerTests
     {
         Assert.False(AdminServerEditBehaviourTests.Run("scopes:unreadable").GetProperty("complete").GetBoolean());
     }
+
+    /* One read fails: the list still says it is incomplete. With the Servers read down, the server list falls back to the fleet's enabled servers
+       and the disabled one is missing (only the Servers read knows it), and both the Routes and Profiles tabs show the notice. */
+    [Fact]
+    public void WhenOnlyTheServersReadFails_TheListsFallBackToTheFleetAndSayTheyAreIncomplete()
+    {
+        var result = AdminServerEditBehaviourTests.Run("scopes:serversFail");
+
+        Assert.False(result.GetProperty("complete").GetBoolean());
+        var servers = result.GetProperty("servers").EnumerateArray().ToArray();
+        Assert.Equal(new[] { 3 }, servers.Select(s => s.GetProperty("id").GetInt32()).ToArray());
+        Assert.Equal("Alpha", servers[0].GetProperty("name").GetString());
+        Assert.False(servers[0].GetProperty("disabled").GetBoolean());
+        Assert.Equal(new[] { 2 }, result.GetProperty("tags").EnumerateArray().Select(t => t.GetProperty("id").GetInt32()).ToArray());
+
+        Assert.Single(AdminServerEditBehaviourTests.Run("routeScope:serversFail").GetProperty("notes").EnumerateArray());
+        Assert.Single(AdminServerEditBehaviourTests.Run("profileScope:serversFail").GetProperty("notes").EnumerateArray());
+    }
+
+    /* The mirror: with the fleet read down there are no tags to offer, the servers still come from the Servers read (disabled one marked), and
+       the tabs say the lists are incomplete. */
+    [Fact]
+    public void WhenOnlyTheFleetReadFails_TheServersStayAndTheListsSayTheyAreIncomplete()
+    {
+        var result = AdminServerEditBehaviourTests.Run("scopes:fleetFails");
+
+        Assert.False(result.GetProperty("complete").GetBoolean());
+        var servers = result.GetProperty("servers").EnumerateArray().ToArray();
+        Assert.Equal(new[] { 3, 7 }, servers.Select(s => s.GetProperty("id").GetInt32()).ToArray());
+        Assert.Equal("Bravo (disabled)", servers[1].GetProperty("name").GetString());
+        Assert.Empty(result.GetProperty("tags").EnumerateArray());
+
+        Assert.Single(AdminServerEditBehaviourTests.Run("routeScope:fleetFails").GetProperty("notes").EnumerateArray());
+        Assert.Single(AdminServerEditBehaviourTests.Run("profileScope:fleetFails").GetProperty("notes").EnumerateArray());
+    }
 }
