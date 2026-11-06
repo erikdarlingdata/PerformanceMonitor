@@ -80,6 +80,8 @@ const rows = bodyRows.map((r) => {
   const details = finding.findAll((n) => n.tag === "details");
   return {
     finding: details.length ? details[0].children[0].textContent : finding.textContent,
+    /* #7652: the cell's classes, which the stylesheet keys the column's width and wrapping on. */
+    findingCellClass: finding.className,
     severity: cell("Severity").textContent,
     occurrences: cell("Occurrences").textContent,
     text: r.textContent,
