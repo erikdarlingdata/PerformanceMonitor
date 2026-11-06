@@ -1909,7 +1909,6 @@ const overridesNoteReadOnly = (managed, adminWritesOff) =>
   "This list shows each threshold that differs from the global value, for one server, one database or a server tag. " +
   adminListOnlyNote(managed, "this page lists them only", "To change an override", adminWritesOff);
 const OVERRIDES_NOTE_UNCONFIRMED = "This list shows each threshold that differs from the global value, for one server, one database or a server tag. Could not check whether this sign-in can change them. Reload the page to try again.";
-const OVERRIDE_DENIED = "Changing a threshold override needs";
 
 /** The rows of the overrides grid from the list read's body. `database` and `server_id` stay on the row for Edit and Remove. */
 export function overrideRows(data) {
