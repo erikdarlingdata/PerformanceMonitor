@@ -332,10 +332,13 @@ async function submit() {
     busy = false;
     if (saveButton) saveButton.disabled = false;
   }
+  /* #7989: the answer belongs to the form it was sent from. When that form was cancelled while the save was out, the form open now, if
+     any, is left as it is: a success still re-reads the list, and a refusal is dropped with the form it was for. */
   if (res.kind === "ok") {
-    closeForm();
+    if (form === f) closeForm();
     return refreshList(live);
   }
+  if (form !== f) return;
   f.banner = res.message;
   drawForm();
 }
