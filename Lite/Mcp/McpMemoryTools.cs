@@ -280,7 +280,8 @@ public sealed class McpMemoryTools
                     sample_time = r.SampleTime.ToString("o"),
                     memory_notification = r.MemoryNotification,
                     memory_indicators_process = r.MemoryIndicatorsProcess,
-                    memory_indicators_system = r.MemoryIndicatorsSystem
+                    memory_indicators_system = r.MemoryIndicatorsSystem,
+                    memory_node_id = r.MemoryNodeId
                 })
             }, McpHelpers.JsonOptions);
         }

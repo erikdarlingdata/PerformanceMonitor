@@ -169,7 +169,8 @@ public sealed class EventWindowedReadsAreBoundedLivePostgresTests
             sample_time,
             memory_notification,
             memory_indicators_process,
-            memory_indicators_system
+            memory_indicators_system,
+            memory_node_id
         FROM v_memory_pressure_events
         WHERE server_id = $1
         AND   sample_time >= $2
