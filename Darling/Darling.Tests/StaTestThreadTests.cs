@@ -342,7 +342,7 @@ public sealed class StaTestThreadTests
     }
 
     /// <summary>
-    /// #7968: a CI body spent 34 s building and showing a window, then began a 30 s wait for idle. The wait's limit passed after the 60 s hang guard
+    /// #7968: a CI body spent 34 s building and showing a window, then began a 30 s wait for idle. The wait's limit passed after the hang guard (60 s then, 180 s now)
     /// did, so the guard stranded the shared thread instead of the wait failing its own test. The wait is now cut to what the guard has left.
     /// </summary>
     [Fact]

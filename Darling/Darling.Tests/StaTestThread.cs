@@ -34,8 +34,8 @@ using Xunit;
 /// <para>
 /// <b>Hang guard.</b> A body that does not return within <see cref="HangGuard"/> fails the calling test, naming it. The shared
 /// thread is then stuck inside that body and cannot be freed, so every later WPF test that asks while the body is still inside
-/// it fails at once with a message naming the stuck test, instead of each waiting out its own 60 s. A body that does return
-/// (it was slow, not blocked for good: #6632, and the two 11-04 hangs of #7600 returned after 68 s and 126 s) frees the thread
+/// it fails at once with a message naming the stuck test, instead of each waiting out its own 180 s. A body that does return
+/// (it was slow, not blocked for good: #6632, and the five stalls seen under #7600 all returned within 126 s, so the guard is 180 s and not 60 s) frees the thread
 /// again once its drain is done, and the tests after that run; only the slow body's own test fails (#7600).
 /// </para>
 /// <para>
@@ -75,7 +75,7 @@ internal static class StaTestThread
     internal static void Step(string what) => s_host.Step(what);
 
     /// <summary>
-    /// How long <see cref="Settle"/> waits for application idle at most. Half the hang guard, so a settle that never ends fails its own test before the guard
+    /// How long <see cref="Settle"/> waits for application idle at most. A sixth of the 180 s hang guard, so a settle that never ends fails its own test well before the guard
     /// strands the shared thread. #7968: the wait is also cut to what the body's hang guard has left (<see cref="StaHost.WithinGuard"/>), because a body that
     /// spent 34 s before it began waiting (a window's first composition flush on a loaded runner) could not otherwise reach this limit before the guard.
     /// </summary>
@@ -84,7 +84,7 @@ internal static class StaTestThread
     /// <summary>
     /// #6333: shows the window and lets the dispatcher reach application idle, with the wait bounded. Replaces the unbounded
     /// <c>PushFrame</c> each WPF test class copied: a frame that is never woken left the body, and with it the shared thread, waiting
-    /// until the 60 s hang guard stranded every later WPF test in the process (a Lite shard lost a whole class that way).
+    /// until the hang guard (60 s then, 180 s now) stranded every later WPF test in the process (a Lite shard lost a whole class that way).
     /// </summary>
     internal static void Settle(Window window)
     {
@@ -172,7 +172,7 @@ internal static class StaTestThread
 /// </summary>
 internal sealed class StaHost
 {
-    internal TimeSpan HangGuard { get; set; } = TimeSpan.FromSeconds(60);
+    internal TimeSpan HangGuard { get; set; } = TimeSpan.FromSeconds(180);
 
     /* A SemaphoreSlim, not a Monitor: a test may be async, so the releasing thread is not promised to be the taking one. */
     private readonly SemaphoreSlim _gate = new(1, 1);
