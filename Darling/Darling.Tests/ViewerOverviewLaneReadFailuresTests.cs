@@ -16,8 +16,9 @@ namespace Darling.Tests;
 
 /// <summary>
 /// What the Overview says when one of its ten lane reads fails. Each lane is drawn from its own read, so one failure costs one
-/// lane, and the tab's status line names the reads that failed instead of saying the tab refreshed. Pure logic over the finished
-/// tasks, so no store and no WPF object is needed.
+/// lane, and the tab's status line names the reads that failed instead of saying the tab refreshed. A failed baseline read alone is
+/// not a failed refresh: the lane drew and only its band is missing. Pure logic over the finished tasks, so no store and no WPF
+/// object is needed.
 /// </summary>
 public sealed class ViewerOverviewLaneReadFailuresTests
 {
@@ -54,5 +55,33 @@ public sealed class ViewerOverviewLaneReadFailuresTests
         var summary = OverviewLaneReadFailures.Summary([("CPU %", Task.FromCanceled(new CancellationToken(canceled: true))), ("Wait ms/sec", Done())]);
 
         Assert.Equal("Overview lanes did not read CPU %", summary);
+    }
+
+    [Fact]
+    public void AFailedBaselineReadAlone_IsNotAFailedRefresh()
+    {
+        var status = OverviewLaneReadFailures.Status(
+            laneReads: [("CPU %", Done()), ("Wait ms/sec", Done()), ("Buffer Pool MB", Done())],
+            baselineReads: [("CPU baseline", Failed("the baseline read missed its deadline")), ("Wait baseline", Done())]);
+
+        Assert.Null(status);
+    }
+
+    [Fact]
+    public void EveryFailedBaselineRead_IsNamedForTheLog()
+    {
+        var logged = OverviewLaneReadFailures.Summary([("CPU baseline", Failed("first")), ("Wait baseline", Done()), ("I/O baseline", Failed("second"))]);
+
+        Assert.Equal("Overview lanes did not read CPU baseline, I/O baseline: first", logged);
+    }
+
+    [Fact]
+    public void AFailedLaneRead_IsAFailedRefresh_AndEveryFailedReadIsNamed()
+    {
+        var status = OverviewLaneReadFailures.Status(
+            laneReads: [("CPU %", Done()), ("Wait ms/sec", Failed("first")), ("Buffer Pool MB", Done())],
+            baselineReads: [("CPU baseline", Done()), ("Wait baseline", Failed("second"))]);
+
+        Assert.Equal("Overview lanes did not read Wait ms/sec, Wait baseline: first", status);
     }
 }
