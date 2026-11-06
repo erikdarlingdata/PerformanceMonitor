@@ -498,6 +498,53 @@ VALUES ($1, $2, $3, $4, $5, $6, 'ROWS', '', 100, 10, 10, 81920, 81920, 20, 30, 6
         Assert.Equal(PvsSecondaryNote.WithoutRow(new[] { "DbSecondary" }, Array.Empty<string>(), new[] { "DbSecondary" }), SecondaryNoteOf(empty));
     }
 
+    private void SetServerMajorVersion(int major) =>
+        _serverManager.GetConnectionStatus(_serverManager.GetEnabledServers()[0].Id).SqlMajorVersion = major;
+
+    [Fact]
+    public async Task PvsStats_ASql2017Secondary_SaysTheVersionHasNoPvs_AndNeverTellsYouToCheckThePrimary()
+    {
+        // SQL Server 2017 has no persistent version store, so no database has a row and the primary has none either (#7822).
+        SetServerMajorVersion(14);
+        await SeedSecondaryAsync("DbSecondary");
+
+        foreach (var database in new string?[] { null, "DbSecondary" })
+        {
+            var reply = await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName, database_name: database);
+            Assert.Equal("empty", StatusOf(reply));
+            using var doc = JsonDocument.Parse(reply);
+            Assert.Contains("no persistent version store", doc.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.Null(SecondaryNoteOf(reply));
+        }
+    }
+
+    [Fact]
+    public async Task PvsStats_ASql2019SecondaryWithNoRowForADatabase_StillGetsTheNote()
+    {
+        SetServerMajorVersion(15);
+        await SeedPvsAsync("DbA", 5, 10);
+        await SeedSecondaryAsync("DbSecondary");
+
+        var expected = PvsSecondaryNote.WithoutRow(new[] { "DbSecondary" }, new[] { "DbA" });
+        Assert.NotNull(expected);
+        Assert.Equal(expected, SecondaryNoteOf(await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName)));
+
+        var filtered = await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName, database_name: "DbSecondary");
+        Assert.Equal("empty", StatusOf(filtered));
+        Assert.Equal(PvsSecondaryNote.WithoutRow(new[] { "DbSecondary" }, Array.Empty<string>(), new[] { "DbSecondary" }), SecondaryNoteOf(filtered));
+    }
+
+    [Fact]
+    public async Task PvsStats_ASql2019SecondaryWithNoPvsRowsAtAll_KeepsTheNoteOnTheNoRowsReply()
+    {
+        SetServerMajorVersion(15);
+        await SeedSecondaryAsync("DbSecondary");
+
+        var reply = await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName);
+        Assert.Equal("empty", StatusOf(reply));
+        Assert.Equal(PvsSecondaryNote.WithoutRow(new[] { "DbSecondary" }, Array.Empty<string>()), SecondaryNoteOf(reply));
+    }
+
     private static string StatusOf(string json)
     {
         using var doc = JsonDocument.Parse(json);
