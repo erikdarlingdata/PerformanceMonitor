@@ -711,6 +711,13 @@ CREATE OR REPLACE VIEW collect.v_blocked_process_reports AS SELECT * FROM collec
         // re-run of V249 adds it back. Safe on a store that never had it.
         new(249, "hasStatementStatsDatabaseName",
             @"ALTER TABLE IF EXISTS collect.pg_statement_stats DROP COLUMN IF EXISTS database_name;"),
+        // V250 (#7691): the memory node on the memory pressure events. The column is the probe's newest sentinel, so the rewind drops the view,
+        // drops the column and creates the view again over the older shape (V199's shape); the re-run of V250 adds the column and re-expands the
+        // view. Safe on a store that never had it.
+        new(250, "hasMemoryPressureNode",
+            @"DROP VIEW IF EXISTS collect.v_memory_pressure_events;
+ALTER TABLE IF EXISTS collect.memory_pressure_events DROP COLUMN IF EXISTS memory_node_id;
+CREATE OR REPLACE VIEW collect.v_memory_pressure_events AS SELECT * FROM collect.memory_pressure_events;"),
     ];
 
     /// <summary>

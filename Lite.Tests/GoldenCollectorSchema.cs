@@ -204,7 +204,8 @@ internal static class GoldenCollectorSchema
     sample_time TIMESTAMP NOT NULL,
     memory_notification VARCHAR NOT NULL,
     memory_indicators_process INTEGER NOT NULL,
-    memory_indicators_system INTEGER NOT NULL
+    memory_indicators_system INTEGER NOT NULL,
+    memory_node_id INTEGER
 )",
         ["file_io_stats"] = @"CREATE TABLE IF NOT EXISTS file_io_stats (
     collection_id BIGINT PRIMARY KEY,
