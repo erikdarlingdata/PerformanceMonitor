@@ -866,10 +866,12 @@ public sealed partial class DarlingWorker
             var now = DateTime.UtcNow;
 
             /* #5735: what the PREVIOUS body measured is the cause of any slot this one steps over, so it is read before this
-               body overwrites it. */
+               body overwrites it. The daily-run permit backlog is read as it stands now: a lost daily slot was lost to it. */
             var priorCauses = new CycleSkipCauses(
                 server.LastBodyMs, server.LastBodySlowestName, server.LastBodySlowestMs, server.LastGateWaitMs,
-                server.LastAnalysisMs, server.LastGateWaitAnalysisHolders);
+                server.LastAnalysisMs, server.LastGateWaitAnalysisHolders,
+                _dailyRunPermits.Waiting,
+                _dailyRunPermits.OldestWaitUtc is { } oldestDailyWait ? (long)Math.Max(0, (now - oldestDailyWait).TotalMilliseconds) : 0);
             var bodyStarted = Stopwatch.GetTimestamp();
             var bodySlowestName = (string?)null;
             var bodySlowestMs = 0L;
@@ -2822,11 +2824,19 @@ LIMIT 1";
             {
                 /* #4938: a daily run's skip costs a whole day for that collector on that server, not one tick, so
                    it says so rather than "re-reads next tick". It only happens when the previous run, which may
-                   still be waiting for a permit, has not finished by the time this one comes due. */
-                _logger.LogInformation(
+                   still be waiting for a permit, has not finished by the time this one comes due. On a fleet whose
+                   daily runs need more permit time than a day holds, that is some collector every day, so the lost
+                   day is counted where the fleet gate and the server's collection_cycle row (what
+                   get_collection_health reads) see it, as a run-time collector's lost day is, and the line names
+                   the permit backlog: how many daily runs are waiting and how long the oldest has waited. */
+                var skippedAt = DateTime.UtcNow;
+                _fleetGateStats?.RecordSkippedSlots(1);
+                server.CycleSkips.AddDailyLost(collectorName, 1, skippedAt);
+                _logger.LogWarning(
                     "  [{Server}] {Collector} skipped this run — its previous daily run has not finished (#4938). " +
-                    "It runs again at its next daily interval.",
-                    server.Config.DisplayName, collectorName);
+                    "It runs again at its next daily interval. {Backlog}",
+                    server.Config.DisplayName, collectorName,
+                    DailyRunLimiter.DescribeBacklog(_dailyRunPermits.Waiting, _dailyRunPermits.Cap, _dailyRunPermits.OldestWaitUtc, skippedAt));
                 return 0;
             }
 

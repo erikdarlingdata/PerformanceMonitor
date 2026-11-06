@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -27,12 +28,26 @@ namespace PerformanceMonitor.Darling.Service;
 internal sealed class DailyRunLimiter
 {
     private readonly object _lock = new();
-    private readonly LinkedList<TaskCompletionSource> _waiters = new();
+    private readonly LinkedList<Waiter> _waiters = new();
+    private readonly Func<DateTime> _clock;
     private int _cap;
     private int _inUse;
 
     /// <summary>A limiter that lets <paramref name="cap"/> runs go at once (at least one).</summary>
-    internal DailyRunLimiter(int cap) => _cap = Math.Max(1, cap);
+    internal DailyRunLimiter(int cap)
+        : this(cap, static () => DateTime.UtcNow)
+    {
+    }
+
+    /// <param name="clock">The UTC clock that stamps when a run starts waiting; tests pin it.</param>
+    internal DailyRunLimiter(int cap, Func<DateTime> clock)
+    {
+        _cap = Math.Max(1, cap);
+        _clock = clock;
+    }
+
+    /// <summary>One run waiting for a permit: its wake-up and when it started waiting.</summary>
+    private sealed record Waiter(TaskCompletionSource Source, DateTime SinceUtc);
 
     /// <summary>How many runs may go at once right now.</summary>
     internal int Cap
@@ -68,6 +83,42 @@ internal sealed class DailyRunLimiter
                 return _waiters.Count;
             }
         }
+    }
+
+    /// <summary>
+    /// When the run that has waited longest started waiting, or null when none is waiting. With <see cref="Waiting"/>,
+    /// the size and the age of the permit backlog: on a fleet whose daily runs need more permit time than a day holds,
+    /// this is the cause a lost daily run names (<see cref="DescribeBacklog"/>).
+    /// </summary>
+    internal DateTime? OldestWaitUtc
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _waiters.First?.Value.SinceUtc;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The backlog in words, for the line a lost daily run logs and the server's collection_cycle row: how many runs wait
+    /// for one of <paramref name="cap"/> permits and how long the oldest has waited, or that none waits, which means the
+    /// run that holds the collector's slot is still executing.
+    /// </summary>
+    internal static string DescribeBacklog(int waiting, int cap, DateTime? oldestWaitUtc, DateTime nowUtc)
+    {
+        if (waiting <= 0 || oldestWaitUtc is not { } oldest)
+        {
+            return "no daily run is waiting for a permit, so the previous run is still executing";
+        }
+
+        var minutes = nowUtc > oldest ? (int)(nowUtc - oldest).TotalMinutes : 0;
+        var age = minutes < 60
+            ? string.Create(CultureInfo.InvariantCulture, $"{minutes} min")
+            : string.Create(CultureInfo.InvariantCulture, $"{minutes / 60} h {minutes % 60} min");
+        return string.Create(CultureInfo.InvariantCulture,
+            $"{waiting} daily run(s) are waiting for one of {cap} permits, and the oldest has waited {age}");
     }
 
     /// <summary>
@@ -120,7 +171,7 @@ internal sealed class DailyRunLimiter
     internal async Task AcquireAsync(CancellationToken cancellationToken)
     {
         var waiter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        LinkedListNode<TaskCompletionSource> node;
+        LinkedListNode<Waiter> node;
         lock (_lock)
         {
             if (_waiters.Count == 0 && _inUse < _cap)
@@ -129,7 +180,7 @@ internal sealed class DailyRunLimiter
                 return;
             }
 
-            node = _waiters.AddLast(waiter);
+            node = _waiters.AddLast(new Waiter(waiter, _clock()));
         }
 
         using var registration = cancellationToken.Register(() => CancelWaiter(node, cancellationToken));
@@ -153,7 +204,7 @@ internal sealed class DailyRunLimiter
         Complete(granted);
     }
 
-    private void CancelWaiter(LinkedListNode<TaskCompletionSource> node, CancellationToken cancellationToken)
+    private void CancelWaiter(LinkedListNode<Waiter> node, CancellationToken cancellationToken)
     {
         lock (_lock)
         {
@@ -166,7 +217,7 @@ internal sealed class DailyRunLimiter
             _waiters.Remove(node);
         }
 
-        node.Value.TrySetCanceled(cancellationToken);
+        node.Value.Source.TrySetCanceled(cancellationToken);
     }
 
     private List<TaskCompletionSource>? GrantWaitersLocked()
@@ -176,7 +227,7 @@ internal sealed class DailyRunLimiter
         {
             _waiters.RemoveFirst();
             _inUse++;
-            (granted ??= []).Add(first.Value);
+            (granted ??= []).Add(first.Value.Source);
         }
 
         return granted;

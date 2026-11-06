@@ -30,15 +30,18 @@ internal sealed record CycleSkipSnapshot(
 }
 
 /// <summary>The measured causes the late run carries in: the previous body's length and its slowest collector, the time
-/// this body queued for a fleet slot, and (#5824) the previous body's scheduled analysis pass length and how many analysis
-/// passes held fleet slots when this body got its slot. 0 or null is "not measured".</summary>
+/// this body queued for a fleet slot, (#5824) the previous body's scheduled analysis pass length and how many analysis
+/// passes held fleet slots when this body got its slot, and the daily-run permit backlog as this body started: how many
+/// daily runs were waiting for a permit and how long the oldest had waited. 0 or null is "not measured".</summary>
 internal readonly record struct CycleSkipCauses(
     long PrevBodyMs,
     string? PrevBodySlowestName,
     long PrevBodySlowestMs,
     long GateWaitMs,
     long PrevAnalysisMs = 0,
-    int GateWaitAnalysisHolders = 0);
+    int GateWaitAnalysisHolders = 0,
+    int DailyRunsWaiting = 0,
+    long OldestDailyWaitMs = 0);
 
 /// <summary>
 /// #5735: the slots one server has lost since its last <c>collection_cycle</c> row, summed over its collectors. The three
@@ -254,8 +257,14 @@ internal static class DarlingCycleSkip
         if (dailySlots > 0)
         {
             var lost = string.Join(", ", snapshot.DailyLostSlots.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).Select(k => k.Replace('_', ' ')));
+            /* A day lost while daily runs were queued for a permit was lost to the permit backlog, not to this server, so
+               the row says how deep the queue was and how long its oldest run had waited. */
+            var backlog = causes.DailyRunsWaiting > 0
+                ? string.Create(CultureInfo.InvariantCulture,
+                    $" while {causes.DailyRunsWaiting} daily run(s) waited for a permit, the oldest for {Format(causes.OldestDailyWaitMs)}")
+                : string.Empty;
             candidates.Add((
-                string.Create(CultureInfo.InvariantCulture, $"{dailySlots} run-time collector slot(s) lost their day ({lost})"),
+                string.Create(CultureInfo.InvariantCulture, $"{dailySlots} run-time collector slot(s) lost their day ({lost}){backlog}"),
                 null, snapshot.DailyLostSlots.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).First(), 0));
         }
 
