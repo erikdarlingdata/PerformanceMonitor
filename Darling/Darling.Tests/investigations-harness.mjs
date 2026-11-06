@@ -78,9 +78,17 @@ globalThis.document = withDocumentListeners({
 
 const fetches = [];
 const bodies = { session: { can_edit: true, signed_in_admin: false } };
+/* The close writes (PUT .../close) the page sent, and a gate that holds the service's answer back while a scenario looks at the page in between. */
+const closes = [];
+let closeGate = null;
 globalThis.fetch = async (url, init) => {
   const u = String(url);
   fetches.push(u);
+  if (init && init.method === "PUT") {
+    closes.push({ url: u, body: init.body ? JSON.parse(init.body) : null });
+    if (closeGate) await closeGate;
+    return { status: 200, ok: true, text: async () => JSON.stringify({ status: "closed" }) };
+  }
   /* The seat the page learns from /api/session: can edit, but not signed in as an admin (#6265). */
   if (u.split("?")[0].endsWith("/api/session")) return { status: 200, ok: true, text: async () => JSON.stringify(bodies.session) };
   if (u.split("?")[0] === "/api/agent-changes") {
@@ -212,6 +220,44 @@ try {
   renderInvestigations(main);
   await settle();
   out.rebuilt = { reportCalls: calls("get_investigation_reports"), hasDetail: slotText().includes("Request on srv-new") };
+
+  /* #7956: a signed-in admin types a close reason, and the poll rebuilds the page before the Close button is pressed: the new form
+     holds the same text. Then a Close whose PUT is still out when the poll redraws the form: the new button is disabled, a press on it
+     sends nothing more, and the answer (one PUT) clears the draft. */
+  session.signed_in_admin = true;
+  rowsOf(main)[0].handlers.click({ type: "click" });
+  await settle();
+  const reasonBox = () => all(main, "input").find((i) => i.attrs["data-close-reason"] === "1");
+  const closeButton = () => all(main, "button").find((b) => b.attrs["data-close-request"] != null);
+  reasonBox().value = "The blocker was a one-off import";
+  if (reasonBox().handlers.input) reasonBox().handlers.input({ type: "input" });
+  renderInvestigations(main);
+  await settle();
+  out.draft = { kept: reasonBox() ? reasonBox().value : null, boxes: all(main, "input").filter((i) => i.attrs["data-close-reason"] === "1").length };
+  let release;
+  closeGate = new Promise((r) => (release = r));
+  closes.length = 0;
+  closeButton().handlers.click({ type: "click" });
+  await settle();
+  renderInvestigations(main);
+  await settle();
+  const rebuiltButton = closeButton();
+  out.closing = {
+    url: closes[0] ? closes[0].url : null,
+    reasonSent: closes[0] && closes[0].body ? closes[0].body.reason : null,
+    putsBeforeReply: closes.length,
+    rebuiltDisabled: rebuiltButton.disabled === true,
+  };
+  rebuiltButton.handlers.click({ type: "click" });
+  await settle();
+  out.closing.putsAfterSecondPress = closes.length;
+  release();
+  closeGate = null;
+  await settle();
+  out.closing.putsAfterReply = closes.length;
+  out.closing.draftAfterClose = reasonBox() ? reasonBox().value : null;
+  out.closing.buttonEnabledAfter = closeButton() ? closeButton().disabled !== true : null;
+  session.signed_in_admin = false;
 
   // Close empties the pane.
   all(main, "button").find((b) => b.textContent === "Close").handlers.click();

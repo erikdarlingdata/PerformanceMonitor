@@ -166,8 +166,11 @@ AND   database_name IS NOT NULL";
 
     /// <summary>
     /// <c>get_current_waits_trend</c>'s waiting-task series (#7877): per wait type, bucketed to <paramref name="bucketMinutes"/>. The inner read keeps the
-    /// per-collection total (the wait type's summed duration in ONE collection); the outer read averages those over the bucket, keeps the
-    /// largest as the peak and counts the collections, so a wide bucket never reads as a bigger wait than one collection. (The desktop chart's
+    /// per-collection total (the wait type's summed duration in ONE collection); the outer read averages those over EVERY collection
+    /// that ran in the bucket (#7974), a collection in which the wait type was absent counting 0, and keeps the largest as the peak, so a wide bucket never reads as a bigger wait
+    /// than one collection and a wait type seen in 1 of 60 collections reads 1/60 of one seen in all 60. The run count M is the bucket's SUCCESS runs of the
+    /// <c>waiting_tasks</c> collector in <c>v_collection_log</c> (a run that found nothing waiting writes no row but is logged), floored at the series' own row
+    /// count so a log older than the data never divides by fewer collections than the series was seen in; <c>collection_count</c> is M. (The desktop chart's
     /// <see cref="GetWaitingTaskTrendAsync"/> sums per bucket on purpose and is not this read.) Darling's twin is <c>DarlingDataReader.GetWaitingTaskTrendAsync</c>.
     /// </summary>
     internal async Task<List<CurrentWaitsWaitPoint>> GetCurrentWaitsWaitPointsAsync(int serverId, int hoursBack, DateTime? asOfUtc, int bucketMinutes)
@@ -193,18 +196,44 @@ WITH per_collection AS
     GROUP BY
         collection_time,
         rtrim(wait_type)
+),
+bucketed AS
+(
+    SELECT
+        GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+        wait_type,
+        SUM(total_wait_ms) AS sum_wait_ms,
+        MAX(total_wait_ms) AS peak_wait_ms,
+        COUNT(*) AS present_count
+    FROM per_collection
+    GROUP BY
+        1, wait_type
+),
+runs AS
+(
+    SELECT
+        GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+        COUNT(*) AS run_count
+    FROM v_collection_log
+    WHERE server_id = $1
+    AND   collector_name = 'waiting_tasks'
+    AND   status = 'SUCCESS'
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    GROUP BY
+        1
 )
 SELECT
-    GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
-    wait_type,
-    ROUND(AVG(total_wait_ms)) AS avg_wait_ms,
-    MAX(total_wait_ms) AS peak_wait_ms,
-    COUNT(*) AS collection_count
-FROM per_collection
-GROUP BY
-    1, wait_type
+    b.bucket_start,
+    b.wait_type,
+    ROUND(CAST(b.sum_wait_ms AS DOUBLE) / GREATEST(COALESCE(r.run_count, 0), b.present_count)) AS avg_wait_ms,
+    b.peak_wait_ms,
+    GREATEST(COALESCE(r.run_count, 0), b.present_count) AS collection_count
+FROM bucketed AS b
+LEFT JOIN runs AS r
+    ON r.bucket_start = b.bucket_start
 ORDER BY
-    1, wait_type";
+    b.bucket_start, b.wait_type";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -228,8 +257,9 @@ ORDER BY
 
     /// <summary>
     /// <c>get_current_waits_trend</c>'s blocked-session series (#7877): per database, bucketed to <paramref name="bucketMinutes"/>. The inner read is
-    /// <see cref="GetBlockedSessionTrendAsync"/>'s per-collection distinct blocked sessions (#7577); the outer read averages them over the bucket
-    /// (a gauge is never summed, #4349), keeps the most any one collection saw as the peak and counts the collections. Darling's twin is
+    /// <see cref="GetBlockedSessionTrendAsync"/>'s per-collection distinct blocked sessions (#7577); the outer read averages them over EVERY collection that ran
+    /// in the bucket (a gauge is never summed, #4349; a collection with none blocked for the database counts 0, #7974, over the same run count as
+    /// <see cref="GetCurrentWaitsWaitPointsAsync"/>) and keeps the most any one collection saw as the peak. Darling's twin is
     /// <c>DarlingDataReader.GetBlockedSessionTrendAsync</c>.
     /// </summary>
     internal async Task<List<CurrentWaitsBlockedPoint>> GetCurrentWaitsBlockedPointsAsync(
@@ -259,18 +289,44 @@ WITH per_collection AS
     GROUP BY
         collection_time,
         database_name
+),
+bucketed AS
+(
+    SELECT
+        GREATEST(time_bucket(to_minutes(CAST(${widthParam} AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+        database_name,
+        SUM(blocked_count) AS sum_blocked_count,
+        MAX(blocked_count) AS peak_blocked_count,
+        COUNT(*) AS present_count
+    FROM per_collection
+    GROUP BY
+        1, database_name
+),
+runs AS
+(
+    SELECT
+        GREATEST(time_bucket(to_minutes(CAST(${widthParam} AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+        COUNT(*) AS run_count
+    FROM v_collection_log
+    WHERE server_id = $1
+    AND   collector_name = 'waiting_tasks'
+    AND   status = 'SUCCESS'
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    GROUP BY
+        1
 )
 SELECT
-    GREATEST(time_bucket(to_minutes(CAST(${widthParam} AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
-    database_name,
-    AVG(blocked_count) AS avg_blocked_count,
-    MAX(blocked_count) AS peak_blocked_count,
-    COUNT(*) AS collection_count
-FROM per_collection
-GROUP BY
-    1, database_name
+    b.bucket_start,
+    b.database_name,
+    CAST(b.sum_blocked_count AS DOUBLE) / GREATEST(COALESCE(r.run_count, 0), b.present_count) AS avg_blocked_count,
+    b.peak_blocked_count,
+    GREATEST(COALESCE(r.run_count, 0), b.present_count) AS collection_count
+FROM bucketed AS b
+LEFT JOIN runs AS r
+    ON r.bucket_start = b.bucket_start
 ORDER BY
-    1, database_name";
+    b.bucket_start, b.database_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
