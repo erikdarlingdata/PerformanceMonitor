@@ -141,7 +141,7 @@ try {
 
   /* Health Checks and Alert Setup Gaps. */
   const health = panels.VIZ.stat(
-    { summary: { text: "11 of 13 judged databases overdue. full backup: a, b. CHECKDB: c." }, captured_at: "2026-11-01T10:00:00" },
+    { summary: { text: "11 of 13 judged databases overdue. Full backup: a, b. CHECKDB: c." }, captured_at: "2026-11-01T10:00:00" },
     config.DATABASE_PROTECTION_SPECS[0]
   );
   const gapSpec = config.AGENT_ALERT_SPECS.find((s) => s.title === "Alert Setup Gaps");

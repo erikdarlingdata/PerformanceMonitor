@@ -1774,7 +1774,7 @@
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CompressableIndexes" Click="FilterButton_Click" Margin="0,0,4,0"/>
-                                        <TextBlock Text="Compressable" FontWeight="Bold" VerticalAlignment="Center"/>
+                                        <TextBlock Text="Compressible" FontWeight="Bold" VerticalAlignment="Center"/>
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>

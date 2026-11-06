@@ -840,11 +840,16 @@ export function metricBands(c, store) {
   /* #3281: on a serverless PostgreSQL target cpuValue above is percent of the capacity CURRENTLY ALLOCATED,
      which is NOT what cpu_severity banded — so the detail names the figure that did, and the ceiling it is a
      fraction of. Without it the chip reads a green 100% and the band looks broken. */
+  /* #7682: a SQL Server that cannot report host CPU (Linux before 2025 CU1) has a SQL figure and no total. The chip says "SQL CPU", so the
+     line under it says why, instead of repeating "SQL 41%". A PostgreSQL target keeps the plain "CPU" label. */
+  const noHostFigure = c.total_cpu_percent == null && c.cpu_percent != null && c.other_process_cpu_percent == null && c.is_postgres !== true;
   const cpuDetail =
     c.acu_utilization_percent != null
       ? "ACU " +
         fmtPct(c.acu_utilization_percent) +
         (c.max_configured_acu != null ? " of " + c.max_configured_acu + " configured" : "")
+      : noHostFigure
+      ? "host CPU not reported"
       : c.cpu_percent != null
       ? "SQL " + fmtPct(c.cpu_percent) + (c.other_process_cpu_percent != null ? " · other " + fmtPct(c.other_process_cpu_percent) : "")
       : null;
@@ -943,7 +948,7 @@ export function metricBands(c, store) {
     /* W19 (#5644): total_cpu_percent is the whole box (SQL Server plus other processes); FinOps reads the SQL Server
        process alone, so this chip says which one it shows. The cpu_percent fallback (a PostgreSQL target) stays "CPU". */
     /* #7682: a server that cannot report host CPU (SQL Server on Linux before 2025 CU1) has a SQL figure and no total, and the chip says so. */
-    chip(c.total_cpu_percent != null ? "Total CPU" : c.cpu_percent != null && c.other_process_cpu_percent == null ? "SQL CPU" : "CPU", cpuValue, sevOf(c.cpu_severity), known(cpuDetail)),
+    chip(c.total_cpu_percent != null ? "Total CPU" : noHostFigure ? "SQL CPU" : "CPU", cpuValue, sevOf(c.cpu_severity), known(cpuDetail)),
     chip("Threads", threadsValue, sevOf(c.threads_severity), known(threadsDetail)),
     chip("Memory", memValue, sevOf(c.memory_severity), known(memDetail)),
     /* #7616 / #7654: a PostgreSQL target's Blocking is how many of its per-minute blocking captures saw any blocking, so the value names that unit.
