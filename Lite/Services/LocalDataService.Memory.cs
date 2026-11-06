@@ -371,7 +371,8 @@ SELECT
     sample_time,
     memory_notification,
     memory_indicators_process,
-    memory_indicators_system
+    memory_indicators_system,
+    memory_node_id
 FROM v_memory_pressure_events
 WHERE server_id = $1
 AND   sample_time >= $2
@@ -391,7 +392,8 @@ ORDER BY sample_time";
                 SampleTime = reader.GetDateTime(0),
                 MemoryNotification = reader.IsDBNull(1) ? "" : reader.GetString(1),
                 MemoryIndicatorsProcess = reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
-                MemoryIndicatorsSystem = reader.IsDBNull(3) ? 0 : reader.GetInt32(3)
+                MemoryIndicatorsSystem = reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
+                MemoryNodeId = reader.IsDBNull(4) ? null : reader.GetInt32(4)
             });
         }
 
@@ -425,7 +427,8 @@ SELECT
     sample_time,
     memory_notification,
     memory_indicators_process,
-    memory_indicators_system
+    memory_indicators_system,
+    memory_node_id
 FROM v_memory_pressure_events
 WHERE server_id = $1
 AND   sample_time >= $2
@@ -444,7 +447,8 @@ LIMIT $4";
                     SampleTime = reader.GetDateTime(0),
                     MemoryNotification = reader.IsDBNull(1) ? "" : reader.GetString(1),
                     MemoryIndicatorsProcess = reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
-                    MemoryIndicatorsSystem = reader.IsDBNull(3) ? 0 : reader.GetInt32(3)
+                    MemoryIndicatorsSystem = reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
+                    MemoryNodeId = reader.IsDBNull(4) ? null : reader.GetInt32(4)
                 });
             }
         }
@@ -574,4 +578,6 @@ public class MemoryPressureEventRow
     public string MemoryNotification { get; set; } = "";
     public int MemoryIndicatorsProcess { get; set; }
     public int MemoryIndicatorsSystem { get; set; }
+    /// <summary>The memory node the record came from (#7691); NULL on a row stored before v81 and on a record with no node.</summary>
+    public int? MemoryNodeId { get; set; }
 }

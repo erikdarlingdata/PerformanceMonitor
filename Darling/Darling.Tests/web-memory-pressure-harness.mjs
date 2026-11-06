@@ -126,6 +126,16 @@ const scenarios = {
     answer = () => data({ server: "SRV1", hours_back: 6, events: [ev(at(3, 5), 2, 0), ev(at(1, 5), 2, 1), ev(at(1, 10), 3, 2), ev(at(1, 20), 0, 1), ev(at(1, 30), 1, 3)] });
     return modules.tabs.memoryPressurePanels("SRV1", { hours: 6, label: "last 6 hours" });
   },
+  // #7691: one event stored once per memory node, the same stamp and notification on nodes 0 and 1, so the grid shows the Node column.
+  twonodes: () => {
+    answer = () => data({ server: "SRV1", hours_back: 6, events: [{ ...ev(at(1, 5), 2, 0), memory_node_id: 0 }, { ...ev(at(1, 5), 2, 0), memory_node_id: 1 }] });
+    return modules.tabs.memoryPressurePanels("SRV1", { hours: 6, label: "last 6 hours" });
+  },
+  // #7691: rows that all name one node (a one-node server) show no Node column, and neither do rows stored before the column (no node at all).
+  onenode: () => {
+    answer = () => data({ server: "SRV1", hours_back: 6, events: [{ ...ev(at(1, 5), 2, 0), memory_node_id: 0 }, { ...ev(at(1, 10), 2, 0), memory_node_id: 0 }, ev(at(2, 5), 2, 0)] });
+    return modules.tabs.memoryPressurePanels("SRV1", { hours: 6, label: "last 6 hours" });
+  },
   // #7691: one event stored once per memory node. Four hours back, two rows at one second with one notification (1 event);
   // three back, two different notifications at one second (2 events); two back, one notification 1 ms apart in one second (1 event).
   nodes: () => {
@@ -182,6 +192,7 @@ console.log(JSON.stringify({
   charts: calls.map((c) => ({ series: c.series, unit: c.unit, mode: c.mode, points: c.points.map((p) => [p.time, p.sql_medium, p.sql_severe, p.os_medium, p.os_severe]), windowStart: c.windowStart, windowEnd: c.windowEnd })),
   panelHeads: all(root, "h3").map((h) => h.textContent),
   tableCells: table ? all(table, "tr").map((tr) => all(tr, "td").map((td) => td.textContent)).filter((cells) => cells.length) : [],
+  tableHeads: table ? all(table, "th").map((th) => th.textContent) : [],
   tableRows: table ? all(table, "tr").map((tr) => all(tr, "td").map((td) => td.textContent)).filter((cells) => cells.length).length : 0,
   notices: all(root, "div").filter((n) => n.className === "strip notice").map((n) => n.textContent),
   /* #7558: the chart's note on what a 0 hour means only explains the chart, so it is the quiet caption, not the yellow notice. */
