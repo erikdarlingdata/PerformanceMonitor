@@ -59,7 +59,7 @@ import { renderEditor } from "./editor.js";
 import { renderNotebookEditor } from "./notebook.js";
 import { renderAlertEditor } from "./alert-editor.js";
 import { getSession, listViews, onViewsChanged } from "./views-api.js";
-import { paintViewList } from "./view-sidebar.js";
+import { paintViewList, viewListAfterRead } from "./view-sidebar.js";
 import { renderMuteRules } from "./pages/mute-rules.js";
 import { renderKnownPatterns } from "./pages/known-patterns.js";
 import { renderManageTags } from "./pages/manage-tags.js";
@@ -275,11 +275,11 @@ export const ROUTE_RENDERERS = {
   alerts: (m) => renderAlerts(m),
   investigations: (m, r) => renderInvestigations(m, r.request),
   proposals: (m, r, o) => renderProposals(m, r.proposal, o),
-  alertRules: (m) => renderAlertRuleList(m),
+  alertRules: (m, r, o) => renderAlertRuleList(m, o),
   alertEditor: (m, r) => renderAlertEditor(m, r.id, r.template),
   admin: (m, r) => renderAdmin(m, r.tab),
   triage: (m, r) => renderTriage(m, r.query),
-  views: (m) => renderViewList(m),
+  views: (m, r, o) => renderViewList(m, o),
   view: (m, r, o) => renderView(m, r.id, o),
   editor: (m, r) => renderEditor(m, r.id),
   notebook: (m, r, o) => renderView(m, r.id, o), // renderView kind-detects -> notebook document
@@ -449,7 +449,8 @@ async function refreshViewList() {
   if (!viewList) return;
   const [session, res] = await Promise.all([getSession(), listViews()]);
   if (isSessionExpired()) return; // the session ended while the list was in flight: keep nothing of it
-  lastViewList = { session, views: res.kind === "data" && Array.isArray(res.data) ? res.data : [] };
+  /* #7929: a failed read keeps the last good list and the paint says so; only an answered list replaces it. */
+  lastViewList = viewListAfterRead(lastViewList, session, res);
   paintViewListNow();
 }
 
@@ -460,7 +461,7 @@ let lastViewList = null;
 function paintViewListNow() {
   if (isSessionExpired() || !viewList || !lastViewList) return;
   const r = currentRoute();
-  paintViewList(viewList, lastViewList.views, lastViewList.session, isViewItemRoute(r.name) ? r.id : null);
+  paintViewList(viewList, lastViewList.views, lastViewList.session, isViewItemRoute(r.name) ? r.id : null, lastViewList.readFailed === true);
 }
 
 /* ─────────────────────────── status bar ─────────────────────────── */

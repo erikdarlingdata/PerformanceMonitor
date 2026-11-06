@@ -101,6 +101,10 @@ export function clampSlice(sel, win, minSpanMs) {
   if (!(end > start)) return null;
   start = Math.round(start / MINUTE_MS) * MINUTE_MS;
   end = Math.round(end / MINUTE_MS) * MINUTE_MS;
+  /* #7931: a window built mid-minute ends off the minute, so the rounding can carry an end that sat at the window end up to 30 s past it (and a
+     start before the window start). Both are held inside the window again: the end is what a narrowed read sends as `as_of` and what the label names. */
+  start = Math.max(win.startMs, start);
+  end = Math.min(win.endMs, end);
   if (end - start < minSpan) {
     end = Math.min(win.endMs, start + minSpan);
     start = Math.max(win.startMs, end - minSpan);
