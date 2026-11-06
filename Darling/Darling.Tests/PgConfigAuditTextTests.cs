@@ -192,7 +192,7 @@ public sealed class PgConfigAuditTextTests
 
         var text = Row(fact, setting, "x");
 
-        Assert.Equal(1, Regex.Matches(text, Regex.Escape(setting + " is ")).Count);
+        Assert.Single(Regex.Matches(text, Regex.Escape(setting + " is ")));
         Assert.DoesNotContain("checkpoint-pressure card", text, StringComparison.Ordinal);
         Assert.DoesNotContain("the composite", text, StringComparison.Ordinal);
     }
