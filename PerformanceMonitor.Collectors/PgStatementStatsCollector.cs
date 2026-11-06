@@ -265,7 +265,7 @@ SELECT
 /* #7783: the function with showtext off, not the view. The view is SELECT * FROM pg_stat_statements(true), and showtext = true
    loads the whole query-text file from disk on every call whether or not query is selected; this read selects no text (the
    hourly statement-text fetch does). The function has taken showtext since pg_stat_statements 1.2, so every layout this
-   collector reads has it. The same choice the Aurora flavor makes with aurora_stat_statements(false). */
+   collector reads has it. The Aurora flavor reads its own function the same way. */
 FROM public.pg_stat_statements(false)
 /* #7731: the database NAME beside dbid, ordinal 31, the same pg_database join PgKernelStatsCollector uses. LEFT, so a statement row whose database was dropped
    still ships (with a NULL name) instead of vanishing with the database. */
