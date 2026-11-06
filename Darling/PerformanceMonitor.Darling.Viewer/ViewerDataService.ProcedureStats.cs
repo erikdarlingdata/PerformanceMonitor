@@ -339,7 +339,7 @@ public sealed partial class ViewerDataService
         /*TAG:object:database_name,schema_name,object_name*/
         GROUP BY database_name, schema_name, object_name
         HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
-        ORDER BY SUM(worker_time_sum) DESC
+        ORDER BY SUM(elapsed_time_sum) DESC
         LIMIT $4
         """;
 
