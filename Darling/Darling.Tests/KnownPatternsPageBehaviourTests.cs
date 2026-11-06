@@ -186,4 +186,14 @@ public sealed class KnownPatternsPageBehaviourTests
         Assert.Equal("notfound", r.GetProperty("interpret404").GetString());
         Assert.Equal("readonly", r.GetProperty("interpret403").GetString());
     }
+
+    /* #7975: a server id is a 32-bit hash, negative for about half of all servers. A negative id typed or chosen on the form must be
+       sent as that server, not dropped to null (which saves the entry for every server). */
+    [Fact]
+    public void ANegativeServerId_IsSentAsThatServer_NotDroppedToEveryServer()
+    {
+        var body = Run("pure").GetProperty("negativeServer");
+
+        Assert.Equal(-1714925380, body.GetProperty("server_id").GetInt32());
+    }
 }

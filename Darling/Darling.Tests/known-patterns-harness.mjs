@@ -184,6 +184,7 @@ try {
     async pure() {
       out.timeOnlyZone = page.formToBody({ time_of_day: "02:00", time_zone: "", note: "n" }, "Europe/Paris");
       out.noTimeNoZone = page.formToBody({ time_zone: "Europe/Paris", window_minutes: "30", note: "n" }, "Europe/Paris");
+      out.negativeServer = page.formToBody({ server_id: "-1714925380", note: "n" }, "UTC");
       out.interpret400 = page.interpretWrite(400, { status: "invalid", error: "The refusal." });
       out.interpret404 = page.interpretWrite(404, { status: "not_found" }).kind;
       out.interpret403 = page.interpretWrite(403, {}).kind;
