@@ -130,6 +130,8 @@ The front door decides where a call goes in this order.
 
 The fan-out tools that take no server are the names in `DarlingFrontDoorRouting.FanOutTools` in the service source. That list is the one place the routing reads, and a read tool that is in no list is fanned out.
 
+`find_queries_by_text` is one of those reads: with no `server_name` it is fanned out, so each store searches the plan-cache text of its own servers and answers with its own trigram index state (a store whose index is not ready answers with the refusal that names it).
+
 
 
 A test in the build fails if any tool is in no class, so a new tool cannot go missing from this routing.

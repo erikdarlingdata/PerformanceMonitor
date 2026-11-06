@@ -72,15 +72,16 @@ public sealed class WebChartAxisBehaviourTests
     }
 
     /// <summary>#7586: the FinOps Version Store (PVS) size trend, drawn by the shipped tab (version-store.js) from a stand-in read. A range
-    /// under 0.01 MB reads one decimal finer than the step needs, so every tick is its own value; a large range keeps its two decimals.</summary>
+    /// under 0.01 MB reads one decimal finer than the step needs, so every tick is its own value. #7702: a large range, whose step is a whole
+    /// number, prints no decimals (2,000, not 2,000.00), as the other size axes do.</summary>
     [Fact]
-    public void ThePvsSizeAxis_GrowsDecimalsWithItsStep_AndKeepsTwoOnALargeRange()
+    public void ThePvsSizeAxis_GrowsDecimalsWithItsStep_AndPrintsNoneOnAWholeNumberStep()
     {
         var r = Run();
         var small = Strings(r.GetProperty("pvsSmall"));
         Assert.Equal(new[] { "0.000", "0.002", "0.004", "0.006", "0.008", "0.010" }, small);
         Assert.Equal(small.Length, small.Distinct().Count());
-        Assert.Equal(new[] { "0.00", "2,000.00", "4,000.00", "6,000.00", "8,000.00", "10,000.00" }, Strings(r.GetProperty("pvsLarge")));
+        Assert.Equal(new[] { "0", "2,000", "4,000", "6,000", "8,000", "10,000" }, Strings(r.GetProperty("pvsLarge")));
     }
 
     /// <summary>#7670: the Collector Duration Trends chart, drawn by the shipped panel (shared.js) from a stand-in read. A longest run of 78 s

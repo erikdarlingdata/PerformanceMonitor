@@ -588,7 +588,7 @@ public static class FactAdvice
            instead of cores per socket, so the vCores basis is the one that names the database-scoped statement. */
         var applySentence = basis.FromVcores
             ? $"An Azure SQL Database has no instance setting for it; set it per database with ALTER DATABASE SCOPED CONFIGURATION SET MAXDOP = {rec}, an online change."
-            : "The Apply button runs sp_configure + RECONFIGURE, an online metadata change.";
+            : "sp_configure + RECONFIGURE is an online metadata change.";
         var viaClause = basis.FromVcores
             ? $"with ALTER DATABASE SCOPED CONFIGURATION SET MAXDOP = {rec}"
             : "via sp_configure + RECONFIGURE";
@@ -651,10 +651,10 @@ public static class FactAdvice
         string remediation = ctfp <= 5
             ? $"CTFP is {ctfp}, the shipped default — on modern hardware it sends trivial queries parallel, paying " +
               "thread-coordination overhead (CXPACKET) for no gain. Raise it to 50 as a starting point, then tune " +
-              "up if CXPACKET persists on genuinely large queries. The Apply button runs sp_configure + RECONFIGURE, " +
+              "up if CXPACKET persists on genuinely large queries. sp_configure + RECONFIGURE is " +
               "an online metadata change. Pair it with a sane MAXDOP if that companion finding fired."
             : $"CTFP is {ctfp}. Raise it toward 50 so only genuinely expensive queries go parallel, then tune up if " +
-              "CXPACKET persists on large queries. The Apply button runs sp_configure + RECONFIGURE, an online change.";
+              "CXPACKET persists on large queries. sp_configure + RECONFIGURE is an online change.";
 
         return fallback with { Headline = headline, Remediation = remediation };
     }
@@ -3437,7 +3437,7 @@ public static class FactAdvice
             Investigation:
                 "`max degree of parallelism` at 0 lets one query use all available schedulers, up to a hard limit of 64 processors. On a server with more cores than a single NUMA node, that lets one large query monopolize schedulers and drive up CXPACKET / SOS_SCHEDULER_YIELD; on a small box — a single NUMA node of 8 or fewer logical processors — MAXDOP 0 is within Microsoft's guidance and is far less likely to be the problem. Open Configuration → Server Configuration to see the value alongside the socket/core layout. Note this is the SERVER default: MAXDOP can be overridden per database with `ALTER DATABASE SCOPED CONFIGURATION SET MAXDOP = N`, which takes precedence for queries running in that database — so if the parallelism is concentrated in one database, set it there rather than changing the instance default. (The analysis engine scores only the server default today; per-database overrides live in the database scoped configuration.)",
             Remediation:
-                "Set MAXDOP from CPU topology, not edition — the SKU is irrelevant to the right value. Microsoft's guidance keys on logical processors per NUMA node: on a single NUMA node keep MAXDOP at or under the processor count, capped at 8; only on multi-NUMA hardware with more than 16 logical processors per node does it go higher (half the per-node count, max 16). The Apply button sets it to this server's cores-per-socket capped at 8 — cores-per-socket is the NUMA-node proxy, since NUMA node count isn't collected — followed by RECONFIGURE, an online metadata change. On a box with more than 16 logical processors per NUMA node you can raise it by hand. Raise Cost Threshold for Parallelism (the companion finding, if it fired) in the same pass.");
+                "Set MAXDOP from CPU topology, not edition — the SKU is irrelevant to the right value. Microsoft's guidance keys on logical processors per NUMA node: on a single NUMA node keep MAXDOP at or under the processor count, capped at 8; only on multi-NUMA hardware with more than 16 logical processors per node does it go higher (half the per-node count, max 16). The suggested value is this server's cores-per-socket capped at 8 — cores-per-socket is the NUMA-node proxy, since NUMA node count isn't collected — set with sp_configure + RECONFIGURE, an online metadata change. On a box with more than 16 logical processors per NUMA node you can raise it by hand. Raise Cost Threshold for Parallelism (the companion finding, if it fired) in the same pass.");
 
         t["CONFIG_CTFP"] = new AdviceBlock(
             Headline:
@@ -3445,7 +3445,7 @@ public static class FactAdvice
             Investigation:
                 "`cost threshold for parallelism` is the optimizer-cost cutoff above which a query gets a parallel plan. The shipped default of 5 is from the 1990s: on modern hardware it sends trivial queries parallel, paying thread-coordination overhead (CXPACKET) for no gain.",
             Remediation:
-                "Raise CTFP to 50 as a starting point (then tune up if CXPACKET persists on genuinely large queries). The Apply button runs `sp_configure 'cost threshold for parallelism', 50` + RECONFIGURE — an online metadata change. Pair it with a sane MAXDOP (the companion finding).");
+                "Raise CTFP to 50 as a starting point (then tune up if CXPACKET persists on genuinely large queries). `sp_configure 'cost threshold for parallelism', 50` + RECONFIGURE is an online metadata change. Pair it with a sane MAXDOP (the companion finding).");
 
         t["CONFIG_MAX_MEMORY_MB"] = new AdviceBlock(
             Headline:

@@ -500,9 +500,11 @@ export function localizeAlertDetail(text, sample) {
 /**
  * The two collectors the blocking reads draw from (#5244): the blocked-process-report XE session when it holds a row in the window
  * for the chosen databases, and the DMV snapshot only when it holds none. The MCP answers name the one that answered in `source`;
- * these are the same two tags.
+ * these are the same two tags. The DMV snapshot is a sample taken on the collector's schedule, not a record of every event, so a trend drawn
+ * from it has a row only where a sample saw blocking (SAMPLED_BLOCKING_SOURCE, which vizLine's zero fill leaves alone).
  */
-export const BLOCKING_SOURCES = ["blocked-process-report", "DMV snapshot"];
+export const SAMPLED_BLOCKING_SOURCE = "DMV snapshot";
+export const BLOCKING_SOURCES = ["blocked-process-report", SAMPLED_BLOCKING_SOURCE];
 
 /**
  * Which collector answered a blocking read, as text in the panel's subtitle (#5244, moved from a row above the chart by #7543 so it

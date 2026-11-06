@@ -29,7 +29,8 @@ public partial class WebhookAlertService
     /// a bool loses the reason, and the reason is what the alert log's <c>send_error</c> carries on a
     /// <see cref="AlertDelivery.ChannelFailed"/> row. <paramref name="webhookUrl"/> is the ROUTED destination
     /// (#3598) — the parent's URL when no route touched this firing — while the proxy stays the parent's:
-    /// a route says where a family lands, not how the channel type is reached.</summary>
+    /// a route says where a family lands, not how the channel type is reached. The outcome is counted against every
+    /// health entry that names the destination (<see cref="EntriesNaming"/>).</summary>
     private async Task<string?> TrySendTeamsAlertAsync(
         IAlertSettings settings,
         string webhookUrl,
@@ -44,6 +45,7 @@ public partial class WebhookAlertService
         string? displayName = null,
         CancellationToken cancellationToken = default)
     {
+        var entries = EntriesNaming(settings, NotificationRouter.TeamsChannel, webhookUrl);
         try
         {
             var payload = BuildTeamsPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl,
@@ -52,11 +54,11 @@ public partial class WebhookAlertService
 
             if (error != null)
             {
-                RecordChannelFailure(ref _consecutiveTeamsFailures, ref _lastTeamsError, "Teams", error);
+                RecordChannelFailure(NotificationRouter.TeamsChannel, entries, error);
                 return error;
             }
 
-            RecordChannelRecovered(ref _consecutiveTeamsFailures, ref _lastTeamsError, "Teams");
+            RecordChannelRecovered(NotificationRouter.TeamsChannel, entries);
             _logger.LogInformation($"Teams webhook sent for {metricName} on {serverName}");
             return null;
         }
@@ -69,7 +71,7 @@ public partial class WebhookAlertService
         }
         catch (Exception ex)
         {
-            RecordChannelException(ref _consecutiveTeamsFailures, ref _lastTeamsError, "Teams", ex);
+            RecordChannelException(NotificationRouter.TeamsChannel, entries, ex);
             return ex.Message;
         }
     }
