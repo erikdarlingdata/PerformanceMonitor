@@ -67,16 +67,18 @@ function svg(tag, attrs) {
  * A unit caption on its axis (#7856). The caption is anchored beside its axis: "end" at the left axis, "start" at a right axis, "end" at the
  * plot's right edge. A caption wider than the room on its growing side ran off the chart ("snapshot rows" lost its first 20 px at the 58 px
  * margin), so it is moved to the chart's edge instead: the plot keeps its size, and a short caption keeps the placement it always had.
+ * `rightPx` is the room kept clear at the chart's right edge: UNIT_CAPTION_EDGE_PX by default, MENU_BTN_CLEAR_PX for the right-axis caption of a chart
+ * that draws the menu button over that corner (#7863).
  */
-function unitCaption(text, x, anchor, W, attrs) {
+export function unitCaption(text, x, anchor, W, attrs, rightPx = UNIT_CAPTION_EDGE_PX) {
   const px = String(text).length * UNIT_CAPTION_CHAR_PX;
   let at = x;
   let how = anchor;
   if (anchor === "end" && x - px < UNIT_CAPTION_EDGE_PX) {
     at = UNIT_CAPTION_EDGE_PX;
     how = "start";
-  } else if (anchor === "start" && x + px > W - UNIT_CAPTION_EDGE_PX) {
-    at = W - UNIT_CAPTION_EDGE_PX;
+  } else if (anchor === "start" && x + px > W - rightPx) {
+    at = W - rightPx;
     how = "end";
   }
   const cap = svg("text", { class: "axis-unit", x: at, y: 11, "text-anchor": how, ...attrs });
@@ -92,6 +94,12 @@ const X_LABEL_GAP_PX = 32;
 /* A unit caption is 10px text (app.css .axis-unit), about 6px per character. Its width is estimated, as the tick labels' is. */
 const UNIT_CAPTION_CHAR_PX = 6;
 const UNIT_CAPTION_EDGE_PX = 2;
+/* The chart's menu button sits over the top-right corner (app.css .chart-menu-btn: right 4px, top 2px, 24 px wide as drawn, so its left edge is
+   28 px from the chart's right edge). A right-axis caption at the top of the chart ends left of it, with a small gap (#7863). */
+const MENU_BTN_RIGHT_PX = 4;
+const MENU_BTN_W_PX = 24;
+const MENU_BTN_GAP_PX = 4;
+const MENU_BTN_CLEAR_PX = MENU_BTN_RIGHT_PX + MENU_BTN_W_PX + MENU_BTN_GAP_PX;
 const X_MAX_INTERVALS = 10;
 
 /* The last width each chart was measured at, by chart key (#5586): a line chart's menuKey (zoomableLineChart sets one) or the
@@ -509,7 +517,7 @@ export function renderLineChart(spec) {
         axis.appendChild(label);
       }
       if (series2.unit && series2.unit !== "%" && !ticksCarryUnit(yLabels2)) {
-        axis.appendChild(unitCaption(series2.unit, plotRight + 8, "start", W, { fill: normalizeColor(series2.color) }));
+        axis.appendChild(unitCaption(series2.unit, plotRight + 8, "start", W, { fill: normalizeColor(series2.color) }, MENU_BTN_CLEAR_PX));
       }
     }
 

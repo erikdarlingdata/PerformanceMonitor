@@ -462,4 +462,41 @@ public sealed class WebChartAxisBehaviourTests
         Assert.Contains(scatter, c => c.Text == "ms" && c.X == 50 && c.Anchor == "end");
         Assert.Contains(scatter, c => c.Text == "MB" && c.Anchor == "end" && c.X > 100);
     }
+
+    /// <summary>#7863: the chart's menu button sits over the top-right corner. Measured in a browser it is 24 px wide at right 4 px, so its left
+    /// edge is 28 px in from the chart's right edge. A long right-axis caption used to end at the chart's edge, under the button.</summary>
+    private const double MenuButtonLeftFromRight = 28;
+
+    [Fact]
+    public void ALongRightAxisCaption_EndsLeftOfTheMenuButton()
+    {
+        var e = Run().GetProperty("captionEdges");
+        foreach (var name in new[] { "lineRightLong", "lineRightMenuLong" })
+        {
+            var chart = e.GetProperty(name);
+            var buttonLeft = chart.GetProperty("width").GetDouble() - MenuButtonLeftFromRight;
+            var right = Captions(chart).Single(c => c.Anchor != "end" || c.X > 100);
+            Assert.True(right.Right <= buttonLeft, $"{name}: right-axis caption '{right.Text}' ends at {right.Right}, under the menu button that starts at {buttonLeft}");
+        }
+    }
+
+    /// <summary>#7863: a right-axis caption that already clears the button stays where it was: left-aligned at the tick labels' x.</summary>
+    [Fact]
+    public void AShortRightAxisCaption_ThatClearsTheMenuButton_KeepsItsX()
+    {
+        var chart = Run().GetProperty("captionEdges").GetProperty("lineRightShort");
+        var right = Captions(chart).Single(c => c.Text == "ms");
+        Assert.Equal("start", right.Anchor);
+        Assert.Equal(chart.GetProperty("rightTickX").GetDouble(), right.X);
+        Assert.True(right.Right <= chart.GetProperty("width").GetDouble() - MenuButtonLeftFromRight);
+    }
+
+    /// <summary>#7863: with no menu button the long caption keeps ending 2 px inside the chart's right edge.</summary>
+    [Fact]
+    public void ALongCaption_WithNoMenuButton_StillEndsAtTheChartEdge()
+    {
+        var c = Run().GetProperty("noMenuCaption");
+        Assert.Equal(998d, c.GetProperty("x").GetDouble());
+        Assert.Equal("end", c.GetProperty("anchor").GetString());
+    }
 }
