@@ -355,6 +355,9 @@ if (scenario === "crosshair") {
   out.series = built.find((s) => s.key === "cpu").series.map((s) => s.label);
   out.lines = find(g, (n) => n.tag === "polyline").length;
   out.notes = find(g, (n) => n.attrs.class === "strip-baseline-note").map((n) => n.textContent);
+  /* #7682: the strip's texts each start at their own point. The host note once sat at the title's x and y, so the two drew over each other. */
+  const starts = find(g, (n) => n.tag === "text" && n.textContent).map((n) => n.attrs.x + "," + n.attrs.y);
+  out.sharedTextStarts = starts.length - new Set(starts).size;
   out.measuredSeries = strips.buildStrips(reads).find((s) => s.key === "cpu").series.map((s) => s.label);
   out.measuredNotes = find(find(strips.drawStrips(strips.buildStrips(reads), domain, 1000, null).node, (n) => n.attrs["data-strip"] === "cpu")[0], (n) => n.attrs.class === "strip-baseline-note").length;
 } else if (scenario === "empty") {

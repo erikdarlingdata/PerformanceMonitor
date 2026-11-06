@@ -322,6 +322,18 @@ public sealed class WebPlainTextTests
         Assert.Contains("starts partway into the window, so", o[0]);
     }
 
+    /* #7682: the CPU tab prints get_cpu_utilization's host_cpu_note under the chart. The raw note names four reply fields and ends "null is not 0";
+       the page says what is not reported and what is drawn, and keeps the engine and version words the reply carries. */
+    [Fact]
+    public void TheHostCpuNote_IsSaidAsWhatIsNotReportedAndWhatIsDrawn()
+    {
+        var o = Run([TrendPayloads.HostCpuUnavailableNote], out _);
+        Assert.Equal("This server cannot report host CPU (SQL Server on Linux before 2025 CU1), so only SQL Server's own CPU is drawn.", o[0]);
+        Assert.DoesNotContain("other_process_cpu", o[0]);
+        Assert.DoesNotContain("peak_total_cpu", o[0]);
+        Assert.DoesNotContain("null is not 0", o[0]);
+    }
+
     /* #5644 W8: the clauses that point an MCP caller at a parameter the page has no control for. */
     [Fact]
     public void ParameterClauses_ForAnMcpCaller_AreDroppedOrSaidInThePagesWords()

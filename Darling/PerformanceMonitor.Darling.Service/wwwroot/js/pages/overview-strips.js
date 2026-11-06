@@ -376,9 +376,10 @@ export function drawStrips(strips, domain, width, onZoom) {
     }
 
     if (s.hostNote && hasData) {
-      const hn = svg("text", { class: "strip-baseline-note", x: plotL, y: top + 12, "text-anchor": "start" });
+      /* A span inside the title, so it follows the title's own width. A text of its own at the title's x and y drew the two on top of each other. */
+      const hn = svg("tspan", { class: "strip-baseline-note", dx: 8 });
       hn.textContent = s.hostNote;
-      g.appendChild(hn);
+      title.appendChild(hn);
     }
 
     if (!hasData) {
