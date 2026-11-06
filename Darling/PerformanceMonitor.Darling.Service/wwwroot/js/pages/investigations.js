@@ -106,8 +106,8 @@ export function listParams(choices) {
 
 const choices = { state: "", family: "", requestId: null };
 /* #7956: the Close reason as typed for ONE request, with whether its box has the focus and where the caret is. The poll's rebuild draws
-   the form from it, as Job History does for its job box. A successful close, the pane's Close button, a filter change and picking
-   another request drop it. */
+   the form from it, as Job History does for its job box. A successful close of its own request, the pane's Close button, a filter
+   change and picking another request drop it. */
 let closeDraft = null;
 /* #7956: the requests whose close PUT is out. A form the poll draws while one is out has its button disabled, and a press on it sends
    nothing (the pressing set of proposals.js). */
@@ -118,10 +118,12 @@ let pageSeq = 0;
 let detailSeq = 0;
 let pageAbort = null;
 let detailAbort = null;
-/* #6793: leaving the page (route() calls beginPageScope) aborts its reads. */
+/* #6793: leaving the page (route() calls beginPageScope) aborts its reads. #7987: the reason box leaves with the page, so its draft is
+   marked unfocused: the form drawn on return keeps the reason and does not take the focus. */
 onPageLeave(() => {
   if (pageAbort) pageAbort.abort();
   if (detailAbort) detailAbort.abort();
+  if (closeDraft) closeDraft.focused = false;
 });
 
 function select(label, options, value, onPick) {
@@ -169,7 +171,8 @@ function closeForm(row, access, offNote) {
     if (out.message === null) return;
     now.status.textContent = out.message;
     if (out.ok) {
-      closeDraft = null;
+      /* #7987: only the closed request's own draft is dropped; a reason being typed for another request is kept for the re-read's form. */
+      if (closeDraft && String(closeDraft.requestId) === String(row.request_id)) closeDraft = null;
       if (reloadList) await reloadList();
     }
   });
