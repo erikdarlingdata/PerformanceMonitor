@@ -173,9 +173,8 @@ public sealed class DarlingQueryHeatmapSurfaceAndSqlTests
         Assert.DoesNotContain("LEFT(query_text, 120)", sql, StringComparison.Ordinal);
 
         /* DuckDB's ARG_MAX has no Postgres equivalent; the viewer's replacement is a top-1 window over the
-           cell, with the cell's count carried alongside so one pass yields both. */
+           cell. */
         Assert.Contains("ROW_NUMBER() OVER (PARTITION BY time_bin, bucket_index ORDER BY delta_execution_count DESC)", sql, StringComparison.Ordinal);
-        Assert.Contains("COUNT(*) OVER (PARTITION BY time_bin, bucket_index)", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE rn = 1", sql, StringComparison.Ordinal);
     }
 
@@ -720,6 +719,35 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
 
             var names = grid.EnumerateObject().Select(p => p.Name).ToList();
             Assert.Equal(["effective_start", "window_truncated", "truncation_note"], names.Skip(names.IndexOf("hours_back") + 1).Take(3));
+        });
+    }
+
+    /// <summary>#7881: <c>query_count</c> is the number of distinct queries in the cell, not the sample rows. One hash
+    /// collected five times in one 5-minute bin is ONE query (the old per-row count read 5), and the same count reaches the
+    /// tool's reply whatever the bin width, so a wider bin does not report more queries for the same ones.</summary>
+    [Fact]
+    public async Task OneQueryCollectedFiveTimesInACell_CountsAsOneQuery_AgainstDevPostgres()
+    {
+        await WithServerAsync(async (connection, postgres, baseNow, ct) =>
+        {
+            var bin = FloorToHour(baseNow.AddHours(-3)); /* on a 5-minute boundary, so +0..+4 minutes stay in one bin */
+            /* ~50ms per execution -> one magnitude bucket for every row. */
+            for (var minute = 0; minute < 5; minute++)
+                await SeedAsync(connection, ct, bin.AddMinutes(minute), "0xSTEADY", deltaExec: 5, deltaElapsed: 250_000);
+            await SeedAsync(connection, ct, bin, "0xTWICE", deltaExec: 1, deltaElapsed: 50_000);
+            await SeedAsync(connection, ct, bin.AddMinutes(1), "0xTWICE", deltaExec: 1, deltaElapsed: 50_000);
+
+            var rows = await DarlingQueryHeatmapReader.GetQueryHeatmapAsync(
+                postgres, ServerId, HeatmapMetric.Duration, bin.AddMinutes(-1), bin.AddMinutes(4), DatabaseFilter.All, 5, 100, 200, ct);
+            var cell = Assert.Single(rows);
+            Assert.Equal(2, cell.QueryCount); /* two queries, seven sample rows */
+
+            var steadyOnly = await DarlingQueryHeatmapReader.GetQueryHeatmapAsync(
+                postgres, ServerId, HeatmapMetric.Duration, bin.AddMinutes(2), bin.AddMinutes(4), DatabaseFilter.All, 5, 100, 200, ct);
+            Assert.Equal(1, Assert.Single(steadyOnly).QueryCount); /* one query, three sample rows */
+
+            var wide = Root(await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 24, bucket_minutes: 60));
+            Assert.Equal(2, wide.GetProperty("cells").EnumerateArray().Max(c => c.GetProperty("query_count").GetInt64()));
         });
     }
 
