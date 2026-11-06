@@ -110,6 +110,20 @@ let busy = false;
 let pending = null;
 /* #7954: true while the Turn on warning panel is shown; the switch is written only from that panel's button. */
 let pendingSwitch = false;
+const buttons = new Set();
+
+function setBusy(value) {
+  busy = value;
+  for (const b of buttons) b.disabled = value;
+}
+
+/** A button of this tab: disabled while a write is in flight, and tracked so the next write disables it at once. */
+function button(props) {
+  const b = el("button", { type: "button", ...props });
+  b.disabled = busy;
+  buttons.add(b);
+  return b;
+}
 
 /** The state the server reported, in a line a person can read: the plan forced now, or that none is. */
 export function agentStateText(state) {
@@ -122,6 +136,7 @@ export function agentStateText(state) {
 export async function buildAgentChanges(body, generation, ctx) {
   const res = await apiGet("/api/agent-changes");
   if (!ctx.isCurrent(generation)) return;
+  buttons.clear();
   const nodes = [];
   if (status) nodes.push(status.isError ? errorStrip(status.message) : noticeStrip(status.message));
   if (pending) nodes.push(confirmPanel(pending, ctx));
@@ -140,8 +155,8 @@ export async function buildAgentChanges(body, generation, ctx) {
   const rows = agentChangeRows(data);
   const columns = AGENT_CHANGE_COLUMNS.concat(canDecide ? [{
     key: "undo", label: "Undo", csv: false, copy: false,
-    render: (row) => (row && row.can_undo ? el("button", {
-      class: "btn", type: "button", text: "Undo", "aria-label": "Undo agent change " + row.called_id,
+    render: (row) => (row && row.can_undo ? button({
+      class: "btn", text: "Undo", "aria-label": "Undo agent change " + row.called_id,
       onClick: () => {
         /* #7954: a plan force or unforce is confirmed through the service's own two-step answer (confirmPanel); every other kind asks here first. */
         if (!row.is_plan && !window.confirm("Undo agent change " + row.called_id + " (" + row.kind + " on " + row.server + ")? The setting goes back to what it was before the agent changed it.")) return undefined;
@@ -167,8 +182,8 @@ function switchBar(enabled, canDecide, ctx) {
   const label = enabled ? "Agent changes are ON." : "Agent changes are OFF: every agent change is refused (actions_off).";
   const children = [el("span", { text: label })];
   if (canDecide) {
-    children.push(el("button", {
-      class: "btn" + (enabled ? "" : " primary"), type: "button", text: enabled ? "Turn off agent changes" : "Turn on agent changes",
+    children.push(button({
+      class: "btn" + (enabled ? "" : " primary"), text: enabled ? "Turn off agent changes" : "Turn on agent changes",
       onClick: () => {
         /* #7954: turning the switch off asks here; turning it on shows the warning panel first, as the per-server action switches do. */
         if (enabled) return window.confirm("Turn off agent changes? Every agent change on every server is refused until they are turned on again.") ? flip(false, ctx) : undefined;
@@ -196,22 +211,22 @@ function switchPanel(ctx) {
     el("p", { class: "mute-label", text: "Turn on: agent changes" }),
     el("p", { text: SWITCH_ON_WARNING }),
     el("div", { class: "row-actions" }, [
-      el("button", { class: "btn primary", type: "button", text: "Turn them on", onClick: () => flip(true, ctx) }),
-      el("button", { class: "btn", type: "button", text: "Cancel", onClick: () => { pendingSwitch = false; ctx.repaint(); } }),
+      button({ class: "btn primary", text: "Turn them on", onClick: () => flip(true, ctx) }),
+      button({ class: "btn", text: "Cancel", onClick: () => { pendingSwitch = false; ctx.repaint(); } }),
     ]),
   ]);
 }
 
 async function flip(enabled, ctx) {
   if (busy) return;
-  busy = true;
+  setBusy(true);
   pendingSwitch = false;
   try {
     const res = await apiWrite("PUT", "/api/agent-changes/switch", { enabled });
     if (res && res.status === 200) status = { message: enabled ? "Agent changes are on." : "Agent changes are off.", isError: false };
     else if (res && !res.expired) status = { message: (res.body && res.body.error) || "The switch was not changed.", isError: true };
   } finally {
-    busy = false;
+    setBusy(false);
   }
   ctx.repaint();
 }
@@ -223,15 +238,15 @@ function confirmPanel(p, ctx) {
     el("p", { text: agentStateText(p.state) }),
     el("pre", { text: p.statement }),
     el("div", { class: "row-actions" }, [
-      el("button", { class: "btn primary", type: "button", text: "Confirm undo", onClick: () => undo(p.calledId, ctx, { confirm: true, statement: p.statement }) }),
-      el("button", { class: "btn", type: "button", text: "Cancel", onClick: () => { pending = null; ctx.repaint(); } }),
+      button({ class: "btn primary", text: "Confirm undo", onClick: () => undo(p.calledId, ctx, { confirm: true, statement: p.statement }) }),
+      button({ class: "btn", text: "Cancel", onClick: () => { pending = null; ctx.repaint(); } }),
     ]),
   ]);
 }
 
 async function undo(calledId, ctx, sent) {
   if (busy) return;
-  busy = true;
+  setBusy(true);
   let out;
   try {
     out = agentUndoOutcome(await apiWrite("PUT", "/api/agent-changes/" + encodeURIComponent(calledId) + "/undo", sent || {}));
@@ -240,7 +255,7 @@ async function undo(calledId, ctx, sent) {
     pending = null;
     out = { message: "Could not undo: " + (e && e.message ? e.message : String(e)), isError: true, reread: false };
   }
-  busy = false;
+  setBusy(false);
   if (out.message) status = { message: out.message, isError: out.isError };
   ctx.repaint();
 }
