@@ -214,10 +214,47 @@ VALUES ($1, $2, $3, $4, 'Db', NULL, $5, 'ROWS', $6, NULL, $7, $8)",
         Assert.Equal(
             new[]
             {
-                "buffer_pool_mb", "buffer_pool_pct", "forced_grants", "grant_timeouts", "grant_utilization_pct", "max_grant_waiters",
+                "buffer_pool_mb", "buffer_pool_pct", "forced_grants", "grant_reason", "grant_timeouts", "grant_utilization_pct", "max_grant_waiters",
                 "memory_basis", "memory_ratio", "physical_memory_mb", "stolen_memory_note", "stolen_memory_pct", "target_memory_mb", "total_memory_mb",
             },
             doc.RootElement.GetProperty("memory").EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray());
+    });
+
+    /// <summary>#7906: a server whose memory-grant collector is off, gated or has not run has no grant sample in the window. Its four
+    /// grant figures are null with a reason, in the read and on the wire, not the 0 waiters and 0% utilization a healthy idle server reads.</summary>
+    [Fact]
+    public Task ServerWithoutGrantSamples_HasNullGrantFigures_AndAReason() => WithStoreAsync(async (ds, ct) =>
+    {
+        var id = ServerIdHelper.GetDeterministicHashCode(ServerNameNoProps);
+        var dto = (await DarlingFinOpsUtilizationReader.GetUtilizationEfficiencyAsync(ds, id, 30, ct))!;
+        /* Boxed: a nullable figure with no value reads as null here, and a number of any kind does not. */
+        object? waiters = dto.MaxGrantWaiters, timeouts = dto.GrantTimeouts, forced = dto.ForcedGrants, utilization = dto.GrantUtilizationPct;
+        Assert.Null(waiters);
+        Assert.Null(timeouts);
+        Assert.Null(forced);
+        Assert.Null(utilization);
+
+        using var doc = await CallAsync(ds, ServerNameNoProps, ct: ct);
+        var mem = doc.RootElement.GetProperty("memory");
+        Assert.Equal(JsonValueKind.Null, mem.GetProperty("max_grant_waiters").ValueKind);
+        Assert.Equal(JsonValueKind.Null, mem.GetProperty("grant_timeouts").ValueKind);
+        Assert.Equal(JsonValueKind.Null, mem.GetProperty("forced_grants").ValueKind);
+        Assert.Equal(JsonValueKind.Null, mem.GetProperty("grant_utilization_pct").ValueKind);
+        Assert.Equal("no memory grant sample in the last 24 hours", mem.GetProperty("grant_reason").GetString());
+    });
+
+    /// <summary>#7906: a server with grant samples keeps its figures, and carries no reason.</summary>
+    [Fact]
+    public Task ServerWithGrantSamples_KeepsItsGrantFigures() => WithStoreAsync(async (ds, ct) =>
+    {
+        var dto = (await DarlingFinOpsUtilizationReader.GetUtilizationEfficiencyAsync(ds, FinOpsUtilizationGoldenLiveTests.ServerIdA, 30, ct))!;
+        using var doc = await CallAsync(ds, FinOpsUtilizationGoldenLiveTests.ServerNameA, ct: ct);
+        var mem = doc.RootElement.GetProperty("memory");
+        Assert.Equal(dto.MaxGrantWaiters, mem.GetProperty("max_grant_waiters").GetInt64());
+        Assert.Equal(dto.GrantTimeouts, mem.GetProperty("grant_timeouts").GetInt64());
+        Assert.Equal(dto.ForcedGrants, mem.GetProperty("forced_grants").GetInt64());
+        Assert.Equal(FinOpsWireFigures.Pct(dto.GrantUtilizationPct), mem.GetProperty("grant_utilization_pct").GetDecimal());
+        Assert.True(!mem.TryGetProperty("grant_reason", out var reason) || reason.ValueKind == JsonValueKind.Null);
     });
 
     [Fact]

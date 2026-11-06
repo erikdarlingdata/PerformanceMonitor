@@ -71,6 +71,8 @@ public sealed partial class DarlingMcpFinOpsTools
         var vcoreEdition = ServerHardwareScope.HardwareIsTheHosts(dto.EngineEdition);
         var noVcores = vcoreEdition && dto.CpuCount <= 0;
         var hasCost = monthly > 0m;
+        /* #7906: the read leaves all four grant figures null when the window holds no memory grant sample. */
+        var hasGrants = dto.MaxGrantWaiters is not null || dto.GrantTimeouts is not null || dto.ForcedGrants is not null || dto.GrantUtilizationPct is not null;
 
         return JsonSerializer.Serialize(new
         {
@@ -113,10 +115,13 @@ public sealed partial class DarlingMcpFinOpsTools
                 stolen_memory_pct = FinOpsWireFigures.Pct(FinOpsUtilizationFigures.StolenMemoryPct(dto.TotalMemoryMb, dto.BufferPoolMb)),
                 /* The Viewer's tooltip text for an amber or red figure (#6139); null while the figure is below amber. */
                 stolen_memory_note = StolenMemoryNoteOrNull(FinOpsUtilizationFigures.StolenMemoryPct(dto.TotalMemoryMb, dto.BufferPoolMb)),
+                /* #7906: null, with grant_reason saying why, when no memory grant sample was collected in the window (the collector off,
+                   gated by the engine edition or not yet run); never the 0 waiters and 0% utilization an idle server reads. */
                 max_grant_waiters = dto.MaxGrantWaiters,
                 grant_timeouts = dto.GrantTimeouts,
                 forced_grants = dto.ForcedGrants,
                 grant_utilization_pct = FinOpsWireFigures.Pct(dto.GrantUtilizationPct),
+                grant_reason = hasGrants ? null : "no memory grant sample in the last 24 hours",
             },
             monthly_cost_usd = hasCost ? monthly : (decimal?)null,
             annual_cost_usd = hasCost ? FinOpsCost.Annual(monthly) : (decimal?)null,

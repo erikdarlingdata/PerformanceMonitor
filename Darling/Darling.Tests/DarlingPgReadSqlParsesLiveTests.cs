@@ -104,6 +104,10 @@ public sealed class DarlingPgReadSqlParsesLiveTests
            population) and into the bad-actor detail read of PgTargetDrillDownCollector. Not a statement, and verified
            where it is spliced. */
         "DarlingPgStatementReader.WalBytesWindowSql",
+        /* #7909: the seed lookup's bound, one INTERVAL literal spliced into PgTopQueriesSql (in the parse-checked population)
+           and into the bad-actor detail read of PgTargetDrillDownCollector (executed on a real store by
+           PgOldVersionReadPathLiveTests and DarlingPgTopQueriesLiveTests). Not a statement, and verified where it is spliced. */
+        "DarlingPgStatementReader.SeedLookbackSql",
         "DarlingPgStatementReader.IsServiceStatementSql",
         /* #3278's twin of the line above, and the same reasoning: an IN-list fragment built from
            EnumeratedCollectorDriver.FreshnessSuccessStatuses, so it is 'SUCCESS', 'SKIPPED' and not a
