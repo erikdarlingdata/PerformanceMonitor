@@ -11,6 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -66,7 +67,7 @@ VALUES ($1,$2,$3,$4,'master',1,TRUE,10,1000)",
 
         var (rows, note) = await viewer.GetPvsStatsLatestWithNoteAsync(ServerId, cancellationToken: ct);
         Assert.Single(rows);
-        Assert.Equal(PvsSecondaryNote.WithoutRow(new[] { "AgDb" }, new[] { "master" }, DatabaseFilter.All), note);
+        Assert.Equal(PvsSecondaryNote.WithoutRow(new[] { "AgDb" }, new[] { "master" }, null), note);
         Assert.StartsWith("1 database has no row here: this server holds a secondary copy of it in an availability group.", note, StringComparison.Ordinal);
 
         /* The saved database filter chose only master, so the secondary copy is not among the databases the grid is about. */

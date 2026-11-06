@@ -8,9 +8,12 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Analysis;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -148,6 +151,22 @@ ORDER BY lower(p.database_name), p.database_name, p.collection_time";
         }
 
         return items;
+    }
+
+    /// <summary>
+    /// #7706: the latest PVS rows plus the one-sentence note for a database this server holds only as an availability group secondary
+    /// copy and that has no row here (<see cref="PvsSecondaryNote"/>, the same sentence Darling's tool and grid use). The note is null
+    /// when there are no rows, and fails open: stale or missing snapshots, a standalone server and Azure SQL Database give no note.
+    /// </summary>
+    public async Task<(List<PvsStatsRow> Rows, string? SecondaryNote)> GetPvsStatsLatestWithNoteAsync(
+        int serverId, IReadOnlyList<string>? databaseNames = null)
+    {
+        var rows = await GetPvsStatsLatestAsync(serverId, databaseNames);
+        if (rows.Count == 0)
+            return (rows, null);
+
+        var secondary = await SecondaryReplicaScope.ReadAsync(_duckDb, serverId, DateTime.UtcNow, System.Threading.CancellationToken.None);
+        return (rows, PvsSecondaryNote.WithoutRow(secondary, rows.Select(r => r.DatabaseName), databaseNames));
     }
 
     /// <summary>

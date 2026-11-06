@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -136,8 +137,7 @@ ORDER BY lower(p.database_name), p.database_name, p.collection_time";
         }
 
         var secondary = await PgSecondaryReplicaScope.ReadAsync(_dataSource, serverId, DateTime.UtcNow, logger: null, cancellationToken);
-        var filter = databaseNames is { Count: > 0 } ? DatabaseFilter.Of(databaseNames) : DatabaseFilter.All;
-        return (rows, PvsSecondaryNote.WithoutRow(secondary, rows.Select(r => r.DatabaseName), filter));
+        return (rows, PvsSecondaryNote.WithoutRow(secondary, rows.Select(r => r.DatabaseName), databaseNames));
     }
 
     public async Task<List<PvsStatsRow>> GetPvsStatsLatestAsync(int serverId, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)

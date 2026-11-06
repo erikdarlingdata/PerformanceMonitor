@@ -27,11 +27,6 @@ public sealed record FinOpsRecommendation(
 /// <summary>One database's collected encryption state.</summary>
 public sealed record DatabaseEncryptionFact(string DatabaseName, string StateDesc, bool IsEncrypted);
 
-/// <summary>One database's I/O totals over the storage-tier window.</summary>
-public sealed record StorageTierIo(
-    string DatabaseName, long TotalReads, long TotalStallReadMs, long TotalWrites, long TotalStallWriteMs,
-    DateTime? FirstSample, DateTime? LastSample, long WindowSamples);
-
 /// <summary>One maintenance job's recent and historical run durations.</summary>
 public sealed record MaintenanceJobRun(
     string JobName, long AvgDurationSeconds, long MaxDurationSeconds, long AvgHistoricalSeconds, int TimesRanLong);
@@ -548,54 +543,8 @@ public static class FinOpsRecommendationFigures
     }
 
     /// <summary>The storage-tier advice for the databases whose average read latency is under 5 ms and write latency under 3 ms, or null when none qualify. The window and sample totals cover the qualifying databases only.</summary>
-    public static FinOpsRecommendation? StorageTier(IEnumerable<StorageTierIo> rows)
-    {
-        var lowLatencyDbs = new List<(string Name, decimal AvgReadMs, decimal? AvgWriteMs)>();
-        var storageMin = DateTime.MaxValue;
-        var storageMax = DateTime.MinValue;
-        long storageSamples = 0;
-
-        foreach (var row in rows)
-        {
-            var dbName = row.DatabaseName;
-            var totalReads = row.TotalReads;
-            var totalStallRead = row.TotalStallReadMs;
-            var totalWrites = row.TotalWrites;
-            var totalStallWrite = row.TotalStallWriteMs;
-
-            var avgReadMs = totalReads > 0 ? (decimal)totalStallRead / totalReads : 0m;
-            // #7706: no writes is not a 0 ms write latency. It stays null, passes the test, and prints as "no writes".
-            decimal? avgWriteMs = totalWrites > 0 ? (decimal)totalStallWrite / totalWrites : null;
-
-            if (avgReadMs < 5m && (avgWriteMs ?? 0m) < 3m)
-            {
-                lowLatencyDbs.Add((dbName, avgReadMs, avgWriteMs));
-                storageSamples += row.WindowSamples;
-                if (row.FirstSample.HasValue && row.LastSample.HasValue)
-                {
-                    storageMin = row.FirstSample.Value < storageMin ? row.FirstSample.Value : storageMin;
-                    storageMax = row.LastSample.Value > storageMax ? row.LastSample.Value : storageMax;
-                }
-            }
-        }
-
-        if (lowLatencyDbs.Count > 0)
-        {
-            var storageWindow = RightSizingWindow.Describe(storageSamples, storageMax > storageMin ? storageMax - storageMin : TimeSpan.Zero);
-            var detail = string.Join("; ", lowLatencyDbs.Take(10)
-                .Select(d => $"{d.Name} (read {d.AvgReadMs:N1}ms, {(d.AvgWriteMs is { } w ? $"write {w:N1}ms" : "no writes")})"));
-            var noWritesNote = lowLatencyDbs.Take(10).Any(d => d.AvgWriteMs is null) ? " A database with no writes was judged on reads only." : "";
-            return new FinOpsRecommendation
-            {
-                Category = "Storage",
-                Severity = "Low",
-                Confidence = "Medium",
-                Finding = $"{lowLatencyDbs.Count} {(lowLatencyDbs.Count == 1 ? "database" : "databases")} with low IO latency, so standard storage may suffice",
-                Detail = $"These databases have avg read latency under 5ms and write under 3ms across {storageWindow}: {detail}" +
-                         (lowLatencyDbs.Count > 10 ? $" and {lowLatencyDbs.Count - 10} more" : "") +
-                         ". Premium/high-performance storage may not be needed." + noWritesNote
-            };
-        }
-        return null;
-    }
+    public static FinOpsRecommendation? StorageTier(IEnumerable<StorageTierIo> rows) =>
+        StorageTierFigures.Evaluate(rows) is { } text
+            ? new FinOpsRecommendation { Category = "Storage", Severity = "Low", Confidence = "Medium", Finding = text.Finding, Detail = text.Detail }
+            : null;
 }

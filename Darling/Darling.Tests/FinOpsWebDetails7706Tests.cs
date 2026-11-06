@@ -12,6 +12,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Text.Json;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Storage.FinOps;
 using Xunit;
@@ -115,11 +116,13 @@ public sealed class FinOpsWebDetails7706Tests
 
         Assert.Equal(
             "2 databases have no row here: this server holds a secondary copy of them in an availability group. Check the primary replica for their persistent version store.",
-            PvsSecondaryNote.WithoutRow(secondary, withRows, DatabaseFilter.All));
-        Assert.StartsWith("1 database has no row here:", PvsSecondaryNote.WithoutRow(secondary, withRows, DatabaseFilter.One("AgDb")), StringComparison.Ordinal);
+            PvsSecondaryNote.WithoutRow(secondary, withRows, null));
+        Assert.StartsWith("1 database has no row here:", PvsSecondaryNote.WithoutRow(secondary, withRows, new[] { "AgDb" }), StringComparison.Ordinal);
         // A secondary copy that does have a row is not named, and a filter that leaves the secondary out says nothing.
-        Assert.Null(PvsSecondaryNote.WithoutRow(secondary, ["AgDb", "OtherAg"], DatabaseFilter.All));
-        Assert.Null(PvsSecondaryNote.WithoutRow(secondary, withRows, DatabaseFilter.One("master")));
-        Assert.Null(PvsSecondaryNote.WithoutRow(Array.Empty<string>(), withRows, DatabaseFilter.All));
+        Assert.Null(PvsSecondaryNote.WithoutRow(secondary, ["AgDb", "OtherAg"], null));
+        Assert.Null(PvsSecondaryNote.WithoutRow(secondary, withRows, new[] { "master" }));
+        Assert.Null(PvsSecondaryNote.WithoutRow(Array.Empty<string>(), withRows, null));
+        // A database the chosen set excludes is left out whatever else was chosen.
+        Assert.StartsWith("1 database has no row here:", PvsSecondaryNote.WithoutRow(secondary, withRows, null, new[] { "OtherAg" }), StringComparison.Ordinal);
     }
 }

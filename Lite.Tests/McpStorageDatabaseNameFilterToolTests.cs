@@ -392,4 +392,67 @@ INSERT INTO file_io_stats
      sample_interval_seconds)
 VALUES ($1, $2, $3, $4, $5, $6, 'ROWS', '', 100, 10, 10, 81920, 81920, 20, 30, 60)",
             _nextId++, Minute(minutesAgo), _serverId, ServerName, databaseName, fileName);
+
+    // ── get_pvs_stats: secondary_replica_note (#7706) ──
+
+    /// <summary>The node is the local SECONDARY of AG1 for each named database, as of two minutes ago.</summary>
+    private async Task SeedSecondaryAsync(params string[] databases)
+    {
+        const string Replica = "INSERT INTO ag_replica_states (collection_id, collection_time, server_id, server_name, ag_name, replica_server_name, role_desc, is_local) VALUES ($1,$2,$3,$4,'AG1',$5,$6,$7)";
+        await ExecAsync(Replica, _nextId++, Minute(2), _serverId, ServerName, "NODE1", "SECONDARY", true);
+        await ExecAsync(Replica, _nextId++, Minute(2), _serverId, ServerName, "NODE2", "PRIMARY", false);
+        const string Db = "INSERT INTO ag_database_replica_states (collection_id, collection_time, server_id, server_name, ag_name, database_name, replica_server_name, is_local) VALUES ($1,$2,$3,$4,'AG1',$5,'NODE1',true)";
+        foreach (var database in databases)
+            await ExecAsync(Db, _nextId++, Minute(2), _serverId, ServerName, database);
+    }
+
+    private static string? SecondaryNoteOf(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        return doc.RootElement.TryGetProperty("secondary_replica_note", out var note) && note.ValueKind == JsonValueKind.String ? note.GetString() : null;
+    }
+
+    [Fact]
+    public async Task PvsStats_ASecondaryCopyWithNoPvsRow_CarriesTheNote_AndOnlyThen()
+    {
+        await SeedPvsAsync("DbA", 5, 10);
+        await SeedPvsAsync("DbB", 5, 10);
+
+        // No availability group snapshot: nothing is a secondary copy here, so there is no note.
+        Assert.Null(SecondaryNoteOf(await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName)));
+
+        // A secondary copy that has no PVS row at the snapshot: the one shared sentence, on the rows reply.
+        await SeedSecondaryAsync("DbSecondary");
+        var expected = PvsSecondaryNote.WithoutRow(new[] { "DbSecondary" }, new[] { "DbA", "DbB" });
+        Assert.StartsWith("1 database has no row here:", expected, StringComparison.Ordinal);
+        Assert.Equal(expected, SecondaryNoteOf(await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName)));
+
+        // A database filter that leaves the secondary copy out says nothing about it.
+        Assert.Null(SecondaryNoteOf(await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName, database_name: "DbA")));
+    }
+
+    [Fact]
+    public async Task PvsStats_ASecondaryCopyThatHasItsOwnPvsRow_CarriesNoNote()
+    {
+        await SeedPvsAsync("DbA", 5, 10);
+        await SeedPvsAsync("DbSecondary", 5, 10);
+        await SeedSecondaryAsync("DbSecondary");
+
+        Assert.Null(SecondaryNoteOf(await McpPvsTools.GetPvsStats(_dataService, _serverManager, ServerName)));
+    }
+
+    [Fact]
+    public async Task PvsStatsLatestWithNote_TheDesktopGridStripIsFedTheSameSentence()
+    {
+        // The grid strip shows exactly the text this read returns (FinOpsTab.LoadPvsStatsAsync); the WPF control itself is not constructed here.
+        await SeedPvsAsync("DbA", 5, 10);
+        await SeedSecondaryAsync("DbSecondary");
+
+        var (rows, note) = await _dataService.GetPvsStatsLatestWithNoteAsync(_serverId);
+        Assert.Equal("DbA", Assert.Single(rows).DatabaseName);
+        Assert.Equal(PvsSecondaryNote.WithoutRow(new[] { "DbSecondary" }, new[] { "DbA" }), note);
+
+        var (_, filtered) = await _dataService.GetPvsStatsLatestWithNoteAsync(_serverId, new[] { "DbA" });
+        Assert.Null(filtered);
+    }
 }
