@@ -26,8 +26,8 @@ public static class McpPlanAnalysisFormatter
     /// <summary>
     /// How many operators <c>top_operators</c> carries per statement. A fixed cut rather than a caller knob
     /// (the plan tools take no <c>limit</c>, and #3653 A15/A16 is about STATING the cut, not adding a knob):
-    /// ten operators is enough to hold the expensive spine of any plan an LLM can reason about in one
-    /// payload, and the rest of the plan is still reachable through the warnings (every node's warnings are
+    /// ten operators is enough to hold the operators that own the time in any plan an LLM can reason about in
+    /// one payload, and the rest of the plan is still reachable through the warnings (every node's warnings are
     /// in <c>warnings</c>, uncut) and the viewer. Published on every statement as <c>operators_cap</c> beside
     /// <c>operators_returned</c> / <c>total_operators</c> / <c>truncated</c>, so the cut is never silent.
     /// </summary>
@@ -35,15 +35,20 @@ public static class McpPlanAnalysisFormatter
 
     /// <summary>
     /// The two <c>top_operators</c> ranking bases, published per statement as <c>operators_ranked_by</c>
-    /// (#3653 A15/A16). A plan with runtime statistics ranks by measured elapsed time; an estimated plan has
-    /// no measurement and ranks by the optimizer's cost SHARE. The switch was silent before: the same key
-    /// carried a measurement in one payload and an estimate in the next, and only <c>has_actual_stats</c>
-    /// hinted at which — a caller comparing two payloads' top operators was comparing a stopwatch to a
-    /// guess without being told.
+    /// (#3653 A15/A16). A plan with runtime statistics ranks by each operator's OWN measured elapsed time
+    /// (#7887): a row-mode operator's <c>ActualElapsedMs</c> is cumulative over its subtree, so a parent is
+    /// never below its child and a rank on it lists the root path while the leaf that did the work falls
+    /// outside the cut. <see cref="PlanAnalyzer.GetOperatorOwnElapsedMs"/> takes the children off (per
+    /// thread in a parallel plan, nothing in batch mode where showplan's value is already standalone), and
+    /// the result rides on every row as <c>self_elapsed_ms</c> beside the cumulative <c>actual_elapsed_ms</c>.
+    /// An estimated plan has no measurement and ranks by the optimizer's cost SHARE. The switch was silent
+    /// before: the same key carried a measurement in one payload and an estimate in the next, and only
+    /// <c>has_actual_stats</c> hinted at which — a caller comparing two payloads' top operators was comparing
+    /// a stopwatch to a guess without being told.
     /// </summary>
-    public const string RankedByActualElapsed = "actual_elapsed_ms";
+    public const string RankedBySelfElapsed = "self_elapsed_ms";
 
-    /// <inheritdoc cref="RankedByActualElapsed"/>
+    /// <inheritdoc cref="RankedBySelfElapsed"/>
     public const string RankedByEstimatedCostPercent = "cost_percent (optimizer estimate)";
 
     /// <summary>
@@ -164,28 +169,37 @@ public static class McpPlanAnalysisFormatter
 
                 var hasActuals = allNodes.Any(n => n.HasActualStats);
                 /* #3653 A15/A16: the cut and the basis are published, not silent — see TopOperatorCap and
-                   RankedByActualElapsed. truncated is OBSERVED against the whole population (every node is in
-                   hand), never inferred from the page size. */
+                   RankedBySelfElapsed. truncated is OBSERVED against the whole population (every node is in
+                   hand), never inferred from the page size. #7887: with runtime statistics the rank is each
+                   operator's own time, so a deep scan outranks the cheap ancestors whose cumulative elapsed
+                   contains it; operators with equal own time keep cumulative-elapsed order. The synthetic
+                   statement node has no runtime stats and ranks last. */
+                var ranked = allNodes.Select(n => (Node: n, SelfMs: n.HasActualStats ? PlanAnalyzer.GetOperatorOwnElapsedMs(n) : (long?)null));
                 var topOps = (hasActuals
-                        ? allNodes.OrderByDescending(n => n.ActualElapsedMs)
-                        : allNodes.OrderByDescending(n => n.CostPercent))
+                        ? ranked.OrderByDescending(r => r.SelfMs ?? -1).ThenByDescending(r => r.Node.ActualElapsedMs)
+                        : ranked.OrderByDescending(r => r.Node.CostPercent))
                     .Take(TopOperatorCap)
-                    .Select(n => new
+                    .Select(r =>
                     {
-                        node_id = n.NodeId,
-                        physical_op = n.PhysicalOp,
-                        logical_op = n.LogicalOp,
-                        cost_percent = n.CostPercent,
-                        estimated_rows = n.EstimateRows,
-                        actual_rows = n.HasActualStats ? n.ActualRows : (long?)null,
-                        actual_elapsed_ms = n.HasActualStats ? n.ActualElapsedMs : (long?)null,
-                        actual_cpu_ms = n.HasActualStats ? n.ActualCPUMs : (long?)null,
-                        logical_reads = n.HasActualStats ? n.ActualLogicalReads : (long?)null,
-                        object_name = n.ObjectName,
-                        index_name = n.IndexName,
-                        predicate = McpHelpers.Truncate(n.Predicate, 500),
-                        seek_predicates = McpHelpers.Truncate(n.SeekPredicates, 500),
-                        warning_count = n.Warnings.Count
+                        var n = r.Node;
+                        return new
+                        {
+                            node_id = n.NodeId,
+                            physical_op = n.PhysicalOp,
+                            logical_op = n.LogicalOp,
+                            cost_percent = n.CostPercent,
+                            estimated_rows = n.EstimateRows,
+                            actual_rows = n.HasActualStats ? n.ActualRows : (long?)null,
+                            actual_elapsed_ms = n.HasActualStats ? n.ActualElapsedMs : (long?)null,
+                            self_elapsed_ms = r.SelfMs,
+                            actual_cpu_ms = n.HasActualStats ? n.ActualCPUMs : (long?)null,
+                            logical_reads = n.HasActualStats ? n.ActualLogicalReads : (long?)null,
+                            object_name = n.ObjectName,
+                            index_name = n.IndexName,
+                            predicate = McpHelpers.Truncate(n.Predicate, 500),
+                            seek_predicates = McpHelpers.Truncate(n.SeekPredicates, 500),
+                            warning_count = n.Warnings.Count
+                        };
                     });
 
                 return new
@@ -262,7 +276,7 @@ public static class McpPlanAnalysisFormatter
                         grant_wait_ms = s.MemoryGrant.GrantWaitTimeMs,
                         feedback = s.MemoryGrant.IsMemoryGrantFeedbackAdjusted
                     },
-                    operators_ranked_by = hasActuals ? RankedByActualElapsed : RankedByEstimatedCostPercent,
+                    operators_ranked_by = hasActuals ? RankedBySelfElapsed : RankedByEstimatedCostPercent,
                     operators_cap = TopOperatorCap,
                     operators_returned = Math.Min(allNodes.Count, TopOperatorCap),
                     total_operators = allNodes.Count,
