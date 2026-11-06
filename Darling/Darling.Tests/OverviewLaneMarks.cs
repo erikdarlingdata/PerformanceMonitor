@@ -32,6 +32,25 @@ internal static class OverviewLaneMarks
     /// <summary>The number of marked points.</summary>
     public static int MarkedCount(ScottPlot.Plot plot) => Marks(plot).Sum(s => s.Data.GetScatterPoints().Count());
 
+    /// <summary>
+    /// True when every anomaly mark sits after the lane's own series line in the plot's plottable list. ScottPlot paints in that order, so a mark
+    /// added first is painted over by the 1.5 px line instead of redrawing the line's stretch thicker. False when there is no mark or no series line.
+    /// </summary>
+    public static bool MarksComeAfterTheSeries(ScottPlot.Plot plot)
+    {
+        var anomaly = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Anomaly"));
+        var list = plot.PlottableList;
+        var firstMark = -1;
+        var lastSeries = -1;
+        for (var i = 0; i < list.Count; i++)
+        {
+            if (list[i] is not Scatter sc) continue;
+            if (sc.Color == anomaly) { if (firstMark < 0) firstMark = i; }
+            else lastSeries = i;
+        }
+        return firstMark >= 0 && lastSeries >= 0 && lastSeries < firstMark;
+    }
+
     /// <summary>One entry per drawn mark: how many points it spans and whether it is the lone-point dot (no line) or a segment.</summary>
     public static List<(int Points, bool IsDot)> Shapes(ScottPlot.Plot plot) =>
         Marks(plot).Select(s => (s.Data.GetScatterPoints().Count(), s.LineWidth == 0)).ToList();

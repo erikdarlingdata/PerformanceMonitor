@@ -352,6 +352,20 @@ public sealed class WebOverviewStripsBehaviourTests
         }
     }
 
+    /// <summary>
+    /// #7678: a marked run is split where collection stopped, by the line's own gap rule, so a red polyline never crosses a stretch the service was
+    /// off. Ten marked points sit each side of a 100 minute hole: two runs of ten, not one run of twenty.
+    /// </summary>
+    [Fact]
+    public void AMarkedRun_IsSplitWhereCollectionStopped()
+    {
+        var r = Run("markerrungap");
+
+        Assert.Equal(20, r.GetProperty("markedPoints").GetInt32());
+        Assert.Equal(new[] { 10, 10 }, r.GetProperty("runPointCounts").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+        Assert.Equal(0, r.GetProperty("circles").GetInt32());
+    }
+
     [Fact]
     public void TheAxisAndTheReadout_ReadInLocalTime_NotUtc()
     {

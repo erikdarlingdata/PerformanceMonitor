@@ -161,6 +161,30 @@ public sealed class OverviewBaselineBandTests
         });
     }
 
+    /// <summary>
+    /// #7678: ScottPlot paints plottables in the order they were added. The marks are added AFTER the lane's own 1.5 px line, so a run reads as
+    /// the line's stretch redrawn thicker in the anomaly colour and the line is not painted over it. Both the CPU lane and the other lanes.
+    /// </summary>
+    [Fact]
+    public void TheMarks_ArePaintedOverTheLanesOwnLine()
+    {
+        StaTestThread.Run(() =>
+        {
+            var control = NewControl();
+            IReadOnlyList<BaselineBand.HourStep> steps = [BaselineBand.MakeStep(T0 - 1, T0 + 1, 10, 5)]; // 0 to 20
+            double[] values = [10, 90, 90, 10, 90, 10];
+            var data = values.Select((v, i) => (T0 + i / 1440.0, v)).ToList();
+
+            control.UpdateLane(control.WaitStatsChart, "Wait", data, "#FFB74D", baseline: steps, minAnomalyValue: 1);
+            Assert.True(OverviewLaneMarks.MarkedCount(control.WaitStatsChart.Plot) > 0);
+            Assert.True(OverviewLaneMarks.MarksComeAfterTheSeries(control.WaitStatsChart.Plot), "the other lanes draw the marks before the line");
+
+            control.UpdateCpuLane(data, data, steps);
+            Assert.True(OverviewLaneMarks.MarkedCount(control.CpuChart.Plot) > 0);
+            Assert.True(OverviewLaneMarks.MarksComeAfterTheSeries(control.CpuChart.Plot), "the CPU lane draws the marks before the line");
+        });
+    }
+
     /// <summary>#7644: an hour with no step draws no band, so a lane whose every hour has none draws no rectangle and no marker.</summary>
     [Fact]
     public void ALaneWithNoSteps_DrawsNoBandAndNoMarker()

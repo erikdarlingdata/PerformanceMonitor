@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -73,5 +74,37 @@ public sealed class OverviewBaselineZeroActivityTests
         /* A step with a band is not marked, so the page draws it. */
         Assert.Null(DarlingWebOverviewBaselines.Step(lanes[1][0])["zero_activity"]);
         Assert.True(DarlingWebOverviewBaselines.Step(lanes[1][0])["effective_std_dev"]!.GetValue<double>() > 0);
+    }
+
+    /// <summary>
+    /// A strip whose four lanes all sat at exactly 0 (samples held, no spread) is an answer: the reply is <c>ok</c> and every lane carries its
+    /// <c>zero_activity</c> steps, so the page says each metric sat at 0. It used to read as <c>empty</c> ("not enough history"), because only
+    /// steps with a band counted as usable. A strip with no step in any lane is still <c>empty</c>.
+    /// </summary>
+    [Fact]
+    public async Task AStripWhereAllFourLanesSatAtZero_IsOk_AndEachLaneCarriesZeroActivitySteps()
+    {
+        await using var postgres = Unreachable();
+        var shared = new BaselineCache();
+        var provider = new PgBaselineProvider(postgres, null, shared);
+        var kind = provider.GetType().FullName!;
+        foreach (var metric in new[] { MetricNames.Cpu, MetricNames.WaitMsPerSec, MetricNames.IoLatencyChart, MetricNames.BlockingPerMinute })
+        {
+            shared.Put(kind, ServerId, PgBaselineProvider.CacheKeyFor(ServerId, metric, key: null), EntryAt(provider.RoundedKeyTime(metric, Now), 0, 0));
+        }
+
+        var lanes = await DarlingWebOverviewBaselines.ReadLaneStepsAsync(provider, ServerId, WindowStart, Now, CancellationToken.None);
+        var reply = JsonNode.Parse(DarlingWebOverviewBaselines.BuildReply("srv", WindowStart, lanes))!;
+
+        Assert.Equal("ok", reply["status"]!.GetValue<string>());
+        foreach (var lane in new[] { "cpu", "waits", "io", "blocking" })
+        {
+            var steps = reply["baselines"]![lane]!["steps"]!.AsArray();
+            Assert.NotEmpty(steps);
+            Assert.All(steps, step => Assert.True(step!["zero_activity"]?.GetValue<bool>()));
+        }
+
+        var none = new IReadOnlyList<PgBaselineProvider.BaselineStep>[] { [], [], [], [] };
+        Assert.Equal("empty", JsonNode.Parse(DarlingWebOverviewBaselines.BuildReply("srv", WindowStart, none))!["status"]!.GetValue<string>());
     }
 }

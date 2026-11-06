@@ -393,6 +393,25 @@ if (scenario === "crosshair") {
       allCircles: find(g, (x) => x.tag === "circle").length,
     };
   }
+} else if (scenario === "markerrungap") {
+  /* #7678: a marked run is broken where collection stopped, as the line is. Points every minute, none from minute 100 to 199 (the service was
+     off), and the points either side of the gap (90 to 99 and 200 to 209) are all above the band: two runs, not one polyline across the gap. */
+  const above = (i) => (i >= 90 && i < 100) || (i >= 200 && i < 210);
+  const line = [];
+  for (let i = 0; i < 300; i++) {
+    if (i >= 100 && i < 200) continue;
+    line.push({ t: T0 + i * MIN, v: above(i) ? 300 : 100 });
+  }
+  const wide = { windowStart: T0, windowEnd: T0 + 300 * MIN };
+  const wideDomain = { from: T0, to: T0 + 300 * MIN };
+  const res = { kind: "data", data: { baselines: { waits: { steps: [{ from: new Date(T0 - 60 * MIN).toISOString(), to: new Date(T0 + 360 * MIN).toISOString(), mean: 105, effective_std_dev: 66, sample_count: 600, tier: "Full" }] } } } };
+  const list = [{ key: "waits", title: "Waits", unit: "ms/s", min: 0, series: [{ label: "Wait time", color: "#ffb74d", points: line }] }];
+  strips.applyBaselines(list, res, wide, {});
+  const drawn = strips.drawStrips(list, wideDomain, 1280, null);
+  const g = find(drawn.node, (x) => x.attrs["data-strip"] === "waits")[0];
+  out.markedPoints = list[0].markers.length;
+  out.runPointCounts = find(g, (x) => x.attrs.class === "strip-anomaly-run").map((x) => x.attrs.points.split(" ").length);
+  out.circles = find(g, (x) => x.attrs.class === "strip-anomaly").length;
 } else if (scenario === "linuxcpu") {
   /* #7682: SQL Server on Linux before 2025 CU1 cannot report host CPU: other_process_cpu is null on every sample. The CPU strip draws the SQL line
      alone and says so; a Total line over a null Other would sit on the SQL line and claim the host was measured. */

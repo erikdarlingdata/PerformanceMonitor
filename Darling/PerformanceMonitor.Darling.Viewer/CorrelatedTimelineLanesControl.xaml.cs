@@ -428,6 +428,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         _crosshairManager?.AddLaneSeries(CpuChart, "Total", "%", totalTimes, totalValues);
 
         // Baseline band — applies to SQL CPU (what the baseline was computed on)
+        List<int>? cpuAnomalyIndices = null;
         if (baseline is { Count: > 0 })
         {
             _crosshairManager?.SetLaneBaselineSteps(CpuChart, baseline, 10);
@@ -443,7 +444,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                     anomalyIndices.Add(i);
             }
 
-            AddAnomalyMarks(CpuChart.Plot, sqlTimes, sqlValues, anomalyIndices);
+            cpuAnomalyIndices = anomalyIndices;
         }
 
         if (totalValues.Length > 0)
@@ -466,6 +467,10 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             sqlScatter.ConnectStyle = ScottPlot.ConnectStyle.Straight;
         }
 
+        // #7678: the marks go AFTER the series lines so a run reads as the line's stretch redrawn thicker in the anomaly colour.
+        if (cpuAnomalyIndices is not null)
+            PerformanceMonitor.Ui.AnomalyMarks.Add(CpuChart.Plot, sqlTimes, sqlValues, cpuAnomalyIndices);
+
         CpuChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         if (CpuChart != FileIoChart)
             CpuChart.Plot.Axes.Bottom.TickLabelStyle.IsVisible = false;
@@ -479,41 +484,6 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         CpuChart.Plot.Axes.SetLimitsY(0, 105);
 
         CpuChart.Refresh();
-    }
-
-    /// <summary>
-    /// #7678: a run of neighbouring points above the band is ONE mark, the line's own stretch redrawn thicker in the anomaly colour; a point alone
-    /// is one small dot. A 6 px circle per point turned a quiet server's lane (a third of its points marked) into a solid row of dots that hid the line.
-    /// <paramref name="indices"/> ascend, and neighbours are points one index apart.
-    /// </summary>
-    internal static void AddAnomalyMarks(ScottPlot.Plot plot, double[] times, double[] values, IReadOnlyList<int> indices)
-    {
-        var color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Anomaly"));
-        var start = 0;
-        while (start < indices.Count)
-        {
-            var end = start;
-            while (end + 1 < indices.Count && indices[end + 1] == indices[end] + 1) end++;
-            var count = end - start + 1;
-            var runTimes = new double[count];
-            var runValues = new double[count];
-            Array.Copy(times, indices[start], runTimes, 0, count);
-            Array.Copy(values, indices[start], runValues, 0, count);
-            var mark = plot.Add.TimeSeries(runTimes, runValues);
-            mark.Color = color;
-            if (count == 1)
-            {
-                mark.MarkerSize = 4;
-                mark.MarkerShape = ScottPlot.MarkerShape.FilledCircle;
-                mark.LineWidth = 0;
-            }
-            else
-            {
-                mark.MarkerSize = 0;
-                mark.LineWidth = 3.5f;
-            }
-            start = end + 1;
-        }
     }
 
     internal void UpdateLane(ScottPlot.WPF.WpfPlot chart, string title,
@@ -534,6 +504,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         var values = data.Select(d => d.Value).ToArray();
 
         // Render baseline band FIRST (behind the data line)
+        List<int>? laneAnomalyIndices = null;
         if (baseline is { Count: > 0 })
         {
             _crosshairManager?.SetLaneBaselineSteps(chart, baseline, minAnomalyValue);
@@ -554,7 +525,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                     anomalyIndices.Add(i);
             }
 
-            AddAnomalyMarks(chart.Plot, times, values, anomalyIndices);
+            laneAnomalyIndices = anomalyIndices;
         }
 
         var scatter = chart.Plot.Add.TimeSeries(times, values);
@@ -563,6 +534,10 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         scatter.LineWidth = 1.5f;
         scatter.LegendText = title;
         scatter.ConnectStyle = ScottPlot.ConnectStyle.Straight;
+
+        // #7678: the marks go AFTER the series line so a run reads as the line's stretch redrawn thicker in the anomaly colour.
+        if (laneAnomalyIndices is not null)
+            PerformanceMonitor.Ui.AnomalyMarks.Add(chart.Plot, times, values, laneAnomalyIndices);
 
         _crosshairManager?.SetLaneData(chart, times, values,
             reads: pointReads?.ToArray(), minReads: pointReads == null ? 0 : minPointReads);

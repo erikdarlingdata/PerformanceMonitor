@@ -86,32 +86,41 @@ internal static class DarlingWebOverviewBaselines
             var provider = ProviderFor(postgres, analysis);
             var lanes = await ReadLaneStepsAsync(provider, resolved.ServerId, startUtc, DateTime.UtcNow, cancellationToken);
 
-            var baselines = new JsonObject();
-            var any = false;
-            for (var i = 0; i < Lanes.Length; i++)
-            {
-                var usable = lanes[i].Count > 0;
-                any |= usable;
-                baselines[Lanes[i].Key] = usable ? new JsonObject { ["steps"] = new JsonArray(lanes[i].Select(Step).ToArray<JsonNode?>()) } : null;
-            }
-
-            /* A lane holding only zero-activity steps still counts as an answer: the page says the metric sat at 0. Not enough history is its own answer, never a band at 0: the page draws no band and no markers and says why. */
-            if (!any)
-                return McpHelpers.Status("empty",
-                    "Not enough history yet to draw a baseline: the store holds no samples of CPU, waits, I/O latency or blocking for this hour of the week.");
-
-            return new JsonObject
-            {
-                ["status"] = "ok",
-                ["server"] = resolved.DisplayName,
-                ["window_start"] = startUtc.ToString("o", CultureInfo.InvariantCulture),
-                ["baselines"] = baselines,
-            }.ToJsonString(McpHelpers.JsonOptions);
+            return BuildReply(resolved.DisplayName, startUtc, lanes);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_overview_baselines", ex);
         }
+    }
+
+    /// <summary>
+    /// The reply for the four lanes' steps (in <see cref="Lanes"/> order). A lane with no step is null. A lane holding only zero-activity steps (#7663)
+    /// still counts as an answer, so a strip that sat at 0 on every metric is <c>ok</c>, not <c>empty</c>: the page says each metric sat at 0.
+    /// Not enough history in every lane is its own answer, never a band at 0: the page draws no band and no markers and says why.
+    /// </summary>
+    internal static string BuildReply(string displayName, DateTime startUtc, IReadOnlyList<PgBaselineProvider.BaselineStep>[] lanes)
+    {
+        var baselines = new JsonObject();
+        var any = false;
+        for (var i = 0; i < Lanes.Length; i++)
+        {
+            var usable = lanes[i].Count > 0;
+            any |= usable;
+            baselines[Lanes[i].Key] = usable ? new JsonObject { ["steps"] = new JsonArray(lanes[i].Select(Step).ToArray<JsonNode?>()) } : null;
+        }
+
+        if (!any)
+            return McpHelpers.Status("empty",
+                "Not enough history yet to draw a baseline: the store holds no samples of CPU, waits, I/O latency or blocking for this hour of the week.");
+
+        return new JsonObject
+        {
+            ["status"] = "ok",
+            ["server"] = displayName,
+            ["window_start"] = startUtc.ToString("o", CultureInfo.InvariantCulture),
+            ["baselines"] = baselines,
+        }.ToJsonString(McpHelpers.JsonOptions);
     }
 
     /// <summary>
