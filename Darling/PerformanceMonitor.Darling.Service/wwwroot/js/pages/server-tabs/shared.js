@@ -229,7 +229,7 @@ function discontinuityWhat(reason) {
     case "postmaster_restart": return "PostgreSQL restarted";
     case "failover": return "The connection reached a different server";
     case "rename": return "SQL Server was renamed";
-    case "identity": return "The server's identity changed";
+    case "identity": return "SQL Server restarted, was renamed, or the connection reached another server";
     case "stats_reset": return "Statistics were reset";
     default: return "Collection started again";
   }
@@ -978,15 +978,14 @@ export const SWEEP_STATS = [
    then the same facts as tiles. The collector rows beside it are not relabelled. */
 export const SERVER_CONNECTION_PANEL = {
   title: "Server Connection",
-  subtitle: "the service's own connect",
+  subtitle: "the service's own connection",
   viz: "stat",
   emptyText: "Connected: the service's last connect to this server succeeded.",
   stats: [
-    { key: "server_connection.message", label: "Connection", format: "text", sentence: true },
+    { key: "server_connection.message", label: "Connection", format: "text", sentence: true, localizeText: true, localizeMinutes: true, sinceKey: "server_connection.since" },
     { key: "server_connection.status", label: "Collection", format: "status", small: true },
     { key: "server_connection.since", label: "Unreachable since", format: "time", small: true },
     { key: "server_connection.next_connect_attempt", label: "Next retry", format: "time", small: true },
-    { key: "server_connection.last_connect_error", label: "Last error", format: "text", small: true },
   ],
 };
 
