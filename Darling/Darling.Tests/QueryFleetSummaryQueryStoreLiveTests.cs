@@ -341,6 +341,7 @@ public sealed class QueryFleetSummaryQueryStoreLiveTests
         await using var command = new NpgsqlCommand(ViewerDataService.StoreSchemaProbeSql, connection);
         await using var reader = await command.ExecuteReaderAsync(ct);
         Assert.True(await reader.ReadAsync(ct));
-        return reader.GetBoolean(reader.FieldCount - 1);
+        /* The V246 sentinel is no longer the last column: V247's (#7731) follows it. */
+        return reader.GetBoolean(reader.FieldCount - 2);
     }
 }

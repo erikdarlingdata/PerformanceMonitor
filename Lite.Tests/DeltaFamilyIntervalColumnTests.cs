@@ -139,6 +139,15 @@ public sealed class DeltaFamilyIntervalColumnTests
         foreach (var family in DressedByRung)
         {
             var columns = CollectorCatalog.Find(family)!.PayloadColumns;
+            /* pg_statement_stats has since appended the database name behind the interval (V247, #7731): the same rule one column later,
+               because an ALTER can only land at the end. The interval is still ahead of every column an ALTER added after it. */
+            if (family == "pg_statement_stats")
+            {
+                Assert.Equal(IntervalColumn, columns[^2].Name);
+                Assert.Equal("database_name", columns[^1].Name);
+                continue;
+            }
+
             Assert.Equal(IntervalColumn, columns[^1].Name);
         }
     }

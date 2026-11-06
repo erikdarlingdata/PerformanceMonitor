@@ -7033,7 +7033,8 @@ CREATE TABLE IF NOT EXISTS collect.pg_statement_stats (
     delta_calls bigint,
     delta_total_exec_time_ms bigint,
     delta_rows bigint,
-    sample_interval_seconds integer
+    sample_interval_seconds integer,
+    database_name text
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_statement_stats_time
