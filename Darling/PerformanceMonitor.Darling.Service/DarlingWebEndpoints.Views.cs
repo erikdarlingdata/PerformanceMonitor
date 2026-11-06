@@ -1606,9 +1606,10 @@ public static partial class DarlingWebEndpoints
     };
 
     /// <summary>The 400 sentence for a personal view a session cannot own (#6214): a session that names a person (a cookie from before
-    /// owner keys existed) signs in again; one with no person at all has none to give.</summary>
+    /// owner keys existed) signs in again; one with no person at all (the shared token, or a named web token, which is not a person and
+    /// never gets an owner key) has none to give.</summary>
     internal static string NoOwnerKeyMessage(DarlingWebSeat seat) =>
-        seat.Subject is null ? CustomViewStore.NoIdentityMessage : CustomViewStore.SignInAgainMessage;
+        seat.Subject is null || seat.TokenName is not null ? CustomViewStore.NoIdentityMessage : CustomViewStore.SignInAgainMessage;
 
     /// <summary>The bare-array list wire shape (no definition body). Carries the view <c>kind</c> — always
     /// concrete (<c>"dashboard"</c> when the stored definition declares none) so the list page/sidebar can badge
