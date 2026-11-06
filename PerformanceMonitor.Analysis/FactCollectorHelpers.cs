@@ -258,6 +258,41 @@ public static class FactCollectorHelpers
             metadata["coverage_fraction"] = coverage.Fraction;
     }
 
+    /// <summary>The width of the blocking peak bucket in hours, the grain the BLOCKING_EVENTS (10, 50) pair was
+    /// measured on (#3871). Both collectors bucket with the same literal interval in their SQL.</summary>
+    public const double PeakBucketHours = 4.0;
+
+    /// <summary>
+    /// #7895: the hours the collector covered inside a span of the window, under the window's coverage fraction
+    /// (<see cref="WindowCoverage.Fraction"/>, the same basis every per-hour fact divides by), floored at one hour
+    /// so a sliver of a tail bucket cannot turn one event into a storm. The coverage witness carries one fraction
+    /// for the whole window, so a collector gap is spread evenly over the window's buckets rather than placed in
+    /// the one it fell in.
+    /// </summary>
+    public static double CoveredHours(double spanHours, AnalysisContext context) =>
+        Math.Max(1.0, spanHours * (context.Coverage is { Fraction: > 0 } coverage ? coverage.Fraction : 1.0));
+
+    /// <summary>
+    /// #7895: the busiest blocking bucket by RATE, from the two bucket shapes a window-start origin produces: full
+    /// buckets of <see cref="PeakBucketHours"/>, of which only the biggest count can win, and the one clipped tail
+    /// bucket, whose own span is <paramref name="tailBucketHours"/>. Each count divides by the
+    /// <see cref="CoveredHours"/> of its span; the higher rate wins and the bigger count breaks a tie. A window
+    /// that is a multiple of the bucket width has no tail (count 0), and a window shorter than one bucket has no
+    /// full bucket (count 0). Returns the rate, the winning bucket's count and the hours it divided by, so the
+    /// fact publishes all three.
+    /// </summary>
+    public static (double EventsPerHour, long EventCount, double CoveredHours) PeakBucketRate(
+        long peakFullBucketCount, long tailBucketCount, double tailBucketHours, AnalysisContext context)
+    {
+        var fullHours = CoveredHours(PeakBucketHours, context);
+        var tailHours = CoveredHours(tailBucketHours, context);
+        var fullRate = peakFullBucketCount / fullHours;
+        var tailRate = tailBucketCount > 0 ? tailBucketCount / tailHours : 0.0;
+        return tailRate > fullRate || (tailRate == fullRate && tailBucketCount > peakFullBucketCount)
+            ? (tailRate, tailBucketCount, tailHours)
+            : (fullRate, peakFullBucketCount, fullHours);
+    }
+
     /// <summary>
     /// Maps a raw wait type to the FAMILY key its regular fact is grouped under, mirroring
     /// <see cref="GroupParallelismWaits"/> (all CX* → CXPACKET) and <see cref="GroupGeneralLockWaits"/> /
