@@ -698,6 +698,71 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     }
 
     /// <summary>
+    /// #7776: the grid bounds its window on the same interval start the bars are keyed on, so an interval that started before the
+    /// window but was collected inside it is not a grid row (the left edge the slicer test above pins for the bars).
+    /// </summary>
+    [Fact]
+    public async Task Grid_DropsAnIntervalThatStartedBeforeTheWindow_EvenWhenItWasCollectedInsideIt()
+    {
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var startedBeforeWindow = HourFloor(now.AddHours(-26));
+        var collectedInsideWindow = now.AddHours(-22);
+
+        await SeedAsync(collectedInsideWindow, queryId: 92, planId: 992, FirstExecA,
+            executionCount: 4, avgCpuUs: 1_000, avgDurationUs: 2_000, avgReads: 6, queryHash: "0xEDGE3",
+            intervalId: 9003, intervalStart: startedBeforeWindow);
+
+        var rows = await new LocalDataService(_duckDb).GetQueryStoreTopQueriesAsync(ServerId, hoursBack: 24);
+
+        Assert.Empty(rows);
+    }
+
+    /// <summary>
+    /// #7776: the window's last interval, still open when the window ends and so collected after it, is a grid row, as it is a bar.
+    /// </summary>
+    [Fact]
+    public async Task Grid_KeepsAnIntervalThatStartedInsideTheWindow_ThoughItsClosingFetchLandedAfterIt()
+    {
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var startedInsideWindow = HourFloor(now.AddHours(-2));
+        var collectedAfterWindow = now.AddHours(2);
+
+        await SeedAsync(collectedAfterWindow, queryId: 93, planId: 993, FirstExecB,
+            executionCount: 6, avgCpuUs: 1_000, avgDurationUs: 2_000, avgReads: 6, queryHash: "0xEDGE4",
+            intervalId: 9004, intervalStart: startedInsideWindow);
+
+        var rows = await new LocalDataService(_duckDb).GetQueryStoreTopQueriesAsync(ServerId, hoursBack: 24);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(93, row.QueryId);
+        Assert.Equal(6, row.TotalExecutions);
+    }
+
+    /// <summary>
+    /// #7776: Lite's <c>get_query_store_top</c> MCP tool goes through the same <c>GetQueryStoreTopQueriesAsync</c> (it passes
+    /// <c>hours_back</c> and <c>as_of</c> straight in), so it places its window by interval start too. At <c>hours_back=4</c> an
+    /// interval that started five hours ago and was collected three and a half hours ago is outside the window, and a neighbouring
+    /// interval that started three hours ago is inside it. Darling's MCP tool still windows on collection_time (#7814).
+    /// </summary>
+    [Fact]
+    public async Task McpTopTool_PlacesTheWindowByIntervalStart_AtTheEdge()
+    {
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+
+        await SeedAsync(now.AddHours(-3.5), queryId: 94, planId: 994, FirstExecA,
+            executionCount: 4, avgCpuUs: 1_000, avgDurationUs: 2_000, avgReads: 6, queryHash: "0xEDGE5",
+            intervalId: 9005, intervalStart: HourFloor(now.AddHours(-5)));
+        await SeedAsync(now.AddHours(-2), queryId: 95, planId: 995, FirstExecB,
+            executionCount: 6, avgCpuUs: 1_000, avgDurationUs: 2_000, avgReads: 6, queryHash: "0xEDGE6",
+            intervalId: 9006, intervalStart: HourFloor(now.AddHours(-3)));
+
+        var rows = await new LocalDataService(_duckDb).GetQueryStoreTopQueriesAsync(ServerId, hoursBack: 4, asOfUtc: now);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(95, row.QueryId);
+    }
+
+    /// <summary>
     /// WATCHED (mutation): the duration trend carries the identical mismatch, and fixing only the slicer
     /// leaves the two charts on the same screen disagreeing about which interval is in the window.
     /// </summary>

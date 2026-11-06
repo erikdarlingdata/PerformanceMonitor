@@ -175,6 +175,8 @@ WHERE NOT {(collectionGap ? "TRUE" : "FALSE")} OR t < now() - INTERVAL '10 days'
 
         var hints = root.GetProperty("hints");
         Assert.True(hints.GetProperty("window_truncated").GetBoolean());
+        /* #7729: this note is the shared window-floor sentence in the empty envelope's hints. The page never prints it (it shows `message` and reads
+           only hints.effective_start), so it keeps its table name for an MCP caller. The plain wording is the table-path note's (TableNote). */
         Assert.Contains("further back than this server's raw query_store_stats retains", hints.GetProperty("truncation_note").GetString()!, StringComparison.Ordinal);
         Assert.NotEqual(JsonValueKind.Null, hints.GetProperty("effective_start").ValueKind);
     }

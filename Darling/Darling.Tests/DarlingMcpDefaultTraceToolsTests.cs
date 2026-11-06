@@ -236,6 +236,13 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
             Assert.DoesNotContain("ROUTINE_MARKER", json, StringComparison.Ordinal);
             JsonAssert.Contains("\"total_events\": 2", json);
 
+            /* #7729: by_event counts every significant event of the window by name (the page's note reads it), and the routine ErrorLog row is not counted. */
+            using var answer = System.Text.Json.JsonDocument.Parse(json);
+            var byEvent = answer.RootElement.GetProperty("by_event");
+            Assert.Equal(2, byEvent.GetArrayLength());
+            Assert.All(byEvent.EnumerateArray(), e => Assert.Equal(1, e.GetProperty("count").GetInt32()));
+            Assert.Contains(byEvent.EnumerateArray(), e => e.GetProperty("event_name").GetString() == "Data File Auto Grow");
+
             /* Unknown server → the listing error; empty store → the miss. */
             Assert.StartsWith("Could not resolve server.", McpHelpers.ErrorMessageOf(await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(postgres, "darling-no-such-server")), StringComparison.Ordinal);
             await DeleteRowsAsync(connection, ct, keepServer: true);

@@ -180,10 +180,12 @@ public sealed class ViewerServerSetSyncTests
             new Regex(@"\bUpdateServerCountText\s*\(\s*\)\s*=>[^;]*_fleet\s*\.\s*TotalCount\b", RegexOptions.Singleline),
             Stripped("MainWindow.xaml.cs"));
 
-        /* The Overview's total: the fleet's own count, not the cards that happened to load. */
+        /* The Overview's total: the fleet's own count, not the cards that happened to load. The Overview takes the
+           fleet through OverviewServers, which keeps the enabled servers (#7773: a disabled one gets no card), so the
+           total counts the enabled fleet the reload rebuilds; a pass over anything but _fleet.All does not match. */
         var overview = MethodBody("MainWindow.xaml.cs", "LoadOverviewAsync");
 
-        Assert.Matches(@"\bservers\s*=\s*_fleet\s*\.\s*All\b", overview);
+        Assert.Matches(@"\bservers\s*=\s*OverviewServers\s*\(\s*_fleet\s*\.\s*All\s*\)", overview);
         Assert.Matches(@"\blist\s*=\s*servers\s*\.\s*ToList\s*\(", overview);
         /* The roll-up goes through OverviewCardView.BuildRollup (the Overview search narrows it, D9): its registered
            count is still list.Count, and the count a search-box change rebuilds the roll-up with (the

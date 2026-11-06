@@ -382,6 +382,7 @@ export async function renderFleet(main, opts) {
         primaryKey: "display_name",
         bandKey: "band",
         bandLabelKey: "band_label",
+        advisoryKey: "advisory_tiles",
         reasonKey: "reason",
         navKey: "display_name",
       })
