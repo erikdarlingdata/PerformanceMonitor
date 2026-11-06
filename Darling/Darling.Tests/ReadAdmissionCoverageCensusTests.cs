@@ -259,6 +259,7 @@ public sealed class ReadAdmissionCoverageCensusTests
         [WebFile + "DELETE \"/api/notification-routes/{id:int}\""] = "write",
         [WebFile + "PUT \"/api/alert-settings/daily-report\""] = "write",
         [WebFile + "PUT \"/api/alert-settings/database-protection\""] = "write",
+        [WebFile + "PUT \"/api/slack-bot-tokens\""] = "write",
         [WebFile + "POST \"/api/collectors/run\""] = "write",
         [WebFile + "GET \"/api/collectors/run/{commandId:long}\""] = "definition read: one command row's status and result (a single indexed row, #5941)",
         [WebFile + "GET \"/api/active-queries/live/available\""] = "definition read: whether this seat and store login can queue a live read (one catalog lookup, #6386)",

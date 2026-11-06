@@ -2623,6 +2623,21 @@ public sealed class WebhooksConfig
     [JsonPropertyName("slackProxy")]
     public string SlackProxy { get; set; } = "";
 
+    /// <summary>
+    /// #7656: the Slack bot token (<c>xoxb-</c>, V252 <c>config_notification.slack_bot_token</c>) the bot posts investigation threads
+    /// with. Sealed as the store holds it, to its own slot on the settings row and to no proxy, and opened by
+    /// <see cref="DarlingWebhookSecrets.Open"/>; a value that is not sealed is read as stored and sealed at the next start.
+    /// </summary>
+    [JsonPropertyName("slackBotToken")]
+    public string SlackBotToken { get; set; } = "";
+
+    /// <summary>
+    /// #7656: the Slack app-level token (<c>xapp-</c>, V252 <c>config_notification.slack_app_token</c>) a Socket Mode listener connects
+    /// with. Sealed and opened as <see cref="SlackBotToken"/> is; stored now, read by nothing beyond the opener yet.
+    /// </summary>
+    [JsonPropertyName("slackAppToken")]
+    public string SlackAppToken { get; set; } = "";
+
     /* Generic webhook (#1506): POSTs an operator-authored JSON body to any endpoint, so an alert can drive
        automation we ship no adapter for (PagerDuty, Opsgenie, n8n, a GitHub repository_dispatch that re-runs
        a workflow). Enabled by a non-empty URL, like the sibling channels. */

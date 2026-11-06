@@ -38,6 +38,7 @@ import { buildAgentChanges, resetAgentChangesStatus } from "./admin-agent-change
 import { buildServerActions, resetServerActionsStatus, engineWord } from "./admin-server-actions.js";
 import { buildPeople, resetPeopleStatus } from "./admin-people.js";
 import { buildProfiles, nobodyCanApproveNodes, readAgentSetupAccess, routeColumns, routeEditorNodes, routeListOnlyNodes, routeUseText } from "./admin-agent-setup.js";
+import { slackBotTokenNodes } from "./admin-slack-bot.js";
 
 export const SERVER_COLUMNS = [
   { key: "display_name", label: "Display Name" },
@@ -1308,6 +1309,8 @@ async function buildRoutes(body, generation) {
   const signingNodes = signing && signing.kind === "data" ? signingStatusLines(signing.data).map((t) => noticeStrip(t)) : [];
   mount(body, [
     ...(access.routes ? routeEditorNodes(options) : routeListOnlyNodes(access.message, access.managed, access.adminWritesOff)),
+    /* #7656: the Slack bot's tokens, for the same seat that edits routes. */
+    ...(access.routes ? slackBotTokenNodes(options) : []),
     captionStrip(ROUTES_NOTE),
     ...signingNodes,
     ...nobodyCanApproveNodes(approvers),

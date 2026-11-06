@@ -1609,8 +1609,9 @@ INSERT INTO config_notification (
     smtp_recipients, email_cooldown_minutes, teams_url, teams_proxy, slack_url, slack_proxy, modified_at,
     generic_url, generic_headers, generic_body_template, generic_proxy,
     pagerduty_routing_key, pagerduty_use_eu_region, pagerduty_proxy, pagerduty_auto_resolve,
-    slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions)
-VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+    slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions,
+    slack_bot_token, slack_app_token)
+VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
 ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         command.Parameters.AddWithValue(s.Host);
         command.Parameters.AddWithValue(s.Port);
@@ -1641,6 +1642,9 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
         command.Parameters.AddWithValue(w.TeamsSendResolutions);
         command.Parameters.AddWithValue(w.GenericSendResolutions);
         command.Parameters.AddWithValue(s.SendResolutions);
+        /* #7656: the Slack bot's tokens, raw like the URLs above; the start seal below seals a plain one. */
+        command.Parameters.AddWithValue(w.SlackBotToken);
+        command.Parameters.AddWithValue(w.SlackAppToken);
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -1670,11 +1674,12 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-            var v = new string?[9];
+            var v = new string?[11];
             bool signingSaved;
             await using (var select = new NpgsqlCommand(
                 "SELECT teams_url, teams_proxy, slack_url, slack_proxy, generic_url, generic_headers, generic_proxy, "
-                + "pagerduty_routing_key, pagerduty_proxy, COALESCE(signing_key, '') <> '' OR COALESCE(previous_signing_key, '') <> '' "
+                + "pagerduty_routing_key, pagerduty_proxy, slack_bot_token, slack_app_token, "
+                + "COALESCE(signing_key, '') <> '' OR COALESCE(previous_signing_key, '') <> '' "
                 + "FROM config_notification WHERE id = 1",
                 connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds })
             await using (var reader = await select.ExecuteReaderAsync(cancellationToken))
@@ -1689,11 +1694,15 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
                     v[i] = reader.IsDBNull(i) ? null : reader.GetString(i);
                 }
 
-                signingSaved = reader.GetBoolean(9);
+                signingSaved = reader.GetBoolean(11);
             }
 
             static bool IsPlain(string? value) => !string.IsNullOrWhiteSpace(value) && !PasswordSeal.IsSealed(value);
-            var plain = new (int Index, string Column)[] { (0, "teams_url"), (2, "slack_url"), (4, "generic_url"), (5, "generic_headers"), (7, "pagerduty_routing_key") }
+            var plain = new (int Index, string Column)[]
+                {
+                    (0, "teams_url"), (2, "slack_url"), (4, "generic_url"), (5, "generic_headers"), (7, "pagerduty_routing_key"),
+                    (9, "slack_bot_token"), (10, "slack_app_token"),
+                }
                 .Where(c => IsPlain(v[c.Index])).Select(c => c.Column).ToList();
             if (plain.Count == 0)
             {
@@ -1778,6 +1787,19 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
             }
 
             SealUrlOrKey("pagerduty_routing_key", "pagerduty_proxy", "pagerduty", v[7], v[8], "PagerDuty routing key");
+
+            /* #7656: the Slack bot's tokens have no proxy column: each is sealed to its slot and the row alone, and changes only while it
+               still holds what was read. */
+            void SealToken(string column, string slot, string? value, string label)
+            {
+                if (IsPlain(value) && Seal(column, slot, value!, null, null, label) is { } sealedText)
+                {
+                    writes.Add((column, sealedText, $"{column} = {P(value)}"));
+                }
+            }
+
+            SealToken("slack_bot_token", PasswordBinding.SlackBotTokenSlot, v[9], "Slack bot token");
+            SealToken("slack_app_token", PasswordBinding.SlackAppTokenSlot, v[10], "Slack app-level token");
 
             if (refused.Count > 0)
             {
@@ -2475,7 +2497,7 @@ SELECT smtp_host, smtp_port, smtp_use_ssl, smtp_username, smtp_encrypted_passwor
        generic_url, generic_headers, generic_body_template, generic_proxy,
        pagerduty_routing_key, pagerduty_use_eu_region, pagerduty_proxy, pagerduty_auto_resolve,
        slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions,
-       signing_key, previous_signing_key, previous_signing_key_until
+       signing_key, previous_signing_key, previous_signing_key_until, slack_bot_token, slack_app_token
 FROM config_notification WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -2518,6 +2540,9 @@ FROM config_notification WHERE id = 1", connection) { CommandTimeout = ServiceCo
             GenericSigning = new WebhookSigningKeys(
                 reader.GetString(24), reader.GetString(25), reader.IsDBNull(26) ? null : reader.GetFieldValue<DateTime>(26),
                 clockAhead),
+            /* V252 (#7656): the Slack bot's tokens, sealed. Appended last, like every addition to this row. */
+            SlackBotToken = reader.GetString(27),
+            SlackAppToken = reader.GetString(28),
         };
         return (smtp, webhooks);
     }

@@ -561,6 +561,10 @@ internal static class DiagnosticsBundle
             {
                 AddUrlHost(aliaser, proxy);
             }
+
+            /* #7656: the Slack bot's tokens are secrets, sealed or as stored. */
+            aliaser.AddSecret(hooks.SlackBotToken);
+            aliaser.AddSecret(hooks.SlackAppToken);
         }
 
         SeedHeartbeat(aliaser, config.Heartbeat);
@@ -609,7 +613,7 @@ internal static class DiagnosticsBundle
     {
         var hooks = config.Webhooks ?? new WebhooksConfig();
         var routes = config.NotificationRoutes ?? new List<PerformanceMonitor.Notifications.NotificationRoute>();
-        var anySealed = new[] { hooks.TeamsUrl, hooks.SlackUrl, hooks.GenericUrl, hooks.GenericHeaders, hooks.PagerDutyRoutingKey }.Any(PasswordSeal.IsSealed)
+        var anySealed = new[] { hooks.TeamsUrl, hooks.SlackUrl, hooks.GenericUrl, hooks.GenericHeaders, hooks.PagerDutyRoutingKey, hooks.SlackBotToken, hooks.SlackAppToken }.Any(PasswordSeal.IsSealed)
             || routes.Any(r => new[] { r.TeamsUrl, r.SlackUrl, r.GenericUrl, r.PagerDutyRoutingKey }.Any(PasswordSeal.IsSealed))
             || SigningTexts(hooks.GenericSigning).Concat(routes.SelectMany(r => SigningTexts(r.GenericSigning))).Any(PasswordSeal.IsSealed);
         if (!anySealed)
@@ -631,6 +635,8 @@ internal static class DiagnosticsBundle
         }
 
         aliaser.AddSecret(opened.Webhooks.PagerDutyRoutingKey);
+        aliaser.AddSecret(opened.Webhooks.SlackBotToken);
+        aliaser.AddSecret(opened.Webhooks.SlackAppToken);
         foreach (var route in opened.Routes)
         {
             aliaser.AddSecret(route.PagerDutyRoutingKey);

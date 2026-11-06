@@ -71,6 +71,10 @@ internal static class DarlingWebhookSecrets
             TeamsProxy = stored.TeamsProxy,
             SlackUrl = OpenValue(stored.SlackUrl, "slack", row, stored.SlackProxy, null, NotificationRouter.SlackChannel, "Slack webhook URL", ring, failures),
             SlackProxy = stored.SlackProxy,
+            /* #7656: the bot's tokens are bound to no proxy. One that will not open is reported under the Slack channel's name and leaves
+               the webhook URL as it is: the bot posts nothing, the webhook still delivers. */
+            SlackBotToken = OpenValue(stored.SlackBotToken, PasswordBinding.SlackBotTokenSlot, row, null, null, NotificationRouter.SlackChannel, "Slack bot token", ring, failures),
+            SlackAppToken = OpenValue(stored.SlackAppToken, PasswordBinding.SlackAppTokenSlot, row, null, null, NotificationRouter.SlackChannel, "Slack app-level token", ring, failures),
             GenericUrl = OpenValue(stored.GenericUrl, "generic", row, stored.GenericProxy, null, NotificationRouter.GenericChannel, "generic webhook URL", ring, failures),
             GenericHeaders = OpenValue(stored.GenericHeaders, "generic_headers", row, stored.GenericProxy, stored.GenericUrl, NotificationRouter.GenericChannel, "generic webhook headers", ring, failures),
             GenericBodyTemplate = stored.GenericBodyTemplate,
@@ -305,6 +309,8 @@ internal static class DarlingWebhookSecrets
         Add(w.TeamsProxy);
         Add(w.SlackUrl);
         Add(w.SlackProxy);
+        Add(w.SlackBotToken);
+        Add(w.SlackAppToken);
         Add(w.GenericUrl);
         Add(w.GenericHeaders);
         Add(w.GenericBodyTemplate);

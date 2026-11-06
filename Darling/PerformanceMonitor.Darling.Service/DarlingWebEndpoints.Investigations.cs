@@ -295,6 +295,18 @@ public static partial class DarlingWebEndpoints
                 run.Body, "/api/notification-routes/{id}", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, run.Status);
         });
 
+        /* #7656: the Slack bot token and app-level token on the notification settings row, sealed by the service and written through the
+           store's channel settings function; the answer says set or not set. A signed-in admin only, like the other agent setup writes. */
+        app.MapPut("/api/slack-bot-tokens", async Task<IResult> (HttpContext context) =>
+        {
+            var stopwatch = Stopwatch.StartNew();
+            var run = await AgentSetupRunAsync(context, logger, DarlingWebSlackBotTokens.Route,
+                (body, editor, ct) => DarlingWebSlackBotTokens.SaveAsync(
+                    WebAdminArm.SourceFor(adminArm, context, postgres), logger, body, editor, passwordKeys ?? DarlingPasswordKey.Current, ct, managedStore, adminWritesOff));
+            return DarlingWebStatementSweep.JsonText(
+                run.Body, DarlingWebSlackBotTokens.Route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, run.Status);
+        });
+
         /* #7041: the Daily Health Report settings. The body is the daily_report group of get_alert_settings; update_alert_settings' own
            body validates and writes it. A signed-in admin only, like the other agent setup writes. */
         app.MapPut("/api/alert-settings/daily-report", async Task<IResult> (HttpContext context) =>

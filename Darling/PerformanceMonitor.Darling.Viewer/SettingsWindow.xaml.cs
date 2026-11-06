@@ -1763,6 +1763,12 @@ public partial class SettingsWindow : Window
         SlackStatusText.Text = ViewerWebhookSealing.IsSaved(r.SlackUrl) ? ViewerWebhookSealing.KeepHint : "";
         SlackProxyAddressBox.Text = r.SlackProxy;
         SlackSendResolutionsCheckBox.IsChecked = r.SlackSendResolutions;
+        /* #7656: a saved token is shown blank with the keep hint, as a saved webhook URL is. */
+        SlackBotTokenBox.Text = ViewerWebhookSealing.ShownText(r.SlackBotToken);
+        SlackAppTokenBox.Text = ViewerWebhookSealing.ShownText(r.SlackAppToken);
+        SlackBotTokenStatusText.Text = ViewerWebhookSealing.IsSaved(r.SlackBotToken) || ViewerWebhookSealing.IsSaved(r.SlackAppToken)
+            ? ViewerWebhookSealing.KeepHint
+            : "";
 
         GenericWebhookEnabledCheckBox.IsChecked = !string.IsNullOrWhiteSpace(r.GenericUrl);
         GenericWebhookUrlBox.Text = ViewerWebhookSealing.ShownText(r.GenericUrl);
@@ -1835,6 +1841,10 @@ public partial class SettingsWindow : Window
             row.SlackProxy = SlackProxyAddressBox.Text?.Trim() ?? "";
             row.SlackSendResolutions = SlackSendResolutionsCheckBox.IsChecked == true;
         }
+
+        /* #7656: the Slack bot's tokens ride the row whether or not the Slack webhook is on. */
+        row.SlackBotToken = ViewerWebhookSealing.CarryKept(SlackBotTokenBox.Text, _loadedNotification?.SlackBotToken);
+        row.SlackAppToken = ViewerWebhookSealing.CarryKept(SlackAppTokenBox.Text, _loadedNotification?.SlackAppToken);
 
         if (GenericWebhookEnabledCheckBox.IsChecked == true)
         {

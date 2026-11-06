@@ -41,11 +41,18 @@ public sealed class PasswordBinding
     /// <summary>The webhook slots, in the order the notification row lists its columns: the Teams URL, the Slack URL,
     /// the generic URL, the PagerDuty routing key and the generic headers, then the generic webhook's signing key (#5998).
     /// The signing key and the previous signing key share the one slot: a rotation moves the sealed text from one column to
-    /// the other without opening it, and both are bound to the same row, proxy and generic URL.</summary>
+    /// the other without opening it, and both are bound to the same row, proxy and generic URL. The Slack bot token and app-level
+    /// token (#7656) have their own slots on the settings row and are bound to no proxy.</summary>
     public static readonly IReadOnlyList<string> WebhookSlots = new[]
     {
-        "teams", "slack", "generic", "pagerduty", "generic_headers", SigningKeySlot,
+        "teams", "slack", "generic", "pagerduty", "generic_headers", SigningKeySlot, SlackBotTokenSlot, SlackAppTokenSlot,
     };
+
+    /// <summary>The slot of the Slack bot token (#7656), on the settings row only.</summary>
+    public const string SlackBotTokenSlot = "slack_bot";
+
+    /// <summary>The slot of the Slack app-level token (#7656), on the settings row only.</summary>
+    public const string SlackAppTokenSlot = "slack_app";
 
     /// <summary>The slot of a generic webhook signing key (#5998), current or previous. Its bound URL is the stored text of
     /// the same row's generic URL, as for the headers.</summary>

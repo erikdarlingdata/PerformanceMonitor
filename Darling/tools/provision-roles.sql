@@ -2420,6 +2420,8 @@ GRANT EXECUTE ON FUNCTION config.clear_webhook_signing_key(integer) TO mcp;
 --     Viewer's refusals (a change to what a saved secret is tied to needs the secret again, a signing key blocks a URL or proxy change).
 --     It returns only whether each secret named in the call was saved before. The tool is served only under mcp.allowWrites with a token.
 --     Granted to mcp only.
+-- #7656: the signature without the Slack bot token parameters; the GRANT below names the current one.
+DROP FUNCTION IF EXISTS config.set_notification_channels(text[], text, integer, boolean, text, text, text, text, text, text, text, text, text, text, text, text, text, boolean, text, boolean);
 CREATE OR REPLACE FUNCTION config.set_notification_channels(
    p_columns text[],
    p_smtp_host text,
@@ -2440,9 +2442,12 @@ CREATE OR REPLACE FUNCTION config.set_notification_channels(
    p_pagerduty_routing_key text,
    p_pagerduty_use_eu_region boolean,
    p_pagerduty_proxy text,
-   p_pagerduty_auto_resolve boolean)
+   p_pagerduty_auto_resolve boolean,
+   p_slack_bot_token text,
+   p_slack_app_token text)
 RETURNS TABLE (prev_smtp_username_set boolean, prev_smtp_password_set boolean, prev_teams_url_set boolean, prev_slack_url_set boolean,
-               prev_generic_url_set boolean, prev_generic_headers_set boolean, prev_pagerduty_routing_key_set boolean)
+               prev_generic_url_set boolean, prev_generic_headers_set boolean, prev_pagerduty_routing_key_set boolean,
+               prev_slack_bot_token_set boolean, prev_slack_app_token_set boolean)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
@@ -2468,13 +2473,16 @@ DECLARE
    v_eu boolean;
    v_pd_proxy text;
    v_auto boolean;
+   v_bot_token text;
+   v_app_token text;
 BEGIN
    IF p_columns IS NULL OR cardinality(p_columns) = 0
       OR EXISTS (SELECT 1 FROM unnest(p_columns) AS c(name)
                  WHERE c.name IS NULL OR c.name NOT IN (
                     'smtp_host', 'smtp_port', 'smtp_use_ssl', 'smtp_username', 'smtp_encrypted_password', 'smtp_from_address', 'smtp_recipients',
                     'teams_url', 'teams_proxy', 'slack_url', 'slack_proxy', 'generic_url', 'generic_headers', 'generic_body_template',
-                    'generic_proxy', 'pagerduty_routing_key', 'pagerduty_use_eu_region', 'pagerduty_proxy', 'pagerduty_auto_resolve')) THEN
+                    'generic_proxy', 'pagerduty_routing_key', 'pagerduty_use_eu_region', 'pagerduty_proxy', 'pagerduty_auto_resolve',
+                    'slack_bot_token', 'slack_app_token')) THEN
       RAISE EXCEPTION 'The notification channel columns to change are the SMTP, Teams, Slack, generic webhook and PagerDuty settings.' USING ERRCODE = 'DL400';
    END IF;
    -- The row is read under its lock, so every check below is on what is stored now.
@@ -2501,6 +2509,8 @@ BEGIN
    v_eu := CASE WHEN 'pagerduty_use_eu_region' = ANY (p_columns) THEN COALESCE(p_pagerduty_use_eu_region, v_row.pagerduty_use_eu_region) ELSE v_row.pagerduty_use_eu_region END;
    v_pd_proxy := CASE WHEN 'pagerduty_proxy' = ANY (p_columns) THEN COALESCE(p_pagerduty_proxy, '') ELSE v_row.pagerduty_proxy END;
    v_auto := CASE WHEN 'pagerduty_auto_resolve' = ANY (p_columns) THEN COALESCE(p_pagerduty_auto_resolve, v_row.pagerduty_auto_resolve) ELSE v_row.pagerduty_auto_resolve END;
+   v_bot_token := CASE WHEN 'slack_bot_token' = ANY (p_columns) THEN COALESCE(p_slack_bot_token, '') ELSE v_row.slack_bot_token END;
+   v_app_token := CASE WHEN 'slack_app_token' = ANY (p_columns) THEN COALESCE(p_slack_app_token, '') ELSE v_row.slack_app_token END;
    IF v_port < 1 OR v_port > 65535 THEN
       RAISE EXCEPTION 'The SMTP port is between 1 and 65535.' USING ERRCODE = 'DL400';
    END IF;
@@ -2512,7 +2522,8 @@ BEGIN
    -- of sealed:v1:, the 16 character key id, base64, at most 16384 characters), so no caller of it can store a secret as text.
    IF EXISTS (SELECT 1
                 FROM (VALUES (v_password, COALESCE(v_row.smtp_encrypted_password, '')), (v_teams, v_row.teams_url), (v_slack, v_row.slack_url),
-                             (v_generic, v_row.generic_url), (v_headers, v_row.generic_headers), (v_key, v_row.pagerduty_routing_key))
+                             (v_generic, v_row.generic_url), (v_headers, v_row.generic_headers), (v_key, v_row.pagerduty_routing_key),
+                             (v_bot_token, v_row.slack_bot_token), (v_app_token, v_row.slack_app_token))
                      AS w(new_value, old_value)
                WHERE w.new_value <> w.old_value AND w.new_value <> ''
                  AND (length(w.new_value) > 16384
@@ -2590,6 +2601,8 @@ BEGIN
           pagerduty_use_eu_region = v_eu,
           pagerduty_proxy = v_pd_proxy,
           pagerduty_auto_resolve = v_auto,
+          slack_bot_token = v_bot_token,
+          slack_app_token = v_app_token,
           modified_at = (now() AT TIME ZONE 'UTC')
     WHERE id = 1;
    -- What was stored before comes back only as a flag for whether a secret was saved, and only for the columns this call names: the
@@ -2601,11 +2614,13 @@ BEGIN
       CASE WHEN 'slack_url' = ANY (p_columns) THEN v_row.slack_url <> '' END,
       CASE WHEN 'generic_url' = ANY (p_columns) THEN v_row.generic_url <> '' END,
       CASE WHEN 'generic_headers' = ANY (p_columns) THEN v_row.generic_headers <> '' END,
-      CASE WHEN 'pagerduty_routing_key' = ANY (p_columns) THEN v_row.pagerduty_routing_key <> '' END;
+      CASE WHEN 'pagerduty_routing_key' = ANY (p_columns) THEN v_row.pagerduty_routing_key <> '' END,
+      CASE WHEN 'slack_bot_token' = ANY (p_columns) THEN v_row.slack_bot_token <> '' END,
+      CASE WHEN 'slack_app_token' = ANY (p_columns) THEN v_row.slack_app_token <> '' END;
 END
 $fn$;
-REVOKE ALL ON FUNCTION config.set_notification_channels(text[], text, integer, boolean, text, text, text, text, text, text, text, text, text, text, text, text, text, boolean, text, boolean) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION config.set_notification_channels(text[], text, integer, boolean, text, text, text, text, text, text, text, text, text, text, text, text, text, boolean, text, boolean) TO mcp;
+REVOKE ALL ON FUNCTION config.set_notification_channels(text[], text, integer, boolean, text, text, text, text, text, text, text, text, text, text, text, text, text, boolean, text, boolean, text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION config.set_notification_channels(text[], text, integer, boolean, text, text, text, text, text, text, text, text, text, text, text, text, text, boolean, text, boolean, text, text) TO mcp;
 COMMIT;
 
 -- #6230: the MCP incident tools queue analyze_now, purge_now, test_connect, pause and resume through this function, the only way the

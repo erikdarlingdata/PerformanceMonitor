@@ -776,6 +776,37 @@
                                     </Hyperlink>
                                 </TextBlock>
 
+                                <!-- #7656: the Slack bot. Its tokens live on the same settings row as the webhook URL and are sealed the same way;
+                                     they do not follow the webhook's enable toggle, because the bot posts investigation threads whether or not
+                                     alerts go to a webhook. -->
+                                <TextBlock Text="Slack Bot" FontSize="13" FontWeight="SemiBold"
+                                           Foreground="{DynamicResource ForegroundBrush}" Margin="0,16,0,0"/>
+                                <TextBlock Text="The bot posts each investigation request into one Slack thread. The bot token starts with xoxb- and the app-level token with xapp-; both are stored sealed. A route's Slack bot channel field lists the scopes the app needs."
+                                           FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                                <Grid Margin="20,6,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="110"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Bot token:" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
+                                    <TextBox AutomationProperties.Name="Slack bot token" Grid.Row="0" Grid.Column="1" x:Name="SlackBotTokenBox" Margin="0,0,0,4"
+                                             ToolTip="Slack bot token (starts with xoxb-). Stored sealed; leave blank to keep the saved one, type - to remove it."/>
+
+                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="App-level token:" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,8,4"/>
+                                    <TextBox AutomationProperties.Name="Slack app-level token" Grid.Row="1" Grid.Column="1" x:Name="SlackAppTokenBox" Margin="0,0,0,4"
+                                             ToolTip="Slack app-level token (starts with xapp-). Stored sealed; leave blank to keep the saved one, type - to remove it."/>
+
+                                    <TextBlock Grid.Row="2" Grid.Column="1" x:Name="SlackBotTokenStatusText" FontSize="11" FontStyle="Italic"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,4,0,0"/>
+                                </Grid>
+
                                 <!-- PagerDuty -->
                                 <TextBlock Text="PagerDuty Notifications" FontSize="14" FontWeight="SemiBold"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="0,20,0,0"/>
