@@ -126,6 +126,24 @@ public sealed class WebMemoryPressureChartBehaviourTests
     }
 
     [Fact]
+    public void TheGrid_ShowsANodeColumn_OnlyWhenTheRowsInViewHoldMoreThanOneNode()
+    {
+        // #7691: one event is stored once per memory node, so on a multi-node server the twin rows need the node to tell them apart.
+        var two = Run("twonodes");
+        var heads = two.GetProperty("tableHeads").EnumerateArray().Select(h => h.GetString()!).ToArray();
+        Assert.Equal(new[] { "Time", "Notification", "Node", "SQL Server process", "Operating system" }, heads);
+        var cells = two.GetProperty("tableCells").EnumerateArray()
+            .Select(row => row.EnumerateArray().Select(c => c.GetString()!).ToArray()).ToArray();
+        Assert.Equal(2, cells.Length);
+        Assert.Equal(new[] { "0", "1" }, cells.Select(c => c[2]).OrderBy(n => n, StringComparer.Ordinal).ToArray());
+
+        // One node on every row, or no node at all (rows stored before the column), is not worth a column.
+        var one = Run("onenode");
+        Assert.DoesNotContain("Node", one.GetProperty("tableHeads").EnumerateArray().Select(h => h.GetString()!));
+        Assert.Equal(3, one.GetProperty("tableRows").GetInt32());
+    }
+
+    [Fact]
     public void ThePlanCachePanels_SayTheyShowOneSnapshot_NotTheWindow()
     {
         var heads = Run("plancache").GetProperty("panelHeads").EnumerateArray().Select(h => h.GetString()!).ToArray();
