@@ -249,7 +249,8 @@ public sealed class QueryTagUsageBehaviourTests
     {
         var busy = Run().GetProperty("busyOnce");
         Assert.Equal(1, busy.GetProperty("readsBefore").GetInt32());
-        Assert.Contains("strip notice", StripClasses(busy.GetProperty("stripsBefore")));
+        /* #7934: the strip waiting to send the read again carries busy-retry, which marks a panel that has not drawn yet. */
+        Assert.Contains("strip notice busy-retry", StripClasses(busy.GetProperty("stripsBefore")));
         Assert.DoesNotContain("strip error", StripClasses(busy.GetProperty("stripsBefore")));
         Assert.Equal(2, busy.GetProperty("readsAfter").GetInt32());
         Assert.True(busy.GetProperty("planCardAfter").GetBoolean());

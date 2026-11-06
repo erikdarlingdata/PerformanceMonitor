@@ -250,6 +250,29 @@ const scenarios = {
     await flush();
     out.error = cell.all((n) => n.className === "strip error").map((n) => n.textContent);
   },
+  /* #7933: the rate measures' formatter as a tooltip calls it (the value alone) and as an axis tick calls it (with the tick step). */
+  async tooltipRates() {
+    respond(procTrend());
+    const cell = mod.statsHistoryColumn("procedures", "srv-a", 24).render(procRow);
+    cell.byText("History").click();
+    await flush();
+    const select = cell.all((n) => n.tag === "select")[0];
+    const formatterFor = (metric) => {
+      select.value = metric;
+      select.listeners.change[0]();
+      return globalThis.__charts.slice(-1)[0].spec.formatValue;
+    };
+    const msPerSecond = formatterFor("elapsed_ms_per_second");
+    out.msPerSecond = {
+      tooltip: [msPerSecond(0.17), msPerSecond(0), msPerSecond(200)],
+      ticks: [0, 0.2, 0.4].map((t) => msPerSecond(t, { step: 0.2, axisMax: 0.4 })),
+    };
+    const perSecond = formatterFor("executions_per_second");
+    out.perSecond = {
+      tooltip: [perSecond(0.00028), perSecond(0), perSecond(4)],
+      ticks: [0, 0.2, 0.4].map((t) => perSecond(t, { step: 0.2, axisMax: 0.4 })),
+    };
+  },
 };
 await scenarios[process.argv[3]]();
 console.log(JSON.stringify(out));

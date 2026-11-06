@@ -307,4 +307,73 @@ public sealed class AlertHistoryRangePageTests
         var meta = Assert.Single(r.GetProperty("meta").EnumerateArray()).GetString()!;
         Assert.StartsWith("Server A · ", meta);
     }
+
+    /// <summary>#7943: a poll whose read failed keeps the table and says so above it, and the next good poll reconciles the same rows, so
+    /// an opened Detail line stays open. Only a first load that fails draws the error strip in the table's place.</summary>
+    [Fact]
+    public void AFailedPoll_KeepsTheTableAndItsOpenDetail_UntilTheNextGoodPoll()
+    {
+        var r = Run("pollFails");
+        Assert.True(r.GetProperty("openBefore").GetBoolean());
+        Assert.True(r.GetProperty("tableDuringFailure").GetBoolean(), "the failed poll replaced the table");
+        Assert.Equal(2, r.GetProperty("rowsDuringFailure").GetInt32());
+        var notice = Assert.Single(r.GetProperty("noticeDuringFailure").EnumerateArray().Select(e => e.GetString()!));
+        Assert.Contains("the store did not answer", notice);
+        Assert.Equal(0, r.GetProperty("errorStripDuringFailure").GetInt32());
+        // The notice is a red strip for the footer too, so the failed poll does not move the page's Updated time.
+        Assert.True(r.GetProperty("errorCounted").GetBoolean());
+        Assert.True(r.GetProperty("sameRowAfter").GetBoolean());
+        Assert.True(r.GetProperty("openAfter").GetBoolean(), "the poll after the failure closed the opened Detail line");
+        Assert.Equal(0, r.GetProperty("noticeAfter").GetInt32());
+        Assert.True(r.GetProperty("firstLoadErrorStrip").GetBoolean());
+    }
+
+    private static string[] Strings(JsonElement r, string name) => r.GetProperty(name).EnumerateArray().Select(e => e.GetString()!).ToArray();
+
+    /// <summary>The table is kept through a failed read only when that read asked for what the table on screen was drawn from. A read after
+    /// a changed Server choice that fails replaces the table with the error strip, so the previous server's rows are never listed under the
+    /// new server's label.</summary>
+    [Fact]
+    public void AFailedReadAfterAServerChange_ReplacesTheTableWithTheError()
+    {
+        var r = Run("serverChangeFails");
+        Assert.Equal(2, r.GetProperty("rowsBefore").GetInt32());
+        Assert.Equal(0, r.GetProperty("table").GetInt32());
+        Assert.Equal(0, r.GetProperty("rows").GetInt32());
+        var strip = Assert.Single(Strings(r, "errorStrips"));
+        Assert.Contains("the store did not answer", strip, StringComparison.Ordinal);
+        Assert.Empty(Strings(r, "refreshNotices"));
+        Assert.StartsWith("srv-b", r.GetProperty("meta").GetString()!, StringComparison.Ordinal);
+    }
+
+    /// <summary>#5562: a range the page cannot read (Today at exactly midnight, zero length) shows that reason in the table's place, never
+    /// the previous window's rows, on the poll as on a first load.</summary>
+    [Fact]
+    public void ARangeThatCannotBeReadYet_ReplacesTheTableWithTheReason()
+    {
+        var r = Run("rangeCannotBeReadOnPoll", "UTC");
+        Assert.Equal(2, r.GetProperty("rowsBefore").GetInt32());
+        Assert.Equal("12", Get(r.GetProperty("readBefore"), "hours_back"));
+        Assert.Equal(0, r.GetProperty("readsAtMidnight").GetInt32());
+        Assert.Equal(0, r.GetProperty("table").GetInt32());
+        Assert.Equal(0, r.GetProperty("rows").GetInt32());
+        var strip = Assert.Single(Strings(r, "errorStrips"));
+        Assert.StartsWith("This range cannot be read yet: Today has only just started.", strip, StringComparison.Ordinal);
+        Assert.Empty(Strings(r, "refreshNotices"));
+    }
+
+    /// <summary>The re-read after a dismiss the store accepted: a re-read that fails replaces the table with the error rather than listing
+    /// the dismissed row as if nothing had changed.</summary>
+    [Fact]
+    public void AFailedReReadAfterADismiss_ReplacesTheTableWithTheError()
+    {
+        var r = Run("dismissRereadFails");
+        Assert.Equal(1, r.GetProperty("posted").GetInt32());
+        Assert.StartsWith("Dismissed 1 of 1", r.GetProperty("status").GetString()!, StringComparison.Ordinal);
+        Assert.Equal(0, r.GetProperty("table").GetInt32());
+        Assert.Equal(0, r.GetProperty("rows").GetInt32());
+        var strip = Assert.Single(Strings(r, "errorStrips"));
+        Assert.Contains("the store did not answer", strip, StringComparison.Ordinal);
+        Assert.Empty(Strings(r, "refreshNotices"));
+    }
 }

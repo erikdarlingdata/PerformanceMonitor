@@ -59,7 +59,7 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
         + "\"changes\":[{\"changed_at\":\"2026-01-02T20:00:00\",\"name\":\"a\"},{\"changed_at\":\"2026-01-02T08:15:00\",\"name\":\"b\"},{\"changed_at\":\"2026-01-02T12:00:00\",\"name\":\"c\"}]}";
 
     private static NpgsqlDataSource NeverConnects() =>
-        NpgsqlDataSource.Create("Host=127.0.0.1;Port=9;Username=x;Database=x;Timeout=1;Pooling=false");
+        NpgsqlDataSource.Create("Host=127.0.0.1;Port=9;Username=x;Database=x;Timeout=15;Pooling=false");
 
     private static readonly CancellationToken Cancelled = new(canceled: true);
 
