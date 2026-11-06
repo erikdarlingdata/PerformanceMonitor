@@ -277,6 +277,8 @@ categorized AS (
             WHEN wait_type IN ('RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE', 'CMEMTHREAD') THEN 'Memory'
             WHEN wait_type = 'ASYNC_NETWORK_IO' THEN 'Network'
             WHEN wait_type ILIKE 'LCK_M_%' THEN 'Locks'
+            WHEN wait_type ILIKE 'LATCH_%'
+            OR   wait_type ILIKE 'PAGELATCH_%' THEN 'Latches'
             ELSE 'Other'
         END AS category,
         wait_type,

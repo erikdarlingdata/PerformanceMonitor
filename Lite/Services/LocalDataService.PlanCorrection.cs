@@ -159,6 +159,12 @@ FROM {planCorrectionRelation}
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM {planCorrectionRelation} WHERE server_id = $1)" + dbClause + @"
 ) AS d
+/* #7699 item 2: tempdb is on the collector's list but sys.database_automatic_tuning_options has no row for it, so it
+   came back as a name over empty states. A row with no state at all is left out. */
+WHERE d.force_last_good_plan_desired_state IS NOT NULL
+OR    d.force_last_good_plan_actual_state IS NOT NULL
+OR    d.create_index_actual_state IS NOT NULL
+OR    d.drop_index_actual_state IS NOT NULL
 ORDER BY lower(database_name), database_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
