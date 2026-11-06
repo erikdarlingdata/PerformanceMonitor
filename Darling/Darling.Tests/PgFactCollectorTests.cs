@@ -115,8 +115,10 @@ public sealed class PgFactCollectorTests
            three reads per server, and Lite has no store for the second or the third (its DuckDB keeps no
            latest-snapshot interval table), plus #5516's DatabaseSizeNewestSql: the database-size method runs
            it first and DatabaseSizeSql only when a file has dropped out of the newest snapshot, plus #6640's
-           QuerySpillsRankedSql: the query-stats method runs it second, only when the aggregate found spills. */
-        Assert.Equal(LiteCollectMethodSurface.Length + 5, PgFactCollector.AllSql.Count);
+           QuerySpillsRankedSql: the query-stats method runs it second, only when the aggregate found spills, plus
+           #8001's BlockingBucketsSql: the blocking method runs it second, for the peak bucket's observed hours. */
+        Assert.Equal(LiteCollectMethodSurface.Length + 6, PgFactCollector.AllSql.Count);
+        Assert.Contains(PgFactCollector.BlockingBucketsSql, PgFactCollector.AllSql);
         Assert.Contains(PgFactCollector.QuerySpillsRankedSql, PgFactCollector.AllSql);
         Assert.Contains(PgFactCollector.DatabaseSizeNewestSql, PgFactCollector.AllSql);
         Assert.Contains(PgFactCollector.PlanRegressionTableSql, PgFactCollector.AllSql);

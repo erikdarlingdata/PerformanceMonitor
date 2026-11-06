@@ -236,10 +236,14 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
     /// Value is the busiest 4-hour sub-window's events per hour (#3871), the PG collector's shape
     /// exactly — see <c>PgFactCollector.CollectBlockingFactsAsync</c> for the grain argument (the same
     /// storm must not grade CRITICAL on a 4-hour pass and Information on a 24-hour one). Each bucket
-    /// divides by its OWN covered hours (#7895, <see cref="FactCollectorHelpers.PeakBucketRate"/>): its
-    /// span clipped to the window end, never more than the window's observed hours (#3538 A2's
-    /// observed-time rule), never under one hour, and the peak is the highest rate rather than the
-    /// biggest count.
+    /// divides by the hours the collector observed INSIDE it (#7895, #8001,
+    /// <see cref="FactCollectorHelpers.PeakBucketRate"/>): the second read buckets the coverage witness,
+    /// the wait-stats collection series <see cref="CollectObservedCoverageAsync"/> sums for the window,
+    /// with the same width and window-start origin as the waits, credits each interval to the buckets it
+    /// overlaps and drops an interval past the gap policy as that read does, so a collector gap shrinks
+    /// only the bucket it fell in. A bucket with waits the witness never saw divides by its own span,
+    /// clipped to the window end and capped at the window's observed hours; never under one hour; and
+    /// the peak is the highest rate rather than the biggest count.
     /// DuckDB's 3-arg <c>time_bucket</c> takes the same window-start origin PG's <c>date_bin</c> does.
     /// <c>events_per_hour</c> stays published as whole-window context.
     /// </summary>
@@ -247,72 +251,124 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
     {
         if (context.ObservedDurationMs <= 0) return;
 
+        var witnessFrom = context.TimeRangeStart.AddSeconds(-CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var plan = await _duckDb.PlanArchiveReadAsync("wait_stats", "collection_time", witnessFrom, context.CancellationToken);
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
 
-        using var command = connection.CreateCommand();
         var scopeList = context.SeparatelyMonitoredDatabases;
-        var scopeFilter = SeparatelyMonitoredScope.BprFilter(scopeList, 4);
         /* #5644 W1: the rows the fact counts are WAITS (BlockingWaits.WaitsCteSql: a blocked session, its blocker
            and the wait's derived start, the longest wait time kept), not blocked-process reports, which SQL
            Server writes for a still-blocked session every threshold seconds. The PG collector counts the same
            way, from the same definition. */
-        command.CommandText = (@"
-WITH " + BlockingWaits.WaitsCteSql(
+        static string WaitsCte(string scopeFilter) => BlockingWaits.WaitsCteSql(
             BlockingWaits.SqlDialect.DuckDb, "waits",
             @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms, blocking_status
-    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3{SCOPE}") + @" AS ev") + @",
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3" + scopeFilter) + @" AS ev");
+
+        long eventCount;
+        double avgWaitTimeMs;
+        long maxWaitTimeMs, distinctHeadBlockers, sleepingBlockerCount;
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = @"
+WITH " + WaitsCte(SeparatelyMonitoredScope.BprFilter(scopeList, 4)) + @"
+SELECT
+    COUNT(*) AS event_count,
+    AVG(wait_time_ms) AS avg_wait_time_ms,
+    MAX(wait_time_ms) AS max_wait_time_ms,
+    COUNT(DISTINCT blocking_spid) AS distinct_head_blockers,
+    COUNT(CASE WHEN blocking_status = 'sleeping' THEN 1 END) AS sleeping_blocker_count
+FROM waits";
+
+            command.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+            command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
+            command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            SeparatelyMonitoredScope.AddParameters(command, scopeList);
+
+            using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
+
+            eventCount = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
+            if (eventCount <= 0) return;
+
+            avgWaitTimeMs = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
+            maxWaitTimeMs = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
+            distinctHeadBlockers = reader.IsDBNull(3) ? 0L : ToInt64(reader.GetValue(3));
+            sleepingBlockerCount = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
+        }
+
+        /* #8001: the waits per 4 h bucket beside the bucket's span clipped to the window end and the seconds the collector
+           observed inside it. $4 is the window start minus the gap policy and $5 the policy itself, bound as the coverage
+           read binds them; the scope list follows. */
+        var buckets = new List<(long EventCount, double SpanHours, double ObservedHours)>();
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = plan.Apply(@"
+WITH " + WaitsCte(SeparatelyMonitoredScope.BprFilter(scopeList, 6)) + @",
 reports AS (
-    SELECT
-        wait_time_ms,
-        blocking_spid,
-        blocking_status,
-        time_bucket(INTERVAL '4 hours', event_time, $2) AS bucket_start
+    SELECT time_bucket(INTERVAL '4 hours', event_time, $2) AS bucket_start
     FROM waits
 ),
 buckets AS (
     SELECT bucket_start, COUNT(*) AS bucket_event_count
     FROM reports
     GROUP BY bucket_start
+),
+samples AS (
+    SELECT DISTINCT collection_time
+    FROM v_wait_stats
+    WHERE server_id = $1
+    AND   collection_time >= $4
+    AND   collection_time <= $3
+),
+intervals AS (
+    SELECT collection_time,
+           LAG(collection_time) OVER (ORDER BY collection_time) AS previous_time
+    FROM samples
+),
+observed AS (
+    SELECT
+        b.bucket_start,
+        SUM(EXTRACT(EPOCH FROM (LEAST(i.collection_time, b.bucket_start + INTERVAL '4 hours') - GREATEST(i.previous_time, b.bucket_start)))) AS observed_seconds
+    FROM buckets AS b
+    JOIN intervals AS i
+      ON i.previous_time IS NOT NULL
+     AND EXTRACT(EPOCH FROM (i.collection_time - i.previous_time)) <= $5
+     AND i.collection_time > b.bucket_start
+     AND i.previous_time < b.bucket_start + INTERVAL '4 hours'
+    GROUP BY b.bucket_start
 )
 SELECT
-    COUNT(*) AS event_count,
-    AVG(wait_time_ms) AS avg_wait_time_ms,
-    MAX(wait_time_ms) AS max_wait_time_ms,
-    COUNT(DISTINCT blocking_spid) AS distinct_head_blockers,
-    COUNT(CASE WHEN blocking_status = 'sleeping' THEN 1 END) AS sleeping_blocker_count,
-    /* #7895: the busiest FULL bucket, and the clipped tail bucket with its own span, so each is rated by its covered
-       hours (FactCollectorHelpers.PeakBucketRate). With the window-start origin only the last bucket can be short. */
-    (SELECT COALESCE(MAX(bucket_event_count), 0) FROM buckets WHERE bucket_start + INTERVAL '4 hours' <= $3) AS peak_full_bucket_count,
-    (SELECT COALESCE(MAX(bucket_event_count), 0) FROM buckets WHERE bucket_start + INTERVAL '4 hours' > $3) AS tail_bucket_count,
-    (SELECT COALESCE(MAX(date_diff('second', bucket_start, $3)) / 3600.0, 0) FROM buckets WHERE bucket_start + INTERVAL '4 hours' > $3) AS tail_bucket_hours
-FROM reports").Replace("{SCOPE}", scopeFilter);
+    b.bucket_event_count,
+    date_diff('second', b.bucket_start, LEAST(b.bucket_start + INTERVAL '4 hours', $3)) AS span_seconds,
+    COALESCE(o.observed_seconds, 0) AS observed_seconds
+FROM buckets AS b
+LEFT JOIN observed AS o
+  ON o.bucket_start = b.bucket_start");
 
-        command.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
-        command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
-        command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
-        SeparatelyMonitoredScope.AddParameters(command, scopeList);
+            command.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+            command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
+            command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            command.Parameters.Add(new DuckDBParameter { Value = witnessFrom });
+            command.Parameters.Add(new DuckDBParameter { Value = CollectorDeltaCalculator.DefaultMaxGapSeconds });
+            SeparatelyMonitoredScope.AddParameters(command, scopeList);
 
-        using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
-        if (!await reader.ReadAsync(context.CancellationToken)) return;
-
-        var eventCount = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
-        if (eventCount <= 0) return;
-
-        var avgWaitTimeMs = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
-        var maxWaitTimeMs = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
-        var distinctHeadBlockers = reader.IsDBNull(3) ? 0L : ToInt64(reader.GetValue(3));
-        var sleepingBlockerCount = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
-        var peakFullBucketCount = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
-        var tailBucketCount = reader.IsDBNull(6) ? 0L : ToInt64(reader.GetValue(6));
-        var tailBucketHours = reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7));
+            using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
+            while (await reader.ReadAsync(context.CancellationToken))
+            {
+                var bucketEventCount = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
+                var spanSeconds = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
+                var observedSeconds = reader.IsDBNull(2) ? 0.0 : Convert.ToDouble(reader.GetValue(2));
+                buckets.Add((bucketEventCount, spanSeconds / 3600.0, observedSeconds / 3600.0));
+            }
+        }
 
         var periodHours = context.PeriodDurationMs / 3_600_000.0;
         var observedHours = context.ObservedDurationMs / 3_600_000.0;
         var eventsPerHour = eventCount / observedHours;
-        var (peakEventsPerHour, peakEventCount, peakCoveredHours) =
-            FactCollectorHelpers.PeakBucketRate(peakFullBucketCount, tailBucketCount, tailBucketHours, context);
+        var (peakEventsPerHour, peakEventCount, peakCoveredHours) = FactCollectorHelpers.PeakBucketRate(buckets, context);
 
         facts.Add(new Fact
         {

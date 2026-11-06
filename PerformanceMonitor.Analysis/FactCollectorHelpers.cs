@@ -263,35 +263,36 @@ public static class FactCollectorHelpers
     public const double PeakBucketHours = 4.0;
 
     /// <summary>
-    /// #7895: the hours a bucket divides its events by: its own span, clipped to the window end, never more than the
-    /// hours the collector observed in the window (<see cref="AnalysisContext.ObservedDurationMs"/>, the divisor
-    /// every per-hour fact shares), and never under one hour, so a sliver of a tail bucket cannot turn one event
-    /// into a storm. The coverage witness carries one observed figure for the whole window, so a collector gap caps
-    /// a bucket's hours at what the window observed but never shrinks a bucket the collector saw end to end. A gap
-    /// inside the peak bucket itself needs observed time per bucket, which the witness does not carry (#8001).
+    /// #7895, #8001: the hours a bucket divides its events by. The coverage witness is the wait-stats collection
+    /// series <see cref="AnalysisContext.ObservedDurationMs"/> sums for the whole window; both collectors bucket it
+    /// with the events' own width and window-start origin, so <paramref name="observedHours"/> is the time the
+    /// witness saw inside this bucket. When it saw any, that is the divisor: a collector gap shrinks the bucket it
+    /// fell in and no other, and a fully observed bucket in a window the collector saw a quarter of still divides by
+    /// four. When it saw none, the bucket's events prove their own collector was up, so the witness does not describe
+    /// the bucket: the divisor is <paramref name="spanHours"/>, the bucket's span clipped to the window end, capped
+    /// at the hours the collector observed in the whole window. Never over the span and never under one hour, so a
+    /// sliver of observed time cannot turn one event into a storm.
     /// </summary>
-    public static double CoveredHours(double spanHours, AnalysisContext context) =>
-        Math.Max(1.0, Math.Min(spanHours, context.ObservedDurationMs / 3_600_000.0));
+    public static double CoveredHours(double spanHours, double observedHours, AnalysisContext context) =>
+        Math.Max(1.0, Math.Min(spanHours, observedHours > 0 ? observedHours : context.ObservedDurationMs / 3_600_000.0));
 
     /// <summary>
-    /// #7895: the busiest blocking bucket by RATE, from the two bucket shapes a window-start origin produces: full
-    /// buckets of <see cref="PeakBucketHours"/>, of which only the biggest count can win, and the one clipped tail
-    /// bucket, whose own span is <paramref name="tailBucketHours"/>. Each count divides by the
-    /// <see cref="CoveredHours"/> of its span; the higher rate wins and the bigger count breaks a tie. A window
-    /// that is a multiple of the bucket width has no tail (count 0), and a window shorter than one bucket has no
-    /// full bucket (count 0). Returns the rate, the winning bucket's count and the hours it divided by, so the
-    /// fact publishes all three.
+    /// #7895, #8001: the busiest blocking bucket by RATE. Each bucket's count divides by its <see cref="CoveredHours"/>;
+    /// the higher rate wins and the bigger count breaks a tie. Returns the rate, the winning bucket's count and the
+    /// hours it divided by, so the fact publishes all three; no buckets returns zeros.
     /// </summary>
     public static (double EventsPerHour, long EventCount, double CoveredHours) PeakBucketRate(
-        long peakFullBucketCount, long tailBucketCount, double tailBucketHours, AnalysisContext context)
+        IEnumerable<(long EventCount, double SpanHours, double ObservedHours)> buckets, AnalysisContext context)
     {
-        var fullHours = CoveredHours(PeakBucketHours, context);
-        var tailHours = CoveredHours(tailBucketHours, context);
-        var fullRate = peakFullBucketCount / fullHours;
-        var tailRate = tailBucketCount > 0 ? tailBucketCount / tailHours : 0.0;
-        return tailRate > fullRate || (tailRate == fullRate && tailBucketCount > peakFullBucketCount)
-            ? (tailRate, tailBucketCount, tailHours)
-            : (fullRate, peakFullBucketCount, fullHours);
+        var peak = (EventsPerHour: 0.0, EventCount: 0L, CoveredHours: 0.0);
+        foreach (var (eventCount, spanHours, observedHours) in buckets)
+        {
+            var hours = CoveredHours(spanHours, observedHours, context);
+            var rate = eventCount / hours;
+            if (rate > peak.EventsPerHour || (rate == peak.EventsPerHour && eventCount > peak.EventCount))
+                peak = (rate, eventCount, hours);
+        }
+        return peak;
     }
 
     /// <summary>

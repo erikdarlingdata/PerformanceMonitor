@@ -304,13 +304,7 @@ SELECT
     (SELECT COALESCE(MAX(bucket_event_count), 0) FROM buckets) AS peak_4h_event_count,
     /* #5644: the report rows before they collapse to waits, the unit the health band's per-hour count tiers were
        measured in. Appended last so every ordinal above is where it was; the fleet tile and the viewer band read it. */
-    (SELECT COUNT(*) FROM waits_marked) AS report_count,
-    /* #7895: the busiest FULL bucket, and the clipped tail bucket with its own span, so the collector rates each by
-       its covered hours (FactCollectorHelpers.PeakBucketRate). With the window-start origin only the last bucket can
-       be short. Appended after report_count so every ordinal the fleet tile and the viewer read is where it was. */
-    (SELECT COALESCE(MAX(bucket_event_count), 0) FROM buckets WHERE bucket_start + interval '4 hours' <= $3) AS peak_full_bucket_count,
-    (SELECT COALESCE(MAX(bucket_event_count), 0) FROM buckets WHERE bucket_start + interval '4 hours' > $3) AS tail_bucket_count,
-    (SELECT COALESCE(MAX(EXTRACT(EPOCH FROM ($3 - bucket_start))) / 3600.0, 0) FROM buckets WHERE bucket_start + interval '4 hours' > $3) AS tail_bucket_hours
+    (SELECT COUNT(*) FROM waits_marked) AS report_count
 FROM reports";
 
     public static string BlockingSql => BuildBlockingSql(@"
@@ -324,6 +318,76 @@ FROM reports";
     AND   collection_time >= $5
     AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)))");
 
+    /* #8001: the waits per 4 h bucket beside the bucket's span clipped to the window end and the seconds the collector
+       observed inside it. The witness is the wait-stats collection series CoverageSql sums for the whole window,
+       bucketed here with the waits' own width and window-start origin: each credited interval (previous sample,
+       sample] is clipped to the bucket it overlaps, so an interval across a bucket edge is split between the two, and
+       an interval past the gap policy is dropped as CoverageSql drops it. The samples reach back one policy before the
+       window so the first in-window sample finds its predecessor, and a bucket's observed seconds can never exceed its
+       span clipped to the window end, because every sample is at or before it. The same waits CTE and scope as
+       BuildBlockingSql, so the bucket counts are the counts of the events that read aggregates. witnessFrom and
+       gapSeconds are the parameter names of the window start minus the policy and the policy itself, which follow the
+       scoped read's own parameters. */
+    private static string BuildBlockingBucketsSql(string extraWhere, string witnessFrom, string gapSeconds) => @"
+WITH " + BlockingWaits.WaitsCteSql(
+        BlockingWaits.SqlDialect.Postgres, "waits",
+        @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms, blocking_status
+    FROM blocked_process_reports
+    WHERE server_id = $1
+    AND   event_time >= $2
+    AND   event_time <= $3" + extraWhere) + @",
+reports AS (
+    SELECT date_bin('4 hours', event_time, $2) AS bucket_start
+    FROM waits
+),
+buckets AS (
+    SELECT bucket_start, COUNT(*) AS bucket_event_count
+    FROM reports
+    GROUP BY bucket_start
+),
+samples AS (
+    SELECT DISTINCT collection_time
+    FROM v_wait_stats
+    WHERE server_id = $1
+    AND   collection_time >= " + witnessFrom + @"
+    AND   collection_time <= $3
+),
+intervals AS (
+    SELECT collection_time,
+           LAG(collection_time) OVER (ORDER BY collection_time) AS previous_time
+    FROM samples
+),
+observed AS (
+    SELECT
+        b.bucket_start,
+        SUM(EXTRACT(EPOCH FROM (LEAST(i.collection_time, b.bucket_start + interval '4 hours') - GREATEST(i.previous_time, b.bucket_start)))) AS observed_seconds
+    FROM buckets AS b
+    JOIN intervals AS i
+      ON i.previous_time IS NOT NULL
+     AND EXTRACT(EPOCH FROM (i.collection_time - i.previous_time)) <= " + gapSeconds + @"
+     AND i.collection_time > b.bucket_start
+     AND i.previous_time < b.bucket_start + interval '4 hours'
+    GROUP BY b.bucket_start
+)
+SELECT
+    b.bucket_event_count,
+    EXTRACT(EPOCH FROM (LEAST(b.bucket_start + interval '4 hours', $3) - b.bucket_start)) AS span_seconds,
+    COALESCE(o.observed_seconds, 0) AS observed_seconds
+FROM buckets AS b
+LEFT JOIN observed AS o
+  ON o.bucket_start = b.bucket_start";
+
+    /// <summary>The per-bucket read behind <see cref="BlockingSql"/>: $4 the event-window floor, $5 the window start minus
+    /// the gap policy, $6 the policy in seconds.</summary>
+    public static string BlockingBucketsSql => BuildBlockingBucketsSql(@"
+    AND   collection_time >= $4", "$5", "$6");
+
+    /// <summary>The per-bucket read behind <see cref="BlockingSqlSkippingSeparate"/>: $4 the separately monitored
+    /// databases, $5 the event-window floor, $6 the window start minus the gap policy, $7 the policy in seconds.</summary>
+    public static string BlockingBucketsSqlSkippingSeparate => BuildBlockingBucketsSql(@"
+    AND   collection_time >= $5
+    AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)))", "$6", "$7");
+
     /// <summary>
     /// Collects blocking facts from blocked_process_reports.
     /// Produces a single BLOCKING_EVENTS fact with event count, rate, and details.
@@ -331,13 +395,15 @@ FROM reports";
     /// CRITICAL on a 4-hour pass and Information on a 24-hour one, and a whole-window average dilutes a
     /// one-hour storm by however much quiet surrounds it, so the graded value is the peak 4-hour bucket
     /// — the grain the (10, 50) pair was measured on — while <c>events_per_hour</c> stays published as
-    /// the whole-window context. Each bucket divides by its OWN covered hours (#7895,
-    /// <see cref="FactCollectorHelpers.PeakBucketRate"/>): its span clipped to the window end, never more
-    /// than the window's observed hours (#3538 A2's observed-time rule: forty events in the one hour the
-    /// collector saw is a 40/hr storm, not a 10/hr murmur), never under one hour, and the peak is the
-    /// highest rate rather than the biggest count. With the window-start bucket origin a ≤4-hour window
-    /// is one bucket, so it divides by its own covered hours. <c>period_hours</c> stays the nominal
-    /// window; <c>observed_hours</c> the observed. An unobserved window emits no fact.
+    /// the whole-window context. Each bucket divides by the hours the collector observed INSIDE it (#7895,
+    /// #8001, <see cref="FactCollectorHelpers.PeakBucketRate"/>): <see cref="BlockingBucketsSql"/> buckets
+    /// the coverage witness with the waits, so a collector gap shrinks only the bucket it fell in (#3538
+    /// A2's observed-time rule at the bucket's grain: forty events in the one hour the collector saw is a
+    /// 40/hr storm, not a 10/hr murmur). A bucket with waits the witness never saw divides by its own
+    /// span, clipped to the window end and capped at the window's observed hours; never under one hour;
+    /// and the peak is the highest rate rather than the biggest count. With the window-start bucket
+    /// origin a ≤4-hour window is one bucket, so it divides by its own observed hours. <c>period_hours</c>
+    /// stays the nominal window; <c>observed_hours</c> the observed. An unobserved window emits no fact.
     /// </summary>
     private async Task CollectBlockingFactsAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -346,33 +412,60 @@ FROM reports";
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
         var separate = SeparateDatabases(context);
-        using var command = new NpgsqlCommand(separate is null ? BlockingSql : BlockingSqlSkippingSeparate, connection) { CommandTimeout = FactCommandTimeoutSeconds };
-        command.Parameters.AddWithValue(context.ServerId);
-        command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
-        command.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
-        /* The scoped read keeps its list at $4 and takes the floor as $5; the plain read has the floor at $4. */
-        if (separate is not null) command.Parameters.AddWithValue(separate);
-        command.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(context.TimeRangeStart));
+        var floor = PerformanceMonitor.Darling.Storage.EventWindowFloor.For(context.TimeRangeStart);
 
-        using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
-        if (!await reader.ReadAsync(context.CancellationToken)) return;
+        long eventCount;
+        double avgWaitTimeMs;
+        long maxWaitTimeMs, distinctHeadBlockers, sleepingBlockerCount;
+        using (var command = new NpgsqlCommand(separate is null ? BlockingSql : BlockingSqlSkippingSeparate, connection) { CommandTimeout = FactCommandTimeoutSeconds })
+        {
+            command.Parameters.AddWithValue(context.ServerId);
+            command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+            command.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+            /* The scoped read keeps its list at $4 and takes the floor as $5; the plain read has the floor at $4. */
+            if (separate is not null) command.Parameters.AddWithValue(separate);
+            command.Parameters.AddWithValue(floor);
 
-        var eventCount = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
-        if (eventCount <= 0) return;
+            using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
+            if (!await reader.ReadAsync(context.CancellationToken)) return;
 
-        var avgWaitTimeMs = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
-        var maxWaitTimeMs = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
-        var distinctHeadBlockers = reader.IsDBNull(3) ? 0L : ToInt64(reader.GetValue(3));
-        var sleepingBlockerCount = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
-        var peakFullBucketCount = reader.IsDBNull(7) ? 0L : ToInt64(reader.GetValue(7));
-        var tailBucketCount = reader.IsDBNull(8) ? 0L : ToInt64(reader.GetValue(8));
-        var tailBucketHours = reader.IsDBNull(9) ? 0.0 : Convert.ToDouble(reader.GetValue(9));
+            eventCount = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
+            if (eventCount <= 0) return;
+
+            avgWaitTimeMs = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
+            maxWaitTimeMs = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
+            distinctHeadBlockers = reader.IsDBNull(3) ? 0L : ToInt64(reader.GetValue(3));
+            sleepingBlockerCount = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
+        }
+
+        /* #8001: the waits per bucket beside each bucket's span and the seconds the collector observed inside it; the
+           witness bound (window start minus the gap policy) and the policy follow the read's own parameters, as CoverageSql
+           binds them. */
+        var buckets = new List<(long EventCount, double SpanHours, double ObservedHours)>();
+        using (var command = new NpgsqlCommand(separate is null ? BlockingBucketsSql : BlockingBucketsSqlSkippingSeparate, connection) { CommandTimeout = FactCommandTimeoutSeconds })
+        {
+            command.Parameters.AddWithValue(context.ServerId);
+            command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+            command.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+            if (separate is not null) command.Parameters.AddWithValue(separate);
+            command.Parameters.AddWithValue(floor);
+            command.Parameters.AddWithValue(AsNaive(context.TimeRangeStart.AddSeconds(-CollectorDeltaCalculator.DefaultMaxGapSeconds)));
+            command.Parameters.AddWithValue(CollectorDeltaCalculator.DefaultMaxGapSeconds);
+
+            using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
+            while (await reader.ReadAsync(context.CancellationToken))
+            {
+                var bucketEventCount = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
+                var spanSeconds = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
+                var observedSeconds = reader.IsDBNull(2) ? 0.0 : Convert.ToDouble(reader.GetValue(2));
+                buckets.Add((bucketEventCount, spanSeconds / 3600.0, observedSeconds / 3600.0));
+            }
+        }
 
         var periodHours = context.PeriodDurationMs / 3_600_000.0;
         var observedHours = context.ObservedDurationMs / 3_600_000.0;
         var eventsPerHour = eventCount / observedHours;
-        var (peakEventsPerHour, peakEventCount, peakCoveredHours) =
-            FactCollectorHelpers.PeakBucketRate(peakFullBucketCount, tailBucketCount, tailBucketHours, context);
+        var (peakEventsPerHour, peakEventCount, peakCoveredHours) = FactCollectorHelpers.PeakBucketRate(buckets, context);
 
         facts.Add(new Fact
         {
