@@ -239,20 +239,20 @@ public sealed partial class ViewerDataService
     // the MCP surface, so these add a window and nothing else.
     // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// <summary>Vacuum tab, panel 1 — what is holding the xmin horizon back, by cause.</summary>
+    /// <summary>Vacuum tab, panel 1 — what is holding the xmin horizon back, by cause. Includes rows that cleared since the newest run (#7878): the tab lists the current ones and counts the rest in its note. The same holds for the autovacuum, wraparound and slot reads below.</summary>
     public Task<List<DarlingPgXminReader.PgXminRow>> GetPgXminHorizonAsync(
         int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
-        DarlingPgXminReader.GetPgXminHorizonAsync(_dataSource, serverId, startUtc, endUtc, cancellationToken);
+        DarlingPgXminReader.GetPgXminHorizonAsync(_dataSource, serverId, startUtc, endUtc, includeCleared: true, cancellationToken: cancellationToken);
 
     /// <summary>Vacuum tab, panel 2 — per-table autovacuum backlog, ranked by ratio to the table's own threshold.</summary>
     public Task<List<DarlingPgAutovacuumReader.PgAutovacuumRow>> GetPgAutovacuumAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int limit = 100, CancellationToken cancellationToken = default) =>
-        DarlingPgAutovacuumReader.GetPgAutovacuumAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
+        DarlingPgAutovacuumReader.GetPgAutovacuumAsync(_dataSource, serverId, startUtc, endUtc, limit, includeCleared: true, cancellationToken: cancellationToken);
 
     /// <summary>Vacuum tab, panel 3 — per-database transaction-ID and multixact freeze headroom.</summary>
     public Task<List<DarlingPgWraparoundReader.PgWraparoundRow>> GetPgWraparoundAsync(
         int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
-        DarlingPgWraparoundReader.GetPgWraparoundAsync(_dataSource, serverId, startUtc, endUtc, cancellationToken);
+        DarlingPgWraparoundReader.GetPgWraparoundAsync(_dataSource, serverId, startUtc, endUtc, includeCleared: true, cancellationToken: cancellationToken);
 
     /// <summary>Waits tab — Aurora's cumulative wait counters, differenced over the window.</summary>
     public Task<List<DarlingPgWaitReader.PgWaitRow>> GetPgWaitStatsAsync(
@@ -267,7 +267,7 @@ public sealed partial class ViewerDataService
     /// <summary>Replication tab — slot WAL retention and the xmin each slot pins.</summary>
     public Task<List<DarlingPgSlotReader.PgSlotRow>> GetPgSlotsAsync(
         int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
-        DarlingPgSlotReader.GetPgSlotsAsync(_dataSource, serverId, startUtc, endUtc, cancellationToken);
+        DarlingPgSlotReader.GetPgSlotsAsync(_dataSource, serverId, startUtc, endUtc, includeCleared: true, cancellationToken: cancellationToken);
 
     /// <summary>Activity tab, panel 1 — the sampling DENOMINATOR: how many captures ran, and how many saw blocking.</summary>
     public Task<DarlingPgBlockingReader.PgBlockingCaptureCounts> GetPgBlockingCaptureCountsAsync(

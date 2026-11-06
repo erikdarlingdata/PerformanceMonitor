@@ -195,7 +195,7 @@ export async function renderManageTags(main) {
   const newRoot = canEdit ? lockButton({ class: "btn primary", type: "button", text: "New root tag", onClick: () => openForm({ mode: "create", values: { name: "", colour: "", parent_id: "" } }) }) : null;
   const headEl = el("div", { class: "page-head" }, [
     el("h2", { text: "Manage Tags" }),
-    el("div", { class: "meta", text: canEdit ? "tags scope custom alert rules" : "read-only sign-in: tags can be viewed, not changed" }),
+    el("div", { class: "meta", text: canEdit ? "tags scope custom alert rules" : session.probe_failed === true ? "could not check this sign-in: tags can be viewed, not changed until you reload" : "read-only sign-in: tags can be viewed, not changed" }),
     el("div", { class: "spacer" }),
     newRoot,
   ]);
