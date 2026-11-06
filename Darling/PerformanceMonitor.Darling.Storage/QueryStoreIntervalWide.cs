@@ -478,9 +478,10 @@ WHERE t.server_id = $1;";
     /// floor (<see cref="PlainTableFloorSql"/>). Clause 3 of <see cref="UseTable"/> needs an upper bound on the intervals the table
     /// dropped for the server it decides, and takes the lower of the two floors: a server whose own floor is young, because it was
     /// enrolled a day or two ago and its first intervals are all the table has of it, is proved by this floor where its own cannot be.
-    /// Its own floor is not evidence of a purge; it is the age of its history. Read only when a server's own floor refused clause 3, once
-    /// per check through <see cref="StoreWideInputsCache"/>, on the same index the one-server statement uses, so it has that statement's
-    /// cost after a drain (#5581) and no more.
+    /// Its own floor is not evidence of a purge; it is the age of its history. Read only when a server's own floor refused clause 3, and
+    /// tried once per check through <see cref="StoreWideInputsCache"/> (<see cref="StoreWideInputsCache.ReadTableFloorAllServersAsync"/>),
+    /// success or fault, under a savepoint inside the tag rollup's transaction. It has no server predicate, so it reads the index the
+    /// one-server statement uses from its lowest key over the whole table.
     /// </summary>
     public const string PlainTableFloorAllServersSql = @"
 SELECT
@@ -1333,9 +1334,9 @@ FROM (
         /// <summary>The table floors <see cref="PlainTableFloorsSql"/> answered; null until it ran, and after it failed.</summary>
         internal Dictionary<int, DateTime?>? TableFloors;
 
-        /// <summary>#7746: the table's floor over every server (<see cref="PlainTableFloorAllServersSql"/>), read at most once per check and
-        /// only when a server's own floor refused clause 3. <see cref="TableFloorAllServersRead"/> says it was read; a NULL answer is an
-        /// empty table.</summary>
+        /// <summary>#7746: the table's floor over every server (<see cref="PlainTableFloorAllServersSql"/>), tried at most once per check and
+        /// only when a server's own floor refused clause 3. <see cref="TableFloorAllServersRead"/> says the statement was tried; a NULL answer
+        /// is an empty table, or a statement that faulted.</summary>
         internal DateTime? TableFloorAllServers;
 
         internal bool TableFloorAllServersRead;
@@ -1424,6 +1425,60 @@ FROM (
                         logger?.LogWarning("Query Store table floors: the rollback to the savepoint failed ({Failure})", rollback.Message);
                     }
                 }
+            }
+        }
+
+        /// <summary>#7746: runs <see cref="PlainTableFloorAllServersSql"/> once per check, at the first server whose own floor refused clause 3,
+        /// and answers every later one from <see cref="TableFloorAllServers"/>. Marked tried before the statement runs, so a fault leaves
+        /// a NULL answer for every later server instead of each paying the statement, and its deadline, again. Inside an explicit
+        /// transaction the statement runs under the prefetch's savepoint, so a fault undoes only itself and the transaction's snapshot and
+        /// every later statement on it, the decisions after this one and the read, are untouched. The fault itself propagates: it is this
+        /// server's decision's, and the server reads raw. Cancellation propagates.</summary>
+        internal async Task<DateTime?> ReadTableFloorAllServersAsync(NpgsqlConnection connection, int commandTimeoutSeconds, ILogger? logger, CancellationToken cancellationToken)
+        {
+            if (TableFloorAllServersRead)
+            {
+                return TableFloorAllServers;
+            }
+
+            TableFloorAllServersRead = true;
+            if (_inTransaction)
+            {
+                await ExecuteAsync(connection, TableFloorsSavepointSql, commandTimeoutSeconds, cancellationToken);
+            }
+
+            try
+            {
+                await using (var command = new NpgsqlCommand(TableFloorAllServersSqlForTests.Value ?? PlainTableFloorAllServersSql, connection) { CommandTimeout = commandTimeoutSeconds })
+                {
+                    TableFloorAllServers = await command.ExecuteScalarAsync(cancellationToken) as DateTime?;
+                }
+
+                if (_inTransaction)
+                {
+                    await ExecuteAsync(connection, TableFloorsReleaseSql, commandTimeoutSeconds, cancellationToken);
+                }
+
+                return TableFloorAllServers;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                TableFloorAllServers = null;
+                if (_inTransaction)
+                {
+                    /* Undo the failed statement only. If this fails too, the connection is gone, and every later statement on it fails and
+                       refuses, as it would have on that connection without this read. */
+                    try
+                    {
+                        await ExecuteAsync(connection, TableFloorsRollbackSql, commandTimeoutSeconds, cancellationToken);
+                    }
+                    catch (Exception rollback) when (rollback is not OperationCanceledException)
+                    {
+                        logger?.LogWarning("Query Store whole-table floor: the rollback to the savepoint failed ({Failure})", rollback.Message);
+                    }
+                }
+
+                throw;
             }
         }
 
@@ -1550,8 +1605,9 @@ FROM (
             {
                 /* #7746: clauses 1, 2, 4 and 5 were checked above, so this refusal is clause 3's, on the server's own floor. The table's
                    floor over every server bounds the purge's cutoff for this server too (PlainTableFloorAllServersSql), so the clause is asked
-                   once more with it. A server it refuses again reads raw, as before. A fault here is the decision's, and reads raw. */
-                var allServersFloor = await ReadTableFloorAllServersAsync(connection, storeWide, commandTimeoutSeconds, cancellationToken);
+                   once more with it. A server it refuses again reads raw, as before. A fault here is the decision's, and reads raw; through
+                   storeWide the statement is tried once per check, and inside a transaction it runs under a savepoint. */
+                var allServersFloor = await ReadTableFloorAllServersAsync(connection, storeWide, commandTimeoutSeconds, logger, cancellationToken);
                 useTable = UseTable(filledSince, hasPending, rawFloor, windowStart, windowEnd, literalWindowEnd, appliedThrough, tableFloor, minWindow, allServersFloor);
             }
 
@@ -1609,25 +1665,19 @@ FROM (
         }
     }
 
-    /// <summary>#7746: <see cref="PlainTableFloorAllServersSql"/>, through <paramref name="storeWide"/> when the caller passed one, so a
-    /// fleet check reads it once for every server whose own floor refused clause 3.</summary>
+    /// <summary>#7746: <see cref="PlainTableFloorAllServersSql"/>, through <paramref name="storeWide"/> when the caller passed one
+    /// (<see cref="StoreWideInputsCache.ReadTableFloorAllServersAsync"/>), so a fleet check tries it once for every server whose own floor
+    /// refused clause 3. A caller without a cache runs the statement as it runs the server's own floor read.</summary>
     private static async Task<DateTime?> ReadTableFloorAllServersAsync(
-        NpgsqlConnection connection, StoreWideInputsCache? storeWide, int commandTimeoutSeconds, CancellationToken cancellationToken)
+        NpgsqlConnection connection, StoreWideInputsCache? storeWide, int commandTimeoutSeconds, ILogger? logger, CancellationToken cancellationToken)
     {
-        if (storeWide is { TableFloorAllServersRead: true })
+        if (storeWide is not null)
         {
-            return storeWide.TableFloorAllServers;
+            return await storeWide.ReadTableFloorAllServersAsync(connection, commandTimeoutSeconds, logger, cancellationToken);
         }
 
         await using var command = new NpgsqlCommand(StoreWideInputsCache.TableFloorAllServersSqlForTests.Value ?? PlainTableFloorAllServersSql, connection) { CommandTimeout = commandTimeoutSeconds };
-        var floor = await command.ExecuteScalarAsync(cancellationToken) as DateTime?;
-        if (storeWide is not null)
-        {
-            storeWide.TableFloorAllServers = floor;
-            storeWide.TableFloorAllServersRead = true;
-        }
-
-        return floor;
+        return await command.ExecuteScalarAsync(cancellationToken) as DateTime?;
     }
 
     private readonly ConcurrentDictionary<int, byte> _coverageEnsured = new();
