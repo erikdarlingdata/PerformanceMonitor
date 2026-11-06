@@ -1192,6 +1192,54 @@ try {
         familyRow: all(main, (n) => n.tag === "td").map((n) => n.textContent),
       };
     },
+    /* #7953: Record feedback with the PUT held, the 60 s poll's render (renderAdmin with { poll: true }) while it is in flight, then the PUT
+       answers "recorded" and from then on the list carries the new line. Returns the list reads and lines after the poll and after the
+       answer, and the status line, so a test can see the new line is on the page without another poll. */
+    feedbackPoll: async () => {
+      state.canEdit = true;
+      const id = "11111111-1111-1111-1111-111111111111";
+      let stored = false;
+      const report = () => ({
+        request_id: id, server_name: "alpha", family: "blocking", first_metric: "Blocking", opened_at_utc: "2026-10-01T00:00:00Z",
+        reported_at_utc: "2026-10-01T00:10:00Z", agent_id: "agent-a", report_verdict: "real", root_cause: "the nightly load blocks", summary: null,
+        feedback: stored ? [{ verdict: "wrong", corrected_verdict: null, missed_step: null, comment: "never a real block", author: "web", recorded_at_utc: "2026-10-01T01:00:00Z" }] : [],
+      });
+      state.responder = (method, url) => {
+        if (method === "GET" && url === "/api/investigation-feedback") {
+          return { status: 200, body: { hours_back: 168, can_record: true, requests_returned: 1, truncated: false,
+            families: [{ family: "blocking", reported: 1, with_feedback: stored ? 1 : 0, marked_wrong: 0, agent_false_positives: 0, false_positives: 0 }], requests: [report()] } };
+        }
+        if (method === "PUT" && url === "/api/investigation-feedback/" + id) { stored = true; return { status: 200, body: { status: "recorded", request_id: id, author: "web" } }; }
+        return { status: 404, body: { error: "no such request " + url } };
+      };
+      const reads = () => requests.filter((r) => r.method === "GET" && r.url === "/api/investigation-feedback").length;
+      const lines = () => byAttr(main, "data-fb-line").map((n) => n.textContent);
+      await mountPage("feedback");
+      const field = (name) => byAttr(main, "data-fb-field", name)[0];
+      field("verdict").value = "wrong";
+      await fire(field("verdict"), "change");
+      await typeInto(field("comment"), "never a real block");
+      /* Pressing the button moves the focus onto it, as a click does in a browser. */
+      const save = byAttr(main, "data-fb-save", id)[0];
+      save.focus();
+      /* The gate is read at fetch time, so set around the click it holds the PUT alone; the poll's list read, made after it is cleared, answers at once. */
+      let release;
+      state.gate = new Promise((r) => { release = r; });
+      const clicked = fire(save, "click");
+      await settle(30);
+      state.gate = null;
+      page.renderAdmin(main, "feedback", { poll: true });
+      await settle(30);
+      const afterPoll = { reads: reads(), lines: lines() };
+      release();
+      await clicked;
+      await settle(30);
+      return {
+        afterPoll,
+        afterAnswer: { reads: reads(), lines: lines(), status: byAttr(main, "data-fb-status").map((n) => n.textContent) },
+        writes: requests.filter((r) => r.method === "PUT").length,
+      };
+    },
     /* #5903: Approve on the Pending Notes tab. The page acts on the answer's reread flag: it reads the list again after an
        approval or a 404 (the list is stale) and does NOT after a 403 refusal or a 500 (the list is right, the person is told why). */
     decide: async (kind) => {
