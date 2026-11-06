@@ -1724,7 +1724,8 @@ public static class FactAdvice
     }
 
     /// <summary>
-    /// QUERY_SPILLS composed: states the pages spilled, how many distinct queries spilled, then the
+    /// QUERY_SPILLS composed: states the pages spilled, how many distinct queries spilled, the rate per observed
+    /// hour the fact is graded on beside its two bars (#7884, when the fact carries its period), then the
     /// statistics/grant remediation and the current max-server-memory sentence. The value is the sum of
     /// <c>sys.dm_exec_query_stats.total_spills</c> deltas, and that column counts 8 KB PAGES written to
     /// tempdb, not spill events, so it is named as pages and megabytes (#5633 item 2), never as "spills".
@@ -1742,6 +1743,11 @@ public static class FactAdvice
         var inv = new StringBuilder($"{spilled} spilled to tempdb this window");
         if (distinct is > 0)
             inv.Append($", across {Plural(distinct.Value, "distinct query")}");
+        if (FactMeta(facts, "QUERY_SPILLS", "period_duration_ms") is > 0)
+        {
+            var perHour = Math.Round(total.Value / FactScorer.ObservedHours(facts["QUERY_SPILLS"]));
+            inv.Append($". About {SpilledPagesText(perHour)} per observed hour; the warning bar is {SpilledPagesText(FactScorer.QuerySpillsWarningPagesPerObservedHour)} an hour and the critical bar {SpilledPagesText(FactScorer.QuerySpillsCriticalPagesPerObservedHour)}");
+        }
         inv.Append(". A spill means a query's memory grant was too small for its sort or hash operation, so the overflow went to tempdb — disk-speed work in place of memory-speed.");
         inv.Append(NamedQueriesSentence(facts, "QUERY_SPILLS", "Most spilled", o => SpilledPagesText(o.Value)));
 
@@ -3272,7 +3278,7 @@ public static class FactAdvice
             Headline:
                 "Average log and tempdb write latency is above the storage-health threshold — disk writes are slow",
             Investigation:
-                "The per-database, per-file-type write-latency breakdown is attached, ranked. The transaction log is the usual suspect — every commit blocks on WRITELOG, so even modest log latency directly hurts throughput. Above 10 ms on tempdb data files is concerning, 2 ms on log is the OLTP target. Open File I/O → File I/O Latency for the write series over time. WRITELOG co-elevation confirms log is the bottleneck; PAGEIOLATCH_EX co-elevation means data file writes are slow under modification load.",
+                "The per-database, per-file-type write-latency breakdown is attached, ranked. The transaction log is the usual suspect — every commit blocks on WRITELOG, so even modest log latency directly hurts throughput. Above 10 ms on the combined log and tempdb write average is concerning, 30 ms is critical. Open File I/O → File I/O Latency for the write series over time. WRITELOG co-elevation confirms log is the bottleneck; PAGEIOLATCH_EX co-elevation means data file writes are slow under modification load.",
             Remediation:
                 "Move the transaction log to its own low-latency device (NVMe, log-tier SAN), and never share that device with non-database workloads. For data-file write pressure, look at the modification workload — bulk inserts and large updates are the usual drivers, and batching them so the buffer pool can flush between batches helps. A too-wide index set inflates write I/O: every INSERT and DELETE maintains all nonclustered indexes, and an UPDATE maintains every index that includes one of the changed columns — so dropping unused or redundant indexes directly cuts modification cost. The plans of the modification queries will surface specific opportunities.");
 
