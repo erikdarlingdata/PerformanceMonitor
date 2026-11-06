@@ -60,7 +60,6 @@ public sealed class PgTrendReaderTests
         var sql = DarlingPgTrendReader.WaitTrendSql;
 
         Assert.Contains("interval_seconds", sql, StringComparison.Ordinal);
-        Assert.Contains("/ interval_seconds", sql, StringComparison.Ordinal);
         Assert.Contains("estimated_wait_ms_per_second", sql, StringComparison.Ordinal);
     }
 
@@ -263,7 +262,7 @@ public sealed class PgTrendReaderTests
 
         /* Every rate alias is the tail of a guarded CASE that has no ELSE: `... / interval_seconds` then
            optional whitespace then END then AS <alias>. Nine aliases, both directions. */
-        var rateArm = new Regex(@"/\s*interval_seconds\s+END\s+AS\s+(\w+_per_second)\b", RegexOptions.IgnoreCase);
+        var rateArm = new Regex(@"/\s*(?:interval_seconds|CAST\(coalesce\(sampled_ms / 1000\.0, interval_seconds\) AS double precision\))\s+END\s+AS\s+(\w+_per_second)\b", RegexOptions.IgnoreCase);
         var aliases = new[] { wait, io, db }.SelectMany(sql => rateArm.Matches(sql).Select(m => m.Groups[1].Value)).OrderBy(a => a, StringComparer.Ordinal).ToArray();
         Assert.Equal(
             new[]

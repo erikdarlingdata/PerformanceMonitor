@@ -2188,6 +2188,17 @@ public sealed class WebNetworkConfig
     public bool Hsts { get; set; }
 
     /// <summary>
+    /// Named access tokens, each with a role (#7735), shaped like <c>mcp.tokens</c>, served beside the shared token
+    /// (<see cref="EncryptedToken"/> or <see cref="Token"/>), which stays required and keeps its edit seat. A <c>reader</c> entry signs a
+    /// browser in to the read-only seat an OIDC viewer gets: every read, and every write refused by the dashboard's write gate. An
+    /// <c>operator</c> entry gets the edit seat, with its writes stamped with the entry's name. An entry that cannot be served (a bad name
+    /// or role, an unreadable or short value, a value or name another token already has, a value an MCP token has) is left out with one
+    /// Critical line naming it. Null or empty changes nothing. File-only and restart-only, like the rest of this block.
+    /// </summary>
+    [JsonPropertyName("tokens")]
+    public List<WebTokenEntry>? Tokens { get; set; }
+
+    /// <summary>
     /// True when any field is set — used only for the BYO "network.* is ignored" caller warning (D-BYO);
     /// NOT the same as "exposed".
     /// </summary>
@@ -2199,7 +2210,12 @@ public sealed class WebNetworkConfig
         || !string.IsNullOrWhiteSpace(Token)
         || (Tls?.IsConfigured ?? false)
         || (Oidc?.IsConfigured ?? false)
-        || (TrustedProxies?.Length ?? 0) > 0;
+        || (TrustedProxies?.Length ?? 0) > 0
+        || HasNamedTokens;
+
+    /// <summary>True when <see cref="Tokens"/> has an entry, served or not.</summary>
+    [JsonIgnore]
+    public bool HasNamedTokens => Tokens is { Count: > 0 } && Tokens.Any(t => t is not null);
 
     /// <summary>
     /// The access token, preferring <see cref="EncryptedToken"/> (DPAPI-decrypted; Windows-only) over the
@@ -2232,6 +2248,64 @@ public sealed class WebNetworkConfig
         }
 
         return null;
+    }
+}
+
+/// <summary>
+/// One named web dashboard access token (#7735), the twin of <see cref="McpTokenEntry"/>: a <see cref="Name"/> (1 to 64 of
+/// <c>A-Za-z0-9._:-</c>, and not a name a built-in writer stamps as itself: <c>Hosting.DarlingWebSeat.BuiltInStamps</c>), the token itself (<see cref="EncryptedToken"/> or <see cref="Token"/>, the same rules as <c>web.network</c>'s),
+/// and a <see cref="Role"/>: <c>reader</c> (the read-only seat) or <c>operator</c> (the edit seat), the <c>mcp.tokens</c> words and only
+/// those. There is no <c>agent</c> seat on the web. The name is what the log and the <c>updated_by</c> stamp record; the value is never logged.
+/// </summary>
+public sealed class WebTokenEntry
+{
+    /// <summary>The <c>reader</c> role: the read-only seat, the one an OIDC viewer gets.</summary>
+    public const string ReaderRole = "reader";
+
+    /// <summary>The <c>operator</c> role: the edit seat, the one the shared token and an OIDC admin get.</summary>
+    public const string OperatorRole = "operator";
+
+    /// <summary>The role word as served, or null when <paramref name="role"/> names no web seat: <c>reader</c> is
+    /// <see cref="ReaderRole"/> and <c>operator</c> is <see cref="OperatorRole"/>, compared ignoring case and surrounding space. Any other
+    /// word, <c>agent</c> included, is no web seat.</summary>
+    public static string? NormalizeRole(string? role) => (role ?? "").Trim().ToLowerInvariant() switch
+    {
+        ReaderRole => ReaderRole,
+        OperatorRole => OperatorRole,
+        _ => null,
+    };
+
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+
+    /// <summary>The DPAPI-encrypted token (Windows), as <c>--encrypt-password</c> writes it. Preferred over <see cref="Token"/>.</summary>
+    [JsonPropertyName("encryptedToken")]
+    public string? EncryptedToken { get; set; }
+
+    /// <summary>The plaintext token, or an <c>env:</c>/<c>file:</c> reference.</summary>
+    [JsonPropertyName("token")]
+    public string? Token { get; set; }
+
+    [JsonPropertyName("role")]
+    public string? Role { get; set; }
+
+    /// <summary>The token, preferring <see cref="EncryptedToken"/> over <see cref="Token"/>; null when neither is set. Throws when an
+    /// encrypted token cannot be read. The error names this entry's own setting, so an operator fixes the right line.</summary>
+    public string? ResolveToken()
+    {
+        var setting = $"web.network.tokens[{Name}]";
+        if (!string.IsNullOrWhiteSpace(EncryptedToken))
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                throw new PlatformNotSupportedException(
+                    setting + ".encryptedToken requires Windows (DPAPI); use the plaintext \"token\" on other platforms.");
+            }
+
+            return DarlingSecrets.Unprotect(EncryptedToken);
+        }
+
+        return string.IsNullOrWhiteSpace(Token) ? null : DarlingSecretSource.Resolve(Token, setting + ".token");
     }
 }
 

@@ -146,6 +146,11 @@ public sealed class DarlingMcpPgWaitSamplingTools
         }
     }
 
+    /// <summary>The instrument token a response echoes (#3604, #7876): the recorded arm when this build knows it,
+    /// otherwise <c>unknown</c> (no cycle has recorded one, or a future arm).</summary>
+    internal static string InstrumentToken(DarlingPgWaitSamplingReader.WaitInstrumentState? instrument) =>
+        instrument is not null && PgWaitInstrument.IsKnown(instrument.Instrument) ? instrument.Instrument : "unknown";
+
     /// <summary>
     /// The sentence the empty arm appends about the instrument (#3604): the service tier's floor caveat when
     /// that is what is sampling, nothing when the extension is (its idle answer needs no qualification), and a
@@ -194,9 +199,7 @@ public sealed class DarlingMcpPgWaitSamplingTools
     {
         /* #3604: an unrecognised token is not echoed as an instrument - a future arm this build does not know
            reads as unknown, which is the honest word, rather than as a grain the caller might act on. */
-        var instrumentToken = instrument is not null && PgWaitInstrument.IsKnown(instrument.Instrument)
-            ? instrument.Instrument
-            : "unknown";
+        var instrumentToken = InstrumentToken(instrument);
         var serviceTier = string.Equals(instrumentToken, PgWaitInstrument.ServiceSampled, StringComparison.Ordinal);
         var extensionTier = string.Equals(instrumentToken, PgWaitInstrument.ExtensionSampled, StringComparison.Ordinal);
         var truncated = page.Rows.Count > limit;

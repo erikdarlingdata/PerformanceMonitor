@@ -514,7 +514,7 @@ public static partial class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --configure-network Interactive LAN-exposure wizard." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-firewall  Create/remove the scoped firewall rules to match darling.json (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --harden-files      Re-apply the ACLs on darling.json, the store credentials, the log-hash key and the TLS key files darling.json names (run elevated)." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --grant-cert-key-access <thumbprint> [--account <name>] [--store-location LocalMachine|CurrentUser] [--store-name <name>]   Give the service account (or --account) Read on the private key of a certificate in a Windows certificate store, for web.network.tls.store and mcp.network.tls.store. Adds one Read entry and keeps the rest (run elevated for LocalMachine; restart the service after)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --grant-cert-key-access <thumbprint> [--account <name>] [--store-location LocalMachine|CurrentUser] [--store-name <name>]   Give the service account (or --account) Read on the private key of a certificate in a Windows certificate store, for web.network.tls.store and mcp.network.tls.store. Adds one Read entry and keeps the rest (run elevated for LocalMachine; restart the service after). CurrentUser grants on the key in the store of the account running this command, so it helps only when the service runs as that same account; a service under its own account never reads it, so leave the default LocalMachine." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-mcp        Enable the MCP endpoint in the store and open its firewall (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-mcp       Disable the MCP endpoint in the store and remove its firewall rule (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-web        Enable the web dashboard in the store and open its firewall (run elevated)." + Environment.NewLine +
@@ -709,6 +709,15 @@ public static partial class DarlingCliCommands
     internal static async Task ReportAgentDispatchAsync(
         DarlingConfig config, TextWriter output, CancellationToken cancellationToken)
     {
+        /* #7735: the named web tokens' findings print whenever web.network.tokens is set, the way the mcp.tokens findings print below.
+           Nothing is read from the store for them. Never a token value. */
+        foreach (var finding in DarlingWebTokenSet.Check(
+            config.Web.Network, DarlingAgentDispatchChecks.ResolveWebToken(config.Web), DarlingAgentDispatchChecks.ResolveAllTokens(config.Mcp),
+            DarlingWebTokenSet.ResolveEntry, out _))
+        {
+            output.WriteLine("WARNING: " + finding);
+        }
+
         if (!config.Mcp.AllowInvestigations && !config.Mcp.HasNamedTokens)
         {
             return;
