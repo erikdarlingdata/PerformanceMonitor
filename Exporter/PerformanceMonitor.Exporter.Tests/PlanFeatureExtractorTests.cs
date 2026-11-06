@@ -67,7 +67,8 @@ public class PlanFeatureExtractorTests
         Assert.Equal("0xE451D88319CC70FF", row.QueryHash);
         Assert.Equal("COND WITH QUERY", row.StatementType);
         Assert.Equal(5, row.OperatorCount);
-        Assert.Equal(2, row.WarningCount);
+        // #7899: one table variable (@hits) read by one operator is one finding, not a statement warning plus an operator warning.
+        Assert.Equal(1, row.WarningCount);
         Assert.All(result.Warnings, w => Assert.Equal("Table Variable", w.WarningType));
     }
 

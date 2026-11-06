@@ -1473,24 +1473,9 @@ public static partial class PlanAnalyzer
             });
         }
 
-        // Rule 22: Table variables (Object name starts with @)
-        if (!cfg.IsRuleDisabled(22) && !string.IsNullOrEmpty(node.ObjectName) &&
-            node.ObjectName.StartsWith('@'))
-        {
-            var isModificationOp = node.PhysicalOp.Contains("Insert", StringComparison.OrdinalIgnoreCase)
-                || node.PhysicalOp.Contains("Update", StringComparison.OrdinalIgnoreCase)
-                || node.PhysicalOp.Contains("Delete", StringComparison.OrdinalIgnoreCase);
-
-            node.Warnings.Add(new PlanWarning
-            {
-                RuleNumber = 22,
-                WarningType = "Table Variable",
-                Message = isModificationOp
-                    ? "Modifying a table variable forces the entire plan to run single-threaded. Replace with a #temp table to allow parallel execution."
-                    : "Table variable detected. Table variables lack column-level statistics, which causes bad row estimates, join choices, and memory grant decisions. Replace with a #temp table.",
-                Severity = isModificationOp ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
-            });
-        }
+        // Rule 22 (table variables) is reported once per statement, with the operators that touch
+        // the table variable in OriginNodeIds. #7899: it used to be reported again here, per
+        // operator, so warning_count and critical_count read one higher than the facts found.
 
         // Rule 23: Table-valued functions
         // A function the engine supplies runs as the same operator: STRING_SPLIT, OPENJSON,
