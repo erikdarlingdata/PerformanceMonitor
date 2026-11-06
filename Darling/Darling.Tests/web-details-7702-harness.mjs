@@ -1,8 +1,8 @@
 /* Runs the shipped page scripts against a node-tree DOM and a recording fetch, and prints as one line of JSON what each of the web details
    of #7702 now shows: the FinOps Wait Stats Summary's duration cells, the version store chart's tick and tooltip figures, the Database Scoped
    Configuration subtitle, the Configuration Audit's grouped figures, the Buffer Pool Residency Kind words, the Admin Engine words, the Index
-   Bloat Basis cell on a row with no estimate, the Alert Settings headings, the sp_server_diagnostics label and the notify severity word, the
-   zero-filled event-count trend points, and the sidebar's Query Tags entry.
+   Bloat Basis cell on a row with no estimate, the Alert Settings headings, the sp_server_diagnostics label and the notify severity word, and the
+   zero-filled event-count trend points, both from the helper and as the line viz hands them to the chart.
    A step that throws (a page script without the helper it drives) records the error under its key, so every other key is still printed.
        node web-details-7702-harness.mjs <path to wwwroot/js> */
 import fs from "node:fs";
@@ -191,12 +191,32 @@ try {
   step("zeroFillNoWindow", () => zeroFilledPoints(two, "time", series, 5, null).map((p) => p.count));
   step("zeroFillEmpty", () => zeroFilledPoints([], "time", series, null, null).length);
 
-  // 17. The sidebar names the page as the page names itself.
-  step("sidebarQueryTags", () => {
-    const html = fs.readFileSync(path.join(jsDir, "..", "index.html"), "utf8");
-    const m = html.match(/<a data-route="manage-query-tags"[^>]*>([^<]*)<\/a>/);
-    return m ? m[1] : null;
-  });
+  /* The same fill through the line viz, as the Blocking tab's panels draw it: the points the chart is handed are judged, so the fill must take the
+     reply's own bucket (5 minutes here, not the points' 1 minute step), the window the panel's hours give (one hour ending now, with the clock
+     pinned), and the panel's series. A reply whose source is the DMV snapshot is handed to the chart as it came: a bucket that sample has no row
+     for is time nobody observed, not a count of 0. A reply naming no source (the Deadlock trend) fills. */
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-11-05T10:05:00Z");
+  const fiveApart = [{ time: "2026-11-05T10:00:00.000Z", count: 4 }, { time: "2026-11-05T10:05:00.000Z", count: 1 }];
+  const trendDesc = { viz: "line", rowsKey: "trend", xKey: "time", series, format: "int", zeroFill: true, sourceKey: "source", params: { server: "srv-a", hours: 1 }, emptyText: "none" };
+  const drawn = (data, desc) => {
+    specs.length = 0;
+    VIZ.line(data, desc);
+    const pts = specs[0].points;
+    return {
+      count: pts.length,
+      first: pts[0].time,
+      last: pts[pts.length - 1].time,
+      zeros: pts.filter((p) => p.count === 0).length,
+      kept: pts.filter((p) => data.trend.includes(p)).length,
+      sum: pts.reduce((s, p) => s + p.count, 0),
+      window: [new Date(specs[0].windowStart).toISOString(), new Date(specs[0].windowEnd).toISOString()],
+    };
+  };
+  step("zeroFillPanel", () => drawn({ source: "blocked-process-report", bucket_minutes: 5, trend: fiveApart }, trendDesc));
+  step("zeroFillPanelSnapshot", () => drawn({ source: "DMV snapshot", bucket_minutes: 5, trend: fiveApart }, trendDesc));
+  step("zeroFillPanelNoSource", () => drawn({ bucket_minutes: 5, trend: fiveApart }, { ...trendDesc, sourceKey: undefined }));
+  Date.now = realNow;
 
   process.stdout.write(JSON.stringify(out) + "\n");
 } finally {

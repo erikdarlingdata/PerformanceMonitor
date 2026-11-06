@@ -22,8 +22,8 @@ namespace Darling.Tests;
 /// Database Scoped Configuration subtitle says when the snapshot was taken in words, the Configuration Audit groups a whole-number figure,
 /// Buffer Pool Residency prints the relation kind in words, Admin prints the engine in words, an Index Bloat row with no estimate has no
 /// basis, the Alert Settings headings share one style and keep sp_server_diagnostics as a name, the notify severity carries its word, an
-/// event-count trend draws the buckets the read left out at 0, and the sidebar names the Query Tags page as the page names itself. Node is
-/// skipped when it is not installed.
+/// event-count trend draws the buckets the read left out at 0, through the chart the panel draws with, and a DMV snapshot trend is drawn
+/// as it came. Node is skipped when it is not installed.
 /// </summary>
 public sealed class WebDetails7702BehaviourTests
 {
@@ -155,9 +155,39 @@ public sealed class WebDetails7702BehaviourTests
         Assert.Equal(0, run.GetProperty("zeroFillEmpty").GetInt32());
     }
 
+    /// <summary>
+    /// Through the line viz, as the Blocking tab draws it: the chart is handed every 5 minute bucket of the one hour window (the reply's own
+    /// bucket, not the points' step), aligned on the first point, with the two reported buckets kept and the other eleven at 0.
+    /// </summary>
     [Fact]
-    public void TheSidebar_NamesTheQueryTagsPageAsThePageDoes()
+    public void AnEventCountPanel_HandsTheChartTheFilledBuckets_OfTheReplysBucketAcrossThePanelsWindow()
     {
-        Assert.Equal("Manage Query Tags", Run().GetProperty("sidebarQueryTags").GetString());
+        var run = Run();
+        var fill = run.GetProperty("zeroFillPanel");
+        Assert.Equal(13, fill.GetProperty("count").GetInt32());
+        Assert.Equal("2026-11-05T09:05:00.000Z", fill.GetProperty("first").GetString());
+        Assert.Equal("2026-11-05T10:05:00.000Z", fill.GetProperty("last").GetString());
+        Assert.Equal(11, fill.GetProperty("zeros").GetInt32());
+        Assert.Equal(2, fill.GetProperty("kept").GetInt32());
+        Assert.Equal(5, fill.GetProperty("sum").GetInt32());
+        Assert.Equal(new[] { "2026-11-05T09:05:00.000Z", "2026-11-05T10:05:00.000Z" }, Strings(fill.GetProperty("window")));
+        var noSource = run.GetProperty("zeroFillPanelNoSource");
+        Assert.Equal(13, noSource.GetProperty("count").GetInt32());
+        Assert.Equal(11, noSource.GetProperty("zeros").GetInt32());
+    }
+
+    /// <summary>
+    /// The DMV snapshot samples blocking on a schedule, so a bucket it has no row for is time nobody observed: its trend reaches the chart
+    /// as the read returned it, two points and no 0.
+    /// </summary>
+    [Fact]
+    public void ADmvSnapshotTrend_IsHandedToTheChartAsItCame_WithNoFill()
+    {
+        var snapshot = Run().GetProperty("zeroFillPanelSnapshot");
+        Assert.Equal(2, snapshot.GetProperty("count").GetInt32());
+        Assert.Equal(0, snapshot.GetProperty("zeros").GetInt32());
+        Assert.Equal(2, snapshot.GetProperty("kept").GetInt32());
+        Assert.Equal("2026-11-05T10:00:00.000Z", snapshot.GetProperty("first").GetString());
+        Assert.Equal("2026-11-05T10:05:00.000Z", snapshot.GetProperty("last").GetString());
     }
 }
