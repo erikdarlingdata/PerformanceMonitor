@@ -148,7 +148,8 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
             "reserved_mb DESC NULLS LAST, database_name, schema_name, table_name, index_name NULLS LAST", sql,
             "reserved_mb ties no longer break by name (a heap's NULL name last, as on Lite), so a capped page can change between calls");
         Assert.Contains("FROM v_index_object_stats", sql, StringComparison.Ordinal);
-        SqlTextPin.AssertExpresses("MAX(collection_time)", sql, "the read is no longer the latest snapshot");
+        /* That the rows are the newest snapshot's is asserted by running the read, in
+           LatestSnapshotLookupLiveTests.IndexUsage_ItsMatchCount_ObjectLocking_AndItsDetail_ReturnOnlyTheNewestSnapshot. */
         /* Case is NOT normalised: these are the values the tool emits and callers compare. */
         Assert.Contains("'Unused'", sql, StringComparison.Ordinal);
         Assert.Contains("'Write-only'", sql, StringComparison.Ordinal);
@@ -165,9 +166,10 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
     /// is FOR, and that claim is what changed. The two halves the old name also carried — only contended rows,
     /// most contended first — are unchanged and still asserted here.
     ///
-    /// <para>A bare <c>MAX(collection_time)</c> is no longer a sufficient needle, because the shape being
-    /// retired contained one too. The anchor is pinned whole, and the retired grouping asserted absent, so
-    /// this cannot pass again by going back.</para>
+    /// <para>The anchor is the server-wide snapshot the reader resolves before the statement and binds as a
+    /// parameter, so the statement has no anchor to pin; the retired grouping is asserted absent here, and that
+    /// the anchor stays the SERVER's capture rather than a per-database one is asserted by running the read, in
+    /// <c>ObjectStatsDatabaseFilterLiveTests.ObjectLockingReader_TheSnapshotAnchorStaysServerWide</c>.</para>
     /// </summary>
     [Fact]
     public void IndexLockingSql_ServerLatestCapture_NonzeroWaits_ContendedFirst()
@@ -177,10 +179,6 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
         Assert.Contains("row_lock_wait_in_ms", sql, StringComparison.Ordinal);
         Assert.Contains("page_io_latch_wait_in_ms", sql, StringComparison.Ordinal);
         Assert.Contains("index_lock_promotion_count", sql, StringComparison.Ordinal);
-        SqlTextPin.AssertExpresses(
-            "collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)",
-            sql,
-            "the read is no longer anchored on the server's latest capture — #3878's immortal per-name groups are back");
         Assert.DoesNotContain("GROUP BY database_name", sql, StringComparison.Ordinal);
     }
 
@@ -208,9 +206,9 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
     /// statement's select list (the general rule
     /// <see cref="McpLatestSnapshotStampTests.EveryStampedRead_SelectsItsStampColumn_OnTheRowStatement"/>
     /// holds per read, and this names the tool) and the record carries it in the position the tool reads.
-    /// The negative half matters as much: a stamp fetched by a SECOND <c>MAX(collection_time)</c> read can
-    /// resolve to the next capture landing between the two queries, so there is exactly one such subquery in
-    /// this constant — the anchor itself.
+    /// The stamp it projects is the bound instant the reader resolved before the statement, so it is the capture
+    /// the returned rows came from and never a fresher one; <c>LatestSnapshotLookupLiveTests</c> asserts that by
+    /// running the read.
     ///
     /// <para>That the PAYLOAD publishes <c>captured_at</c> is asserted where every other stamped read's is:
     /// <c>get_object_locking</c> is a <c>Shape.Stamped</c> roster row in <see cref="McpLatestSnapshotStampTests"/>
@@ -230,10 +228,6 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
         Assert.True(from > 0, "no column-zero FROM — the read's shape has changed; re-anchor this pin");
         var select = sql.LastIndexOf("\nSELECT", from, StringComparison.Ordinal);
         Assert.Contains("collection_time", sql[(select < 0 ? 0 : select)..from], StringComparison.Ordinal);
-
-        /* Exactly one MAX(collection_time): the anchor. A second one would be a stamp read that can see a
-           capture the returned rows did not come from. */
-        Assert.Single(System.Text.RegularExpressions.Regex.Matches(sql, @"MAX\(collection_time\)"));
 
         /* The stamp reaches the row type at ordinal 0, which is the mapping the reader's GetDateTime(0) and
            the tool's rows[0].CollectionTime both depend on: a member inserted ahead of it would shift every

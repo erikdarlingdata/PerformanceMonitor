@@ -418,9 +418,11 @@ export const SERVER_TABS = [
           rowsKey: "blocked_sessions",
           xKey: "collection_time",
           series: BLOCKED_SESSION_SERIES,
-          /* #7877: each point is the MEAN of the collections in its bucket (0.4 sessions is real), so one decimal, and not format "int", which
-             would print 0.4 as 0 and also declare a count axis (whole-number ticks) for a series that is no longer whole. */
-          format: "num1",
+          /* #7877: each point is the MEAN of the collections in its bucket (0.4 sessions is real), so a fractional format, and not "int", which
+             would print 0.4 as 0 and also declare a count axis (whole-number ticks) for a series that is no longer whole. #7974: the mean is over
+             every collection that ran, so a database blocked in 1 of 60 is 0.017 and "num1" printed that as 0.0 though blocking happened. "rate"
+             keeps up to two decimals from 1 up (2, 1.5, 3.33) and two significant digits below 1 (0.4, 0.017), so only a true 0 reads 0. */
+          format: "rate",
           emptyText: "No blocked sessions in this window.",
         },
       ]),

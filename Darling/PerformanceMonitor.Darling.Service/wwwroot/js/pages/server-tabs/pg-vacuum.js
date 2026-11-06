@@ -107,7 +107,14 @@ export const PG_XMIN_COLUMNS = [
   { key: "holder", label: "Holder", wrap: true },
   { key: "detail", label: "Detail", wrap: true },
   { key: "samples_as_winner", label: "Samples Winning", format: "int" },
-  { key: "samples", label: "Samples", format: "int" },
+  /* #7926: the read names this captures_recording_this_source: the captures in which THIS source recorded a holder, its own
+     rows, not the window's capture count (captures_in_window, the denominator of % of Window). */
+  {
+    key: "captures_recording_this_source",
+    label: "Captures (this source)",
+    format: "int",
+    hint: "The number of captures in the window in which this source recorded a holder, counted over its own rows. % of Window divides Samples Winning by every capture in the window instead, held or not.",
+  },
   { key: "pct_of_window_winning", label: "% of Window", format: "num1" },
   { key: "measured_at", label: "Measured", format: "time" },
   { key: "remedy", label: "Remedy", clamp: true },

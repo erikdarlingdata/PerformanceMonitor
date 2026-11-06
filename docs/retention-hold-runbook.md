@@ -107,6 +107,28 @@ A rollup's own retention can trim the backfill's older days before the re-evalua
 undo the backfill. Those days are older than the rollup keeps. The gate checks a rollup with armed
 retention only as far back as it keeps (#7114), so the trim cannot put the hold back.
 
+## After a store outage
+
+While the store is down, nothing is collected, rolled up or purged. When it comes back, expect two alerts
+for a while:
+
+- **Raw Purge Over Horizon.** A raw table holds more than its 4 days. The raw purge runs only on the hourly
+  maintenance pass. It waits until every rollup that reads the table covers it and the startup hole repair
+  is done. This alert alone needs nothing from you: it clears within an hour or two.
+- **Retention Held.** A rollup is missing history that its source still holds. The service fills a gap of up
+  to one day by itself. The HELD line in the log names each rollup and its remedy. When it says the gap is
+  wider than one day, run `--backfill-rollups` as shown above.
+
+You do not need to restart after the backfill. The hourly re-evaluation arms the held policies, and the next
+hourly pass runs the raw purge. A restart only makes this happen sooner.
+
+The outage leaves a gap in the data, and no backfill can fill it: the rows were never collected. Some
+rollups keep only a short history, such as the Query Store interval hourly rollup (7 days). When its
+retention runs, it trims itself to the first hour after the gap. The gate treats the gap as nothing to
+cover, so this does not put the raw table's purge back on hold (#7961). A log line can still say `RE-HELD`
+after a backfill. Then the rollup it names is missing hours that the raw table holds inside that rollup's
+own retention, so run `--backfill-rollups` again.
+
 ## How you know it worked
 
 Three independent confirmations:

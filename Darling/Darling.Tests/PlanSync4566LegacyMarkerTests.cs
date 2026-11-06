@@ -54,6 +54,7 @@ public sealed class PlanSync4566LegacyMarkerTests
             PhysicalOp = "Table Scan",
             LogicalOp = "Table Scan",
             HasActualStats = true,
+            ActualRows = 1_000_000,
             ActualElapsedMs = 50,
             OutputColumns = "[dbo].[t].[a],[dbo].[t].[b]"
         };

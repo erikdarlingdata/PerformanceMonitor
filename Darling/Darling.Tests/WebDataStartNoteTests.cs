@@ -65,7 +65,7 @@ public sealed class WebDataStartNoteTests
     /// the answer comes back untouched whether or not a guard held. Every use pairs with a control that does reach
     /// the store, so an instrument that stopped seeing a reach would fail loudly rather than pass every case.</summary>
     private static NpgsqlDataSource NeverConnects() =>
-        NpgsqlDataSource.Create("Host=127.0.0.1;Port=9;Username=x;Database=x;Timeout=1;Pooling=false");
+        NpgsqlDataSource.Create("Host=127.0.0.1;Port=9;Username=x;Database=x;Timeout=15;Pooling=false");
 
     private static readonly CancellationToken Cancelled = new(canceled: true);
 
