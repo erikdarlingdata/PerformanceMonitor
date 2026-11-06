@@ -19,6 +19,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Chat;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 using Xunit;
 

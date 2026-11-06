@@ -711,6 +711,14 @@ CREATE OR REPLACE VIEW collect.v_blocked_process_reports AS SELECT * FROM collec
         // re-run of V249 adds it back. Safe on a store that never had it.
         new(249, "hasStatementStatsDatabaseName",
             @"ALTER TABLE IF EXISTS collect.pg_statement_stats DROP COLUMN IF EXISTS database_name;"),
+        // V252 (#7656): the Slack bot's route channel, the sealed tokens on the notification settings row and the request thread table. The
+        // probe's sentinel is the thread table, so the rewind drops it and the three columns, and a re-run of V252 adds them back. Safe on a
+        // store that never had them.
+        new(252, "hasSlackBotThreads",
+            @"DROP TABLE IF EXISTS config.investigation_request_threads;
+ALTER TABLE IF EXISTS config.config_notification_routes DROP COLUMN IF EXISTS slack_bot_channel;
+ALTER TABLE IF EXISTS config.config_notification DROP COLUMN IF EXISTS slack_bot_token;
+ALTER TABLE IF EXISTS config.config_notification DROP COLUMN IF EXISTS slack_app_token;"),
     ];
 
     /// <summary>

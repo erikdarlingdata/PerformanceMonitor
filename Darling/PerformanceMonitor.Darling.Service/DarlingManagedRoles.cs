@@ -4319,6 +4319,7 @@ CREATE OR REPLACE TRIGGER trg_investigation_request_alerts_owner_rows
             .Concat(PersonEvents.OwnerOnly)
             .Concat(ProposalEvents.OwnerOnly)
             .Append(InvestigationRequestStore.ProposalNoticeSent)
+            .Append(InvestigationRequestStore.SlackThreadPosted)
             .Append(InvestigationRequestStore.AskerJournalEvent)
             .Select(k => "'" + k + "'"));
 

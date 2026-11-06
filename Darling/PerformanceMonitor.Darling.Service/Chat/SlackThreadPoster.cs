@@ -10,27 +10,9 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Chat;
-
-/// <summary>#7656: a request's Slack thread: the channel the parent was posted to and the parent's <c>ts</c>.</summary>
-public sealed record SlackRequestThread(Guid RequestId, string ChannelId, string ThreadTs);
-
-/// <summary>
-/// #7656: where request threads and post marks live. The store writes the thread row when the parent post delivers, finds it for
-/// every later post, and writes each post's once mark (a journal row under <see cref="SlackThreadPosts.OnceKey"/>) before the send.
-/// </summary>
-public interface ISlackRequestThreadStore
-{
-    /// <summary>The thread of <paramref name="threadRequestId"/>, or null when it has none yet.</summary>
-    Task<SlackRequestThread?> FindAsync(Guid threadRequestId, CancellationToken cancellationToken);
-
-    /// <summary>Saves a request's thread after its parent post delivered.</summary>
-    Task SaveAsync(SlackRequestThread thread, CancellationToken cancellationToken);
-
-    /// <summary>Writes the once mark of one post and answers whether THIS call wrote it. The poster sends only on true.</summary>
-    Task<bool> MarkOnceAsync(Guid requestId, int routeId, int serverId, string postKey, string onceKey, CancellationToken cancellationToken);
-}
 
 /// <summary>
 /// #7656: which request a post belongs to and where its thread is. <see cref="ThreadRequestId"/> is the request whose thread the post

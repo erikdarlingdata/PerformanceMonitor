@@ -2640,6 +2640,28 @@ ALTER TABLE config.config_monitored_servers
     private const string V249Sql = @"
 ALTER TABLE collect.pg_statement_stats ADD COLUMN IF NOT EXISTS database_name text;";
 
+    /* V252 (#7656): the Slack bot. A route's bot channel id, the sealed bot and app tokens on the notification settings row (opened like
+       the webhook URLs), and one thread per investigation request: the channel the parent post went to and its ts. The thread table is
+       owner-written, as config_server_actions is: admin reads it and nothing else. The REVOKE and GRANT run only where the role exists. */
+    private const string V252Sql = @"
+ALTER TABLE config.config_notification_routes ADD COLUMN IF NOT EXISTS slack_bot_channel text NOT NULL DEFAULT '';
+ALTER TABLE config.config_notification ADD COLUMN IF NOT EXISTS slack_bot_token text NOT NULL DEFAULT '';
+ALTER TABLE config.config_notification ADD COLUMN IF NOT EXISTS slack_app_token text NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS config.investigation_request_threads (
+    request_id uuid PRIMARY KEY REFERENCES config.investigation_requests(request_id) ON DELETE CASCADE,
+    channel_id text NOT NULL,
+    thread_ts text NOT NULL,
+    posted_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC')
+);
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'admin') THEN
+        REVOKE ALL ON config.investigation_request_threads FROM admin;
+        GRANT SELECT ON config.investigation_request_threads TO admin;
+    END IF;
+END
+$$;";
+
     /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
     /// <c>DatabaseProtectionCollector</c> every 60 minutes (Darling only). One row per database per pass: the raw times (UTC), the
@@ -3147,6 +3169,7 @@ $rung$;";
         new Migration(247, "xe-session-databases", V247Sql),
         new Migration(248, "query-store-self-keys-old-statements", V248Sql),
         new Migration(249, "pg-statement-stats-database-name", V249Sql),
+        new Migration(252, "slack-bot-threads", V252Sql),
     };
 
     /// <summary>
