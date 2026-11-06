@@ -65,6 +65,7 @@ import {
   localizeIsoText,
   localizeAlertDetail,
   noValuesText,
+  SAMPLED_BLOCKING_SOURCE,
 } from "./util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
 import { bucketMsOf } from "./chart-gaps.js";
@@ -1646,8 +1647,12 @@ function vizLine(data, desc) {
   /* #7682: `footNoteKey` names a text field of the reply drawn as a notice under the chart, only when a series was left out for having no measured value
      (get_cpu_utilization's host_cpu_note: this server cannot report host CPU, so Other and Total are not drawn). */
   const footNote = desc.footNoteKey && seriesCfg.length < allSeriesCfg.length ? getPath(data, desc.footNoteKey) : null;
+  /* `zeroFill` draws the buckets an event-count read left out at 0 (zeroFilledPoints): the read records every event, so a bucket with no row is a
+     count of 0. Not when the answer's source (`sourceKey`) is the DMV snapshot, a sample taken on a schedule: a bucket it has no row for is time
+     nobody observed, so those points reach the chart as they came. */
+  const fill = desc.zeroFill && !(desc.sourceKey && getPath(data, desc.sourceKey) === SAMPLED_BLOCKING_SOURCE);
   const chart = zoomableLineChart({
-    points: desc.zeroFill ? zeroFilledPoints(points, desc.xKey, seriesCfg, getPath(data, "bucket_minutes"), win) : points,
+    points: fill ? zeroFilledPoints(points, desc.xKey, seriesCfg, getPath(data, "bucket_minutes"), win) : points,
     xKey: desc.xKey,
     series,
     annotations,
@@ -1717,7 +1722,10 @@ export function zeroFilledPoints(points, xKey, seriesCfg, bucketMinutes, win) {
       out.push(zero);
     }
   }
-  for (const p of points) if (!out.includes(p) && timeOf(p) != null) out.push(p);
+  /* A returned point off the grid (a second row for one time, or one past the bucket cap) is kept too. A set, not a scan of `out` per point:
+     a week of minute buckets is 10,000 points against as many buckets, redrawn on every poll. */
+  const placed = new Set(out);
+  for (const p of points) if (!placed.has(p) && timeOf(p) != null) out.push(p);
   return out.sort((a, b) => timeOf(a) - timeOf(b));
 }
 
