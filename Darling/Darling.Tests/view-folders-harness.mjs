@@ -49,6 +49,8 @@ globalThis.document = {
   activeElement: null,
   createElement: (tag) => new FakeNode(tag),
   createTextNode: (text) => new FakeNode("#text", text),
+  /* The list page keeps the reader's scroll position when it draws (refresh-in-place.js), which looks the grids up; there are none here. */
+  querySelectorAll: () => [],
 };
 globalThis.window = globalThis;
 globalThis.location = { hash: "", pathname: "/", search: "", href: "http://localhost/", origin: "http://localhost" };

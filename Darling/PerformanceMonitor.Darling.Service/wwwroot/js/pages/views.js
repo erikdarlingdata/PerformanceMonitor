@@ -28,7 +28,7 @@
 import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, noticeStrip, relTime, localTime, localizeIsoText, localizeAlertDetail, fmtNum, storeHash } from "../util.js";
 import { rollingHoursPicker } from "../page-range.js";
 import { renderPanel, setPanelSignal, VIZ } from "../panels.js";
-import { holdsPage, refreshGridInPlace, showAround, showPage, showRefreshError } from "../refresh-in-place.js";
+import { holdsPage, keepScroll, refreshGridInPlace, showAround, showPage, showRefreshError } from "../refresh-in-place.js";
 import { orderServers } from "../server-order.js";
 import { renderComposedPanelCard } from "../compose.js";
 import { keepLonePanelsWide } from "../panel-layout.js";
@@ -100,23 +100,39 @@ function viewRefreshControl(view, def, isNotebook, canEdit) {
 
 /* ─────────────────────────── list page ─────────────────────────── */
 
-export async function renderViewList(main) {
-  mount(main, [listHead(false, []), loadingStrip("Loading views…")]);
+/* #7925: the key the list page is held under (refresh-in-place.js), so the 60 s poll can tell that the list on screen is its own. */
+const LIST_KEY = "views";
+
+/* #7925: each card's count chips by view id, with the version they were read at. The counts come from the view's full definition,
+   which the list payload does not carry, so a card whose version is unchanged draws its chips from here instead of reading the
+   definition again on every poll. */
+const chipCache = new Map();
+
+export async function renderViewList(main, opts) {
+  /* #7925: the poll over the list on screen leaves it there while the list is read again. The import JSON a reader has pasted, an open
+     Import or template menu and the server picked for a template are what they are working with, and a "Loading views…" strip in
+     their place would throw them away. When the new list arrives only the cards are redrawn. */
+  const inPlace = holdsPage(main, LIST_KEY, !!(opts && opts.poll === true));
+  if (!inPlace) mount(main, [listHead(false, []), loadingStrip("Loading views…")]);
 
   /* #6243: the list needs only the session and the view list. The fleet read exists for the dashboard templates' server
      picker, so the list is drawn the moment those two answer; a slow or hung fleet read used to hold the page on
-     "Loading views…". The picker is filled in when the fleet answers, if the page is still this one. */
-  const serversRead = loadServerNames();
+     "Loading views…". The picker is filled in when the fleet answers, if the page is still this one. The poll keeps the
+     picker it has, so it does not read the fleet. */
+  const serversRead = inPlace ? null : loadServerNames();
   const [session, res] = await Promise.all([api.getSession(), api.listViews()]);
   const canEdit = !!session.can_edit;
   const ourHash = location.hash;
 
   if (res.kind === "error") {
-    mount(main, [listHead(canEdit, []), errorStrip(res.message)]);
+    if (inPlace && showRefreshError(main, LIST_KEY, res.message)) return;
+    showPage(main, LIST_KEY, [listHead(canEdit, []), errorStrip(res.message)]);
     return;
   }
 
   const views = Array.isArray(res.data) ? res.data : [];
+  if (inPlace && holdsPage(main, LIST_KEY, true) && swapCards(main, views)) return;
+
   const head = listHead(canEdit, []);
   const nodes = [head];
 
@@ -128,16 +144,39 @@ export async function renderViewList(main) {
     if (canEdit) nodes.push(importPanel());
     nodes.push(el("div", { class: "view-cards" }, views.map((v) => viewCard(v))));
   }
-  mount(main, nodes);
+  showPage(main, LIST_KEY, nodes);
 
+  if (!serversRead) return;
   const servers = await serversRead;
   if (!servers.length || location.hash !== ourHash || main.firstChild !== head) return;
   if (!views.length) {
-    mount(main, [listHead(canEdit, servers), firstRunHero(canEdit, servers)]);
+    showPage(main, LIST_KEY, [listHead(canEdit, servers), firstRunHero(canEdit, servers)]);
     return;
   }
-  /* Only the head holds the picker: swap it in place so the cards, and their own reads, are not rebuilt. */
-  main.replaceChild(listHead(canEdit, servers), head);
+  /* Only the head holds the picker: its children are swapped in place so the cards, their own reads and the import box are not
+     rebuilt, and the head stays the first child the poll knows the page by. */
+  mount(head, Array.from(listHead(canEdit, servers).children));
+}
+
+/* #7925: the poll's redraw of a list that is on screen. The cards are replaced in one step, with the reader's scroll position kept,
+   and the head and the import panel stay as they are; an earlier poll's failure notice comes down. False when the page is not a
+   list of cards (the first-run hero) and views now exist, or when it is one and no views are left: the caller draws the whole page.
+   A hero over a store that still has no views stays as it is. */
+function swapCards(main, views) {
+  const children = () => Array.from(main.children || []);
+  const live = children().find((n) => hasClass(n, "view-cards"));
+  if (!live) return !views.length;
+  if (!views.length) return false;
+  keepScroll(() => {
+    const stale = children().find((n) => hasClass(n, "refresh-error"));
+    if (stale) main.removeChild(stale);
+    main.replaceChild(el("div", { class: "view-cards" }, views.map((v) => viewCard(v))), live);
+  });
+  return true;
+}
+
+function hasClass(n, name) {
+  return typeof n.className === "string" && (" " + n.className + " ").includes(" " + name + " ");
 }
 
 /* First-run hero (M4): a centered pitch + a prominent New view + a few starting-point ideas + the (secondary)
@@ -333,41 +372,50 @@ function viewCard(v) {
     chips,
     el("div", { class: "vc-meta", text: meta }),
   ]);
-  enrichCard(v.id, chips, isNotebook);
+  enrichCard(v.id, v.version, chips, isNotebook);
   return card;
 }
 
 /* The list summary carries `kind` (link + badge already set in viewCard) but NOT the panel/cell counts, so those
    are fetched per card and filled in progressively — the card renders immediately and never blocks on this fetch,
    and a failed/empty fetch just leaves the (display:none-when-empty) chip row absent. `isNotebook` comes from the
-   summary; the fetched definition is a robust fallback for the count shape. */
-async function enrichCard(id, chips, isNotebook) {
+   summary; the fetched definition is a robust fallback for the count shape. The chips a read gave are kept by view id
+   and version (#7925), so a card whose version the list still reports draws them without a read. */
+async function enrichCard(id, version, chips, isNotebook) {
+  const kept = chipCache.get(String(id));
+  if (kept && kept.version === version) {
+    mount(chips, kept.chips.map((c) => el("span", { class: c.cls, text: c.text })));
+    return;
+  }
   const res = await api.getView(id);
   if (res.kind !== "data" || !res.data) return;
-  const def = res.data.definition || {};
+  const texts = chipTexts(res.data.definition || {}, isNotebook);
+  chipCache.set(String(id), { version, chips: texts });
+  mount(chips, texts.map((c) => el("span", { class: c.cls, text: c.text })));
+}
 
+/* The count chips for a definition, as class and text: a notebook's cells and the panels among them, or a dashboard's panels and
+   the viz types they use. Empty for a definition with nothing to count. */
+function chipTexts(def, isNotebook) {
   if (isNotebook || isNotebookDefinition(def)) {
     const cells = Array.isArray(def.cells) ? def.cells : [];
-    if (!cells.length) return;
+    if (!cells.length) return [];
     const panelCount = cells.filter((c) => c && c.type === "panel").length;
-    const nodes = [el("span", { class: "vc-chip count", text: cells.length + (cells.length === 1 ? " cell" : " cells") })];
-    if (panelCount) nodes.push(el("span", { class: "vc-chip", text: panelCount + (panelCount === 1 ? " panel" : " panels") }));
-    mount(chips, nodes);
-    return;
+    const texts = [{ cls: "vc-chip count", text: cells.length + (cells.length === 1 ? " cell" : " cells") }];
+    if (panelCount) texts.push({ cls: "vc-chip", text: panelCount + (panelCount === 1 ? " panel" : " panels") });
+    return texts;
   }
 
   const panels = Array.isArray(def.panels) ? def.panels : [];
-  if (!panels.length) return;
+  if (!panels.length) return [];
   const vizTypes = [];
   for (const p of panels) {
     const viz = p && typeof p.viz === "string" ? p.viz : null;
     if (viz && !vizTypes.includes(viz)) vizTypes.push(viz);
   }
-  const nodes = [
-    el("span", { class: "vc-chip count", text: panels.length + (panels.length === 1 ? " panel" : " panels") }),
-  ];
-  for (const viz of vizTypes) nodes.push(el("span", { class: "vc-chip viz", text: viz }));
-  mount(chips, nodes);
+  const texts = [{ cls: "vc-chip count", text: panels.length + (panels.length === 1 ? " panel" : " panels") }];
+  for (const viz of vizTypes) texts.push({ cls: "vc-chip viz", text: viz });
+  return texts;
 }
 
 /* Paste-to-import (can_edit only): parse -> client-validate against the catalog -> POST (backend re-validates).
