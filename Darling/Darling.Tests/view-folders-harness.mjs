@@ -165,6 +165,40 @@ try {
     const hostile = new FakeNode("div");
     side.paintViewList(hostile, [v(20, "<img src=x onerror=alert(1)>", { folder: "<b>f</b>" })], { can_edit: false }, null);
     out.hostile = hostile.children.map((n) => n.textContent);
+  } else if (scenario === "readFailed") {
+    // #7929: the shell's 60 s poll: a good list read, then a failed one. The rows of the last good list stay, under a note.
+    const list = new FakeNode("div");
+    local.setStorage(globalThis.localStorage);
+    local.setSessionStorage(globalThis.sessionStorage);
+    const session = { can_edit: true, can_own: true };
+    /* app.js keeps the list through viewListAfterRead. Without it, the shell keeps nothing of a failed read, which is what the
+       asserts refuse: the rows are gone and no note is drawn. */
+    const afterRead = typeof side.viewListAfterRead === "function"
+      ? side.viewListAfterRead
+      : (last, s, res) => ({ session: s, views: res.kind === "data" && Array.isArray(res.data) ? res.data : [] });
+    const paint = (kept) => side.paintViewList(list, kept.views, kept.session, 4, kept.readFailed === true);
+    const lines = () => list.children.map((n) => (n.dataset.viewGroup !== undefined ? "G:" + n.children[1].textContent : n.className.includes("view-item") ? "V:" + n.textContent : "N:" + n.textContent));
+    let kept = afterRead(null, session, { kind: "data", data: as(views, "alice") });
+    paint(kept);
+    out.good = lines();
+    kept = afterRead(kept, session, { kind: "error", message: "Too many requests", status: 429 });
+    paint(kept);
+    out.afterFailure = lines();
+    out.failureText = list.textContent;
+    // a failed read before any list answered: a note alone, never "No views yet"
+    const fresh = new FakeNode("div");
+    const none = afterRead(null, { can_edit: false, can_own: false }, { kind: "error", message: "Fleet unavailable" });
+    side.paintViewList(fresh, none.views, none.session, null, none.readFailed === true);
+    out.noEarlierList = fresh.children.map((n) => n.textContent);
+    // an answered empty list is the one thing that says "No views yet"
+    const empty = new FakeNode("div");
+    const answeredEmpty = afterRead(kept, { can_edit: false, can_own: false }, { kind: "data", data: [] });
+    side.paintViewList(empty, answeredEmpty.views, answeredEmpty.session, null, answeredEmpty.readFailed === true);
+    out.answeredEmpty = empty.children.map((n) => n.textContent);
+    // the next good read clears the note
+    kept = afterRead(kept, session, { kind: "data", data: as(views, "alice") });
+    paint(kept);
+    out.recovered = lines();
   } else if (scenario === "fields") {
     const session = (user) => ({ can_edit: true, can_own: user !== null });
     const build = (view, subject, meta) => fields.buildViewMetaFields({ meta: meta || { folder: view ? view.folder || "" : "", personal: view ? view.personal === true : false }, view: asOne(view, subject), session: session(subject), views, onChange: () => { out.changed = (out.changed || 0) + 1; } });
