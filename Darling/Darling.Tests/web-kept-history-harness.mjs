@@ -690,6 +690,28 @@ Object.assign(scenarios, {
     found = { latchRows: lat.data.latches.length, seriesRows: cpu.data.samples.length };
     return [];
   },
+  // #7945: a trend read's rows are bucket starts whatever name the stamp carries (sample_time, time, collection_time, event_time, time_bucket),
+  // so the bucket that starts at the range's end lies outside the range and is cut; a read of instants keeps the one stamped at the end.
+  customBucketEdge: async () => {
+    const stamps = [T0, new Date((Date.parse(T0) + Date.parse(T1)) / 2).toISOString(), T1];
+    const rows = (field) => stamps.map((s) => ({ [field]: s, v: 1 }));
+    const shapes = {
+      get_cpu_utilization: ["samples", rows("sample_time")],
+      get_wait_trend: ["trend", rows("time")],
+      get_lock_wait_trend: ["trend", rows("collection_time")],
+      get_health_parser_system_health: ["entries", rows("event_time")],
+      get_query_heatmap: ["cells", rows("time_bucket")],
+      get_memory_pressure_events: ["events", rows("sample_time")],
+    };
+    answer = (url) => data({ [shapes[tool(url)][0]]: shapes[tool(url)][1] });
+    modules.util.setActiveRange({ server: "SRV1", hours: 4, startMs: Date.parse(T0), endMs: Date.parse(T1), asOf: T1 });
+    found = {};
+    for (const [read, [key]] of Object.entries(shapes)) {
+      const res = await modules.util.readTool(read, { server: "SRV1", hours: 4 });
+      found[read] = res.data[key].length;
+    }
+    return [];
+  },
   // The label says where totals begin when the span is not whole hours.
   customRoundedLabel: async () => {
     answer = (url) => (url.pathname === "/api/fleet" ? data({ cards: [] }) : data({ samples: cpuRows }));

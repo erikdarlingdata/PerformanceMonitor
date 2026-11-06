@@ -225,6 +225,16 @@ public sealed class StatsHistoryBehaviourTests
         Assert.EndsWith("The earlier part has aged out of this tier.", Note("oldQueryNoDays"));
     }
 
+    /// <summary>#7945: a read that fails with no sentence of its own (a 500 with an empty body) says which path failed, through the shared
+    /// read path every page read takes, so the strip names the read and not just the status.</summary>
+    [Fact]
+    public void AFailedReadWithNoMessage_NamesThePathItAskedFor()
+    {
+        var r = Run("failedReadNamesPath");
+        var error = Assert.Single(r.GetProperty("error").EnumerateArray()).GetString()!;
+        Assert.StartsWith("The Darling service answered HTTP 500 for /api/read/get_procedure_duration_trend with no message.", error);
+    }
+
     /// <summary>
     /// #7933: the procedures a reader opens History on are the rare ones, whose rates sit under 1: one 50 ms run in a five-minute bucket is
     /// 0.17 ms/s, and a procedure that runs once an hour is 0.00028 a second. A tooltip prints each with its significant digits, so a point

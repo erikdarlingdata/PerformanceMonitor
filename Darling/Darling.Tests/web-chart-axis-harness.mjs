@@ -344,6 +344,11 @@ out.formatters = {
   intStep: [0, 0.2].map((v) => util.fmtInt(v, { step: 0.2 })),
   mapIndex: [5, 7].map(util.fmtMs),
   mb: [200, 1023, 1024, 2048].map((v) => util.fmtMb(v)),
+  /* #7945: a cell or tooltip value that rounds up to the next unit's base steps into that unit, and a percent under 1 keeps one significant digit. */
+  msEdge: [999.6, 59960, 3599940, 999.4].map((v) => util.fmtMs(v)),
+  mbEdge: [1023.6, 1023.4].map((v) => util.fmtMb(v)),
+  bytesEdge: [1023.6, 1048535, 1073741000, 1023.4].map((v) => util.fmtBytes(v)),
+  pctSmall: [0.46, 0.04, 0, 12.6, -0.46].map((v) => util.fmtPct(v)),
 };
 
 /* #7726: the wiring, not just localizeIsoText. The real Server Connection descriptor drawn by the real stat viz, and the real server head
