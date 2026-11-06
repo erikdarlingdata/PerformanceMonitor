@@ -258,9 +258,11 @@ out.next5m = await secondsToNextRead("5m");
   await fresh("30s", "#/fleet");
   await advance(2);
   out.controlHiddenOnFleet = brand.find((x) => x.attrs.id === "page-refresh-control").hidden;
+  out.intervalVisibilityOnFleet = brand.find((x) => x.attrs.id === "page-refresh-select").style.visibility;
   await fresh("30s", "#/finops/alpha/utilization");
   await advance(2);
   out.controlHiddenOnFinops = brand.find((x) => x.attrs.id === "page-refresh-control").hidden;
+  out.intervalVisibilityOnFinops = brand.find((x) => x.attrs.id === "page-refresh-select").style.visibility;
 }
 
 console.log(JSON.stringify(out));

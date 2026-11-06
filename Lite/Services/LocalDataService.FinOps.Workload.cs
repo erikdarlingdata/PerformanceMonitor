@@ -17,6 +17,21 @@ public partial class LocalDataService
 {
     private static readonly string[] WorkloadAndIoTables = ["query_stats", "file_io_stats"];
 
+    /// <summary>#7725: marks each row whose database is in <paramref name="dropped"/> (null, unknown, marks none), the one rule the FinOps grids share.</summary>
+    internal static void MarkDropped<T>(IEnumerable<T> rows, IReadOnlyList<string>? dropped, Func<T, string> databaseOf, Action<T, bool> mark)
+    {
+        if (dropped is null || dropped.Count == 0)
+        {
+            return;
+        }
+
+        var set = new HashSet<string>(dropped, StringComparer.Ordinal);
+        foreach (var row in rows)
+        {
+            mark(row, set.Contains(databaseOf(row)));
+        }
+    }
+
     /// <summary>
     /// Computes per-database resource usage from query_stats + file_io_stats deltas.
     /// </summary>
@@ -25,7 +40,12 @@ public partial class LocalDataService
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
 
         /* #7256: a table whose archive holds nothing at or after the cutoff is read as the hot table alone, each of the two on its own. A view opens every Parquet file of its archive (one per day) however short the window is. */
-        return await ReadWindowSkippingEmptyArchivesAsync(WorkloadAndIoTables, "collection_time", cutoff, ReadAsync, CancellationToken.None);
+        var usage = await ReadWindowSkippingEmptyArchivesAsync(WorkloadAndIoTables, "collection_time", cutoff, ReadAsync, CancellationToken.None);
+
+        /* #7725: a database the server no longer lists keeps its row and is marked, the rule the Viewer's grid and the web page use. */
+        var dropped = await GetDroppedDatabasesAsync(serverId, windowStartUtc: cutoff);
+        MarkDropped(usage, dropped, row => row.DatabaseName, (row, flag) => row.MarkDropped(flag));
+        return usage;
 
         async Task<List<DatabaseResourceUsageRow>> ReadAsync(Func<string, string> relationFor)
         {
@@ -214,7 +234,13 @@ ORDER BY max_connections DESC";
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
 
         /* #7256: a table whose archive holds nothing at or after the cutoff is read as the hot table alone, each of the two on its own. A view opens every Parquet file of its archive (one per day) however short the window is. */
-        return await ReadWindowSkippingEmptyArchivesAsync(WorkloadAndIoTables, "collection_time", cutoff, ReadAsync, CancellationToken.None);
+        var consumers = await ReadWindowSkippingEmptyArchivesAsync(WorkloadAndIoTables, "collection_time", cutoff, ReadAsync, CancellationToken.None);
+
+        /* #7725: a database the server no longer lists keeps its row in both grids and is marked. */
+        var dropped = await GetDroppedDatabasesAsync(serverId, windowStartUtc: cutoff);
+        MarkDropped(consumers.ByTotal, dropped, row => row.DatabaseName, (row, flag) => row.MarkDropped(flag));
+        MarkDropped(consumers.ByAvg, dropped, row => row.DatabaseName, (row, flag) => row.MarkDropped(flag));
+        return consumers;
 
         async Task<(List<TopResourceConsumerRow> ByTotal, List<TopResourceConsumerRow> ByAvg)> ReadAsync(Func<string, string> relationFor)
         {
@@ -353,6 +379,8 @@ WITH categorized AS (
             WHEN wait_type IN ('RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE', 'CMEMTHREAD') THEN 'Memory'
             WHEN wait_type = 'ASYNC_NETWORK_IO' THEN 'Network'
             WHEN wait_type ILIKE 'LCK_M_%' THEN 'Locks'
+            WHEN wait_type ILIKE 'LATCH_%'
+            OR   wait_type ILIKE 'PAGELATCH_%' THEN 'Latches'
             ELSE 'Other'
         END AS category,
         rtrim(wait_type) AS wait_type,
@@ -372,6 +400,8 @@ WITH categorized AS (
             WHEN wait_type IN ('RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE', 'CMEMTHREAD') THEN 'Memory'
             WHEN wait_type = 'ASYNC_NETWORK_IO' THEN 'Network'
             WHEN wait_type ILIKE 'LCK_M_%' THEN 'Locks'
+            WHEN wait_type ILIKE 'LATCH_%'
+            OR   wait_type ILIKE 'PAGELATCH_%' THEN 'Latches'
             ELSE 'Other'
         END,
         rtrim(wait_type)
@@ -499,7 +529,12 @@ LIMIT $3";
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
 
         /* #7256: a window that starts after the newest archived row of query_stats reads the hot table alone. The view opens every Parquet file of it (one per day) however short the window is. */
-        return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", cutoff, ReadAsync, CancellationToken.None);
+        var impact = await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", cutoff, ReadAsync, CancellationToken.None);
+
+        /* #7725: a row whose named database the server no longer lists is marked. */
+        var dropped = await GetDroppedDatabasesAsync(serverId, windowStartUtc: cutoff);
+        MarkDropped(impact, dropped, row => row.DatabaseName, (row, flag) => row.MarkDropped(flag));
+        return impact;
 
         async Task<List<HighImpactQueryRow>> ReadAsync(string relation)
         {
