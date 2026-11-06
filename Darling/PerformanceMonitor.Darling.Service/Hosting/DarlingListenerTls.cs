@@ -235,6 +235,13 @@ internal static class DarlingListenerTls
             loaded = DarlingWebTls.Load(tls, plan.Shape, labels.Section);
             var certificate = loaded.Value.Leaf;
 
+            /* #7865: the store form served an older certificate because the newest one's key cannot be opened.
+               Loud and once: the listener is up, so nothing else would tell the operator the renewal is waiting. */
+            if (loaded.Value.FallbackNote is { } fallbackNote)
+            {
+                logger.LogWarning("{Surface} TLS: {Warning}", labels.Surface, fallbackNote);
+            }
+
             if (plan.Warning is not null)
             {
                 logger.LogWarning("{Surface} TLS: {Warning}", labels.Surface, plan.Warning);
