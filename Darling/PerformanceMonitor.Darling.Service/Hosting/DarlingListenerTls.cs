@@ -323,7 +323,7 @@ internal static class DarlingListenerTls
                to watch", which is healthy, and would resolve a standing expiry alert while the listener is down. */
             certState.PublishLoadRefusal(ex.Message);
 
-            logger.LogCritical(
+            logger.LogCritical(ex, 
                 "{Surface} TLS certificate could not be loaded ({Message}) — refusing to expose; binding loopback-only.",
                 labels.Surface, ex.Message);
             return new ListenerTlsOutcome(Expose: false, Certificate: null, plan.Shape);

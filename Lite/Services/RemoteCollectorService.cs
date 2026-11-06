@@ -1313,7 +1313,7 @@ public partial class RemoteCollectorService
             else if (_logInsertFailures % 100 == 0)
             {
                 /* Periodic reminder for ongoing failures */
-                AppLogger.Error("Collector", $"COLLECTION LOGGING STILL BROKEN: {_logInsertFailures} consecutive failures. Last error: {ex.Message}");
+                AppLogger.Error("Collector", $"COLLECTION LOGGING STILL BROKEN: {_logInsertFailures} consecutive failures. Last error: {ex.Message}", ex);
             }
         }
     }

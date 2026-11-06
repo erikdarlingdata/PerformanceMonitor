@@ -602,7 +602,7 @@ public partial class ServerTab : UserControl
         catch (Exception ex)
         {
             LiveSnapshotIndicator.Text = $"Error: {DuckDbMemoryLimitSetting.Describe(ex)}";
-            AppLogger.Error("ServerTab", $"Live snapshot failed: {ex.Message}");
+            AppLogger.Error("ServerTab", $"Live snapshot failed: {ex.Message}", ex);
         }
         finally
         {

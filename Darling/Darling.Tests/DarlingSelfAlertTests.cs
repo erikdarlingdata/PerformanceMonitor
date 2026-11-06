@@ -281,7 +281,9 @@ public sealed class DarlingSelfAlertTests
     /// </summary>
     internal sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger
     {
-        public List<(Microsoft.Extensions.Logging.LogLevel Level, string Message)> Entries { get; } = new();
+        /// <summary>Each entry's exception is the object handed to the logger (the <c>LogError(ex, ...)</c>
+        /// overload), null when a call passed only text, so a test can tell the two apart.</summary>
+        public List<(Microsoft.Extensions.Logging.LogLevel Level, string Message, Exception? Exception)> Entries { get; } = new();
 
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 
@@ -293,7 +295,7 @@ public sealed class DarlingSelfAlertTests
             TState state,
             Exception? exception,
             Func<TState, Exception?, string> formatter) =>
-            Entries.Add((logLevel, formatter(state, exception)));
+            Entries.Add((logLevel, formatter(state, exception), exception));
     }
 
     /// <summary>One evaluator + fakes + a controllable clock per test.</summary>
@@ -2900,6 +2902,28 @@ public sealed class DarlingSelfAlertTests
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             new Harness { Now = CertClock, MuteThrows = true }.Build()
                 .ApplyMcpTlsCertificateAsync(McpCert(CertClock.AddDays(10)), Ct));
+    }
+
+    /// <summary>Both wrappers' catch-alls hand the logger the exception itself, so the entry carries its type,
+    /// stack and inner exception, not only the text the {Message} placeholder formats into the line.</summary>
+    [Fact]
+    public async Task TlsCertEvaluateWrappers_LogTheExceptionItself_NotOnlyItsMessage()
+    {
+        var web = new Harness { Now = CertClock, MuteThrows = true };
+        await web.Build().EvaluateWebTlsCertificateAsync(Cert(CertClock.AddDays(10)), Ct);
+        Assert.Contains(
+            web.Log.Entries,
+            x => x.Level == Microsoft.Extensions.Logging.LogLevel.Error
+                && x.Message == "Web TLS certificate self-alert failed: mute check boom"
+                && x.Exception is InvalidOperationException { Message: "mute check boom" });
+
+        var mcp = new Harness { Now = CertClock, MuteThrows = true };
+        await mcp.Build().EvaluateMcpTlsCertificateAsync(McpCert(CertClock.AddDays(10)), Ct);
+        Assert.Contains(
+            mcp.Log.Entries,
+            x => x.Level == Microsoft.Extensions.Logging.LogLevel.Error
+                && x.Message == "MCP TLS certificate self-alert failed: mute check boom"
+                && x.Exception is InvalidOperationException { Message: "mute check boom" });
     }
 
     /// <summary>Master switch off: the MCP alert is as silent as the web one, even for an expired certificate.</summary>

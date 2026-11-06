@@ -143,9 +143,18 @@ public sealed class AlertEngineTests
         public CurrentBlockingWaitResult? BlockingWait { get; set; }
         public (int ThresholdMinutes, int MaxResults, bool Diag, bool WaitFor, bool Backups, bool Misc, bool Cdc, IReadOnlyList<string> Excluded)? LastLrqArgs { get; private set; }
 
+        /* The blocking read throws while this is set, so a pin can drive the engine's log-and-skip arm through a streak of
+           failures and a recovery, the way a store fault that comes and goes does. */
+        public bool BlockingThrows { get; set; }
+
         public Task<List<BlockedProcessAlertRow>> GetRecentBlockedProcessReportsAsync(string serverKey, int hoursBack, CancellationToken cancellationToken = default)
         {
             BlockingFetches++;
+            if (BlockingThrows)
+            {
+                throw new InvalidOperationException("blocking read failed");
+            }
+
             return Task.FromResult(new List<BlockedProcessAlertRow>(Blocking));
         }
 

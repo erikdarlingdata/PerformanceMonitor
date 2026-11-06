@@ -40,7 +40,7 @@ internal static class LiteAlertResolutionRecorder
             }
             catch (Exception ex)
             {
-                AppLogger.Error("Alerts", $"Could not record the '{resolution.Title}' resolution row: {ex.Message}");
+                AppLogger.Error("Alerts", $"Could not record the '{resolution.Title}' resolution row: {ex.Message}", ex);
             }
 
             await afterRecord(resolution, cancellationToken);

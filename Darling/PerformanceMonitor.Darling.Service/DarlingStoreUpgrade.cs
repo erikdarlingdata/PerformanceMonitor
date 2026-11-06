@@ -1866,7 +1866,7 @@ internal sealed class DarlingStoreUpgrade
         {
             if (!movedAside)
             {
-                _logger.LogCritical(
+                _logger.LogCritical(ex, 
                     "Could not revert the store runtime ({Message}). Restore {Previous} over {Current} by hand before restarting the service.",
                     ex.Message, previousPgsql, pgsqlDirectory);
                 return false;
@@ -1879,13 +1879,13 @@ internal sealed class DarlingStoreUpgrade
             try
             {
                 Directory.Move(failedRuntime, pgsqlDirectory);
-                _logger.LogCritical(
+                _logger.LogCritical(ex, 
                     "Could not revert the store runtime ({Message}), so the runtime it had moved aside was put back at {Current} rather than leave no runtime there at all. The revert did not happen: restore {Previous} over it by hand before restarting the service.",
                     ex.Message, pgsqlDirectory, previousPgsql);
             }
             catch (Exception undo)
             {
-                _logger.LogCritical(
+                _logger.LogCritical(ex, 
                     "Could not revert the store runtime ({Message}), and could not put back the runtime it had moved aside either ({UndoMessage}): there is NO runtime at {Current}. Move {Previous} to that path by hand before restarting the service; the runtime that was moved aside is at {Failed}.",
                     ex.Message, undo.Message, pgsqlDirectory, previousPgsql, failedRuntime);
             }
@@ -2556,7 +2556,7 @@ internal sealed class DarlingStoreUpgrade
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogCritical(
+            _logger.LogCritical(ex, 
                 "Could not update the store's TimescaleDB from {From} to {To} ({Message}). Nothing is reverted: the store opens on the version it has, whose library the runtime carries. The update is retried on the next service start.",
                 before ?? "(unread)", bundledTimescaleVersion, ex.Message);
             return new TimescaleUpdateOutcome(TimescaleUpdateStatus.Failed, before, bundledTimescaleVersion, ex.Message);
@@ -2711,7 +2711,7 @@ internal sealed class DarlingStoreUpgrade
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogCritical(
+            _logger.LogCritical(ex, 
                 "Could not read the store's TimescaleDB version after start ({Message}). The store is running; check its extension with SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'.",
                 ex.Message);
             return (quiesced, null);
@@ -4625,7 +4625,7 @@ internal sealed class DarlingStoreUpgrade
 
             var warning =
                 $"the upgrade to PostgreSQL {context.NewMajor} COMPLETED, but post-upgrade bookkeeping failed at step '{step}': {ex.Message}";
-            _logger.LogCritical(
+            _logger.LogCritical(ex, 
                 "STORE UPGRADE COMPLETED WITH A WARNING: the data directory swap succeeded, so the store is now PostgreSQL {New} and is NOT being reverted — reverting past this point would leave the old binaries in front of a new data directory and the store would not boot. But post-upgrade bookkeeping failed at step '{Step}': {Message}. Check free disk space on the store volume and the pre-upgrade rollback copy's retention counter by hand.",
                 context.NewMajor, step, ex.Message);
 
@@ -5465,7 +5465,7 @@ internal sealed class DarlingStoreUpgrade
         {
             /* Verification is diagnosis, not a gate: the data is already migrated and the server is up, so
                a failed check must not take collection down — it must be LOUD. */
-            _logger.LogCritical(
+            _logger.LogCritical(ex, 
                 "Post-upgrade store verification failed ({Message}). The store is running; confirm its version and TimescaleDB state by hand.",
                 ex.Message);
         }
