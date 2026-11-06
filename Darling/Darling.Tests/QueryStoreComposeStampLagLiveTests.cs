@@ -96,7 +96,7 @@ public sealed class QueryStoreComposeStampLagLiveTests
             var first = await TickAtAsync(source, clock, ct);
             Assert.Equal(0, first.Failed);
             Assert.True(first.Built > 0, "an eligible hour is built");
-            Assert.Equal(1, await HoursBuiltAsync(connection, NewestDueHour(clock), ct));
+            Assert.Equal(1, await CountAsync(connection, $"SELECT count(*) FROM collect.query_store_compose_stamp_hours WHERE hour = TIMESTAMP '{At(NewestDueHour(clock))}'", ct));
 
             /* Everything due is built: the next tick builds nothing and writes no rollup, validity or hours row. */
             Assert.Equal(BuiltHours - first.Built, await BuildAllAsync(source, ct, clock));
