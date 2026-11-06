@@ -291,7 +291,8 @@ public static partial class DarlingCliCommands
         string.Equals(arg, "--disable-collector", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The verb <see cref="ResetPasswordKeyAsync"/> handles: mark the service's current password key replaced, so
-    /// the next start makes a new one (#5366). It changes the store only (as the store owner) and never touches a key file.</summary>
+    /// the next start makes a new one (#5366; without <c>passwordKey</c>, and with it the start waits for a new key in that
+    /// source, #8006). It changes the store only (as the store owner) and never touches a key file.</summary>
     public static bool IsResetPasswordKeyVerb(string arg) =>
         string.Equals(arg, "--reset-password-key", StringComparison.OrdinalIgnoreCase);
 
@@ -472,8 +473,9 @@ public static partial class DarlingCliCommands
 
     /// <summary>
     /// <c>--reset-password-key [--config &lt;path&gt;]</c>: on the owner connection, in one transaction, counts the saved
-    /// passwords sealed to the current key and marks that key <c>replaced</c> with the reason <c>reset</c>. The next service
-    /// start retires the key file and makes a new key. Key files are never touched here.
+    /// passwords sealed to the current key and marks that key <c>replaced</c> with the reason <c>reset</c>. Without
+    /// <c>passwordKey</c>, the next service start retires the key file and makes a new key; with it, the start reports
+    /// <c>reset_pending</c> until a new key is put in that source (#8006). Key files are never touched here.
     /// </summary>
     public static async Task<int> ResetPasswordKeyAsync(
         string[] rest, TextWriter output, TextWriter error, CancellationToken cancellationToken)

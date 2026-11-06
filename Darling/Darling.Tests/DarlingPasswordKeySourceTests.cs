@@ -285,7 +285,7 @@ public sealed class DarlingPasswordKeySourceTests
     [Theory]
     [InlineData("encrypted", "encrypted")]
     [InlineData("2048", "it is not a 3072-bit RSA key")]
-    [InlineData("two PEM blocks", "it holds more than one key")]
+    [InlineData("two PEM blocks", "it holds more than one PEM block")]
     [InlineData("two DER keys", "it holds more than one key")]
     [InlineData("garbage", "base64")]
     public void AnEncryptedPem_A2048BitKey_TwoKeys_AndGarbage_AreRefused(string input, string expected)

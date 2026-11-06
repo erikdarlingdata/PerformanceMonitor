@@ -21,10 +21,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// <c>file:</c> or <c>env:</c> reference the service loads its password key from, instead of generating and
 /// keeping a key file in the credentials directory.
 ///
-/// <para><see cref="LoadConfigured"/> is the one loader every caller uses (the start, the CLI, the diagnostics), so
-/// the setting is read, refused and parsed the same way everywhere. With the setting it reads only the reference and
-/// never generates, writes or falls back to the key file; without it, it is exactly
-/// <see cref="DarlingPasswordKeyFile.Load"/>.</para>
+/// <para><see cref="LoadFromSetting"/> is the one loader every caller reaches: the start through
+/// <see cref="DarlingPasswordKeyRuntime"/>, and the CLI, <c>--validate-config</c> and the diagnostics through
+/// <see cref="LoadConfigured"/> and <see cref="DescribeForValidation"/>. So the setting is read, refused and parsed the
+/// same way everywhere. With the setting it reads only the reference and never generates, writes or falls back to the
+/// key file; without it, <see cref="LoadConfigured"/> is exactly <see cref="DarlingPasswordKeyFile.Load"/>.</para>
 /// </summary>
 public static class DarlingPasswordKeySource
 {
@@ -51,7 +52,8 @@ public static class DarlingPasswordKeySource
     private const string EmptyProblem = "it is empty";
     private const string NotAKeyProblem =
         "it is neither base64 of a PKCS#8 DER key nor a -----BEGIN PRIVATE KEY----- PEM block";
-    private const string TwoKeysProblem = "it holds more than one key";
+    /* A second block of any kind: a key followed by its certificate is refused too, so "key" would be wrong. */
+    private const string TwoKeysProblem = "it holds more than one PEM block";
     private const string UnreadablePemProblem = "it has a -----BEGIN line but no PEM block that can be read";
     private const string OtherPemProblem = "it holds a PEM block that is not -----BEGIN PRIVATE KEY-----";
     private const string EscapedNewlinesProblem =

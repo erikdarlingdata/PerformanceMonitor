@@ -92,7 +92,8 @@ internal sealed class DarlingPasswordKeyRuntime
     /// <summary>The ring this start decided on: keyed when the key could be used, otherwise refusing with the reason.</summary>
     public IPasswordKeyRing Ring { get; }
 
-    /// <summary>The state written for this host: <c>ok</c>, <c>missing</c>, <c>mismatch</c> or <c>refused</c>.</summary>
+    /// <summary>The state written for this host: <c>ok</c>, <c>missing</c>, <c>mismatch</c>, <c>refused</c> or, with
+    /// <c>passwordKey</c> after a reset, <c>reset_pending</c>.</summary>
     public string State { get; }
 
     /// <summary>The note written with <see cref="State"/>: the refusal reason, or the open-directory warning, or null.</summary>
