@@ -122,6 +122,25 @@ const PRESSURE_COLUMNS = [
   { key: "memory_indicators_system", label: "Operating system", display: (r) => pressureLevelWord(r.memory_indicators_system), sortValue: (r) => r.memory_indicators_system },
 ];
 
+/**
+ * #7691: a server with several memory nodes stores one record per node for the same event, so the grid lists it once per node. The Node
+ * column tells those rows apart, and shows only when the rows in view hold more than one distinct node: on a one-node server, or when no row
+ * carries a node (rows stored before the column existed), it would repeat one value down the grid.
+ */
+export function pressureColumns(events) {
+  const nodes = new Set();
+  for (const e of Array.isArray(events) ? events : []) {
+    if (e && e.memory_node_id !== null && e.memory_node_id !== undefined) nodes.add(e.memory_node_id);
+  }
+  if (nodes.size < 2) return PRESSURE_COLUMNS;
+  return [
+    PRESSURE_COLUMNS[0],
+    PRESSURE_COLUMNS[1],
+    { key: "memory_node_id", label: "Node", format: "int" },
+    ...PRESSURE_COLUMNS.slice(2),
+  ];
+}
+
 /** The resource monitor's indicator as words (#7416): 0 and 1 are normal, 2 is medium, 3 and above are severe, the collector's own reading of the number. */
 export function pressureLevelWord(value) {
   if (typeof value !== "number" || !Number.isFinite(value)) return "";
@@ -331,7 +350,7 @@ export function memoryPressurePanels(server, ctx) {
       windowFloorStrip(res.data, { viz: "table" }),
       /* #7578: the read sends oldest first (the chart and the MCP tool keep that order), but the rows someone opens this grid for are
          the newest, so the grid shows them first. */
-      VIZ.table(Array.isArray(res.data.events) ? { ...res.data, events: [...res.data.events].reverse() } : res.data, { rowsKey: "events", columns: PRESSURE_COLUMNS, emptyText: empty }),
+      VIZ.table(Array.isArray(res.data.events) ? { ...res.data, events: [...res.data.events].reverse() } : res.data, { rowsKey: "events", columns: pressureColumns(res.data.events), emptyText: empty }),
     ]);
   })();
   return [chart.panel, grid.panel];

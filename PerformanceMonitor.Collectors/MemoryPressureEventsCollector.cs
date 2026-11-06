@@ -31,7 +31,12 @@ public sealed class MemoryPressureEventsCollector : CollectorDefinitionBase<Memo
     {
     }
 
-    public readonly record struct Row(DateTime SampleTime, string MemoryNotification, int IndicatorsProcess, int IndicatorsSystem);
+    /// <summary>
+    /// <c>NodeId</c> is the memory node the ring buffer record came from (<c>/Record/ResourceMonitor/NodeId</c>, #7691). A server with several
+    /// memory nodes writes one record per node for the same event, so two rows at one <c>sample_time</c> are two nodes, not a double insert.
+    /// NULL when the record carries no node.
+    /// </summary>
+    public readonly record struct Row(DateTime SampleTime, string MemoryNotification, int IndicatorsProcess, int IndicatorsSystem, int? NodeId = null);
 
     private const string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -80,7 +85,10 @@ SELECT /* PerformanceMonitorLite */
     /* When this SQL Server instance started. It changes on a service restart and on a reboot, and does not
        change on a VM suspend or a clock step, so ReadAsync can tell a new raw timestamp series from a
        sample_time that merely moved (#7441). */
-    start_time = @start_time
+    start_time = @start_time,
+    /* #7691: the memory node. A server with several memory nodes writes one record per node for the same event, which reads as a twin row
+       without it. Last, so the positions above stay where ReadAsync reads them. */
+    memory_node_id = t.record.value('(/Record/ResourceMonitor/NodeId)[1]', 'integer')
 FROM
 (
     SELECT
@@ -114,6 +122,8 @@ OPTION(RECOMPILE);";
         new CollectorColumn("memory_notification", CollectorColumnType.Varchar),
         new CollectorColumn("memory_indicators_process", CollectorColumnType.Integer),
         new CollectorColumn("memory_indicators_system", CollectorColumnType.Integer),
+        /* #7691: LAST, so a store that predates it comes up to shape with one ADD COLUMN (Darling's V248, Lite's v81). */
+        new CollectorColumn("memory_node_id", CollectorColumnType.Integer),
     };
 
     /// <summary>
@@ -172,7 +182,8 @@ OPTION(RECOMPILE);";
                 nullStamp ? DateTime.MinValue : reader.GetDateTime(0),
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
                 reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
-                reader.IsDBNull(3) ? 0 : reader.GetInt32(3)), nullStamp, reader.IsDBNull(4) ? 0 : reader.GetInt64(4)));
+                reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
+                reader.IsDBNull(6) ? null : reader.GetInt32(6)), nullStamp, reader.IsDBNull(4) ? 0 : reader.GetInt64(4)));
             if (readStart is null && !reader.IsDBNull(5))
             {
                 readStart = reader.GetDateTime(5);
@@ -300,6 +311,7 @@ OPTION(RECOMPILE);";
             .Value(row.SampleTime)            /* sample_time TIMESTAMP */
             .Value(row.MemoryNotification)    /* memory_notification VARCHAR */
             .Value(row.IndicatorsProcess)     /* memory_indicators_process INTEGER */
-            .Value(row.IndicatorsSystem);     /* memory_indicators_system INTEGER */
+            .Value(row.IndicatorsSystem)      /* memory_indicators_system INTEGER */
+            .Value(row.NodeId);               /* memory_node_id INTEGER, NULL when the record has none (#7691) */
     }
 }
