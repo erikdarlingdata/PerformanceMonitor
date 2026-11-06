@@ -512,11 +512,18 @@ public static partial class PlanAnalyzer
             });
         }
 
+        /* #7898: rule 27's test, read once here because rule 20 needs it too. OPTIMIZE FOR UNKNOWN also leaves a
+           parameter without a compiled value, and rule 27 reports the hint, so rule 20 leaves those to it. */
+        var hasOptimizeForUnknown = !string.IsNullOrEmpty(stmt.StatementText) &&
+            PlanRegex.IsMatch(OptimizeForUnknownRegExp(), MaskCommentsAndLiterals(stmt.StatementText), // #4524
+                "OPTIMIZE FOR UNKNOWN hint", // a regex that cannot finish gives way to a text search: the warning names a hint the text must hold
+                t => PlanTextSearch.ContainsWords(t, false, false, "OPTIMIZE", "FOR", "UNKNOWN"));
+
         // Rule 20: Local variables without RECOMPILE
         // Parameters with no CompiledValue are likely local variables — the optimizer
         // cannot sniff their values and uses density-based ("unknown") estimates.
         // Skip statements with cost < 1 (can't go parallel, estimate quality rarely matters).
-        if (!cfg.IsRuleDisabled(20) && stmt.Parameters.Count > 0 && stmt.StatementSubTreeCost >= 1.0)
+        if (!cfg.IsRuleDisabled(20) && stmt.Parameters.Count > 0 && stmt.StatementSubTreeCost >= 1.0 && !hasOptimizeForUnknown)
         {
             var unsnifffedParams = stmt.Parameters
                 .Where(p => string.IsNullOrEmpty(p.CompiledValue))
@@ -545,10 +552,7 @@ public static partial class PlanAnalyzer
         // warning about CTE reuse is guessing.
 
         // Rule 27: OPTIMIZE FOR UNKNOWN in statement text
-        if (!cfg.IsRuleDisabled(27) && !string.IsNullOrEmpty(stmt.StatementText) &&
-            PlanRegex.IsMatch(OptimizeForUnknownRegExp(), MaskCommentsAndLiterals(stmt.StatementText), // #4524
-                "OPTIMIZE FOR UNKNOWN hint", // a regex that cannot finish gives way to a text search: the warning names a hint the text must hold
-                t => PlanTextSearch.ContainsWords(t, false, false, "OPTIMIZE", "FOR", "UNKNOWN")))
+        if (!cfg.IsRuleDisabled(27) && hasOptimizeForUnknown)
         {
             stmt.PlanWarnings.Add(new PlanWarning
             {
@@ -1331,9 +1335,12 @@ public static partial class PlanAnalyzer
 
             if (hasMismatch || hasConvert)
             {
+                /* #7898: GetRangeWithMismatchedTypes and GetRangeThroughConvert are the functions the optimizer
+                   uses to build a dynamic seek range through the conversion, so the index is still sought. The
+                   cost of the mismatch is the wider range and the guessed estimate for it. */
                 var reason = hasMismatch
-                    ? "Mismatched data types between the column and the parameter/literal. SQL Server is converting every row to compare, preventing index seeks. Match your data types — don't pass nvarchar to a varchar column, or int to a bigint column."
-                    : "CONVERT/CAST wrapping a column in the predicate. SQL Server is converting every row to compare, preventing index seeks. Match your data types — convert the parameter/literal instead of the column.";
+                    ? "Mismatched data types between the column and the parameter/literal. The optimizer built a dynamic seek range through the conversion, so the index is still sought, but the range is wider than an exact match and the row estimate for it is a guess. Match your data types — don't pass nvarchar to a varchar column, or int to a bigint column."
+                    : "CONVERT/CAST wrapping a column in the predicate. The optimizer built a dynamic seek range through the conversion, so the index is still sought, but the range is wider than an exact match and the row estimate for it is a guess. Match your data types — convert the parameter/literal instead of the column.";
 
                 node.Warnings.Add(new PlanWarning
                 {
@@ -1510,7 +1517,7 @@ public static partial class PlanAnalyzer
             {
                 RuleNumber = 23,
                 WarningType = "Table-Valued Function",
-                Message = $"Table-valued function: {funcName}. Multi-statement TVFs have no statistics — SQL Server guesses 1 row (pre-2017) or 100 rows (2017+) regardless of actual size. Rewrite as an inline table-valued function if possible, or dump the function results into a #temp table and join to that instead.",
+                Message = $"Table-valued function: {funcName}. Multi-statement TVFs have no statistics — SQL Server guesses 1 row (before SQL Server 2014) or 100 rows (SQL Server 2014 and later) regardless of actual size, unless interleaved execution (SQL Server 2017 and later) runs the function first and uses its real row count. Rewrite as an inline table-valued function if possible, or dump the function results into a #temp table and join to that instead.",
                 Severity = PlanWarningSeverity.Warning
             });
         }
