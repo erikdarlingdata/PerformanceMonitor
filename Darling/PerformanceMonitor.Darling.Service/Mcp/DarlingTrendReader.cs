@@ -312,11 +312,14 @@ internal static class DarlingTrendReader
 
     /// <summary>
     /// A single counter's value + per-interval delta trend — Lite's <c>GetPerfmonTrendAsync</c> / the
-    /// viewer's perfmon read: SUM the counter's instances per collection, or take the <c>_Total</c> instance alone
-    /// when the counter has one (the Databases and Locks objects), since that row already is the sum of the others
-    /// and adding them again doubled every point. Postgres <c>SUM(bigint)</c> is
-    /// numeric, so both SUMs CAST back to bigint for the typed GetInt64 reader (the viewer's PerfmonTrendsSql
-    /// makes the same cast). $1 server_id, $2 counter_name, $3/$4 window (naive UTC).
+    /// viewer's perfmon read: per collection, SUM the counter's instances object by object. An object whose
+    /// instances include <c>_Total</c> (the Databases and Locks objects) contributes that row alone, since it
+    /// already is the sum of the object's other instances and adding them again doubles the point; an object with
+    /// no <c>_Total</c> row contributes the sum of its instances; the objects are then summed, so a counter name
+    /// two objects share (Transaction Delay on Database Replica and Database Mirroring, #7416) keeps both objects'
+    /// rows whichever of them carries <c>_Total</c>. Postgres <c>SUM(bigint)</c> is numeric, so the outer SUMs
+    /// CAST back to bigint for the typed GetInt64 reader (the viewer's PerfmonTrendsSql makes the same cast).
+    /// $1 server_id, $2 counter_name, $3/$4 window (naive UTC).
     /// <para>The interval is MAX, not SUM, and that distinction is load-bearing. cntr_value and
     /// delta_cntr_value are additive across a counter's instance rows — summing Transactions/sec over
     /// every database is a meaningful total — but the interval is the same measured sweep gap repeated
@@ -364,63 +367,75 @@ internal static class DarlingTrendReader
         return $$"""
             SELECT
                 collection_time,
-                CASE WHEN bool_or(instance_name = '_Total')
-                     THEN CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total') AS bigint)
-                     ELSE CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) END AS cntr_value,
-                CASE WHEN bool_or(instance_name = '_Total')
-                     THEN CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total') AS bigint)
-                     ELSE CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) END AS delta_cntr_value,
+                CAST(SUM(cntr_value) AS bigint) AS cntr_value,
+                CAST(SUM(delta_cntr_value) AS bigint) AS delta_cntr_value,
                 CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds,
                 CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
-                COUNT(*) FILTER (WHERE is_artifact) AS artifacts
+                SUM(artifacts) AS artifacts
             FROM (
                 SELECT
                     collection_time,
-                    cntr_value,
-                    delta_cntr_value,
-                    sample_interval_seconds,
-                    cntr_type,
-                    instance_name,
-                    {{isArtifact}} AS is_artifact
+                    object_name,
+                    CASE WHEN bool_or(instance_name = '_Total')
+                         THEN SUM(cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total')
+                         ELSE SUM(cntr_value) FILTER (WHERE NOT is_artifact) END AS cntr_value,
+                    CASE WHEN bool_or(instance_name = '_Total')
+                         THEN SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total')
+                         ELSE SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) END AS delta_cntr_value,
+                    MAX(sample_interval_seconds) AS sample_interval_seconds,
+                    CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
+                    COUNT(*) FILTER (WHERE is_artifact) AS artifacts
                 FROM (
                     SELECT
                         collection_time,
                         object_name,
-                        instance_name,
                         cntr_value,
                         delta_cntr_value,
                         sample_interval_seconds,
                         cntr_type,
-                        lag(cntr_value) OVER w AS prev_value,
-                        lead(cntr_value) OVER w AS next_value
-                    FROM v_perfmon_stats
-                    WHERE server_id = $1
-                    AND   counter_name = $2
-                    AND   collection_time >= $3
-                    AND   collection_time <= $4
-                    AND   {{isWaitStatistics}}
-                    WINDOW w AS (PARTITION BY object_name, instance_name ORDER BY collection_time)
-
-                    UNION ALL
-
-                    SELECT
-                        collection_time,
-                        object_name,
                         instance_name,
-                        cntr_value,
-                        delta_cntr_value,
-                        sample_interval_seconds,
-                        cntr_type,
-                        NULL AS prev_value,
-                        NULL AS next_value
-                    FROM v_perfmon_stats
-                    WHERE server_id = $1
-                    AND   counter_name = $2
-                    AND   collection_time >= $3
-                    AND   collection_time <= $4
-                    AND   NOT ({{isWaitStatistics}})
-                ) AS raw
-            ) AS flagged
+                        {{isArtifact}} AS is_artifact
+                    FROM (
+                        SELECT
+                            collection_time,
+                            object_name,
+                            instance_name,
+                            cntr_value,
+                            delta_cntr_value,
+                            sample_interval_seconds,
+                            cntr_type,
+                            lag(cntr_value) OVER w AS prev_value,
+                            lead(cntr_value) OVER w AS next_value
+                        FROM v_perfmon_stats
+                        WHERE server_id = $1
+                        AND   counter_name = $2
+                        AND   collection_time >= $3
+                        AND   collection_time <= $4
+                        AND   {{isWaitStatistics}}
+                        WINDOW w AS (PARTITION BY object_name, instance_name ORDER BY collection_time)
+
+                        UNION ALL
+
+                        SELECT
+                            collection_time,
+                            object_name,
+                            instance_name,
+                            cntr_value,
+                            delta_cntr_value,
+                            sample_interval_seconds,
+                            cntr_type,
+                            NULL AS prev_value,
+                            NULL AS next_value
+                        FROM v_perfmon_stats
+                        WHERE server_id = $1
+                        AND   counter_name = $2
+                        AND   collection_time >= $3
+                        AND   collection_time <= $4
+                        AND   NOT ({{isWaitStatistics}})
+                    ) AS raw
+                ) AS flagged
+                GROUP BY collection_time, object_name
+            ) AS objects
             GROUP BY collection_time
             ORDER BY collection_time
             """;

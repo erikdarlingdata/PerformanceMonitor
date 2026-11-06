@@ -225,9 +225,10 @@ public sealed class PerfmonCounterTypeRungTests
         Assert.Contains(AgreedTypeExpression, viewerTrend, StringComparison.Ordinal);
 
         var lite = RepoFile.ReadRepoFile("Lite", "Services", "LocalDataService.Perfmon.cs");
-        /* Lite's single-counter read holds it once; its bucketed batched read (#4234) holds it twice, per collection
-           inside and per bucket outside, as both Darling twins do. */
-        Assert.Equal(3, Regex.Matches(lite, Regex.Escape(AgreedTypeExpression)).Count);
+        /* Lite's single-counter read holds it twice, per object inside and per collection outside (#7771); its
+           bucketed batched read (#4234) holds it three times, per object, per collection and per bucket, as both
+           Darling twins do at their own layers. */
+        Assert.Equal(5, Regex.Matches(lite, Regex.Escape(AgreedTypeExpression)).Count);
 
         var latest = DarlingDataReader.LatestPerfmonStatsSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         Assert.Contains("collection_time,\n    cntr_type,\n    sample_interval_seconds,\n    object_name\nFROM v_perfmon_stats", latest, StringComparison.Ordinal);

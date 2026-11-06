@@ -793,6 +793,13 @@ ORDER BY 1";
     /// than manufacturing a 0, but keeps its count in <see cref="PerfmonBucketsResult.ArtifactsSetAside"/> so a
     /// dropped bucket does not silently drop its own count too — the same shape as Darling's
     /// <c>DarlingTrendReader.GetPerfmonBucketsAsync</c>.</para>
+    /// <para>The per-collection point is built per object first (<c>objects</c>). An object whose instances include
+    /// <c>_Total</c> (the Databases and Locks objects) contributes that row alone, since it already is the sum of
+    /// the object's other instances and adding them again doubles the point; an object with no <c>_Total</c> row
+    /// contributes the sum of its instances. <c>collections</c> then sums the objects, so a counter name two
+    /// objects share (Transaction Delay on Database Replica and Database Mirroring, #7416) keeps both objects'
+    /// rows whichever of them carries <c>_Total</c>. The interval is MAX at both layers, the type rule is applied
+    /// at both, and the artifact count is summed up through them.</para>
     /// </summary>
     internal async Task<PerfmonBucketsResult> GetPerfmonBucketsAsync(int serverId, string counterName, int hoursBack, DateTime asOfUtc, int bucketMinutes)
     {
@@ -810,6 +817,7 @@ WITH flagged AS
 (
     SELECT
         collection_time,
+        object_name,
         cntr_value,
         delta_cntr_value,
         sample_interval_seconds,
@@ -855,10 +863,11 @@ WITH flagged AS
         AND   NOT ({isWaitStatistics})
     ) AS raw
 ),
-collections AS
+objects AS
 (
     SELECT
         collection_time,
+        object_name,
         CASE WHEN bool_or(instance_name = '_Total')
              THEN SUM(cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total')
              ELSE SUM(cntr_value) FILTER (WHERE NOT is_artifact) END AS cntr_value,
@@ -869,6 +878,18 @@ collections AS
         CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
         COUNT(*) FILTER (WHERE is_artifact) AS artifacts
     FROM flagged
+    GROUP BY collection_time, object_name
+),
+collections AS
+(
+    SELECT
+        collection_time,
+        SUM(cntr_value) AS cntr_value,
+        SUM(delta_cntr_value) AS delta_cntr_value,
+        MAX(sample_interval_seconds) AS sample_interval_seconds,
+        CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
+        SUM(artifacts) AS artifacts
+    FROM objects
     GROUP BY collection_time
 )
 SELECT

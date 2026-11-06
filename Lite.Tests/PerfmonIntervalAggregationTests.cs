@@ -34,7 +34,9 @@ public sealed class PerfmonIntervalAggregationTests
     private const string ReadPath = "Lite/Services/LocalDataService.Perfmon.cs";
 
     /// <summary>Both trend reads — the single-counter one and its batched sibling — must take the interval
-    /// as MAX. Two occurrences, because a fix applied to only one of the pair is the likelier mistake.
+    /// as MAX, at both of their layers: per object, where the instance rows are summed, and per collection,
+    /// over the per-object rows (#7771). Four occurrences, two per read, because a fix applied to only one of
+    /// the pair, or at only one layer, is the likelier mistake.
     /// </summary>
     [Fact]
     public void BothPerfmonTrendReads_TakeTheIntervalAsMax()
@@ -42,7 +44,7 @@ public sealed class PerfmonIntervalAggregationTests
         var source = ParitySource.ReadFile(ReadPath);
 
         var max = CountOccurrences(source, "MAX(sample_interval_seconds)");
-        Assert.Equal(2, max);
+        Assert.Equal(4, max);
     }
 
     /// <summary>The failure mode itself: a summed interval across a collection's INSTANCE rows is the
