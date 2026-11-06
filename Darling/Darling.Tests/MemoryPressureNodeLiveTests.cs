@@ -47,8 +47,8 @@ public sealed class MemoryPressureNodeLiveTests
 
     /// <summary>
     /// A store at V249 has no <c>memory_node_id</c> and a view over the older shape. Built the way the rewind does it (the view dropped, the
-    /// column dropped, the view created again), with a row planted, then the V250 stamp is rolled back and the ladder re-run: exactly V250 is
-    /// left to apply. The column must exist as a nullable integer with no default, the view must return it (NULL for the old row), and a
+    /// column dropped, the view created again), with a row planted, then the V250 stamp is rolled back and the ladder re-run: V250 and every
+    /// rung above it is left to apply. The column must exist as a nullable integer with no default, the view must return it (NULL for the old row), and a
     /// second run must change nothing.
     /// </summary>
     [Fact]
@@ -74,7 +74,8 @@ public sealed class MemoryPressureNodeLiveTests
             "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'v_memory_pressure_events' AND column_name = 'memory_node_id')", ct));
 
         await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= 250", ct);
-        Assert.Equal(1, await PgMigrations.MigrateAsync(connection, ct));
+        /* V250 and every rung above it is left to apply (V251 since #7762), so the count is read from the ladder. */
+        Assert.Equal(PgMigrations.Scripts.Count(s => s.Version >= 250), await PgMigrations.MigrateAsync(connection, ct));
 
         await using (var column = new NpgsqlCommand(
             "SELECT data_type, is_nullable, column_default FROM information_schema.columns "

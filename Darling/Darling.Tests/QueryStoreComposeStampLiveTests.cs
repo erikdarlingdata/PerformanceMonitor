@@ -184,7 +184,7 @@ VALUES (TIMESTAMP '{At(collectionTime)}', {serverId}, 'dbX', 99, 99, 'Regular', 
         await SeedAsync(connection, hourNow, ct);
         await ComposeStampLiveSupport.SeedPrecisionRowsAsync(connection, hourNow, ComposeStampLiveSupport.PrecisionSpot.Built, ct);
         var source = NpgsqlDataSource.Create(scratch.ConnectionString);
-        Assert.Equal(28, await BuildAllAsync(source, ct, ComposeStampLiveSupport.ClockWithin(hourNow)));
+        Assert.Equal(ComposeStampLiveSupport.BuiltHours, await BuildAllAsync(source, ct, ComposeStampLiveSupport.ClockWithin(hourNow)));
         await ComposeStampLiveSupport.AssertPrecisionRowsHaveTeethAsync(connection, ct);
         return (scratch, connection, source, hourNow);
     }
@@ -199,7 +199,9 @@ VALUES (TIMESTAMP '{At(collectionTime)}', {serverId}, 'dbX', 99, 99, 'Regular', 
         try
         {
             var from = hourNow.AddHours(-30);
-            var to = hourNow.AddHours(-2);
+            /* The newest hour the build reaches at the test's clock (#7762: the 90-minute lag), through its end. */
+            var newestDue = ComposeStampLiveSupport.NewestDueHour(ComposeStampLiveSupport.ClockWithin(hourNow));
+            var to = newestDue.AddHours(1);
             Assert.True(await CountAsync(connection, "SELECT count(*) FROM collect.query_store_compose_stamp", ct) > 1000);
             Assert.Equal(0, await MismatchesAsync(connection, from, to, ct));
 
@@ -224,11 +226,11 @@ VALUES (TIMESTAMP '{At(collectionTime)}', {serverId}, 'dbX', 99, 99, 'Regular', 
             Assert.Equal(0, await CountAsync(connection, @"SELECT count(*) FROM (SELECT DISTINCT server_id, date_trunc('hour', collection_time) AS hour FROM collect.query_store_compose_stamp) AS k
                 LEFT JOIN collect.query_store_compose_stamp_built AS b ON b.server_id = k.server_id AND b.hour = k.hour
                 WHERE b.built_seq IS DISTINCT FROM b.late_seq OR b.server_id IS NULL", ct));
-            Assert.Equal(28, await CountAsync(connection, "SELECT count(*) FROM collect.query_store_compose_stamp_hours", ct));
+            Assert.Equal(ComposeStampLiveSupport.BuiltHours, await CountAsync(connection, "SELECT count(*) FROM collect.query_store_compose_stamp_hours", ct));
 
             /* A tick with nothing due builds nothing; the newest builds were the youngest due hour. */
             Assert.Equal(0, await BuildAllAsync(source, ct, ComposeStampLiveSupport.ClockWithin(hourNow)));
-            Assert.Equal(hourNow.AddHours(-3), Convert.ToDateTime(await TextAsync(connection, "SELECT max(hour) FROM collect.query_store_compose_stamp_hours", ct), CultureInfo.InvariantCulture));
+            Assert.Equal(newestDue, Convert.ToDateTime(await TextAsync(connection, "SELECT max(hour) FROM collect.query_store_compose_stamp_hours", ct), CultureInfo.InvariantCulture));
             bodySucceeded = true;
         }
         finally
@@ -399,8 +401,13 @@ SELECT md5(
             Assert.Equal(0, await PgMigrations.MigrateAsync(connection, ct));
             await using (var transaction = await connection.BeginTransactionAsync(ct))
             {
-                await using var command = new NpgsqlCommand(PgMigrations.Scripts.Single(s => s.Version == QueryStoreComposeStamp.RungVersion).Sql, connection, transaction) { CommandTimeout = 120 };
-                await command.ExecuteNonQueryAsync(ct);
+                /* V173's text, then V251's (#7762), which replaces its trigger function and triggers: the pair is the rung text run again over the newest store. */
+                foreach (var version in new[] { QueryStoreComposeStamp.RungVersion, QueryStoreComposeStamp.LateMarkOffsetZeroRungVersion })
+                {
+                    await using var command = new NpgsqlCommand(PgMigrations.Scripts.Single(s => s.Version == version).Sql, connection, transaction) { CommandTimeout = 120 };
+                    await command.ExecuteNonQueryAsync(ct);
+                }
+
                 await transaction.CommitAsync(ct);
             }
 

@@ -43,7 +43,7 @@ public sealed class QueryStoreHashHourlyLiveTests
         ComposeStampLiveSupport.CountAsync(connection, sql, ct);
 
     /// <summary>
-    /// The shared 30-hour seed, built hour by hour (28 hours), with logical reads, logical writes and memory added to every wide row
+    /// The shared 30-hour seed, built hour by hour (every due hour), with logical reads, logical writes and memory added to every wide row
     /// first. The values are small so no product passes a bigint, and some are NULL, so a SUM over a NULL measure is exercised. An
     /// interval that crosses the top of an hour is in the seed (its first_execution_time is 3 minutes before the stamp).
     /// </summary>
@@ -55,7 +55,7 @@ UPDATE collect.query_store_interval_wide
 SET avg_logical_io_reads = CASE WHEN query_id % 4 = 0 THEN NULL ELSE ((query_id * 7 + plan_id) % 1000) + 1 END,
     avg_logical_io_writes = CASE WHEN query_id % 3 = 0 THEN NULL ELSE query_id * 5 + (plan_id % 7) END,
     max_query_max_used_memory = CASE WHEN query_id % 5 = 0 THEN NULL ELSE (runtime_stats_interval_id % 5000) + 1 END", ct);
-        Assert.Equal(28, await ComposeStampLiveSupport.BuildAllAsync(arranged.Source, ct, ComposeStampLiveSupport.ClockWithin(arranged.HourNow)));
+        Assert.Equal(ComposeStampLiveSupport.BuiltHours, await ComposeStampLiveSupport.BuildAllAsync(arranged.Source, ct, ComposeStampLiveSupport.ClockWithin(arranged.HourNow)));
         return arranged;
     }
 
@@ -102,13 +102,13 @@ SELECT (SELECT count(*) FROM (SELECT * FROM direct EXCEPT SELECT * FROM stored) 
         try
         {
             /* Teeth: the compared side is not empty, covers all three servers and holds the NULL-hash groups, and the sums are not all one value. */
-            /* 28 hours x 3 servers x 6 hashes (one of them NULL): the plans of a hash and the stamps of an hour are merged into one row. */
-            Assert.Equal(28 * 3 * 6, await CountAsync(connection, "SELECT count(*) FROM collect.query_store_hash_hourly", ct));
+            /* BuiltHours x 3 servers x 6 hashes (one of them NULL): the plans of a hash and the stamps of an hour are merged into one row. */
+            Assert.Equal(ComposeStampLiveSupport.BuiltHours * 3 * 6, await CountAsync(connection, "SELECT count(*) FROM collect.query_store_hash_hourly", ct));
             Assert.Equal(3, await CountAsync(connection, "SELECT count(DISTINCT server_id) FROM collect.query_store_hash_hourly", ct));
-            Assert.Equal(28 * 3, await CountAsync(connection, "SELECT count(*) FROM collect.query_store_hash_hourly WHERE query_hash IS NULL", ct));
+            Assert.Equal(ComposeStampLiveSupport.BuiltHours * 3, await CountAsync(connection, "SELECT count(*) FROM collect.query_store_hash_hourly WHERE query_hash IS NULL", ct));
             Assert.True(await CountAsync(connection, "SELECT count(DISTINCT reads_wsum) FROM collect.query_store_hash_hourly", ct) > 10);
             Assert.True(await CountAsync(connection, "SELECT count(*) FROM collect.query_store_hash_hourly WHERE mem_max IS NULL", ct) > 0);
-            Assert.Equal(28, await CountAsync(connection, "SELECT count(DISTINCT hour) FROM collect.query_store_hash_hourly", ct));
+            Assert.Equal(ComposeStampLiveSupport.BuiltHours, await CountAsync(connection, "SELECT count(DISTINCT hour) FROM collect.query_store_hash_hourly", ct));
             Assert.Equal(0, await MismatchesAsync(connection, ct));
             Assert.Equal(0, await HashStalePairsAsync(connection, ct));
             Assert.Equal(0, await CustomViewsStalePairsAsync(connection, ct));
@@ -193,21 +193,22 @@ WHERE server_id = 1 AND query_id = 3 AND plan_id = 31 AND collection_time >= TIM
             await ExecAsync(connection, "UPDATE collect.query_store_compose_stamp_built SET hash_built_seq = NULL", ct);
             await ExecAsync(connection, "DELETE FROM collect.query_store_hash_hourly", ct);
             Assert.Equal(0, await CustomViewsStalePairsAsync(connection, ct));
-            Assert.Equal(28 * 3, await HashStalePairsAsync(connection, ct));
+            Assert.Equal(ComposeStampLiveSupport.BuiltHours * 3, await HashStalePairsAsync(connection, ct));
 
+            var newestDue = ComposeStampLiveSupport.NewestDueHour(ComposeStampLiveSupport.ClockWithin(hourNow));
             var plan = await PlanAsync(connection, hourNow, ct);
             Assert.Equal(QueryStoreComposeStamp.MaxBuildsPerTick, plan.Builds.Count);
             Assert.All(plan.Builds, build => Assert.True(build.Stale));
             Assert.Equal(
-                Enumerable.Range(0, QueryStoreComposeStamp.MaxBuildsPerTick).Select(i => hourNow.AddHours(-3 - i)).ToArray(),
+                Enumerable.Range(0, QueryStoreComposeStamp.MaxBuildsPerTick).Select(i => newestDue.AddHours(-i)).ToArray(),
                 plan.Builds.Select(build => build.Hour).OrderByDescending(hour => hour).ToArray());
 
             var tick = await ComposeStampLiveSupport.TickAtAsync(source, ComposeStampLiveSupport.ClockWithin(hourNow), ct);
-            /* #6865: the six normal builds, then the extra backlog builds (up to 24 more): the 28 hours are done in one tick. */
-            Assert.Equal(28, tick.Built);
-            Assert.Equal(28, tick.BuiltBacklog);
-            Assert.Equal(28, await CountAsync(connection, "SELECT count(DISTINCT hour) FROM collect.query_store_hash_hourly", ct));
-            Assert.Equal(hourNow.AddHours(-3), (DateTime)(await ScalarAsync(connection, "SELECT max(hour) FROM collect.query_store_hash_hourly", ct))!);
+            /* #6865: the six normal builds, then the extra backlog builds (up to MaxExtraBacklogBuilds more): every built hour is done in one tick. */
+            Assert.Equal(ComposeStampLiveSupport.BuiltHours, tick.Built);
+            Assert.Equal(ComposeStampLiveSupport.BuiltHours, tick.BuiltBacklog);
+            Assert.Equal(ComposeStampLiveSupport.BuiltHours, await CountAsync(connection, "SELECT count(DISTINCT hour) FROM collect.query_store_hash_hourly", ct));
+            Assert.Equal(newestDue, (DateTime)(await ScalarAsync(connection, "SELECT max(hour) FROM collect.query_store_hash_hourly", ct))!);
 
             Assert.Equal(0, await ComposeStampLiveSupport.BuildAllAsync(source, ct, ComposeStampLiveSupport.ClockWithin(hourNow)));
             Assert.Equal(0, await HashStalePairsAsync(connection, ct));
@@ -240,7 +241,8 @@ WHERE server_id = 1 AND query_id = 3 AND plan_id = 31 AND collection_time >= TIM
             await ExecAsync(connection, "UPDATE collect.query_store_compose_stamp_built SET hash_built_seq = NULL", ct);
             await ExecAsync(connection, "DELETE FROM collect.query_store_hash_hourly", ct);
             /* The newest two hours were never built (the hour due this tick and the one before it). */
-            var never = new[] { hourNow.AddHours(-3), hourNow.AddHours(-4) };
+            var newestDue = ComposeStampLiveSupport.NewestDueHour(ComposeStampLiveSupport.ClockWithin(hourNow));
+            var never = new[] { newestDue, newestDue.AddHours(-1) };
             foreach (var hour in never)
             {
                 await ExecAsync(connection, $"DELETE FROM collect.query_store_compose_stamp_built WHERE hour = TIMESTAMP '{At(hour)}'", ct);
@@ -250,15 +252,15 @@ WHERE server_id = 1 AND query_id = 3 AND plan_id = 31 AND collection_time >= TIM
             var plan = await PlanAsync(connection, hourNow, ct);
             Assert.Equal(2, plan.Builds.Count(b => !b.Stale));
             Assert.Equal(QueryStoreComposeStamp.MaxBuildsPerTick - 2, plan.Builds.Count(b => b.Backlog));
-            Assert.Equal(22, plan.ExtraBacklog!.Count);
+            Assert.Equal(ComposeStampLiveSupport.ExtraBacklogHours, plan.ExtraBacklog!.Count);
 
             var tick = await ComposeStampLiveSupport.TickAtAsync(source, ComposeStampLiveSupport.ClockWithin(hourNow), ct);
             Assert.Equal(2, tick.BuiltMissing);
             Assert.Equal(0, tick.BuiltStale);
             Assert.Equal(0, tick.Failed);
-            /* 26 backlog hours: 4 in the normal builds and 22 extra, far above the 3 the old half-and-half split gave. */
-            Assert.Equal(26, tick.BuiltBacklog);
-            Assert.Equal(28, await CountAsync(connection, "SELECT count(DISTINCT hour) FROM collect.query_store_hash_hourly", ct));
+            /* The backlog: the normal builds left after the two never-built hours, then every extra, far above the 3 the old half-and-half split gave. */
+            Assert.Equal(QueryStoreComposeStamp.MaxBuildsPerTick - 2 + ComposeStampLiveSupport.ExtraBacklogHours, tick.BuiltBacklog);
+            Assert.Equal(ComposeStampLiveSupport.BuiltHours, await CountAsync(connection, "SELECT count(DISTINCT hour) FROM collect.query_store_hash_hourly", ct));
             Assert.Equal(0, await HashStalePairsAsync(connection, ct));
             bodySucceeded = true;
         }
@@ -274,7 +276,7 @@ WHERE server_id = 1 AND query_id = 3 AND plan_id = 31 AND collection_time >= TIM
     /// <summary>
     /// #6865: a writer of the wide table that opens after the six normal builds holds the extra backlog builds back (its start time is not readable, so it
     /// holds every hour). Those extras are opportunistic: they are the next tick's backlog, so they are not "deferred" and not "deferred for writers". The
-    /// plan held 6 hours and all 6 built, so <c>Deferred</c> is 0, not the 22 extras the writer held. The clock opens the writer the first time it sees six
+    /// plan held 6 hours and all 6 built, so <c>Deferred</c> is 0, not the extras the writer held. The clock opens the writer the first time it sees six
     /// hours built, which is before the first extra starts.
     /// </summary>
     [Fact]
@@ -292,7 +294,7 @@ WHERE server_id = 1 AND query_id = 3 AND plan_id = 31 AND collection_time >= TIM
             await ExecAsync(connection, "DELETE FROM collect.query_store_hash_hourly", ct);
             var plan = await PlanAsync(connection, hourNow, ct);
             Assert.Equal(QueryStoreComposeStamp.MaxBuildsPerTick, plan.Builds.Count);
-            Assert.Equal(22, plan.ExtraBacklog!.Count);
+            Assert.Equal(ComposeStampLiveSupport.ExtraBacklogHours, plan.ExtraBacklog!.Count);
 
             using var clockConnection = source.OpenConnection();
             TimeSpan Elapsed()
@@ -369,7 +371,7 @@ VALUES (TIMESTAMP '{at}', 1, 'dbX', 99, 99, 'Regular', TIMESTAMP '{at}', TIMESTA
     /// <summary>
     /// #6865: the extra backlog builds stop at <see cref="QueryStoreComposeStamp.ExtraBacklogBudget"/> of their own time, not at the 24 hours the plan
     /// offers, and the tick stays inside <see cref="QueryStoreComposeStamp.MaxTickDuration"/>. Each build costs 40 s on the clock: the six normal builds
-    /// take 240 s, the extras are measured from there, and the fifth extra is the first to find the 180 s used (the plan offers 22). Every normal hour
+    /// take 240 s, the extras are measured from there, and the fifth extra is the first to find the 180 s used (the plan offers ExtraBacklogHours). Every normal hour
     /// started, so nothing is deferred: the extras the budget did not reach are the next tick's backlog, not deferred hours.
     /// </summary>
     [Fact]
@@ -385,7 +387,7 @@ VALUES (TIMESTAMP '{at}', 1, 'dbX', 99, 99, 'Regular', TIMESTAMP '{at}', TIMESTA
             await ExecAsync(connection, "DELETE FROM collect.query_store_hash_hourly", ct);
             var plan = await PlanAsync(connection, hourNow, ct);
             Assert.Equal(QueryStoreComposeStamp.MaxBuildsPerTick, plan.Builds.Count);
-            Assert.Equal(22, plan.ExtraBacklog!.Count);
+            Assert.Equal(ComposeStampLiveSupport.ExtraBacklogHours, plan.ExtraBacklog!.Count);
 
             var perBuild = TimeSpan.FromSeconds(40);
             var tick = await TickWithBuildCostAsync(source, hourNow, perBuild, ct);
@@ -411,7 +413,7 @@ VALUES (TIMESTAMP '{at}', 1, 'dbX', 99, 99, 'Regular', TIMESTAMP '{at}', TIMESTA
 
     /// <summary>
     /// #6865: when the tick limit is reached inside the normal builds, no extra build starts, and <c>Deferred</c> counts the normal hours not started
-    /// (2 of the 6), not the 22 extras that were never reached. Each build costs 150 s, so the fifth normal build finds 600 s used.
+    /// (2 of the 6), not the extras that were never reached. Each build costs 150 s, so the fifth normal build finds 600 s used.
     /// </summary>
     [Fact]
     public async Task WhenTheTickLimitEndsTheNormalBuilds_NoExtraStarts_AndDeferredCountsOnlyThePlannedHoursNotStarted()
@@ -425,7 +427,7 @@ VALUES (TIMESTAMP '{at}', 1, 'dbX', 99, 99, 'Regular', TIMESTAMP '{at}', TIMESTA
             await ExecAsync(connection, "UPDATE collect.query_store_compose_stamp_built SET hash_built_seq = NULL", ct);
             await ExecAsync(connection, "DELETE FROM collect.query_store_hash_hourly", ct);
             var plan = await PlanAsync(connection, hourNow, ct);
-            Assert.Equal(22, plan.ExtraBacklog!.Count);
+            Assert.Equal(ComposeStampLiveSupport.ExtraBacklogHours, plan.ExtraBacklog!.Count);
 
             var perBuild = TimeSpan.FromSeconds(150);
             var tick = await TickWithBuildCostAsync(source, hourNow, perBuild, ct);

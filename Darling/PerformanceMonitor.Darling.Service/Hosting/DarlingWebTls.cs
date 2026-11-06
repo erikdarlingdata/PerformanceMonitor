@@ -79,7 +79,13 @@ internal static class DarlingWebTls
     /// <c>ServerCertificateChain</c>), and because conflating "the certificate we present" with "the certs
     /// that prove it" is the confusion that produced the bug this type exists to fix.
     /// </summary>
-    internal readonly record struct LoadedCertificate(X509Certificate2 Leaf, X509Certificate2Collection Chain)
+    /// <param name="Leaf">The certificate the listener presents.</param>
+    /// <param name="Chain">The intermediates that travel with it.</param>
+    /// <param name="FallbackNote">Non-null only when the store form served an older certificate because the newest
+    /// matching one's key could not be opened (#7865). The caller logs it as one Warning: it names the newer
+    /// certificate, the one served and the grant command.</param>
+    internal readonly record struct LoadedCertificate(
+        X509Certificate2 Leaf, X509Certificate2Collection Chain, string? FallbackNote = null)
         : IDisposable
     {
         /// <summary>Disposes the leaf AND every intermediate — on Windows each holds machine key-store state.</summary>

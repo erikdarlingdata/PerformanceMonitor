@@ -484,6 +484,21 @@ OPTION(RECOMPILE);" + NoDatabaseAccessNote.ScopeResults;
     public override bool AppliesTo(CollectorTargetInfo target) =>
         target is null || target.MeetsMinimumVersion(14, unknownIsNewest: true);
 
+    /// <summary>
+    /// #7813: the empty answer of get_plan_corrections on a server with no plan correction rows, in the one sentence that fits. A
+    /// version below SQL Server 2017 has no automatic tuning at all (the same gate <see cref="AppliesTo"/> applies, so Azure SQL
+    /// Database and Managed Instance are never taken for an old version and an unknown version is assumed newest), which is a fact
+    /// about the version, not about collection. On any other version an empty store means no successful cycle has been stored: every
+    /// cycle writes an enablement row for every database it reads, Query Store on or off (the one-row anchor in
+    /// <see cref="PayloadBodyText"/>), so a cycle that ran and found no recommendation still leaves rows. The sentence therefore points
+    /// at collection health and claims nothing about Query Store or about what the engine has recommended. Both products' tools say it
+    /// through here, and the web page prints the sentence as it is, so it names no store column, system view or tool.
+    /// </summary>
+    public static string NoRowsMessage(CollectorTargetInfo target) =>
+        Instance.AppliesTo(target)
+            ? "No plan correction data collected for this server yet: its plan correction collector has not stored a cycle, so nothing here says what has been recommended. Collection health shows whether it has run."
+            : "This SQL Server version has no automatic tuning (it arrived in SQL Server 2017), so there is nothing to collect.";
+
     /// <summary>Azure SQL DB rejects three-part names, so the host connects per database there instead.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => target is not null && target.IsAzureSqlDb;
 

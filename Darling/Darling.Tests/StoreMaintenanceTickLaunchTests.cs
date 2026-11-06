@@ -146,6 +146,37 @@ public sealed class StoreMaintenanceTickLaunchTests
         Assert.True(secondRan);
     }
 
+    /* #7762: the compose build's own 15-minute timer launches through TryStartComposeStampTick. The loop's call to it has no seam a test can
+       see without reading the worker's source; the launcher is what these tests run. */
+    [Fact]
+    public async Task ComposeStampLauncher_RunsTheTick_SkipsASecondWhileItRuns_AndStartsTheNextAfterItCompletes()
+    {
+        var (worker, _) = MakeWorker();
+        var gate = new TaskCompletionSource();
+        var firstRan = new TaskCompletionSource();
+        Assert.True(worker.TryStartComposeStampTick(_ => { firstRan.SetResult(); return gate.Task; }, CancellationToken.None));
+        await firstRan.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        var secondRan = false;
+        Assert.False(worker.TryStartComposeStampTick(_ => { secondRan = true; return Task.CompletedTask; }, CancellationToken.None));
+        Assert.False(secondRan);
+
+        gate.SetResult();
+        var third = new TaskCompletionSource();
+        var started = false;
+        for (var i = 0; i < 100 && !started; i++)
+        {
+            started = worker.TryStartComposeStampTick(_ => { third.SetResult(); return Task.CompletedTask; }, CancellationToken.None);
+            if (!started)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(50));
+            }
+        }
+
+        Assert.True(started, "the launcher never accepted a tick after the first completed");
+        await third.Task.WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
     [Fact]
     public async Task AFaultingMetricsTick_IsObservedAndDoesNotBlockTheNext()
     {

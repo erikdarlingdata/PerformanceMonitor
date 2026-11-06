@@ -67,7 +67,7 @@ JOIN collect.query_store_compose_stamp_hours AS h ON h.hour = b.hour
 WHERE b.built_seq IS DISTINCT FROM b.late_seq", ct);
 
     [Fact]
-    public async Task AReplayedRow_AndARowMovedOutOfABuiltHour_StopTheLookupAtThatHour_TheStaleArmGivesTheOraclesAnswer_AndARebuildMakesTheHourCurrent()
+    public async Task StalePairsOnSomeServers_DoNotMoveTheTail_AndThePanelAnswersWhatTheWideTableAloneAnswers()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), ComposeStampLiveSupport.SkipReason);
         var ct = TestContext.Current.CancellationToken;
@@ -77,7 +77,44 @@ WHERE b.built_seq IS DISTINCT FROM b.late_seq", ct);
         {
             var start = hourNow.AddHours(-28).AddMinutes(17);
             var end = hourNow.AddMinutes(-40);
-            var baseline = hourNow.AddHours(-2);
+
+            /* Stale pairs on servers 1 and 2 (server 1 in two hours, one of them shared with server 2), none on server 3. */
+            await ComposeStampLiveSupport.InsertRowAsync(connection, 1, hourNow.AddHours(-10).AddMinutes(55), 9_000_001, ct);
+            await ComposeStampLiveSupport.InsertRowAsync(connection, 1, hourNow.AddHours(-20).AddMinutes(40), 9_000_002, ct);
+            await ComposeStampLiveSupport.InsertRowAsync(connection, 2, hourNow.AddHours(-10).AddMinutes(50), 9_000_003, ct);
+            Assert.Equal(
+                $"{Pair(1, hourNow.AddHours(-20))},{Pair(1, hourNow.AddHours(-10))},{Pair(2, hourNow.AddHours(-10))}",
+                await StaleListAsync(connection, ct));
+
+            /* The lookup passes every stale hour: the hours after the oldest stale one come from the rollup, not the tail. */
+            var through = await ComposeStampLiveSupport.StampThroughAsync(connection, start, end, ct);
+            Assert.Equal(end, through);
+
+            /* Every row once, none twice: the answer equals the one with no rollup at all, for the fleet, a server with stale pairs and the one without. */
+            await AssertSameAsOracleAsync(connection, start, end, through, null, "stale pairs, fleet", ct);
+            await AssertSameAsOracleAsync(connection, start, end, through, new[] { "srv1" }, "stale pairs, server 1", ct);
+            await AssertSameAsOracleAsync(connection, start, end, through, new[] { "srv3" }, "stale pairs, server 3 (none stale)", ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await ComposeStampLiveSupport.CleanupAsync(scratch, connection, source, bodySucceeded);
+        }
+    }
+
+    [Fact]
+    public async Task AReplayedRow_AndARowMovedOutOfABuiltHour_DoNotMoveTheLookup_TheStaleArmGivesTheOraclesAnswer_AndARebuildMakesTheHourCurrent()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), ComposeStampLiveSupport.SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection, source, hourNow) = await ComposeStampLiveSupport.ArrangeAsync(ct);
+        var bodySucceeded = false;
+        try
+        {
+            var start = hourNow.AddHours(-28).AddMinutes(17);
+            var end = hourNow.AddMinutes(-40);
+            /* Every seeded hour is built at the arrange step's clock (BuildLag), so the lookup finds no unbuilt hour and answers the window's end. */
+            var baseline = end;
             Assert.Equal(baseline, await ComposeStampLiveSupport.StampThroughAsync(connection, start, end, ct));
             Assert.Equal(string.Empty, await StaleListAsync(connection, ct));
             await AssertSameAsOracleAsync(connection, start, end, baseline, null, "before any late write", ct);
@@ -90,16 +127,13 @@ WHERE b.built_seq IS DISTINCT FROM b.late_seq", ct);
                 await ComposeStampLiveSupport.CountAsync(connection, $"SELECT sum(execution_count) FROM collect.query_store_interval_wide WHERE server_id = 1 AND collection_time >= TIMESTAMP '{ComposeStampLiveSupport.At(replayHour)}' AND collection_time < TIMESTAMP '{ComposeStampLiveSupport.At(replayHour.AddHours(1))}'", ct),
                 await ComposeStampLiveSupport.CountAsync(connection, $"SELECT sum(ec_sum) FROM collect.query_store_compose_stamp WHERE server_id = 1 AND collection_time >= TIMESTAMP '{ComposeStampLiveSupport.At(replayHour)}' AND collection_time < TIMESTAMP '{ComposeStampLiveSupport.At(replayHour.AddHours(1))}'", ct));
 
-            /* The lookup stops at the stale hour, for the fleet and for a scope that includes server 1, and passes it for a scope
-               of the other two servers (the stale pair is not theirs). */
-            Assert.Equal(replayHour, await ComposeStampLiveSupport.StampThroughAsync(connection, start, end, ct));
-            Assert.Equal(baseline, await StampThroughForAsync(connection, new[] { 2, 3 }, start, end, ct));
-            Assert.Equal(replayHour, await StampThroughForAsync(connection, new[] { 1 }, start, end, ct));
+            /* #7762: a stale pair no longer ends the rollup, so the lookup stays at the baseline (before, it stopped at the stale hour). */
+            Assert.Equal(baseline, await ComposeStampLiveSupport.StampThroughAsync(connection, start, end, ct));
 
             /* The pair turned stale after the lookup: the statement still has the baseline StampThrough, and its stale arm answers. */
             await AssertSameAsOracleAsync(connection, start, end, baseline, null, "replayed row, stale arm", ct);
             await AssertSameAsOracleAsync(connection, start, end, baseline, new[] { "srv1" }, "replayed row, stale arm, server 1", ct);
-            await AssertSameAsOracleAsync(connection, start, end, replayHour, null, "replayed row, runner's StampThrough", ct);
+            await AssertSameAsOracleAsync(connection, start, end, replayHour, null, "replayed row, a StampThrough at the stale hour (the arms cover each row once whatever it is)", ct);
 
             /* The rebuild makes it current. */
             var rebuilt = await ComposeStampLiveSupport.TickAtAsync(source, ComposeStampLiveSupport.ClockWithin(hourNow), ct);
@@ -116,8 +150,9 @@ UPDATE collect.query_store_interval_wide SET collection_time = TIMESTAMP '{Compo
 WHERE ctid = (SELECT ctid FROM collect.query_store_interval_wide WHERE server_id = 2 AND collection_time >= TIMESTAMP '{ComposeStampLiveSupport.At(moveHour)}'
                 AND collection_time < TIMESTAMP '{ComposeStampLiveSupport.At(moveHour.AddHours(1))}' ORDER BY collection_time, query_id, plan_id LIMIT 1)", ct);
             Assert.Equal(Pair(2, moveHour), await StaleListAsync(connection, ct));
-            Assert.Equal(moveHour, await ComposeStampLiveSupport.StampThroughAsync(connection, start, end, ct));
+            Assert.Equal(baseline, await ComposeStampLiveSupport.StampThroughAsync(connection, start, end, ct));
             await AssertSameAsOracleAsync(connection, start, end, baseline, null, "moved-out row, stale arm", ct);
+            await AssertSameAsOracleAsync(connection, start, end, moveHour, null, "moved-out row, a StampThrough at the stale hour", ct);
             await AssertSameAsOracleAsync(connection, start, end, baseline, new[] { "srv2" }, "moved-out row, stale arm, server 2", ct);
 
             rebuilt = await ComposeStampLiveSupport.TickAtAsync(source, ComposeStampLiveSupport.ClockWithin(hourNow), ct);
@@ -133,7 +168,4 @@ WHERE ctid = (SELECT ctid FROM collect.query_store_interval_wide WHERE server_id
             await ComposeStampLiveSupport.CleanupAsync(scratch, connection, source, bodySucceeded);
         }
     }
-
-    private static Task<DateTime?> StampThroughForAsync(NpgsqlConnection connection, int[] serverIds, DateTime start, DateTime end, CancellationToken ct) =>
-        ComposePanelRunner.ResolveQueryStoreStampThroughAsync(connection, serverIds, start, end, QueryStoreComposeStamp.RungVersion, ct);
 }
