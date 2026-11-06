@@ -19,11 +19,11 @@ using Xunit;
 namespace Lite.Tests;
 
 /// <summary>
-/// #7895, the Lite twin of the Darling live tests in <c>AnalysisCoverageLivePostgresTests</c>: the BLOCKING_EVENTS peak
-/// divides each 4 h bucket's waits by that bucket's own covered hours, its span clipped to the window end, never more
-/// than the hours the collector observed in the window and never under one hour, and the peak is the bucket with the
-/// highest rate, not the biggest count. The wait samples planted here are the coverage witness, a reading every
-/// fifteen minutes.
+/// #7895 and #8001, the Lite twin of the Darling live tests in <c>AnalysisCoverageLivePostgresTests</c>: the
+/// BLOCKING_EVENTS peak divides each 4 h bucket's waits by the hours the collector observed inside that bucket, or,
+/// when the witness never saw the bucket, by its span clipped to the window end and capped at the window's observed
+/// hours; never under one hour; and the peak is the bucket with the highest rate, not the biggest count. The wait
+/// samples planted here are the coverage witness, a reading every fifteen minutes.
 /// </summary>
 public sealed class BlockingPeakBucketHoursTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
@@ -135,6 +135,57 @@ public sealed class BlockingPeakBucketHoursTests : IClassFixture<SharedDuckDbFix
         Assert.Equal(10.0, blocking.Value, precision: 6);
         Assert.Equal(10.0, blocking.Metadata["events_per_hour_peak_4h"], precision: 6);
         Assert.Equal(40.0, blocking.Metadata["peak_4h_event_count"], precision: 6);
+        Assert.True(blocking.Metadata.TryGetValue("peak_4h_covered_hours", out var covered), "the fact carries the peak bucket's covered hours");
+        Assert.Equal(4.0, covered, precision: 6);
+    }
+
+    [Fact]
+    public async Task ATwoHourCollectorGapInsideThePeakBucket_DividesByItsTwoObservedHours()
+    {
+        var start = WindowEnd.AddHours(-24);
+        /* #8001: the collector was up for the first four hours and again from hour six to hour eight, six observed hours
+           of twenty-four. Forty waits across the fully observed first bucket are 10/h. Thirty waits in the two hours the
+           collector saw of the [4h, 8h) bucket are 15/h, the peak, and that bucket divides by its own two observed
+           hours, not by four and not by the window's six. */
+        await PlantCoverageAsync(start, start.AddHours(4));
+        await PlantCoverageAsync(start.AddHours(6), start.AddHours(8));
+        for (var i = 0; i < 40; i++)
+            await PlantBlockingAsync(start.AddMinutes(6 * i), 100 + i);
+        for (var i = 0; i < 30; i++)
+            await PlantBlockingAsync(start.AddHours(6).AddMinutes(4 * i), 200 + i);
+
+        var blocking = await CollectBlockingAsync(start);
+
+        Assert.Equal(0.25, blocking.Metadata["observed_hours"] / blocking.Metadata["period_hours"], precision: 6);
+        Assert.Equal(70.0, blocking.Metadata["event_count"], precision: 6);
+        Assert.Equal(15.0, blocking.Value, precision: 6);
+        Assert.Equal(15.0, blocking.Metadata["events_per_hour_peak_4h"], precision: 6);
+        Assert.Equal(30.0, blocking.Metadata["peak_4h_event_count"], precision: 6);
+        Assert.True(blocking.Metadata.TryGetValue("peak_4h_covered_hours", out var covered), "the fact carries the peak bucket's covered hours");
+        Assert.Equal(2.0, covered, precision: 6);
+    }
+
+    [Fact]
+    public async Task ABucketTheWitnessNeverSaw_DividesByItsOwnSpan_NotTheOneHourFloor()
+    {
+        var start = WindowEnd.AddHours(-24);
+        /* #8001: the collector was up for the first eight hours of the day only. Eight waits across the first bucket are
+           2/h. Twenty waits sit in the [8h, 12h) bucket, which the coverage witness never saw. Those waits prove their
+           own collector was up there, so the witness does not describe that bucket: it divides by its own four-hour
+           span, 5/h, not by the one-hour floor's 20/h. */
+        await PlantCoverageAsync(start, start.AddHours(8));
+        for (var i = 0; i < 8; i++)
+            await PlantBlockingAsync(start.AddMinutes(30 * i), 100 + i);
+        for (var i = 0; i < 20; i++)
+            await PlantBlockingAsync(start.AddHours(8).AddMinutes(10 * i), 200 + i);
+
+        var blocking = await CollectBlockingAsync(start);
+
+        Assert.Equal(8.0, blocking.Metadata["observed_hours"], precision: 6);
+        Assert.Equal(28.0, blocking.Metadata["event_count"], precision: 6);
+        Assert.Equal(5.0, blocking.Value, precision: 6);
+        Assert.Equal(5.0, blocking.Metadata["events_per_hour_peak_4h"], precision: 6);
+        Assert.Equal(20.0, blocking.Metadata["peak_4h_event_count"], precision: 6);
         Assert.True(blocking.Metadata.TryGetValue("peak_4h_covered_hours", out var covered), "the fact carries the peak bucket's covered hours");
         Assert.Equal(4.0, covered, precision: 6);
     }
