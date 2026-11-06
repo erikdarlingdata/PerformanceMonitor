@@ -560,7 +560,7 @@ function stripOf(kind, server, ctx) {
     return { title: "Query Store duration", tool: "get_query_store_duration_trend", params: { server, hours: ctx.hours }, rows: (d) => d.trend, time: "time", value: "value", seam: (d) => d && d.routing && d.routing.raw_from };
   }
   const queries = kind === "queries";
-  return { title: queries ? "Query duration" : "Procedure duration", tool: queries ? "get_query_duration_trend" : "get_procedure_duration_trend", params: { server, hours: ctx.hours }, rows: (d) => d.trend, time: "time", value: "value" };
+  return { title: queries ? "Query duration" : "Procedure duration", tool: queries ? "get_query_duration_trend" : "get_procedure_duration_trend", params: { server, hours: ctx.hours }, rows: (d) => d.trend, time: "time", value: "value", bucketed: true };
 }
 
 const timeOf = (v) => (parseUtc(v) || { getTime: () => NaN }).getTime();
@@ -646,7 +646,7 @@ function rankedSlicer(kind, cmp) {
     const rows = strip.rows(res.data);
     const samples = (Array.isArray(rows) ? rows : []).map((r) => ({ t: timeOf(r[strip.time]), v: stripValue(r[strip.value]) }));
     if (!samples.some((p) => Number.isFinite(p.t) && Number.isFinite(p.v))) return hideEmpty();
-    slicer.setPoints(samples, stripGap(strip, res.data));
+    slicer.setPoints(samples, stripGap(strip, res.data, samples.map((p) => p.t)));
     /* The Active strip reads the newest snapshots only: say so when the list was cut, so a blank stretch of a long range is not read as quiet. */
     if (strip.note) slicer.setNote(strip.note(res.data));
   });
@@ -845,6 +845,8 @@ export function linePanel(title, read, params, rowsKey, xKey, series, opts = {})
     sourceKey: opts.sourceKey,
     /* #7508: the answer's field holding the instant a series changes grain (get_query_store_duration_trend's routing.raw_from); absent on every other line. */
     seamKey: opts.seamKey,
+    /* #7692: the answer's field stating the bucket width (bucket_minutes), for a read with rows only where something ran; absent on every other line. */
+    bucketKey: opts.bucketKey,
     /* #7699: a function of the seam instant that returns the sentence drawn under the chart. */
     seamCaption: opts.seamCaption,
     /* #5644 W16: wording that follows the collector that answered (see BLOCKING_BY_SOURCE); absent on every other line. */
