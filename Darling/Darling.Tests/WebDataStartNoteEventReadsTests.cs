@@ -31,7 +31,7 @@ public sealed class WebDataStartNoteEventReadsTests
     /* A data source that never connects and a token that is already cancelled: a read that asks the store throws
        OperationCanceledException (see WebDataStartNoteTests.NeverConnects). */
     private static NpgsqlDataSource NeverConnects() =>
-        NpgsqlDataSource.Create("Host=127.0.0.1;Port=9;Username=x;Database=x;Timeout=1;Pooling=false");
+        NpgsqlDataSource.Create("Host=127.0.0.1;Port=9;Username=x;Database=x;Timeout=15;Pooling=false");
 
     private static readonly CancellationToken Cancelled = new(canceled: true);
 

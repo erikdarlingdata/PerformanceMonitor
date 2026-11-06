@@ -147,4 +147,15 @@ public sealed class AlertNotebookRenderBehaviourTests
         Assert.Equal("get_blocking", Assert.Single(r.GetProperty("reads").EnumerateArray()).GetProperty("read").GetString());
         Assert.Equal(0, r.GetProperty("loading").GetInt32());
     }
+
+    /// <summary>#7918: a dismissed firing's card says it is dismissed, so a reader who followed the link knows the alert
+    /// was acknowledged. A live firing's card carries no such notice (the "good" scenario pins zero notices).</summary>
+    [Fact]
+    public void ADismissedAlert_SaysSoOnItsCard()
+    {
+        if (!TryRun("dismissed", out var r)) return;
+
+        Assert.Empty(Strings(r, "errors"));
+        Assert.Contains(Strings(r, "notices"), n => n.Contains("dismissed", StringComparison.OrdinalIgnoreCase));
+    }
 }
