@@ -1047,8 +1047,9 @@ public sealed class AdminServerEditBehaviourTests
             page.GetProperty("headers").EnumerateArray().Select(h => h.GetString()).ToArray());
         var cells = page.GetProperty("cells").EnumerateArray().Select(r => r.EnumerateArray().Select(c => c.GetString()).ToArray()).ToArray();
         Assert.Equal(2, cells.Length);
-        Assert.Equal(new[] { "Alpha", "alpha", "Windows", "sqlserver", "SQL Server 2022", "Enabled", "Online", "$1,234" }, cells[0].Take(8).ToArray());
-        Assert.Equal(new[] { "Bravo", "bravo", "SQL Server", "postgres", "PostgreSQL 18", "Disabled", "AwaitingFirstCollection", "—" }, cells[1].Take(8).ToArray());
+        // #7702: the Engine cell prints the registry's word for a person (sqlserver reads SQL Server, postgres reads PostgreSQL).
+        Assert.Equal(new[] { "Alpha", "alpha", "Windows", "SQL Server", "SQL Server 2022", "Enabled", "Online", "$1,234" }, cells[0].Take(8).ToArray());
+        Assert.Equal(new[] { "Bravo", "bravo", "SQL Server", "PostgreSQL", "PostgreSQL 18", "Disabled", "AwaitingFirstCollection", "—" }, cells[1].Take(8).ToArray());
         // The grid's time cells follow the process zone, so the harness pins UTC; the cell text itself depends on the locale.
         Assert.Equal(0, page.GetProperty("utcOffsetMinutes").GetInt32());
         Assert.Equal(12, cells[0].Length);

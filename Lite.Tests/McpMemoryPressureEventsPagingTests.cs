@@ -184,4 +184,34 @@ FROM generate_series(1, " + Samples + ") AS s(g)",
         Assert.Equal("invalid", root.GetProperty("status").GetString());
         Assert.Contains("Invalid limit value '0'", root.GetProperty("message").GetString(), StringComparison.Ordinal);
     }
+
+    /* #7691: a server with several memory nodes stores one record per node for the same event, so the summary counts an event once. A is one
+       LOW event on two nodes, B a LOW and a STEADY event at one second, C one severe LOW event on two nodes 1 ms apart, D a STEADY event
+       on two nodes that stayed normal. */
+    [Fact]
+    public async Task TheSummary_CountsAnEventOnce_AcrossNodes()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await _seed.ExecuteAsync(@"
+INSERT INTO memory_pressure_events (collection_id, collection_time, server_id, server_name, sample_time, memory_notification, memory_indicators_process, memory_indicators_system)
+SELECT $1 + row_number() OVER (), $2, $3, $4, $2 - t.m * INTERVAL 1 MINUTE + t.ms * INTERVAL 1 MILLISECOND, t.n, t.p, t.s
+FROM (VALUES
+    (10, 0, 'RESOURCE_MEMPHYSICAL_LOW', 2, 0), (10, 0, 'RESOURCE_MEMPHYSICAL_LOW', 2, 0),
+    (20, 0, 'RESOURCE_MEMPHYSICAL_LOW', 2, 0), (20, 0, 'RESOURCE_MEM_STEADY', 2, 0),
+    (30, 0, 'RESOURCE_MEMPHYSICAL_LOW', 3, 0), (30, 1, 'RESOURCE_MEMPHYSICAL_LOW', 3, 0),
+    (40, 0, 'RESOURCE_MEM_STEADY', 1, 0), (40, 0, 'RESOURCE_MEM_STEADY', 1, 0)
+) AS t(m, ms, n, p, s)",
+            1L, Naive(Anchor), _serverId, ServerName);
+        _seed.Flush();
+
+        var summary = JsonDocument.Parse(await CallAsync(1000)).RootElement.GetProperty("summary");
+
+        Assert.Equal(5, summary.GetProperty("total_events").GetInt64());
+        Assert.Equal(4, summary.GetProperty("medium_or_worse_events").GetInt64());
+        var byNotification = summary.GetProperty("by_notification").EnumerateArray().ToDictionary(n => n.GetProperty("memory_notification").GetString()!);
+        Assert.Equal(3, byNotification["RESOURCE_MEMPHYSICAL_LOW"].GetProperty("events").GetInt64());
+        Assert.Equal(3, byNotification["RESOURCE_MEMPHYSICAL_LOW"].GetProperty("medium_or_worse_events").GetInt64());
+        Assert.Equal(2, byNotification["RESOURCE_MEM_STEADY"].GetProperty("events").GetInt64());
+        Assert.Equal(1, byNotification["RESOURCE_MEM_STEADY"].GetProperty("medium_or_worse_events").GetInt64());
+    }
 }

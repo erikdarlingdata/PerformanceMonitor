@@ -65,6 +65,7 @@ import {
   localizeIsoText,
   localizeAlertDetail,
   noValuesText,
+  SAMPLED_BLOCKING_SOURCE,
 } from "./util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
 import { bucketMsOf } from "./chart-gaps.js";
@@ -1646,8 +1647,12 @@ function vizLine(data, desc) {
   /* #7682: `footNoteKey` names a text field of the reply drawn as a notice under the chart, only when a series was left out for having no measured value
      (get_cpu_utilization's host_cpu_note: this server cannot report host CPU, so Other and Total are not drawn). */
   const footNote = desc.footNoteKey && seriesCfg.length < allSeriesCfg.length ? getPath(data, desc.footNoteKey) : null;
+  /* `zeroFill` draws the buckets an event-count read left out at 0 (zeroFilledPoints): the read records every event, so a bucket with no row is a
+     count of 0. Not when the answer's source (`sourceKey`) is the DMV snapshot, a sample taken on a schedule: a bucket it has no row for is time
+     nobody observed, so those points reach the chart as they came. */
+  const fill = desc.zeroFill && !(desc.sourceKey && getPath(data, desc.sourceKey) === SAMPLED_BLOCKING_SOURCE);
   const chart = zoomableLineChart({
-    points,
+    points: fill ? zeroFilledPoints(points, desc.xKey, seriesCfg, getPath(data, "bucket_minutes"), win) : points,
     xKey: desc.xKey,
     series,
     annotations,
@@ -1676,6 +1681,52 @@ function vizLine(data, desc) {
   if (typeof footNote === "string" && footNote) under.push(noticeStrip(footNote));
   if (typeof seamCaption === "string" && seamCaption) under.push(captionStrip(seamCaption));
   return under.length ? el("div", {}, [chart, ...under]) : chart;
+}
+
+/**
+ * The points of an event-count trend with every bucket of the window present (`zeroFill`). get_blocking_trend and get_deadlock_trend
+ * return only the buckets that have events, so a bucket they leave out is a count of 0 and not a gap in collection: two reports a
+ * minute apart must not read as a line floating between 1 and 4. The bucket is the reply's own (`bucket_minutes`) when it states one,
+ * else the smallest step between the points it returned, and never under a minute. The window is the chart's own (windowStart and
+ * windowEnd in epoch ms); without one the fill spans the points. The points the read returned are kept as they are.
+ */
+export function zeroFilledPoints(points, xKey, seriesCfg, bucketMinutes, win) {
+  const timeOf = (p) => {
+    const d = p ? parseUtc(p[xKey]) : null;
+    return d instanceof Date && Number.isFinite(d.getTime()) ? d.getTime() : null;
+  };
+  const have = new Map();
+  for (const p of points) {
+    const t = timeOf(p);
+    if (t != null && !have.has(t)) have.set(t, p);
+  }
+  const times = [...have.keys()].sort((a, b) => a - b);
+  if (!times.length) return points;
+  let stepMs = Number(bucketMinutes) > 0 ? Number(bucketMinutes) * 60000 : Infinity;
+  if (!Number.isFinite(stepMs)) {
+    for (let i = 1; i < times.length; i++) stepMs = Math.min(stepMs, times[i] - times[i - 1]);
+    if (!Number.isFinite(stepMs)) stepMs = 60000;
+  }
+  stepMs = Math.max(60000, stepMs);
+  const start = win && Number.isFinite(Number(win.windowStart)) ? Number(win.windowStart) : times[0];
+  const end = win && Number.isFinite(Number(win.windowEnd)) ? Number(win.windowEnd) : times[times.length - 1];
+  /* The grid is aligned on the first returned point, so every returned point sits on it. At most 20,000 buckets are drawn. */
+  const first = times[0] - Math.ceil((times[0] - start) / stepMs) * stepMs;
+  const out = [];
+  for (let t = first, n = 0; t <= end && n < 20000; t += stepMs, n++) {
+    const p = have.get(t);
+    if (p) out.push(p);
+    else {
+      const zero = { [xKey]: new Date(t).toISOString() };
+      for (const s of seriesCfg) zero[s.key] = 0;
+      out.push(zero);
+    }
+  }
+  /* A returned point off the grid (a second row for one time, or one past the bucket cap) is kept too. A set, not a scan of `out` per point:
+     a week of minute buckets is 10,000 points against as many buckets, redrawn on every poll. */
+  const placed = new Set(out);
+  for (const p of points) if (!placed.has(p) && timeOf(p) != null) out.push(p);
+  return out.sort((a, b) => timeOf(a) - timeOf(b));
 }
 
 /* bandlist: desc = { rowsKey, primaryKey, bandKey, bandLabelKey?, reasonKey?, navKey?, emptyText? } */

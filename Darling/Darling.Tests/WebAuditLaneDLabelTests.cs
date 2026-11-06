@@ -34,7 +34,12 @@ public sealed class WebAuditLaneDLabelTests
     public void W16_TheDeadlockTrendChartAndTheDeadlocksTableAreNamedApartAndEmptyTheSameWay()
     {
         var tabs = Js("pages", "server-tabs.js");
-        Assert.Contains("linePanel(\"Deadlock trend\", \"get_deadlock_trend\", { server, hours: ctx.hours }, \"trend\", \"time\", COUNT_SERIES, {\n        subtitle: ctx.label,\n        format: \"int\",\n        atTimeItem: \"deadlocks\",\n        emptyText: DEADLOCKS_EMPTY_TEXT,", tabs, StringComparison.Ordinal);
+        const string deadlockTrendCall = "linePanel(\"Deadlock trend\", \"get_deadlock_trend\", { server, hours: ctx.hours }, \"trend\", \"time\", COUNT_SERIES, {\n        subtitle: ctx.label,\n        format: \"int\",\n        atTimeItem: \"deadlocks\",";
+        var start = tabs.IndexOf(deadlockTrendCall, StringComparison.Ordinal);
+        Assert.True(start >= 0, "the Deadlock trend line panel is not in server-tabs.js");
+        /* The panel's own options, from its call to its closing brace: the empty text is pinned wherever it sits among them. */
+        var deadlockTrend = tabs.Substring(start, tabs.IndexOf("}),", start, StringComparison.Ordinal) - start);
+        Assert.Contains("\n        emptyText: DEADLOCKS_EMPTY_TEXT,", deadlockTrend, StringComparison.Ordinal);
         Assert.Contains("const DEADLOCKS_EMPTY_TEXT = \"No deadlocks in this window.\";", tabs, StringComparison.Ordinal);
         Assert.DoesNotContain("an empty trend here means none happened", tabs, StringComparison.Ordinal);
     }
