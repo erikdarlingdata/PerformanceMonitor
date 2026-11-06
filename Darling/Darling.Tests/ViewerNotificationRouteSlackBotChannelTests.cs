@@ -175,11 +175,15 @@ public sealed class ViewerNotificationRouteSlackBotChannelTests
                     new NotificationRouteRow { MetricMatch = "performance", SmtpRecipients = "c@example.invalid", SlackBotChannel = "#ops" }, ct));
             }
 
-            /* A store below V252 has no column. The list reads the V238 statement, and every route reads as none. The column is dropped as well
-               as the sentinels, so a list that still asked for it would fail instead of reading the dropped value. */
+            /* A store below V252 has no column. The list reads the V238 statement, and every route reads as none. The V252 rewind drops the
+               column with the sentinel table, so a list that still asked for it would fail instead of reading the dropped value. */
             /* The probe reads newest first, so every later sentinel goes too, or the store would still read as the newest one left on disk. */
             await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 251, ct);
-            await ExecAsync(connection, "ALTER TABLE config.config_notification_routes DROP COLUMN slack_bot_channel", ct);
+            await using (var columns = new NpgsqlCommand(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = 'config.config_notification_routes'::regclass AND attname = 'slack_bot_channel' AND NOT attisdropped)", connection))
+            {
+                Assert.False((bool)(await columns.ExecuteScalarAsync(ct))!, "the V252 rewind drops slack_bot_channel");
+            }
             await using (var older = new ViewerDataService(scratch.ConnectionString))
             {
                 Assert.True(await older.GetStoreSchemaVersionAsync(ct) < 252);

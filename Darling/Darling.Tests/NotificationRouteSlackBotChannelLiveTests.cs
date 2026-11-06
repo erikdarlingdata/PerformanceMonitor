@@ -48,6 +48,10 @@ public sealed class NotificationRouteSlackBotChannelLiveTests
 
     private static string Status(string answer) => JsonDocument.Parse(answer).RootElement.GetProperty("status").GetString()!;
 
+    /// <summary>The answer's message as text. The serializer writes the sentence's apostrophe as <c>\u0027</c>, so the raw JSON never
+    /// contains it.</summary>
+    private static string Message(string answer) => JsonDocument.Parse(answer).RootElement.GetProperty("message").GetString()!;
+
     private static int RouteIdOf(string answer) =>
         JsonDocument.Parse(answer).RootElement.GetProperty("route").GetProperty("route_id").GetInt32();
 
@@ -285,12 +289,12 @@ public sealed class NotificationRouteSlackBotChannelLiveTests
             var badCreate = await DarlingMcpAlertTools.CreateNotificationRoute(
                 asMcp, "Blocking Wait", slack_bot_channel: "#ops", served: OperatorPolicy(), cancellationToken: ct);
             Assert.Equal("invalid", Status(badCreate));
-            Assert.Contains(Sentence, badCreate, StringComparison.Ordinal);
+            Assert.Contains(Sentence, Message(badCreate), StringComparison.Ordinal);
             Assert.Equal("2", await ScalarAsync(owner, "SELECT count(*) FROM config.config_notification_routes", ct));
             var badUpdate = await DarlingMcpAlertTools.UpdateNotificationRoute(
                 asMcp, routeId, slack_bot_channel: "c0123abc", served: OperatorPolicy(), cancellationToken: ct);
             Assert.Equal("invalid", Status(badUpdate));
-            Assert.Contains(Sentence, badUpdate, StringComparison.Ordinal);
+            Assert.Contains(Sentence, Message(badUpdate), StringComparison.Ordinal);
             Assert.Equal("", await ScalarAsync(owner, StoredChannel(routeId), ct));
         });
     }

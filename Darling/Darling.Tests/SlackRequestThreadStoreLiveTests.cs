@@ -265,11 +265,15 @@ public sealed class SlackRequestThreadGrantLiveTests
             else
                 await AssertDeniedAsync(login, $"SELECT count(*) FROM {Table}", ct);
 
-            /* The journal trigger keeps the post mark to the owner: a login that wrote it first would silence the post. */
+            /* The journal keeps the post mark to the owner: a login that wrote it first would silence the post. admin and mcp hold the
+               journal writer's column INSERT, so the owner-row trigger refuses them by the event's name; viewer and web hold no INSERT on
+               the journal at all, so the table refuses them before any trigger runs. */
             var journal = await Assert.ThrowsAsync<PostgresException>(() => ActionProposalStoreLiveTests.ExecAsync(login,
                 $"INSERT INTO config.investigation_journal (request_id, event, actor, detail) VALUES ('{s_request}', '{InvestigationRequestStore.SlackThreadPosted}', 'person:eve', '{{}}'::jsonb)", ct));
             Assert.Equal("42501", journal.SqlState);
-            Assert.Contains("Only the Darling service journals the request event " + InvestigationRequestStore.SlackThreadPosted, journal.MessageText, StringComparison.Ordinal);
+            Assert.Contains(role is "admin" or "mcp"
+                ? "Only the Darling service journals the request event " + InvestigationRequestStore.SlackThreadPosted
+                : "permission denied for table investigation_journal", journal.MessageText, StringComparison.Ordinal);
 
             /* The store on the login's own data source: admin finds the thread and no login saves one or marks a post. */
             await using var source = NpgsqlDataSource.Create(LoginConnectionString(scratch, role, password));
@@ -307,13 +311,17 @@ public sealed class SlackRequestThreadGrantLiveTests
                 15, PasswordReassert.All,
                 ProvisioningTarget.ComposeStore(new NpgsqlConnectionStringBuilder(owner.ConnectionString).Username ?? "darling", scratch.DatabaseName)), ct);
 
-    /// <summary>The shipped script, whole, its database-level statements retargeted at the scratch store and its passwords filled in.</summary>
+    /// <summary>The shipped script, whole, its database-level statements retargeted at the scratch store and its passwords filled in. The
+    /// retarget matters on a shared cluster (#5618): the script's <c>REVOKE ALL ON DATABASE darling FROM PUBLIC</c> names the database by
+    /// name, and database privileges live in the cluster's shared catalog, so run as written it would take CONNECT from every later test.</summary>
     private static async Task<string> ShippedScriptAsync(NpgsqlConnection owner, (string Role, string Password)[] logins, CancellationToken ct)
     {
         Assert.SkipUnless(await ActionProposalStoreLiveTests.ScalarAsync(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'darling')", ct) == "True",
             "The script names the store owner 'darling', and this cluster has no such role.");
+        var database = new NpgsqlConnectionStringBuilder(owner.ConnectionString).Database;
         var script = ComposeStoreRolesLiveTests.WithoutPsqlMetaCommands(
-            System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "provision-roles.sql")));
+            System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "provision-roles.sql")))
+            .Replace("ON DATABASE darling", $"ON DATABASE \"{database}\"", StringComparison.Ordinal);
         foreach (var (role, password) in logins)
             script = script.Replace("CHANGE_ME_" + role.ToUpperInvariant() + "_PASSWORD", password, StringComparison.Ordinal);
         return script;
