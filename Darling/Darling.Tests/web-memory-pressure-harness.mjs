@@ -126,6 +126,16 @@ const scenarios = {
     answer = () => data({ server: "SRV1", hours_back: 6, events: [ev(at(3, 5), 2, 0), ev(at(1, 5), 2, 1), ev(at(1, 10), 3, 2), ev(at(1, 20), 0, 1), ev(at(1, 30), 1, 3)] });
     return modules.tabs.memoryPressurePanels("SRV1", { hours: 6, label: "last 6 hours" });
   },
+  // #7691: one event stored once per memory node. Four hours back, two rows at one second with one notification (1 event);
+  // three back, two different notifications at one second (2 events); two back, one notification 1 ms apart in one second (1 event).
+  nodes: () => {
+    answer = () => data({ server: "SRV1", hours_back: 6, events: [
+      ev(at(4, 5), 2, 0), ev(at(4, 5), 2, 0),
+      ev(at(3, 5), 2, 0, "RESOURCE_MEMPHYSICAL_LOW"), ev(at(3, 5), 2, 0, "RESOURCE_MEM_STEADY"),
+      ev(at(2, 5) + ".000", 2, 0), ev(at(2, 5) + ".001", 2, 0),
+    ] });
+    return modules.tabs.memoryPressurePanels("SRV1", { hours: 6, label: "last 6 hours" });
+  },
   // Only normal samples: nothing drawn, the table still lists them.
   quiet: () => {
     answer = () => data({ server: "SRV1", hours_back: 6, events: [ev(at(1, 5), 1, 0), ev(at(2, 5), 0, 1)] });
