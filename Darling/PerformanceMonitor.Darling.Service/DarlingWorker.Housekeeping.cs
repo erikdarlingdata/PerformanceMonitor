@@ -890,18 +890,18 @@ public sealed partial class DarlingWorker
     /// has run this pass's coverage sweep, so the drop decision below is measured fresh, not read back from a
     /// value the sweep merely wrote. For each raw relation, in the same pass:
     /// <list type="bullet">
-    /// <item>a FRESH Covered verdict — <see cref="TimescaleSupport.IsRawTierDropSafeAsync"/>, called again
+    /// <item>a FRESH Covered verdict — <see cref="TimescaleSupport.MeasureRawTierCoverageAsync"/>, the probe <see cref="TimescaleSupport.IsRawTierDropSafeAsync"/> reads, called again
     /// here rather than trusting <c>config-&gt;&gt;'darling_armed'</c> the sweep just above wrote: <c>darling_armed</c>
     /// is the readers' and alerts' standing verdict and is deliberately left as it was on anything OTHER than
     /// Covered (#1877's bounded-depth-cap posture), so an Unknown probe (one that throws, times out, or comes
     /// back empty) leaves a PRIOR pass's <c>true</c> in place; a purge gated on that stale value would drop
-    /// chunks on a coverage state this pass itself could not confirm. <c>IsRawTierDropSafeAsync</c> answers
-    /// true ONLY on a Covered verdict measured THIS call — Short and Unknown both answer false — so the purge
+    /// chunks on a coverage state this pass itself could not confirm. The purge goes on ONLY on a Covered verdict measured THIS call — Short and Unknown both stop it — so the purge
     /// can never run on a verdict older than the pass that is about to act on it;</item>
     /// <item>a repair finished under the CURRENT <c>pg_postmaster_start_time()</c> — <see cref="TimescaleSupport.RawRepairEpochMatchesSql"/>;</item>
     /// <item>no hole in the range the purge is about to drop — <see cref="TimescaleSupport.HoleFreeThroughAsync"/>
     /// over every registered aggregate whose source is this raw relation, from the oldest raw chunk's
-    /// <c>range_start</c> to <c>now() - drop_after</c>. A successor <see cref="TimescaleSupport.ResolveMaterializationAsync"/>
+    /// <c>range_start</c> to <c>now() - drop_after</c>, except that a rollup the same measure judged within its own
+    /// armed retention is scanned from that horizon (#7961, <see cref="TimescaleSupport.RawPurgeHoleScanFrom"/>). A successor <see cref="TimescaleSupport.ResolveMaterializationAsync"/>
     /// cannot resolve (mid-rebuild, renamed, or dropped) is NOT skipped as though it were hole-free: an
     /// unresolvable successor means the gate cannot tell whether the range it should be covering is intact,
     /// which is exactly the state <c>hole-free</c> must never mean. This records <c>gate_unknown</c> and blocks
@@ -934,8 +934,10 @@ public sealed partial class DarlingWorker
                 /* Measured THIS call, not read back from config->>'darling_armed' — that key stays as the
                    readers' and alerts' standing verdict and can hold a PRIOR pass's true through an Unknown
                    probe (#1877). The purge decision needs this pass's own fresh answer, so it calls the same
-                   probe IsRawTierDropSafeAsync arms against, again, right here. */
-                var covered = await TimescaleSupport.IsRawTierDropSafeAsync(connection, relation, cancellationToken);
+                   probe the sweep arms against, again, right here, and keeps the measure for the hole scan. */
+                var measuredAt = DateTime.UtcNow;
+                var measure = await TimescaleSupport.MeasureRawTierCoverageAsync(connection, relation, measuredAt, cancellationToken);
+                var covered = measure.Verdict == TimescaleSupport.RetentionCoverage.Covered;
 
                 if (!covered)
                 {
@@ -1022,8 +1024,12 @@ AND   j.hypertable_name = '{relation}'", connection))
                         break;
                     }
 
+                    /* #7961: a rollup the measure above judged within its own armed retention is scanned only
+                       from that horizon. Below it the rollup drops its own buckets, so a scan from the oldest raw
+                       chunk would read every one of them as a hole and hold the raw table for good. */
+                    var scanFrom = TimescaleSupport.RawPurgeHoleScanFrom(dropFrom, target.View, target.BucketWidth, measure.HorizonCovered, measuredAt);
                     if (!await TimescaleSupport.HoleFreeThroughAsync(
-                        connection, target, materialization.Value, dropFrom, dropTo, emptyDeferred, cancellationToken))
+                        connection, target, materialization.Value, scanFrom, dropTo, emptyDeferred, cancellationToken))
                     {
                         holeFree = false;
                         break;
