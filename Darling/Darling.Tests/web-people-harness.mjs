@@ -24,6 +24,9 @@ class FakeText extends FakeNode { constructor(t) { super("#text"); this._text = 
 globalThis.Node = FakeNode;
 globalThis.document = { createElement: (t) => new FakeNode(t), createTextNode: (t) => new FakeText(t) };
 globalThis.location = { hash: "#/admin/people" };
+/* The page asks before a destructive write (#7954). These scenarios press through, so the browser's confirm answers yes. */
+globalThis.window = globalThis;
+globalThis.confirm = () => true;
 let copied = null;
 Object.defineProperty(globalThis, "navigator", { value: { clipboard: { writeText: async (t) => { copied = t; } } }, configurable: true, writable: true });
 

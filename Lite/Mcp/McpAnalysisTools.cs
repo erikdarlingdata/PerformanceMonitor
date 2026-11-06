@@ -914,6 +914,11 @@ public sealed class McpAnalysisTools
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
+        /* #7901: the group page cap is validated like every other paged tool's limit, so 0 or a negative is refused
+           by name instead of answering an empty page that reads as a real answer. */
+        var limitError = McpHelpers.ValidateTop(limit);
+        if (limitError != null) return limitError;
+
         /* Null for an absent anchor — see analyze_server's note. */
         var anchor = string.IsNullOrWhiteSpace(as_of) ? (DateTime?)null : windowEnd;
 
