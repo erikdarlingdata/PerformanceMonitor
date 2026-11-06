@@ -15,7 +15,9 @@ using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Storage.FinOps;
 
-/// <summary>Utilization efficiency summary for one server over the last 24 hours. No display or WPF state.</summary>
+/// <summary>Utilization efficiency summary for one server over the last 24 hours. No display or WPF state. The four grant figures
+/// are null when the window holds no memory grant sample (#7906): a grant collector that is off, gated by the engine edition or not
+/// yet run is not the 0 waiters and 0% utilization a healthy idle server reads.</summary>
 public sealed record UtilizationEfficiencyDto(
     decimal AvgCpuPct,
     int MaxCpuPct,
@@ -26,10 +28,10 @@ public sealed record UtilizationEfficiencyDto(
     int PhysicalMemoryMb,
     int BufferPoolMb,
     decimal MemoryRatio,
-    long MaxGrantWaiters,
-    long GrantTimeouts,
-    long ForcedGrants,
-    decimal GrantUtilizationPct,
+    long? MaxGrantWaiters,
+    long? GrantTimeouts,
+    long? ForcedGrants,
+    decimal? GrantUtilizationPct,
     int MaxWorkersCount,
     int? CurrentWorkersCount,
     int CpuCount,
@@ -136,10 +138,12 @@ SELECT
     m.max_workers_count,
     m.current_workers_count,
     s.cpu_count,
-    COALESCE(g.max_grant_waiters, 0),
-    COALESCE(g.grant_timeouts, 0),
-    COALESCE(g.forced_grants, 0),
-    COALESCE(g.grant_utilization_pct, 0),
+    /* #7906: NULL when the window holds no grant sample, so a server whose grant collector is off, gated or not yet run does not read as
+       0 waiters and 0% utilization. */
+    g.max_grant_waiters,
+    g.grant_timeouts,
+    g.forced_grants,
+    g.grant_utilization_pct,
     s.engine_edition,
     s.edition,
     s.ag_replica_role
@@ -196,10 +200,10 @@ SELECT
     c.max_cpu_pct,
     c.p95_cpu_pct,
     COALESCE(m.avg_memory_ratio, 0),
-    COALESCE(g.max_grant_waiters, 0),
-    COALESCE(g.grant_timeouts, 0),
-    COALESCE(g.forced_grants, 0),
-    COALESCE(g.grant_utilization_pct, 0),
+    g.max_grant_waiters,
+    g.grant_timeouts,
+    g.forced_grants,
+    g.grant_utilization_pct,
     COALESCE(m.max_workers_count, 0),
     m.current_workers_count,
     sp.engine_edition,
@@ -295,10 +299,11 @@ ORDER BY CAST(collection_time AS DATE)";
             PhysicalMemoryMb: reader.IsDBNull(6) ? 0 : Convert.ToInt32(reader.GetValue(6)),
             BufferPoolMb: reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7)),
             MemoryRatio: memRatio,
-            MaxGrantWaiters: reader.IsDBNull(12) ? 0L : Convert.ToInt64(reader.GetValue(12)),
-            GrantTimeouts: reader.IsDBNull(13) ? 0L : Convert.ToInt64(reader.GetValue(13)),
-            ForcedGrants: reader.IsDBNull(14) ? 0L : Convert.ToInt64(reader.GetValue(14)),
-            GrantUtilizationPct: reader.IsDBNull(15) ? 0m : Convert.ToDecimal(reader.GetValue(15)),
+            /* #7906: null with no grant sample in the window; the verdict above reads the same absence as no grant pressure. */
+            MaxGrantWaiters: reader.IsDBNull(12) ? null : Convert.ToInt64(reader.GetValue(12)),
+            GrantTimeouts: reader.IsDBNull(13) ? null : Convert.ToInt64(reader.GetValue(13)),
+            ForcedGrants: reader.IsDBNull(14) ? null : Convert.ToInt64(reader.GetValue(14)),
+            GrantUtilizationPct: reader.IsDBNull(15) ? null : Convert.ToDecimal(reader.GetValue(15)),
             MaxWorkersCount: maxWorkers,
             CurrentWorkersCount: currentWorkers,
             CpuCount: reader.IsDBNull(11) ? 0 : Convert.ToInt32(reader.GetValue(11)),
