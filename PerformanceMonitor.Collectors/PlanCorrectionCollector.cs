@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Data.Common;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common;
@@ -483,6 +484,32 @@ OPTION(RECOMPILE);" + NoDatabaseAccessNote.ScopeResults;
     /// </summary>
     public override bool AppliesTo(CollectorTargetInfo target) =>
         target is null || target.MeetsMinimumVersion(14, unknownIsNewest: true);
+
+    /// <summary>
+    /// The empty answer of get_plan_corrections on a server with no plan correction rows, in the one sentence that fits what the
+    /// store knows. A version below SQL Server 2017 has no automatic tuning at all (the same gate <see cref="AppliesTo"/> applies,
+    /// so Azure SQL Database and Managed Instance are never taken for an old version and an unknown version is assumed newest),
+    /// which is a fact about the version, not about collection. On a version that has it, the newest Query Store snapshot decides:
+    /// Query Store off in every database means automatic tuning has nothing to work from. Otherwise nothing has been recommended
+    /// so far, and the sentence says Query Store is on only when the snapshot shows a database with it on. Both products' tools
+    /// say it through here, and the web page prints the sentence as it is, so it names no store column or system view.
+    /// </summary>
+    public static string NoRowsMessage(CollectorTargetInfo target, IReadOnlyList<CollectorRuntimePrecondition.QueryStoreDatabaseState>? queryStoreStates)
+    {
+        if (!Instance.AppliesTo(target))
+            return "This SQL Server version has no automatic tuning (it arrived in SQL Server 2017), so there is nothing to collect.";
+
+        var known = queryStoreStates is { Count: > 0 };
+        if (known && queryStoreStates!.All(s => IsQueryStoreOff(s.ActualState)))
+            return "No plan correction data collected for this server: no database has Query Store on, and automatic tuning needs it.";
+
+        return known && queryStoreStates!.Any(s => s.ActualState is not null && !IsQueryStoreOff(s.ActualState))
+            ? "No plan correction data collected for this server yet: its version has automatic tuning and Query Store is on, and nothing has been recommended so far."
+            : "No plan correction data collected for this server yet: its version has automatic tuning, and nothing has been recommended so far.";
+    }
+
+    private static bool IsQueryStoreOff(string? actualState) =>
+        string.Equals(actualState, "OFF", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Azure SQL DB rejects three-part names, so the host connects per database there instead.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => target is not null && target.IsAzureSqlDb;

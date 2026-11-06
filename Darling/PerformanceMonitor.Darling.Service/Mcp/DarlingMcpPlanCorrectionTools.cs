@@ -67,6 +67,18 @@ public sealed class DarlingMcpPlanCorrectionTools
         return array;
     }
 
+    /// <summary>
+    /// The empty sentence for a server with no plan correction rows. It reads the version from the registry the way the PVS tool does
+    /// and the newest Query Store snapshot the way the Query Store hints do, and says which case applies: the version has no automatic
+    /// tuning, no database has Query Store on, or nothing has been recommended. A registry or snapshot that cannot be read makes no claim.
+    /// </summary>
+    internal static async Task<string> NoRowsMessageAsync(NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
+        var target = await DarlingMcpPvsTools.ReadTargetAsync(postgres, serverId, cancellationToken);
+        var states = await DarlingRuntimePrecondition.QueryStoreStatesOrNullAsync(postgres, serverId, cancellationToken);
+        return PerformanceMonitor.Collectors.PlanCorrectionCollector.NoRowsMessage(target, states);
+    }
+
     [McpServerTool(Name = "get_plan_corrections"), Description(
         "Gets SQL Server automatic plan correction (APC) activity: FORCE_LAST_GOOD_PLAN recommendations/actions over the window ending at as_of, newest capture first, plus each database's automatic-tuning enablement. Rows recur per capture, not per distinct recommendation. THE PAGE IS BOUNDED BY limit, NOT hours_back: truncated means more rows existed; oldest/newest_returned_collection_time bound the page. automatic_tuning ignores the window: the latest snapshot; each row's as_of says when. All timestamps are UTC. No rows and no automatic_tuning: empty (not_collected checked first). <<GUIDE>> Gets SQL Server automatic plan correction (APC) activity: the engine's FORCE_LAST_GOOD_PLAN recommendations and actions over the window, NEWEST CAPTURE FIRST, plus each database's current automatic-tuning enablement state. Use when a query's plan changed suddenly - APC forcing or unforcing a plan is a first-class explanation - or to check whether automatic tuning is on and actually working (desired vs actual state). Rows come from sys.dm_db_tuning_recommendations captured on a schedule, and the collector RE-CAPTURES every open recommendation on every cycle, so the same recommendation appears once per capture and a few open recommendations fill a page fast. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: recommendations_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_collection_time / newest_returned_collection_time bound the page - under newest-first ordering the oldest stamp IS how far back this read reached, and on a server with open recommendations a week-long request at the default limit reaches back hours, not days. Raise limit or narrow hours_back when truncated is true. automatic_tuning is a latest-snapshot read that ignores the window entirely; its as_of stamps say when. A recommendation's state moves through Active/Verifying/Success/Reverted as the engine acts. query_text is a preview by default, capped at 150 characters with query_text_truncated marking whichever rows were actually cut - pass full_text=true for the whole regressed statement on every row instead, the same opt-in get_store_query_stats uses. Every timestamp here is UTC, including valid_since / last_refresh / execute_action_initiated_time / revert_action_initiated_time - sys.dm_db_tuning_recommendations reports those four in UTC and they are stored and returned unconverted - so they order correctly against collection_time and against get_query_store_regressions.")]
     public static Task<string> GetPlanCorrections(
@@ -139,9 +151,7 @@ public sealed class DarlingMcpPlanCorrectionTools
                     ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.StatusForDatabase("empty",
                         !databaseFilter.IsAll
                             ? $"No plan correction data found{DarlingMcpBlockingTools.ForChosenDatabases(databaseFilter)}."
-                            : "No plan correction data collected for this server. The collector runs against SQL Server 2017+ " +
-                        "(sys.dm_db_tuning_recommendations); a server that has never produced a row here either predates " +
-                        "that or has no databases with Query Store on.",
+                            : await NoRowsMessageAsync(postgres, resolved.ServerId, cancellationToken),
                         databaseFilter.Describe(), /* #5244 review L2: the echo rides on an empty answer too */
                         notice.AsHints()), cancellationToken, windowStart);
             }
