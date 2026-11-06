@@ -243,82 +243,93 @@ WHERE w.wait_time > 0";
         var rows = new DeltaBaselineRollbackRows<Row>(context, DeltaGroups);
         var epochObserved = false;
 
-        while (await reader.ReadAsync(cancellationToken))
+        try
         {
-            /* #3653 A5: the epoch first, off the FIRST row and BEFORE that row's own subtraction — and before
-               the type filter below, since an ignored first row carries the same scalar as every other and
-               the forget must not wait for a row this pass happens to keep. The forget it may trigger is
-               what makes THIS pass's rows honest; forgotten after the loop, every row would already have been
-               subtracted from the dead baseline and stored. A pass that returns no rows (nothing has waited yet
-               on a freshly started instance, `wait_time > 0` matching nothing) observes nothing and catches up
-               on the first pass with a row, where the reset branch would have marked those rows (0, 0) anyway. */
-            if (!epochObserved)
+            while (await reader.ReadAsync(cancellationToken))
             {
-                epochObserved = true;
-                ServerEpoch.ObservePostmaster(
-                    context,
-                    reader.IsDBNull(6) ? null : reader.GetDateTime(6),
-                    DeltaGroups);
+                /* #3653 A5: the epoch first, off the FIRST row and BEFORE that row's own subtraction — and before
+                   the type filter below, since an ignored first row carries the same scalar as every other and
+                   the forget must not wait for a row this pass happens to keep. The forget it may trigger is
+                   what makes THIS pass's rows honest; forgotten after the loop, every row would already have been
+                   subtracted from the dead baseline and stored. A pass that returns no rows (nothing has waited yet
+                   on a freshly started instance, `wait_time > 0` matching nothing) observes nothing and catches up
+                   on the first pass with a row, where the reset branch would have marked those rows (0, 0) anyway. */
+                if (!epochObserved)
+                {
+                    epochObserved = true;
+                    ServerEpoch.ObservePostmaster(
+                        context,
+                        reader.IsDBNull(6) ? null : reader.GetDateTime(6),
+                        DeltaGroups);
+                }
+
+                var typeName = reader.IsDBNull(2) ? null : reader.GetString(2);
+
+                /* Filter by type name, case-insensitively and on our own list rather than
+                   context.IgnoredWaitTypes, which holds SQL Server wait-type names. An undecodable type
+                   (NULL type_name) is deliberately KEPT: it means the lookup did not know the type, and
+                   dropping it would hide exactly the new-wait-type case worth seeing. */
+                if (typeName is not null && IgnoredWaitTypes.Contains(typeName))
+                {
+                    continue;
+                }
+
+                var eventId = reader.GetInt64(1);
+                var waits = reader.GetInt64(4);
+                var waitTimeMicroseconds = reader.GetInt64(5);
+
+                /* Delta key is the numeric event_id, NOT the event name. Wait-event NAME CASING DIFFERS
+                   BETWEEN AURORA MAJORS — 16.11 emits AutoVacuumMain and BgWriterMain where 17.7 emits
+                   AutovacuumMain and BgwriterMain — so a name-keyed delta would break its own history the
+                   moment a cluster is upgraded, reading as one series ending and another beginning. The id
+                   is stable, and event_id >> 24 == type_id holds (verified on every event on two clusters),
+                   so the id also carries the type. */
+                var key = eventId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+                /* Captured before the first delta call of the run for this key, so a store write that fails before the rows are
+                   stored can hand the baseline back (DeltaBaselineRollbackRows). */
+                rows.CaptureKey(key);
+
+                var deltaWaits = context.Deltas.CalculateDeltaWithInterval(
+                    context.ServerId, "pg_wait_stats_waits", key, waits, out var waitsIntervalSeconds,
+                    collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+                /* Computed unconditionally, even on a row this pass goes on to skip — see the class remarks
+                   on why the wait-time series' baseline must stay fresh regardless. With the interval (#3540,
+                   V128): the stored interval is the MINIMUM over the row's two groups (the V127 rule,
+                   WaitStatsCollector), so a reader never divides one group's reset 0 by the other's real span. */
+                var deltaWaitTime = context.Deltas.CalculateDeltaWithInterval(
+                    context.ServerId, "pg_wait_stats_time", key, waitTimeMicroseconds, out var timeIntervalSeconds,
+                    collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+                var sampleIntervalSeconds = Math.Min(waitsIntervalSeconds, timeIntervalSeconds);
+
+                /* The skip: a REAL interval (this is not a first sighting, a counter reset, or a gap this
+                   pass just re-baselined) with zero new waits means the event demonstrably did not fire,
+                   and Aurora only advances wait_time when a wait completes — so nothing on this row changed
+                   and there is nothing new to write. See the class remarks for the full reasoning. */
+                if (waitsIntervalSeconds > 0 && deltaWaits == 0)
+                {
+                    continue;
+                }
+
+                rows.Add(new Row(
+                    TypeId: reader.GetInt32(0),
+                    EventId: eventId,
+                    TypeName: typeName,
+                    EventName: reader.IsDBNull(3) ? null : reader.GetString(3),
+                    Waits: waits,
+                    WaitTimeMicroseconds: waitTimeMicroseconds,
+                    DeltaWaits: deltaWaits,
+                    DeltaWaitTime: deltaWaitTime,
+                    SampleIntervalSeconds: sampleIntervalSeconds));
             }
-
-            var typeName = reader.IsDBNull(2) ? null : reader.GetString(2);
-
-            /* Filter by type name, case-insensitively and on our own list rather than
-               context.IgnoredWaitTypes, which holds SQL Server wait-type names. An undecodable type
-               (NULL type_name) is deliberately KEPT: it means the lookup did not know the type, and
-               dropping it would hide exactly the new-wait-type case worth seeing. */
-            if (typeName is not null && IgnoredWaitTypes.Contains(typeName))
-            {
-                continue;
-            }
-
-            var eventId = reader.GetInt64(1);
-            var waits = reader.GetInt64(4);
-            var waitTimeMicroseconds = reader.GetInt64(5);
-
-            /* Delta key is the numeric event_id, NOT the event name. Wait-event NAME CASING DIFFERS
-               BETWEEN AURORA MAJORS — 16.11 emits AutoVacuumMain and BgWriterMain where 17.7 emits
-               AutovacuumMain and BgwriterMain — so a name-keyed delta would break its own history the
-               moment a cluster is upgraded, reading as one series ending and another beginning. The id
-               is stable, and event_id >> 24 == type_id holds (verified on every event on two clusters),
-               so the id also carries the type. */
-            var key = eventId.ToString(System.Globalization.CultureInfo.InvariantCulture);
-
-            /* Captured before the first delta call of the run for this key, so a store write that fails before the rows are
-               stored can hand the baseline back (DeltaBaselineRollbackRows). */
-            rows.CaptureKey(key);
-
-            var deltaWaits = context.Deltas.CalculateDeltaWithInterval(
-                context.ServerId, "pg_wait_stats_waits", key, waits, out var waitsIntervalSeconds,
-                collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-            /* Computed unconditionally, even on a row this pass goes on to skip — see the class remarks
-               on why the wait-time series' baseline must stay fresh regardless. With the interval (#3540,
-               V128): the stored interval is the MINIMUM over the row's two groups (the V127 rule,
-               WaitStatsCollector), so a reader never divides one group's reset 0 by the other's real span. */
-            var deltaWaitTime = context.Deltas.CalculateDeltaWithInterval(
-                context.ServerId, "pg_wait_stats_time", key, waitTimeMicroseconds, out var timeIntervalSeconds,
-                collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-            var sampleIntervalSeconds = Math.Min(waitsIntervalSeconds, timeIntervalSeconds);
-
-            /* The skip: a REAL interval (this is not a first sighting, a counter reset, or a gap this
-               pass just re-baselined) with zero new waits means the event demonstrably did not fire,
-               and Aurora only advances wait_time when a wait completes — so nothing on this row changed
-               and there is nothing new to write. See the class remarks for the full reasoning. */
-            if (waitsIntervalSeconds > 0 && deltaWaits == 0)
-            {
-                continue;
-            }
-
-            rows.Add(new Row(
-                TypeId: reader.GetInt32(0),
-                EventId: eventId,
-                TypeName: typeName,
-                EventName: reader.IsDBNull(3) ? null : reader.GetString(3),
-                Waits: waits,
-                WaitTimeMicroseconds: waitTimeMicroseconds,
-                DeltaWaits: deltaWaits,
-                DeltaWaitTime: deltaWaitTime,
-                SampleIntervalSeconds: sampleIntervalSeconds));
+        }
+        catch
+        {
+            /* A read that fails after it has differenced a row (a stop, a transport fault, the host's time budget) has advanced
+               baselines for rows no run stores, and the host sees the rows only once the read returns, so they hand their
+               baselines back here before the exception leaves. */
+            rows.RollBackBaselines();
+            throw;
         }
 
         return rows;
