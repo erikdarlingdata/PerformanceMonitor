@@ -421,6 +421,13 @@ public sealed class MigrationDataMovingRungCensusPins
             + "collect.query_store_self_keys, which is the function text and not a statement the rung runs. The rung scans no table and "
             + "rewrites no collected row (the backfill runs in the background after start), so it spends none of the lock-wait budget "
             + "and the multiple stays 5."),
+        new(
+            250,
+            SetsTheFloor: false,
+            "Replaces the compose-stamp trigger function and creates both row triggers again (#7762), with the threshold moved to the hour of the "
+            + "writer's clock. The function body names an INSERT ... SELECT into collect.query_store_compose_stamp_built (created V173), which is the "
+            + "function text and not a statement the rung runs. The rung is a function replace and two trigger creates: catalog work on the partitioned "
+            + "parent, cloned onto each leaf without a scan, and it reads and rewrites no row. It spends none of the lock-wait budget, so the multiple stays 5."),
     ];
 
     /// <summary>

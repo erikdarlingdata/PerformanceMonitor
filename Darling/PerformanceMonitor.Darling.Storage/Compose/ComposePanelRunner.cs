@@ -881,9 +881,11 @@ internal static class ComposePanelRunner
     /// <summary>
     /// #5582 part 3: the first hour of the window the compose rollup (V173) cannot answer. The hours checked run from
     /// <c>date_trunc('hour', wideStart)</c> to the hour of the window end. An hour is unusable when it is missing from
-    /// <c>query_store_compose_stamp_hours</c> (never built), or when a <c>_built</c> pair for a server in scope has
-    /// <c>built_seq IS DISTINCT FROM late_seq</c> (a late write since the build). The statement's own stale arm covers the
-    /// race between this lookup and the read, so this is only where the rollup arm stops and the wide-table tail starts.
+    /// <c>query_store_compose_stamp_hours</c> (never built). A stale pair (<c>built_seq IS DISTINCT FROM late_seq</c>, a late write
+    /// since the build) no longer ends the rollup here (#7762): one late write on one server of 210 used to send every later hour to the
+    /// tail. The statement's stale arm reads the rows of each stale (server, hour) from the wide table, once per stale hour, and the rollup
+    /// arm leaves those pairs out, so every row is read once (see <c>ComposeCompiler.BuildStampRelation</c>); this is only where the
+    /// rollup arm stops and the wide-table tail starts.
     /// Null means today's route: the schema is below V173, the very first hour is already unusable (nothing to gain), or
     /// the lookup faulted (it leans toward the route that needs no rollup). A usable run to the end is capped at the window
     /// end, because a later instant makes the rollup arm read rows the statement's outer WHERE throws away.
@@ -915,13 +917,12 @@ internal static class ComposePanelRunner
         }
     }
 
-    /// <summary>#5582 part 3: see <see cref="ResolveQueryStoreStampThroughAsync"/>. $1 wide start, $2 window end, $3 server ids in scope.</summary>
+    /// <summary>#5582 part 3: see <see cref="ResolveQueryStoreStampThroughAsync"/>. $1 wide start, $2 window end, $3 server ids in scope (#7762: no longer read, the
+    /// statement binds it and the lookup ignores it, because the stale pairs are the statement's stale arm's, not this lookup's).</summary>
     internal const string QueryStoreStampThroughSql = """
         SELECT MIN(g.hour)
         FROM generate_series(date_trunc('hour', $1::timestamp), date_trunc('hour', $2::timestamp), interval '1 hour') AS g(hour)
         WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_compose_stamp_hours h WHERE h.hour = g.hour)
-           OR EXISTS (SELECT 1 FROM collect.query_store_compose_stamp_built b
-                      WHERE b.hour = g.hour AND b.server_id = ANY($3::integer[]) AND b.built_seq IS DISTINCT FROM b.late_seq)
         """;
 
     /// <summary>#4689: the note a Compose Query Store panel carries when the interval table served it from a

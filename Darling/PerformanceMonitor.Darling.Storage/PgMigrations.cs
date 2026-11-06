@@ -2641,6 +2641,16 @@ ALTER TABLE config.config_monitored_servers
 ALTER TABLE collect.pg_statement_stats ADD COLUMN IF NOT EXISTS database_name text;";
 
     /// <summary>
+    /// V250 (#7762): the Query Store compose rollup's row trigger marks every row of an hour written from the next hour on, one hour sooner than V173's
+    /// trigger did, so the builder can read an hour at 90 minutes instead of three hours and the 24-hour fleet panel's tail holds one to two hours of rows
+    /// instead of three to four. Replaces the trigger function and creates both triggers again
+    /// (<see cref="QueryStoreComposeStamp.LateMarkOffsetZeroSql"/>), catalog-only on the partitioned parent, with V173's lock timeout. No row is read or
+    /// rewritten. Idempotent. <b>No Lite twin:</b> Lite has no PostgreSQL store. An older build marks and builds under the old rule, which is the safe side.
+    /// </summary>
+    private static readonly string V250Sql =
+        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreComposeStamp.LateMarkOffsetZeroSql;
+
+    /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
     /// <c>DatabaseProtectionCollector</c> every 60 minutes (Darling only). One row per database per pass: the raw times (UTC), the
     /// recovery model, the database state and replica role, a per-row platform label (native, platform_managed, native_only) and a state
@@ -3147,6 +3157,7 @@ $rung$;";
         new Migration(247, "xe-session-databases", V247Sql),
         new Migration(248, "query-store-self-keys-old-statements", V248Sql),
         new Migration(249, "pg-statement-stats-database-name", V249Sql),
+        new Migration(250, "compose-stamp-late-mark-offset-zero", V250Sql),
     };
 
     /// <summary>

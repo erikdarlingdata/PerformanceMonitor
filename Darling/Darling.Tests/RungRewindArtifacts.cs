@@ -711,6 +711,9 @@ CREATE OR REPLACE VIEW collect.v_blocked_process_reports AS SELECT * FROM collec
         // re-run of V249 adds it back. Safe on a store that never had it.
         new(249, "hasStatementStatsDatabaseName",
             @"ALTER TABLE IF EXISTS collect.pg_statement_stats DROP COLUMN IF EXISTS database_name;"),
+        // V250 (#7762): the compose rollup's row trigger marks from the hour of the writer's clock. The rewind puts V173's function and triggers back (the
+        // probe's sentinel is the one-hour subtraction in the function's source), so a re-run of V250 replaces them again. V173's text is idempotent.
+        new(250, "hasComposeStampLateMarkOffsetZero", PerformanceMonitor.Darling.Storage.QueryStoreComposeStamp.CreateSql),
     ];
 
     /// <summary>
