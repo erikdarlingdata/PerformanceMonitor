@@ -308,7 +308,7 @@ public static partial class PgTargetAdvice
         else
         {
             sb.Append("max_wal_size is ").Append(current)
-              .Append(". No measured WAL rate accompanies this card, so there is no number to size against yet: read " +
+              .Append(". No measured WAL rate accompanies this finding, so there is no number to size against yet: read " +
                       "get_pg_write_stats over a busy window for wal_bytes and the requested-vs-timed split, then raise " +
                       "max_wal_size so one checkpoint_timeout of WAL fits inside it with headroom. ");
         }
@@ -327,7 +327,7 @@ public static partial class PgTargetAdvice
         "Correlate first: WAL volume is the write workload, so a shift is a deployment, a batch schedule, a bulk load or a " +
         "reindex before it is a setting — find what changed. Then the levers, each with its cost: wal_compression trades CPU " +
         "for fewer full-page-image bytes; a larger max_wal_size absorbs the volume between checkpoints at the cost of pg_wal " +
-        "footprint and crash-recovery replay time (the checkpoint-pressure card carries the arithmetic when it co-fired); and " +
+        "footprint and crash-recovery replay time (the checkpoint pressure finding carries the arithmetic when it co-fired); and " +
         "batch sizing — fewer, larger transactions write fewer full-page images than many small ones touching the same pages " +
         "across checkpoints — is the application's to change. Downstream, a replication slot retains every byte of this " +
         "until its consumer reads it.";
@@ -472,7 +472,7 @@ public static partial class PgTargetAdvice
             : string.Empty;
         var checkpoint = KnobFact(facts, PgTargetFactKeys.CheckpointPressure);
         var pressure = checkpoint is not null && checkpoint.BaseSeverity > 0
-            ? " Checkpoint pressure co-fired this window — the volume has already reached max_wal_size ahead of the timer; that card carries the sizing arithmetic."
+            ? " Checkpoint pressure co-fired this window — the volume has already reached max_wal_size ahead of the timer; that finding carries the sizing arithmetic."
             : " Checkpoints were not yet forced this window: this is the leading edge, before the checkpointer or a slot consumer shows it.";
 
         return block with { Investigation = block.Investigation + against + pressure };

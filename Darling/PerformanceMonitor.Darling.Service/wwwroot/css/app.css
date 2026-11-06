@@ -753,9 +753,11 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 .chart .overview-strips .strip-readout { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .chart .overview-strips .strip-none { fill: var(--dim); font-size: 11px; }
 .chart .overview-strips .strip-band { fill: rgba(46, 174, 241, 0.14); }
-.chart .overview-strips .strip-anomaly { fill: #ef5350; stroke: var(--bg-dark); stroke-width: 1; }
+/* #7678: one small dot for a point alone above the band (no outline), one thicker segment in the marker colour over a run of neighbours. */
+.chart .overview-strips .strip-anomaly { fill: #ef5350; }
+.chart .overview-strips .strip-anomaly-run { fill: none; stroke: #ef5350; stroke-width: 3; stroke-linejoin: round; stroke-linecap: round; }
 .chart .overview-strips .strip-band-mean { stroke: rgba(46, 174, 241, 0.5); stroke-width: 1; stroke-dasharray: 4 3; }
-.chart .overview-strips .strip-baseline-note { fill: var(--dim); font-size: 10px; }
+.chart .overview-strips .strip-baseline-note { fill: var(--dim); font-size: 10px; font-weight: normal; }
 
 .chart-legend {
   display: flex;
@@ -1452,7 +1454,8 @@ pre.code {
 .server-reason.band-Critical { color: var(--err); }
 .server-reason.band-Warning { color: var(--warn); }
 .server-reason.band-Offline { color: var(--err); }
-.server-reason.band-Healthy { color: var(--ok); }
+/* #7684 item 6: a Healthy server's sentence can list open problems ("Agent alerts 3 gaps"), so it is neutral rather than green. */
+.server-reason.band-Healthy { color: var(--muted); }
 /* #7395: the tiles use the page's width instead of stopping at a fixed one. The column count follows the width the page has (a
    tile is never narrower than 13rem), and auto-fit hands a row's spare width to the tiles instead of leaving blank columns. */
 .server-why .metric-bands { grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); }
@@ -1558,6 +1561,8 @@ table.data td.rec-text { min-width: 16rem; }
 .reco-group { margin-bottom: 0.6rem; }
 .reco-card { margin: 0.5rem 0; }
 .reco-fix { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg-dark); padding: 0.6rem; border-radius: 4px; }
+/* #7726: a backtick span in the advice text is drawn as code. */
+.reco-advice code { font-family: var(--mono); font-size: 0.9em; background: var(--bg-dark); padding: 0.05rem 0.3rem; border-radius: 3px; overflow-wrap: anywhere; }
 .reco-actions { display: flex; gap: 0.5rem; margin-top: 0.4rem; }
 
 /* #5235: a wait cell that links to Active Queries filtered to that wait, and the strip that clears the filter. */

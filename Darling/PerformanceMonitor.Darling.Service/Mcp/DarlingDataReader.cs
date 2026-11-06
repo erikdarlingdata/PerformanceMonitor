@@ -856,7 +856,7 @@ internal static class DarlingDataReader
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_file_io_stats WHERE server_id = $1)
         AND   ($2::text[] IS NULL OR database_name = ANY($2))
-        ORDER BY (delta_stall_read_ms + delta_stall_write_ms) DESC
+        ORDER BY (delta_stall_read_ms + delta_stall_write_ms) DESC, database_name, file_name
         """;
 
     /// <summary>
@@ -1092,7 +1092,7 @@ internal static class DarlingDataReader
     /// $7 the candidate limit for pass 1 (#5313: top + 5 first, larger when the WAITFOR trim leaves a short page),
     /// $8 the databases to leave out (#7725: the ones the server dropped, ranked after the listed ones by a second read; NULL = none).
     /// </summary>
-    public const string TopQueriesSql = $"""
+    public static readonly string TopQueriesSql = $"""
         WITH winners AS MATERIALIZED (
             /* #5226 pass 1 of 2: rank every group of the window on NARROW columns. The wide row (forty
                aggregates and the distinct-text count) forces a sort of wide rows when it shares the
@@ -1114,7 +1114,7 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
-            AND   ($8::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($8))
+           {DatabaseFilter.ExcludeClause("database_name", 8)}
             /*TAG:hash:query_hash*/
             /* #4394: excludes zero-interval rows (sample_interval_seconds = 0) through
                TimescaleSupport.IntervalHonestSourceFilter, the same filter the hourly successors
@@ -1351,7 +1351,7 @@ internal static class DarlingDataReader
     /// <c>query_hash</c> in a rolled-up row is one member of the group, exactly as <c>query_text</c> already
     /// is when <c>distinct_texts &gt; 1</c> — <c>distinct_query_hashes</c> is what says so.</para>
     /// </summary>
-    public const string TopQueriesByHostObjectSql = $"""
+    public static readonly string TopQueriesByHostObjectSql = $"""
         WITH winners AS MATERIALIZED (
             /* #5226 pass 1 of 2: rank every group of the window on NARROW columns. The wide row (forty
                aggregates and the distinct-text count) forces a sort of wide rows when it shares the
@@ -1373,7 +1373,7 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
-            AND   ($8::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($8))
+           {DatabaseFilter.ExcludeClause("database_name", 8)}
             /*TAG:hash:query_hash*/
             /* #4394: same first-collection exclusion as TopQueriesSql — see its note. */
             AND   {TimescaleSupport.IntervalHonestSourceFilter}
@@ -1596,7 +1596,7 @@ internal static class DarlingDataReader
     /// sums on <c>query_stats_io_hourly</c> and typed NULLs on the stitched relation. <c>min_dop</c> and host-object grouping need columns only raw carries, so
     /// a read that sets either never reaches this const (it is forced to raw) and it takes no $6, $7 or $8.
     /// </summary>
-    public const string TopQueriesHourlySql = """
+    public static readonly string TopQueriesHourlySql = $"""
         WITH ranked AS MATERIALIZED (
             SELECT
                 database_name,
@@ -1613,7 +1613,7 @@ internal static class DarlingDataReader
             AND   bucket >= $2
             AND   bucket < $3$CEIL$
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
-            AND   ($7::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($7))
+           {DatabaseFilter.ExcludeClause("database_name", 7)}
             /*TAG:hash:query_hash*/
             GROUP BY database_name, query_hash
             HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
@@ -2738,6 +2738,7 @@ internal static class DarlingDataReader
             FROM deduped
             WHERE rn = 1
             AND   ($7::text IS NULL OR module_name = $7)
+            /*SELFKEY:deduped*/
             /*TAG:hash:query_hash*/
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             ORDER BY {{QueryStoreWeightedAverage.RankByDuration}} DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
@@ -2838,7 +2839,7 @@ internal static class DarlingDataReader
         """;
 
     /// <summary><see cref="QueryStoreTopRankedHead"/> + <see cref="QueryStoreTopTail"/>: byte-identical to the single
-    /// string it was before the tail was split off for <see cref="QueryStoreTopDailyTableSql"/> (a test pins its hash).</summary>
+    /// string it was before the tail was split off for <see cref="QueryStoreTopDailyTableSql"/>.</summary>
     private const string QueryStoreTopSuffix = QueryStoreTopRankedHead + QueryStoreTopTail;
 
     /// <summary>
@@ -2944,6 +2945,7 @@ internal static class DarlingDataReader
                 MAX(query_plan_hash) AS query_plan_hash
             FROM parts
             WHERE ($7::text IS NULL OR module_name = $7)
+            /*SELFKEY:parts*/
             /*TAG:hash:query_hash*/
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             ORDER BY CAST(SUM(duration_wsum) AS double precision) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
@@ -3132,9 +3134,18 @@ internal static class DarlingDataReader
            re-read the window; the tail looks up text only until the page is full, so the answer and the lookups
            are the rounds' own (TopFill.FinalCandidates). */
         List<QueryStoreRow> rows;
-        await using (var command = postgres.CreateCommand(QueryTagReadJoin.Apply(QueryStoreTopSql, serverId, tags)))
+        /* #7736: the monitor's own statements leave ranked before its candidate limit once the key backfill has run, so the gate and
+           the read are one snapshot: one read-only REPEATABLE READ transaction, as the interval-table read below runs in. */
+        await using (var connection = await postgres.OpenConnectionAsync(cancellationToken))
+        await using (var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken))
         {
-            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            await using (var readOnly = new NpgsqlCommand(SetTransactionReadOnlySql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            {
+                await readOnly.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            var rawSql = await WithSelfKeysBeforeCandidateLimitAsync(connection, transaction, QueryTagReadJoin.Apply(QueryStoreTopSql, serverId, tags), cancellationToken);
+            await using var command = new NpgsqlCommand(rawSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
             AddWindow(command, serverId, startUtc, endUtc);
             AddInt(command, top);
             AddDatabases(command, databases);
@@ -3149,6 +3160,14 @@ internal static class DarlingDataReader
         ReadScope.NoteRows(rows.Count);
         return new QueryStoreTopRead(rows, null);
     }
+
+    /// <summary>#7736: <paramref name="sql"/> with the self-statement test on the key table in <c>ranked</c>, ahead of its candidate limit,
+    /// once its backfill has run (<see cref="QueryStoreSelfKeys.ReadyAsync"/>, read in this read's snapshot), else as it is: the
+    /// tail's text test still removes the monitor's own statements from a store the backfill has not reached.</summary>
+    private static async Task<string> WithSelfKeysBeforeCandidateLimitAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string sql, CancellationToken cancellationToken) =>
+        await QueryStoreSelfKeys.ReadyAsync(connection, transaction, McpCommandDeadlines.ReadSeconds, cancellationToken)
+            ? QueryStoreSelfStatement.WithRankedKeyTest(sql)
+            : sql;
 
     /// <summary>The transaction's own read-only statement (#3953). Named, not inline, so this store-only
     /// construction keeps the receiver shape <c>McpReadCommandTimeoutTests</c>' census recognizes: a
@@ -3245,6 +3264,9 @@ internal static class DarlingDataReader
 
             /* #5984: the query tag filter, ahead of the ranking and the cap. */
             topSql = QueryTagReadJoin.Apply(topSql, serverId, tags);
+
+            /* #7736: the monitor's own statements leave ranked before its candidate limit, once the key backfill has run. */
+            topSql = await WithSelfKeysBeforeCandidateLimitAsync(connection, transaction, topSql, cancellationToken);
 
             /* #5313: the same candidate limit as the raw read, bound LAST ($8 on the interval table read, $10 on the
                daily read, after its two dates). #5815: one run at TopFill's final limit; each fill round used to

@@ -36,6 +36,7 @@ import {
   readErrorStrip,
   emptyStrip,
   noticeStrip,
+  captionStrip,
   keptWindowStrip,
   windowFloorStrip,
   leftOutStrip,
@@ -46,7 +47,6 @@ import {
   getPath,
   parseUtc,
   applyFormat,
-  tickDecimals,
   bandClass,
   sevClass,
   windowFromHours,
@@ -65,6 +65,7 @@ import {
   noValuesText,
 } from "./util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
+import { bucketMsOf } from "./chart-gaps.js";
 import { plainText, plainTextNamed, plainTextCounts, shortEmptyLine } from "./plain-text.js";
 import { panelPlotPx } from "./trend-points.js";
 import { withheldDisplayText } from "./mute-context.js";
@@ -1486,7 +1487,7 @@ function vizStat(data, desc) {
   }
   const rest = shown.filter((s) => !s.sentence);
   return el("div", { class: "stat-block" }, [
-    ...sentences.map((s) => el("p", { class: "stat-sentence", text: String(getPath(data, s.key)) })),
+    ...sentences.map((s) => el("p", { class: "stat-sentence", text: s.localizeText ? localizeIsoText(String(getPath(data, s.key)), s.localizeMinutes ? { minutes: true, since: s.sinceKey ? getPath(data, s.sinceKey) : null } : undefined) : String(getPath(data, s.key)) })),
     rest.length ? el("div", { class: "stats natural" }, rest.map(tile)) : null,
     ...cutNotes,
   ]);
@@ -1577,7 +1578,7 @@ function vizLine(data, desc) {
     color: s.color || SERIES_COLORS[i % SERIES_COLORS.length],
   }));
   /* The second argument is the axis tick step the chart passes (#6158), so a small range prints enough decimals that no two ticks read alike. */
-  const formatValue = desc.format ? (v, o) => applyFormat(desc.format, v, o) : (v, o) => (o && o.step > 0 && tickDecimals(o.step) ? Number(v).toFixed(tickDecimals(o.step)) : String(Math.round(v)));
+  const formatValue = desc.format ? (v, o) => applyFormat(desc.format, v, o) : (v, o) => applyFormat("int", v, o); /* #7679: with the thousands separator (60,000, not 60000), as every other whole-number axis prints it */
   /* Percentage charts cap the y-domain at 100 so a 96% reading never rounds the axis up past 100% (B3). */
   const clampMax = desc.clampMax ?? (desc.format === "pct" ? 100 : null);
   /* #2802: span the x-axis over the REQUESTED window ("last N hours" ending now), not the data's own extent, so a
@@ -1598,6 +1599,13 @@ function vizLine(data, desc) {
   /* #7508: `seamKey` names the field of the reply holding the instant where the series changes grain (routing.raw_from on the Query
      Store Duration Trend), so the chart's gap rule judges each grain against its own spacing. Absent or unparseable: no seam. */
   const seam = desc.seamKey ? parseUtc(getPath(data, desc.seamKey)) : null;
+  /* #7692: `bucketKey` names the field of the reply stating its bucket (bucket_minutes). A read that returns rows only where something ran (the Query
+     Duration Trend on a quiet server) has uneven steps, so the chart's own cadence guess reads it as events and never breaks it, and a four hour hole
+     drew one diagonal. The step is the bucket, or the rows' own cadence when a collector runs slower (bucketMsOf), judged from EVERY row's time, a row
+     with no figure included. A panel with a seam (Query Store) names no bucketKey: its two grains are judged by the seam. */
+  const bucketMs = desc.bucketKey
+    ? bucketMsOf(getPath(data, desc.bucketKey), (Array.isArray(rawPoints) ? rawPoints : []).map((p) => { const d = p ? parseUtc(p[desc.xKey]) : null; return d ? d.getTime() : NaN; }))
+    : null;
   /* #7682: `footNoteKey` names a text field of the reply drawn as a notice under the chart, only when a series was left out for having no measured value
      (get_cpu_utilization's host_cpu_note: this server cannot report host CPU, so Other and Total are not drawn). */
   const footNote = desc.footNoteKey && seriesCfg.length < allSeriesCfg.length ? getPath(data, desc.footNoteKey) : null;
@@ -1607,6 +1615,7 @@ function vizLine(data, desc) {
     series,
     annotations,
     gapSeamMs: seam ? seam.getTime() : null,
+    bucketMs,
     formatValue,
     clampMax,
     /* A count chart's ticks are whole numbers: on a small domain a fractional step (0.2, 0.5) prints through the
@@ -1624,7 +1633,12 @@ function vizLine(data, desc) {
     windowStart: win ? win.windowStart : null,
     windowEnd: win ? win.windowEnd : null,
   }, zoomId, chartZoomScope(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours));
-  return typeof footNote === "string" && footNote ? el("div", {}, [chart, noticeStrip(footNote)]) : chart;
+  /* #7699: `seamCaption` turns the seam instant into the sentence that says why the line changes grain there. A caption, not a warning. */
+  const seamCaption = seam && typeof desc.seamCaption === "function" ? desc.seamCaption(seam) : null;
+  const under = [];
+  if (typeof footNote === "string" && footNote) under.push(noticeStrip(footNote));
+  if (typeof seamCaption === "string" && seamCaption) under.push(captionStrip(seamCaption));
+  return under.length ? el("div", {}, [chart, ...under]) : chart;
 }
 
 /* bandlist: desc = { rowsKey, primaryKey, bandKey, bandLabelKey?, reasonKey?, navKey?, emptyText? } */
@@ -1717,16 +1731,19 @@ export function statusToSev(status) {
     case "SUCCESS":
     case "ANALYZED":
     case "ONLINE":
+    case "LOW": /* #7699: the Latch Stats Severity band words */
       return "Healthy";
     case "STALE":
     case "WARNING":
     case "REVIEW":
     case "PERMISSIONS":
     case "SKIPPED":
+    case "MEDIUM":
       return "Warning";
     case "FAILING":
     case "ERROR":
     case "OFFLINE":
+    case "HIGH":
       return "Critical";
     default:
       return "Unknown";

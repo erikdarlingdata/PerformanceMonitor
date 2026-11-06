@@ -100,6 +100,15 @@ public sealed class WebDisplayDetailsBehaviourTests
         Assert.Equal("800.0 s", Str("composedTooltip"));
     }
 
+    [Theory]
+    [InlineData("identityBandCritical", "Critical")]
+    [InlineData("identityBandOk", "OK")]
+    public void AnIdentityCapacityBand_IsCapitalised(string cell, string expected) => Assert.Equal(expected, Text(cell));
+
+    [Fact]
+    public void ALinePanelWithNoFormat_PrintsItsWholeNumberAxisWithTheThousandsSeparator() =>
+        Assert.Equal("0 | 20,000 | 40,000 | 60,000", Str("axisTicks"));
+
     [Fact]
     public void ATopWaitName_MayBreakAfterEachUnderscore_AndStillReadsAsTheOneName()
     {

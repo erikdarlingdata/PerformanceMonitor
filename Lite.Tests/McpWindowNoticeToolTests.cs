@@ -770,7 +770,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         var message = root.GetProperty("message").GetString()!;
         Assert.Contains("more than 25% worse than its baseline", message, StringComparison.Ordinal);
         Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage, message, StringComparison.Ordinal);
-        Assert.DoesNotContain("this IS the all-clear", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("this is the all-clear", message, StringComparison.Ordinal);
         AssertTruncatedAt(EmptyHints(root), floor, "query_store_stats");
         Assert.Contains("baseline_start", EmptyHints(root).GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
     }
@@ -787,7 +787,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
 
         var root = Root(await McpQueryTools.GetQueryStoreRegressions(Service(), _serverManager, ServerName, hours_back: 24));
 
-        Assert.Contains("this IS the all-clear", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Contains("this is the all-clear", root.GetProperty("message").GetString(), StringComparison.Ordinal);
         Assert.False(EmptyHints(root).GetProperty("window_truncated").GetBoolean());
     }
 
@@ -807,7 +807,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         var message = root.GetProperty("message").GetString()!;
         Assert.Contains("database_name 'NoSuchDb'", message, StringComparison.Ordinal);
         Assert.Contains("the filter matched nothing and this is NOT the all-clear", message, StringComparison.Ordinal);
-        Assert.DoesNotContain("this IS the all-clear", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("this is the all-clear", message, StringComparison.Ordinal);
     }
 
     /// <summary>#5015: a filter that matches, and finds nothing wrong, is still the all-clear.</summary>
@@ -822,7 +822,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
 
         var root = Root(await McpQueryTools.GetQueryStoreRegressions(Service(), _serverManager, ServerName, hours_back: 24, database_name: "Db"));
 
-        Assert.Contains("this IS the all-clear", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Contains("this is the all-clear", root.GetProperty("message").GetString(), StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -847,7 +847,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         Assert.Contains("database_name 'Db'", message, StringComparison.Ordinal);
         Assert.Contains("nothing of it collected IN the last 24 hour(s)", message, StringComparison.Ordinal);
         Assert.Contains("NOT the all-clear", message, StringComparison.Ordinal);
-        Assert.DoesNotContain("this IS the all-clear", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("this is the all-clear", message, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -870,7 +870,7 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         Assert.Contains("database_name 'Db'", message, StringComparison.Ordinal);
         Assert.Contains("no baseline", message, StringComparison.Ordinal);
         Assert.Contains("NOT a clean bill of health", message, StringComparison.Ordinal);
-        Assert.DoesNotContain("this IS the all-clear", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("this is the all-clear", message, StringComparison.Ordinal);
     }
 
     /// <summary>

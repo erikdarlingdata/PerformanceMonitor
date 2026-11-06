@@ -337,13 +337,13 @@ public sealed class QueryFleetSummaryQueryStoreLiveTests
         }
     }
 
-    /// <summary>The Viewer's schema probe, the V246 sentinel: the column before the last, now that V247's sentinel (#7639) is the last.</summary>
+    /// <summary>The Viewer's schema probe, the V246 sentinel: the column before the last three, now that V247's (#7639), V248's (#7730) and V249's (#7731) sentinels are the last three.</summary>
     private static async Task<bool> ProbeSentinelAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(ViewerDataService.StoreSchemaProbeSql, connection);
         await using var reader = await command.ExecuteReaderAsync(ct);
         Assert.True(await reader.ReadAsync(ct));
-        /* The V246 sentinel is no longer the last column: V247's (#7639) and V249's (#7731) follow it. */
-        return reader.GetBoolean(reader.FieldCount - 3);
+        /* The V246 sentinel is no longer the last column: V247's (#7639), V248's (#7730) and V249's (#7731) follow it. */
+        return reader.GetBoolean(reader.FieldCount - 4);
     }
 }

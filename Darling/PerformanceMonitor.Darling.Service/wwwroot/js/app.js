@@ -651,7 +651,8 @@ function pageIntervalMs() {
   return POLL_MS;
 }
 
-/* The server and FinOps pages carry the shell's interval selector and Refresh button (persisted in localStorage). */
+/* The shell's Refresh button shows on every page, in the same place. Its interval selector shows on the server and FinOps pages
+   only (persisted in localStorage); elsewhere it is blanked, not removed, so the sidebar list does not move between pages (#7690). */
 let pageRefreshChoice = loadPageRefreshChoice(localStorage);
 let pageRefreshControl = null;
 
@@ -661,7 +662,8 @@ function isPickerRoute(routeName) {
 
 function syncPageRefreshControl(routeName) {
   if (!pageRefreshControl) return;
-  pageRefreshControl.root.hidden = !isPickerRoute(routeName);
+  pageRefreshControl.root.hidden = false;
+  pageRefreshControl.setIntervalShown(isPickerRoute(routeName));
 }
 
 /* The Refresh button: one shell refresh and one immediate page re-render. While any read is outstanding it does
