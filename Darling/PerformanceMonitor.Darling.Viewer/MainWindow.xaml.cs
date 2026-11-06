@@ -590,6 +590,7 @@ public partial class MainWindow : Window
 
         _refreshTimer = new DispatcherTimer { Interval = _refreshInterval };
         _refreshTimer.Tick += OnRefreshTimerTick;
+        _refreshTimer.Tick += OnStoreRetryTick;
         _refreshTimer.Start();
 
         /* The Overview keeps its own timer so it refreshes when it is the visible tab and the aggregate timer
@@ -616,13 +617,6 @@ public partial class MainWindow : Window
     {
         if (_storeUnavailable)
         {
-            /* The store may be back. The server-list read is the one path that clears the message, so the tick retries
-               it while the message is up for that read's failure, rather than leaving the shell locked until a restart. */
-            if (StoreUnavailableShell.RetryServerListOnTick(_storeUnavailable, _serverListReadFailed, _storeRetryInFlight))
-            {
-                _ = RetryServerListAsync();
-            }
-
             return;
         }
 
@@ -701,6 +695,21 @@ public partial class MainWindow : Window
         }
 
         await RefreshVisibleAsync();
+    }
+
+    /// <summary>
+    /// The refresh timer's second handler: while the full-window message is up because the server-list reload failed,
+    /// retry that read, so the shell comes back when the store does instead of staying locked until a restart. It is
+    /// its own handler because <see cref="OnRefreshTimerTick"/> makes no store read while the message is up (#4648),
+    /// and that guard has to stay the tick's first statement. The server-list read is the one read that can take the
+    /// message down; <see cref="StoreUnavailableShell.RetryServerListOnTick"/> is the rule for when it is retried.
+    /// </summary>
+    private void OnStoreRetryTick(object? sender, EventArgs e)
+    {
+        if (StoreUnavailableShell.RetryServerListOnTick(_storeUnavailable, _serverListReadFailed, _storeRetryInFlight))
+        {
+            _ = RetryServerListAsync();
+        }
     }
 
     private async void OnOverviewTimerTick(object? sender, EventArgs e)
@@ -2528,10 +2537,16 @@ public partial class MainWindow : Window
         ApplyStoreUnavailableShell();
     }
 
-    /// <summary>The refresh tick's retry of the server-list read while the message is up for that read's failure.
-    /// Single-flight; a failed retry re-shows the message and the next tick tries again.</summary>
+    /// <summary>The retry of the server-list read while the message is up for that read's failure. Single-flight: the
+    /// guard is tested and claimed here, ahead of the await, so a tick that fires while a retry is still running drops.
+    /// A failed retry re-shows the message and the next tick tries again.</summary>
     private async Task RetryServerListAsync()
     {
+        if (_storeRetryInFlight)
+        {
+            return;
+        }
+
         _storeRetryInFlight = true;
         try
         {
