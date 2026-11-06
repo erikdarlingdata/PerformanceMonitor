@@ -1135,6 +1135,7 @@ public sealed class DarlingMcpDataTools
                 /* #7725: disclosed, never silent (get_top_procedures_by_cpu's rule): the dropped databases this read left out and that have
                    no row in the reply, in the same words. Null when every one of them got rows, or the read left none out. */
                 databases_left_out = DatabasesLeftOut.Named(droppedWithoutRows),
+                databases_left_out_count = DatabasesLeftOut.Count(droppedWithoutRows),
                 databases_left_out_note = DatabasesLeftOut.Note(droppedWithoutRows),
                 queries = result
             }, McpHelpers.JsonOptions)!.AsObject();
@@ -1477,6 +1478,7 @@ public sealed class DarlingMcpDataTools
                 retention_notice = routed.RetentionNotice,
                 /* #5633 review (finding D): null when the read left no database out. */
                 databases_left_out = DatabasesLeftOut.Named(leftOutWithoutRows),
+                databases_left_out_count = DatabasesLeftOut.Count(leftOutWithoutRows),
                 databases_left_out_note = DatabasesLeftOut.Note(leftOutWithoutRows),
                 procedures = result
             }, McpHelpers.JsonOptions)!.AsObject();

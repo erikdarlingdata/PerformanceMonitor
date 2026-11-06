@@ -181,7 +181,7 @@ export const SERVER_TABS = [
           "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) before it reports non-zero values.",
           2,
           "truncation_note",
-          null,
+          ["databases_left_out_note"],
           TOP_QUERY_GROUPS,
           picker,
           null,
@@ -202,7 +202,7 @@ export const SERVER_TABS = [
           "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
           2,
           "truncation_note",
-          null,
+          ["databases_left_out_note"],
           TOP_PROC_GROUPS,
           picker,
           null,
@@ -643,7 +643,7 @@ export const SERVER_TABS = [
           "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
           2,
           "truncation_note",
-          null,
+          ["databases_left_out_note"],
           TOP_PROC_GROUPS,
           picker,
           null,
@@ -694,7 +694,8 @@ export const SERVER_TABS = [
         ctx.label,
         "No query regressed against its baseline in this window. A server with no earlier history has nothing to compare against.",
         2,
-        /* #6654: the read leaves out databases the server dropped; the note names them (drawn on an empty answer too, panels.js). */
+        /* #6654, #7538, #7651: the read leaves out databases the server dropped; the strip says so and lists their names from the reply's
+           `databases_left_out` (drawn on an empty answer too, panels.js, util.js leftOutNoteText). */
         "databases_left_out_note",
         null,
         QUERY_STORE_REGRESSION_GROUPS,
@@ -725,6 +726,8 @@ export const SERVER_TABS = [
           floorKey: "window",
           columns: QS_CLUTTER_COLUMNS,
           noteKey: "server_note",
+          /* #7538, #7651: the read leaves out databases the server dropped; the strip names them. */
+          moreNoteKeys: ["databases_left_out_note"],
           noteShort: "Every database here that has Query Store is a readable secondary, so its Query Store is a copy of the primary's and no verdict is given for it. Read the primary for the clutter. The overhead panels below are still measured on this server.",
           emptyText:
             "No Query Store rows, no Query Store collection run and no Query Store health capture for this " +

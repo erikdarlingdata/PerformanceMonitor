@@ -437,7 +437,8 @@ export function plainText(text) {
   t = t.replace(/\bmin_duration_ms (?=\d)/g, "minimum duration (ms) ");
   t = t.replace(/\bblocking_only\b/g, "blocking queries only");
   /* #6649: field names inside the service's own sentences. The left-out databases' names live in the MCP answer's
-     `databases_left_out` list, which the page never shows, so the pointer goes and the count before it stays. */
+     `databases_left_out` list; the panels draw them in their own strip (util.js leftOutNoteText, #7538), so in the sentence the pointer goes and the
+     count before it stays. */
   t = t.replace(/ \(see databases_left_out\)/g, "");
   t = t.replace(
     /Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end\./g,

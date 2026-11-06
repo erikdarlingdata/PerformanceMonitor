@@ -70,6 +70,12 @@ const NOTES = {
   neither: { window_truncated: false, truncation_note: null, retention_notice: null },
   markup: { window_truncated: true, truncation_note: null, retention_notice: MARKUP },
   columns: { window_truncated: false, truncation_note: null, retention_notice: null },
+  /* #7538, #7651: a read that left two dropped databases out. The reply's own note speaks to an MCP client; the page words its own sentence from the names. */
+  leftOut: {
+    window_truncated: false, truncation_note: null, retention_notice: null,
+    databases_left_out: ["a_old", "b_old"], databases_left_out_count: 2,
+    databases_left_out_note: "These databases were left out of this read because the server's newest database snapshot no longer lists them. Name one in database_name to read its history.",
+  },
 }[scenario];
 
 const asks = [];

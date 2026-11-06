@@ -107,6 +107,19 @@ public sealed class TopRankingNoticeBehaviourTests
         Assert.True(asks.Count(a => a == "get_top_procedures_by_cpu:reads") >= 2, "both Top Procedures cards ask for the reads ranking: " + string.Join(", ", asks));
     }
 
+    /// <summary>#7538, #7651: a read that left databases out draws the page's own sentence, naming them, once on each of the four cards: the CPU tab's two plain
+    /// grids, the Queries tab's Top Procedures grid and its Top Queries composite. The tool's note, which points at a <c>database_name</c> argument the page does
+    /// not have, is not drawn.</summary>
+    [Fact]
+    public void ALeftOutReply_NamesTheDatabasesOnce_OnEveryRankedCard()
+    {
+        var run = Run("leftOut");
+        foreach (var card in Cards)
+        {
+            Assert.Equal(["2 databases were left out because the server no longer lists them. They were dropped or detached: a_old, b_old."], NoticesOf(run, card));
+        }
+    }
+
     /// <summary>An answer with only the window floor's note (a store with no rollups, or a server monitored for less time than the window) still draws that one note.</summary>
     [Fact]
     public void AFloorNoteAlone_IsDrawnOnce()
