@@ -456,9 +456,25 @@ if (scenario === "crosshair") {
       header: find(g, (n) => n.attrs.class === "strip-title")[0].textContent,
     };
   };
+  /* The blocking strip with a null blocking baseline lane, so applyBaselines gives it the "not enough history" note. The right-anchored note and a
+     header that names a failed read sit on one baseline, so the note is not drawn beside an error. Counts the note's text nodes (the tspans share its class). */
+  const blockingWithBaseline = (over) => {
+    const window = { windowStart: T0, windowEnd: T0 + 60 * MIN };
+    const list = strips.applyBaselines(strips.buildStrips({ ...reads, ...over }), { kind: "data", data: { baselines: { blocking: null } } }, window, {});
+    const note = list.find((s) => s.key === "blocking").baselineNote;
+    const g = find(strips.drawStrips(list, domain, 1000, null).node, (n) => n.attrs["data-strip"] === "blocking")[0];
+    return {
+      note,
+      noteTexts: find(g, (n) => n.tag === "text" && n.attrs.class === "strip-baseline-note").length,
+      errorTspans: find(g, (n) => n.attrs.class === "strip-baseline-note strip-error-note").length,
+      header: find(g, (n) => n.attrs.class === "strip-title")[0].textContent,
+    };
+  };
   out.blockingFailed = blocking({ blocking: { kind: "error", message: "The blocking trend read timed out." }, deadlocks: data({ trend: [{ time: iso(12), count: 1 }] }) });
   out.deadlocksFailed = blocking({ deadlocks: { kind: "error", message: "The deadlock trend read timed out." } });
   out.bothAnswered = blocking({ deadlocks: data({ trend: [{ time: iso(12), count: 1 }] }) });
+  out.failedWithBaselineNote = blockingWithBaseline({ blocking: { kind: "error", message: "The blocking trend read timed out." }, deadlocks: data({ trend: [{ time: iso(12), count: 1 }] }) });
+  out.answeredWithBaselineNote = blockingWithBaseline({ deadlocks: data({ trend: [{ time: iso(12), count: 1 }] }) });
 } else if (scenario === "mixedempty") {
   /* #7921: one of the six reads fails and the other five answer empty. The page names the failed read instead of only "No overview samples in this
      window", which is what a server with nothing collected says. With every read empty it says that sentence alone, and with every read failed

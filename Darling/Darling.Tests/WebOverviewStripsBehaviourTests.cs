@@ -496,6 +496,15 @@ public sealed class WebOverviewStripsBehaviourTests
         var both = r.GetProperty("bothAnswered");
         Assert.Equal(3, both.GetProperty("bars").GetInt32());
         Assert.Equal("Blocking (per min)", both.GetProperty("header").GetString());
+        // The right-anchored baseline note shares the header's baseline: beside a named failure it is not drawn, so the two cannot overlap at narrow widths.
+        var failedNoted = r.GetProperty("failedWithBaselineNote");
+        Assert.Equal("No baseline yet: not enough history.", failedNoted.GetProperty("note").GetString());
+        Assert.Equal(0, failedNoted.GetProperty("noteTexts").GetInt32());
+        Assert.Equal(1, failedNoted.GetProperty("errorTspans").GetInt32());
+        Assert.Contains("The blocking trend read timed out.", failedNoted.GetProperty("header").GetString());
+        var answeredNoted = r.GetProperty("answeredWithBaselineNote");
+        Assert.Equal(1, answeredNoted.GetProperty("noteTexts").GetInt32());
+        Assert.Equal(0, answeredNoted.GetProperty("errorTspans").GetInt32());
     }
 
     /// <summary>

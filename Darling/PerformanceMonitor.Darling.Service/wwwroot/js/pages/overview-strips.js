@@ -389,8 +389,8 @@ export function drawStrips(strips, domain, width, onZoom) {
         if (b.mean != null && b.mean >= yMin && b.mean <= yMax) g.appendChild(svg("line", { class: "strip-band-mean", x1, x2, y1: y(b.mean), y2: y(b.mean) }));
       }
     }
-    /* A strip with data but no band says why, in its header: never a band at 0. */
-    if (s.baselineNote && hasData) {
+    /* A strip with data but no band says why, in its header: never a band at 0. When a read failed, the header names the failure instead (#7921), because the error matters more than the missing band. */
+    if (s.baselineNote && hasData && !s.errorNote) {
       const bn = svg("text", { class: "strip-baseline-note", x: plotR, y: top + 12, "text-anchor": "end" });
       bn.textContent = s.baselineNote;
       g.appendChild(bn);
