@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Analysis.Recommendations;
 using PerformanceMonitorLite.Database;
@@ -96,6 +97,7 @@ public class FindingStoreTests : IClassFixture<SharedDuckDbFixture>, IDisposable
     {
         var findings = stories.Select(s => new AnalysisFinding
         {
+            FindingId = CollectionIdGenerator.Next(),
             ServerId = serverId,
             ServerName = "story-paths",
             AnalysisTime = analysisTime,
@@ -813,9 +815,13 @@ VALUES ($1, $2, $3, $4, $5, $6)";
            census needs no exemption for it either. Nine since #3916: GetMutedStoryHashesAsync, the mute
            registry re-read the analysis notification service makes at its hold-back flush, so a mute applied
            inside the window drops the queued page. A READ, under the read lock like the mute filter it
-           mirrors, taking the flush's own token (there is no analysis pass at flush time). The count is pinned
-           so a new lock site is a decision someone makes here, not a tidy-up. */
-        Assert.Equal(9, CountOf(source, "_duckDb.AcquireReadLock("));
+           mirrors, taking the flush's own token (there is no analysis pass at flush time). Ten since #8012:
+           GetStoryPathsAsync, the stored-story-paths read the analysis notification service makes to seed a
+           shorter path's page bucket from a wider path's page row. A READ off the pass, under the read lock like
+           every other reader here, so maintenance's exclusive lock waits for it instead of checkpointing or
+           compacting under its scan; untokened like the two read-backs, because its caller has no pass to
+           abandon. The count is pinned so a new lock site is a decision someone makes here, not a tidy-up. */
+        Assert.Equal(10, CountOf(source, "_duckDb.AcquireReadLock("));
 
         /* The explanation, at the class and at each write site — whichever one a reader lands on. */
         Assert.Contains("The read lock around the WRITES is deliberate (#2455)", source, StringComparison.Ordinal);

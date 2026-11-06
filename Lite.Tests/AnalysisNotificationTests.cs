@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitorLite;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
@@ -1202,7 +1203,10 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
     private static Task StoreRunAsync(FindingStore store, DateTime analysisTime, params AnalysisFinding[] findings)
     {
         foreach (var f in findings)
+        {
+            f.FindingId = CollectionIdGenerator.Next();
             f.AnalysisTime = analysisTime;
+        }
         return store.InsertFindingsAsync(findings.ToList(), new AnalysisContext
         {
             ServerId = findings[0].ServerId,

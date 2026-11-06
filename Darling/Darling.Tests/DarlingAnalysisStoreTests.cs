@@ -449,8 +449,11 @@ public sealed class DarlingAnalysisStoreTests
     private const string NoStoryPathsRead =
         "PgFindingStore has no GetStoryPathsAsync(serverId, rootFactKey): the distinct story paths of one server and root across the findings retention.";
 
+    /* As the engine builds a finding (#3859): the typed keys beside their rendered join, one fact per key. The
+       seed reads PathKeys, not the rendered text, so a finding without them is never held. */
     private static AnalysisFinding Story(string hash, string root, string path, int serverId = StoryPathsServerId) => new()
     {
+        FindingId = CollectionIdGenerator.Next(),
         ServerId = serverId,
         ServerName = StoryPathsServerName,
         AnalysisTime = DateTime.UtcNow,
@@ -459,6 +462,7 @@ public sealed class DarlingAnalysisStoreTests
         Category = "parameter_sensitivity",
         StoryPath = path,
         StoryPathHash = hash,
+        PathKeys = path.Split(" → ").ToList(),
         StoryText = path,
         RootFactKey = root,
         RootFactValue = 1.0,
