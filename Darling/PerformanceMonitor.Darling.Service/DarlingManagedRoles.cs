@@ -292,8 +292,9 @@ public static class DarlingManagedRoles
                 "report_notice",
                 /* V238 (#7109): whether a Level 3 action waits for a person's approval, and whether the asker may approve. Non-secret. */
                 "action_approval", "approval_single_person",
-                /* V252 (#7656): the route's Slack bot channel id, blank for none. Non-secret. */
-                "slack_bot_channel",
+                /* V252 (#7656): the route's Slack bot channel id, blank for none, and the time the route got it (the trigger's stamp, null
+                   when the channel is blank). Non-secret. */
+                "slack_bot_channel", "slack_bot_channel_set_at",
             },
             SecretColumns: new[] { "teams_url", "slack_url", "generic_url", "pagerduty_routing_key", "signing_key", "previous_signing_key" }),
     };

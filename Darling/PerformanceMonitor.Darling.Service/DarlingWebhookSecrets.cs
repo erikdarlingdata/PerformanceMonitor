@@ -367,8 +367,10 @@ internal static class DarlingWebhookSecrets
             Add(r.ActionApproval);
             Add(r.ApprovalSinglePerson ? "1" : "0");
 
-            /* #7656: the bot channel. The thread poster reads it from the cached route, so an edit of only this member must reopen the cache. */
+            /* #7656: the bot channel and the time the route got it. The thread poster reads the channel and the thread pass gates the parent
+               post on the stamp, both from the cached route, so a change to either alone must reopen the cache. */
             Add(r.SlackBotChannel);
+            Add(r.SlackBotChannelSetAt?.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
 
         return text.ToString();

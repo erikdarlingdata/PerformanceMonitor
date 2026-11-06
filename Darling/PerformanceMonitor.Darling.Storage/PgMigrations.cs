@@ -2667,7 +2667,9 @@ CREATE OR REPLACE VIEW v_memory_pressure_events AS SELECT * FROM memory_pressure
        ts. The stamp (slack_bot_channel_set_at, naive UTC) is written by a row trigger, so every path that writes the channel (the route
        writer, the store functions and the undo function) stamps it the same way: set or moved when the channel goes from blank to an
        id or to a different id, cleared when the channel is cleared, kept by a write that keeps the channel. The thread pass posts a
-       request's parent only when the request opened at or after the stamp. The thread table is owner-written, as config_server_actions
+       request's parent only when the request opened at or after the stamp. The trigger function is REVOKEd from PUBLIC like the other
+       trigger functions here (a trigger fires it without an EXECUTE check, so the table's writers lose nothing, and a login such as an
+       alert source holds no EXECUTE on it). The thread table is owner-written, as config_server_actions
        is: REVOKE ALL ... CASCADE takes every privilege the default privileges gave from PUBLIC and each of the four roles that exists,
        and SELECT goes back to admin alone. Managed provisioning section 10e5 and provision-roles.sql step 3j5 do the same after their
        blanket grants. */
@@ -2686,6 +2688,7 @@ BEGIN
     RETURN NEW;
 END
 $fn$;
+REVOKE ALL ON FUNCTION config.notification_routes_stamp_slack_bot_channel() FROM PUBLIC;
 
 DROP TRIGGER IF EXISTS trg_notification_routes_slack_bot_channel_stamp ON config.config_notification_routes;
 CREATE TRIGGER trg_notification_routes_slack_bot_channel_stamp

@@ -693,13 +693,13 @@ $v233$;
 GRANT SELECT (action_approval, approval_single_person) ON config.config_notification_routes TO viewer;
 $v238$;
       END IF;
-      -- V252 (#7656): the route's Slack bot channel id, blank for none. Non-secret. Granted on its own column inside the routes table's guard, so a
-      -- store below V252 still commits.
+      -- V252 (#7656): the route's Slack bot channel id, blank for none, and the time it was set (null when blank). Non-secret. Granted on their own
+      -- columns inside the routes table's guard, on the channel column the same rung adds, so a store below V252 still commits.
       IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
                  WHERE attrelid = 'config.config_notification_routes'::regclass
                    AND attname = 'slack_bot_channel' AND NOT attisdropped) THEN
          EXECUTE $v252$
-GRANT SELECT (slack_bot_channel) ON config.config_notification_routes TO viewer;
+GRANT SELECT (slack_bot_channel, slack_bot_channel_set_at) ON config.config_notification_routes TOviewer;
 $v252$;
       END IF;
    END IF;
@@ -868,12 +868,13 @@ $v233$;
 GRANT SELECT (action_approval, approval_single_person) ON config.config_notification_routes TO web;
 $v238$;
       END IF;
-      -- V252 (#7656): the route's Slack bot channel id, blank for none. Non-secret. Guarded on the column, so a store below V252 still commits.
+      -- V252 (#7656): the route's Slack bot channel id, blank for none, and the time it was set (null when blank). Non-secret. Guarded on the
+      -- channel column, which the same rung adds, so a store below V252 still commits.
       IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
                  WHERE attrelid = 'config.config_notification_routes'::regclass
                    AND attname = 'slack_bot_channel' AND NOT attisdropped) THEN
          EXECUTE $v252$
-GRANT SELECT (slack_bot_channel) ON config.config_notification_routes TO web;
+GRANT SELECT (slack_bot_channel, slack_bot_channel_set_at) ON config.config_notification_routes TOweb;
 $v252$;
       END IF;
    END IF;
@@ -1030,12 +1031,13 @@ $v233$;
 GRANT SELECT (action_approval, approval_single_person) ON config.config_notification_routes TO mcp;
 $v238$;
       END IF;
-      -- V252 (#7656): the route's Slack bot channel id, blank for none. Non-secret. Guarded on the column, so a store below V252 still commits.
+      -- V252 (#7656): the route's Slack bot channel id, blank for none, and the time it was set (null when blank). Non-secret. Guarded on the
+      -- channel column, which the same rung adds, so a store below V252 still commits.
       IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
                  WHERE attrelid = 'config.config_notification_routes'::regclass
                    AND attname = 'slack_bot_channel' AND NOT attisdropped) THEN
          EXECUTE $v252$
-GRANT SELECT (slack_bot_channel) ON config.config_notification_routes TO mcp;
+GRANT SELECT (slack_bot_channel, slack_bot_channel_set_at) ON config.config_notification_routes TOmcp;
 $v252$;
       END IF;
    END IF;
