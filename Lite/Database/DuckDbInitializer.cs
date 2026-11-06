@@ -1498,7 +1498,7 @@ public partial class DuckDbInitializer : IDisposable
               but we can only read version Y"
            Since DuckDB v0.10+, newer libraries read older files, so this almost
            always means an older library was pointed at a newer file. */
-        var message = ex.ToString().ToLowerInvariant();
+        var message = DuckDbFailureText.Of(ex);
         return message.Contains("failed to deserialize")
             || message.Contains("trying to read a database file with version")
             || message.Contains("storage version");
@@ -1511,7 +1511,7 @@ public partial class DuckDbInitializer : IDisposable
     /// </summary>
     internal static bool IsTransientLockError(Exception ex)
     {
-        var message = ex.ToString().ToLowerInvariant();
+        var message = DuckDbFailureText.Of(ex);
         return message.Contains("conflicting lock")
             || message.Contains("could not set lock")
             || message.Contains("being used by another process");
