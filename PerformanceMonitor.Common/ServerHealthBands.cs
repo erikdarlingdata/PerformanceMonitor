@@ -3218,9 +3218,15 @@ namespace PerformanceMonitor.Common
         /// #7416: the store keeps ONE text column per log row (<c>error_message</c>) and the collectors write their run notes into it on
         /// SUCCESS rows ("shred gated: 1", "plans rendered: 0, ..."). On a row that did not succeed the same column holds the error. A
         /// SUCCESS row therefore has no error, only a note, and the Error column of a log grid must not show it.
+        /// #7690: the same holds for an ANALYZED row, the scheduled analysis pass that finished ("Scheduled analysis pass ran in 4.3s, ...").
+        /// ABANDONED, ERROR and the rest keep their text under Error.
         /// </summary>
-        public static bool IsRunNote(string? status) =>
-            string.Equals(status?.Trim(), "SUCCESS", StringComparison.OrdinalIgnoreCase);
+        public static bool IsRunNote(string? status)
+        {
+            var word = status?.Trim();
+            return string.Equals(word, "SUCCESS", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(word, "ANALYZED", StringComparison.OrdinalIgnoreCase);
+        }
 
         /// <summary>#7416: the row's error text: its stored message unless the row succeeded (then the message is a note, see <see cref="IsRunNote"/>). Null for none.</summary>
         public static string? RunError(string? status, string? message) =>

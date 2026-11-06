@@ -562,6 +562,31 @@ public sealed class WebPlainTextTests
         Assert.Equal("No stored plan for this query. pg_stat_statements has none.", o[1]);
     }
 
+    /// <summary>#7690: the Extensions note, the Wait Trend empty text and the Index Bloat note were written for an MCP reader and name a field
+    /// (install_census, exact_measurement_command) or a tier (service_sampled). The page names the panel, the column and the sampler.</summary>
+    [Fact]
+    public void ThePgNotesWrittenForAnMcpReader_NameThePanelTheColumnAndTheSampler()
+    {
+        var extensions = "Per DATABASE, not per cluster: installed_version describes the database the row names. 'available' means the files are present and CREATE EXTENSION would work "
+            + "— usually a one-line fix for an empty panel elsewhere. Rows are the PRODUCT of databases and extension names, so this row list outgrows any row limit on a "
+            + "multi-database host — read install_census for what is installed where, because it is aggregated per extension and no limit touches it.";
+        var waitTrend = "No wait event gained samples on srv in the last 24 hour(s), so there is nothing to follow. This server is on the service_sampled tier "
+            + "(the pg_wait_sampling extension is not installed), so \"none to sample\" was measured over one-second polls in a 30-second window each cycle.";
+        var bloat = "median absolute error is 2.79 percentage points and p90 is 6.63, which is close enough to decide WHICH index to act on and not close enough to "
+            + "justify a REINDEX on its own — use exact_measurement_command for that, on the one index concerned.";
+
+        var o = Run([extensions, waitTrend, bloat], out _);
+
+        Assert.Contains("Each row describes one database, not the whole server", o[0], StringComparison.Ordinal);
+        Assert.Contains("The Extension Install Census shows what is installed where", o[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("install_census", o[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("installed_version", o[0], StringComparison.Ordinal);
+        Assert.Contains("on the service sampler (the pg_wait_sampling extension is not installed)", o[1], StringComparison.Ordinal);
+        Assert.DoesNotContain("service_sampled", o[1], StringComparison.Ordinal);
+        Assert.Contains("on its own. Use the Measure It Exactly column for that, on the one index concerned.", o[2], StringComparison.Ordinal);
+        Assert.DoesNotContain("exact_measurement_command", o[2], StringComparison.Ordinal);
+    }
+
     /// <summary>#6178: the sentence the service writes for an Azure SQL Database names the engine on the page, from the real gate text; the
     /// PostgreSQL sentence keeps the generic line.</summary>
     [Fact]

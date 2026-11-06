@@ -53,8 +53,9 @@ public sealed record ServerInventoryDto(
 public static class DarlingFinOpsInventoryReader
 {
     /// <summary>The host OS version as stored, trimmed (#7467): the collected text can end in a line break, and every surface
-    /// (the MCP tool, the web page and both desktop grids) reads it through here, so none shows one.</summary>
-    internal static string CleanHostOsVersion(string? raw) => raw?.Trim() ?? "";
+    /// (the MCP tool, the web page and both desktop grids) reads it through here, so none shows one. A SQL Server 2016
+    /// row stored with the <c>@@VERSION</c> tail is cut to the product name (#7699 item 3, <c>HostOsText</c>).</summary>
+    internal static string CleanHostOsVersion(string? raw) => PerformanceMonitor.Common.HostOsText.Clean(raw);
 
     /// <summary>
     /// Collected 24h-CPU / storage / idle-DB / provisioning metrics for EVERY server, in one round trip (#4227).
