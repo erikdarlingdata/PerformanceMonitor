@@ -597,6 +597,19 @@ Object.assign(scenarios, {
     found = { err, hours: ctx.hours, label: ctx.label, custom: ctx.custom === true, reads: fetches.slice(before), rows: cpu.data.samples.length };
     return [];
   },
+  // #7932: a picked range whose end has not arrived (today's date alone, a date-box end later today) is read live up to now, so the page
+  // context, the label and the chart window end at now too; the range key still names the picked pair, so a tab switch matches it.
+  pickerFutureEnd: async () => {
+    answer = (url) => (url.pathname === "/api/fleet" ? data({ cards: [] }) : data({ samples: cpuRows }));
+    await customServerPage("SRV1");
+    const start = NOW - 6 * 3600000;
+    const end = NOW + 6 * 3600000;
+    const err = modules.server.holdSpec("SRV1", modules.timeRange.fixedSpec(start, end), NOW);
+    const ctx = modules.server.rangeContext(NOW);
+    const axis = modules.util.windowFromHours(ctx.hours);
+    found = { err, hours: ctx.hours, label: ctx.label, endMs: ctx.endMs, axisEnd: axis ? axis.windowEnd : null, rangeKey: ctx.rangeKey, now: NOW, pickedKey: "custom:" + start + "-" + end };
+    return [];
+  },
   // Every preset and calendar period the picker offers, held for a server in the browser's zone (the scenario name carries it).
   pickerPresetsLocal: async () => {
     answer = (url) => (url.pathname === "/api/fleet" ? data({ cards: [] }) : data({ samples: cpuRows }));
@@ -675,6 +688,28 @@ Object.assign(scenarios, {
     const lat = await modules.util.readTool("get_latch_stats", { server: "SRV1", hours: 4 });
     const cpu = await modules.util.readTool("get_cpu_utilization", { server: "SRV1", hours: 4 });
     found = { latchRows: lat.data.latches.length, seriesRows: cpu.data.samples.length };
+    return [];
+  },
+  // #7945: a trend read's rows are bucket starts whatever name the stamp carries (sample_time, time, collection_time, event_time, time_bucket),
+  // so the bucket that starts at the range's end lies outside the range and is cut; a read of instants keeps the one stamped at the end.
+  customBucketEdge: async () => {
+    const stamps = [T0, new Date((Date.parse(T0) + Date.parse(T1)) / 2).toISOString(), T1];
+    const rows = (field) => stamps.map((s) => ({ [field]: s, v: 1 }));
+    const shapes = {
+      get_cpu_utilization: ["samples", rows("sample_time")],
+      get_wait_trend: ["trend", rows("time")],
+      get_lock_wait_trend: ["trend", rows("collection_time")],
+      get_health_parser_system_health: ["entries", rows("event_time")],
+      get_query_heatmap: ["cells", rows("time_bucket")],
+      get_memory_pressure_events: ["events", rows("sample_time")],
+    };
+    answer = (url) => data({ [shapes[tool(url)][0]]: shapes[tool(url)][1] });
+    modules.util.setActiveRange({ server: "SRV1", hours: 4, startMs: Date.parse(T0), endMs: Date.parse(T1), asOf: T1 });
+    found = {};
+    for (const [read, [key]] of Object.entries(shapes)) {
+      const res = await modules.util.readTool(read, { server: "SRV1", hours: 4 });
+      found[read] = res.data[key].length;
+    }
     return [];
   },
   // The label says where totals begin when the span is not whole hours.

@@ -538,16 +538,21 @@ public static class BenefitScorer
                 // CXPACKET/CXCONSUMER/CXSYNC: benefit is the parallelism efficiency gap,
                 // not the raw wait time. Threads waiting for other threads is a symptom
                 // of imperfect parallelism, not directly addressable time.
+                /* #7888: the gap is bounded by the wait's own share of elapsed time. Wait time is
+                   summed across threads, so the share is a loose ceiling, but it keeps a few
+                   milliseconds of CXCONSUMER on an I/O-bound plan from scoring as the whole gap. */
+                var ownSharePct = (double)wait.WaitTimeMs / elapsedMs * 100;
                 var cpu = stmt.QueryTimeStats!.CpuTimeMs;
                 var dop = stmt.DegreeOfParallelism;
                 if (cpu > 0 && dop > 1)
                 {
                     var idealElapsed = (double)cpu / dop;
-                    benefitPct = Math.Max(0, (elapsedMs - idealElapsed) / elapsedMs * 100);
+                    var gapPct = Math.Max(0, (elapsedMs - idealElapsed) / elapsedMs * 100);
+                    benefitPct = Math.Min(gapPct, ownSharePct);
                 }
                 else
                 {
-                    benefitPct = (double)wait.WaitTimeMs / elapsedMs * 100;
+                    benefitPct = ownSharePct;
                 }
             }
             else if (!isParallel || operatorProfiles.Count == 0)
