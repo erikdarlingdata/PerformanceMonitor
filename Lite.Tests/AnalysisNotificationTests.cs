@@ -1073,10 +1073,16 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
     private static AnalysisFinding MakeWiderPathFinding() =>
         MakeFinding("aaaaaaaa11111111", severity: 1.5, rootFactKey: "PARAMETER_SENSITIVITY", storyPath: WiderPath);
 
+    /// <summary>A notifier whose stored-story-paths read answers from <paramref name="stored"/> the way the store does:
+    /// the distinct paths of the asked server and root.</summary>
     private AnalysisNotificationService MakeNotifierWithStoredFindings(
         IFindingAlertSender sender, params AnalysisFinding[] stored) =>
         new(sender, _settings, f => f.ServerId.ToString(), new AppLoggerAdapter<AnalysisNotificationService>(),
-            getStoredFindings: _ => Task.FromResult<IReadOnlyList<AnalysisFinding>>(stored));
+            getStoredStoryPaths: (serverId, rootFactKey) => Task.FromResult<IReadOnlyList<StoredStoryPath>>(stored
+                .Where(f => f.ServerId == serverId && f.RootFactKey == rootFactKey)
+                .Select(f => new StoredStoryPath(f.StoryPathHash, f.StoryPath, f.Category, f.FactCount))
+                .Distinct()
+                .ToList()));
 
     [Fact]
     public async Task NotifyAsync_ShorterPath_WiderPathAlreadyPaged_StaysHeld()

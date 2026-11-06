@@ -79,7 +79,7 @@ public sealed class AnalysisNotificationService : IDisposable
     private readonly ILogger<AnalysisNotificationService> _logger;
     private readonly Action<string, string>? _showTrayNotification;
     private readonly Func<int, string, Task<bool>>? _isStoryMuted;
-    private readonly Func<int, Task<IReadOnlyList<AnalysisFinding>>>? _getStoredFindings;
+    private readonly Func<int, string, Task<IReadOnlyList<StoredStoryPath>>>? _getStoredStoryPaths;
     private readonly TimeSpan _holdBack;
     private readonly Func<string, DateTime, Task<AlertAttachedToDto?>>? _findOpenEngineAlert;
 
@@ -192,10 +192,11 @@ public sealed class AnalysisNotificationService : IDisposable
     /// means no attach (the finding pages as the gate routed it); a read that throws also pages, because a missed attach
     /// costs one extra page and a swallowed page costs the operator the finding.
     /// </param>
-    /// <param name="getStoredFindings">
-    /// Optional <c>(serverId)</c> read of the server's recent stored findings (#8012), consulted when a
-    /// page-band member has no bucket and no page row under its own hash, to find a WIDER path of the same
-    /// root that was already paged. Null means no such lookup (a shorter path pages as new, as before).
+    /// <param name="getStoredStoryPaths">
+    /// Optional <c>(serverId, rootFactKey)</c> read of the distinct story paths that server has stored under that
+    /// root across the findings retention (#8012), consulted when a page-band member has no bucket and no page row
+    /// under its own hash, to find a WIDER path of the same root that was already paged. Read at most once per
+    /// server and root per <see cref="NotifyAsync"/> call. Null means no such lookup (a shorter path pages as new).
     /// </param>
     public AnalysisNotificationService(
         IFindingAlertSender sender,
@@ -206,9 +207,9 @@ public sealed class AnalysisNotificationService : IDisposable
         Action<string, string>? showTrayNotification = null,
         Func<int, string, Task<bool>>? isStoryMuted = null,
         Func<string, DateTime, Task<AlertAttachedToDto?>>? findOpenEngineAlert = null,
-        Func<int, Task<IReadOnlyList<AnalysisFinding>>>? getStoredFindings = null)
+        Func<int, string, Task<IReadOnlyList<StoredStoryPath>>>? getStoredStoryPaths = null)
         : this(sender, settings, serverIdResolver, logger, PageHoldBackWindow,
-               isServerSilenced, showTrayNotification, isStoryMuted, findOpenEngineAlert, getStoredFindings)
+               isServerSilenced, showTrayNotification, isStoryMuted, findOpenEngineAlert, getStoredStoryPaths)
     {
     }
 
@@ -224,7 +225,7 @@ public sealed class AnalysisNotificationService : IDisposable
         Action<string, string>? showTrayNotification = null,
         Func<int, string, Task<bool>>? isStoryMuted = null,
         Func<string, DateTime, Task<AlertAttachedToDto?>>? findOpenEngineAlert = null,
-        Func<int, Task<IReadOnlyList<AnalysisFinding>>>? getStoredFindings = null)
+        Func<int, string, Task<IReadOnlyList<StoredStoryPath>>>? getStoredStoryPaths = null)
     {
         _sender = sender;
         _settings = settings;
@@ -235,7 +236,7 @@ public sealed class AnalysisNotificationService : IDisposable
         _showTrayNotification = showTrayNotification;
         _isStoryMuted = isStoryMuted;
         _findOpenEngineAlert = findOpenEngineAlert;
-        _getStoredFindings = getStoredFindings;
+        _getStoredStoryPaths = getStoredStoryPaths;
     }
 
     /// <summary>
@@ -308,6 +309,9 @@ public sealed class AnalysisNotificationService : IDisposable
 
             eligible.Add(f);
         }
+
+        /* #8012: the wider-path seed's store reads, shared by every member this call seeds. */
+        var seedReads = new SeedReads();
 
         var incidents = eligible
             .GroupBy(f => $"{f.ServerId}:{IncidentToken(f)}");
@@ -422,8 +426,8 @@ public sealed class AnalysisNotificationService : IDisposable
                        path already heard. A wider path of the same server and root with a delivered page row seeds
                        this bucket the same way a same-hash row does. A longer path or a different root finds
                        nothing here and still pages (#3712). */
-                    if (!lastPersisted.HasValue && _getStoredFindings is not null && m.Severity >= CriticalSeverityCutoff)
-                        lastPersisted = await LastWiderPathPageUtcAsync(serverId, m);
+                    if (!lastPersisted.HasValue && _getStoredStoryPaths is not null && m.Severity >= CriticalSeverityCutoff)
+                        lastPersisted = await LastWiderPathPageUtcAsync(serverId, m, seedReads);
                     if (lastPersisted.HasValue)
                     {
                         /* #4732: a persisted notification time ahead of the clock (it stepped back across the restart)
@@ -821,33 +825,56 @@ public sealed class AnalysisNotificationService : IDisposable
     private const string DigestBucketPrefix = "digest|";
 
     /// <summary>
-    /// The newest delivered page time of any WIDER path of the same server and root as <paramref name="m"/> (#8012),
-    /// or null. Wider means its fact keys are a strict superset of <paramref name="m"/>'s: the same story with
-    /// more corroboration, already heard. The stored paths come from <c>getStoredFindings</c>, whose rows carry
-    /// only the rendered path, so both sides are split on the join string the engine uses. A read or a page-row
-    /// lookup that throws returns null (the story pages, as it did before this seam): a held story that pages
-    /// once more costs one extra page, a swallowed page costs the operator the finding.
+    /// The store reads one <see cref="NotifyAsync"/> call makes for the wider-path seed (#8012): each (server, root)
+    /// path list and each candidate's page row is read at most once per call, however many members ask.
     /// </summary>
-    private async Task<DateTime?> LastWiderPathPageUtcAsync(string serverId, AnalysisFinding m)
+    private sealed class SeedReads
     {
-        if (string.IsNullOrEmpty(m.RootFactKey))
+        public Dictionary<(int ServerId, string RootFactKey), IReadOnlyList<StoredStoryPath>> Paths { get; } = new();
+        public Dictionary<(string ServerId, string MetricName), DateTime?> PageRows { get; } = new();
+    }
+
+    /// <summary>
+    /// The newest delivered page time of any WIDER path of the same server and root as <paramref name="m"/> (#8012),
+    /// or null. Wider means its fact keys are a strict superset of <paramref name="m"/>'s typed keys
+    /// (<see cref="AnalysisFinding.PathKeys"/>, #3859): the same story with more corroboration, already heard. The
+    /// candidates are <c>getStoredStoryPaths</c>'s answer, the distinct paths this server has stored under this root
+    /// across the findings retention, so the previous build's last run is in reach however busy the server has been
+    /// since. A stored row keeps only the rendered path, so a candidate's keys are that path split on the engine's
+    /// join string, and a candidate whose segments outnumber its facts (the pileup's path carries a statement hash
+    /// beside its one fact) is not a chain of keys and is skipped. A read or a page-row lookup that throws returns
+    /// null (the story pages): a held story that pages once more costs one extra page, a swallowed page costs the
+    /// operator the finding.
+    /// </summary>
+    private async Task<DateTime?> LastWiderPathPageUtcAsync(string serverId, AnalysisFinding m, SeedReads reads)
+    {
+        if (string.IsNullOrEmpty(m.RootFactKey) || m.PathKeys.Count == 0)
             return null;
         try
         {
-            var keys = m.StoryPath.Split(StoryPathSeparator, StringSplitOptions.RemoveEmptyEntries);
-            var stored = await _getStoredFindings!(m.ServerId).ConfigureAwait(false);
+            if (!reads.Paths.TryGetValue((m.ServerId, m.RootFactKey), out var stored))
+            {
+                stored = await _getStoredStoryPaths!(m.ServerId, m.RootFactKey).ConfigureAwait(false);
+                reads.Paths[(m.ServerId, m.RootFactKey)] = stored;
+            }
+
             DateTime? newest = null;
-            var seen = new HashSet<string>(StringComparer.Ordinal);
             foreach (var candidate in stored)
             {
-                if (candidate.RootFactKey != m.RootFactKey
-                    || candidate.StoryPathHash == m.StoryPathHash
-                    || !seen.Add(candidate.StoryPathHash))
+                if (candidate.StoryPathHash == m.StoryPathHash)
                     continue;
-                var candidateKeys = candidate.StoryPath.Split(StoryPathSeparator, StringSplitOptions.RemoveEmptyEntries);
-                if (candidateKeys.Length <= keys.Length || !keys.All(k => candidateKeys.Contains(k)))
+                var candidateKeys = candidate.StoryPath.Split(StoryPathSeparator, StringSplitOptions.None);
+                if (candidateKeys.Length != candidate.FactCount
+                    || candidateKeys.Length <= m.PathKeys.Count
+                    || !m.PathKeys.All(k => Array.IndexOf(candidateKeys, k) >= 0))
                     continue;
-                var page = await _sender.GetLastDeliveredPageUtcAsync(serverId, FindingMessageFormatter.MetricName(candidate));
+
+                var metricName = FindingMessageFormatter.MetricName(candidate.Category, candidate.StoryPathHash);
+                if (!reads.PageRows.TryGetValue((serverId, metricName), out var page))
+                {
+                    page = await _sender.GetLastDeliveredPageUtcAsync(serverId, metricName);
+                    reads.PageRows[(serverId, metricName)] = page;
+                }
                 if (page.HasValue && (newest is null || page.Value > newest.Value))
                     newest = page;
             }
@@ -860,7 +887,7 @@ public sealed class AnalysisNotificationService : IDisposable
         }
     }
 
-    /// <summary>The join string of a rendered story path (InferenceEngine.BuildStory).</summary>
+    /// <summary>The join string of a rendered story path (InferenceEngine.BuildStory), the one spelling a stored row keeps.</summary>
     private const string StoryPathSeparator = " → ";
 
     /// <summary>
@@ -895,12 +922,14 @@ internal static class FindingMessageFormatter
     /// short hash suffix makes each distinct finding unique, so the {serverId}:{metricName}
     /// cooldown cannot collapse two findings sharing a Category.
     /// </summary>
-    public static string MetricName(AnalysisFinding finding)
+    public static string MetricName(AnalysisFinding finding) => MetricName(finding.Category, finding.StoryPathHash);
+
+    /// <summary>The same name from a stored row's category and hash (#8012: the wider-path seed's page-row lookup).</summary>
+    public static string MetricName(string? category, string? storyPathHash)
     {
-        var hash = finding.StoryPathHash ?? string.Empty;
+        var hash = storyPathHash ?? string.Empty;
         var shortHash = hash.Length >= 8 ? hash[..8] : hash;
-        var category = string.IsNullOrEmpty(finding.Category) ? "finding" : finding.Category;
-        return $"Analysis: {category} [{shortHash}]";
+        return $"Analysis: {(string.IsNullOrEmpty(category) ? "finding" : category)} [{shortHash}]";
     }
 
     /// <summary>

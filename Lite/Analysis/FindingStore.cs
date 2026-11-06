@@ -422,6 +422,43 @@ LIMIT $4";
     }
 
     /// <summary>
+    /// The distinct story paths this server has stored under one root fact key, across the findings retention
+    /// (#8012): what the analysis page hold reads, when a story's path has got shorter, to find the wider path of
+    /// the same story that was already paged. Rare by construction (a page-band member with no bucket and no page
+    /// row of its own) and small in answer (the distinct paths of one root), so it reads only the four columns the
+    /// seed needs and no row's drill-down. The server_id predicate is the one the time index leads with; the root
+    /// is a filter on the rows it admits. Matches the Darling twin's PgFindingStore.
+    ///
+    /// <para>#2443 exempt: off the analysis pass. This surface serves the notifier's restart seed, a lifetime with
+    /// no per-pass budget and no wedged analysis to abandon, so its store calls take no pass token.</para>
+    /// </summary>
+    public async Task<IReadOnlyList<StoredStoryPath>> GetStoryPathsAsync(int serverId, string rootFactKey)
+    {
+        var paths = new List<StoredStoryPath>();
+
+        using var readLock = _duckDb.AcquireReadLock();
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync();
+
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+SELECT DISTINCT story_path_hash, story_path, category, fact_count
+FROM analysis_findings
+WHERE server_id = $1
+AND   root_fact_key = $2";
+        cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = rootFactKey });
+
+        using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            paths.Add(new StoredStoryPath(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetInt32(3)));
+        }
+
+        return paths;
+    }
+
+    /// <summary>
     /// Returns the latest analysis run's findings for a server (most recent analysis_time).
     ///
     /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the

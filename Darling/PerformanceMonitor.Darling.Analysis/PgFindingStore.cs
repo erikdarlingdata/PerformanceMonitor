@@ -272,6 +272,16 @@ WHERE story_path_hash = $1 AND server_id = $2";
 
     public const string CleanupOldFindingsSql = "DELETE FROM analysis_findings WHERE analysis_time < $1";
 
+    /* #8012: the distinct story paths one server has stored under one root, across the findings retention, for the
+       analysis page hold's wider-path seed. Four columns and no drill-down. server_id rides the leading column of
+       idx_analysis_findings_time (a bitmap index scan on a fleet-sized table); root_fact_key filters the rows it
+       admits, and the DISTINCT folds a root's thirty days of runs to its handful of paths. */
+    public const string GetStoryPathsSql = @"
+SELECT DISTINCT story_path_hash, story_path, category, fact_count
+FROM analysis_findings
+WHERE server_id = $1
+AND   root_fact_key = $2";
+
     /* #3653 item 3 (Q3): the prior weeks, for RecurrenceLabeler — ONE statement per analysis pass, not one per
        story. $1 server, $2 the lower bound (RecurrenceLabeler.ReadLowerBoundUtc — three weeks and an hour of
        slack), $3 the pass's reference instant, which is the exclusive upper bound: this pass has not persisted
@@ -707,6 +717,41 @@ ORDER BY local_bucket, story_path_hash";
         }
 
         return findings;
+    }
+
+    /// <summary>
+    /// The distinct story paths this server has stored under one root fact key, across the findings retention
+    /// (#8012): what the analysis page hold reads, when a story's path has got shorter, to find the wider path of
+    /// the same story that was already paged. Rare by construction (a page-band member with no bucket and no page
+    /// row of its own) and small in answer (the distinct paths of one root). A failed read answers empty, logged,
+    /// and the story pages. Matches the Lite twin's FindingStore.
+    ///
+    /// <para>#2443 exempt: off the analysis pass. This surface serves the notifier's restart seed, a lifetime with
+    /// no per-pass budget and no wedged analysis to abandon, so its store calls take no pass token.</para>
+    /// </summary>
+    public async Task<IReadOnlyList<StoredStoryPath>> GetStoryPathsAsync(int serverId, string rootFactKey)
+    {
+        var paths = new List<StoredStoryPath>();
+
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync();
+            using var command = new NpgsqlCommand(GetStoryPathsSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.AddWithValue(rootFactKey);
+
+            using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                paths.Add(new StoredStoryPath(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetInt32(3)));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("[PgFindingStore] GetStoryPathsAsync failed: {Message}", ex.Message);
+        }
+
+        return paths;
     }
 
     /// <summary>
