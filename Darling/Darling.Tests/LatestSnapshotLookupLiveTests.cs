@@ -133,11 +133,17 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
             {
                 using var writer = new NpgsqlConnection(cs);
                 writer.Open();
+                /* SET, never inherit, as LiveStoreCleanup does: Npgsql pools physical sessions, and one opened before the
+                   store's first migration keeps the pre-ALTER search_path for its whole life, so on that session the bare
+                   table name in the seed resolves to nothing (42P01) while on any other it is index_object_stats. */
+                using (var setPath = new NpgsqlCommand("SET search_path = " + PgSchemaGenerator.SearchPath, writer))
+                    setPath.ExecuteNonQuery();
                 for (var i = 1; i <= 5; i++)
                     SeedIndex(writer, FreshId, FreshName, newer, 10 + i, "IX_new_" + i.ToString(CultureInfo.InvariantCulture));
             });
 
             var json = await DarlingMcpObjectStatsTools.GetIndexUsage(postgres, FreshName, DatabaseFilter.All, 50, ct);
+            Assert.True(landing.Error is null, $"the listener's seed threw inside the tool's read, so the payload is not evidence about the count: {landing.Error}");
             Assert.True(landing.Fired, "the newer capture was never planted: the listener did not see the row statement complete on this database, so the test proved nothing");
 
             using var payload = JsonDocument.Parse(json);
@@ -502,6 +508,9 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
     /// Runs one action the first time a command on the named database whose text carries every fragment completes
     /// (Npgsql stops the command's activity when its reader closes), before the caller that ran the command gets control
     /// back. The same process-wide listener and value-matched tags as <see cref="NpgsqlCommandCounter"/>.
+    /// <para>The action runs inside the command's reader close, so a throw from it would surface as the command's own
+    /// failure, in the tool's error payload, with the fixture's fault reported as the product's. The hook keeps the
+    /// throw in <see cref="Error"/> instead, for the test to assert on before it reads the payload.</para>
     /// </summary>
     private sealed class NpgsqlCommandCompletionHook : IDisposable
     {
@@ -510,6 +519,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
         private readonly Action _onCompleted;
         private readonly System.Diagnostics.ActivityListener _listener;
         private int _fired;
+        private Exception? _error;
 
         public NpgsqlCommandCompletionHook(string databaseName, string[] fragments, Action onCompleted)
         {
@@ -527,6 +537,9 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
 
         public bool Fired => Volatile.Read(ref _fired) == 1;
 
+        /// <summary>What the action threw, or null when it ran clean or has not run.</summary>
+        public Exception? Error => Volatile.Read(ref _error);
+
         private void OnStopped(System.Diagnostics.Activity activity)
         {
             var onThisDatabase = false;
@@ -541,7 +554,16 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
                     carriesTheText = true;
             }
             if (onThisDatabase && carriesTheText && Interlocked.Exchange(ref _fired, 1) == 0)
-                _onCompleted();
+            {
+                try
+                {
+                    _onCompleted();
+                }
+                catch (Exception ex)
+                {
+                    Volatile.Write(ref _error, ex);
+                }
+            }
         }
 
         public void Dispose() => _listener.Dispose();

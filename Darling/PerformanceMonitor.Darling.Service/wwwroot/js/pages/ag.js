@@ -79,6 +79,10 @@ export async function renderAg(main, opts) {
   const [res, fleet] = await Promise.all([apiGet("/api/ag"), apiGetFleet()]);
   /* A poll that lands after the reader went to another page must not draw the groups over it. */
   if (location.hash !== ourHash) return;
+  /* #7959: a 401 from either read (an expired session, or a front door answering a sign-in page) has put the shell's sign-in strip in
+     main by the time the reads return. Nothing is drawn over it: the "no groups" line would read as a healthy absence under a
+     "Signed out" status bar. An aborted read is a route change, handled the same way. */
+  if (res.kind === "aborted" || res.kind === "auth" || fleet.kind === "aborted" || fleet.kind === "auth") return;
   const fleetCards = fleet.kind === "data" && fleet.data && Array.isArray(fleet.data.cards) ? fleet.data.cards : [];
   if (res.kind === "error") {
     if (!showRefreshError(main, "ag", res.message)) mount(main, [pageHead(null), errorStrip(res.message)]);

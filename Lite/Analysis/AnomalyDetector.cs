@@ -873,9 +873,11 @@ FROM (SELECT (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("
             var baselineBlockingRate = blockingBaseline.SampleCount > 0 ? blockingBaseline.Mean : 0;
             var baselineDeadlockRate = deadlockBaseline.SampleCount > 0 ? deadlockBaseline.Mean : 0;
 
-            // Blocking spike: at least 5 events in the window AND (trustworthy → per-hour rate >= 3x
-            // baseline; untrustworthy → fire on the count alone).
-            if (currentBlocking >= 5 && (!blockingTrust || currentBlockingPerHour / Math.Max(baselineBlockingRate, 1) >= DefaultEventRatioThreshold))
+            // Blocking spike: at least BlockingSpikeMinEvents in the window AND (trustworthy → per-hour rate
+            // >= 3x the bucket's real mean; untrustworthy → fire on the count alone). #7885: the divisor is the
+            // mean itself, floored only at EventBaselineRateEpsilon against a zero; the count gate bounds the
+            // numerator, so a small mean cannot turn a handful of events into an unbounded ratio.
+            if (currentBlocking >= BlockingSpikeMinEvents && (!blockingTrust || currentBlockingPerHour / Math.Max(baselineBlockingRate, EventBaselineRateEpsilon) >= DefaultEventRatioThreshold))
             {
                 var metadata = CountFamilyMetadata.Build(currentBlocking, currentBlockingPerHour, baselineBlockingRate, blockingBaseline, blockingFromDmv);
                 AddBaselineContext(metadata, blockingBaseline);
@@ -890,9 +892,10 @@ FROM (SELECT (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("
                 });
             }
 
-            // Deadlock spike: at least 3 events in the window AND (trustworthy → per-hour rate >= 3x
-            // baseline; untrustworthy → fire on the count alone).
-            if (currentDeadlocks >= 3 && (!deadlockTrust || currentDeadlocksPerHour / Math.Max(baselineDeadlockRate, 1) >= DefaultEventRatioThreshold))
+            // Deadlock spike: at least DeadlockSpikeMinEvents in the window AND (trustworthy → per-hour rate
+            // >= 3x the bucket's real mean; untrustworthy → fire on the count alone). Same divisor rule as the
+            // blocking arm (#7885).
+            if (currentDeadlocks >= DeadlockSpikeMinEvents && (!deadlockTrust || currentDeadlocksPerHour / Math.Max(baselineDeadlockRate, EventBaselineRateEpsilon) >= DefaultEventRatioThreshold))
             {
                 var metadata = CountFamilyMetadata.Build(currentDeadlocks, currentDeadlocksPerHour, baselineDeadlockRate, deadlockBaseline);
                 AddBaselineContext(metadata, deadlockBaseline);

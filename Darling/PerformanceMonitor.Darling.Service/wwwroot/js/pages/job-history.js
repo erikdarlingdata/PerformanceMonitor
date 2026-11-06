@@ -161,16 +161,17 @@ function fill(sel, options, value) {
 
 /** The read takes whole hours back from the end, so a range of 30 minutes comes back as the whole hour. The runs are newest first, so
  *  the row limit drops only the OLDEST ones and cutting at the range's start cannot hide a run inside it; the end is bounded in
- *  the reader (R6), never here. */
+ *  the reader (R6), never here.
+ *  #7960: a run the trim removes lies before the window's start, so the row limit's cut, older still, did too: every run inside the
+ *  window is on the page, and `truncated` is cleared so the limit note is not drawn for runs the person did not ask for. When the trim
+ *  removes nothing the flag stays as the read set it. */
 export function trimRunsToStart(data, w) {
   if (!w || !Array.isArray(data.runs)) return data;
-  return {
-    ...data,
-    runs: data.runs.filter((r) => {
-      const t = Date.parse(r && r.run_time);
-      return !Number.isFinite(t) || t >= w.startMs;
-    }),
-  };
+  const runs = data.runs.filter((r) => {
+    const t = Date.parse(r && r.run_time);
+    return !Number.isFinite(t) || t >= w.startMs;
+  });
+  return runs.length < data.runs.length ? { ...data, runs, truncated: false } : { ...data, runs };
 }
 
 /** The window the held range reads as of now, or the default one when it cannot resolve. */
