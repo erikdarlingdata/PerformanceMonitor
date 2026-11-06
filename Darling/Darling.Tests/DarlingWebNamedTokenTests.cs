@@ -91,10 +91,9 @@ public sealed class DarlingWebNamedTokenTests
     [Theory]
     [InlineData("reader", "reader", false)]
     [InlineData("Reader", "reader", false)]
-    [InlineData(" viewer ", "reader", false)]
     [InlineData("operator", "operator", true)]
-    [InlineData("ADMIN", "operator", true)]
-    public void Check_ServesTheTwoSeats_UnderTheMcpWordsAndTheOidcWords(string role, string normalized, bool canEdit)
+    [InlineData(" OPERATOR ", "operator", true)]
+    public void Check_ServesTheTwoSeats_UnderTheMcpWords(string role, string normalized, bool canEdit)
     {
         var problems = Check(Network(Entry("t", ReaderToken, role)), out var usable);
 
@@ -109,6 +108,8 @@ public sealed class DarlingWebNamedTokenTests
     [InlineData("")]
     [InlineData("agent")]
     [InlineData("editor")]
+    [InlineData("viewer")]
+    [InlineData("admin")]
     public void Check_RefusesARoleThatIsNotAWebSeat(string? role)
     {
         var problems = Check(Network(Entry("t", ReaderToken, role)), out var usable);
