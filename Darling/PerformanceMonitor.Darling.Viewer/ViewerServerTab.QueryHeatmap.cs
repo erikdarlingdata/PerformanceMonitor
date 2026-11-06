@@ -298,7 +298,7 @@ public partial class ViewerServerTab
             ? _lastHeatmapResult.BucketLabels[row]
             : "?";
 
-        var tipText = $"{time}  |  {bucketLabel}  |  {count:N0} queries";
+        var tipText = $"{time}  |  {bucketLabel}  |  {PerformanceMonitor.Common.QueryHeatmapCellText.CountText(count)}";
         if (cell != null && !string.IsNullOrEmpty(cell.TopQueryText))
         {
             // Single line, collapse whitespace, truncate

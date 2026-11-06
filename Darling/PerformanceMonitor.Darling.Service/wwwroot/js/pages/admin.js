@@ -32,8 +32,8 @@ import { routeHash, el, mount, loadingStrip, errorStrip, emptyStrip, plainEmptyS
 import { getSession } from "../views-api.js";
 import { severityLabel } from "./analysis-findings.js";
 import { writeNote, startPractice, writeAccess, SIGN_IN_SENTENCE, NOTE_MAX_LENGTH, NOTE_MAX_DAYS, NOTE_DEFAULT_DAYS } from "../investigation-writes.js";
-import { dailyReportEditor, dailyReportPreviewOnly } from "./admin-daily-report.js";
-import { databaseProtectionEditor } from "./admin-database-protection.js";
+import { dailyReportEditor, dailyReportPreviewOnly, clearDailyReportDraft } from "./admin-daily-report.js";
+import { databaseProtectionEditor, clearDatabaseProtectionDraft } from "./admin-database-protection.js";
 import { buildAgentChanges, resetAgentChangesStatus } from "./admin-agent-changes.js";
 import { buildServerActions, resetServerActionsStatus, engineWord } from "./admin-server-actions.js";
 import { buildPeople, resetPeopleStatus } from "./admin-people.js";
@@ -1537,7 +1537,10 @@ async function buildFeedback(body, generation) {
   const data = res.data || {};
   const requests = Array.isArray(data.requests) ? data.requests : [];
   const families = Array.isArray(data.families) ? data.families : [];
-  const rerender = () => buildFeedback(body, generation);
+  /* #7953: the re-read after a feedback write runs under a new render generation, as every other tab's repaint does. The generation this
+     card was built under is stale once the 60 s poll has drawn, and a re-read under it would return at buildFeedback's first line and
+     draw nothing, leaving "No feedback yet." beside "Feedback recorded." until the next poll. */
+  const rerender = () => (shownTab === "feedback" && shownBody ? startBuilder("feedback", shownBody, ++renderGeneration) : undefined);
   const canRecord = session.can_edit === true && data.can_record === true;
   const nodes = [captionStrip(FEEDBACK_NOTE)];
   if (data.can_record !== true) nodes.push(captionStrip(feedbackListOnly(session.managed_store === true, session.admin_writes_off === true)));
@@ -1715,6 +1718,15 @@ export function pendingNotesTruncatedNotice(data) {
   return "This list shows the oldest " + shown + " pending notes and more are waiting. Approve or reject some and the next ones appear.";
 }
 
+/** The service's own sentence for a refused change, or null. A refusal the service made is a 403 whose body carries a `reason`
+    code beside its `error` sentence (store_refused, admin_writes_off, read_only_seat, reads_only_dashboard, sign_in_required: #7955),
+    and the sentence says what to do about that reason. The page shows it as sent and never matches its words. A 403 with no reason or
+    no sentence did not come from the service's refusal (a proxy, say), so the caller says its own read-only line. */
+function refusalSentence(res, body) {
+  if (!res || res.status !== 403 || !body) return null;
+  return typeof body.reason === "string" && body.reason !== "" && typeof body.error === "string" && body.error !== "" ? body.error : null;
+}
+
 /** What a decision's answer says, in plain words: { message, isError, reread }. `verb` is "approve" or "reject". An expired
     session says nothing here (the shell has already told the person). A note that was already decided, or is gone, is a 404:
     the list is stale, so it is read again. */
@@ -1725,9 +1737,9 @@ export function noteDecisionOutcome(verb, noteId, res) {
   const body = res.body && typeof res.body === "object" ? res.body : null;
   if (res.status === 200 && body && body.status === past) return { message: "Note " + noteId + " " + past + ".", isError: false, reread: true };
   if (res.status === 404) return { message: "Note " + noteId + " was not changed. " + ((body && body.error) || NOTE_NOT_PENDING), isError: true, reread: true };
-  /* The store refused the write for privilege: the web host's login is not the admin role. Its sentence says how to decide; the list stays. */
-  if (res.status === 403 && body && typeof body.error === "string" && body.error.indexOf("Deciding a note needs") === 0) return { message: body.error, isError: true, reread: false };
-  if (res.status === 403 && body && body.error === SIGN_IN_SENTENCE) return { message: body.error, isError: true, reread: false };
+  /* A refusal the service made (the store login's privilege, the admin-writes switch, a read-only seat, no sign-in): its own sentence says what to do; the list stays. */
+  const refused = refusalSentence(res, body);
+  if (refused) return { message: refused, isError: true, reread: false };
   if (res.status === 403) return { message: "This sign-in is read-only, so it cannot " + verb + " notes.", isError: true, reread: false };
   const said = body && typeof body.error === "string" && body.error ? " " + body.error : "";
   return { message: "Note " + noteId + " was not " + past + ". The service answered " + res.status + "." + said, isError: true, reread: false };
@@ -1910,7 +1922,6 @@ const overridesNoteReadOnly = (managed, adminWritesOff) =>
   "This list shows each threshold that differs from the global value, for one server, one database or a server tag. " +
   adminListOnlyNote(managed, "this page lists them only", "To change an override", adminWritesOff);
 const OVERRIDES_NOTE_UNCONFIRMED = "This list shows each threshold that differs from the global value, for one server, one database or a server tag. Could not check whether this sign-in can change them. Reload the page to try again.";
-const OVERRIDE_DENIED = "Changing a threshold override needs";
 
 /** The rows of the overrides grid from the list read's body. `database` and `server_id` stay on the row for Edit and Remove. */
 export function overrideRows(data) {
@@ -1966,9 +1977,8 @@ export function overrideOutcome(verb, res) {
   if (res.status === 200 && body && (body.status === "ok" || body.status === "cleared")) {
     return { message: body.status === "cleared" ? "Override removed. The global value applies again." : "Override saved.", isError: false, reread: true };
   }
-  if (res.status === 403 && body && typeof body.error === "string" && body.error.indexOf(OVERRIDE_DENIED) === 0) {
-    return { message: body.error, isError: true, reread: false };
-  }
+  const refused = refusalSentence(res, body);
+  if (refused) return { message: refused, isError: true, reread: false };
   if (res.status === 403) return { message: "This sign-in is read-only, so it cannot change overrides.", isError: true, reread: false };
   const said = body && typeof body.error === "string" && body.error ? " " + body.error : "";
   return {
@@ -2054,7 +2064,12 @@ function overrideActions(row) {
   });
   const remove = el("button", {
     class: "btn", type: "button", text: "Remove", "aria-label": "Remove " + row.key + " for " + row.scope_text, "data-action": "remove-override",
-    onClick: () => changeOverride("clear", { server: row.tag_id == null ? row.server_name : "", tag: row.tag_id == null ? "" : String(row.tag_id), key: row.key, database: row.database }),
+    onClick: () => {
+      /* #7954: Remove sits beside Edit, so it asks first and names what goes away, as the route Delete does. */
+      const where = row.scope_text + (row.database ? ", database " + row.database : "");
+      if (!window.confirm("Remove the " + row.key + " override for " + where + "? Its value " + row.value + " goes away and the global value applies at the engine's next reload.")) return undefined;
+      return changeOverride("clear", { server: row.tag_id == null ? row.server_name : "", tag: row.tag_id == null ? "" : String(row.tag_id), key: row.key, database: row.database });
+    },
   });
   return el("span", { class: "row-actions" }, [edit, remove]);
 }
@@ -2132,36 +2147,68 @@ function startBuilder(tabId, body, generation) {
   });
 }
 
+/* True when `hash` is this page's: #/admin or #/admin/<tab>. */
+const showsAdmin = (hash) => hash === "#/admin" || hash.startsWith("#/admin/");
+
 /* True when `hash` shows the Servers tab: #/admin or #/admin/servers, or a tab name the page does not know while the
    Servers tab is the one on screen (renderAdmin falls back the same way). */
 function showsServers(hash) {
-  if (hash !== "#/admin" && !hash.startsWith("#/admin/")) return false;
+  if (!showsAdmin(hash)) return false;
   return findTab(hash.slice("#/admin".length).replace(/^\//, "")).id === "servers";
+}
+
+/* #7951: the Alert Settings editors' unsaved text is dropped, so the next draw of the tab shows the saved values. */
+function clearSettingsDrafts() {
+  clearDailyReportDraft();
+  clearDatabaseProtectionDraft();
 }
 
 /* The one hashchange listener (D6, review finding 6). Another Admin tab is seen by renderAdmin, but leaving the page for
    another one is seen by nothing else, because no render of this page follows it. A hash that no longer shows the Servers
-   tab discards the open form, password first, and drops a by-id read still in flight. Discarding twice is harmless. */
+   tab discards the open form, password first, and drops a by-id read still in flight. Discarding twice is harmless.
+   #7951: a hash that leaves Admin also drops the Alert Settings editors' unsaved text. */
 function onHashChange() {
-  if (!showsServers(routeHash())) closeEdit();
+  const hash = routeHash();
+  if (!showsServers(hash)) closeEdit();
+  if (!showsAdmin(hash)) clearSettingsDrafts();
 }
 
-export function renderAdmin(main, tabId) {
+/* #7951: input types a person clicks rather than types in. A click leaves the focus on one, and a poll while it has the focus still draws. */
+const CLICK_INPUT_TYPES = ["checkbox", "radio", "button", "submit", "reset", "file", "range", "color"];
+
+/* #7951: true while the focused element inside `root` is a box a person types in or picks from: a textarea, a select, or an input that
+   takes text (not one of CLICK_INPUT_TYPES). */
+function typingInside(root) {
+  const focused = document.activeElement;
+  if (!focused || !root || !root.contains(focused)) return false;
+  const tag = String(focused.tagName).toUpperCase();
+  if (tag === "TEXTAREA" || tag === "SELECT") return true;
+  return tag === "INPUT" && !CLICK_INPUT_TYPES.includes(String(focused.type || "").toLowerCase());
+}
+
+/** `opts.poll` is true when the 60 s poll (or the Refresh button) re-renders the page; a hashchange and the first paint carry no opts. */
+export function renderAdmin(main, tabId, opts) {
   if (!hashWatched) {
     hashWatched = true;
     window.addEventListener("hashchange", onHashChange);
   }
   const tab = findTab(tabId);
   activeTab = tab.id;
-  const generation = ++renderGeneration;
   /* A repaint of the tab already on screen keeps the body it drew, so the page does not collapse and lose its scroll
      position while the read is in flight; the loading strip is only for the first draw of a tab. */
   const sameTab = !!shownBody && shownTab === tab.id;
+  /* #7951: every tab but Servers mounts new nodes on each draw, so a box being typed in would be a new node and the caret, an open
+     list and an IME composition would be lost. While a form box inside the tab body has the focus, the poll's tick leaves the tab as it
+     is; the next tick draws from the then-current state. A hashchange, a save's repaint and the first paint are not polls and still draw.
+     The Servers tab keeps its nodes across a draw (serverBoxes), so its poll reads the list under an open form and is not held back. */
+  if (opts && opts.poll === true && sameTab && tab.id !== "servers" && shownBody.parentNode === main && typingInside(shownBody)) return;
+  const generation = ++renderGeneration;
   if (!sameTab) {
-    /* Arriving at a tab other than the one on screen discards an open edit form (its password is cleared first) and the
-       Servers tab's page state. The one thing kept is the answer of a save that landed while the Servers tab was off screen:
-       arriving at that tab shows it, once. */
+    /* Arriving at a tab other than the one on screen discards an open edit form (its password is cleared first), the
+       Servers tab's page state and the Alert Settings editors' unsaved text (#7951). The one thing kept is the answer of a
+       save that landed while the Servers tab was off screen: arriving at that tab shows it, once. */
     closeEdit();
+    clearSettingsDrafts();
     layout = null;
     summary = null;
     notesStatus = null;

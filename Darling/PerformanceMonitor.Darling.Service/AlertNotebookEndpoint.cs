@@ -161,8 +161,13 @@ internal static partial class AlertNotebookEndpoint
             List<DarlingAlertReader.AlertHistoryReadRow> historyRows = new();
             try
             {
-                historyRows = await DarlingAlertReader.GetAlertHistoryAsync(
-                    postgres, anchor - DarlingTriageEndpoint.AlertMatchLookback, windowEnd, serverId, 200, context.RequestAborted);
+                /* #7918: dismissed rows are in the match window. Dismissal is the operator's acknowledgement, not a
+                   fact about whether the alert fired, and the link names a firing: with the dismissed row left out,
+                   the dedup match finds nothing and the nearest-row fallback in MatchAlert shows a different firing
+                   of the same metric as this one. The envelope carries the row's dismissed flag so the page can say so. */
+                historyRows = await DarlingAlertReader.GetAlertHistoryPageAsync(
+                    postgres, anchor - DarlingTriageEndpoint.AlertMatchLookback, windowEnd, serverId, 200,
+                    includeDismissed: true, cancellationToken: context.RequestAborted);
 
                 (matchedRow, matchedIncident) = MatchAlert(historyRows, metric, dedup, anchor);
 
@@ -192,10 +197,10 @@ internal static partial class AlertNotebookEndpoint
 
             /* #4755: status arms 1 and 2 read the FIRST resolution row and the FIRST later firing straight from
                the store -- two targeted reads with no window and no shared row cap (see ReadStatusRowsAsync) --
-               instead of scanning the 24-hour, 200-row, newest-first, dismissed-excluded window the match read
-               above uses. That window missed a resolution that landed later than 24 hours, one that sat behind
-               200 newer rows (a fleet-level alert has no server id, so one cap covered every server), and one
-               the viewer's "Dismiss all" had hidden. The match read above stays for the alert match. */
+               instead of scanning the 24-hour, 200-row, newest-first window the match read above uses. That
+               window missed a resolution that landed later than 24 hours and one that sat behind 200 newer rows
+               (a fleet-level alert has no server id, so one cap covered every server). The match read above
+               stays for the alert match. */
             List<DarlingAlertReader.AlertHistoryReadRow> statusHistoryRows = new();
             var statusHistoryStopwatch = Stopwatch.StartNew();
             try
@@ -1328,6 +1333,8 @@ internal static partial class AlertNotebookEndpoint
             ["current_value"] = row.CurrentValue,
             ["threshold_value"] = row.ThresholdValue,
             ["detail_text"] = row.DetailText,
+            /* #7918: whether an operator dismissed this firing, so the page can show the card as a dismissed one. */
+            ["dismissed"] = row.Dismissed,
             /* #5642: the fire-time age of the newest sample, read from the persisted context. */
             ["newest_sample"] = NewestSampleNode(row.ContextJson),
             /* #5654: the source an external alert came from, read from the persisted context; null for every built-in alert. */
