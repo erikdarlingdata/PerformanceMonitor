@@ -148,8 +148,14 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     ///
     /// <para><b>Guarded on the snapshot existing</b> (<c>newest IS NOT NULL</c>): a server that has never
     /// collected database_states, or whose rows have aged out, produces an empty snapshot, and an unguarded
-    /// anti-join against nothing deletes EVERY row. The subselect always yields one row (MAX over zero rows
-    /// is NULL), so the guard is what turns "no snapshot" into "prune nothing" instead of "prune all".</para>
+    /// anti-join against nothing deletes EVERY row. #8013: the newest <c>collection_time</c> is resolved before
+    /// this statement runs (<see cref="NewestDatabaseStateWindowedProbeSql"/>, then
+    /// <see cref="NewestDatabaseStateFallbackProbeSql"/> when the window is empty) and bound as <c>$4</c>; a null
+    /// result skips the statement for every prefix, so "no snapshot" is "prune nothing" before the store is
+    /// asked to delete. The in-statement guard stays as the same promise, read off the statement itself.
+    /// Resolving the snapshot first is what lets the planner exclude every <c>database_states</c> chunk but the
+    /// one holding it: the correlated form planned a subplan per retained chunk, about 59 ms a call over
+    /// 287,000 calls on a production store.</para>
     ///
     /// <para><b>And guarded on the snapshot being NEWER than the state row</b>
     /// (<c>s.updated_at &lt; snapshot.newest</c>), which is the stronger of the two and the one that makes
@@ -189,7 +195,7 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     /// </summary>
     internal const string PruneOrphanedDatabaseStateKeysSql = @"
 DELETE FROM collector_state s
-USING (SELECT MAX(collection_time) AS newest FROM database_states WHERE server_id = $1) snapshot
+USING (SELECT $4::timestamp AS newest) snapshot
 WHERE s.server_id = $1
 AND   s.collector_name = $2
 AND   starts_with(s.state_key, $3)
@@ -204,6 +210,17 @@ AND   NOT EXISTS
           AND   s.state_key = $3 || ds.database_name
       )
 RETURNING s.state_key";
+
+    /// <summary>#8013: the newest <c>database_states</c> snapshot inside a window, $1 server_id, $2 window start. Bounded
+    /// below so the planner excludes every chunk before the window at plan time; not bounded above, because the collector
+    /// host's clock is not this reader's and a snapshot stamped a few minutes ahead is still the newest.</summary>
+    internal const string NewestDatabaseStateWindowedProbeSql =
+        "SELECT MAX(collection_time) FROM database_states WHERE server_id = $1 AND collection_time >= $2";
+
+    /// <summary>The unbounded fallback of the probe above, run only when the window is empty, so a server whose collection
+    /// stopped earlier still resolves its newest snapshot. $1 server_id. NULL when the server has no database_states rows.</summary>
+    internal const string NewestDatabaseStateFallbackProbeSql =
+        "SELECT MAX(collection_time) FROM database_states WHERE server_id = $1";
 
     /// <summary>
     /// The Azure SQL DB variant (#2191): prune every per-database state key that is not the ONE database this
@@ -252,6 +269,32 @@ RETURNING s.state_key";
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
             var pruned = new List<string>();
 
+            /* #8013: the snapshot is resolved once, for every prefix, before any delete: a windowed probe (two days,
+               generous over the one-minute cadence) that lets the planner exclude every older chunk, then the unbounded
+               probe only when the window is empty. The windowed MAX, when it finds a row, IS the unbounded MAX. */
+            object? snapshot;
+            using (var probe = new NpgsqlCommand(NewestDatabaseStateWindowedProbeSql, connection))
+            {
+                probe.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+                probe.Parameters.AddWithValue(serverId);
+                probe.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-2), DateTimeKind.Unspecified));
+                snapshot = await probe.ExecuteScalarAsync(cancellationToken);
+            }
+
+            if (snapshot is not DateTime)
+            {
+                using var fallback = new NpgsqlCommand(NewestDatabaseStateFallbackProbeSql, connection);
+                fallback.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+                fallback.Parameters.AddWithValue(serverId);
+                snapshot = await fallback.ExecuteScalarAsync(cancellationToken);
+            }
+
+            if (snapshot is not DateTime newest)
+            {
+                /* No database_states snapshot: nothing can be judged dropped, so nothing is deleted. */
+                return true;
+            }
+
             foreach (var (owner, prefix) in QueryStorePerDatabaseState.PrunableKeys)
             {
                 using var command = new NpgsqlCommand(PruneOrphanedDatabaseStateKeysSql, connection);
@@ -259,6 +302,7 @@ RETURNING s.state_key";
                 command.Parameters.AddWithValue(serverId);
                 command.Parameters.AddWithValue(owner);
                 command.Parameters.AddWithValue(prefix);
+                command.Parameters.AddWithValue(DateTime.SpecifyKind(newest, DateTimeKind.Unspecified));
 
                 /* RETURNING rather than a rows-affected count: the only symptom of a WRONG delete here is a
                    silent refetch, so a bare number would leave nothing to diagnose it with. The keys name

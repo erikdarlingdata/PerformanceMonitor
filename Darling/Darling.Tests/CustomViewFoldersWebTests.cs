@@ -147,6 +147,30 @@ public sealed class CustomViewFoldersWebTests
     }
 
     [Fact]
+    public void TheViewList_KeepsTheLastGoodListWhenAPollReadFails_AndSaysSo()
+    {
+        if (!TryRun("readFailed", out var r)) return;
+
+        var good = Strings(r.GetProperty("good"));
+        Assert.Contains("V:Waits", good);
+        Assert.Contains("V:＋ New view", good);
+        Assert.DoesNotContain(good, line => line.StartsWith("N:", StringComparison.Ordinal));
+
+        /* #7929: a failed poll read (an error, a 429) keeps every row of the last good list, under a note that says why. */
+        var after = Strings(r.GetProperty("afterFailure"));
+        Assert.Equal("N:Views unavailable, showing the last list", after[0]);
+        Assert.Equal(good, after.Skip(1).ToArray());
+        Assert.DoesNotContain("No views yet", r.GetProperty("failureText").GetString());
+
+        /* No earlier list to keep: the note alone. Only an answered empty list says "No views yet". */
+        Assert.Equal(new[] { "Views unavailable" }, Strings(r.GetProperty("noEarlierList")));
+        Assert.Equal(new[] { "No views yet" }, Strings(r.GetProperty("answeredEmpty")));
+
+        /* The next good read clears the note. */
+        Assert.Equal(good, Strings(r.GetProperty("recovered")));
+    }
+
+    [Fact]
     public void TheEditorFields_OfferFolderAndPersonalOnlyWhereTheStoreWouldAllowThem_AndSayWhy()
     {
         if (!TryRun("fields", out var r)) return;

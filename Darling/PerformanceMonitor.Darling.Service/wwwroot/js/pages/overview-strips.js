@@ -116,10 +116,13 @@ export function valueAt(points, tMs, spanMs, isEvent = false) {
 
 /**
  * The strips' series from the six reads' replies (each `{ kind, data, message }` as readTool returns). A strip whose read failed
- * or answered nothing keeps its reason in `note` and has no series, so the page says why rather than drawing an empty axis.
+ * or answered nothing keeps its reason in `note` and has no series, so the page says why rather than drawing an empty axis. A read that
+ * failed is also named in `errorNote` (#7921), which the strip's header shows when another of its series has points and the page shows when
+ * no strip has any.
  */
 export function buildStrips(reads) {
   const note = (res, fallback) => (!res ? fallback : res.kind === "error" ? res.message : res.kind === "empty" ? res.message || fallback : null);
+  const failedNote = (res, label) => (res && res.kind === "error" ? label + ": " + res.message : null);
   const rowsOf = (res, key) => (res && res.kind === "data" && res.data && Array.isArray(res.data[key]) ? res.data[key] : []);
 
   const cpuRows = rowsOf(reads.cpu, "samples");
@@ -136,6 +139,7 @@ export function buildStrips(reads) {
     ],
     hostNote: cpuRows.length && !hostKnown ? "This server cannot report host CPU" : null,
     note: note(reads.cpu, "No CPU samples in this window."),
+    errorNote: failedNote(reads.cpu, "CPU"),
   };
 
   const waits = {
@@ -143,6 +147,7 @@ export function buildStrips(reads) {
     key: "waits", title: "Waits", unit: "ms/sec", min: 0,
     series: [{ label: "Wait time", color: "#ffb74d", points: toTimed(rowsOf(reads.waits, "trend"), "time", (r) => r.wait_time_ms_per_second) }],
     note: note(reads.waits, "No wait samples in this window."),
+    errorNote: failedNote(reads.waits, "Waits"),
   };
 
   /* #7219: get_blocking_trend counts blocked-process reports, or DMV snapshot rows when the window holds no reports (the AWS RDS case
@@ -159,11 +164,15 @@ export function buildStrips(reads) {
   /* Blocking and deadlocks are events: a window with none is a true "nothing happened", said on the strip, but a read that FAILED is an error. */
   const blockNote = [reads.blocking, reads.deadlocks].find((r) => r && r.kind === "error");
   blocking.note = blockNote ? blockNote.message : "No blocking or deadlocks in this window.";
+  /* #7921: the strip has two reads. A failed one is named for its series, so when the other read answers points the header says which line is
+     missing instead of the strip reading as "no blocking". */
+  blocking.errorNote = [failedNote(reads.blocking, blocking.series[0].label), failedNote(reads.deadlocks, "Deadlocks")].filter(Boolean).join(" ") || null;
 
   const memory = {
     key: "memory", title: "Buffer pool", unit: "MB", min: 0,
     series: [{ label: "Buffer pool", color: "#ce93d8", points: toTimed(rowsOf(reads.memory, "trend"), "time", (r) => r.buffer_pool_mb) }],
     note: note(reads.memory, "No memory samples in this window."),
+    errorNote: failedNote(reads.memory, "Buffer pool"),
   };
 
   const ioBucketMs = (res, withCadence) => {
@@ -180,6 +189,7 @@ export function buildStrips(reads) {
        collector is slower than the bucket (`bucketMsOf` returned 1.5 times that step), since such a row holds the reads of the whole step. */
     series: [{ label: "Read latency", color: "#81c784", points: weightedReadLatency(rowsOf(reads.io, "trend")), bucketMs: ioStepMs, readSpanMs: ioStepMs > ioWidthMs ? ioStepMs / 1.5 : ioWidthMs }],
     note: note(reads.io, "No file I/O samples in this window."),
+    errorNote: failedNote(reads.io, "I/O latency"),
   };
 
   return [cpu, waits, blocking, memory, io];
@@ -379,8 +389,8 @@ export function drawStrips(strips, domain, width, onZoom) {
         if (b.mean != null && b.mean >= yMin && b.mean <= yMax) g.appendChild(svg("line", { class: "strip-band-mean", x1, x2, y1: y(b.mean), y2: y(b.mean) }));
       }
     }
-    /* A strip with data but no band says why, in its header: never a band at 0. */
-    if (s.baselineNote && hasData) {
+    /* A strip with data but no band says why, in its header: never a band at 0. When a read failed, the header names the failure instead (#7921), because the error matters more than the missing band. */
+    if (s.baselineNote && hasData && !s.errorNote) {
       const bn = svg("text", { class: "strip-baseline-note", x: plotR, y: top + 12, "text-anchor": "end" });
       bn.textContent = s.baselineNote;
       g.appendChild(bn);
@@ -391,6 +401,12 @@ export function drawStrips(strips, domain, width, onZoom) {
       const hn = svg("tspan", { class: "strip-baseline-note", dx: 8 });
       hn.textContent = s.hostNote;
       title.appendChild(hn);
+    }
+    /* #7921: a read that failed beside a series with points is named in the header, as the host note is, so the missing series is not read as nothing happened. */
+    if (s.errorNote && hasData) {
+      const en = svg("tspan", { class: "strip-baseline-note strip-error-note", dx: 8 });
+      en.textContent = s.errorNote;
+      title.appendChild(en);
     }
 
     if (!hasData) {
@@ -576,7 +592,15 @@ export function fillOverviewStrips(body, server, ctx) {
     const anyData = strips.some((s) => s.series.some((ser) => ser.points.length));
     const allFailed = results.every((r) => r.kind === "error");
     if (allFailed) return mount(body, readErrorStrip(results[0].message));
-    if (!anyData) return mount(body, [results.map((r) => keptWindowStrip(r)).find(Boolean) || null, emptyStrip("No overview samples in this window.")]);
+    if (!anyData) {
+      /* #7921: a page with no points and a failed read names the failure. The no-samples sentence alone is what a server with nothing collected says. */
+      const failed = strips.map((s) => s.errorNote).filter(Boolean);
+      return mount(body, [
+        results.map((r) => keptWindowStrip(r)).find(Boolean) || null,
+        ...failed.map((text) => readErrorStrip(text)),
+        emptyStrip(failed.length ? "No overview samples in this window from the reads that answered." : "No overview samples in this window."),
+      ]);
+    }
 
     const kept = results.map((r) => r.keptHours).filter(Boolean);
     const window = windowFromHours(kept.length ? Math.min(...kept) : ctx.hours);

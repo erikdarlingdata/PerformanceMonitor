@@ -126,7 +126,7 @@ try {
     'import { el } from "./util.js";\nexport const SERIES_COLORS = [];\nexport function normalizeColor(c) { return c; }\nexport function renderLineChart() { return el("div", {}); }\n' +
       'export function zoomableLineChart() { return el("div", {}); }\nexport function chartZoomScope() { return ""; }\n'
   );
-  const { renderJobHistory, JOB_HISTORY_COLUMNS, limitNote, noAgentLine } = await import(pathToFileURL(path.join(scratch, "pages", "job-history.js")).href);
+  const { renderJobHistory, JOB_HISTORY_COLUMNS, limitNote, noAgentLine, trimRunsToStart } = await import(pathToFileURL(path.join(scratch, "pages", "job-history.js")).href);
 
   const run = {
     runs: [
@@ -191,6 +191,29 @@ try {
   pickRange(main, "Window", "30m");
   await settle();
   out.range.thirtyMinutes = { calls: historyCalls().map((c) => c.q), shown: all(main, "div").filter((d) => d.className === "muted").map((d) => d.textContent) };
+  /* #7960: a read the row limit cut (truncated) whose oldest run lies before a sub-hour window's start. The runs are newest first, so the
+     limit cut runs older still: every run inside the window is on the page, and no limit note is drawn. With every run inside the window
+     the note stays, with the runs shown as its N. */
+  const strips = (root, cls) => all(root, "div").filter((d) => d.className === cls).map((d) => d.textContent);
+  const at = (minutesAgo) => new Date(Date.now() - minutesAgo * 60000).toISOString();
+  fetches.length = 0;
+  historyBody = JSON.stringify({ ...run, truncated: true, runs: [{ ...run.runs[0], run_time: at(5) }, { ...run.runs[1], run_time: at(50) }] });
+  pickRange(main, "Window", "45m");
+  await settle();
+  out.range.cutBeforeStart = { calls: historyCalls().map((c) => c.q), shown: strips(main, "muted"), notices: strips(main, "strip notice") };
+  fetches.length = 0;
+  historyBody = JSON.stringify({ ...run, truncated: true, runs: [{ ...run.runs[0], run_time: at(5) }, { ...run.runs[1], run_time: at(20) }] });
+  pickRange(main, "Window", "30m");
+  await settle();
+  out.range.cutInsideWindow = { calls: historyCalls().map((c) => c.q), shown: strips(main, "muted"), notices: strips(main, "strip notice") };
+  /* The trim on the data itself: truncated is cleared only when a run was removed, and never set. */
+  const w = { startMs: Date.now() - 30 * 60000 };
+  const removedOne = trimRunsToStart({ truncated: true, runs: [{ run_time: at(5) }, { run_time: at(50) }] }, w);
+  out.trim = {
+    removedOne: { truncated: removedOne.truncated, runs: removedOne.runs.length },
+    removedNone: trimRunsToStart({ truncated: true, runs: [{ run_time: at(5) }, { run_time: at(20) }] }, w).truncated,
+    notCut: trimRunsToStart({ truncated: false, runs: [{ run_time: at(5) }, { run_time: at(50) }] }, w).truncated,
+  };
   historyBody = JSON.stringify(run);
   /* Which periods the popup greys out depends on the date: Month to Date is a real, reachable range for the first 7 days of a month
      (and Year to Date for the first 7 days of January), so on the real clock the list changed with the day the suite ran (#7055).

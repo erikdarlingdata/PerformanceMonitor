@@ -20,6 +20,11 @@ public sealed class McpAlertTools
     /// <summary>All non-idle CPU. Darling's <c>ViewerDataService.CpuModeTotal</c>.</summary>
     internal const string CpuModeTotal = "total";
 
+    /// <summary>#7902: how far back <c>get_alert_history</c> reaches, in hours: the alert log's retention
+    /// (<see cref="RetentionService.ArchiveRetentionMonths"/>, at 30 days a month), the same 2160 hours Darling's twin
+    /// serves. The read is bounded by its row limit, so a long window costs a page, not a scan.</summary>
+    internal const int AlertHistoryMaxHours = RetentionService.ArchiveRetentionMonths * 30 * 24;
+
     /// <summary>The wire-side deprecation note for <c>poison_wait.threshold_ms</c> (#3653) — Darling's
     /// <c>DarlingMcpAlertTools.PoisonWaitThresholdMsNote</c>, byte for byte; <c>McpAlertSettingsKeyTests</c>
     /// reads that declaration to hold the two equal, the way it holds the cpu.mode vocabulary.</summary>
@@ -47,7 +52,7 @@ public sealed class McpAlertTools
     internal static string CpuModeFor(CpuAlertMode mode) =>
         mode == CpuAlertMode.SqlOnly ? CpuModeSql : CpuModeTotal;
 
-    [McpServerTool(Name = "get_alert_history"), Description("Gets alert history, NEWEST FIRST: each row FIRED; notification_type says whether it was DELIVERED, a separate question from DISMISSED (UI-acknowledged), excluded by default. THE PAGE IS BOUNDED BY limit, NOT hours_back: truncated says the window held more, and oldest/newest_returned_alert_time bound how far the page reached. An EMPTY page can mean no alerts fired, or that every alert here was dismissed: dismissed_excluded_count says which; include_dismissed = true returns them, labelled dismissed = true. A null send_error proves nothing about delivery.<<GUIDE>>Gets recent alert history from the alert log, NEWEST FIRST. Shows what alerts fired, when, and whether email was sent successfully. state_only is true on a row whose alert reports a state, not a measurement (Database State, Agent Not Running, a resolution): its current_value and threshold_value are a stored 0 that is not a reading, so do not read them as a number. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: alerts_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_alert_time / newest_returned_alert_time bound the page — under newest-first ordering the oldest stamp IS how far back this read reached. Raise limit or narrow hours_back when truncated is true; widening hours_back cannot help. BY DEFAULT THIS READ EXCLUDES DISMISSED ALERTS — rows an operator acknowledged in the Alerts History tab. Dismissal says nothing about whether the alert fired or mattered, so an incident reconstruction that ignores it can miss the very critical someone already looked at: dismissed_excluded says whether the filter applied and dismissed_excluded_count is how many rows in the window it removed, and include_dismissed = true returns them, each labelled dismissed = true. On this edition an alert that was dismissed AFTER aging into the parquet archive is removed by the archive view itself and can be neither returned nor counted here. notification_type is the delivery disposition and is the ONLY field that says why a row did not deliver: 'email'/'webhook'/'email+webhook' delivered on that channel; 'tray' is this instance's own balloon notification, which every non-muted alert gets, so it is what most rows read here and it does NOT report the email or webhook outcome; 'failed' means a channel was attempted and came back unsuccessful, with send_error carrying the first failing channel's text; 'muted' means a mute rule suppressed it; 'digest' means the analysis finding was UNCORROBORATED (one fact in its chain, no matched co-fire check) and the corroboration gate kept it off email, the webhooks and the tray — it is persisted, shown in Recommendations with a not-paged marker, and routing_reason on the row says which components decided; 'none' is a resolution row, which no channel applies to. Do NOT split the not-delivered rows on send_error: it is null whenever a cooldown or the per-metric repeat budget suppressed a send, on 'digest' rows, and on every row written before those dispositions existed. 'throttled' and 'folded' are recorded by the headless service; on this instance the tray channel answers first, so a cooldown-suppressed or folded send is stored as 'tray'. 'undelivered' is a retained legacy value that means throttled OR folded OR failed with nothing in the row to say which. severity is the row's tier — 'critical', 'warning', 'info' or 'resolution' — and severity_source says where it came from: 'fired' when the row persisted the tier the alert actually fired at (graded alerts such as Poison Wait, Volume Free Space and Database State fire Warning OR Critical by measurement), 'metric_name' when the row carries no tier and the metric's name is the only evidence (rows written before the tier was persisted, alerts whose severity is fixed per metric, and every resolution row). Do not infer a graded alert's tier from its name: a 'Poison Wait' row with severity 'warning' fired as a warning. routing is the corroboration gate's decision for an 'Analysis: …' finding, one step upstream of delivery: 'page' when it earned a channel (two or more facts in its chain, a matched co-fire check, or one of the two by-construction stories), 'digest' when it was a lone uncorroborated fact; routing_reason names the components. Both are null on engine alerts and on analysis rows written before the gate existed. Dismissal is an acknowledgement, not a verdict — a dismissed critical still fired — so set this when reconstructing an incident rather than triaging what is still open. Each row then carries dismissed so the two populations stay distinguishable. Optional metric_name and family narrow the page IN THE QUERY, ahead of limit (#6074): metric_name matches the stored alert name exactly, ignoring case; family is one of self-monitor, reports, agent-jobs, performance, external (get_notification_routes lists them) and covers every alert in that family, a recovery row included. An unknown family or a name with no alerts in the window answers empty and names the filter, so a mistyped filter is distinguishable from a quiet window. include_streak = true adds streak_days to each row (#6261): how many days in a row, counting back from the day before that alert, the same metric on the same server fired within 30 minutes of its time of day, so 'this is the Nth day in a row' is streak_days + 1. A muted fire counts (it fired); a recovery row has null. streak_days is at most 7 (the look-back), and streak_at_least_days_window true means it filled the look-back, so it is a floor, not an exact count. Rows carry neither field unless include_streak is set.")]
+    [McpServerTool(Name = "get_alert_history"), Description("Gets alert history, NEWEST FIRST: each row FIRED; notification_type says whether it was DELIVERED, a separate question from DISMISSED (UI-acknowledged), excluded by default. THE PAGE IS BOUNDED BY limit, NOT hours_back: truncated says the window held more, and oldest/newest_returned_alert_time bound how far the page reached. An EMPTY page can mean no alerts fired, or that every alert here was dismissed: dismissed_excluded_count says which; include_dismissed = true returns them, labelled dismissed = true. A null send_error proves nothing about delivery.<<GUIDE>>Gets recent alert history from the alert log, NEWEST FIRST. Shows what alerts fired, when, and whether email was sent successfully. state_only is true on a row whose alert reports a state, not a measurement (Database State, Agent Not Running, a resolution): its current_value and threshold_value are a stored 0 that is not a reading, so do not read them as a number. hours_back reaches 2160 (90 days, the alert log's retention). Omit server_name to see every monitored server (each row names its server); pass one to scope to a single server. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: alerts_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_alert_time / newest_returned_alert_time bound the page — under newest-first ordering the oldest stamp IS how far back this read reached. Raise limit or narrow hours_back when truncated is true; widening hours_back cannot help. BY DEFAULT THIS READ EXCLUDES DISMISSED ALERTS — rows an operator acknowledged in the Alerts History tab. Dismissal says nothing about whether the alert fired or mattered, so an incident reconstruction that ignores it can miss the very critical someone already looked at: dismissed_excluded says whether the filter applied and dismissed_excluded_count is how many rows in the window it removed, and include_dismissed = true returns them, each labelled dismissed = true. On this edition an alert that was dismissed AFTER aging into the parquet archive is removed by the archive view itself and can be neither returned nor counted here. notification_type is the delivery disposition and is the ONLY field that says why a row did not deliver: 'email'/'webhook'/'email+webhook' delivered on that channel; 'tray' is this instance's own balloon notification, which every non-muted alert gets, so it is what most rows read here and it does NOT report the email or webhook outcome; 'failed' means a channel was attempted and came back unsuccessful, with send_error carrying the first failing channel's text; 'muted' means a mute rule suppressed it; 'digest' means the analysis finding was UNCORROBORATED (one fact in its chain, no matched co-fire check) and the corroboration gate kept it off email, the webhooks and the tray — it is persisted, shown in Recommendations with a not-paged marker, and routing_reason on the row says which components decided; 'none' is a resolution row, which no channel applies to. Do NOT split the not-delivered rows on send_error: it is null whenever a cooldown or the per-metric repeat budget suppressed a send, on 'digest' rows, and on every row written before those dispositions existed. 'throttled' and 'folded' are recorded by the headless service; on this instance the tray channel answers first, so a cooldown-suppressed or folded send is stored as 'tray'. 'undelivered' is a retained legacy value that means throttled OR folded OR failed with nothing in the row to say which. severity is the row's tier — 'critical', 'warning', 'info' or 'resolution' — and severity_source says where it came from: 'fired' when the row persisted the tier the alert actually fired at (graded alerts such as Poison Wait, Volume Free Space and Database State fire Warning OR Critical by measurement), 'metric_name' when the row carries no tier and the metric's name is the only evidence (rows written before the tier was persisted, alerts whose severity is fixed per metric, and every resolution row). Do not infer a graded alert's tier from its name: a 'Poison Wait' row with severity 'warning' fired as a warning. routing is the corroboration gate's decision for an 'Analysis: …' finding, one step upstream of delivery: 'page' when it earned a channel (two or more facts in its chain, a matched co-fire check, or one of the two by-construction stories), 'digest' when it was a lone uncorroborated fact; routing_reason names the components. Both are null on engine alerts and on analysis rows written before the gate existed. Dismissal is an acknowledgement, not a verdict — a dismissed critical still fired — so set this when reconstructing an incident rather than triaging what is still open. Each row then carries dismissed so the two populations stay distinguishable. Optional metric_name and family narrow the page IN THE QUERY, ahead of limit (#6074): metric_name matches the stored alert name exactly, ignoring case; family is one of self-monitor, reports, agent-jobs, performance, external (get_notification_routes lists them) and covers every alert in that family, a recovery row included. An unknown family or a name with no alerts in the window answers empty and names the filter, so a mistyped filter is distinguishable from a quiet window. include_streak = true adds streak_days to each row (#6261): how many days in a row, counting back from the day before that alert, the same metric on the same server fired within 30 minutes of its time of day, so 'this is the Nth day in a row' is streak_days + 1. A muted fire counts (it fired); a recovery row has null. streak_days is at most 7 (the look-back), and streak_at_least_days_window true means it filled the look-back, so it is a floor, not an exact count. Rows carry neither field unless include_streak is set.")]
     public static async Task<string> GetAlertHistory(
         LocalDataService dataService,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
@@ -58,13 +63,17 @@ public sealed class McpAlertTools
         [Description("Include alerts an operator has dismissed in the Alerts History tab. Default false, which is the tab's own read.")] bool include_dismissed = false,
         [Description("Only alerts with this metric name (e.g. 'High CPU', 'Blocking Detected'), matched exactly, ignoring case. Omit for every metric.")] string? metric_name = null,
         [Description("Alert family: self-monitor, reports, agent-jobs, performance or external. Not an investigation family such as blocking or resources: filter those with metric_name. Omit for all.")] string? family = null,
-        [Description("Add streak_days to each row: days in a row (up to 7) this metric fired at this time of day before the alert, muted fires counting. Default false: rows are unchanged.")] bool include_streak = false)
+        [Description("Add streak_days to each row: days in a row (up to 7) this metric fired at this time of day before the alert, muted fires counting. Default false: rows are unchanged.")] bool include_streak = false,
+        /* #7902: Darling's twin takes server_name; appended here for the same reason the filters above are. */
+        [Description("Server name or display name. Omit to return alerts across all servers (the default).")] string? server_name = null,
+        /* DI-resolved (no [Description]), trailing so every positional caller keeps compiling; only a named server needs it. */
+        ServerManager? serverManager = null)
     {
-        var answer = await GetAlertHistoryCore(dataService, hours_back, limit, as_of, include_dismissed, metric_name, family, include_streak);
+        var answer = await GetAlertHistoryCore(dataService, hours_back, limit, as_of, include_dismissed, metric_name, family, include_streak, server_name, serverManager);
         /* #7005: the floor is the store's data floor (the wait_stats collector, which every collecting server runs every cycle: the oldest of its runs or rows any server has in the window; not the collection log, which also holds the Query Store backfill's older runs),
            not the oldest alert row: a window that holds no alert is not truncation, a window that starts before the data is. The alert log is
            archived and pruned with the collector tables (ArchiveService.ArchivableTables), so it has no earlier cutoff of its own. */
-        if (McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) != null)
+        if (McpHelpers.ValidateWindow(hours_back, as_of, AlertHistoryMaxHours, out var windowEnd) != null)
         {
             return answer;
         }
@@ -94,15 +103,35 @@ public sealed class McpAlertTools
         [Description("Include alerts an operator has dismissed in the Alerts History tab. Default false, which is the tab's own read.")] bool include_dismissed = false,
         [Description("Only alerts with this metric name (e.g. 'High CPU', 'Blocking Detected'), matched exactly, ignoring case. Omit for every metric.")] string? metric_name = null,
         [Description("Alert family: self-monitor, reports, agent-jobs, performance or external. Not an investigation family such as blocking or resources: filter those with metric_name. Omit for all.")] string? family = null,
-        [Description("Add streak_days to each row: days in a row (up to 7) this metric fired at this time of day before the alert, muted fires counting. Default false: rows are unchanged.")] bool include_streak = false)
+        [Description("Add streak_days to each row: days in a row (up to 7) this metric fired at this time of day before the alert, muted fires counting. Default false: rows are unchanged.")] bool include_streak = false,
+        [Description("Server name or display name. Omit to return alerts across all servers (the default).")] string? server_name = null,
+        ServerManager? serverManager = null)
     {
         try
         {
-            var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
+            /* #7902: the alert log keeps three months and the read is bounded by its row limit, so the window reaches the retention, as Darling's does. */
+            var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, AlertHistoryMaxHours, out var windowEnd);
             if (hoursError != null) return hoursError;
 
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
+
+            /* #7902: optional server scope, applied in the SQL ahead of the row cap (Darling's twin): a named server resolves and
+               scopes; omitted is every monitored server, the Alerts History tab's own default. */
+            int? serverId = null;
+            var scope = "(all servers)";
+            if (!string.IsNullOrWhiteSpace(server_name))
+            {
+                if (serverManager is null)
+                {
+                    return McpHelpers.Refusal("server_name", "server_name cannot be resolved on this call: no server registry was supplied.");
+                }
+
+                var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
+                if (error != null) return error;
+                serverId = resolved.ServerId;
+                scope = resolved.DisplayName;
+            }
 
             /* #3541 A3: over-fetch by one so truncation is OBSERVED rather than inferred from count == limit.
                The cap was already the caller's here; what was missing was any way to tell a window of
@@ -113,7 +142,7 @@ public sealed class McpAlertTools
             var (metricFilter, familyFilter) = AlertFamily.NormalizeHistoryFilter(metric_name, family);
             var filterSentence = AlertFamily.DescribeHistoryFilter(metricFilter, familyFilter);
 
-            var rows = await dataService.GetAlertHistoryAsync(hours_back, limit + 1, asOfUtc: windowEnd, includeDismissed: include_dismissed, metricName: metricFilter, family: familyFilter);
+            var rows = await dataService.GetAlertHistoryAsync(hours_back, limit + 1, serverId: serverId, asOfUtc: windowEnd, includeDismissed: include_dismissed, metricName: metricFilter, family: familyFilter);
             var truncated = rows.Count > limit;
             var page = truncated ? rows.Take(limit).ToList() : rows;
 
@@ -122,7 +151,7 @@ public sealed class McpAlertTools
                construction. */
             var dismissedExcludedCount = include_dismissed
                 ? 0L
-                : await dataService.CountDismissedAlertsAsync(hours_back, serverId: null, asOfUtc: windowEnd, metricName: metricFilter, family: familyFilter);
+                : await dataService.CountDismissedAlertsAsync(hours_back, serverId: serverId, asOfUtc: windowEnd, metricName: metricFilter, family: familyFilter);
 
             if (page.Count == 0)
             {
@@ -219,6 +248,8 @@ public sealed class McpAlertTools
 
             return JsonSerializer.Serialize(new
             {
+                /* #7902: the scope the page was read under, as Darling's twin reports it: the chosen server's display name, or every server. */
+                server = scope,
                 hours_back,
                 /* #3541 A3: `total_alerts` is gone — it was the page count under a name that promised the
                    window. What is published is what was measured: the page, whether the window held more,

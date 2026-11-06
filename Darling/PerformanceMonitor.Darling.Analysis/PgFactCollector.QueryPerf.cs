@@ -135,6 +135,18 @@ LIMIT " + FactRanked.MaxObjects + ";";
 
             if (totalSpills > 0)
             {
+                /* #7884: the period and coverage stamps the wait facts carry, so the scorer grades pages per OBSERVED hour
+                   (FactScorer.ObservedHours) and the same spill rate reads the same at every hours_back. */
+                var spillMetadata = new Dictionary<string, double>
+                {
+                    ["total_spills"] = totalSpills,
+                    /* #5633: DISTINCT queries (database + query_hash) with a spill, not snapshot rows. */
+                    ["spilling_query_count"] = spillingQueries,
+                    ["total_executions"] = totalExecutions,
+                    ["period_duration_ms"] = context.PeriodDurationMs
+                };
+                FactCollectorHelpers.AddCoverageFraction(spillMetadata, context);
+
                 facts.Add(new Fact
                 {
                     Source = "queries",
@@ -143,13 +155,7 @@ LIMIT " + FactRanked.MaxObjects + ";";
                     ServerId = context.ServerId,
                     ObjectName = spillRanked.Count > 0 ? spillRanked[0].ObjectName : null,
                     Ranked = spillRanked,
-                    Metadata = new Dictionary<string, double>
-                    {
-                        ["total_spills"] = totalSpills,
-                        /* #5633: DISTINCT queries (database + query_hash) with a spill, not snapshot rows. */
-                        ["spilling_query_count"] = spillingQueries,
-                        ["total_executions"] = totalExecutions
-                    }
+                    Metadata = spillMetadata
                 });
             }
 
@@ -1449,16 +1455,34 @@ AND   delta_execution_count > 0";
 
     public const string PlanAdvisorySql = @"
 SELECT query_plan_xml, query_plan_gz
-FROM v_query_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-/* #2069: plan content written since V54 lives as gzip bytes (query_plan_gz) with the text
-   column NULL, so the presence guard and the projection both carry BOTH forms and the read
-   loop resolves text-else-gz (PayloadDimensions.ResolveContent). A guard on query_plan_xml
-   alone matches nothing on a store using the default plan_xml_compression = 'gzip', which
-   costs this collector every MISSING_INDEX and PLAN_WARNING it exists to emit. */
-AND   (query_plan_xml IS NOT NULL OR query_plan_gz IS NOT NULL)
+FROM
+(
+    SELECT
+        query_plan_xml,
+        query_plan_gz,
+        delta_worker_time,
+        /* #7886: one row per plan. v_query_stats holds one row per query per snapshot, and every snapshot
+           row of a cached plan resolves to the same plan XML. Without this rank the hottest plan fills all
+           ten slots and is parsed once per snapshot, so PLAN_WARNING's warning_count and critical_count
+           multiply by its snapshot count and the two facts cover one to three plans instead of ten. The
+           plan's costliest snapshot row stands for it, and the limit below counts distinct plans. A plan is
+           a statement's plan in one database: query_plan_hash is a shape hash that two statements with one
+           shape share, as does one statement in two databases, and a hashless row's plan_handle is shared by
+           every statement in its batch, so database_name and query_hash stay in the key. The window sorts
+           every in-window row that has a plan, plan column included, before the limit takes ten. */
+        ROW_NUMBER() OVER (PARTITION BY database_name, query_hash, COALESCE(query_plan_hash, plan_handle) ORDER BY delta_worker_time DESC) AS plan_rank
+    FROM v_query_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    /* #2069: plan content written since V54 lives as gzip bytes (query_plan_gz) with the text
+       column NULL, so the presence guard and the projection both carry BOTH forms and the read
+       loop resolves text-else-gz (PayloadDimensions.ResolveContent). A guard on query_plan_xml
+       alone matches nothing on a store using the default plan_xml_compression = 'gzip', which
+       costs this collector every MISSING_INDEX and PLAN_WARNING it exists to emit. */
+    AND   (query_plan_xml IS NOT NULL OR query_plan_gz IS NOT NULL)
+) AS ranked
+WHERE plan_rank = 1
 ORDER BY delta_worker_time DESC
 LIMIT 10";
 
