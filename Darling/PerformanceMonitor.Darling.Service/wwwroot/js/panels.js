@@ -64,7 +64,8 @@ import {
   localizeAlertDetail,
   noValuesText,
 } from "./util.js";
-import { zoomableLineChart, chartZoomScope, SERIES_COLORS, bucketMsOf } from "./charts.js";
+import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
+import { bucketMsOf } from "./chart-gaps.js";
 import { plainText, plainTextNamed, plainTextCounts, shortEmptyLine } from "./plain-text.js";
 import { panelPlotPx } from "./trend-points.js";
 import { withheldDisplayText } from "./mute-context.js";
