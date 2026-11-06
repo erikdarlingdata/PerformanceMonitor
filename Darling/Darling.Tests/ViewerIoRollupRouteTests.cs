@@ -83,9 +83,9 @@ public sealed class ViewerIoRollupRouteTests
             Assert.Contains("HAVING", with, StringComparison.Ordinal);
         }
 
-        /* No new ranking: the ORDER BY is untouched (queries rank by elapsed, procedures by worker time). */
+        /* No new ranking: the ORDER BY is untouched (both grids are "by Duration", so both arms rank by elapsed). */
         Assert.Contains("ORDER BY SUM(elapsed_time_sum) DESC", ViewerDataService.BuildTopQueriesHourlySql(From, withIo: true), StringComparison.Ordinal);
-        Assert.Contains("ORDER BY SUM(worker_time_sum) DESC", ViewerDataService.BuildTopProceduresHourlySql(From, withIo: true), StringComparison.Ordinal);
+        Assert.Contains("ORDER BY SUM(elapsed_time_sum) DESC", ViewerDataService.BuildTopProceduresHourlySql(From, withIo: true), StringComparison.Ordinal);
     }
 
     /// <summary>Source pin: both arms decide with <c>IoHourlyCoversWindow</c> and name the io view only through

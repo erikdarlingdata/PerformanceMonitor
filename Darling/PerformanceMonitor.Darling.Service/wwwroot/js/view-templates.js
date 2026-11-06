@@ -389,7 +389,7 @@ export const DASHBOARD_TEMPLATES = [
             rowsKey: "trace_flags",
             emptyText: "No trace flags are enabled on this server.",
             columns: [
-              { key: "trace_flag", label: "Flag", format: "int" },
+              { key: "trace_flag", label: "Flag", format: "id" },
               { key: "enabled", label: "Enabled", format: "bool" },
               { key: "is_global", label: "Global", format: "bool" },
             ],
