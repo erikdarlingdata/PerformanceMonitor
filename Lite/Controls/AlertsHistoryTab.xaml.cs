@@ -162,7 +162,7 @@ public partial class AlertsHistoryTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Error("AlertsHistory", $"Failed to load alert history: {ex.Message}");
+            AppLogger.Error("AlertsHistory", $"Failed to load alert history: {ex.Message}", ex);
         }
     }
 
@@ -458,7 +458,7 @@ public partial class AlertsHistoryTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Error("AlertsHistory", $"Failed to dismiss selected alerts: {ex.Message}");
+            AppLogger.Error("AlertsHistory", $"Failed to dismiss selected alerts: {ex.Message}", ex);
         }
         finally
         {
@@ -538,7 +538,7 @@ public partial class AlertsHistoryTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Error("AlertsHistory", $"Failed to dismiss all alerts: {ex.Message}");
+            AppLogger.Error("AlertsHistory", $"Failed to dismiss all alerts: {ex.Message}", ex);
         }
         finally
         {
@@ -593,7 +593,7 @@ public partial class AlertsHistoryTab : UserControl
             }
             catch (Exception ex)
             {
-                AppLogger.Error("AlertDetail", $"Could not read the findings attached to {item.MetricName}: {ex.Message}");
+                AppLogger.Error("AlertDetail", $"Could not read the findings attached to {item.MetricName}: {ex.Message}", ex);
             }
         }
 

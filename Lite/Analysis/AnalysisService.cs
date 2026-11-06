@@ -525,7 +525,7 @@ public class AnalysisService
         }
         catch (Exception ex)
         {
-            AppLogger.Error("AnalysisService", $"Analysis failed for {context.ServerName}: {ex.Message}");
+            AppLogger.Error("AnalysisService", $"Analysis failed for {context.ServerName}: {ex.Message}", ex);
             return [];
         }
         finally

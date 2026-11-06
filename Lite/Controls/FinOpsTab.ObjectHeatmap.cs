@@ -168,7 +168,7 @@ public partial class FinOpsTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Failed to load object growth heatmap: {ex.Message}");
+            AppLogger.Error("FinOps", $"Failed to load object growth heatmap: {ex.Message}", ex);
         }
     }
 
@@ -188,7 +188,7 @@ public partial class FinOpsTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Failed to load object index detail: {ex.Message}");
+            AppLogger.Error("FinOps", $"Failed to load object index detail: {ex.Message}", ex);
         }
     }
 

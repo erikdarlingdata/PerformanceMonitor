@@ -7756,7 +7756,9 @@ WHERE c.is_enabled";
                host's in-memory TLS certificate state publish (WebTlsCertificateState for the web host,
                McpTlsCertificateState for the MCP host), and this method performs no store read. Two literal
                messages in ONE catch rather than a templated one: the failed-read census reads this catch's
-               text, and the web line stays byte-identical to what it has always logged. */
+               text, and the web line's formatted message stays byte-identical to what it has always logged.
+               The exception rides with each call, so the file log appends " | Type: Message" to that line, and
+               the console log also shows the stack. */
             if (listener == TlsListener.Mcp)
             {
                 _logger?.LogError(ex, "MCP TLS certificate self-alert failed: {Message}", ex.Message);

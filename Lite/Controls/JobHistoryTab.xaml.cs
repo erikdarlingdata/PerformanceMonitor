@@ -251,7 +251,7 @@ public partial class JobHistoryTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Error("JobHistory", $"Failed to load job history: {ex.Message}");
+            AppLogger.Error("JobHistory", $"Failed to load job history: {ex.Message}", ex);
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
             LoadingMessage.Visibility = Visibility.Collapsed;
@@ -442,7 +442,7 @@ public partial class JobHistoryTab : UserControl
             /* Logged once for a window; the next refresh still reads again. */
             if (_choicesFailures.ShouldLog("categories", key))
             {
-                AppLogger.Error("JobHistory", $"Failed to load the job history category choices: {ex.Message}");
+                AppLogger.Error("JobHistory", $"Failed to load the job history category choices: {ex.Message}", ex);
             }
 
             return null;

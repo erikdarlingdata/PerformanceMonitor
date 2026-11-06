@@ -373,7 +373,7 @@ public partial class FinOpsTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Failed to load recommendations: {ex.Message}");
+            AppLogger.Error("FinOps", $"Failed to load recommendations: {ex.Message}", ex);
         }
     }
 
@@ -446,7 +446,7 @@ public partial class FinOpsTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Failed to load utilization: {ex.Message}");
+            AppLogger.Error("FinOps", $"Failed to load utilization: {ex.Message}", ex);
         }
     }
 
@@ -624,7 +624,7 @@ public partial class FinOpsTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Failed to load database resources: {ex.Message}");
+            AppLogger.Error("FinOps", $"Failed to load database resources: {ex.Message}", ex);
         }
     }
 
@@ -653,7 +653,7 @@ public partial class FinOpsTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Failed to load application connections: {ex.Message}");
+            AppLogger.Error("FinOps", $"Failed to load application connections: {ex.Message}", ex);
         }
     }
 
@@ -765,7 +765,7 @@ public partial class FinOpsTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Failed to load database sizes: {ex.Message}");
+            AppLogger.Error("FinOps", $"Failed to load database sizes: {ex.Message}", ex);
         }
     }
 
@@ -810,7 +810,7 @@ public partial class FinOpsTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Failed to load PVS stats: {ex.Message}");
+            AppLogger.Error("FinOps", $"Failed to load PVS stats: {ex.Message}", ex);
         }
     }
 
@@ -905,7 +905,7 @@ public partial class FinOpsTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Failed to load server inventory: {ex.Message}");
+            AppLogger.Error("FinOps", $"Failed to load server inventory: {ex.Message}", ex);
         }
     }
 
@@ -931,7 +931,7 @@ public partial class FinOpsTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Failed to load storage growth: {ex.Message}");
+            AppLogger.Error("FinOps", $"Failed to load storage growth: {ex.Message}", ex);
         }
     }
 
@@ -972,7 +972,7 @@ public partial class FinOpsTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Failed to load idle databases: {ex.Message}");
+            AppLogger.Error("FinOps", $"Failed to load idle databases: {ex.Message}", ex);
         }
     }
 
@@ -990,7 +990,7 @@ public partial class FinOpsTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Failed to load tempdb summary: {ex.Message}");
+            AppLogger.Error("FinOps", $"Failed to load tempdb summary: {ex.Message}", ex);
         }
     }
 
@@ -1010,7 +1010,7 @@ public partial class FinOpsTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Failed to load high-impact queries: {ex.Message}");
+            AppLogger.Error("FinOps", $"Failed to load high-impact queries: {ex.Message}", ex);
         }
     }
 
@@ -1042,7 +1042,7 @@ public partial class FinOpsTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Failed to load wait category summary: {ex.Message}");
+            AppLogger.Error("FinOps", $"Failed to load wait category summary: {ex.Message}", ex);
         }
     }
 
@@ -1075,7 +1075,7 @@ public partial class FinOpsTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Failed to load expensive queries: {ex.Message}");
+            AppLogger.Error("FinOps", $"Failed to load expensive queries: {ex.Message}", ex);
         }
     }
 
@@ -1093,7 +1093,7 @@ public partial class FinOpsTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Failed to load memory grant efficiency: {ex.Message}");
+            AppLogger.Error("FinOps", $"Failed to load memory grant efficiency: {ex.Message}", ex);
         }
     }
 
@@ -1346,7 +1346,7 @@ public partial class FinOpsTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Error("FinOps", $"Failed to run index analysis: {ex.Message}");
+            AppLogger.Error("FinOps", $"Failed to run index analysis: {ex.Message}", ex);
             if (_loads.Superseded(nameof(RunIndexAnalysis_Click), gen)) return;
             IndexAnalysisStatusText.Text = $"Error: {DuckDbMemoryLimitSetting.Describe(ex)}";
         }

@@ -188,7 +188,7 @@ public partial class MainWindow : Window
         {
             /* The engine absorbs per-check failures itself; this catches the truly unexpected so
                an async-void sweep can never take down the dispatcher. Badges stay untouched. */
-            AppLogger.Error("Alerts", $"Alert sweep failed for {summary.DisplayName}: {ex.Message}");
+            AppLogger.Error("Alerts", $"Alert sweep failed for {summary.DisplayName}: {ex.Message}", ex);
             return;
         }
 
@@ -322,7 +322,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            AppLogger.Error("ConnectionAlerts", $"Connection alert delivery failed for {metricName}: {ex.Message}");
+            AppLogger.Error("ConnectionAlerts", $"Connection alert delivery failed for {metricName}: {ex.Message}", ex);
             return Task.FromResult<PerformanceMonitor.Notifications.AlertDelivery?>(null);
         }
     }
@@ -358,7 +358,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            AppLogger.Error("ConnectionAlerts", $"Recording the Server Unreachable delivery failed: {ex.Message}");
+            AppLogger.Error("ConnectionAlerts", $"Recording the Server Unreachable delivery failed: {ex.Message}", ex);
         }
         finally
         {
@@ -561,7 +561,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            AppLogger.Error("AgAlerts", $"Availability Group alert evaluation failed for {serverName}: {ex.Message}");
+            AppLogger.Error("AgAlerts", $"Availability Group alert evaluation failed for {serverName}: {ex.Message}", ex);
         }
         finally
         {
@@ -628,7 +628,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            AppLogger.Error("AgAlerts", $"AG alert delivery failed for {alert.MetricName}: {ex.Message}");
+            AppLogger.Error("AgAlerts", $"AG alert delivery failed for {alert.MetricName}: {ex.Message}", ex);
             return Task.FromResult<PerformanceMonitor.Notifications.AlertDelivery?>(null);
         }
     }

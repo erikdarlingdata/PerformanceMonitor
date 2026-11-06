@@ -122,11 +122,11 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
             _consecutiveLogFailures++;
             if (_consecutiveLogFailures <= 3)
             {
-                AppLogger.Error("EmailAlert", $"Failed to log alert ({_consecutiveLogFailures}x): {ex.Message}");
+                AppLogger.Error("EmailAlert", $"Failed to log alert ({_consecutiveLogFailures}x): {ex.Message}", ex);
             }
             else if (_consecutiveLogFailures % 50 == 0)
             {
-                AppLogger.Error("EmailAlert", $"Alert logging STILL broken: {_consecutiveLogFailures} failures. Last: {ex.Message}");
+                AppLogger.Error("EmailAlert", $"Alert logging STILL broken: {_consecutiveLogFailures} failures. Last: {ex.Message}", ex);
             }
         }
     }
@@ -195,7 +195,7 @@ AND   send_error IS NULL"
         }
         catch (Exception ex)
         {
-            AppLogger.Error("EmailAlert", $"Could not read persisted alert cooldown: {ex.Message}");
+            AppLogger.Error("EmailAlert", $"Could not read persisted alert cooldown: {ex.Message}", ex);
             return null;
         }
     }
@@ -264,7 +264,7 @@ AND   notification_type IN ('webhook', 'email+webhook')"
         }
         catch (Exception ex)
         {
-            AppLogger.Error("WebhookAlert", $"Could not read persisted webhook cooldown: {ex.Message}");
+            AppLogger.Error("WebhookAlert", $"Could not read persisted webhook cooldown: {ex.Message}", ex);
             return null;
         }
     }
@@ -336,7 +336,7 @@ AND   metric_name = $2"
         }
         catch (Exception ex)
         {
-            AppLogger.Error("AnalysisNotify", $"Could not read persisted analysis cooldown: {ex.Message}");
+            AppLogger.Error("AnalysisNotify", $"Could not read persisted analysis cooldown: {ex.Message}", ex);
             return null;
         }
     }
@@ -514,7 +514,7 @@ AND   alert_sent"
         }
         catch (Exception ex)
         {
-            AppLogger.Error("AnalysisNotify", $"Could not read persisted delivered-page seed: {ex.Message}");
+            AppLogger.Error("AnalysisNotify", $"Could not read persisted delivered-page seed: {ex.Message}", ex);
             return null;
         }
     }
@@ -622,7 +622,7 @@ WHERE watermark_time IS NULL";
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Could not load edge-trigger watermarks: {ex.Message}");
+            AppLogger.Error("Alerts", $"Could not load edge-trigger watermarks: {ex.Message}", ex);
             throw;
         }
         return result;
@@ -664,7 +664,7 @@ VALUES ($1, $2, $3, $4)";
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Could not persist edge-trigger watermark ({metricName}): {ex.Message}");
+            AppLogger.Error("Alerts", $"Could not persist edge-trigger watermark ({metricName}): {ex.Message}", ex);
         }
     }
 
@@ -718,7 +718,7 @@ AND   metric_name = $2";
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Could not load incident occurrences ({metricName}): {ex.Message}");
+            AppLogger.Error("Alerts", $"Could not load incident occurrences ({metricName}): {ex.Message}", ex);
             return new List<(string, long, int, DateTime, DateTime)>();
         }
         return result;
@@ -816,7 +816,7 @@ AND   metric_name = $2"
             /* A dropped write costs accuracy on the NEXT delivery's total — the fingerprint reads as new and
                restarts, with a fresh start time saying so — never a missed or duplicated alert, which the
                gate has already decided by this point. */
-            AppLogger.Error("Alerts", $"Could not persist incident occurrences ({metricName}): {ex.Message}");
+            AppLogger.Error("Alerts", $"Could not persist incident occurrences ({metricName}): {ex.Message}", ex);
         }
     }
 
@@ -868,7 +868,7 @@ AND   metric_name = $2";
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Could not load the alert persistence gate ({metricName}): {ex.Message}");
+            AppLogger.Error("Alerts", $"Could not load the alert persistence gate ({metricName}): {ex.Message}", ex);
             throw;
         }
     }
@@ -927,7 +927,7 @@ ON CONFLICT (server_id, metric_name) DO UPDATE SET
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Could not persist the alert persistence gate ({metricName}): {ex.Message}");
+            AppLogger.Error("Alerts", $"Could not persist the alert persistence gate ({metricName}): {ex.Message}", ex);
         }
     }
 
@@ -977,7 +977,7 @@ AND   watermark_time IS NOT NULL";
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Could not load failed-job watermarks: {ex.Message}");
+            AppLogger.Error("Alerts", $"Could not load failed-job watermarks: {ex.Message}", ex);
             throw;
         }
         return result;
@@ -1019,7 +1019,7 @@ VALUES ($1, $2, 0, $3, $4)";
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Could not persist failed-job watermark: {ex.Message}");
+            AppLogger.Error("Alerts", $"Could not persist failed-job watermark: {ex.Message}", ex);
         }
     }
 
@@ -1065,7 +1065,7 @@ AND   database_name = $2";
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Could not record the alerted database state for {databaseName}: {ex.Message}");
+            AppLogger.Error("Alerts", $"Could not record the alerted database state for {databaseName}: {ex.Message}", ex);
         }
     }
 
@@ -1109,7 +1109,7 @@ AND   database_name = $2";
         }
         catch (Exception ex)
         {
-            AppLogger.Error("Alerts", $"Could not clear the alerted database state for {databaseName}: {ex.Message}");
+            AppLogger.Error("Alerts", $"Could not clear the alerted database state for {databaseName}: {ex.Message}", ex);
         }
     }
 }
