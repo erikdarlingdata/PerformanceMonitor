@@ -2025,6 +2025,54 @@ VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8, $9, 100, $10, $11)";
     }
 
     /// <summary>
+    /// #7883: seeds ONE Agent job RUN observed across several collection ticks - the shape a job that stays
+    /// past its limit leaves behind, since the collector writes one running_jobs row per running job per
+    /// tick. Every tick carries the same job_id and the same start_time (the run's identity) with a growing
+    /// current duration; ticks are five minutes apart, newest at the usual seed tick unless
+    /// <paramref name="newestMinutesBeforePeriodEnd"/> moves it, which is how a test seeds a SECOND run of
+    /// the same job (same job_id, a different start_time).
+    /// </summary>
+    internal async Task SeedRunningJobTicksAsync(
+        string jobName, string jobId, int ticks, bool isRunningLong, double percentOfAverage = 400,
+        int newestMinutesBeforePeriodEnd = 10)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
+
+        var newest = TestPeriodEnd.AddMinutes(-newestMinutesBeforePeriodEnd);
+        var runStart = newest.AddSeconds(-(ticks * 300L + 3_600));
+        for (var i = 0; i < ticks; i++)
+        {
+            var t = newest.AddMinutes(-5 * (ticks - 1 - i));
+            var currentSeconds = (long)(t - runStart).TotalSeconds;
+
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+INSERT INTO running_jobs
+    (collection_time, server_id, server_name, job_name, job_id,
+     job_enabled, start_time, current_duration_seconds,
+     avg_duration_seconds, p95_duration_seconds, successful_run_count,
+     is_running_long, percent_of_average)
+VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8, $9, 100, $10, $11)";
+
+            cmd.Parameters.Add(new DuckDBParameter { Value = t });
+            cmd.Parameters.Add(new DuckDBParameter { Value = TestServerId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = TestServerName });
+            cmd.Parameters.Add(new DuckDBParameter { Value = jobName });
+            cmd.Parameters.Add(new DuckDBParameter { Value = jobId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = runStart });
+            cmd.Parameters.Add(new DuckDBParameter { Value = currentSeconds });
+            cmd.Parameters.Add(new DuckDBParameter { Value = isRunningLong ? currentSeconds / 3 : currentSeconds });
+            cmd.Parameters.Add(new DuckDBParameter { Value = isRunningLong ? currentSeconds / 2 : currentSeconds * 2 });
+            cmd.Parameters.Add(new DuckDBParameter { Value = isRunningLong });
+            cmd.Parameters.Add(new DuckDBParameter { Value = percentOfAverage });
+
+            await cmd.ExecuteNonQueryAsync();
+        }
+    }
+
+    /// <summary>
     /// Seeds session_stats with per-application connection data.
     /// </summary>
     internal async Task SeedSessionStatsAsync(

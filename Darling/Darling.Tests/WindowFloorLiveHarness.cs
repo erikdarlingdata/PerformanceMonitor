@@ -62,6 +62,27 @@ FROM generate_series($4::timestamp, $5::timestamp, make_interval(mins => $6)) AS
 SELECT COALESCE(MAX(log_id), 0) + 1, $1, $2, $3, $4, 12, $5, 0 FROM collection_log",
             ServerIdHelper.GetDeterministicHashCode(name), name, collector, DarlingMcpTestData.Naive(at), status);
 
+    /// <summary>The collectors whose reads call a row current only when it came from the collector's newest successful run (<see cref="PgCurrentCapture"/>).</summary>
+    private static readonly string[] CurrentCaptureCollectors = ["pg_xmin_horizon", "pg_autovacuum_stats", "pg_replication_slots", "pg_wraparound_stats"];
+
+    /// <summary>
+    /// #7878, #7910: after a row of one of <see cref="CurrentCaptureCollectors"/> is stored at <paramref name="at"/>, drops the collector's
+    /// runs from that instant on and logs one SUCCESS run a second later, so the row belongs to the newest run and the read reports it as
+    /// current. Any other collector is left alone.
+    /// </summary>
+    public static async Task MakeRowCurrentAsync(NpgsqlConnection connection, string name, string collector, DateTime at, CancellationToken ct)
+    {
+        if (Array.IndexOf(CurrentCaptureCollectors, collector) < 0)
+        {
+            return;
+        }
+
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            "DELETE FROM collection_log WHERE server_id = $1 AND collector_name = $2 AND collection_time >= $3",
+            ServerIdHelper.GetDeterministicHashCode(name), collector, DarlingMcpTestData.Naive(at));
+        await SeedRunAsync(connection, name, collector, "SUCCESS", at.AddSeconds(1), ct);
+    }
+
     public static async Task DeleteServerAsync(NpgsqlConnection connection, string name, string[] tables, CancellationToken ct)
     {
         var serverId = ServerIdHelper.GetDeterministicHashCode(name);

@@ -102,6 +102,53 @@ public sealed class ViewerPostgresPlainNoteTests
         Assert.Contains("PostgreSQL 16", io.Detail, StringComparison.Ordinal);
     }
 
+    public static TheoryData<string, int> ClearedPanels => new()
+    {
+        { "xmin", 3 },
+        { "autovacuum", 3 },
+        { "wraparound", 3 },
+        { "slot", 3 },
+    };
+
+    private static ViewerServerTab.ClearedRows ClearedFor(string panel, int count) => panel switch
+    {
+        "xmin" => ViewerServerTab.ClearedRows.Xmin(count),
+        "autovacuum" => ViewerServerTab.ClearedRows.Autovacuum(count),
+        "wraparound" => ViewerServerTab.ClearedRows.Wraparound(count),
+        _ => ViewerServerTab.ClearedRows.Slot(count),
+    };
+
+    /// <summary>#7878, #7910: a holder that finished, a table vacuumed clean, a dropped slot or database leaves the grid empty. "Nothing happened in this window" is then false.</summary>
+    [Theory]
+    [MemberData(nameof(ClearedPanels))]
+    public void AnEmptyGrid_WithClearedRows_SaysHowManyLeftTheNewestCapture_NotThatNothingHappened(string panel, int cleared)
+    {
+        var note = ViewerServerTab.EmptyNoteParts(null, offline: false, rowCount: 0, Short, Full, ClearedFor(panel, cleared));
+
+        Assert.Contains("3 ", note.Text, StringComparison.Ordinal);
+        Assert.Contains("from earlier in this window are not in the newest capture", note.Text, StringComparison.Ordinal);
+        Assert.Contains("newest capture", note.Text.Split('.')[0], StringComparison.Ordinal);
+        Assert.DoesNotContain(Short, note.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("healthy answer", note.Text, StringComparison.Ordinal);
+        Assert.Null(note.Detail);
+    }
+
+    [Fact]
+    public void ClearedRows_AreCountedSingularAndAsAFloor_AndNeverOverrideAnEngineGapOrAnOfflineServer()
+    {
+        Assert.Equal("1 xmin holder from earlier in this window is not in the newest capture, so it is not listed here.",
+            ViewerServerTab.ClearedRows.Xmin(1).Sentence);
+        Assert.StartsWith("At least 2 tables from earlier in this window are not in the newest capture",
+            ViewerServerTab.ClearedRows.Autovacuum(2, atLeast: true).Sentence, StringComparison.Ordinal);
+
+        var cleared = ViewerServerTab.ClearedRows.Slot(2);
+        Assert.Equal("gap", ViewerServerTab.EmptyNoteParts("gap", offline: false, rowCount: 0, Short, Full, cleared).Text);
+        Assert.Equal(ViewerServerTab.OfflineEmptyText, ViewerServerTab.EmptyNoteParts(null, offline: true, rowCount: 0, Short, Full, cleared).Text);
+        Assert.Equal(cleared.Sentence, ViewerServerTab.EmptyNoteParts(null, offline: false, rowCount: 4, Short, Full, cleared).Text);
+        Assert.Equal(string.Empty, ViewerServerTab.EmptyNoteParts(null, offline: false, rowCount: 4, Short, Full, ViewerServerTab.ClearedRows.Slot(0)).Text);
+        Assert.Equal(Short, ViewerServerTab.EmptyNoteParts(null, offline: false, rowCount: 0, Short, Full, ViewerServerTab.ClearedRows.Slot(0)).Text);
+    }
+
     [Fact]
     public void PlanCaptureFacetLabel_IsPlain_CapitalisedForTheGrid_AndKeepsAnUnknownFacetsName()
     {
