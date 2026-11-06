@@ -43,7 +43,7 @@ public class CollectionBackgroundService : BackgroundService
     private readonly ILogger<CollectionBackgroundService>? _logger;
 
     private static readonly TimeSpan CollectionInterval = TimeSpan.FromMinutes(1);
-    /* Start at UtcNow so maintenance tasks don't all fire on the very first cycle. */
+    /* Archival starts at UtcNow so it does not fire on the very first cycle. */
     private DateTime _lastArchiveTime = DateTime.UtcNow;
 
     /* #2058: the Query Store backfill tick — one byte-budgeted slice per server per due-tick, on
@@ -54,10 +54,16 @@ public class CollectionBackgroundService : BackgroundService
        once per idle tick. Starts true to match the setting's default — a deployment that never touches the
        switch therefore logs nothing about it. */
     private bool _queryStoreBackfillWasEnabled = true;
-    private DateTime _lastRetentionTime = DateTime.UtcNow;
     private DateTime _lastAnalysisTime = DateTime.UtcNow;
-    private DateTime _lastFindingsCleanupTime = DateTime.UtcNow;
-    private DateTime _lastDismissedAlertsCleanupTime = DateTime.UtcNow;
+
+    /* The three daily cleanups start at MinValue, so each runs on the first housekeeping tick (one HousekeepingInterval
+       after the first collection round) and daily from there. The stamps live only in memory, and a desktop session is
+       usually shorter than the 24-hour interval, so a stamp seeded with the launch time leaves the findings table and
+       the dismissed-alert sidecar growing until the size-triggered reset wipes them. Each step is a bounded parquet-file
+       sweep or a few DELETEs, cheap enough to run that soon after startup. */
+    private DateTime _lastRetentionTime = DateTime.MinValue;
+    private DateTime _lastFindingsCleanupTime = DateTime.MinValue;
+    private DateTime _lastDismissedAlertsCleanupTime = DateTime.MinValue;
 
     /* Server IDs whose scheduled analysis is currently running — prevents relaunching
        analysis for a server whose previous (possibly hung) pass has not finished. The value

@@ -1800,7 +1800,7 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
                #6665: this tests row.QueryText, which is NULL on the separate-text-fetch path (FetchQueryTextSeparately nulls
                query_sql_text, and Darling turns it on), so on that path the drop does not fire and the statement's stats rows are
                stored. Darling hides it at READ time instead (QueryStoreSelfStatement); Lite keeps inline text and drops it here. */
-            if (row.QueryText?.Contains(SelfQueryMarker, StringComparison.Ordinal) == true)
+            if (SqlServerOwnStatement.IsOwnStatement(row.QueryText))
             {
                 continue;
             }

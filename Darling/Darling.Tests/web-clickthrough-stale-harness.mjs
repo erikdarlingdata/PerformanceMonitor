@@ -151,6 +151,13 @@ const scenarios = {
     offline: chips(modules.fleet.metricBands(card({ is_online: false }))),
     online: chips(modules.fleet.metricBands(card({ last_collection: iso(1000) }))),
   }),
+  /* #7682: a SQL Server that cannot report host CPU has a SQL figure and no total, so its CPU chip reads "SQL CPU" and says why under it. A
+     server with a host figure keeps "Total CPU" over "SQL 18% · other 7%", and a PostgreSQL target with only a CPU figure keeps "CPU". */
+  hostCpu: async () => ({
+    noHost: chips(modules.fleet.metricBands(card({ last_collection: iso(1000), cpu_percent: 41, total_cpu_percent: null, other_process_cpu_percent: null }))),
+    measured: chips(modules.fleet.metricBands(card({ last_collection: iso(1000), cpu_percent: 18, total_cpu_percent: 25, other_process_cpu_percent: 7 }))),
+    postgres: chips(modules.fleet.metricBands(card({ last_collection: iso(1000), is_postgres: true, cpu_percent: 41, total_cpu_percent: null, other_process_cpu_percent: null }))),
+  }),
   /* #6901: a chip's detail is clamped to one line with an ellipsis, so the full sentence has to be on the detail's title. */
   longDetail: async () => ({
     chips: chips(modules.fleet.metricBands(card({

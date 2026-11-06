@@ -153,7 +153,7 @@ public sealed class ToolRecommendationsTests
         Assert.NotNull(advice);
         Assert.Contains("12 pressure notifications", advice!.Investigation, StringComparison.Ordinal);
         Assert.Contains("process indicator peaked at 3 and the system indicator at 1", advice.Investigation, StringComparison.Ordinal);
-        Assert.Contains("get_memory_pressure_events", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("The Memory Pressure Events sub-tab under Memory lists each notification", advice.Investigation, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -164,7 +164,7 @@ public sealed class ToolRecommendationsTests
         var advice = FactAdvice.Compose("MEMORY_PRESSURE_EVENTS", new Dictionary<string, Fact> { [fact.Key] = fact });
 
         Assert.NotNull(advice);
-        Assert.Contains("get_memory_pressure_events", advice!.Investigation, StringComparison.Ordinal);
+        Assert.Contains("The Memory Pressure Events sub-tab under Memory lists each notification", advice!.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("The finding carries", advice.Investigation, StringComparison.Ordinal);
     }
 }

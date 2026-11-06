@@ -738,7 +738,7 @@ public static class FactAdvice
     /// <para><b>Slice two: three families, one grammar.</b> Each change on the fact is decoded from its
     /// ObjectName segment (<see cref="ConfigChangeAttribution.Changes"/>) and described in its family's own
     /// words — a server setting exactly as above (that prose is pinned and unchanged), a database option as
-    /// "<c>`AdventureWorks` recovery_model FULL → SIMPLE</c>" (set to / cleared when one side was NULL), a
+    /// "<c>the recovery model of `AdventureWorks` changed from FULL to SIMPLE</c>" (set to / cleared when one side was NULL; #7726), a
     /// trace flag as "<c>trace flag 4199 enabled (GLOBAL)</c>" / "disabled (was GLOBAL)" / "scope changed (now
     /// …)". The headline names the family ("Database configuration changed", "Trace flag changed") or, for an
     /// event folded across families at one connect, "Configuration changed: N configuration changes observed
@@ -778,12 +778,14 @@ public static class FactAdvice
             {
                 case ConfigChangeAttribution.ChangeFamily.DatabaseConfig:
                 {
-                    var db = $"`{change.DatabaseName}`";
+                    /* #7726 item 7: the setting and the database in words, the same words the "no matching line" list uses (UndatedSettingText),
+                       not the store key ("`Sales` recovery_model FULL → SIMPLE"). */
+                    var phrase = UndatedSettingText(change);
                     described.Add(change.OldText is null && change.NewText is not null
-                        ? $"{db} {change.Setting} set to {change.NewText}"
+                        ? $"{phrase} set to {change.NewText}"
                         : change.OldText is not null && change.NewText is null
-                            ? $"{db} {change.Setting} cleared (was {change.OldText})"
-                            : $"{db} {change.Setting} {change.OldText ?? "(none)"} → {change.NewText ?? "(none)"}");
+                            ? $"{phrase} cleared (was {change.OldText})"
+                            : $"{phrase} changed from {change.OldText ?? "(none)"} to {change.NewText ?? "(none)"}");
                     break;
                 }
                 case ConfigChangeAttribution.ChangeFamily.TraceFlags:
@@ -846,7 +848,7 @@ public static class FactAdvice
             }
             var undated = changes.Where(c => !fact.Metadata.ContainsKey(ConfigChangeAttribution.TraceChangeTimeUnixKey(c.Name))).ToList();
             if (undated.Count > 0 && undated.Count < changes.Count)
-                inv.Append($" The trace dated {changes.Count - undated.Count} of the {changes.Count} settings; {string.Join(", ", undated.Select(c => $"`{c.Name}`"))} had no matching line in the span between snapshots and shares this anchor.");
+                inv.Append($" The trace dated {changes.Count - undated.Count} of the {changes.Count} settings; {string.Join(", ", undated.Select(UndatedSettingText))} had no matching line in the span between snapshots and shares this anchor.");
         }
         else
         {
@@ -949,20 +951,21 @@ public static class FactAdvice
                         : $"{family}: {subject} — {Plural(moved.Count, "metric")} moved beyond band after it";
 
         // ── remediation: the history read(s) of the families present, the compare, and each family's grader ──
+        /* #7726 item 7: the reads are named as what a person looks at, not by tool name: the tools ride in the card's next-tools list. */
         var historyTools = new List<string>(3);
-        if (hasServer) historyTools.Add("`get_server_config_changes`");
-        if (hasDatabase) historyTools.Add("`get_database_config_changes`");
-        if (hasTraceFlags) historyTools.Add("`get_trace_flag_changes`");
+        if (hasServer) historyTools.Add("the server configuration history");
+        if (hasDatabase) historyTools.Add("the database configuration history");
+        if (hasTraceFlags) historyTools.Add("the trace flag history");
         var graders = new List<string>(3);
-        if (hasServer) graders.Add("`audit_config` grades the new value against guidance");
-        if (hasDatabase) graders.Add("the standing `DB_CONFIG` advisory grades the database options this engine has an opinion on (auto-shrink, auto-close, RCSI, auto-stats, page verify)");
-        if (hasTraceFlags) graders.Add("`get_trace_flags` lists what is on now");
+        if (hasServer) graders.Add("the configuration audit grades the new value against guidance");
+        if (hasDatabase) graders.Add("the standing database configuration advisory grades the database options this engine has an opinion on (auto-shrink, auto-close, RCSI, auto-stats, page verify)");
+        if (hasTraceFlags) graders.Add("the trace flag list shows what is on now");
         var rem =
             "This is an attribution, not an accusation: one window against one window cannot show that a change CAUSED anything " +
             "(DB time on an unchanged server routinely varies severalfold day to day), and a metric that moved may have moved for " +
             "reasons of its own. Read it as a pointer. If something moved the wrong way and stays moved on later passes, the " +
             $"{(mixed ? "changes are" : "setting is")} the first suspect: {string.Join(" / ", historyTools)} {(historyTools.Count == 1 ? "lists" : "list")} the change with its old and new values, " +
-            "`compare_analysis` reruns the compare over any pair of windows (a wider one, or the same hour yesterday), and " +
+            "a compare over another pair of windows (a wider one, or the same hour yesterday) reruns the before and after, and " +
             $"{string.Join("; ", graders)}. If nothing moved, there is nothing to do; the card recurs " +
             "on each pass while the change sits inside the analysis window and stops on its own.";
 
@@ -1007,11 +1010,48 @@ public static class FactAdvice
         return bits.Count == 0 ? string.Empty : " Co-fired this window: " + string.Join("; ", bits) + ".";
     }
 
+    /// <summary>#7726 item 7: a setting in the "no matching line" list, as a person reads it. A database option's store key
+    /// (<c>Sales.state_desc</c>, <c>Sales.is_query_store_on</c>) prints as words with the database in backticks
+    /// ("the state of `Sales`", "whether Query Store is on in `Sales`"); a server setting or trace flag keeps its own name.</summary>
+    private static string UndatedSettingText(ConfigChangeAttribution.SettingChange c)
+    {
+        if (c.Family != ConfigChangeAttribution.ChangeFamily.DatabaseConfig || c.DatabaseName is null || string.IsNullOrEmpty(c.Setting))
+            return $"`{c.Name}`";
+        var db = $"`{c.DatabaseName}`";
+        var setting = c.Setting;
+        switch (setting)
+        {
+            case "state_desc": return $"the state of {db}";
+            case "is_query_store_on": return $"whether Query Store is on in {db}";
+            case "is_read_only": return $"whether {db} is read only";
+            case "is_parameterization_forced": return $"whether parameterization is forced in {db}";
+            case "is_cdc_enabled": return $"whether change data capture is enabled in {db}";
+            case "is_broker_enabled": return $"whether Service Broker is enabled in {db}";
+            case "is_db_chaining_on": return $"whether cross-database ownership chaining is on in {db}";
+            case "is_memory_optimized_enabled": return $"whether memory-optimized tables are enabled in {db}";
+            case "snapshot_isolation_state": return $"the snapshot isolation state of {db}";
+        }
+        var words = setting.Replace('_', ' ');
+        if (setting.StartsWith("is_", StringComparison.Ordinal) && setting.EndsWith("_on", StringComparison.Ordinal))
+            return $"whether {words[3..^3]} is on in {db}";
+        if (setting.StartsWith("is_", StringComparison.Ordinal))
+            return $"whether {db} is {words[3..]}";
+        foreach (var suffix in new[] { "_name", "_desc", "_option" })
+        {
+            if (setting.EndsWith(suffix, StringComparison.Ordinal))
+            {
+                words = words[..^suffix.Length];
+                break;
+            }
+        }
+        return $"the {words} of {db}";
+    }
+
     /// <summary>Human-readable duration from milliseconds: "850 ms", "1.4 s", "3.2 min".</summary>
-    /// <summary>#6305: a positive figure under 1 ms is shown in microseconds ("455 us"), never rounded to "0 ms"
-    /// (which read as no change beside a 21 us comparison figure). Zero stays "0 ms".</summary>
+    /// <summary>#6305: a positive figure under 1 ms is shown in microseconds ("455 µs"), never rounded to "0 ms"
+    /// (which read as no change beside a 21 µs comparison figure). Zero stays "0 ms".</summary>
     private static string Duration(double ms) =>
-        ms > 0 && ms < 1 ? (ms * 1000 < 10 ? $"{ms * 1000:0.#} us" : $"{ms * 1000:N0} us")
+        ms > 0 && ms < 1 ? (ms * 1000 < 10 ? $"{ms * 1000:0.#} µs" : $"{ms * 1000:N0} µs")
         : ms < 1000 ? $"{ms:N0} ms"
         : ms < 60000 ? $"{ms / 1000.0:0.#} s"
         : $"{ms / 60000.0:0.#} min";
@@ -1934,7 +1974,7 @@ public static class FactAdvice
     /// <summary>
     /// MEMORY_PRESSURE_EVENTS composed (#7449): the static card said the finding carries the event count and the peak
     /// process/system indicators, but the reply showed only the peak in the root fact's value. This states the count and
-    /// both peaks from the fact's metadata. Falls back to the static block, which points at get_memory_pressure_events, when
+    /// both peaks from the fact's metadata. Falls back to the static block, which points at the Memory Pressure Events sub-tab (#7726: no tool name in the sentence a person reads), when
     /// the metadata is absent.
     /// </summary>
     private static AdviceBlock ComposeMemoryPressureEvents(IReadOnlyDictionary<string, Fact> facts)
@@ -1953,7 +1993,7 @@ public static class FactAdvice
             stated.Append("The window logged pressure notifications");
         stated.Append($". The process indicator peaked at {(process ?? 0):0.#} and the system indicator at {(system ?? 0):0.#}.");
 
-        const string Sentence = "`get_memory_pressure_events` lists each notification with its process and system indicators.";
+        const string Sentence = "The Memory Pressure Events sub-tab under Memory lists each notification with its process and system indicators.";
         return fallback with
         {
             Investigation = fallback.Investigation.Replace(Sentence, stated + " " + Sentence, StringComparison.Ordinal)
@@ -3125,13 +3165,13 @@ public static class FactAdvice
             Investigation:
                 "The finding carries the single-use plan count and size against the totals for the latest snapshot; a single-use ratio above 20% is flagged, above 50% is severe. Each single-use plan is a query that compiled, ran once, and will almost certainly never be reused — most often unparameterized ad-hoc SQL or dynamic SQL that embeds literal values, so every distinct value produces its own one-shot plan. That memory is stolen from the buffer pool and from plans that WOULD be reused. Open Memory → Plan Cache to see the single-use vs. multi-use composition and the trend; RESOURCE_SEMAPHORE_QUERY_COMPILE or high SQL Compilations/sec co-firing confirms the same churn is also costing CPU on constant recompilation.",
             Remediation:
-                "The low-risk first step is `optimize for ad hoc workloads` at the server level — SQL then caches only a small stub for a plan's first execution and the full plan only if it is reused, which collapses single-use bloat without changing plan choice. The durable fix is to stop generating the churn: parameterize the offending ad-hoc/dynamic SQL in the application so one plan serves every parameter value. Where the app cannot be changed, `ALTER DATABASE ... SET PARAMETERIZATION FORCED` makes the optimizer parameterize more aggressively — test it on a workload copy first, because forced parameterization can change plan selection for other queries. (Sourced from the Dashboard's report.plan_cache_bloat recommendation, install/47:1493.)");
+                "The low-risk first step is `optimize for ad hoc workloads` at the server level — SQL then caches only a small stub for a plan's first execution and the full plan only if it is reused, which collapses single-use bloat without changing plan choice. The durable fix is to stop generating the churn: parameterize the offending ad-hoc/dynamic SQL in the application so one plan serves every parameter value. Where the app cannot be changed, `ALTER DATABASE ... SET PARAMETERIZATION FORCED` makes the optimizer parameterize more aggressively — test it on a workload copy first, because forced parameterization can change plan selection for other queries.");
 
         t["MEMORY_PRESSURE_EVENTS"] = new AdviceBlock(
             Headline:
                 "SQL Server signalled physical-memory pressure — the resource monitor logged RESOURCE_MEMPHYSICAL_LOW notifications in the window",
             Investigation:
-                "These come from the RING_BUFFER_RESOURCE_MONITOR ring buffer: when the OS or SQL Server itself flags low available physical memory, the resource monitor raises an indicator (0-1 normal, 2 medium, 3+ severe) and SQL responds by trimming caches — evicting buffer-pool pages and plan cache to free memory. `get_memory_pressure_events` lists each notification with its process and system indicators. That cache trimming shows up downstream as more physical reads (PAGEIOLATCH_SH) and more recompiles as evicted plans are rebuilt, so check the Memory tab and the Wait Stats tab around the event times for that fallout.",
+                "These come from the RING_BUFFER_RESOURCE_MONITOR ring buffer: when the OS or SQL Server itself flags low available physical memory, the resource monitor raises an indicator (0-1 normal, 2 medium, 3+ severe) and SQL responds by trimming caches — evicting buffer-pool pages and plan cache to free memory. The Memory Pressure Events sub-tab under Memory lists each notification with its process and system indicators. That cache trimming shows up downstream as more physical reads (PAGEIOLATCH_SH) and more recompiles as evicted plans are rebuilt, so check the Memory tab and the Wait Stats tab around the event times for that fallout.",
             Remediation:
                 "Confirm whether the pressure is SQL's or the box's: check `max server memory` against physical RAM and what else runs on the host. If `max server memory` is unset or too high, SQL can starve the OS and other processes into signalling system-wide low memory — cap it leaving headroom for the OS (and for other instances/services on the box). If `max server memory` is already conservative and the system indicator is what fired, an external consumer (another instance, an app, a runaway agent) is taking the memory — find and constrain it. If the server is genuinely short of memory for its workload after those checks, add RAM.");
 
@@ -3462,9 +3502,9 @@ public static class FactAdvice
             Headline:
                 "A configuration setting changed inside the analysis window — a server setting, a database option or a trace flag",
             Investigation:
-                "A configuration snapshot (taken on each connect) observed a value that differs from the previous snapshot's — a sys.configurations setting, a sys.databases option on one database, or a trace flag enabled or disabled — and the engine compared the four hours before the change with the four hours after it, banding each metric's move on the server's own dispersion where a baseline exists and on the scorer's ladder otherwise. A server setting is anchored on the default trace's sp_configure line (msg 15457) when the store holds one for that option; every other change is anchored on the snapshot that first observed it, and the prose says which. The frozen finding text states what changed, old → new, when it changed or was first observed, and which metrics moved beyond their band — or that none did. `get_server_config_changes`, `get_database_config_changes` and `get_trace_flag_changes` list the change; `compare_analysis` reruns the compare over any pair of windows.",
+                "A configuration snapshot (taken on each connect) observed a value that differs from the previous snapshot's — a sys.configurations setting, a sys.databases option on one database, or a trace flag enabled or disabled — and the engine compared the four hours before the change with the four hours after it, banding each metric's move on the server's own dispersion where a baseline exists and on the scorer's ladder otherwise. A server setting is anchored on the default trace's sp_configure line (msg 15457) when the store holds one for that option; every other change is anchored on the snapshot that first observed it, and the prose says which. The frozen finding text states what changed, old → new, when it changed or was first observed, and which metrics moved beyond their band — or that none did. The server configuration history, the database configuration history and the trace flag history list the change; the compare can be rerun over any pair of windows.",
             Remediation:
-                "An attribution, not an accusation: a before/after around one change is not a causal test. If a metric moved the wrong way and stays moved on later passes, the change is the first suspect; `audit_config` grades a new server value against guidance, the DB_CONFIG advisory grades the database options this engine has an opinion on, and `get_trace_flags` lists what is on now. If nothing moved, there is nothing to do.");
+                "An attribution, not an accusation: a before/after around one change is not a causal test. If a metric moved the wrong way and stays moved on later passes, the change is the first suspect; the configuration audit grades a new server value against guidance, the standing database configuration advisory grades the database options this engine has an opinion on, and the trace flag list shows what is on now. If nothing moved, there is nothing to do.");
 
         // ─────────────────────────────────────────────────────────────────
         // Query-plan advisories (WS4) — advise-only: missing indexes, plan warnings.

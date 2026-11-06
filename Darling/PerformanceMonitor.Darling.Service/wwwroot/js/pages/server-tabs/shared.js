@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, ticksCarryUnit, noteStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, applyDataSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, captionStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceSpan, applySourceSubtitle, setQueryWaitFilter, waitIsLinked, fmtPlain } from "../../util.js";
+import { el, ticksCarryUnit, noteStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, applyDataSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, captionStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceSpan, applySourceSubtitle, setQueryWaitFilter, waitIsLinked, fmtPlain, fmtMs } from "../../util.js";
 import { renderPanel, panelEmptyStrip, emptyHeadline, setPanelSignal, getPanelSignal, VIZ } from "../../panels.js";
 import { estimatedPlotPx } from "../../trend-points.js";
 import { SNAPSHOT_LIST_CAP, snapshotTruncatedNote } from "../active-snapshots.js";
@@ -229,7 +229,7 @@ function discontinuityWhat(reason) {
     case "postmaster_restart": return "PostgreSQL restarted";
     case "failover": return "The connection reached a different server";
     case "rename": return "SQL Server was renamed";
-    case "identity": return "The server's identity changed";
+    case "identity": return "SQL Server restarted, was renamed, or the connection reached another server";
     case "stats_reset": return "Statistics were reset";
     default: return "Collection started again";
   }
@@ -978,15 +978,14 @@ export const SWEEP_STATS = [
    then the same facts as tiles. The collector rows beside it are not relabelled. */
 export const SERVER_CONNECTION_PANEL = {
   title: "Server Connection",
-  subtitle: "the service's own connect",
+  subtitle: "the service's own connection",
   viz: "stat",
   emptyText: "Connected: the service's last connect to this server succeeded.",
   stats: [
-    { key: "server_connection.message", label: "Connection", format: "text", sentence: true },
+    { key: "server_connection.message", label: "Connection", format: "text", sentence: true, localizeText: true, localizeMinutes: true, sinceKey: "server_connection.since" },
     { key: "server_connection.status", label: "Collection", format: "status", small: true },
     { key: "server_connection.since", label: "Unreachable since", format: "time", small: true },
     { key: "server_connection.next_connect_attempt", label: "Next retry", format: "time", small: true },
-    { key: "server_connection.last_connect_error", label: "Last error", format: "text", small: true },
   ],
 };
 
@@ -1302,7 +1301,8 @@ export function seriesTrendPanel(server, ctx, kind) {
         .filter((d) => d.rows.length >= (spec.minPoints || 1))
         .map((d) => ({ ...d, key: "s" + d.index, color: SERIES_COLORS[d.index % SERIES_COLORS.length] }));
       /* #7578: a unit prints once. These axes print it on every tick ("0.3 MB/s"), so the heading drops its "(MB/s)": the same rule as the caption over an axis (`ticksCarryUnit`). A chart with nothing drawn has no ticks and keeps the unit in its heading. */
-      const tick = (v, o) => fmtPlain(v, o) + " " + chart.unit;
+      /* #7670: a duration in ms reads in the unit its axis tops out in (80 s, not 80,000 ms), as every other ms axis on the web does (fmtMs). */
+      const tick = chart.unit === "ms" ? fmtMs : (v, o) => fmtPlain(v, o) + " " + chart.unit;
       const unitSuffix = " (" + chart.unit + ")";
       const heading = ticksCarryUnit([tick(1)]) && chart.title.endsWith(unitSuffix) ? chart.title.slice(0, -unitSuffix.length) : chart.title;
       return drawn.length
@@ -1315,6 +1315,8 @@ export function seriesTrendPanel(server, ctx, kind) {
               series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
               formatValue: tick,
               unit: chart.unit,
+              /* #7670: the ticks are picked in the unit the labels print in, so a 78 s top reads 0, 0.5, 1.0, 1.5 min and not 20 s steps rounded to 0.3, 0.7 min. */
+              sizeUnit: chart.unit === "ms" ? "ms" : null,
               ...windowFromHours(res.keptHours || ctx.hours),
             }, "series-trend|" + server + "|" + kind + "|" + chart.unit, chartZoomScope(ctx.hours)),
           ]

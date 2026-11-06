@@ -1437,9 +1437,14 @@
                                Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
                 </StackPanel>
 
-                <TextBlock Grid.Row="1" Margin="10,0,10,8" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11"
-                           Text="PVS sizes count OFF-ROW versions only and do not include row versions stored in-row. When a large PVS will not shrink, the skipped-page counters attribute it: Secondary means a query on a secondary replica, Snapshot means a long-running snapshot scan, Aborted means space still held by aborted transactions. Requires SQL Server 2019 or later; always on for Azure SQL Database."/>
+                <StackPanel Grid.Row="1">
+                    <TextBlock Margin="10,0,10,8" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11"
+                               Text="PVS sizes count OFF-ROW versions only and do not include row versions stored in-row. When a large PVS will not shrink, the skipped-page counters attribute it: Secondary means a query on a secondary replica, Snapshot means a long-running snapshot scan, Aborted means space still held by aborted transactions. Requires SQL Server 2019 or later; always on for Azure SQL Database."/>
+                    <!-- #7706: a database this server holds only as an availability group secondary copy has no row here; the same sentence get_pvs_stats and Darling carry. -->
+                    <TextBlock x:Name="PvsSecondaryNoteText" Visibility="Collapsed" TextWrapping="Wrap" Margin="10,0,10,8" FontSize="11"
+                               FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                </StackPanel>
 
                 <!-- DataGrid -->
                 <!-- #1984 stage 2: the PVS trend — "when did it start growing" beside the grid's
@@ -1774,7 +1779,7 @@
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CompressableIndexes" Click="FilterButton_Click" Margin="0,0,4,0"/>
-                                        <TextBlock Text="Compressable" FontWeight="Bold" VerticalAlignment="Center"/>
+                                        <TextBlock Text="Compressible" FontWeight="Bold" VerticalAlignment="Center"/>
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
