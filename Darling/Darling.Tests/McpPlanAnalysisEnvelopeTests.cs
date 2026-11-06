@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
@@ -80,6 +81,91 @@ public sealed class McpPlanAnalysisEnvelopeTests
         /* The ranking IS by cost_percent, descending — the label names the order the rows are actually in. */
         var costs = stmt.GetProperty("top_operators").EnumerateArray().Select(o => o.GetProperty("cost_percent").GetInt32()).ToList();
         Assert.Equal(costs.OrderByDescending(c => c).ToList(), costs);
+    }
+
+    /// <summary>
+    /// #7887. A row-mode operator's <c>ActualElapsedMs</c> is cumulative over its subtree, so a rank on it is the
+    /// root path and the leaf that did the work is the first one the cap cuts. Shape: twelve operators nested one
+    /// under the next, a Clustered Index Scan at the bottom owning 900 ms, and each of the eleven Nested Loops
+    /// above it adding 5 ms of its own, so the root's cumulative elapsed is 955 ms and the scan sits under eleven
+    /// ancestors, past the ten-operator cap. The scan must lead <c>top_operators</c>, the basis must say
+    /// <c>self_elapsed_ms</c>, and every row carries its own time beside the cumulative one.
+    /// </summary>
+    [Fact]
+    public void TopOperators_OnARowModeActualPlan_LeadWithTheOperatorThatOwnsTheTime_NotTheRootPath()
+    {
+        const int relOps = 12;
+        const long scanMs = 900, ownMsPerAncestor = 5;
+        using var doc = JsonDocument.Parse(McpPlanAnalysisFormatter.BuildAnalysisResult(ActualRowModePlan(relOps, scanMs, ownMsPerAncestor), "s", "xml", null));
+        var stmt = Assert.Single(doc.RootElement.GetProperty("statements").EnumerateArray());
+
+        Assert.True(stmt.GetProperty("has_actual_stats").GetBoolean());
+        Assert.Equal("self_elapsed_ms", McpPlanAnalysisFormatter.RankedBySelfElapsed);
+        Assert.Equal(McpPlanAnalysisFormatter.RankedBySelfElapsed, stmt.GetProperty("operators_ranked_by").GetString());
+        Assert.True(stmt.GetProperty("truncated").GetBoolean());
+
+        var top = stmt.GetProperty("top_operators").EnumerateArray().ToList();
+        Assert.Equal(McpPlanAnalysisFormatter.TopOperatorCap, top.Count);
+
+        /* The scan is the leaf (NodeId 11): it owns 900 of the statement's 955 ms and leads the list. */
+        Assert.Equal(relOps - 1, top[0].GetProperty("node_id").GetInt32());
+        Assert.Equal("Clustered Index Scan", top[0].GetProperty("physical_op").GetString());
+        Assert.Equal(scanMs, top[0].GetProperty("self_elapsed_ms").GetInt64());
+        Assert.Equal(scanMs, top[0].GetProperty("actual_elapsed_ms").GetInt64());
+
+        /* The root Nested Loops (NodeId 0) carries the whole 955 ms cumulatively but owns only 5 of it. */
+        var root = Assert.Single(top, o => o.GetProperty("node_id").GetInt32() == 0);
+        Assert.Equal(scanMs + (relOps - 1) * ownMsPerAncestor, root.GetProperty("actual_elapsed_ms").GetInt64());
+        Assert.Equal(ownMsPerAncestor, root.GetProperty("self_elapsed_ms").GetInt64());
+
+        /* Every row carries both figures, own time never above cumulative, and the list is in own-time order. */
+        var selfs = top.Select(o => o.GetProperty("self_elapsed_ms").GetInt64()).ToList();
+        Assert.Equal(selfs.OrderByDescending(s => s).ToList(), selfs);
+        Assert.All(top, o => Assert.True(o.GetProperty("self_elapsed_ms").GetInt64() <= o.GetProperty("actual_elapsed_ms").GetInt64()));
+    }
+
+    /// <summary>
+    /// #7887 on a real parallel plan (PerformanceStudio's <c>eager_index_spool_plan.sqlplan</c>, #4534). The root is a
+    /// Gather Streams exchange whose cumulative elapsed is the whole 17,647 ms statement; it owns 1 ms of it. Under it a
+    /// Nested Loops (1 ms own) and a Top (0 ms own) sit over the Eager Index Spool that owns 17,613 ms. Ranked by
+    /// cumulative time the exchange leads and the spool is fourth; ranked by own time the spool leads and the exchange
+    /// carries its cumulative figure beside its own.
+    /// </summary>
+    [Fact]
+    public void TopOperators_OnAParallelFixture_LeadWithTheSpoolThatOwnsTheTime_NotTheGatherStreamsAboveIt()
+    {
+        var xml = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "OriginPlans", "eager_index_spool_plan.sqlplan"));
+        using var doc = JsonDocument.Parse(McpPlanAnalysisFormatter.BuildAnalysisResult(xml, "s", "xml", null));
+        var stmt = Assert.Single(doc.RootElement.GetProperty("statements").EnumerateArray());
+
+        Assert.True(stmt.GetProperty("parallel").GetBoolean());
+        Assert.Equal(McpPlanAnalysisFormatter.RankedBySelfElapsed, stmt.GetProperty("operators_ranked_by").GetString());
+        var top = stmt.GetProperty("top_operators").EnumerateArray().ToList();
+
+        Assert.Equal(5, top[0].GetProperty("node_id").GetInt32());
+        Assert.Contains("Spool", top[0].GetProperty("physical_op").GetString(), StringComparison.Ordinal);
+        Assert.Equal(17_613, top[0].GetProperty("self_elapsed_ms").GetInt64());
+
+        var gather = Assert.Single(top, o => o.GetProperty("node_id").GetInt32() == 0);
+        Assert.Equal("Parallelism", gather.GetProperty("physical_op").GetString());
+        Assert.Equal(17_647, gather.GetProperty("actual_elapsed_ms").GetInt64());
+        Assert.Equal(1, gather.GetProperty("self_elapsed_ms").GetInt64());
+    }
+
+    /// <summary>#7887: an estimated plan has no measurement, so <c>self_elapsed_ms</c> is null on every row (null,
+    /// not 0, the #3541 A12 rule for every actual_* field) and the rank stays the optimizer's cost share.</summary>
+    [Fact]
+    public void TopOperators_OnAnEstimatedPlan_CarryANullSelfElapsed_AndKeepTheCostBasis()
+    {
+        using var doc = JsonDocument.Parse(McpPlanAnalysisFormatter.BuildAnalysisResult(EstimatedPlan(4, withMissingIndex: false), "s", "xml", null));
+        var stmt = Assert.Single(doc.RootElement.GetProperty("statements").EnumerateArray());
+
+        Assert.Equal(McpPlanAnalysisFormatter.RankedByEstimatedCostPercent, stmt.GetProperty("operators_ranked_by").GetString());
+        Assert.All(stmt.GetProperty("top_operators").EnumerateArray(), o =>
+        {
+            Assert.Equal(JsonValueKind.Null, o.GetProperty("self_elapsed_ms").ValueKind);
+            Assert.Equal(JsonValueKind.Null, o.GetProperty("actual_elapsed_ms").ValueKind);
+        });
     }
 
     [Fact]
@@ -225,7 +311,17 @@ public sealed class McpPlanAnalysisEnvelopeTests
     /// missing-index group on dbo.Posts with all three column usages — plus, when <paramref name="secondGroupOnUsers"/>,
     /// a second group on dbo.Users with a single equality column and no INCLUDE, so the per-row pin sees two
     /// statements that differ in table, key list, name and shape (#3805).</summary>
-    private static string EstimatedPlan(int relOps, bool withMissingIndex, bool secondGroupOnUsers = false)
+    private static string EstimatedPlan(int relOps, bool withMissingIndex, bool secondGroupOnUsers = false) =>
+        ChainPlan(relOps, withMissingIndex, secondGroupOnUsers, elapsedMsFor: null);
+
+    /// <summary>#7887: the same chain with row-mode runtime statistics on every operator. The leaf scan's elapsed is
+    /// <paramref name="leafMs"/>, and each ancestor's elapsed is its child's plus <paramref name="ownMsPerAncestor"/>,
+    /// the way showplan reports row mode: an operator's ActualElapsedms includes everything below it.</summary>
+    private static string ActualRowModePlan(int relOps, long leafMs, long ownMsPerAncestor) =>
+        ChainPlan(relOps, withMissingIndex: false, secondGroupOnUsers: false,
+            elapsedMsFor: i => leafMs + (relOps - 1 - i) * ownMsPerAncestor);
+
+    private static string ChainPlan(int relOps, bool withMissingIndex, bool secondGroupOnUsers, Func<int, long>? elapsedMsFor)
     {
         var sb = new StringBuilder();
         sb.Append("<?xml version=\"1.0\" encoding=\"utf-16\"?>");
@@ -259,6 +355,12 @@ public sealed class McpPlanAnalysisEnvelopeTests
             var op = i == relOps - 1 ? "Clustered Index Scan" : "Nested Loops";
             sb.Append($"<RelOp NodeId=\"{i}\" PhysicalOp=\"{op}\" LogicalOp=\"{(i == relOps - 1 ? "Clustered Index Scan" : "Inner Join")}\" EstimateRows=\"{10 + i}\" EstimateIO=\"0.1\" EstimateCPU=\"0.1\" AvgRowSize=\"9\" EstimatedTotalSubtreeCost=\"{subtree}\" Parallel=\"0\" EstimateRebinds=\"0\" EstimateRewinds=\"0\" EstimatedExecutionMode=\"Row\">");
             sb.Append("<OutputList />");
+            if (elapsedMsFor != null)
+            {
+                var ms = elapsedMsFor(i);
+                sb.Append($"<RunTimeInformation><RunTimeCountersPerThread Thread=\"0\" ActualRows=\"{10 + i}\" ActualExecutions=\"1\" ActualExecutionMode=\"Row\" ActualElapsedms=\"{ms}\" ActualCPUms=\"{ms}\" /></RunTimeInformation>");
+            }
+
             sb.Append(i == relOps - 1 ? "<IndexScan Ordered=\"0\" ForcedIndex=\"0\" ForceScan=\"0\" NoExpandHint=\"0\" Storage=\"RowStore\">" : "<NestedLoops Optimized=\"0\">");
             if (i == relOps - 1)
             {
