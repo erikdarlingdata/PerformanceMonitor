@@ -575,6 +575,149 @@ public sealed class ConnectionFaultDispositionTests
         Assert.DoesNotContain("sqlEx.Number == -2", source, StringComparison.Ordinal);
     }
 
+    private static readonly DateTime T0 = new(2026, 11, 5, 12, 0, 0, DateTimeKind.Utc);
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ASecondTimeout_InsideTheReuseWindow_ReusesTheVerdict_WithoutAnotherLogin(bool alive)
+    {
+        var memo = new LivenessProbeMemo();
+        var probes = 0;
+        Func<ServerRuntime, CancellationToken, Task<bool>> probe = (_, _) => { probes++; return Task.FromResult(alive); };
+        var ct = TestContext.Current.CancellationToken;
+
+        var first = await memo.ProbeAsync(SqlRuntime(), probe, T0, ct);
+        var second = await memo.ProbeAsync(SqlRuntime(), probe, T0.AddSeconds(LivenessProbeMemo.ReuseSeconds - 1), ct);
+
+        Assert.Equal(alive, first);
+        Assert.Equal(alive, second);
+        Assert.Equal(1, probes);
+    }
+
+    [Fact]
+    public async Task ATimeout_PastTheReuseWindow_ProbesAgain_AndTakesTheNewVerdict()
+    {
+        var memo = new LivenessProbeMemo();
+        var answers = new Queue<bool>([true, false]);
+        var probes = 0;
+        Func<ServerRuntime, CancellationToken, Task<bool>> probe = (_, _) => { probes++; return Task.FromResult(answers.Dequeue()); };
+        var ct = TestContext.Current.CancellationToken;
+
+        Assert.True(await memo.ProbeAsync(SqlRuntime(), probe, T0, ct));
+        Assert.False(await memo.ProbeAsync(SqlRuntime(), probe, T0.AddSeconds(LivenessProbeMemo.ReuseSeconds), ct));
+        Assert.Equal(2, probes);
+    }
+
+    [Fact]
+    public async Task AClockThatSteppedBack_ProbesAgain()
+    {
+        var memo = new LivenessProbeMemo();
+        var probes = 0;
+        Func<ServerRuntime, CancellationToken, Task<bool>> probe = (_, _) => { probes++; return Task.FromResult(true); };
+        var ct = TestContext.Current.CancellationToken;
+
+        await memo.ProbeAsync(SqlRuntime(), probe, T0, ct);
+        await memo.ProbeAsync(SqlRuntime(), probe, T0.AddSeconds(-1), ct);
+
+        Assert.Equal(2, probes);
+    }
+
+    [Fact]
+    public async Task ThreeTimeoutsInARow_CostOneProbeLogin_ThroughTheDisposition()
+    {
+        var memo = new LivenessProbeMemo();
+        var probes = 0;
+        Func<ServerRuntime, CancellationToken, Task<bool>> probe = (_, _) => { probes++; return Task.FromResult(true); };
+        var ct = TestContext.Current.CancellationToken;
+
+        for (var i = 0; i < 3; i++)
+        {
+            var at = T0.AddSeconds(i * 5);
+            var drop = await ConnectionFaultDisposition.ShouldDropRuntimeAsync(
+                SqlExceptionFactory.Create(-2, 11), SqlRuntime(),
+                (runtime, token) => memo.ProbeAsync(runtime, probe, at, token), ct);
+            Assert.False(drop);
+        }
+
+        Assert.Equal(1, probes);
+        Assert.NotNull(memo.Last);
+        Assert.True(memo.Last!.Alive);
+    }
+
+    [Fact]
+    public async Task ClearingTheMemo_ForgetsTheVerdict_SoTheNextTimeoutProbes()
+    {
+        var memo = new LivenessProbeMemo();
+        var probes = 0;
+        Func<ServerRuntime, CancellationToken, Task<bool>> probe = (_, _) => { probes++; return Task.FromResult(true); };
+        var ct = TestContext.Current.CancellationToken;
+
+        await memo.ProbeAsync(SqlRuntime(), probe, T0, ct);
+        memo.Clear();
+
+        Assert.Null(memo.Last);
+        await memo.ProbeAsync(SqlRuntime(), probe, T0.AddSeconds(1), ct);
+        Assert.Equal(2, probes);
+    }
+
+    [Fact]
+    public void AProbeWhoseOwnLoginTimesOut_CountsTheServerAlive_AndOtherProbeFaultsDoNot()
+    {
+        Assert.True(ConnectionFaultDisposition.ProbeTimeoutMeansAlive(SqlExceptionFactory.Create(-2, 11)));
+        Assert.False(ConnectionFaultDisposition.ProbeTimeoutMeansAlive(SqlExceptionFactory.Create(53, 20)));
+        Assert.False(ConnectionFaultDisposition.ProbeTimeoutMeansAlive(SqlExceptionFactory.Create(18456, 14)));
+        Assert.False(ConnectionFaultDisposition.ProbeTimeoutMeansAlive(new InvalidOperationException("not a driver fault")));
+    }
+
+    /// <summary>The real probe with its login replaced by one that throws <paramref name="fault"/>.</summary>
+    private static Func<ServerRuntime, CancellationToken, Task<bool>> ProbeWhoseLoginThrows(Exception fault) =>
+        (runtime, token) => ConnectionFaultDisposition.ProbeFreshConnectionAsync(runtime, (_, _) => Task.FromException(fault), token);
+
+    [Fact]
+    public async Task CommandTimeout_WhenTheProbesOwnLoginTimesOut_KeepsTheRuntime()
+    {
+        var drop = await ConnectionFaultDisposition.ShouldDropRuntimeAsync(
+            SqlExceptionFactory.Create(-2, 11), SqlRuntime(),
+            ProbeWhoseLoginThrows(SqlExceptionFactory.Create(-2, 11)), TestContext.Current.CancellationToken);
+
+        Assert.False(drop);
+    }
+
+    [Theory]
+    [InlineData(10061, 20)]
+    [InlineData(53, 20)]
+    [InlineData(18456, 14)]
+    public async Task CommandTimeout_WhenTheProbeIsRefusedOrFailsToLogIn_DropsTheRuntime(int number, byte errorClass)
+    {
+        var drop = await ConnectionFaultDisposition.ShouldDropRuntimeAsync(
+            SqlExceptionFactory.Create(-2, 11), SqlRuntime(),
+            ProbeWhoseLoginThrows(SqlExceptionFactory.Create(number, errorClass)), TestContext.Current.CancellationToken);
+
+        Assert.True(drop);
+    }
+
+    [Fact]
+    public async Task CommandTimeout_WhenTheProbeFaultsOutsideTheDriver_DropsTheRuntime()
+    {
+        var drop = await ConnectionFaultDisposition.ShouldDropRuntimeAsync(
+            SqlExceptionFactory.Create(-2, 11), SqlRuntime(),
+            ProbeWhoseLoginThrows(new InvalidOperationException("not a driver fault")), TestContext.Current.CancellationToken);
+
+        Assert.True(drop);
+    }
+
+    [Fact]
+    public async Task CommandTimeout_WhenTheProbeLogsIn_KeepsTheRuntime()
+    {
+        var drop = await ConnectionFaultDisposition.ShouldDropRuntimeAsync(
+            SqlExceptionFactory.Create(-2, 11), SqlRuntime(),
+            (runtime, token) => ConnectionFaultDisposition.ProbeFreshConnectionAsync(runtime, (_, _) => Task.CompletedTask, token),
+            TestContext.Current.CancellationToken);
+
+        Assert.False(drop);
+    }
+
     /// <summary>SqlException has no public constructor; this builds one through the driver's internals.</summary>
     private static class SqlExceptionFactory
     {
