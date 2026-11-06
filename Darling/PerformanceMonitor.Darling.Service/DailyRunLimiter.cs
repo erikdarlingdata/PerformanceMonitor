@@ -110,7 +110,7 @@ internal sealed class DailyRunLimiter
     {
         if (waiting <= 0 || oldestWaitUtc is not { } oldest)
         {
-            return "no daily run is waiting for a permit, so the previous run is still executing";
+            return "No daily run is waiting for a permit, so the previous run is still executing";
         }
 
         var minutes = nowUtc > oldest ? (int)(nowUtc - oldest).TotalMinutes : 0;

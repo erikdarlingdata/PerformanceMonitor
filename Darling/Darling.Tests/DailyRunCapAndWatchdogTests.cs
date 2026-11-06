@@ -308,7 +308,7 @@ public sealed class DailyRunLimiterTests
             "1 daily run(s) are waiting for one of 4 permits, and the oldest has waited 45 min",
             DailyRunLimiter.DescribeBacklog(1, 4, now.AddMinutes(-45), now));
         Assert.Equal(
-            "no daily run is waiting for a permit, so the previous run is still executing",
+            "No daily run is waiting for a permit, so the previous run is still executing",
             DailyRunLimiter.DescribeBacklog(0, 4, null, now));
     }
 

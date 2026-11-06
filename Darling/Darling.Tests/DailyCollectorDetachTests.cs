@@ -810,7 +810,7 @@ public sealed class DailyCollectorDetachTests
                 e => e.Level == LogLevel.Warning
                      && e.Message.Contains("previous", StringComparison.Ordinal)
                      && e.Message.Contains(Daily, StringComparison.Ordinal)
-                     && e.Message.Contains("no daily run is waiting for a permit", StringComparison.Ordinal));
+                     && e.Message.Contains("No daily run is waiting for a permit", StringComparison.Ordinal));
 
             /* The skip lasts only while the run does: once it finishes, the next due tick runs. */
             runs.ReleaseAll();
