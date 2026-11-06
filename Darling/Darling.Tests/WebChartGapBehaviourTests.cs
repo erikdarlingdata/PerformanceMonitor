@@ -360,7 +360,8 @@ public sealed class WebChartGapBehaviourTests
         Assert.Equal(1, N(r, "quietStripNoBucketed", "lineRuns"));
         var g = r.GetProperty("quietStripGaps");
         Assert.Equal("null", g.GetProperty("noBucketInReply").GetString());
-        Assert.Equal(60000, g.GetProperty("stepWins").GetDouble());
+        /* the harness prints this one through String() (the sibling above is "null" when no step applies), so the step is its text */
+        Assert.Equal("60000", g.GetProperty("stepWins").GetString());
     }
 
     /// <summary>
