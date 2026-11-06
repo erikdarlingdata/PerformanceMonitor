@@ -79,10 +79,10 @@ internal static class PgConfigAuditText
     };
 
     /// <summary>A remediation that opens by restating the setting and its value ("max_wal_size is 1 GB.") says again what the
-    /// headline just said, once the two run together as one Why text (#7670). Drops that opening sentence, and only when it is
-    /// a bare restatement: it starts with the headline's own "name is", ends at the first full stop and has no comma or
-    /// semicolon (a sentence that goes on to say something, as "shared_buffers is 1 GB, already sized above the default.",
-    /// is kept).</summary>
+    /// headline just said, once the two run together as one Why text (#7670). Two shapes are dropped, both only when the opening
+    /// is the headline's own "name is": a bare restatement ("max_wal_size is 1 GB.") goes whole, and one that goes on after the
+    /// value ("shared_buffers is 4 GB, already sized above the default, and ...") loses the "name is value, " part and keeps what
+    /// it goes on to say, first letter capitalised. An opening with a semicolon before its first comma is kept as written.</summary>
     internal static string DropRestatedLead(string headline, string remediation)
     {
         var at = headline.IndexOf(" is ", StringComparison.Ordinal);
@@ -93,6 +93,12 @@ internal static class PgConfigAuditText
         if (!body.StartsWith(lead, StringComparison.Ordinal))
             return remediation;
         var end = body.IndexOf(". ", StringComparison.Ordinal);
+        var comma = body.IndexOf(", ", StringComparison.Ordinal);
+        if (comma > 0 && (end < 0 || comma < end) && body.AsSpan(0, comma).IndexOf(';') < 0)
+        {
+            var rest = body[(comma + 2)..];
+            return rest.Length == 0 ? remediation : char.ToUpperInvariant(rest[0]) + rest[1..];
+        }
         if (end < 0 || body.AsSpan(0, end).IndexOfAny(',', ';') >= 0)
             return remediation;
         return body[(end + 2)..];

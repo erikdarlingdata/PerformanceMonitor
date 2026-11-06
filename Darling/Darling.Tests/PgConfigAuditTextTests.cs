@@ -192,7 +192,7 @@ public sealed class PgConfigAuditTextTests
 
         var text = Row(fact, setting, "x");
 
-        Assert.Single(Regex.Matches(text, Regex.Escape(setting + " is ")));
+        Assert.True(Regex.Matches(text, Regex.Escape(setting + " is ")).Count == 1, "the setting and its value are stated once, but the row reads: " + text);
         Assert.DoesNotContain("checkpoint-pressure card", text, StringComparison.Ordinal);
         Assert.DoesNotContain("the composite", text, StringComparison.Ordinal);
     }
@@ -200,7 +200,9 @@ public sealed class PgConfigAuditTextTests
     [Theory]
     [InlineData("max_wal_size is 1 GB — the shipped default", "max_wal_size is 1 GB. No measured WAL rate.", "No measured WAL rate.")]
     [InlineData("shared_buffers is at the initdb default of 128 MB", "shared_buffers is 128 MB (assumed — no config snapshot). Raise it.", "Raise it.")]
-    [InlineData("shared_buffers is 1 GB", "shared_buffers is 1 GB, already sized above the default. Look first.", "shared_buffers is 1 GB, already sized above the default. Look first.")]
+    [InlineData("shared_buffers is 1 GB", "shared_buffers is 1 GB, already sized above the default. Look first.", "Already sized above the default. Look first.")]
+    [InlineData("shared_buffers is 4 GB", "shared_buffers is 4 GB, already sized above the default, and the cache is still short. Look first.", "Already sized above the default, and the cache is still short. Look first.")]
+    [InlineData("shared_buffers is 1 GB", "shared_buffers is 1 GB; keep it. Look first.", "shared_buffers is 1 GB; keep it. Look first.")]
     [InlineData("a headline", "Then this.", "Then this.")]
     public void DropRestatedLead_DropsOnlyABareRestatement(string headline, string remediation, string expected) =>
         Assert.Equal(expected, PgConfigAuditText.DropRestatedLead(headline, remediation));

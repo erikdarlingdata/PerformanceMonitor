@@ -385,7 +385,7 @@ public static partial class PgTargetAdvice
                 : ". ");
         }
 
-        sb.Append("Counter-objectives: every byte given to shared_buffers is taken from the operating system's page cache " +
+        sb.Append("Counter-objectives: every byte given to shared_buffers comes out of the operating system's page cache " +
                   "(past roughly 40 % of RAM the two cache the same pages twice) and from the memory available to work_mem × " +
                   "connections; a larger cache also holds more dirty pages, so checkpoints write more and take longer — " +
                   "raise checkpoint_completion_target's headroom and watch the checkpoint pressure finding with it.");

@@ -1312,6 +1312,8 @@ export function seriesTrendPanel(server, ctx, kind) {
               series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
               formatValue: tick,
               unit: chart.unit,
+              /* #7670: the ticks are picked in the unit the labels print in, so a 78 s top reads 0, 0.5, 1.0, 1.5 min and not 20 s steps rounded to 0.3, 0.7 min. */
+              sizeUnit: chart.unit === "ms" ? "ms" : null,
               ...windowFromHours(res.keptHours || ctx.hours),
             }, "series-trend|" + server + "|" + kind + "|" + chart.unit, chartZoomScope(ctx.hours)),
           ]

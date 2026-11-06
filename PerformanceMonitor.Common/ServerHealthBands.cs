@@ -3157,6 +3157,55 @@ namespace PerformanceMonitor.Common
         }
 
         /// <summary>
+        /// #7670: <see cref="FormatCollectionNote"/> as the two desktop apps' health grids show it. A measuring collector's counts
+        /// (<c>shred_gated=1 events_read=0</c>) read as words, the way the web page words them (<c>shred gated: 1 (no new events since
+        /// the last run, so the XML was not read), events read: 0</c>). <see cref="FormatCollectionNote"/> itself keeps the raw
+        /// counts, because the MCP <c>note_summary</c> and the health bands are built on that text.
+        /// </summary>
+        public static string FormatCollectionNoteForDisplay(
+            string? lastNote,
+            long noteCount,
+            long totalRuns,
+            string? collectorName = null,
+            bool targetHasUserDatabases = false,
+            string? recoveredNote = null,
+            string? readSource = null)
+        {
+            var text = FormatCollectionNote(lastNote, noteCount, totalRuns, collectorName, targetHasUserDatabases, recoveredNote, readSource);
+            if (!HasMeasurements(lastNote))
+            {
+                return text;
+            }
+
+            var cut = lastNote!.LastIndexOf("; ", StringComparison.Ordinal);
+            var counts = cut >= 0 ? lastNote[(cut + 2)..] : lastNote;
+            return text.Replace(counts, CountsInWords(counts), StringComparison.Ordinal);
+        }
+
+        /// <summary>The meaning of a count a reader cannot work out from its label, worded as the web page words it (plain-text.js COUNT_MEANINGS).</summary>
+        private static string CountMeaning(string label, string value) => (label, value) switch
+        {
+            ("shred_gated", "1") => " (no new events since the last run, so the XML was not read)",
+            ("shred_gated", "0") => " (the XML was read)",
+            _ => string.Empty,
+        };
+
+        /// <summary><c>shred_gated=1 events_read=0</c> as <c>shred gated: 1 (...), events read: 0</c>. The input is a run of counts that passed <see cref="HasMeasurements"/>.</summary>
+        private static string CountsInWords(string counts)
+        {
+            var words = new List<string>();
+            foreach (var token in counts.Split(' '))
+            {
+                var eq = token.IndexOf('=', StringComparison.Ordinal);
+                var label = token[..eq];
+                var value = token[(eq + 1)..];
+                words.Add(label.Replace('_', ' ') + ": " + value + CountMeaning(label, value));
+            }
+
+            return string.Join(", ", words);
+        }
+
+        /// <summary>
         /// #6254: the per-run Collection Log grids' message cell. A run's own message (its error, or the note it left) with the run's
         /// <c>read_source</c> after it, worded as the health views word it (<c>read source: replica 12, primary 2</c>). A run with no
         /// read source (every run of a server with the replica setting off, every collector but Query Store, every run stored before the
