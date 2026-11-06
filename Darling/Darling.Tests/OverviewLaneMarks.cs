@@ -25,12 +25,19 @@ internal static class OverviewLaneMarks
         return plot.GetPlottables<Scatter>().Where(s => s.Color == anomaly);
     }
 
+    /// <summary>
+    /// The points a mark holds. A scatter that went through <c>TimeSeries</c> also holds a NaN break point inside each gap it split; that point
+    /// is not a marked point, so only points with a finite Y count.
+    /// </summary>
+    private static IEnumerable<ScottPlot.Coordinates> MarkedPoints(Scatter s) =>
+        s.Data.GetScatterPoints().Where(p => double.IsFinite(p.Y));
+
     /// <summary>The X of every point that carries a mark, in order, whether it sits in a segment or is a dot of its own.</summary>
     public static List<double> MarkedX(ScottPlot.Plot plot) =>
-        Marks(plot).SelectMany(s => s.Data.GetScatterPoints()).Select(p => p.X).OrderBy(x => x).ToList();
+        Marks(plot).SelectMany(MarkedPoints).Select(p => p.X).OrderBy(x => x).ToList();
 
     /// <summary>The number of marked points.</summary>
-    public static int MarkedCount(ScottPlot.Plot plot) => Marks(plot).Sum(s => s.Data.GetScatterPoints().Count());
+    public static int MarkedCount(ScottPlot.Plot plot) => Marks(plot).Sum(s => MarkedPoints(s).Count());
 
     /// <summary>
     /// True when every anomaly mark sits after the lane's own series line in the plot's plottable list. ScottPlot paints in that order, so a mark
@@ -53,5 +60,5 @@ internal static class OverviewLaneMarks
 
     /// <summary>One entry per drawn mark: how many points it spans and whether it is the lone-point dot (no line) or a segment.</summary>
     public static List<(int Points, bool IsDot)> Shapes(ScottPlot.Plot plot) =>
-        Marks(plot).Select(s => (s.Data.GetScatterPoints().Count(), s.LineWidth == 0)).ToList();
+        Marks(plot).Select(s => (MarkedPoints(s).Count(), s.LineWidth == 0)).ToList();
 }

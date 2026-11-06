@@ -162,6 +162,28 @@ public sealed class OverviewBaselineBandTests
     }
 
     /// <summary>
+    /// #7678: the lane's line breaks where collection stopped (more than 3 times the median spacing), so a mark must not be drawn across that
+    /// hole. One point a minute with the service off from minute 100 to 199, points 99 and 200 above the band: two dots, no segment across the hole.
+    /// </summary>
+    [Fact]
+    public void AMarkedRun_IsSplitWhereCollectionStopped()
+    {
+        StaTestThread.Run(() =>
+        {
+            var control = NewControl();
+            IReadOnlyList<BaselineBand.HourStep> steps = [BaselineBand.MakeStep(T0 - 1, T0 + 1, 100, 50)]; // 0 to 200
+            var minutes = Enumerable.Range(0, 100).Concat(Enumerable.Range(200, 100));
+            var data = minutes.Select(m => (T0 + m / 1440.0, m is 99 or 200 ? 500.0 : 100.0)).ToList();
+
+            control.UpdateLane(control.WaitStatsChart, "Wait", data, "#FFB74D", baseline: steps, minAnomalyValue: 100);
+
+            var plot = control.WaitStatsChart.Plot;
+            Assert.Equal([T0 + 99 / 1440.0, T0 + 200 / 1440.0], OverviewLaneMarks.MarkedX(plot));
+            Assert.Equal([(1, true), (1, true)], OverviewLaneMarks.Shapes(plot));
+        });
+    }
+
+    /// <summary>
     /// #7678: ScottPlot paints plottables in the order they were added. The marks are added AFTER the lane's own 1.5 px line, so a run reads as
     /// the line's stretch redrawn thicker in the anomaly colour and the line is not painted over it. Both the CPU lane and the other lanes.
     /// </summary>

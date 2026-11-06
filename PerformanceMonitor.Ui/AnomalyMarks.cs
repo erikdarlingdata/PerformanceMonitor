@@ -24,24 +24,29 @@ public static class AnomalyMarks
     /// <paramref name="indices"/> ascend, and neighbours are points one index apart.
     /// <para>
     /// Call this AFTER the lane's own series is added: ScottPlot paints plottables in the order they were added, and the mark has to sit over
-    /// the 1.5 px line to read as that stretch redrawn thicker, the way the web strip draws it. The web joins neighbours by the line's gap rule;
-    /// here the neighbours are index neighbours, which is how these lanes draw their own line (straight across a gap).
+    /// the 1.5 px line to read as that stretch redrawn thicker, the way the web strip draws it. The lane's line breaks at a collection gap
+    /// (<see cref="TimeSeriesGaps.GapThreshold"/>, 3 times the series' median spacing), so a run splits at the same gap: two marked points either
+    /// side of a hole are two marks, never a segment across the hole. <paramref name="times"/> must be the lane's FULL series (the one its line is
+    /// added from), which is where the threshold comes from; a run drawn on its own would judge gaps against its own few points.
     /// </para>
     /// </summary>
     public static void Add(ScottPlot.Plot plot, double[] times, double[] values, IReadOnlyList<int> indices)
     {
         var color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Anomaly"));
+        var gap = times.Length > 0 ? TimeSeriesGaps.GapThreshold(times) : null;
         var start = 0;
         while (start < indices.Count)
         {
             var end = start;
-            while (end + 1 < indices.Count && indices[end + 1] == indices[end] + 1) end++;
+            while (end + 1 < indices.Count && indices[end + 1] == indices[end] + 1
+                && (gap is not double limit || times[indices[end + 1]] - times[indices[end]] <= limit)) end++;
             var count = end - start + 1;
             var runTimes = new double[count];
             var runValues = new double[count];
             Array.Copy(times, indices[start], runTimes, 0, count);
             Array.Copy(values, indices[start], runValues, 0, count);
-            var mark = plot.Add.TimeSeries(runTimes, runValues);
+            // Plain scatter: the run is already split at the lane's gaps, and TimeSeries would judge it against its own few points.
+            var mark = plot.Add.Scatter(runTimes, runValues);
             mark.Color = color;
             if (count == 1)
             {

@@ -128,6 +128,29 @@ public sealed class OverviewBaselineBandTests
         });
     }
 
+    /// <summary>
+    /// #7678: the lane's line breaks where collection stopped (more than 3 times the median spacing), so a mark must not be drawn across that
+    /// hole. One point a minute with collection off from minute 100 to 199, points 99 and 200 above the band: two dots, no segment across the hole.
+    /// </summary>
+    [Fact]
+    public void AMarkedRun_IsSplitWhereCollectionStopped()
+    {
+        StaTestThread.Run(() =>
+        {
+            var control = NewControl();
+            IReadOnlyList<PerformanceMonitor.Ui.BaselineBand.HourStep> steps =
+                [PerformanceMonitor.Ui.BaselineBand.MakeStep(T0 - 1, T0 + 1, 100, 50)]; // 0 to 200
+            var minutes = Enumerable.Range(0, 100).Concat(Enumerable.Range(200, 100));
+            var data = minutes.Select(m => (T0 + m / 1440.0, m is 99 or 200 ? 500.0 : 100.0)).ToList();
+
+            control.UpdateLane(control.WaitStatsChart, "Wait", data, "#FFB74D", bands: steps, minAnomalyValue: 100);
+
+            var plot = control.WaitStatsChart.Plot;
+            Assert.Equal([T0 + 99 / 1440.0, T0 + 200 / 1440.0], Darling.Tests.OverviewLaneMarks.MarkedX(plot));
+            Assert.Equal([(1, true), (1, true)], Darling.Tests.OverviewLaneMarks.Shapes(plot));
+        });
+    }
+
     /// <summary>The same run rule on the CPU lane, which has its own marker site.</summary>
     [Fact]
     public void TheCpuLane_DrawsARunAsOneSegment_AndALonePointAsOneDot()
