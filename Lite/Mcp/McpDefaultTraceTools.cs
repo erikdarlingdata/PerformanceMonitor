@@ -85,6 +85,13 @@ public sealed class McpDefaultTraceTools
                 truncation_note = notice.TruncationNote,
                 database_name = database,
                 total_events = rows.Count,
+                /* #7729: how many of the window's events each name holds, from every row the reader returned (it filters in SQL, before the limit, so
+                   not the page), as Darling's twin does, so one noisy event cannot hide the others and a page that stops at the limit still says what it left out. */
+                by_event = rows
+                    .GroupBy(r => r.EventName)
+                    .Select(g => new { event_name = g.Key, count = g.Count() })
+                    .OrderByDescending(g => g.count).ThenBy(g => g.event_name, StringComparer.Ordinal)
+                    .ToList(),
                 shown = Math.Min(rows.Count, limit),
                 events = rows.Take(limit).Select(r => new
                 {
