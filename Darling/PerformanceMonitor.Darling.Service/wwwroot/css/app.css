@@ -758,9 +758,11 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 .chart .overview-strips .strip-readout { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .chart .overview-strips .strip-none { fill: var(--dim); font-size: 11px; }
 .chart .overview-strips .strip-band { fill: rgba(46, 174, 241, 0.14); }
-.chart .overview-strips .strip-anomaly { fill: #ef5350; stroke: var(--bg-dark); stroke-width: 1; }
+/* #7678: one small dot for a point alone above the band (no outline), one thicker segment in the marker colour over a run of neighbours. */
+.chart .overview-strips .strip-anomaly { fill: #ef5350; }
+.chart .overview-strips .strip-anomaly-run { fill: none; stroke: #ef5350; stroke-width: 3; stroke-linejoin: round; stroke-linecap: round; }
 .chart .overview-strips .strip-band-mean { stroke: rgba(46, 174, 241, 0.5); stroke-width: 1; stroke-dasharray: 4 3; }
-.chart .overview-strips .strip-baseline-note { fill: var(--dim); font-size: 10px; }
+.chart .overview-strips .strip-baseline-note { fill: var(--dim); font-size: 10px; font-weight: normal; }
 
 .chart-legend {
   display: flex;

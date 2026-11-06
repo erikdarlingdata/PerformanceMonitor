@@ -46,7 +46,8 @@ export const SERVER_COLUMNS = [
   { key: "version", label: "Version" },
   { key: "status", label: "Status" },
   { key: "freshness", label: "Freshness", statusSev: true },
-  { key: "monthly_cost", label: "Monthly Cost ($)", align: "right", sortValue: (r) => r.monthly_cost_usd },
+  /* #7670: the cells carry the "$", so the header does not. A server with no cost set (the service sends 0, which FinOps says as "Monthly cost not set") shows a dash, not "$0". */
+  { key: "monthly_cost", label: "Monthly Cost", align: "right", sortValue: (r) => r.monthly_cost_usd, display: (r) => (r.monthly_cost_usd > 0 ? r.monthly_cost : "—") },
   { key: "read_only", label: "Read only", format: "bool" },
   { key: "added", label: "Added", format: "time" },
   { key: "last_collected", label: "Last Collected", format: "time" },

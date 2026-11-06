@@ -95,7 +95,7 @@ public sealed class PgConfigAuditTextTests
         {
             var advice = FactAdvice.Compose(key, new Dictionary<string, Fact>(StringComparer.Ordinal) { [key] = fact })!;
             Assert.Contains(advice.Headline, text, StringComparison.Ordinal);
-            Assert.Contains(advice.Remediation, text, StringComparison.Ordinal);
+            Assert.Contains(PgConfigAuditText.DropRestatedLead(advice.Headline, advice.Remediation), text, StringComparison.Ordinal);
         }
         else
         {
@@ -126,11 +126,13 @@ public sealed class PgConfigAuditTextTests
         var advice = FactAdvice.Compose(key, new Dictionary<string, Fact>(StringComparer.Ordinal) { [key] = fact })!;
         var text = Row(fact);
 
+        /* A remediation that restates the setting and its value is joined without that sentence (#7670). */
+        var remediation = PgConfigAuditText.DropRestatedLead(advice.Headline, advice.Remediation).Trim();
         Assert.StartsWith(advice.Headline.TrimEnd().TrimEnd('.'), text, StringComparison.Ordinal);
-        Assert.EndsWith(advice.Remediation.Trim(), text, StringComparison.Ordinal);
+        Assert.EndsWith(remediation, text, StringComparison.Ordinal);
         Assert.DoesNotContain("  ", text, StringComparison.Ordinal);
         /* The sentence break: a mark, then one space, then the remediation. */
-        Assert.Matches(new Regex(@"[.!?] " + Regex.Escape(advice.Remediation.Trim()[..Math.Min(12, advice.Remediation.Trim().Length)])), text);
+        Assert.Matches(new Regex(@"[.!?] " + Regex.Escape(remediation[..Math.Min(12, remediation.Length)])), text);
     }
 
     [Fact]
@@ -179,6 +181,31 @@ public sealed class PgConfigAuditTextTests
     [InlineData("a headline ", " Then this.", "a headline. Then this.")]
     public void Join_AddsAFullStopOnlyWhereTheFirstSentenceHasNone(string first, string second, string expected) =>
         Assert.Equal(expected, PgConfigAuditText.Join(first, second));
+
+    [Theory]
+    [InlineData(PgTargetFactKeys.ConfigMaxWalSize, "max_wal_size")]
+    [InlineData(PgTargetFactKeys.ConfigSharedBuffers, "shared_buffers")]
+    public void AFiredSettingRow_StatesTheSettingAndItsValueOnce(string key, string setting)
+    {
+        /* #7670: the headline says "max_wal_size is 1 GB" and the remediation opened with it again. */
+        var fact = Build(Cases.Single(x => x.Key == key), fired: true);
+
+        var text = Row(fact, setting, "x");
+
+        Assert.True(Regex.Matches(text, Regex.Escape(setting + " is ")).Count == 1, "the setting and its value are stated once, but the row reads: " + text);
+        Assert.DoesNotContain("checkpoint-pressure card", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("the composite", text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("max_wal_size is 1 GB — the shipped default", "max_wal_size is 1 GB. No measured WAL rate.", "No measured WAL rate.")]
+    [InlineData("shared_buffers is at the initdb default of 128 MB", "shared_buffers is 128 MB (assumed — no config snapshot). Raise it.", "Raise it.")]
+    [InlineData("shared_buffers is 1 GB", "shared_buffers is 1 GB, already sized above the default. Look first.", "Already sized above the default. Look first.")]
+    [InlineData("shared_buffers is 4 GB", "shared_buffers is 4 GB, already sized above the default, and the cache is still short. Look first.", "Already sized above the default, and the cache is still short. Look first.")]
+    [InlineData("shared_buffers is 1 GB", "shared_buffers is 1 GB; keep it. Look first.", "shared_buffers is 1 GB; keep it. Look first.")]
+    [InlineData("a headline", "Then this.", "Then this.")]
+    public void DropRestatedLead_DropsOnlyABareRestatement(string headline, string remediation, string expected) =>
+        Assert.Equal(expected, PgConfigAuditText.DropRestatedLead(headline, remediation));
 
     [Fact]
     public void ARowWithNoAdviceBlock_NeverPrintsTheOldNoComposedAdviceText()
