@@ -172,7 +172,7 @@ internal sealed class DarlingPasswordKeyRuntime
 
             setRing(ring);
             await WriteStateAsync(postgres, logger, host, outcome.KeyId, outcome.State, outcome.Note, ct).ConfigureAwait(false);
-            LogOutcome(logger, outcome, options.KeySetting is null ? directory : DarlingPasswordKeySource.SettingName);
+            LogOutcome(logger, outcome, options.KeySetting is null ? directory : DarlingPasswordKeySource.SettingName, options.KeySetting is not null);
 
             var runtime = new DarlingPasswordKeyRuntime(
                 postgres, logger, setRing, host, ring, held is null ? null : ring, held?.PublicKey.Spki, held?.PublicKey.KeyId,
@@ -300,7 +300,11 @@ internal sealed class DarlingPasswordKeyRuntime
         }
     }
 
-    private sealed record Outcome(PasswordPrivateKey? Key, string State, string? Note, string? KeyId, bool Generated, bool TriggersOk, string? Warning);
+    /// <summary>What the start decided and did. <paramref name="Published"/> is true when this start published the key it
+    /// loaded (<see cref="PasswordKeyAction.PublishFile"/>), so the log can tell a passwordKey bootstrap from a reload.</summary>
+    private sealed record Outcome(
+        PasswordPrivateKey? Key, string State, string? Note, string? KeyId, bool Generated, bool TriggersOk, string? Warning,
+        bool Published = false);
 
     private static async Task<Outcome> DecideAndActAsync(
         string directory, NpgsqlDataSource postgres, ILogger logger, Func<PasswordPrivateKey, PublishedKey, bool> selfTest,
@@ -437,7 +441,7 @@ internal sealed class DarlingPasswordKeyRuntime
                     }
 
                     ownsFileKey = false;
-                    return new Outcome(fileKey, "ok", null, fileKey!.PublicKey.KeyId, false, true, null);
+                    return new Outcome(fileKey, "ok", null, fileKey!.PublicKey.KeyId, false, true, null, Published: true);
                 }
 
                 case PasswordKeyAction.Generate:
@@ -541,7 +545,7 @@ internal sealed class DarlingPasswordKeyRuntime
         }
     }
 
-    private static void LogOutcome(ILogger logger, Outcome outcome, string directory)
+    private static void LogOutcome(ILogger logger, Outcome outcome, string directory, bool fromSetting)
     {
         if (outcome.State == "ok" && outcome.KeyId is not null)
         {
@@ -549,6 +553,12 @@ internal sealed class DarlingPasswordKeyRuntime
             if (outcome.Generated)
             {
                 logger.LogInformation("Password key {KeyId} generated in {Directory}", id, directory);
+            }
+            else if (outcome.Published && fromSetting)
+            {
+                /* #8006: only with passwordKey. A key file the store did not publish yet is also published here, and that
+                   start keeps today's "loaded from {Directory}" line. */
+                logger.LogInformation("Password key {KeyId} published from {Setting}", id, DarlingPasswordKeySource.SettingName);
             }
             else
             {

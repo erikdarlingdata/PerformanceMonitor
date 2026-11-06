@@ -906,8 +906,41 @@ UPDATE config.config_notification SET smtp_encrypted_password = 'sealed:v1:01234
             Assert.False(File.Exists(Path.Combine(store.Directory, DarlingPasswordKeyFile.UnixFileName)));
             Assert.False(File.Exists(Path.Combine(store.Directory, DarlingPasswordKeyFile.WindowsFileName)));
             Assert.Empty(System.IO.Directory.EnumerateFileSystemEntries(store.Directory));
-            Assert.Equal(2, logger.Lines.Count(l => l == $"Password key {PasswordSeal.DisplayKeyId(key.PublicKey.KeyId)} loaded from passwordKey"));
+            /* The first start publishes the key and says so; the second finds it published and loads it. */
+            Assert.Equal(1, logger.Lines.Count(l => l == $"Password key {PasswordSeal.DisplayKeyId(key.PublicKey.KeyId)} published from passwordKey"));
+            Assert.Equal(1, logger.Lines.Count(l => l == $"Password key {PasswordSeal.DisplayKeyId(key.PublicKey.KeyId)} loaded from passwordKey"));
+            Assert.True(
+                logger.Lines.IndexOf($"Password key {PasswordSeal.DisplayKeyId(key.PublicKey.KeyId)} published from passwordKey")
+                < logger.Lines.IndexOf($"Password key {PasswordSeal.DisplayKeyId(key.PublicKey.KeyId)} loaded from passwordKey"),
+                "the first start must say published and the second loaded");
             Assert.DoesNotContain(logger.Lines, l => l.Contains(" generated in ", StringComparison.Ordinal));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
+    /// <summary>#8006: the "published from passwordKey" line belongs to the setting only. Without it, a key file the store
+    /// does not publish yet is published and logged exactly as before, as loaded from the credentials directory.</summary>
+    [Fact]
+    public async Task WithoutTheSetting_PublishingTheKeyFile_StillLogsLoadedFromTheDirectory()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        var bodySucceeded = false;
+        try
+        {
+            using var made = PasswordPrivateKey.Generate();
+            Assert.True(DarlingPasswordKeyFile.Generate(store.Directory, made.ExportPkcs8, new ListLogger()).Present);
+            var logger = new ListLogger();
+
+            var runtime = await store.StartAsync(logger: logger);
+
+            Assert.True(runtime.State == "ok", $"The start answered {runtime.State}: {runtime.Note}");
+            Assert.Equal(made.PublicKey.KeyId, (await store.ReadCurrentAsync())!.KeyId);
+            Assert.Contains(logger.Lines, l => l.StartsWith($"Password key {PasswordSeal.DisplayKeyId(made.PublicKey.KeyId)} loaded from ", StringComparison.Ordinal));
+            Assert.DoesNotContain(logger.Lines, l => l.Contains(" published from ", StringComparison.Ordinal));
             bodySucceeded = true;
         }
         finally
