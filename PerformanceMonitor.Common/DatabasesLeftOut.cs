@@ -89,8 +89,9 @@ public static class DatabasesLeftOut
         var named = Named(all)!;
         var one = all.Count == 1;
         var rest = all.Count - named.Count;
-        return string.Format(CultureInfo.InvariantCulture, "{0:N0} {1} left out because the server no longer lists {2}. {3} dropped or detached: {4}{5}.",
-            all.Count, one ? "database was" : "databases were", one ? "it" : "them", one ? "It was" : "They were", string.Join(", ", named),
+        var was = WasOrWere(all.Count);
+        return string.Format(CultureInfo.InvariantCulture, "{0:N0} {1} {2} left out because the server no longer lists {3}. {4} {2} dropped or detached: {5}{6}.",
+            all.Count, one ? "database" : "databases", was, one ? "it" : "them", one ? "It" : "They", string.Join(", ", named),
             rest > 0 ? string.Format(CultureInfo.InvariantCulture, ", and {0:N0} more", rest) : "");
     }
 

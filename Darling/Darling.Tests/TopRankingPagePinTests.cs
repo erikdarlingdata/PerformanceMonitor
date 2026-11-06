@@ -72,9 +72,8 @@ public sealed class TopRankingPagePinTests
     {
         var js = Tab();
         Assert.DoesNotContain("RANKING_NOTE_KEYS", js, StringComparison.Ordinal);
-        /* The three plain grids (queries on the CPU tab, procedures on both tabs) name the window note and no further note key but the left-out databases (#7538)... */
-        Assert.Equal(3, Regex.Matches(js, @"""truncation_note"",\s*\[""databases_left_out_note""\],\s*TOP_(QUERY|PROC)_GROUPS,\s*picker").Count);
-        /* ...and the Queries tab's composite draws no strip of its own for the retention notice. */
+        /* The Queries tab's composite draws no strip of its own for the retention notice. (What the three plain grids draw beside the window note, the
+           left-out sentence, is run by TopRankingNoticeBehaviourTests.ALeftOutReply_NamesTheDatabasesOnce_OnEveryRankedCard; its source-text pin was retired, #5833.) */
         Assert.DoesNotContain("noticeStrip(res.data.retention_notice)", js, StringComparison.Ordinal);
         var util = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "util.js").ReplaceLineEndings("\n");
         Assert.Contains("const note = retentionNoticeOf(res.data) ?? windowNoteText(res.data);", util, StringComparison.Ordinal);

@@ -19,7 +19,7 @@
 
 import { VIZ } from "../../panels.js";
 import { databaseBox, newBoxChoice } from "./database-box.js";
-import { el, mount, loadingStrip, captionStrip, noticeStrip, readErrorStrip, errorStrip, readTool, fmtInt, fmtMbFit, localTime } from "../../util.js";
+import { el, mount, loadingStrip, captionStrip, noticeStrip, leftOutNoteStrip, readErrorStrip, errorStrip, readTool, fmtInt, fmtMbFit, localTime } from "../../util.js";
 import { plainText } from "../../plain-text.js";
 import { gatedEmptyStrip } from "./gate.js";
 
@@ -170,7 +170,8 @@ export const tab = {
         if (mine !== generation) return;
         if (res.kind === "aborted" || res.kind === "auth") return;
         if (res.kind === "error") return mount(content, readErrorStrip(res.message));
-        if (res.kind === "empty") return mount(content, gatedEmptyStrip(res, ctx));
+        /* #7538, #7651: the empty sentence no longer repeats the count, so the page names the databases the read left out itself, on an empty answer and on one with rows. */
+        if (res.kind === "empty") return mount(content, [leftOutNoteStrip(res.data), gatedEmptyStrip(res, ctx)]);
         const data = res.data || {};
         if (!choice.db) {
           choice.names = (data.databases || []).map((d) => d.database_name).filter(Boolean);
@@ -184,7 +185,7 @@ export const tab = {
         const lead = (data.uptime_warning && !data.dedupe_only_applied ? 1 : 0) + (data.dedupe_only_applied ? 1 : 0);
         const notes = data.notes || [];
         // A plain count stays quiet. A cut list or a cut database list is a caveat and stays yellow. The overall-workload reason is an explanation (#7558), so it is a caption.
-        const parts = [captionStrip(noticeText(data, recs.length, choice.db), (recs.length > 0 && data.truncated === true) || data.databases_truncated === true)];
+        const parts = [leftOutNoteStrip(data), captionStrip(noticeText(data, recs.length, choice.db), (recs.length > 0 && data.truncated === true) || data.databases_truncated === true)];
         notes.slice(0, lead).forEach((t) => parts.push(noticeStrip(t)));
         const more = notes.slice(lead);
         if (more.length) {
