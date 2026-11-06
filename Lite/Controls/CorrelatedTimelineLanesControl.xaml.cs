@@ -381,14 +381,21 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 blockingTask.IsCompletedSuccessfully ? blockingTask.Result : [],
                 deadlockTask.IsCompletedSuccessfully ? deadlockTask.Result : []);
 
-            /* The reads that failed, named in lane order for the host's status line; null when all ten read. */
-            return OverviewLaneReadFailures.Summary(
+            /* The reads that failed, named in lane order for the host's status line; null when every lane read. A failed baseline
+               read alone is logged and is not a failed refresh: its lane drew, and only the band is missing. */
+            (string Read, Task Task)[] laneReads =
             [
                 ("CPU %", cpuTask), ("Wait ms/sec", waitTask), ("Blocking", blockingTask), ("Deadlocks", deadlockTask),
                 ("Buffer Pool MB", memoryTask), ("I/O ms", fileIoTask),
+            ];
+            (string Read, Task Task)[] baselineReads =
+            [
                 ("CPU baseline", cpuBaselineTask), ("Wait baseline", waitBaselineTask), ("I/O baseline", ioBaselineTask),
                 ("Blocking baseline", blockingBaselineTask),
-            ]);
+            ];
+            if (OverviewLaneReadFailures.Summary(baselineReads) is { } failedBaselines)
+                AppLogger.Info("CorrelatedLanes", failedBaselines);
+            return OverviewLaneReadFailures.Status(laneReads, baselineReads);
         }
         finally
         {

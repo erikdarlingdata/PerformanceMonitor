@@ -16,7 +16,8 @@ namespace PerformanceMonitor.Ui;
 /// <summary>
 /// What the Overview says when one of its lane reads fails. The ten reads run as one batch and each lane is drawn from its own
 /// read, so one failure costs one lane and the others draw as usual. The failed lane is marked as failed, and the tab's status line
-/// names the reads that failed instead of saying the tab refreshed.
+/// names the reads that failed instead of saying the tab refreshed. The four baseline reads are optional: a failed baseline read
+/// alone leaves its lane drawn without its band, so it is logged and is not a failed refresh.
 /// </summary>
 public static class OverviewLaneReadFailures
 {
@@ -39,5 +40,20 @@ public static class OverviewLaneReadFailures
         return message is null
             ? $"Overview lanes did not read {names}"
             : $"Overview lanes did not read {names}: {message}";
+    }
+
+    /// <summary>
+    /// The tab's status line when a lane read failed: every read that did not complete, lanes then baselines, in the order given,
+    /// with the first failure's message. Null when every lane read, even if a baseline read did not: the lanes drew and only a
+    /// band is missing, so the host logs that failure (<see cref="Summary"/> over the baseline reads) and calls the tab refreshed.
+    /// </summary>
+    public static string? Status(IReadOnlyList<(string Read, Task Task)> laneReads, IReadOnlyList<(string Read, Task Task)> baselineReads)
+    {
+        ArgumentNullException.ThrowIfNull(laneReads);
+        ArgumentNullException.ThrowIfNull(baselineReads);
+
+        return laneReads.All(r => r.Task.IsCompletedSuccessfully)
+            ? null
+            : Summary([.. laneReads, .. baselineReads]);
     }
 }

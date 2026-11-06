@@ -209,7 +209,11 @@ public partial class ServerTab : UserControl
             /* The window and the selected tab are read now, at the pass's own start, so a replay loads whatever is
                selected when it runs, not what was selected when the request was made. */
             var (tabHoursBack, tabFromDate, tabToDate) = GetCurrentWindowUtc();
-            await RefreshVisibleTabAsync(tabHoursBack, tabFromDate, tabToDate, subTabOnly: true, ct);
+            var failedReads = await RefreshVisibleTabAsync(tabHoursBack, tabFromDate, tabToDate, subTabOnly: true, ct);
+            /* A tab switch writes no "Last refresh" stamp, but an Overview lane that did not read is still named on the status
+               line. A superseded pass leaves the line to its replay. */
+            if (failedReads is not null && !ct.IsCancellationRequested)
+                ConnectionStatusText.Text = $"Error: {failedReads}";
             return;
         }
 
@@ -239,40 +243,13 @@ public partial class ServerTab : UserControl
 
             using var _profiler = Helpers.MethodProfiler.StartTiming($"ServerTab-{_server?.DisplayName}");
 
-            /* When this server tab isn't the selected one, its charts/grids aren't on screen —
-               skip the heavy sub-tab data refresh and just keep the alert badge current. Mark
-               dirty so the sub-tab is refreshed when the tab is selected again (IsVisibleChanged). */
-            if (IsVisible)
-            {
-                await RefreshVisibleTabAsync(hoursBack, fromDate, toDate, subTabOnly: true, ct);
-            }
-            else
-            {
-                _refreshPendingWhileHidden = true;
-            }
-
-            /* A newer request superseded this pass (a tab switch, a range change): it carries this pass's scope, so the
-               badges and the status line below are done by its replay, and writing them now would only be stale. */
-            if (ct.IsCancellationRequested) return;
-
-            /* Always keep the alert badge current even when the Blocking tab is not visible.
-               RefreshAlertCountsAsync reads this tab's own held UTC window (GetCurrentWindowUtc). */
-            if (MainTabControl.SelectedIndex != BlockingTabIndex)
-                await RefreshAlertCountsAsync();
-
-            /* #1591: same reasoning as the alert badge above — a permission-denied collector is only visible on the Collection
-               Health tab, which is precisely why it went unnoticed. Badge it from every tab. */
-            await RefreshPermissionDeniedBadgeAsync();
-            if (ct.IsCancellationRequested) return;
-
-            /* #4766: the time is the refresh instant read in the tab's display zone, and the label beside it names that
-               zone at that same instant on the TAB's own clock, so the two agree in all three display modes and on
-               either side of a daylight-saving change (DateTime.Now is this machine's zone, whatever the label, and
-               the active clock follows whichever tab is selected). */
-            var refreshedUtc = DateTime.UtcNow;
-            var tz = ServerTimeHelper.GetTimezoneLabel(ServerTimeHelper.CurrentDisplayMode, _serverClock, refreshedUtc);
-            var refreshedAt = PerformanceMonitor.Ui.DisplayZone.ToDisplay(refreshedUtc, GetPickerZone());
-            ConnectionStatusText.Text = $"Last refresh: {refreshedAt:HH:mm:ss} ({tz})";
+            var status = await RefreshStagesAsync(
+                () => RefreshVisibleTabIfShownAsync(hoursBack, fromDate, toDate, ct),
+                RefreshBadgesAsync,
+                LastRefreshText,
+                ct);
+            if (status is not null)
+                ConnectionStatusText.Text = status;
         }
         catch (Exception ex)
         {
@@ -283,6 +260,67 @@ public partial class ServerTab : UserControl
         {
             _isRefreshing = false;
         }
+    }
+
+    /// <summary>
+    /// The stages of a full refresh pass, in order: the visible tab's reads, then the alert and permission badges, then the
+    /// status line. The badges run whether or not an Overview lane read failed, so a failed lane costs its own chart and the
+    /// "Last refresh" stamp, never the badges. The status line is the failed reads as an error, or otherwise the stamp, which
+    /// <paramref name="lastRefreshText"/> reads after the badges so it is the pass's end. Null when a newer request superseded
+    /// this pass (a tab switch, a range change): it carries this pass's scope, so the badges and the status line are done by
+    /// its replay, and writing them now would only be stale. internal (not private) so the ordering is pinned without a WPF
+    /// control or a store.
+    /// </summary>
+    internal static async Task<string?> RefreshStagesAsync(
+        Func<Task<string?>> refreshVisibleTab, Func<Task> refreshBadges, Func<string> lastRefreshText, CancellationToken ct)
+    {
+        var failedReads = await refreshVisibleTab();
+        if (ct.IsCancellationRequested) return null;
+
+        await refreshBadges();
+        if (ct.IsCancellationRequested) return null;
+
+        return failedReads is null ? lastRefreshText() : $"Error: {failedReads}";
+    }
+
+    /// <summary>
+    /// When this server tab isn't the selected one, its charts/grids aren't on screen: skip the heavy sub-tab data refresh and
+    /// mark it dirty so the sub-tab is refreshed when the tab is selected again (IsVisibleChanged). Returns the Overview lane
+    /// reads that failed, named for the status line, and otherwise null.
+    /// </summary>
+    private async Task<string?> RefreshVisibleTabIfShownAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, CancellationToken ct)
+    {
+        if (IsVisible)
+            return await RefreshVisibleTabAsync(hoursBack, fromDate, toDate, subTabOnly: true, ct);
+
+        _refreshPendingWhileHidden = true;
+        return null;
+    }
+
+    /// <summary>The two badges every full pass keeps current, whichever tab is visible.</summary>
+    private async Task RefreshBadgesAsync()
+    {
+        /* Always keep the alert badge current even when the Blocking tab is not visible.
+           RefreshAlertCountsAsync reads this tab's own held UTC window (GetCurrentWindowUtc). */
+        if (MainTabControl.SelectedIndex != BlockingTabIndex)
+            await RefreshAlertCountsAsync();
+
+        /* #1591: same reasoning as the alert badge above — a permission-denied collector is only visible on the Collection
+           Health tab, which is precisely why it went unnoticed. Badge it from every tab. */
+        await RefreshPermissionDeniedBadgeAsync();
+    }
+
+    /// <summary>
+    /// #4766: the time is the refresh instant read in the tab's display zone, and the label beside it names that zone at that
+    /// same instant on the TAB's own clock, so the two agree in all three display modes and on either side of a daylight-saving
+    /// change (DateTime.Now is this machine's zone, whatever the label, and the active clock follows whichever tab is selected).
+    /// </summary>
+    private string LastRefreshText()
+    {
+        var refreshedUtc = DateTime.UtcNow;
+        var tz = ServerTimeHelper.GetTimezoneLabel(ServerTimeHelper.CurrentDisplayMode, _serverClock, refreshedUtc);
+        var refreshedAt = PerformanceMonitor.Ui.DisplayZone.ToDisplay(refreshedUtc, GetPickerZone());
+        return $"Last refresh: {refreshedAt:HH:mm:ss} ({tz})";
     }
 
     /// <summary>
@@ -325,24 +363,26 @@ public partial class ServerTab : UserControl
         RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase, _awsRdsKind);
     }
 
-    private async System.Threading.Tasks.Task RefreshVisibleTabAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, bool subTabOnly = false, CancellationToken ct = default)
+    /// <summary>Reads the tab now showing. Returns the Overview lane reads that failed, named for the status line, and otherwise null.</summary>
+    private async System.Threading.Tasks.Task<string?> RefreshVisibleTabAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, bool subTabOnly = false, CancellationToken ct = default)
     {
         await RefreshEngineEditionAsync();
         await RefreshServerDataStartAsync(hoursBack, fromDate);
 
         /* #5371: the token is the pass's "a newer request superseded me" signal. The tab loaders below take none, so the
            stage boundaries are where a superseded pass stops: it does not start a read for a tab nobody is looking at. */
-        if (ct.IsCancellationRequested) return;
+        if (ct.IsCancellationRequested) return null;
 
         if (TabReadsCollectorRuns(MainTabControl.SelectedIndex))
         {
             await RefreshCollectorRunsAsync();
-            if (ct.IsCancellationRequested) return;
+            if (ct.IsCancellationRequested) return null;
         }
 
+        string? failedReads = null;
         switch (MainTabControl.SelectedIndex)
         {
-            case 0: await RefreshOverviewAsync(hoursBack, fromDate, toDate); break;
+            case 0: failedReads = await RefreshOverviewAsync(hoursBack, fromDate, toDate); break;
             case 1: await RefreshWaitStatsAsync(hoursBack, fromDate, toDate); break;
             case QueriesTabIndex: await RefreshQueriesAsync(hoursBack, fromDate, toDate, subTabOnly); break;
             case 3: break; // Plan Viewer — no queries
@@ -364,6 +404,7 @@ public partial class ServerTab : UserControl
             case 19: await RefreshConfigChangesAsync(hoursBack, fromDate, toDate); break;
             case 20: await RefreshLongQueriesAsync(hoursBack, fromDate, toDate); break;
         }
+        return failedReads;
     }
 
     /// <summary>
@@ -852,10 +893,11 @@ public partial class ServerTab : UserControl
             : string.Empty;
     }
 
-    /// <summary>Tab 0 — Overview (Correlated Timeline Lanes)</summary>
-    private async System.Threading.Tasks.Task RefreshOverviewAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
+    /// <summary>Tab 0 — Overview (Correlated Timeline Lanes). Returns the lane reads that failed, named for the status line, and
+    /// otherwise null: a lane that did not read is drawn as failed, and the pass puts the failed reads on the status line in place
+    /// of "Last refresh" once the badges have run, so the failure costs the badges nothing.</summary>
+    private async System.Threading.Tasks.Task<string?> RefreshOverviewAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
-        string? failedReads = null;
         try
         {
             /* #4296, #4766: the lanes plot the UTC instant, and the comparison is "the same wall-clock hours N days
@@ -869,17 +911,13 @@ public partial class ServerTab : UserControl
                 ? null
                 : CorrelatedTimelineLanesControl.GetOverviewComparisonRange(
                     CompareToCombo.SelectedIndex, hoursBack, fromDate, toDate, DateTime.UtcNow, clock);
-            failedReads = await CorrelatedLanes.RefreshAsync(hoursBack, fromDate, toDate, clock, comparison);
+            return await CorrelatedLanes.RefreshAsync(hoursBack, fromDate, toDate, clock, comparison);
         }
         catch (Exception ex)
         {
             AppLogger.Info("ServerTab", $"[{_server.DisplayName}] RefreshOverviewAsync failed: {ex.Message}");
+            return null;
         }
-
-        /* A lane that did not read is drawn as failed, and the tab is not refreshed: the refresh's own catch puts the failed reads
-           on the status line in place of "Last refresh". */
-        if (failedReads is not null)
-            throw new InvalidOperationException(failedReads);
     }
 
     /// <summary>Tab 4 — CPU</summary>
