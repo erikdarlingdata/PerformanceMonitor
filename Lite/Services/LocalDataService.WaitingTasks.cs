@@ -170,7 +170,7 @@ AND   database_name IS NOT NULL";
     /// largest as the peak and counts the collections, so a wide bucket never reads as a bigger wait than one collection. (The desktop chart's
     /// <see cref="GetWaitingTaskTrendAsync"/> sums per bucket on purpose and is not this read.) Darling's twin is <c>DarlingDataReader.GetWaitingTaskTrendAsync</c>.
     /// </summary>
-    public async Task<List<CurrentWaitsWaitPoint>> GetCurrentWaitsWaitPointsAsync(int serverId, int hoursBack, DateTime? asOfUtc, int bucketMinutes)
+    internal async Task<List<CurrentWaitsWaitPoint>> GetCurrentWaitsWaitPointsAsync(int serverId, int hoursBack, DateTime? asOfUtc, int bucketMinutes)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -232,7 +232,7 @@ ORDER BY
     /// (a gauge is never summed, #4349), keeps the most any one collection saw as the peak and counts the collections. Darling's twin is
     /// <c>DarlingDataReader.GetBlockedSessionTrendAsync</c>.
     /// </summary>
-    public async Task<List<CurrentWaitsBlockedPoint>> GetCurrentWaitsBlockedPointsAsync(
+    internal async Task<List<CurrentWaitsBlockedPoint>> GetCurrentWaitsBlockedPointsAsync(
         int serverId, int hoursBack, DateTime? asOfUtc, IReadOnlyList<string>? databaseNames, int bucketMinutes)
     {
         using var connection = await OpenConnectionAsync();
