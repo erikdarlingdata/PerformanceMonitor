@@ -182,4 +182,43 @@ public sealed class WebMarkdownTests
         Assert.Equal(cls, pre.GetProperty("cls").GetString());
         Assert.Equal(body, pre.GetProperty("kids")[0].GetProperty("text").GetString());
     }
+
+    /// <summary>The text of each code span in a block, in order.</summary>
+    private static string[] CodeSpans(JsonElement block) =>
+        block.GetProperty("kids").EnumerateArray()
+            .Where(k => k.GetProperty("tag").GetString() == "code")
+            .Select(k => k.GetProperty("text").GetString()!)
+            .ToArray();
+
+    /// <summary>
+    /// #7944: a run of backticks opens a code span that the next run of exactly the same length closes (CommonMark). A longer or
+    /// shorter run inside the span is part of its text, and a two-backtick span is one span rather than two empty ones.
+    /// </summary>
+    [Theory]
+    [InlineData("`a``b`", "a``b", new[] { "a``b" })]
+    [InlineData("``double`` and `single`", "double and single", new[] { "double", "single" })]
+    public void ABacktickRun_IsClosedByTheNextRunOfTheSameLength(string markdown, string shown, string[] spans)
+    {
+        var block = Assert.Single(Render(markdown).EnumerateArray());
+
+        Assert.Equal("p", block.GetProperty("tag").GetString());
+        Assert.Equal(spans, CodeSpans(block));
+        Assert.Equal(shown, ShownText(block));
+    }
+
+    /// <summary>
+    /// #7944: a run of backticks with no run of the same length after it is literal text, kept whole, and the scan goes on after the
+    /// run rather than inside it, so a later span still pairs on its own.
+    /// </summary>
+    [Theory]
+    [InlineData("x ``` y", "x ``` y", new string[0])]
+    [InlineData("``` a `b`", "``` a b", new[] { "b" })]
+    public void ABacktickRunWithNoMatch_IsLiteralText(string markdown, string shown, string[] spans)
+    {
+        var block = Assert.Single(Render(markdown).EnumerateArray());
+
+        Assert.Equal("p", block.GetProperty("tag").GetString());
+        Assert.Equal(spans, CodeSpans(block));
+        Assert.Equal(shown, ShownText(block));
+    }
 }
