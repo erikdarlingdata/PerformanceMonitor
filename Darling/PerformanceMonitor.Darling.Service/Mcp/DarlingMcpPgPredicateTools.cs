@@ -94,7 +94,7 @@ public sealed class DarlingMcpPgPredicateTools
                         + "hour(s). pg_qualstats SAMPLES executions — at the default 1% rate a low-traffic "
                         + "database can genuinely record nothing — and it needs shared_preload_libraries "
                         + "plus a restart to be active at all.",
-                        emptyNotice.AsHints()), cancellationToken);
+                        emptyNotice.AsHints()), cancellationToken, emptyStart);
             }
 
             /* #4966: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote).

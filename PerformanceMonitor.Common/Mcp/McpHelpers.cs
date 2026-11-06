@@ -1115,6 +1115,62 @@ internal static class McpHelpers
             : JsonSerializer.Serialize(new { status, message, hints }, JsonOptions);
     }
 
+    /// <summary>The first words of <see cref="CollectedThroughSentence"/>; a client or a product's own check can tell the answer by them.</summary>
+    public const string CollectedThroughOpening = "Nothing was recorded through the last collection at ";
+
+    /// <summary>
+    /// #7724: what an offline server's empty window says when part of it was collected: the newest collection, and that nothing after it is
+    /// known. The time is ISO-8601 UTC, which the web page shows in the viewer's local time.
+    /// </summary>
+    public static string CollectedThroughSentence(DateTime newestCollectionUtc) =>
+        CollectedThroughOpening
+        + DateTime.SpecifyKind(newestCollectionUtc, DateTimeKind.Utc).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture)
+        + ". Nothing after that is known.";
+
+    /// <summary>
+    /// #7724: the answer for an offline server whose window holds collected history up to <paramref name="newestCollectionUtc"/>. The word stays
+    /// <c>unavailable</c>, so no client reads it as an all-clear, and <c>collected_through</c> carries the newest collection. The <c>message</c>
+    /// opens with <paramref name="offlineLead"/> (the sentence that says the server is offline and why, so an MCP caller still learns it) and
+    /// then <see cref="CollectedThroughSentence"/>. <c>collected_through_note</c> is that second sentence alone: the web page prints it, because
+    /// its red strip already carries the lead. Shared by Lite and Darling.
+    /// </summary>
+    public static string CollectedThroughStatus(DateTime newestCollectionUtc, string? offlineLead = null)
+    {
+        var sentence = CollectedThroughSentence(newestCollectionUtc);
+        return JsonSerializer.Serialize(new
+        {
+            status = "unavailable",
+            message = string.IsNullOrWhiteSpace(offlineLead) ? sentence : offlineLead.TrimEnd() + " " + sentence,
+            collected_through = FormatEffectiveStart(newestCollectionUtc),
+            collected_through_note = sentence,
+        }, JsonOptions);
+    }
+
+    /// <summary>
+    /// #7724: what an empty read answers for a server already judged offline, from the newest collection and the window. A window that ends at or before
+    /// the newest collection lies inside collected history, so there is no offline answer (<c>null</c>: the read's own answer stands). A window that
+    /// starts at or before the newest collection holds collected history, so the answer says what was collected through
+    /// (<see cref="CollectedThroughStatus"/>). A window with no collection in it, or a caller that passes no start, gets <paramref name="offlineAnswerJson"/>,
+    /// the offline sentence as it was before. Shared by Lite and Darling so the boundary is one rule.
+    /// </summary>
+    public static string? OfflineEmptyAnswer(
+        string offlineLead, DateTime? newestCollectionUtc, DateTime windowEndUtc, DateTime? windowStartUtc, string offlineAnswerJson)
+    {
+        if (newestCollectionUtc is not { } through)
+        {
+            return offlineAnswerJson;
+        }
+
+        if (windowEndUtc <= through)
+        {
+            return null;
+        }
+
+        return windowStartUtc is { } start && through >= start
+            ? CollectedThroughStatus(through, offlineLead)
+            : offlineAnswerJson;
+    }
+
     /// <summary>True when <paramref name="answerJson"/> is a status envelope whose <c>status</c> is <c>empty</c> or <c>unavailable</c> (#6074).</summary>
     public static bool IsEmptyOrUnavailableStatus(string answerJson)
     {

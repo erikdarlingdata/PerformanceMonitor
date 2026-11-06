@@ -167,7 +167,7 @@ public sealed partial class DarlingMcpAlertTools
                     : McpHelpers.Status("empty", $"No alerts found in the specified time range{filterSentence}.", notice.AsHints()), notice);
                 /* #7167: a server-scoped read of an offline server is missing data, not a clean history. The fleet-wide read has no one server to judge. */
                 return serverId is { } scopedServer
-                    ? await DarlingServerOfflineNote.EmptyAsync(postgres, scopedServer, scope, windowEnd, emptyPage, cancellationToken)
+                    ? await DarlingServerOfflineNote.EmptyAsync(postgres, scopedServer, scope, windowEnd, emptyPage, cancellationToken, since)
                     : emptyPage;
             }
 

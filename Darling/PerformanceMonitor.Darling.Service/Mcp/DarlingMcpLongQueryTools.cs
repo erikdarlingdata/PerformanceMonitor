@@ -126,7 +126,7 @@ public sealed class DarlingMcpLongQueryTools
                         + (collectorMayBeOff ? ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data." : ".")
                         + (include_monitor ? "" : " The monitor's own statements are left out. Pass include_monitor=true to include them."),
                     databaseFilter.Describe(), /* #5244 review L2: the echo rides on an empty answer too */
-                    emptyNotice.AsHints()), cancellationToken);
+                    emptyNotice.AsHints()), cancellationToken, windowStart);
             }
 
             var truncated = rows.Count > limit;
