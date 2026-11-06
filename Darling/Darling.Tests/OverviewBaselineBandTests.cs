@@ -131,8 +131,33 @@ public sealed class OverviewBaselineBandTests
 
             var plot = control.WaitStatsChart.Plot;
             Assert.Equal(2, plot.GetPlottables<Rectangle>().Count());
-            var dots = plot.GetPlottables<Scatter>().Where(s => s.LineWidth == 0).SelectMany(s => s.Data.GetScatterPoints()).Select(p => p.X).OrderBy(x => x).ToList();
-            Assert.Equal([Hour(10), Hour(70)], dots);
+            // The two marked points are neighbours in the series, so they are drawn as one segment: read the marks by colour, not by shape.
+            Assert.Equal([Hour(10), Hour(70)], OverviewLaneMarks.MarkedX(plot));
+        });
+    }
+
+    /// <summary>
+    /// #7678: a run of neighbouring points above the band is ONE segment spanning the run, and a point alone is ONE dot. Seven points, the
+    /// 2nd to 4th and the 6th above the band: one three-point segment and one dot, not four dots.
+    /// </summary>
+    [Fact]
+    public void ARunAboveTheBand_IsOneSegment_AndALonePointIsOneDot()
+    {
+        StaTestThread.Run(() =>
+        {
+            var control = NewControl();
+            IReadOnlyList<BaselineBand.HourStep> steps = [BaselineBand.MakeStep(T0 - 1, T0 + 1, 100, 50)]; // 0 to 200
+            double[] values = [100, 500, 500, 500, 100, 500, 100];
+            var data = values.Select((v, i) => (T0 + i / 1440.0, v)).ToList();
+
+            control.UpdateLane(control.WaitStatsChart, "Wait", data, "#FFB74D", baseline: steps, minAnomalyValue: 100);
+
+            var plot = control.WaitStatsChart.Plot;
+            Assert.Equal([T0 + 1 / 1440.0, T0 + 2 / 1440.0, T0 + 3 / 1440.0, T0 + 5 / 1440.0], OverviewLaneMarks.MarkedX(plot));
+            var shapes = OverviewLaneMarks.Shapes(plot);
+            Assert.Equal(2, shapes.Count);
+            Assert.Contains((3, false), shapes);
+            Assert.Contains((1, true), shapes);
         });
     }
 
@@ -148,7 +173,7 @@ public sealed class OverviewBaselineBandTests
 
             var plot = control.WaitStatsChart.Plot;
             Assert.Empty(plot.GetPlottables<Rectangle>());
-            Assert.DoesNotContain(plot.GetPlottables<Scatter>(), s => s.LineWidth == 0);
+            Assert.Equal(0, OverviewLaneMarks.MarkedCount(plot));
         });
     }
 
