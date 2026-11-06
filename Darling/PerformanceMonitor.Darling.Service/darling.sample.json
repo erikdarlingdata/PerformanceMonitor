@@ -483,6 +483,8 @@
     //     // ... OR a PEM pair instead of the two lines above:
     //     // "certPath": "C:\\ProgramData\\PerformanceMonitorDarling\\certs\\mcp.crt",
     //     // "keyPath":  "C:\\ProgramData\\PerformanceMonitorDarling\\certs\\mcp.key"
+    //     // ... OR a Windows certificate store entry (Windows only; the service reads it at start, so restart it after a renewal):
+    //     // "store": { "location": "LocalMachine", "name": "My", "thumbprint": "<40 hex>" }   // or "subject": "<DNS name>" for the newest valid certificate
     //   }
     // }
   },
@@ -595,6 +597,8 @@
     //     // ... OR a PEM pair instead of the two lines above:
     //     // "certPath": "C:\\ProgramData\\PerformanceMonitorDarling\\certs\\dashboard.crt",
     //     // "keyPath":  "C:\\ProgramData\\PerformanceMonitorDarling\\certs\\dashboard.key"
+    //     // ... OR a Windows certificate store entry (Windows only; the service reads it at start, so restart it after a renewal):
+    //     // "store": { "location": "LocalMachine", "name": "My", "thumbprint": "<40 hex>" }   // or "subject": "<DNS name>" for the newest valid certificate
     //   },
     //
     //   // OPTIONAL per-user OIDC sign-in (#2550) -- omit the whole block to keep the shared token as the only

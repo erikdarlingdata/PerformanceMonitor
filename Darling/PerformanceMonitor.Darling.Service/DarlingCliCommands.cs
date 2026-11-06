@@ -3524,9 +3524,31 @@ public static partial class DarlingCliCommands
             DarlingWebTls.TlsShape.Pem =>
                 $"         TLS: on (PEM pair, {tls!.CertPath})."
                 + (plan.Warning is null ? string.Empty : $" NOTE: {plan.Warning}"),
+            DarlingWebTls.TlsShape.Store =>
+                $"         TLS: on (certificate store, {DescribeStoreCertificate(tls!.Store!)})."
+                + (plan.Warning is null ? string.Empty : $" NOTE: {plan.Warning}"),
             _ => $"         TLS: on (PKCS#12, {tls!.PfxPath})."
                  + (plan.Warning is null ? string.Empty : $" NOTE: {plan.Warning}"),
         };
+    }
+
+    /// <summary>
+    /// Where the <c>store</c> form's certificate lives and how it is picked, for the status line (#7718):
+    /// <c>LocalMachine\My, 0123...</c> for a thumbprint, <c>LocalMachine\My, newest valid for name</c> for a subject.
+    /// A location that does not parse is shown as written, since <see cref="DarlingWebTls.Describe"/> already refuses
+    /// it before this line is chosen. Pure.
+    /// </summary>
+    internal static string DescribeStoreCertificate(WebTlsStoreConfig store)
+    {
+        var location = DarlingWebTls.TryParseStoreLocation(store.Location, out var parsed)
+            ? parsed.ToString()
+            : (string.IsNullOrWhiteSpace(store.Location) ? "LocalMachine" : store.Location.Trim());
+        var name = string.IsNullOrWhiteSpace(store.Name) ? "My" : store.Name.Trim();
+        var pick = !string.IsNullOrWhiteSpace(store.Thumbprint)
+            ? DarlingTlsStore.NormalizeThumbprint(store.Thumbprint)
+            : $"newest valid for {store.Subject?.Trim()}";
+
+        return $"{location}\\{name}, {pick}";
     }
 
     /// <summary>
@@ -3535,7 +3557,7 @@ public static partial class DarlingCliCommands
     ///
     /// <list type="bullet">
     /// <item><b>The scheme follows the certificate (#5288).</b> It is <c>https</c> when <c>web.network.tls</c> names a
-    /// PKCS#12 bundle or a PEM pair, because the network listener then speaks TLS only and an <c>http://</c> URL
+    /// PKCS#12 bundle, a PEM pair or a store entry, because the network listener then speaks TLS only and an <c>http://</c> URL
     /// fails the handshake. Anything else, a MISCONFIGURED block included, keeps <c>http</c>: a refused block
     /// leaves the dashboard loopback-only, so there is no remote URL to get right.</item>
     /// <item><b>A wildcard listen has no single address to print.</b> <c>0.0.0.0</c> and <c>::</c> both print the
@@ -3546,7 +3568,7 @@ public static partial class DarlingCliCommands
     /// </summary>
     internal static IReadOnlyList<string> BuildWebLoginHint(string? listen, int port, WebTlsConfig? tls)
     {
-        var scheme = DarlingWebTls.Describe(tls).Shape is DarlingWebTls.TlsShape.Pfx or DarlingWebTls.TlsShape.Pem
+        var scheme = DarlingWebTls.Describe(tls).Shape is DarlingWebTls.TlsShape.Pfx or DarlingWebTls.TlsShape.Pem or DarlingWebTls.TlsShape.Store
             ? "https"
             : "http";
 

@@ -51,7 +51,7 @@ internal static class DarlingWebTls
     internal enum TlsShape
     {
         /// <summary>No <c>tls</c> block — plain HTTP (the caller warns when exposed). A block that is present but
-        /// sets none of <c>pfxPath</c>, <c>certPath</c> or <c>keyPath</c> is <see cref="Invalid"/>, not this.</summary>
+        /// sets none of <c>pfxPath</c>, <c>certPath</c>, <c>keyPath</c> or <c>store</c> is <see cref="Invalid"/>, not this.</summary>
         NotConfigured,
 
         /// <summary>A PKCS#12 bundle: <c>pfxPath</c>, optionally with a password.</summary>
@@ -59,6 +59,10 @@ internal static class DarlingWebTls
 
         /// <summary>A PEM pair: <c>certPath</c> + <c>keyPath</c>.</summary>
         Pem,
+
+        /// <summary>A certificate in the Windows certificate store (#7718): <c>store</c>, picked by thumbprint or
+        /// by subject. Windows only; on any other host the block is <see cref="Invalid"/>.</summary>
+        Store,
 
         /// <summary>Configured but not usable as written — ambiguous or incomplete. Fail closed, never guess.</summary>
         Invalid,
@@ -104,11 +108,18 @@ internal static class DarlingWebTls
     /// <param name="tls">The block, or null when the listener has none.</param>
     /// <param name="section">Which listener's block this is, <c>"web"</c> (the default) or <c>"mcp"</c>. It only
     /// names the setting in the messages (<c>{section}.network.tls</c>); it never changes the decision.</param>
-    internal static TlsPlan Describe(WebTlsConfig? tls, string section = "web")
+    /// <param name="isWindows">Whether the host is Windows, which the <c>store</c> form needs. Null (the default)
+    /// asks the operating system; a test passes a value to decide the non-Windows answer on a Windows runner.</param>
+    internal static TlsPlan Describe(WebTlsConfig? tls, string section = "web", bool? isWindows = null)
     {
         if (tls is null)
         {
             return new TlsPlan(TlsShape.NotConfigured, null);
+        }
+
+        if (tls.Store is not null)
+        {
+            return DescribeStore(tls, section, isWindows ?? OperatingSystem.IsWindows());
         }
 
         var hasPfx = !string.IsNullOrWhiteSpace(tls.PfxPath);
@@ -175,8 +186,95 @@ internal static class DarlingWebTls
            password above. Only an ABSENT block (null, handled first) means plain HTTP. */
         return new TlsPlan(
             TlsShape.Invalid,
-            $"{section}.network.tls is present but sets none of pfxPath, certPath or keyPath. "
+            $"{section}.network.tls is present but sets none of pfxPath, certPath, keyPath or store. "
             + "Check the key names, or remove the block for plain HTTP.");
+    }
+
+    /// <summary>
+    /// The <c>store</c> arm of <see cref="Describe"/> (#7718). PURE, like the rest of it. A store form next to a file
+    /// form is refused, never resolved by precedence, for the reason the two file forms are. Exactly one of
+    /// <c>thumbprint</c> and <c>subject</c> picks the certificate: both is ambiguous about which rule decides, and
+    /// neither names nothing. A <c>location</c> other than LocalMachine or CurrentUser is refused here, not left to
+    /// fail at the store.
+    /// </summary>
+    private static TlsPlan DescribeStore(WebTlsConfig tls, string section, bool isWindows)
+    {
+        var store = tls.Store!;
+        var setting = $"{section}.network.tls";
+
+        if (!string.IsNullOrWhiteSpace(tls.PfxPath)
+            || !string.IsNullOrWhiteSpace(tls.CertPath)
+            || !string.IsNullOrWhiteSpace(tls.KeyPath))
+        {
+            return new TlsPlan(
+                TlsShape.Invalid,
+                $"{setting} names BOTH a certificate store entry (store) and a certificate file (pfxPath, or certPath/keyPath) — "
+                + "set one form only, so the certificate actually served is the one you meant.");
+        }
+
+        if (!isWindows)
+        {
+            return new TlsPlan(
+                TlsShape.Invalid,
+                $"{setting}.store needs Windows (the certificate store is a Windows feature) — "
+                + "on this host use pfxPath or certPath/keyPath.");
+        }
+
+        var hasThumbprint = !string.IsNullOrWhiteSpace(store.Thumbprint);
+        var hasSubject = !string.IsNullOrWhiteSpace(store.Subject);
+        if (hasThumbprint && hasSubject)
+        {
+            return new TlsPlan(
+                TlsShape.Invalid,
+                $"{setting}.store sets BOTH thumbprint and subject — set one, never both. "
+                + "thumbprint serves exactly one certificate; subject serves the newest valid certificate for a DNS name.");
+        }
+
+        if (!hasThumbprint && !hasSubject)
+        {
+            return new TlsPlan(
+                TlsShape.Invalid,
+                $"{setting}.store sets neither thumbprint nor subject — name the certificate to serve. "
+                + "Check the key names, or remove the block for plain HTTP.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(store.Location) && !TryParseStoreLocation(store.Location, out _))
+        {
+            return new TlsPlan(
+                TlsShape.Invalid,
+                $"{setting}.store.location '{store.Location.Trim()}' is not LocalMachine or CurrentUser.");
+        }
+
+        var hasPassword =
+            !string.IsNullOrWhiteSpace(tls.PfxPassword) || !string.IsNullOrWhiteSpace(tls.EncryptedPfxPassword);
+        return new TlsPlan(
+            TlsShape.Store,
+            null,
+            hasPassword
+                ? $"{setting} sets a PKCS#12 password alongside a certificate store entry — the store entry is being served "
+                  + "and the password is ignored. Remove it."
+                : null);
+    }
+
+    /// <summary>Parses <c>store.location</c>, case-insensitively. Only the two real locations: a numeric string or any
+    /// other enum name is not one.</summary>
+    internal static bool TryParseStoreLocation(string? text, out StoreLocation location)
+    {
+        var trimmed = text?.Trim();
+        if (string.Equals(trimmed, nameof(StoreLocation.LocalMachine), StringComparison.OrdinalIgnoreCase))
+        {
+            location = StoreLocation.LocalMachine;
+            return true;
+        }
+
+        if (string.Equals(trimmed, nameof(StoreLocation.CurrentUser), StringComparison.OrdinalIgnoreCase))
+        {
+            location = StoreLocation.CurrentUser;
+            return true;
+        }
+
+        location = default;
+        return false;
     }
 
     /// <summary>The lifetime gate's three answers. Kept as a kind rather than only the rendered refusal
@@ -275,6 +373,7 @@ internal static class DarlingWebTls
         {
             TlsShape.Pfx => LoadPfx(tls, section),
             TlsShape.Pem => LoadPem(tls, section),
+            TlsShape.Store => DarlingTlsStore.Load(tls.Store!, section),
             _ => throw new InvalidOperationException(
                 $"{section}.network.tls cannot be loaded in shape {shape} — Describe() must be consulted first."),
         };

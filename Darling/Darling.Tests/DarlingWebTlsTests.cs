@@ -42,7 +42,7 @@ public sealed class DarlingWebTlsTests
         var plan = DarlingWebTls.Describe(new WebTlsConfig { PfxPath = "   ", CertPath = "", KeyPath = null });
         Assert.Equal(DarlingWebTls.TlsShape.Invalid, plan.Shape);
         Assert.Equal(
-            "web.network.tls is present but sets none of pfxPath, certPath or keyPath. Check the key names, or remove the block for plain HTTP.",
+            "web.network.tls is present but sets none of pfxPath, certPath, keyPath or store. Check the key names, or remove the block for plain HTTP.",
             plan.Problem);
     }
 
@@ -72,7 +72,7 @@ public sealed class DarlingWebTlsTests
             var plan = DarlingWebTls.Describe(tls, section);
             Assert.Equal(DarlingWebTls.TlsShape.Invalid, plan.Shape);
             Assert.Equal(
-                $"{section}.network.tls is present but sets none of pfxPath, certPath or keyPath. Check the key names, or remove the block for plain HTTP.",
+                $"{section}.network.tls is present but sets none of pfxPath, certPath, keyPath or store. Check the key names, or remove the block for plain HTTP.",
                 plan.Problem);
         }
     }
@@ -494,7 +494,7 @@ public sealed class DarlingWebTlsTests
         "web.network.tls sets certPath with no keyPath — a PEM certificate cannot serve TLS without its private key.",
         "web.network.tls sets keyPath with no certPath — name the PEM certificate that key belongs to.",
         "web.network.tls sets a PKCS#12 password but no pfxPath — there is no bundle for it to open.",
-        "web.network.tls is present but sets none of pfxPath, certPath or keyPath. Check the key names, or remove the block for plain HTTP.",
+        "web.network.tls is present but sets none of pfxPath, certPath, keyPath or store. Check the key names, or remove the block for plain HTTP.",
     ];
 
     private const string WebStrayPasswordWarning =

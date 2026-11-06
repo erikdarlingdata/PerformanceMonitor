@@ -194,7 +194,7 @@ internal static class DarlingListenerTls
         }
     }
 
-    /// <summary>The Pfx and Pem arms of <see cref="Resolve"/>: load, publish, judge the lifetime, warn, hand back.</summary>
+    /// <summary>The Pfx, Pem and Store arms of <see cref="Resolve"/>: load, publish, judge the lifetime, warn, hand back.</summary>
     private static ListenerTlsOutcome LoadAndJudge(
         ILogger logger,
         ListenerTlsCertificateState certState,
@@ -225,8 +225,9 @@ internal static class DarlingListenerTls
                not after it: a key that fails to load (a pair that does not match, an encrypted key, a wrong PFX
                password) leaves the same readable file on disk, and a warning that waited for a successful load would
                never name it. On Windows only, where the ACL this reads exists. A warning, not a refusal: the fix is
-               one icacls line, and the load below decides whether the listener serves. */
-            if (OperatingSystem.IsWindows())
+               one icacls line, and the load below decides whether the listener serves. The store form (#7718)
+               has no file, so it adds none: its key lives under the machine key store's own ACL. */
+            if (OperatingSystem.IsWindows() && plan.Shape != DarlingWebTls.TlsShape.Store)
             {
                 WarnWhenKeyFileIsReadableByUsers(logger, labels, tls, plan.Shape);
             }
