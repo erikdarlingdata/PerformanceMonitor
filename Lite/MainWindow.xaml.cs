@@ -2217,12 +2217,19 @@ public partial class MainWindow : Window
                     return answer == MessageBoxResult.OK;
                 }));
 
-            if (result.Success)
+            /* The archive views were rebuilt whenever the import reached the copy step, a partial import included: one
+               whose old hot database could not be read still copies the old archive folder. So the overview, the server
+               list and the status bar re-read the store before the outcome is shown. */
+            if (result.ViewsRefreshed)
             {
-                StatusText.Text = "Import complete — refreshing views...";
+                StatusText.Text = "Refreshing views after import...";
                 await _serverManager.CheckAllConnectionsAsync();
                 RefreshServerList();
                 UpdateStatusBar();
+            }
+
+            if (result.Success)
+            {
                 StatusText.Text = "Import complete";
 
                 MessageBox.Show(
