@@ -90,6 +90,83 @@ public class FindingStoreTests : IClassFixture<SharedDuckDbFixture>, IDisposable
         Assert.All(findings, f => Assert.Equal("incident_abc", f.IncidentId));
     }
 
+    /// <summary>Stores one analysis run of <paramref name="serverId"/> at <paramref name="analysisTime"/>, one finding per story.</summary>
+    private static Task StoreRunAsync(FindingStore store, int serverId, DateTime analysisTime,
+        params (string Hash, string Root, string Path)[] stories)
+    {
+        var findings = stories.Select(s => new AnalysisFinding
+        {
+            ServerId = serverId,
+            ServerName = "story-paths",
+            AnalysisTime = analysisTime,
+            Severity = 1.5,
+            Confidence = 0.8,
+            Category = "parameter_sensitivity",
+            StoryPath = s.Path,
+            StoryPathHash = s.Hash,
+            StoryText = s.Path,
+            RootFactKey = s.Root,
+            FactCount = s.Path.Split(" → ").Length,
+            TimeRangeStart = analysisTime.AddHours(-4),
+            TimeRangeEnd = analysisTime
+        }).ToList();
+        return store.InsertFindingsAsync(findings, new AnalysisContext
+        {
+            ServerId = serverId,
+            ServerName = "story-paths",
+            TimeRangeStart = analysisTime.AddHours(-4),
+            TimeRangeEnd = analysisTime
+        });
+    }
+
+    /// <summary>Calls the store's stored-story-paths read by name and reads each row's hash and path by name.</summary>
+    private static async Task<List<(string Hash, string Path)>> StoryPathsAsync(
+        System.Reflection.MethodInfo read, object store, int serverId, string rootFactKey)
+    {
+        var task = (Task)read.Invoke(store, new object[] { serverId, rootFactKey })!;
+        await task;
+        var rows = (System.Collections.IEnumerable)task.GetType().GetProperty("Result")!.GetValue(task)!;
+        var result = new List<(string, string)>();
+        foreach (var row in rows)
+        {
+            result.Add((
+                (string)row.GetType().GetProperty("StoryPathHash")!.GetValue(row)!,
+                (string)row.GetType().GetProperty("StoryPath")!.GetValue(row)!));
+        }
+        return result;
+    }
+
+    [Fact]
+    public async Task GetStoryPaths_ReturnsEachDistinctPathOfTheServerAndRoot_AcrossTheRetention()
+    {
+        /* #8012: the page hold's wider-path seed asks for the distinct story paths one server has stored under one
+           root, however old inside the findings retention and whatever other stories stored since. */
+        var read = typeof(FindingStore).GetMethod("GetStoryPathsAsync", new[] { typeof(int), typeof(string) });
+        Assert.True(read is not null,
+            "FindingStore has no GetStoryPathsAsync(serverId, rootFactKey): the distinct story paths of one server and root across the findings retention.");
+
+        var store = new FindingStore(_duckDb);
+        const int serverId = 8012;
+        const string wider = "PARAMETER_SENSITIVITY → QUERY_SPILLS → TEMPDB_USAGE";
+        const string shorter = "PARAMETER_SENSITIVITY → QUERY_SPILLS";
+        var threeDaysAgo = DateTime.UtcNow.AddDays(-3);
+        /* The same path in two runs is one answer. */
+        await StoreRunAsync(store, serverId, threeDaysAgo, ("aaaaaaaa11111111", "PARAMETER_SENSITIVITY", wider));
+        await StoreRunAsync(store, serverId, threeDaysAgo.AddHours(1), ("aaaaaaaa11111111", "PARAMETER_SENSITIVITY", wider));
+        /* Another root on the same server, and the same root on another server, are not. */
+        await StoreRunAsync(store, serverId, DateTime.UtcNow.AddMinutes(-30),
+            ("bbbbbbbb22222222", "PARAMETER_SENSITIVITY", shorter),
+            ("cccccccc33333333", "QUERY_SPILLS", "QUERY_SPILLS → TEMPDB_USAGE"));
+        await StoreRunAsync(store, serverId + 1, DateTime.UtcNow.AddMinutes(-30),
+            ("dddddddd44444444", "PARAMETER_SENSITIVITY", "PARAMETER_SENSITIVITY → CPU_SPIKE"));
+
+        var paths = await StoryPathsAsync(read!, store, serverId, "PARAMETER_SENSITIVITY");
+
+        Assert.Equal(
+            new[] { ("aaaaaaaa11111111", wider), ("bbbbbbbb22222222", shorter) },
+            paths.OrderBy(p => p.Hash, StringComparer.Ordinal).ToArray());
+    }
+
     [Fact]
     public async Task GetRecentFindings_RespectsTimeRange()
     {

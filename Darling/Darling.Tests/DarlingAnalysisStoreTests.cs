@@ -11,11 +11,14 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Notifications;
 using Xunit;
 
 namespace Darling.Tests;
@@ -430,6 +433,203 @@ public sealed class DarlingAnalysisStoreTests
         {
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteTestRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /* ---------------- gated: #8012, the page hold's wider-path seed ---------------- */
+
+    /* Its own server id, so the round-trip's rows and cleanup and this one's cannot touch each other. */
+    private const int StoryPathsServerId = -801280128;
+    private const string StoryPathsServerName = "analysis-store-story-paths";
+    private const string WiderPath = "PARAMETER_SENSITIVITY → QUERY_SPILLS → TEMPDB_USAGE";
+    private const string ShorterPath = "PARAMETER_SENSITIVITY → QUERY_SPILLS";
+
+    private const string NoStoryPathsRead =
+        "PgFindingStore has no GetStoryPathsAsync(serverId, rootFactKey): the distinct story paths of one server and root across the findings retention.";
+
+    private static AnalysisFinding Story(string hash, string root, string path, int serverId = StoryPathsServerId) => new()
+    {
+        ServerId = serverId,
+        ServerName = StoryPathsServerName,
+        AnalysisTime = DateTime.UtcNow,
+        Severity = 1.5,
+        Confidence = 0.8,
+        Category = "parameter_sensitivity",
+        StoryPath = path,
+        StoryPathHash = hash,
+        StoryText = path,
+        RootFactKey = root,
+        RootFactValue = 1.0,
+        FactCount = path.Split(" → ").Length,
+        TimeRangeStart = DateTime.UtcNow.AddHours(-4),
+        TimeRangeEnd = DateTime.UtcNow
+    };
+
+    /// <summary>Stores <paramref name="findings"/> as one analysis run of their server at <paramref name="analysisTime"/>.</summary>
+    private static Task StoreRunAsync(PgFindingStore store, DateTime analysisTime, params AnalysisFinding[] findings)
+    {
+        foreach (var f in findings)
+            f.AnalysisTime = analysisTime;
+        return store.InsertFindingsAsync(findings.ToList(), new AnalysisContext
+        {
+            ServerId = findings[0].ServerId,
+            ServerName = findings[0].ServerName,
+            TimeRangeStart = analysisTime.AddHours(-4),
+            TimeRangeEnd = analysisTime,
+            ServerUtcOffset = TimeSpan.Zero
+        });
+    }
+
+    /// <summary>Calls the store's stored-story-paths read by name and reads each row's hash and path by name.</summary>
+    private static async Task<List<(string Hash, string Path)>> StoryPathsAsync(
+        System.Reflection.MethodInfo read, object store, int serverId, string rootFactKey)
+    {
+        var task = (Task)read.Invoke(store, new object[] { serverId, rootFactKey })!;
+        await task;
+        var rows = (System.Collections.IEnumerable)task.GetType().GetProperty("Result")!.GetValue(task)!;
+        var result = new List<(string, string)>();
+        foreach (var row in rows)
+        {
+            result.Add((
+                (string)row.GetType().GetProperty("StoryPathHash")!.GetValue(row)!,
+                (string)row.GetType().GetProperty("StoryPath")!.GetValue(row)!));
+        }
+        return result;
+    }
+
+    /// <summary>A sender whose alert log holds one delivered page row per metric name listed, and that sends nothing.</summary>
+    private sealed class PageRowSender : IFindingAlertSender
+    {
+        public Dictionary<string, DateTime> PageRows { get; } = new(StringComparer.Ordinal);
+        public List<FindingAlert> Sent { get; } = new();
+        public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName) =>
+            Task.FromResult(PageRows.TryGetValue(metricName, out var at) ? at : (DateTime?)null);
+        public Task<AlertDelivery?> SendFindingAlertAsync(FindingAlert alert)
+        {
+            Sent.Add(alert);
+            return Task.FromResult<AlertDelivery?>(null);
+        }
+        public Task<AlertDelivery?> SendFindingSummaryAsync(IReadOnlyList<FindingAlert> named)
+        {
+            Sent.AddRange(named);
+            return Task.FromResult<AlertDelivery?>(null);
+        }
+    }
+
+    private static async Task DeleteStoryPathRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
+    {
+        using var cleanup = new NpgsqlCommand(
+            $"DELETE FROM analysis_findings WHERE server_id IN ({StoryPathsServerId}, {StoryPathsServerId + 1});", connection);
+        await cleanup.ExecuteNonQueryAsync(ct);
+    }
+
+    [Fact]
+    public async Task GetStoryPaths_ReturnsEachDistinctPathOfTheServerAndRoot_AcrossTheRetention()
+    {
+        /* The page hold's wider-path seed asks for the distinct story paths one server has stored under one root,
+           however old inside the findings retention and whatever other stories stored since. The seam is checked
+           ahead of the store gate, so a missing read fails here with or without a store. */
+        var read = typeof(PgFindingStore).GetMethod("GetStoryPathsAsync", new[] { typeof(int), typeof(string) });
+        Assert.True(read is not null, NoStoryPathsRead);
+
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live story-paths test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteStoryPathRowsAsync(connection, TestContext.Current.CancellationToken);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var store = new PgFindingStore(postgres);
+        var bodySucceeded = false;
+        try
+        {
+            var threeDaysAgo = DateTime.UtcNow.AddDays(-3);
+            /* The same path in two runs is one answer. */
+            await StoreRunAsync(store, threeDaysAgo, Story("aaaaaaaa11111111", "PARAMETER_SENSITIVITY", WiderPath));
+            await StoreRunAsync(store, threeDaysAgo.AddHours(1), Story("aaaaaaaa11111111", "PARAMETER_SENSITIVITY", WiderPath));
+            /* Another root on the same server, and the same root on another server, are not. */
+            await StoreRunAsync(store, DateTime.UtcNow.AddMinutes(-30),
+                Story("bbbbbbbb22222222", "PARAMETER_SENSITIVITY", ShorterPath),
+                Story("cccccccc33333333", "QUERY_SPILLS", "QUERY_SPILLS → TEMPDB_USAGE"));
+            await StoreRunAsync(store, DateTime.UtcNow.AddMinutes(-30),
+                Story("dddddddd44444444", "PARAMETER_SENSITIVITY", "PARAMETER_SENSITIVITY → CPU_SPIKE", StoryPathsServerId + 1));
+
+            var paths = await StoryPathsAsync(read!, store, StoryPathsServerId, "PARAMETER_SENSITIVITY");
+
+            Assert.Equal(
+                new[] { ("aaaaaaaa11111111", WiderPath), ("bbbbbbbb22222222", ShorterPath) },
+                paths.OrderBy(p => p.Hash, StringComparer.Ordinal).ToArray());
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteStoryPathRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    [Fact]
+    public async Task NotifyAsync_RestartAfterTheWiderPathLeftTheRecentWindow_StillHoldsTheShorterPath()
+    {
+        /* The restart that follows the upgrade by more than a day, over the real store through the seam the worker
+           wires: the previous build stored and paged the wider path; the new build never stores it again, so its
+           rows are three days old under a day of newer rows from other stories, and only its page row is current.
+           A notifier with empty buckets must still hold the shorter path. The seam is reached by name, so this
+           test builds whether or not it exists and fails at an assertion when it does not. */
+        var ctor = typeof(AnalysisNotificationService).GetConstructors()
+            .FirstOrDefault(c => c.GetParameters().Any(p => p.Name == "getStoredStoryPaths"));
+        Assert.True(ctor is not null,
+            "AnalysisNotificationService has no getStoredStoryPaths seam: the wider-path seed reads the server's newest stored findings, and on a busy server those cover hours, not the previous build's last run.");
+        var read = typeof(PgFindingStore).GetMethod("GetStoryPathsAsync", new[] { typeof(int), typeof(string) });
+        Assert.True(read is not null, NoStoryPathsRead);
+
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live story-paths test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteStoryPathRowsAsync(connection, TestContext.Current.CancellationToken);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var store = new PgFindingStore(postgres);
+        var bodySucceeded = false;
+        try
+        {
+            var wider = Story("aaaaaaaa11111111", "PARAMETER_SENSITIVITY", WiderPath);
+            await StoreRunAsync(store, DateTime.UtcNow.AddDays(-3), wider);
+            await StoreRunAsync(store, DateTime.UtcNow.AddHours(-1), Enumerable.Range(0, 600)
+                .Select(i => Story($"filler{i:D10}", "CPU_SPIKE", $"CPU_SPIKE → F{i}"))
+                .ToArray());
+
+            var sender = new PageRowSender();
+            sender.PageRows[FindingMessageFormatter.MetricName(wider)] = DateTime.UtcNow.AddDays(-3);
+            var settings = new DarlingAlertSettings(new DarlingConfig());
+            var args = ctor!.GetParameters().Select(p => p.Name switch
+            {
+                "sender" => (object?)sender,
+                "settings" => settings,
+                "serverIdResolver" => new Func<AnalysisFinding, string>(f => f.ServerId.ToString(CultureInfo.InvariantCulture)),
+                "logger" => NullLogger<AnalysisNotificationService>.Instance,
+                "getStoredStoryPaths" => Delegate.CreateDelegate(p.ParameterType, store, read!),
+                _ => null
+            }).ToArray();
+            using var afterRestart = (AnalysisNotificationService)ctor.Invoke(args);
+
+            await afterRestart.NotifyAsync(new[] { Story("bbbbbbbb22222222", "PARAMETER_SENSITIVITY", ShorterPath) });
+            await afterRestart.FlushPendingAsync();
+
+            Assert.Empty(sender.Sent);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteStoryPathRowsAsync(cleanup, cleanupCt));
         }
     }
 

@@ -6,6 +6,7 @@ using DuckDB.NET.Data;
 using PerformanceMonitorLite;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Notifications;
+using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -70,8 +71,12 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
         Dictionary<string, object>? drillDown = null,
         string rootFactKey = "CPU_SPIKE",
         string incidentId = "",
-        string storyPath = "CPU_SPIKE → PLAN_REGRESSION")
+        string storyPath = "CPU_SPIKE → PLAN_REGRESSION",
+        List<string>? pathKeys = null)
     {
+        /* As the engine builds a finding: the typed keys and their rendered join (#3859), one fact per key. A test
+           passes pathKeys only when its rendered text must differ from the keys. */
+        pathKeys ??= storyPath.Split(" → ").ToList();
         return new AnalysisFinding
         {
             ServerId = serverId,
@@ -79,10 +84,11 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
             Category = category,
             StoryPath = storyPath,
             StoryPathHash = hash,
+            PathKeys = pathKeys,
             IncidentId = incidentId,
             Severity = severity,
             Confidence = 0.67,
-            FactCount = 2,
+            FactCount = pathKeys.Count,
             RootFactKey = rootFactKey,
             RootFactValue = rootValue,
             TimeRangeStart = DateTime.UtcNow.AddHours(-4),
@@ -1153,6 +1159,138 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
         {
             MakeFinding("dddddddd44444444", severity: 1.5, rootFactKey: "QUERY_SPILLS",
                 storyPath: "QUERY_SPILLS → TEMPDB_USAGE")
+        });
+        await notifier.FlushPendingAsync();
+
+        Assert.Single(sender.Sent);
+    }
+
+    /// <summary>
+    /// #8012: the notifier over the real Lite finding store, through the seam MainWindow wires it to:
+    /// <c>FindingStore.GetStoryPathsAsync(serverId, rootFactKey)</c>, the distinct story paths one server has stored
+    /// under one root across the findings retention. Both are reached by name, so this test builds whether or not
+    /// the seam exists and fails at an assertion, not a compile, when it does not.
+    /// </summary>
+    private AnalysisNotificationService MakeNotifierOverStore(IFindingAlertSender sender, FindingStore store)
+    {
+        var ctor = typeof(AnalysisNotificationService).GetConstructors()
+            .FirstOrDefault(c => c.GetParameters().Any(p => p.Name == "getStoredStoryPaths"));
+        Assert.True(ctor is not null,
+            "AnalysisNotificationService has no getStoredStoryPaths seam: the wider-path seed reads the server's newest stored findings, and on a busy server those cover hours, not the previous build's last run.");
+        var read = typeof(FindingStore).GetMethod("GetStoryPathsAsync", new[] { typeof(int), typeof(string) });
+        Assert.True(read is not null,
+            "FindingStore has no GetStoryPathsAsync(serverId, rootFactKey): the distinct story paths of one server and root across the findings retention.");
+        var args = ctor!.GetParameters().Select(p => p.Name switch
+        {
+            "sender" => (object?)sender,
+            "settings" => _settings,
+            "serverIdResolver" => new Func<AnalysisFinding, string>(f => f.ServerId.ToString()),
+            "logger" => new AppLoggerAdapter<AnalysisNotificationService>(),
+            "getStoredStoryPaths" => Delegate.CreateDelegate(p.ParameterType, store, read!),
+            _ => null
+        }).ToArray();
+        return (AnalysisNotificationService)ctor.Invoke(args);
+    }
+
+    /// <summary>Stores <paramref name="findings"/> as one analysis run of their server at <paramref name="analysisTime"/>.</summary>
+    private static Task StoreRunAsync(FindingStore store, DateTime analysisTime, params AnalysisFinding[] findings)
+    {
+        foreach (var f in findings)
+            f.AnalysisTime = analysisTime;
+        return store.InsertFindingsAsync(findings.ToList(), new AnalysisContext
+        {
+            ServerId = findings[0].ServerId,
+            ServerName = findings[0].ServerName,
+            TimeRangeStart = analysisTime.AddHours(-4),
+            TimeRangeEnd = analysisTime
+        });
+    }
+
+    [Fact]
+    public async Task NotifyAsync_RestartAfterTheWiderPathLeftTheRecentWindow_StillHoldsTheShorterPath()
+    {
+        /* The restart that follows the upgrade by more than a day. The previous build stored and paged the wider
+           path; the new build never stores it again, so its rows are three days old under a day of newer rows from
+           other stories, and only its page row is current. A notifier with empty buckets must still hold the
+           shorter path. */
+        App.AnalysisNotifySeverity = 1.5;
+        App.AnalysisNotifyCooldownMinutes = 360;
+        const int serverId = 8012;
+        var store = new FindingStore(_duckDb);
+        var wider = MakeFinding("aaaaaaaa11111111", severity: 1.5, serverId: serverId,
+            rootFactKey: "PARAMETER_SENSITIVITY", storyPath: WiderPath);
+        await StoreRunAsync(store, DateTime.UtcNow.AddDays(-3), wider);
+        var sinceThen = Enumerable.Range(0, 600)
+            .Select(i => MakeFinding($"filler{i:D10}", severity: 1.0, serverId: serverId,
+                rootFactKey: "CPU_SPIKE", storyPath: $"CPU_SPIKE → F{i}"))
+            .ToArray();
+        await StoreRunAsync(store, DateTime.UtcNow.AddHours(-1), sinceThen);
+
+        var sender = new SeededCapturingSender();
+        sender.SeedsByMetric[FindingMessageFormatter.MetricName(wider)] = DateTime.UtcNow.AddDays(-3);
+        var afterRestart = MakeNotifierOverStore(sender, store);
+
+        await afterRestart.NotifyAsync(new[]
+        {
+            MakeFinding("bbbbbbbb22222222", severity: 1.5, serverId: serverId,
+                rootFactKey: "PARAMETER_SENSITIVITY", storyPath: ShorterPath)
+        });
+        await afterRestart.FlushPendingAsync();
+
+        Assert.Empty(sender.Sent);
+    }
+
+    [Fact]
+    public async Task NotifyAsync_ShorterPath_TypedKeysDecide_NotTheRenderedText()
+    {
+        /* #3859: the rendered path is a display string and the typed keys are the chain. A member whose rendered
+           text carries an arrow inside a key's display is matched by its keys. Split on the arrow, the text would
+           name three "keys" no stored path has, and the held story would page. */
+        App.AnalysisNotifySeverity = 1.5;
+        App.AnalysisNotifyCooldownMinutes = 360;
+        const int serverId = 8013;
+        var store = new FindingStore(_duckDb);
+        var wider = MakeFinding("aaaaaaaa11111111", severity: 1.5, serverId: serverId,
+            rootFactKey: "PARAMETER_SENSITIVITY", storyPath: WiderPath);
+        await StoreRunAsync(store, DateTime.UtcNow.AddHours(-1), wider);
+        var sender = new SeededCapturingSender();
+        sender.SeedsByMetric[FindingMessageFormatter.MetricName(wider)] = DateTime.UtcNow.AddMinutes(-5);
+        var notifier = MakeNotifierOverStore(sender, store);
+
+        await notifier.NotifyAsync(new[]
+        {
+            MakeFinding("bbbbbbbb22222222", severity: 1.5, serverId: serverId, rootFactKey: "PARAMETER_SENSITIVITY",
+                storyPath: "PARAMETER_SENSITIVITY → QUERY_SPILLS (spill → tempdb)",
+                pathKeys: new List<string> { "PARAMETER_SENSITIVITY", "QUERY_SPILLS" })
+        });
+        await notifier.FlushPendingAsync();
+
+        Assert.Empty(sender.Sent);
+    }
+
+    [Fact]
+    public async Task NotifyAsync_PileupOfAnotherStatement_IsNotAWiderPath_StillPages()
+    {
+        /* The pileup story's rendered path joins its root to a STATEMENT HASH that is not a fact key, and its typed
+           path is the root alone (#3859), one fact. Read as keys, every other statement's stored pileup path would
+           look wider than this statement's, and a new convoy would be held by another statement's page. A stored
+           path whose rendered segments outnumber its facts is not a chain of keys and seeds nothing. */
+        App.AnalysisNotifySeverity = 1.5;
+        App.AnalysisNotifyCooldownMinutes = 360;
+        const int serverId = 8014;
+        const string root = "SAME_STATEMENT_PILEUP";
+        var store = new FindingStore(_duckDb);
+        var otherStatement = MakeFinding("pileupaa11111111", severity: 1.5, serverId: serverId, rootFactKey: root,
+            storyPath: root + " → aaaaaaaaaaaaaaaa", pathKeys: new List<string> { root });
+        await StoreRunAsync(store, DateTime.UtcNow.AddHours(-1), otherStatement);
+        var sender = new SeededCapturingSender();
+        sender.SeedsByMetric[FindingMessageFormatter.MetricName(otherStatement)] = DateTime.UtcNow.AddMinutes(-5);
+        var notifier = MakeNotifierOverStore(sender, store);
+
+        await notifier.NotifyAsync(new[]
+        {
+            MakeFinding("pileupbb22222222", severity: 1.5, serverId: serverId, rootFactKey: root,
+                storyPath: root + " → bbbbbbbbbbbbbbbb", pathKeys: new List<string> { root })
         });
         await notifier.FlushPendingAsync();
 
