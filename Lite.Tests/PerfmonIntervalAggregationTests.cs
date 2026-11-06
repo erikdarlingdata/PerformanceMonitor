@@ -68,18 +68,24 @@ public sealed class PerfmonIntervalAggregationTests
     /// <summary>Guards the fix from being over-applied: the two columns that ARE additive must stay sums,
     /// in both reads. A well-meant "make it consistent" edit that turned these into MAX would silently
     /// report one instance's value as the whole counter.
-    /// <para>#4234: <c>delta_cntr_value</c> is 3, not 2 — the batched trend's bucketing adds one more SUM,
+    /// <para>#7771: each read spells each column's per-collection SUM twice, as the two arms of one
+    /// <c>CASE WHEN bool_or(instance_name = '_Total')</c>. The THEN arm sums the <c>_Total</c> row alone, because
+    /// that row already is the sum of the other instances and adding them again doubles the point; the ELSE arm
+    /// sums every instance of a counter that has no <c>_Total</c> row. Two reads, two columns: four guards, and
+    /// four SUMs of <c>cntr_value</c>.</para>
+    /// <para>#4234: <c>delta_cntr_value</c> is 5, not 4 — the batched trend's bucketing adds one more SUM,
     /// the outer GROUP BY <c>counter_name, bucket_start</c> summing each collection's already-summed delta
     /// across the bucket's collections (the ruling's summed-deltas rate), same additive column, one layer
-    /// higher. <c>cntr_value</c> stays 2: that outer layer AVERAGES (the ruling's gauge rule), so it adds no
-    /// third SUM.</para></summary>
+    /// higher. <c>cntr_value</c> stays 4: that outer layer AVERAGES (the ruling's gauge rule), so it adds no
+    /// fifth SUM.</para></summary>
     [Fact]
     public void TheAdditiveColumnsStaySummed()
     {
         var source = ParitySource.ReadFile(ReadPath);
 
-        Assert.Equal(2, CountOccurrences(source, "SUM(cntr_value)"));
-        Assert.Equal(3, CountOccurrences(source, "SUM(delta_cntr_value)"));
+        Assert.Equal(4, CountOccurrences(source, "bool_or(instance_name = '_Total')"));
+        Assert.Equal(4, CountOccurrences(source, "SUM(cntr_value)"));
+        Assert.Equal(5, CountOccurrences(source, "SUM(delta_cntr_value)"));
         Assert.DoesNotContain("MAX(cntr_value)", source, StringComparison.Ordinal);
         Assert.DoesNotContain("MAX(delta_cntr_value)", source, StringComparison.Ordinal);
     }

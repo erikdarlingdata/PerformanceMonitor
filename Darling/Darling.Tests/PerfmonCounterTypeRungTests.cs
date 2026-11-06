@@ -63,6 +63,20 @@ public sealed class PerfmonCounterTypeRungTests
     /// being classified by whichever instance's id sorts first.</summary>
     private const string AgreedTypeExpression = "CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type";
 
+    /// <summary>#7771: the per-collection value and delta each read as the two arms of one <c>_Total</c>-aware CASE, spelled
+    /// the same in the MCP and Viewer trend reads. A counter whose instance rows include <c>_Total</c> takes that row alone,
+    /// since it already is the sum of the other instances and adding them again doubles the point; a counter without one
+    /// sums every instance. Both arms carry #4476's <c>FILTER (WHERE NOT is_artifact)</c>, so an artifact row stays out of
+    /// the point whichever arm a collection takes.</summary>
+    private static readonly string[] TotalAwareSumExpressions = new[]
+    {
+        "CASE WHEN bool_or(instance_name = '_Total')",
+        "THEN CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total') AS bigint)",
+        "ELSE CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) END AS cntr_value",
+        "THEN CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact AND instance_name = '_Total') AS bigint)",
+        "ELSE CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) END AS delta_cntr_value",
+    };
+
     private static PgMigrations.Migration V132 => PgMigrations.Scripts.Single(m => m.Version == RungVersion);
 
     /* ---- the rung ------------------------------------------------------------------------------------ */
@@ -238,15 +252,17 @@ public sealed class PerfmonCounterTypeRungTests
            type rule keep reading every row (an artifact row's own type and interval are not themselves
            suspect). The MCP twin (get_perfmon_trend, one counter at a time) carries its own per-collection
            artifacts count; PerfmonTrendBucketedSql SUMs it into artifacts_set_aside the same way the
-           Viewer's outer bucket layer does. */
-        Assert.Contains("CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS cntr_value", mcpTrend, StringComparison.Ordinal);
-        Assert.Contains("CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS delta_cntr_value", mcpTrend, StringComparison.Ordinal);
+           Viewer's outer bucket layer does. Each SUM is one arm of the _Total-aware pair, and both arms filter. */
+        foreach (var expression in TotalAwareSumExpressions)
+        {
+            Assert.Contains(expression, mcpTrend, StringComparison.Ordinal);
+            Assert.Contains(expression, viewerTrend, StringComparison.Ordinal);
+        }
+
         Assert.Contains("CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds", mcpTrend, StringComparison.Ordinal);
         Assert.Contains("COUNT(*) FILTER (WHERE is_artifact) AS artifacts", mcpTrend, StringComparison.Ordinal);
         Assert.Contains("SUM(artifacts) AS artifacts_set_aside", DarlingTrendReader.PerfmonTrendBucketedSql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
 
-        Assert.Contains("CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS cntr_value", viewerTrend, StringComparison.Ordinal);
-        Assert.Contains("CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS delta_cntr_value", viewerTrend, StringComparison.Ordinal);
         Assert.Contains("CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds", viewerTrend, StringComparison.Ordinal);
         Assert.Contains("COUNT(*) FILTER (WHERE is_artifact) AS artifacts", viewerTrend, StringComparison.Ordinal);
         Assert.Contains("SUM(artifacts) AS artifacts_set_aside", viewerTrend, StringComparison.Ordinal);
