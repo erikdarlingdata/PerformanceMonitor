@@ -217,6 +217,17 @@ public sealed class WebClickthroughStaleStateTests
         Assert.StartsWith("MemoryOK", online[2], StringComparison.Ordinal);
     }
 
+    /* #7682: the "SQL CPU" chip of a server with no host figure said "SQL 41%" under "SQL CPU 41%", the same figure twice. The line under it
+       says why instead. A server that does report host CPU, and a PostgreSQL target, read as they did. */
+    [Fact]
+    public void TheCpuChip_OfAServerWithNoHostFigure_SaysWhyUnderTheSqlFigure()
+    {
+        var r = Run("hostCpu");
+        Assert.Equal("SQL CPU41%host CPU not reported", Texts(r.GetProperty("noHost"))[0]);
+        Assert.Equal("Total CPU25%SQL 18% · other 7%", Texts(r.GetProperty("measured"))[0]);
+        Assert.Equal("CPU41%SQL 41%", Texts(r.GetProperty("postgres"))[0]);
+    }
+
     [Fact]
     public void AStaleAvailabilityGroupCard_SaysNoCurrentData_AndAFreshOneDoesNot()
     {

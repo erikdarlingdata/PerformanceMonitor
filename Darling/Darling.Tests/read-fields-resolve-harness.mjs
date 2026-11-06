@@ -17,7 +17,7 @@ const keysOf = (arr) => (Array.isArray(arr) ? arr.map((c) => c.key) : []);
 const cells = JSON.parse(fs.readFileSync(cellsPath, "utf8"));
 const resolved = cells.map((cell) => {
   const d = context.resolveReadTable(cell);
-  return { read: cell.read, viz: cell.viz, rowsKey: d.rowsKey || null, xKey: d.xKey || null, columns: keysOf(d.columns), series: keysOf(d.series), stats: keysOf(d.stats) };
+  return { read: cell.read, viz: cell.viz, rowsKey: d.rowsKey || null, xKey: d.xKey || null, columns: keysOf(d.columns), plain: Array.isArray(d.columns) ? d.columns.filter((c) => c.plain).map((c) => c.key) : [], series: keysOf(d.series), stats: keysOf(d.stats) };
 });
 const cat = vm.runInContext("READ_FIELDS", context);
 console.log(JSON.stringify({ resolved, catalogReads: Object.keys(cat) }));

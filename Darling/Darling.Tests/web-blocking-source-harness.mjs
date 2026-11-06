@@ -130,7 +130,7 @@ const BODIES = {
     trend: { source: null, trend: [] },
     stats: { status: "empty", message: "No blocking or deadlock data in the specified time range." },
     deadlockTrend: { status: "empty", message: "No deadlock was recorded for SRV1 in the last 24 hour(s). 288 collector run(s) DID execute." },
-    deadlocks: { status: "empty", message: "No deadlocks found in the specified time range." },
+    deadlocks: { status: "empty", message: "No deadlocks found in this window." },
   },
 };
 

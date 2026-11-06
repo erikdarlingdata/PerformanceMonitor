@@ -140,7 +140,7 @@ public sealed class WebPlainTextTests
     public void CollectorMeasurementCounts_ReadAsWords()
     {
         var o = Run(["latest run: shred_gated=1 events_read=0 report_xml_empty=0"], out _);
-        Assert.Equal("latest run: shred gated: 1, events read: 0, report xml empty: 0", o[0]);
+        Assert.Equal("latest run: shred gated: 1 (no new events since the last run, so the XML was not read), events read: 0, report xml empty: 0", o[0]);
     }
 
     /* #6649: the left-out databases pointer, the baseline window sentence and the memory clerk note's four arms reached the page
@@ -322,6 +322,18 @@ public sealed class WebPlainTextTests
         Assert.Contains("starts partway into the window, so", o[0]);
     }
 
+    /* #7682: the CPU tab prints get_cpu_utilization's host_cpu_note under the chart. The raw note names four reply fields and ends "null is not 0";
+       the page says what is not reported and what is drawn, and keeps the engine and version words the reply carries. */
+    [Fact]
+    public void TheHostCpuNote_IsSaidAsWhatIsNotReportedAndWhatIsDrawn()
+    {
+        var o = Run([TrendPayloads.HostCpuUnavailableNote], out _);
+        Assert.Equal("This server cannot report host CPU (SQL Server on Linux before 2025 CU1), so only SQL Server's own CPU is drawn.", o[0]);
+        Assert.DoesNotContain("other_process_cpu", o[0]);
+        Assert.DoesNotContain("peak_total_cpu", o[0]);
+        Assert.DoesNotContain("null is not 0", o[0]);
+    }
+
     /* #5644 W8: the clauses that point an MCP caller at a parameter the page has no control for. */
     [Fact]
     public void ParameterClauses_ForAnMcpCaller_AreDroppedOrSaidInThePagesWords()
@@ -407,9 +419,9 @@ public sealed class WebPlainTextTests
             "pg_wraparound_stats failed; last_error has the text",
         ], out _);
         Assert.Equal("use Collection Health to find where it stopped", o[0]);
-        Assert.Equal("latest run: shred gated: 1, events read: 0, report xml empty: 0", o[1]);
+        Assert.Equal("latest run: shred gated: 1 (no new events since the last run, so the XML was not read), events read: 0, report xml empty: 0", o[1]);
         Assert.Equal("latest run: events read: 4", o[2]);
-        Assert.Equal("latest noted run: shred gated: 1, events read: 0 (3 of 5 runs)", o[3]);
+        Assert.Equal("latest noted run: shred gated: 1 (no new events since the last run, so the XML was not read), events read: 0 (3 of 5 runs)", o[3]);
         Assert.Equal("the freeze-headroom collector failed; Last Error has the text", o[4]);
     }
 
