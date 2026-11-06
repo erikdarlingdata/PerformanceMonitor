@@ -115,7 +115,8 @@ public sealed class PgDeadlocksCsvlogLiveTests
                 }
             }
 
-            await PgLogLiveWait.WaitForTextAsync(targetConnection, "csv", ct, "deadlock_forge_check_4053b1");
+            await PgLogLiveWait.WaitForTextAsync(targetConnection, "csv", ct,
+                "deadlock_forge_check_4053b1", $"Process {victimPid}: UPDATE deadlocks_csvlog_live_4053b1 SET");
 
             var context = new CollectorContext
             {
@@ -139,7 +140,11 @@ public sealed class PgDeadlocksCsvlogLiveTests
                 /* Exactly one row for THIS run's real deadlock, matched to the victim pid PostgreSQL's own
                    detector picked, with the two-participant shape a two-session cycle always has, and a
                    graph that is not empty. */
-                var matching = rows.Where(r => r.VictimPid == victimPid).ToList();
+                /* The pid alone can match another live class's deadlock in the shared log (#7818): also require this
+                   test's own table name in the row's report text or victim statement. */
+                var matching = rows.Where(r => r.VictimPid == victimPid
+                    && (r.GraphText.Contains("deadlocks_csvlog_live_4053b1", StringComparison.OrdinalIgnoreCase)
+                        || (r.VictimStatement?.Contains("deadlocks_csvlog_live_4053b1", StringComparison.OrdinalIgnoreCase) ?? false))).ToList();
                 var row = Assert.Single(matching);
                 Assert.Equal(2, row.ParticipantCount);
                 Assert.False(string.IsNullOrWhiteSpace(row.GraphText));
