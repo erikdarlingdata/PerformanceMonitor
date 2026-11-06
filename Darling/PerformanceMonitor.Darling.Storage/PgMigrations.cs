@@ -2606,6 +2606,16 @@ ALTER TABLE config.config_alert_settings
     private static readonly string V246Sql = TimescaleSupport.CreateQueryStoreCorrectedHourlyHashIndexSql;
 
     /// <summary>
+    /// V247 (#7639): <c>config.config_monitored_servers.xe_session_databases</c>, the per-server list of databases that get Extended Events
+    /// sessions on Azure SQL Database, <c>excluded_databases</c>'s shape (<c>text[] NOT NULL DEFAULT '{}'</c>). Empty means every database, so
+    /// an existing store keeps its behavior. Catalog-only add, idempotent, no backfill. The column is the probe's sentinel. An older build never
+    /// reads the column and gives every database a session, as it always did.
+    /// </summary>
+    private const string V247Sql = @"
+ALTER TABLE config.config_monitored_servers
+    ADD COLUMN IF NOT EXISTS xe_session_databases text[] NOT NULL DEFAULT '{}'::text[];";
+
+    /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
     /// <c>DatabaseProtectionCollector</c> every 60 minutes (Darling only). One row per database per pass: the raw times (UTC), the
     /// recovery model, the database state and replica role, a per-row platform label (native, platform_managed, native_only) and a state
@@ -3109,6 +3119,7 @@ $rung$;";
         new Migration(244, "server-connect-down-state", V244Sql),
         new Migration(245, "database-protection-thresholds", V245Sql),
         new Migration(246, "query-store-corrected-hourly-hash-index", V246Sql),
+        new Migration(247, "xe-session-databases", V247Sql),
     };
 
     /// <summary>

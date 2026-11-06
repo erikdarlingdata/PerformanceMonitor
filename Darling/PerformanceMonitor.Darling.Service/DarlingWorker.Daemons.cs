@@ -790,11 +790,44 @@ public sealed partial class DarlingWorker
         : string.Equals(collectorName, BlockedProcessReportCollector.Instance.Name, StringComparison.OrdinalIgnoreCase) ? server.CaptureEnsure.BlockedProcess
         : null;
 
-    /// <summary>#6893: the partial note (Azure SQL Database, the create failed in some databases) merged onto a successful deadlock or blocked-process run, or null.</summary>
+    /// <summary>#6893, #7639: the partial note (Azure SQL Database, the create failed in some databases, or the XE session database list matches none) merged onto a successful deadlock, blocked-process or client-timeout run, or null.</summary>
     internal static string? CaptureEnsurePartialNoteFor(string collectorName, ServerLoopState server) =>
         string.Equals(collectorName, DeadlocksCollector.Instance.Name, StringComparison.OrdinalIgnoreCase) ? server.CaptureEnsure.DeadlockPartialNote
         : string.Equals(collectorName, BlockedProcessReportCollector.Instance.Name, StringComparison.OrdinalIgnoreCase) ? server.CaptureEnsure.BlockedProcessPartialNote
+        : IsAttentionCollector(collectorName) ? server.CaptureEnsure.AttentionPartialNote
         : null;
+
+    internal static bool IsDeadlocksCollector(string collectorName) =>
+        string.Equals(collectorName, DeadlocksCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// #6893, #7639: the run of a deadlock or blocked-process collector whose last ensure could not create the session. It always ends by
+    /// throwing the ensure's failure, so the row is PERMISSIONS or SESSION_MISSING. On Azure SQL Database the deadlock read goes ahead
+    /// first: it still has the logical server's durable telemetry arm (the master item, no session needed, #2641), so a create refused
+    /// in every database does not end the run before the read. A read failure of its own is dropped: the ensure's is the cause and the
+    /// one a person can act on. Every other collector and engine does not read, as a read of a session that does not exist returns zero rows.
+    /// </summary>
+    internal static async Task RaiseCaptureEnsureFaultAsync(
+        string collectorName, bool isAzureSqlDb, DarlingXeSessions.XeEnsureFailure captureFault, Func<Task> read, ILogger logger, string serverName)
+    {
+        Exception captureFailure = captureFault.IsPermission
+            ? new DarlingXeSessionDeniedException(captureFault.Message)
+            : new DarlingXeSessionMissingException(captureFault.Message);
+
+        if (IsDeadlocksCollector(collectorName) && isAzureSqlDb)
+        {
+            try
+            {
+                await read();
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogDebug("[{Server}] Deadlock read after a failed ensure: {Message}", serverName, ex.Message);
+            }
+        }
+
+        throw captureFailure;
+    }
 
     internal static bool IsAttentionCollector(string collectorName) =>
         string.Equals(collectorName, AttentionCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
@@ -1810,7 +1843,9 @@ public sealed partial class DarlingWorker
         && a.Port == b.Port
         && a.TargetEngine == b.TargetEngine
         && a.AwsRoleKey == b.AwsRoleKey
-        && a.ExcludedDatabases.SequenceEqual(b.ExcludedDatabases, StringComparer.OrdinalIgnoreCase);
+        && a.ExcludedDatabases.SequenceEqual(b.ExcludedDatabases, StringComparer.OrdinalIgnoreCase)
+        /* #7639: the Azure XE-session database list is read from the runtime's connect-time Config (the hourly ensure, the long-query creates and the long-query state key), and Config is init-only, so an edit has to reconnect the runtime to reach them. */
+        && a.XeSessionDatabases.SequenceEqual(b.XeSessionDatabases, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// #4732: whether a runtime this body connected still describes the server it was installed on. False when

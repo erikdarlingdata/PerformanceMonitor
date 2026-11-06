@@ -756,6 +756,18 @@ GRANT SELECT (query_store_replica) ON config.config_monitored_servers TO viewer;
 $v211r$;
    END IF;
 END $$;
+-- V247 (#7639): the databases that get Extended Events sessions, on the registry. Non-secret, like excluded_databases. Guarded on the column, so a store below V247
+-- still commits the rest of the carve.
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = pg_catalog.to_regclass('config.config_monitored_servers')
+                AND attname = 'xe_session_databases' AND NOT attisdropped) THEN
+      EXECUTE $v247x$
+GRANT SELECT (xe_session_databases) ON config.config_monitored_servers TO viewer;
+$v247x$;
+   END IF;
+END $$;
 
 -- 2b-2. The SAME carve for web: it reads exactly what viewer reads (the web host connects as it, not as viewer), so the column
 --     lists are the 2b lists with the role swapped, and a column added to one is added to the other.
@@ -910,6 +922,18 @@ GRANT SELECT (query_store_replica) ON config.config_monitored_servers TO web;
 $v211r$;
    END IF;
 END $$;
+-- V247 (#7639): the databases that get Extended Events sessions, on the registry. Non-secret, like excluded_databases. Guarded on the column, so a store below V247
+-- still commits the rest of the carve.
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = pg_catalog.to_regclass('config.config_monitored_servers')
+                AND attname = 'xe_session_databases' AND NOT attisdropped) THEN
+      EXECUTE $v247x$
+GRANT SELECT (xe_session_databases) ON config.config_monitored_servers TO web;
+$v247x$;
+   END IF;
+END $$;
 
 -- 2c. The SAME carve for mcp (#3914): it reads exactly what viewer reads, so it is denied exactly the same
 --     secret columns -- the column lists are identical to 2b's, and the drift test holds both to the C# list.
@@ -1050,6 +1074,18 @@ BEGIN
       EXECUTE $v211r$
 GRANT SELECT (query_store_replica) ON config.config_monitored_servers TO mcp;
 $v211r$;
+   END IF;
+END $$;
+-- V247 (#7639): the databases that get Extended Events sessions, on the registry. Non-secret, like excluded_databases. Guarded on the column, so a store below V247
+-- still commits the rest of the carve.
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = pg_catalog.to_regclass('config.config_monitored_servers')
+                AND attname = 'xe_session_databases' AND NOT attisdropped) THEN
+      EXECUTE $v247x$
+GRANT SELECT (xe_session_databases) ON config.config_monitored_servers TO mcp;
+$v247x$;
    END IF;
 END $$;
 -- The collector run times (V160, #4938): get_collection_health reads them as mcp. The blanket config SELECT above
@@ -2873,6 +2909,18 @@ REVOKE UPDATE ON config.config_monitored_servers FROM mcp;
 -- unless it is one of those.
 GRANT UPDATE (server_id, name, host, database, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, capture_plans, is_enabled, created_at, modified_at, alert_delivery_mode_override, engine, port, plan_force_bot_enabled, remediation_username, remediation_encrypted_password)
    ON config.config_monitored_servers TO mcp;
+-- V247 (#7639): the databases that get Extended Events sessions are a column that set_server_xe_session_databases writes with a plain UPDATE (edit_server
+-- refuses it), so mcp updates it directly like the others. Its own statement, guarded on the column, so a store below V247 still commits the rest of the script.
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = pg_catalog.to_regclass('config.config_monitored_servers')
+                AND attname = 'xe_session_databases' AND NOT attisdropped) THEN
+      EXECUTE $v247u$
+GRANT UPDATE (xe_session_databases) ON config.config_monitored_servers TO mcp;
+$v247u$;
+   END IF;
+END $$;
 
 -- 3h. External alert submit (#5654): another service raises an alert through Darling's channels, routes and mute rules by
 --     calling config.submit_external_alert as its OWN login (one login per source). This is the same function managed

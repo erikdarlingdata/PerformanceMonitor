@@ -238,6 +238,70 @@ public sealed class DiagnosticsBundleSeedFailureLiveTests
         }
     }
 
+    /* #7639: a database named only in the XE session list, set through the Viewer or MCP, is aliased like an excluded one. */
+    [Fact]
+    public async Task ADatabaseNamedOnlyInTheStoredXeSessionList_IsAliased()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the live seed-failure test.");
+        var ct = TestContext.Current.CancellationToken;
+        var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        var ok = false;
+        try
+        {
+            await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+            {
+                await connection.OpenAsync(ct);
+                await PgMigrations.MigrateAsync(connection, ct);
+                await ExecAsync(connection,
+                    "INSERT INTO config.config_monitored_servers (server_id, name, host, database, auth, xe_session_databases) "
+                    + "VALUES (9103, 'xe-owner', 'xe-owner.example.test', 'orders', 'windows', ARRAY['CustomerLedger7639'])", ct);
+            }
+
+            await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var aliaser = new BundleAliaser();
+            var result = await DiagnosticsBundleRunner.SeedFromStoreAsync(aliaser, source, ct);
+            Assert.Null(result.FailedNameSource);
+
+            var text = aliaser.Alias("Creating the session in CustomerLedger7639 failed: the pool is at its limit.");
+            Assert.DoesNotContain("CustomerLedger7639", text, StringComparison.Ordinal);
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, async (_, _) => await Task.CompletedTask);
+            await scratch.DisposeAsync();
+        }
+    }
+
+    /* A store older than 247 has no XE session list column: the bundle still builds, with nothing to alias from that read. */
+    [Fact]
+    public async Task AStoreWithoutTheXeSessionDatabasesColumn_StillSeeds()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the live seed-failure test.");
+        var ct = TestContext.Current.CancellationToken;
+        var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        var ok = false;
+        try
+        {
+            await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+            {
+                await connection.OpenAsync(ct);
+                await PgMigrations.MigrateAsync(connection, ct);
+                await ExecAsync(connection, "ALTER TABLE config.config_monitored_servers DROP COLUMN xe_session_databases", ct);
+            }
+
+            await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var result = await DiagnosticsBundleRunner.SeedFromStoreAsync(new BundleAliaser(), source, ct);
+            Assert.Null(result.FailedNameSource);
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, async (_, _) => await Task.CompletedTask);
+            await scratch.DisposeAsync();
+        }
+    }
+
     /* A store older than 211 has no replica column: the bundle still builds, with nothing to alias from that read. */
     [Fact]
     public async Task AStoreWithoutTheQueryStoreReplicaColumn_StillSeeds()

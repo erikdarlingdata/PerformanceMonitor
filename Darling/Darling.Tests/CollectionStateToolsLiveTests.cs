@@ -13,6 +13,7 @@ using System.Linq;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
@@ -54,6 +55,12 @@ public sealed class CollectionStateToolsLiveTests
             ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
         var statements = new List<string>();
         var uncommented = string.Join('\n', provisioning.Split('\n').Where(l => !l.TrimStart().StartsWith("--", StringComparison.Ordinal)));
+        /* A grant the batch guards on a column (DO $$ ... IF EXISTS (...) THEN EXECUTE $tag$ GRANT ...; $tag$; END IF; END $$) is replayed bare: the scratch store is fully migrated, so every guard holds, and splitting on ';' would otherwise drop the grant (#7639 xe_session_databases). */
+        uncommented = Regex.Replace(
+            uncommented,
+            @"DO \$\$\s*BEGIN\s*IF EXISTS \([^$]*\) THEN\s*EXECUTE \$(?<tag>\w+)\$\s*(?<grant>(?:GRANT|REVOKE) [^;]*;)\s*\$\k<tag>\$;\s*END IF;\s*END \$\$;",
+            "${grant}",
+            RegexOptions.Singleline);
         foreach (var raw in uncommented.Split(';'))
         {
             var statement = raw.Trim();
@@ -414,6 +421,60 @@ public sealed class CollectionStateToolsLiveTests
     }
 
     [Fact]
+    public async Task SetServerXeSessionDatabases_SavesTheList_TheServiceReadsItBack_AndAnEmptyListClearsIt()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            await SeedServerAsync(rig.Owner, 7639, "azure-east", "ARRAY['tempdb']", ct);
+            await ExecAsync(rig.Owner, "UPDATE config_monitored_servers SET xe_session_databases = ARRAY['old'] WHERE server_id = 7639", ct);
+            var modifiedBefore = await ScalarAsync<string>(rig.Owner, "SELECT modified_at::text FROM config_monitored_servers WHERE server_id = 7639", ct);
+
+            var set = Parse(await Tools.SetServerXeSessionDatabases(rig.Mcp, "azure-east", ["Sales", "Orders", "sales", " "], cancellationToken: ct));
+            Assert.Equal("changed", Status(set));
+            Assert.Equal(new[] { "old" }, Strings(set["previous"]!["xe_session_databases"]));
+            Assert.Equal(new[] { "Sales", "Orders" }, Strings(set["current"]!["xe_session_databases"]));
+            Assert.NotEqual(modifiedBefore, await ScalarAsync<string>(rig.Owner, "SELECT modified_at::text FROM config_monitored_servers WHERE server_id = 7639", ct));
+
+            /* The service's next config read hands the worker the list, and the excluded list is untouched. */
+            var server = (await ServiceViewAsync(rig, ct)).EnabledServers.Single();
+            Assert.Equal(new[] { "Sales", "Orders" }, server.XeSessionDatabases.ToArray());
+            Assert.Equal(new[] { "tempdb" }, server.ExcludedDatabases.ToArray());
+
+            /* The undo the answer carries, run as given, puts the first list back. */
+            var undo = set["undo"]!;
+            Assert.Equal("set_server_xe_session_databases", undo["tool"]!.GetValue<string>());
+            var back = Parse(await Tools.SetServerXeSessionDatabases(
+                rig.Mcp, undo["arguments"]!["server_name"]!.GetValue<string>(), Strings(undo["arguments"]!["databases"]), cancellationToken: ct));
+            Assert.Equal("changed", Status(back));
+            Assert.Equal(new[] { "old" }, (await ServiceViewAsync(rig, ct)).EnabledServers.Single().XeSessionDatabases.ToArray());
+
+            /* An empty list clears it (every database); the same empty list again changes nothing. */
+            var cleared = Parse(await Tools.SetServerXeSessionDatabases(rig.Mcp, "azure-east", [], cancellationToken: ct));
+            Assert.Equal("changed", Status(cleared));
+            Assert.Contains("every database", cleared["what_changed"]!.GetValue<string>(), StringComparison.Ordinal);
+            Assert.Empty((await ServiceViewAsync(rig, ct)).EnabledServers.Single().XeSessionDatabases);
+            Assert.Equal("unchanged", Status(Parse(await Tools.SetServerXeSessionDatabases(rig.Mcp, "azure-east", [], cancellationToken: ct))));
+
+            /* Bad arguments are refused in words and write nothing. */
+            await ExecAsync(rig.Owner, "UPDATE config_monitored_servers SET xe_session_databases = ARRAY['keep'] WHERE server_id = 7639", ct);
+            var tooMany = Parse(await Tools.SetServerXeSessionDatabases(rig.Mcp, "azure-east", Enumerable.Range(0, 300).Select(i => "db" + i).ToArray(), cancellationToken: ct));
+            Assert.Equal("refused", Status(tooMany));
+            Assert.Contains("more than 256", tooMany["message"]!.GetValue<string>(), StringComparison.Ordinal);
+            Assert.Equal("refused", Status(Parse(await Tools.SetServerXeSessionDatabases(rig.Mcp, "azure-east", null!, cancellationToken: ct))));
+            Assert.Equal("not_found", Parse(await Tools.SetServerXeSessionDatabases(rig.Mcp, "nope", ["a"], cancellationToken: ct))["reason"]!.GetValue<string>());
+            Assert.Equal("keep", await ScalarAsync<string>(rig.Owner, "SELECT array_to_string(xe_session_databases, ',') FROM config_monitored_servers WHERE server_id = 7639", ct));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
+    [Fact]
     public async Task ReloadConfig_BumpsTheConfigVersion_AndChangesNoSetting()
     {
         var ct = TestContext.Current.CancellationToken;
@@ -443,7 +504,7 @@ public sealed class CollectionStateToolsPolicyTests
 {
     private static readonly string[] Writes =
     [
-        "pause_collection", "resume_collection", "disable_server", "enable_server", "set_server_excluded_databases", "reload_config",
+        "pause_collection", "resume_collection", "disable_server", "enable_server", "set_server_excluded_databases", "set_server_xe_session_databases", "reload_config",
     ];
 
     [Fact]
@@ -470,5 +531,15 @@ public sealed class CollectionStateToolsPolicyTests
         var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
         Assert.Contains("set_server_excluded_databases", description, StringComparison.Ordinal);
         Assert.Contains("disable_server", description, StringComparison.Ordinal);
+        Assert.Contains("set_server_xe_session_databases", description, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EditServer_RefusingTheXeSessionDatabasesList_NamesTheNewTool()
+    {
+        var (changes, error) = DarlingMcpServerAdminTools.ParseEditChanges("{\"xe_session_databases\":[\"a\"]}");
+        Assert.Null(changes);
+        Assert.Contains("set_server_xe_session_databases", error, StringComparison.Ordinal);
+        Assert.Contains("cannot be changed here", error, StringComparison.Ordinal);
     }
 }

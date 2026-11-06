@@ -270,6 +270,11 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", c
         var warnedKey = XeSessionEnsureWarnedKey(server, sessionName);
         var repeatsAtDebug = _databaseScopedXeSessionEnsureWarned.ContainsKey(warnedKey);
 
+        /* #7639: this cycle's account of the databases the ensure was refused in while others were ensured. The read puts it on the
+           run's note (CollectDeadlocksAsync), so a run that is missing some databases says so and why. */
+        _xeEnsurePartialNotes.TryRemove(warnedKey, out _);
+        var partialRefusal = false;
+
         try
         {
             await EnsureDatabaseScopedXeSessionsAsync(
@@ -277,7 +282,9 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", c
                 repeatsAtDebug,
                 ensureInDatabase is null
                     ? alwaysOnInDatabase
-                    : (databaseName, token) => ensureInDatabase(server, sessionName, databaseName, token));
+                    : (databaseName, token) => ensureInDatabase(server, sessionName, databaseName, token),
+                onPartialRefusal: XeEnsurePartialRefusalSink(server, captureName, warnedKey, () => partialRefusal = true),
+                onNoListedDatabase: note => _xeEnsurePartialNotes[warnedKey] = note);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -292,7 +299,17 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", c
             throw;
         }
 
-        _databaseScopedXeSessionEnsureWarned.TryRemove(warnedKey, out _);
+        /* #7639: a cycle that was refused in some databases and ensured in others counts as a failing cycle for the log: its lines
+           were told at Warning, so the cycles after it tell the same refusals at Debug until a cycle has none. A server past the
+           Azure session limits otherwise wrote one Warning per refused database on every cycle, for as long as it ran. */
+        if (partialRefusal)
+        {
+            _databaseScopedXeSessionEnsureWarned[warnedKey] = true;
+        }
+        else
+        {
+            _databaseScopedXeSessionEnsureWarned.TryRemove(warnedKey, out _);
+        }
     }
 
     /// <summary>
@@ -385,6 +402,45 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", c
         _databaseScopedXeSessionEnsureWarned.TryRemove(warnedKey, out _);
     }
 
+    /* #7639: the note for the databases a deadlock or blocked-process ensure was refused in while others were ensured, keyed like
+       _databaseScopedXeSessionEnsureWarned. Emptied at the start of each ensure and set only by a cycle that has such a refusal. */
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _xeEnsurePartialNotes = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// #7639: what the shared ensure driver calls when some databases were refused and others ensured: it keeps the account of the refusal
+    /// (which databases, the server's reason, what fixes it) under <paramref name="noteKey"/>, for <see cref="ApplyXeEnsurePartialNote"/> to put on the run.
+    /// One copy for the deadlock, blocked process, client timeout and long query completions captures.
+    /// </summary>
+    private Action<IReadOnlyList<string>, int, Exception> XeEnsurePartialRefusalSink(ServerConnection server, string captureName, string noteKey, Action? onPartial = null) =>
+        (refused, attempted, first) =>
+        {
+            onPartial?.Invoke();
+            _xeEnsurePartialNotes[noteKey] = EnumeratedCollectorDriver.BuildPartialFailureNote(
+                refused.Count, attempted, refused,
+                $"the {captureName} XE session could not be created or started there: {AlwaysOnXeSessions.DescribeFailure(first)}"
+                + " If the login lacks ALTER ANY DATABASE EVENT SESSION, grant it. If the server is at one of the limits above, drop event sessions"
+                + " you do not need, or exclude those databases in the server's Excluded Databases list.")
+                ?? string.Empty;
+        };
+
+    /// <summary>#7639: puts the partial-refusal note kept under <paramref name="noteKey"/> on the run that is reading now, when there is one.</summary>
+    private void ApplyXeEnsurePartialNote(ServerConnection server, string noteKey)
+    {
+        if (_xeEnsurePartialNotes.TryGetValue(noteKey, out var partialNote) && partialNote.Length > 0)
+        {
+            var telemetry = TelemetryFor(GetServerId(server));
+            telemetry.HostNote = EnumeratedCollectorDriver.MergeNotes(telemetry.HostNote, partialNote);
+        }
+    }
+
+    /// <summary>
+    /// #7639: whether a failed create will be refused again as it stands: it carries the Azure limits (the shared builder marks only a
+    /// create or start failure, and never a read-only database), is not transient and is not a permission refusal. The Azure
+    /// limits give no error number of their own. A permission refusal is not held, so a grant takes effect on the next cycle.
+    /// </summary>
+    internal static bool CreateRefusalWillRepeat(SqlException ex) =>
+        AlwaysOnXeSessions.CarriesAzureCaps(ex) && !RetryHelper.IsTransient(ex) && !SqlServerPermissionErrors.IsPermissionDenied(ex.Number);
+
     /// <summary>The key of the always-on sessions' ensure state (<see cref="_databaseScopedXeSessionEnsureWarned"/>): the server id, then the session name.</summary>
     private static string XeSessionEnsureWarnedKey(ServerConnection server, string sessionName) => $"{server.Id}:{sessionName}";
 
@@ -416,7 +472,10 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", c
         CancellationToken cancellationToken,
         bool repeatsAtDebug = false,
         Func<string, CancellationToken, Task>? ensureInDatabase = null,
-        Func<Exception, string?>? explainRefusal = null)
+        Func<Exception, string?>? explainRefusal = null,
+        Action<IReadOnlyList<string>, int, Exception>? onPartialRefusal = null,
+        bool holdRepeatedRefusals = false,
+        Action<string>? onNoListedDatabase = null)
     {
         IReadOnlyList<string> databases;
         if (plannedDatabases is not null)
@@ -435,6 +494,15 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", c
                 else
                 {
                     databases = await GetAzureDatabaseListAsync(server, cancellationToken);
+                }
+
+                /* #7639: the server's "Databases that get Extended Events sessions" list narrows the always-on creates (deadlock,
+                   blocked process, client timeout). After the excluded databases, which win. Empty = every database. */
+                var beforeTheList = databases;
+                databases = XeSessionDatabaseList.Apply(databases, server.XeSessionDatabases);
+                if (XeSessionDatabaseList.MatchesNone(beforeTheList, server.XeSessionDatabases, databases))
+                {
+                    onNoListedDatabase?.Invoke(XeSessionDatabaseList.MatchesNoDatabaseNote);
                 }
             }
             catch (SqlException ex)
@@ -456,6 +524,7 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", c
         int attempted = 0;
         int healthy = 0;
         Exception? firstFailure = null;
+        var refusedDatabases = new List<string>();
 
         foreach (var databaseName in databases)
         {
@@ -469,8 +538,21 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", c
 
             attempted++;
 
+            /* #7639: the long-query trace has no per-database routine of its own in production, so the driver holds its refused
+               creates the way EnsureAlwaysOnXeSessionInDatabaseAsync holds the others (_alwaysOnCreateRefused): a refusal that
+               will refuse again is raised in place of a connection for LongQueryTraceDatabases.RetryInterval. */
+            var holdKey = holdRepeatedRefusals ? XeCreateRefusalKey(server.Id, databaseName, captureName) : null;
+            var heldRefusal = false;
+            var holdNow = LongQueryTraceUtcNowForTests?.Invoke() ?? DateTime.UtcNow;
+
             try
             {
+                if (holdKey is not null && _alwaysOnCreateRefused.TryGetValue(holdKey, out var held) && holdNow - held.At < LongQueryTraceDatabases.RetryInterval)
+                {
+                    heldRefusal = true;
+                    System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(held.Failure).Throw();
+                }
+
                 /* The caller's own routine replaces the open and the ensure in one database: the deadlock and
                    blocked-process ensures pass theirs in production (it starts a stopped session, falls back to this
                    install's own, and never drops a shared one), and a test passes one for the long-query trace. A failure
@@ -480,6 +562,11 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", c
                 {
                     await ensureInDatabase(databaseName, cancellationToken);
                     healthy++;
+                    if (holdKey is not null)
+                    {
+                        _alwaysOnCreateRefused.TryRemove(holdKey, out _);
+                    }
+
                     continue;
                 }
 
@@ -542,11 +629,21 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", c
                 if (readable)
                 {
                     healthy++;
+                    if (holdKey is not null)
+                    {
+                        _alwaysOnCreateRefused.TryRemove(holdKey, out _);
+                    }
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 firstFailure ??= ex;
+                if (holdKey is not null && !heldRefusal && ex is SqlException sqlRefusal && CreateRefusalWillRepeat(sqlRefusal))
+                {
+                    _alwaysOnCreateRefused[holdKey] = (holdNow, sqlRefusal);
+                }
+
+                refusedDatabases.Add(databaseName);
                 /* #4961: a caller that can say why a refusal happened and what to change (a read-only database) has that line
                    logged here instead of the server's own message. */
                 var refusal = explainRefusal?.Invoke(ex) is { } explanation
@@ -561,6 +658,11 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", c
                     AppLogger.Warn("XeSession", refusal);
                 }
             }
+        }
+
+        if (healthy > 0 && refusedDatabases.Count > 0 && firstFailure is not null)
+        {
+            onPartialRefusal?.Invoke(refusedDatabases, attempted, firstFailure);
         }
 
         if (attempted > 0 && healthy == 0 && firstFailure is not null)
@@ -685,10 +787,16 @@ SELECT /* PerformanceMonitorLite */
     /// <see cref="XeSessionEnsureException"/> like the ensure does, so the run records PERMISSIONS or ERROR with
     /// the XE session flagged unavailable, and never a SUCCESS over a source it could not read.
     /// </summary>
-    private Task<int> CollectBlockedProcessReportsAsync(ServerConnection server, CancellationToken cancellationToken)
-        => ReadXeSessionAsync(
+    private async Task<int> CollectBlockedProcessReportsAsync(ServerConnection server, CancellationToken cancellationToken)
+    {
+        var rows = await ReadXeSessionAsync(
             "blocked process",
             () => RunCollectorDefinitionAsync(BlockedProcessReportCollector.Instance, server, cancellationToken));
+
+        /* #7639: some databases were refused their session while others were ensured: the run's note says which and why. */
+        ApplyXeEnsurePartialNote(server, XeSessionEnsureWarnedKey(server, BlockedProcessXeSessionName));
+        return rows;
+    }
 
     /// <summary>
     /// Whether a SQL error off a ring-buffer read says the session is missing or this principal cannot see it:
