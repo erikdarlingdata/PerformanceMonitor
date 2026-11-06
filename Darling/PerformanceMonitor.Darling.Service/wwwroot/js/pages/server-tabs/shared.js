@@ -229,7 +229,7 @@ function discontinuityWhat(reason) {
     case "postmaster_restart": return "PostgreSQL restarted";
     case "failover": return "The connection reached a different server";
     case "rename": return "SQL Server was renamed";
-    case "identity": return "The server's identity changed";
+    case "identity": return "SQL Server restarted, was renamed, or the connection reached another server";
     case "stats_reset": return "Statistics were reset";
     default: return "Collection started again";
   }
