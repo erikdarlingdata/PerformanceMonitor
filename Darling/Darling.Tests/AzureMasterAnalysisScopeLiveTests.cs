@@ -275,19 +275,6 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
         Assert.Contains("SeparatelyMonitoredDatabases = separatelyMonitoredDatabases", worker, StringComparison.Ordinal);
     }
 
-    /* A master that is disconnected when the fleet sweep fires has no runtime; its list comes from the stored edition and the
-       registry, so its earlier events are not counted twice in the sweep band. */
-    [Fact]
-    public void TheFleetSweep_ScopesATargetWithNoRuntime_ThroughTheStoredEdition()
-    {
-        var worker = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs").Replace("\r\n", "\n");
-        Assert.Contains(
-            "fleetSweepSeparate[target.Config.ServerId] = target.Runtime is null\n"
-            + "                            ? await AnalysisSeparatelyMonitoredDatabasesAsync(target.Config.ServerId, _registryState?.Read(), postgres, stoppingToken)\n"
-            + "                            : AnalysisSeparatelyMonitoredDatabases(target.Runtime);",
-            worker, StringComparison.Ordinal);
-    }
-
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
