@@ -274,6 +274,6 @@ public sealed class WebFetchLayerTests
     [Fact]
     public void AppJs_RouteThreadsThePollFlagToRenderServer()
     {
-        Assert.Contains("if (r.name === \"server\") renderServer(main, r.param, r.tab, opts);", AppJs, StringComparison.Ordinal);
+        Assert.Contains("server: (m, r, o) => renderServer(m, r.param, r.tab, o),", AppJs, StringComparison.Ordinal);
     }
 }
