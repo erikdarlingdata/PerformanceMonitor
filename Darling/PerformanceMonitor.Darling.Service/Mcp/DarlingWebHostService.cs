@@ -1647,7 +1647,9 @@ public sealed class DarlingWebHostService : BackgroundService
                         /* #6286: a page link followed from another site (Teams, mail, a work item) is a cross-site top-level
                            navigation, so the browser withholds the SameSite=Strict session cookie and a live session looks
                            signed out. Answer it once with a page that re-navigates to the same address from this site; that
-                           request is same-origin and carries the cookie. With no session still, it gets the sign-in page below. */
+                           request is same-origin and carries the cookie. With no session still, it gets the sign-in page below.
+                           #7846: any cross-site top-level GET counts, including one a redirect page started by script (Safe
+                           Links), which carries no Sec-Fetch-User. */
                         if (IsCrossSitePageNavigation(context.Request))
                         {
                             await WriteReNavigationPageAsync(context);
@@ -2693,10 +2695,12 @@ public sealed class DarlingWebHostService : BackgroundService
     /// sign-in page as before: the same-origin answer to the re-navigation below is what ends the loop. When the
     /// browser also says what the request is for, only a top-level navigation counts (<c>Sec-Fetch-Mode</c>
     /// <c>navigate</c>, <c>Sec-Fetch-Dest</c> <c>document</c>), so a cross-site image or script request is not
-    /// answered with a page. It must also be a navigation the person started (<c>Sec-Fetch-User</c> is <c>?1</c>, which a
-    /// browser sends for a click or a typed address and not for a script redirect, a meta refresh or a popup nobody
-    /// clicked), so such a navigation gets the sign-in form as it did before. Never true for a non-GET request or an
-    /// /api (or /api/*) call.
+    /// answered with a page. <c>Sec-Fetch-User</c> is not read (#7846): a link that passes through a redirect (a
+    /// Safe Links page, a mail gateway) arrives as a script navigation from the other site, which carries no
+    /// <c>?1</c>, and a person who has a live session expects that link to open signed in. The flag never kept a
+    /// page that a person clicked from away (one click sends <c>?1</c>), and a browser can send it for a script
+    /// redirect too, so any cross-site top-level GET counts, as it would under <c>SameSite=Lax</c>. Never true for a
+    /// non-GET request or an /api (or /api/*) call.
     /// </summary>
     internal static bool IsCrossSitePageNavigation(HttpRequest request)
     {
@@ -2706,11 +2710,6 @@ public sealed class DarlingWebHostService : BackgroundService
         }
 
         if (!string.Equals(request.Headers["Sec-Fetch-Site"].ToString(), "cross-site", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        if (!string.Equals(request.Headers["Sec-Fetch-User"].ToString(), "?1", StringComparison.Ordinal))
         {
             return false;
         }
