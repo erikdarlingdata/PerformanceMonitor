@@ -84,9 +84,9 @@ public sealed class ServerTabRegroupAndSidebarTests
     [Fact]
     public void TheSidebarFooter_ShowsFourIconButtons_AndMoreHoldsTheOtherNineUnderTheirOldNames()
     {
-        var (buttons, icons, moreNames, height) = StaTestThread.Run(() => WithTheme(() =>
+        var (buttons, icons, moreItems, height) = StaTestThread.Run(() => WithTheme(() =>
         {
-            var footer = new SidebarFooter();
+            var footer = new SidebarFooter { VerticalAlignment = VerticalAlignment.Top };
             var window = new Window { Content = footer, Width = 280, Height = 400, Left = 0, Top = 0 };
             window.Show();
             try

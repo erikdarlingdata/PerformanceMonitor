@@ -26,7 +26,7 @@ public partial class ServerTab : UserControl
     private readonly Dictionary<string, string> _skippedNotes = new(StringComparer.Ordinal);
 
     /// <summary>The tabs whose empty states read <see cref="_collectorRuns"/>: Memory, Configuration and Configuration Changes.</summary>
-    private static bool TabReadsCollectorRuns(int tabIndex) => tabIndex is 5 or 11 or 19;
+    private static bool TabReadsCollectorRuns(int tabIndex) => tabIndex is 5 or 11 or 17;
 
     /// <summary>
     /// Brings the known collector runs up to date. Called once per tab refresh, not once per surface. It reads the store only
