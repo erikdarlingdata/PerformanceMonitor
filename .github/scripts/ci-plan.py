@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """The plan job of the pull-request workflow pr.yml (#6656): what a run does, from the event and the changed files.
 
-Inputs: the event (pull_request or push), the base branch, the head branch, the draft flag, the labels and the
-changed file list. Outputs, as `key=value` lines (stdout, and $GITHUB_OUTPUT when --github-output is given):
+Inputs: the event (pull_request, push or workflow_dispatch), the base branch, the head branch, the draft flag, the labels and
+the changed file list. Outputs, as `key=value` lines (stdout, and $GITHUB_OUTPUT when --github-output is given):
 
   run              true when the run does any work; false for a merge-train PR
+  full_suite       true when every class of both suites runs (areas all). pr.yml sets the `CI full suite` commit status on a dev
+                   run that says so (#7819): the hourly workflow_dispatch run, and a push the map rule answers FULL for
   outcome          run | train-blocked  (train-blocked: the verdict job must fail, see below)
   why              one plain sentence for the job log
   areas            docs-only | darling | lite | all | none | classes
@@ -19,8 +21,9 @@ changed file list. Outputs, as `key=value` lines (stdout, and $GITHUB_OUTPUT whe
                    list as an output and an environment variable stopped at about 980 Darling classes; a file has no limit.
   build            true when the shared test build is needed (any run that is not docs-only)
   test_minutes     estimated test time of the selected classes, in minutes
-  legs             a pull request: N = ceil(test_minutes / MINUTES_PER_LEG), at most MAX_LEGS; a dev push: the same, at least DEV_PUSH_MIN_LEGS and at most DEV_PUSH_MAX_LEGS;
-                   0 when nothing runs
+  legs             a pull request: N = ceil(test_minutes / MINUTES_PER_LEG), at most MAX_LEGS; a dev push or dispatch that runs every
+                   area: the same, at least DEV_PUSH_MIN_LEGS and at most DEV_PUSH_MAX_LEGS; a dev push the map narrowed (areas classes):
+                   the pull request count, at most DEV_PUSH_MAX_LEGS; 0 when nothing runs
   legs_json        [1, 2, ..., N], for the test job's matrix
   actionlint       true when a workflow file changed
   check_web_js     true when a dashboard JavaScript file changed
@@ -60,7 +63,11 @@ Rules, in order:
      read, it is older than MAP_MAX_AGE_HOURS (48), map_select answers FULL (a keep-full file, a file the map does not know,
      a new product file, a constant or enum of a shared project), the diff could not be read, no class is selected, or a class
      list is longer than the runner's environment variable allows. There is no drift rule: a changed or new test file is
-     always picked, and a dev push still runs everything. The map is never a reason for a red run.
+     always picked. The map is never a reason for a red run.
+ 10. A dev push with the nightly map (#7819) picks its classes as rule 8 does, from the files of the pushed commit (pr.yml lists
+     HEAD^1..HEAD when the push is one commit on top of `before` and not forced; any other push gets an unknown/ path, so rule 5).
+     The full suite runs on dev once an hour instead: a workflow_dispatch run, which has no file list, runs every area, as does a
+     push without the map or one the map answers FULL for. `full_suite` says when a run is one of those.
   9. CI scripts only (#7743): every changed file is documentation or under .github/scripts/ and no area knows it (a script
      that Darling.Tests parses, like run-darling-pg-shard.ps1, is a Darling file and keeps its area). The areas are
      classes: the Darling and Lite Stage=Guard classes, the build, and the Python script tests of .github/scripts/tests
@@ -301,14 +308,16 @@ def _map_age(selection: dict) -> str:
     return f"map built {built:%Y-%m-%d %H:%M} UTC, {hours:.1f} hours old"
 
 
-def ready_picks(rules, files: "list[str]", base: str, catalog: dict, selection: dict
+def ready_picks(rules, files: "list[str]", base: str, catalog: dict, selection: dict, event: str = "pull_request"
                 ) -> "tuple[dict[str, list[str]] | None, str]":
     """(picks, why) for a pull request that is ready for review (#7728): the classes map_select picks from the nightly map,
     plus the classes of the test files it changed, plus the Darling Stage=Guard classes. picks is None, with the reason,
     when the pull request must run as rule 5 says (see the module docstring, rule 8). Never raises: any failure is FULL.
     selection: {map: the parsed map or None, error: why there is none, now: the clock (tests), shared_diff: the -U0 diff text
-    of the shared-project files, named: map_select's `named`}."""
+    of the shared-project files, named: map_select's `named`}. A dev push (#7819, rule 10) is given to map_select as a pull
+    request into dev would be: the pushed commit's files are the change; `event` only names the run in `why`."""
     age = _map_age(selection)
+    who = "a ready pull request" if event == "pull_request" else f"a dev {event}"
     try:
         test_map = selection.get("map")
         if not isinstance(test_map, dict):
@@ -333,7 +342,7 @@ def ready_picks(rules, files: "list[str]", base: str, catalog: dict, selection: 
             picks[suite] = _real(catalog, suite, list(dict.fromkeys(names)), test_map["classes"].get(suite, {}))
         if not any(picks.values()):
             return None, f"the map selected no class ({age})"
-        return picks, (f"a ready pull request runs the classes the nightly test map selects, {len(picks['darling'])} Darling "
+        return picks, (f"{who} runs the classes the nightly test map selects, {len(picks['darling'])} Darling "
                        f"and {len(picks['lite'])} Lite, with the Darling Guard classes and the classes of its changed test files "
                        f"({age}).")
     except Exception as exc:  # the map is never a reason for a red run
@@ -345,7 +354,9 @@ def classify(rules, event: str, base: str, files: "list[str]", catalog: "dict | 
     """The areas of one change: {areas, darling_scope, lite_scope, why}. draft: a pull request that is a draft (#7727).
     selection: the nightly map and what the pick reads (#7728, see ready_picks); None leaves that rule off."""
     everything = {"areas": "all", "darling_scope": "full", "lite_scope": "full"}
-    if event != "pull_request":
+    # #7819: a dev push with the nightly map goes through the rules below as a ready pull request does (rule 10). Any other event
+    # that is not a pull request (the hourly workflow_dispatch run, a push without the map) runs every area.
+    if event != "pull_request" and not (event == "push" and selection is not None):
         return {**everything, "reason": f"a {event} runs every area."}
     if base != "dev":
         return {**everything, "reason": f"the base branch is '{base}', not dev, so every area runs."}
@@ -414,12 +425,13 @@ def classify(rules, event: str, base: str, files: "list[str]", catalog: "dict | 
                               + "; the full suite runs when it is marked ready for review."}
         reason += f" It is a draft, but {why}, so it runs as a pull request that is ready for review."
     if not draft and selection is not None and areas != "none":
-        picks, why = ready_picks(rules, files, base, catalog if catalog is not None else load_catalog(), selection)
+        picks, why = ready_picks(rules, files, base, catalog if catalog is not None else load_catalog(), selection, event)
         if picks:
             return {"areas": "classes", "darling_scope": "classes" if picks["darling"] else "none",
                     "lite_scope": "classes" if picks["lite"] else "none",
                     "darling_classes": picks["darling"], "lite_classes": picks["lite"], "reason": why}
-        reason += f" A ready pull request picks its classes from the nightly test map, but {why}, so it runs as rule 5 says."
+        who = "A ready pull request" if event == "pull_request" else f"A dev {event}"
+        reason += f" {who} picks its classes from the nightly test map, but {why}, so it runs as rule 5 says."
     return {"areas": areas, "darling_scope": darling_scope, "lite_scope": lite_mode, "reason": reason}
 
 
@@ -511,11 +523,15 @@ def estimate(catalog: dict, darling_scope: str, lite_scope: str, picks: "dict | 
             suite_minutes(lt, catalog["lite_weights"], fallback))
 
 
-def leg_count(test_minutes: float, event: str = "pull_request") -> int:
+def leg_count(test_minutes: float, event: str = "pull_request", narrowed: bool = False) -> int:
+    """narrowed (#7819): a dev push the map cut to areas classes takes the pull request count (no DEV_PUSH_MIN_LEGS floor, which
+    exists for the full suite) and keeps the DEV_PUSH_MAX_LEGS cap, so a push leaves runners for open pull requests."""
     if test_minutes <= 0:
         return 0
     n = min(MAX_LEGS, max(1, math.ceil(test_minutes / MINUTES_PER_LEG)))
-    return n if event == "pull_request" else min(DEV_PUSH_MAX_LEGS, max(DEV_PUSH_MIN_LEGS, n))
+    if event == "pull_request":
+        return n
+    return min(DEV_PUSH_MAX_LEGS, n if narrowed else max(DEV_PUSH_MIN_LEGS, n))
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -531,18 +547,19 @@ def plan(event: str, base: str, head_ref: str, labels: "list[str]", files: "list
     out = {"run": "true" if outcome == "run" else "false", "outcome": outcome, "why": why,
            "areas": "none", "darling_scope": "none", "lite_scope": "none", "build": "false",
            "darling_classes": "", "lite_classes": "", "test_minutes": "0", "legs": "0", "legs_json": "[]",
-           "actionlint": "false", "check_web_js": "false", "pg_old_targets": "false",
+           "actionlint": "false", "check_web_js": "false", "pg_old_targets": "false", "full_suite": "false",
            "script_tests": "false", "self_test_darling": "", "self_test_lite": "", "self_test_note": ""}
     if outcome != "run":
         return out
 
-    picks_from_map = selection is not None and event == "pull_request" and not draft and not _all_docs(rules, files)
+    picks_from_map = selection is not None and event in ("pull_request", "push") and not draft and not _all_docs(rules, files)
     catalog = catalog if catalog is not None else (load_catalog() if draft or picks_from_map or _may_narrow(files) else None)
     c = classify(rules, event, base, files, catalog, draft and event == "pull_request", selection, named, named_error)
     out.update(darling_classes=",".join(c.get("darling_classes", [])), lite_classes=",".join(c.get("lite_classes", [])))
     out.update(areas=c["areas"], darling_scope=c["darling_scope"], lite_scope=c["lite_scope"])
     out["why"] = f"{why} {c['reason']}"
     out["build"] = "false" if c["areas"] == "docs-only" else "true"
+    out["full_suite"] = _bool(c["areas"] == "all")
     out["actionlint"] = _bool(any(f.startswith(".github/workflows/") for f in files))
     out["check_web_js"] = _bool(any(WEB_JS_MARKER in "/" + f for f in files))
     out["pg_old_targets"] = _bool(event == "pull_request" and any(f.startswith(PG_OLD_TARGET_PATHS) for f in files))
@@ -551,7 +568,7 @@ def plan(event: str, base: str, head_ref: str, labels: "list[str]", files: "list
         picks = {"darling": c.get("darling_classes", []), "lite": c.get("lite_classes", [])}
         d_min, l_min = estimate(catalog, c["darling_scope"], c["lite_scope"], picks)
         total = d_min + l_min
-        n = leg_count(total, event)
+        n = leg_count(total, event, narrowed=c["areas"] == "classes")
         if c["areas"] == "classes":
             # Never more legs than classes, so no leg is empty on the duration cut. The hash cut (a class the weight table does not
             # know) can still leave one empty: the runners let such a leg pass under -Areas classes, and the other legs run every class.
@@ -608,10 +625,12 @@ def parse_labels(text: str) -> "list[str]":
     return [x.strip() for x in text.split(",") if x.strip()]
 
 
-def build_selection(map_path: str, map_error: str, root: str = ROOT) -> dict:
+def build_selection(map_path: str, map_error: str, root: str = ROOT, event: str = "pull_request") -> dict:
     """The input of ready_picks for a pull request run (#7728): the map file the workflow downloaded, or why there is none, and
     the two things map_select reads from the pull request's own change. The checkout is the pull request's merge commit, so its
-    change is `HEAD^1..HEAD`. A map that cannot be read, or a diff that cannot be read, leaves `map` None: the run is FULL."""
+    change is `HEAD^1..HEAD`. A dev push (#7819) checks out the pushed commit, whose change against its first parent is the same
+    range; pr.yml has already made sure the push is that one commit. A map that cannot be read, or a diff that cannot be read,
+    leaves `map` None: the run is FULL."""
     out: dict = {"map": None, "error": map_error or "no test map was downloaded", "now": None, "shared_diff": None, "named": None}
     if not map_path or not os.path.isfile(map_path):
         return out
@@ -620,8 +639,11 @@ def build_selection(map_path: str, map_error: str, root: str = ROOT) -> dict:
         out["error"] = "the downloaded test map cannot be read"
         return out
     try:
-        if _CS._git(root, "rev-parse", "-q", "--verify", "HEAD^2") is None:
+        if event == "pull_request" and _CS._git(root, "rev-parse", "-q", "--verify", "HEAD^2") is None:
             out["error"] = "the checkout is not the pull request's merge commit, so its change cannot be read"
+            return out
+        if event != "pull_request" and _CS._git(root, "rev-parse", "-q", "--verify", "HEAD^1") is None:
+            out["error"] = "the pushed commit has no parent in the checkout, so its change cannot be read"
             return out
         text = _CS.symbol_diff_text(root, "HEAD^1", "HEAD")
         if text is None:
@@ -710,7 +732,7 @@ def write_class_lists(directory: str, out: "dict[str, str]") -> "list[str]":
 
 def main(argv: "list[str]") -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--event", required=True, choices=["pull_request", "push"])
+    ap.add_argument("--event", required=True, choices=["pull_request", "push", "workflow_dispatch"])
     ap.add_argument("--base", default="dev", help="the base branch of a pull request; the pushed branch for a push")
     ap.add_argument("--head-ref", default="", help="the head branch of a pull request")
     ap.add_argument("--draft", default="false", help="true when the pull request is a draft (it narrows the scope, #7727)")
@@ -734,8 +756,9 @@ def main(argv: "list[str]") -> int:
 
     draft = parse_bool(args.draft)
     selection = None
-    if args.event == "pull_request" and args.map is not None and not draft:
-        selection = build_selection(args.map, args.map_error)
+    # A ready pull request and a dev push (#7819) pick their classes from the map; the hourly workflow_dispatch run has no file list.
+    if args.event in ("pull_request", "push") and args.map is not None and not draft:
+        selection = build_selection(args.map, args.map_error, event=args.event)
     named, named_error = None, ""
     if args.event == "pull_request" and draft:
         # #7734: a draft also runs the classes whose source names a changed product file. A scan that fails runs the pull request as
