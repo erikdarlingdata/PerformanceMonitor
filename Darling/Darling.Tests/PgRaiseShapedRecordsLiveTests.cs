@@ -77,40 +77,49 @@ public sealed class PgRaiseShapedRecordsLiveTests
             await setup.ExecuteNonQueryAsync(ct);
         }
 
-        await using (var call = new NpgsqlCommand("SELECT raise_fake_deadlock_4058l()", targetConnection))
-        {
-            var ex = await Assert.ThrowsAsync<PostgresException>(async () => await call.ExecuteNonQueryAsync(ct));
-            Assert.Equal("40P01", ex.SqlState);
-        }
+        /* #8205: the same rotation-aware write, wait and read as the forged plan capture below. */
+        await PgLogLiveWait.ReadOwnRecordAcrossRotationAsync(targetConnection, "csv", "Process 9001 waits for ShareLock",
+            write: async () =>
+            {
+                await using var call = new NpgsqlCommand("SELECT raise_fake_deadlock_4058l()", targetConnection);
+                var ex = await Assert.ThrowsAsync<PostgresException>(async () => await call.ExecuteNonQueryAsync(ct));
+                Assert.Equal("40P01", ex.SqlState);
+            },
+            read: async () =>
+            {
+                var context = new CollectorContext
+                {
+                    LogHashKey = TestLogHashKeys.Fixed,
+                    ServerId = ServerId,
+                    ServerName = ServerName,
+                    CollectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
+                    Deltas = new CollectorDeltaCalculator(),
+                    Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
+                    PgLogUsesCsvlog = true,
+                };
 
-        await PgLogLiveWait.WaitForTextAsync(targetConnection, "csv", ct, "Process 9001 waits for ShareLock");
+                foreach (var binaryGranted in new[] { false, true })
+                {
+                    context.PgReadBinaryFileGranted = binaryGranted;
 
-        var context = new CollectorContext
-        {
-            LogHashKey = TestLogHashKeys.Fixed,
-            ServerId = ServerId,
-            ServerName = ServerName,
-            CollectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
-            Deltas = new CollectorDeltaCalculator(),
-            Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
-            PgLogUsesCsvlog = true,
-        };
+                    var definition = PgDeadlocksCollector.Instance;
+                    await using var command = LiveTailQuery.Command(definition.BuildQuery(context), targetConnection);
+                    await using var reader = await command.ExecuteReaderAsync(ct);
+                    var rows = await definition.ReadAsync(reader, context, ct);
 
-        foreach (var binaryGranted in new[] { false, true })
-        {
-            context.PgReadBinaryFileGranted = binaryGranted;
+                    Assert.DoesNotContain(rows, r => r.VictimPid == 9001 || r.VictimPid == 9002);
 
-            var definition = PgDeadlocksCollector.Instance;
-            await using var command = LiveTailQuery.Command(definition.BuildQuery(context), targetConnection);
-            await using var reader = await command.ExecuteReaderAsync(ct);
-            var rows = await definition.ReadAsync(reader, context, ct);
+                    var measurements = context.Measurements.Where(m => m.Label == PgDeadlocksCollector.RaiseShapedDeadlocksSkippedMeasurement).ToList();
+                    if (measurements.Count == 0)
+                    {
+                        return false;
+                    }
 
-            Assert.DoesNotContain(rows, r => r.VictimPid == 9001 || r.VictimPid == 9002);
+                    Assert.True(Assert.Single(measurements).Value >= 1);
+                }
 
-            var measurement = context.Measurements.Single(
-                m => m.Label == PgDeadlocksCollector.RaiseShapedDeadlocksSkippedMeasurement);
-            Assert.True(measurement.Value >= 1);
-        }
+                return true;
+            }, ct);
 
         await using (var cleanup = new NpgsqlCommand("DROP FUNCTION IF EXISTS raise_fake_deadlock_4058l();", targetConnection))
         {
@@ -260,44 +269,58 @@ public sealed class PgRaiseShapedRecordsLiveTests
             await setup.ExecuteNonQueryAsync(ct);
         }
 
-        await using (var call = new NpgsqlCommand("SELECT raise_fake_plan_4058l($1)", targetConnection))
-        {
-            call.Parameters.AddWithValue(forgedMessage);
-            await call.ExecuteNonQueryAsync(ct);
-        }
+        /* #8205: the write, the wait and the read go through the rotation-aware helper, so a log rotation between the write
+           and the read (midnight, log_rotation_size) has the record written again into the file the collector tails. */
+        var rotated = false;
+        await PgLogLiveWait.ReadOwnRecordAcrossRotationAsync(targetConnection, "csv", "forged_4058l",
+            write: async () =>
+            {
+                await using var call = new NpgsqlCommand("SELECT raise_fake_plan_4058l($1)", targetConnection);
+                call.Parameters.AddWithValue(forgedMessage);
+                await call.ExecuteNonQueryAsync(ct);
+            },
+            read: async () =>
+            {
+                if (theLogRotatesBeforeTheRead && !rotated)
+                {
+                    rotated = true;
+                    await PgLogLiveWait.RotateAsync(targetConnection, "csv", ct);
+                }
 
-        await PgLogLiveWait.WaitForTextAsync(targetConnection, "csv", ct, "forged_4058l");
-        if (theLogRotatesBeforeTheRead)
-        {
-            await PgLogLiveWait.RotateAsync(targetConnection, "csv", ct);
-        }
+                var context = new CollectorContext
+                {
+                    LogHashKey = TestLogHashKeys.Fixed,
+                    ServerId = ServerId,
+                    ServerName = ServerName,
+                    CollectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
+                    Deltas = new CollectorDeltaCalculator(),
+                    Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql, PostgresMajorVersion = 18, PostgresVersionNum = 180000 },
+                    PgLogUsesCsvlog = true,
+                };
 
-        var context = new CollectorContext
-        {
-            LogHashKey = TestLogHashKeys.Fixed,
-            ServerId = ServerId,
-            ServerName = ServerName,
-            CollectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
-            Deltas = new CollectorDeltaCalculator(),
-            Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql, PostgresMajorVersion = 18, PostgresVersionNum = 180000 },
-            PgLogUsesCsvlog = true,
-        };
+                foreach (var binaryGranted in new[] { false, true })
+                {
+                    context.PgReadBinaryFileGranted = binaryGranted;
 
-        foreach (var binaryGranted in new[] { false, true })
-        {
-            context.PgReadBinaryFileGranted = binaryGranted;
+                    var definition = PgPlanCaptureCollector.Instance;
+                    await using var command = LiveTailQuery.Command(definition.BuildQuery(context), targetConnection);
+                    await using var reader = await command.ExecuteReaderAsync(ct);
+                    var rows = await definition.ReadAsync(reader, context, ct);
 
-            var definition = PgPlanCaptureCollector.Instance;
-            await using var command = LiveTailQuery.Command(definition.BuildQuery(context), targetConnection);
-            await using var reader = await command.ExecuteReaderAsync(ct);
-            var rows = await definition.ReadAsync(reader, context, ct);
+                    Assert.DoesNotContain(rows, r => r.PlanJson.Contains("forged_4058l", StringComparison.Ordinal));
 
-            Assert.DoesNotContain(rows, r => r.PlanJson.Contains("forged_4058l", StringComparison.Ordinal));
+                    /* No forged-capture measurement at all means the read saw no forged line: its record is not in the file the read tailed. */
+                    var measurements = context.Measurements.Where(m => m.Label == PgPlanCaptureCollector.ForgedCaptureMeasurement).ToList();
+                    if (measurements.Count == 0)
+                    {
+                        return false;
+                    }
 
-            var measurement = context.Measurements.Single(
-                m => m.Label == PgPlanCaptureCollector.ForgedCaptureMeasurement);
-            Assert.True(measurement.Value >= 1);
-        }
+                    Assert.True(Assert.Single(measurements).Value >= 1);
+                }
+
+                return true;
+            }, ct);
 
         await using (var cleanup = new NpgsqlCommand("DROP FUNCTION IF EXISTS raise_fake_plan_4058l(text);", targetConnection))
         {

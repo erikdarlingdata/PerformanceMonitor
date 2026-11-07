@@ -65,7 +65,46 @@ internal static class PgLogLiveWait
         }
     }
 
-    public static async Task WaitForTextAsync(NpgsqlConnection connection, string extension, CancellationToken ct, params string[] markers)
+    public static async Task WaitForTextAsync(NpgsqlConnection connection, string extension, CancellationToken ct, params string[] markers) =>
+        await WaitForTextCoreAsync(connection, extension, null, ct, markers);
+
+    /* The most times a record is written again because the log rotated after the write. */
+    private const int RotationRetries = 2;
+
+    /// <summary>
+    /// Runs <paramref name="write"/>, waits for <paramref name="marker"/> to land, then runs <paramref name="read"/>, which
+    /// returns true when the collector's read held the record (#8205). The collectors tail the newest log file, and the
+    /// server rotates its log at midnight and at <c>log_rotation_size</c>, so a record written a moment before a rotation
+    /// sits in the file before the one the read tails. When the newest file is not the one the record went into and the
+    /// read did not hold it, the record is written again, up to <see cref="RotationRetries"/> more times. A read that misses
+    /// the record with no rotation after the write fails here, naming the file.
+    /// </summary>
+    public static async Task ReadOwnRecordAcrossRotationAsync(
+        NpgsqlConnection connection, string extension, string marker, Func<Task> write, Func<Task<bool>> read, CancellationToken ct)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            var fileAtWrite = await NewestFileAsync(connection, extension, ct);
+            await write();
+            var landed = await WaitForTextCoreAsync(connection, extension, fileAtWrite, ct, marker);
+            if (landed && await read())
+            {
+                return;
+            }
+
+            var newest = await NewestFileAsync(connection, extension, ct);
+            Assert.True(newest != fileAtWrite,
+                "the collector's read of " + newest + " did not hold " + marker + ", and the log did not rotate after the write.");
+            Assert.True(attempt < RotationRetries,
+                "the log rotated after each of " + (RotationRetries + 1) + " writes of " + marker + ".");
+        }
+    }
+
+    /// <summary>
+    /// The wait itself. With <paramref name="fileAtWrite"/> given, it returns false instead of failing once the newest file
+    /// is no longer that one: the log rotated after the write, and the record is in the file before.
+    /// </summary>
+    private static async Task<bool> WaitForTextCoreAsync(NpgsqlConnection connection, string extension, string? fileAtWrite, CancellationToken ct, params string[] markers)
     {
         var deadline = DateTime.UtcNow + Budget;
         while (true)
@@ -75,15 +114,22 @@ internal static class PgLogLiveWait
                 + "ORDER BY modification DESC, name DESC LIMIT 1), "
                 + "b AS (SELECT pg_catalog.pg_read_binary_file(pg_catalog.current_setting('log_directory') || '/' || f.name, "
                 + "greatest(f.size - " + TailBytes + ", 0), " + TailBytes + ") AS body FROM f) "
-                + "SELECT coalesce(pg_catalog.bool_and(position(pg_catalog.convert_to(m, 'UTF8') IN b.body) > 0), false) "
+                + "SELECT (SELECT name FROM f), coalesce(pg_catalog.bool_and(position(pg_catalog.convert_to(m, 'UTF8') IN b.body) > 0), false) "
                 + "FROM b CROSS JOIN pg_catalog.unnest(@markers) AS m",
                 connection))
             {
                 command.Parameters.AddWithValue("ext", "\\." + extension + "$");
                 command.Parameters.Add(new NpgsqlParameter("markers", NpgsqlDbType.Array | NpgsqlDbType.Text) { Value = markers });
-                if ((bool)(await command.ExecuteScalarAsync(ct))!)
+                await using var reader = await command.ExecuteReaderAsync(ct);
+                Assert.True(await reader.ReadAsync(ct));
+                if (reader.GetBoolean(1))
                 {
-                    return;
+                    return true;
+                }
+
+                if (fileAtWrite is not null && !reader.IsDBNull(0) && reader.GetString(0) != fileAtWrite)
+                {
+                    return false;
                 }
             }
 
