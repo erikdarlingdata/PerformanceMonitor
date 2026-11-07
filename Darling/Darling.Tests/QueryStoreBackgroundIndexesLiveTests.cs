@@ -277,7 +277,17 @@ ANALYZE collect.query_store_interval_wide;", ct);
        min/max path (it walks entries of every server until one matches), so a plan that merely shows a Limit over an
        index scan would pass without the wide btree: the pin names the index. */
     [Fact]
-    public async Task ThePerServerTableFloorRead_IsAnsweredByTheWideBtree_NotByAScan()
+    public Task ThePerServerTableFloorRead_IsAnsweredByTheWideBtree_NotByAScan() => AssertFloorReadUsesTheWideBtreeAsync(aSnapshotIsOpenThroughTheFirstVacuum: false);
+
+    /* #8204: a snapshot another session in the database holds from before the seed through the VACUUM (an autoanalyze over a
+       catalog the migration churned, TimescaleDB's scheduler starting on the new database) leaves the vacuum unable to mark
+       the seeded pages all-visible, and the planner then prices the wide btree's index-only scan at random heap fetches and
+       takes the older index. The pin must hold once that snapshot has ended. */
+    [Fact]
+    public Task ThePerServerTableFloorRead_IsAnsweredByTheWideBtree_AfterASnapshotHeldThroughTheFirstVacuumEnds() =>
+        AssertFloorReadUsesTheWideBtreeAsync(aSnapshotIsOpenThroughTheFirstVacuum: true);
+
+    private static async Task AssertFloorReadUsesTheWideBtreeAsync(bool aSnapshotIsOpenThroughTheFirstVacuum)
     {
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #4952 live test.");
@@ -294,14 +304,29 @@ ANALYZE collect.query_store_interval_wide;", ct);
            priced the wide btree's index-only scan at random heap fetches and took the legacy index. A store's commits
            are durable by default, so the seed's must be too: this connection's commits wait for the flush. */
         await ExecAsync(connection, "SET synchronous_commit = on", ct);
-        await SeedAsync(connection, ct);
+        /* The background indexes first, on the empty table: CREATE INDEX CONCURRENTLY waits for every snapshot older than its
+           own to end, so the other session's snapshot below is taken only once they are built. */
         await EnsureAllAsync(connection, ct);
+        /* The other session's snapshot: taken before the seed, so no seeded tuple is visible to it, and held until the
+           first vacuum has run. */
+        await using var snapshotHolder = aSnapshotIsOpenThroughTheFirstVacuum ? new NpgsqlConnection(scratch.ConnectionString) : null;
+        if (snapshotHolder is not null)
+        {
+            await snapshotHolder.OpenAsync(ct);
+            await ExecAsync(snapshotHolder, "BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT count(*) FROM collect.query_store_interval_wide", ct);
+        }
+
+        await SeedAsync(connection, ct);
 
         /* VACUUM as well as ANALYZE, as a store's autovacuum does: it sets the visibility map, which lets the wide btree
            (it holds both columns the statement touches) answer with an index-only scan. On a table whose pages are not yet
            marked all-visible the planner prices that scan's heap fetches at random cost and takes the older index instead,
            whose order follows the heap. */
         await ExecAsync(connection, "VACUUM (ANALYZE) collect.query_store_interval_wide", ct);
+        if (snapshotHolder is not null)
+        {
+            await ExecAsync(snapshotHolder, "COMMIT", ct);
+        }
 
         /* The premise the plan depends on: the VACUUM marked the table's pages all-visible. */
         var allVisible = Convert.ToInt64(await ScalarAsync(connection,
