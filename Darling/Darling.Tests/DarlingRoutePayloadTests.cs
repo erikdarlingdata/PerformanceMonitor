@@ -111,7 +111,7 @@ public sealed class DarlingRoutePayloadTests
     [InlineData("PERFORMANCE", "performance")]
     [InlineData(" High CPU ", "High CPU")]
     [InlineData("*", "*")]
-    public void TheMcpWriters_StoreTheCanonicalMatch(string typed, string stored)
+    public void TheMcpWritersMatchHelper_ReturnsTheCanonicalMatch(string typed, string stored)
     {
         Assert.Equal(stored, DarlingMcpAlertTools.NormalizeRouteMatch(typed));
     }

@@ -101,9 +101,9 @@ public sealed class NotificationRouteCategoryLevelTests
     }
 
     [Fact]
-    public void AnalysisAll_IsASaveableFleetWideRoute()
+    public void AnalysisAll_CanMatchFleetWide()
     {
-        /* Unlike `*`, it is narrower than a family, so a fleet-wide one can match. */
+        /* Unlike `*`, it is narrower than a family, so a fleet-wide one can match (CanMatch only; the writers' acceptance is tested in the Viewer and writer classes). */
         Assert.True(Route(1, "Analysis: *", "all").CanMatch);
     }
 

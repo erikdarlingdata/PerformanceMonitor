@@ -175,6 +175,8 @@ public sealed class ViewerNotificationRouteScopeTests
     {
         Assert.Equal("Every analysis finding", Row(match).MatchKindDisplay);
         Assert.Equal("Every analysis finding", Row(match, server: 1).MatchKindDisplay);
+        /* The store's own validation accepts it fleet-wide, unlike `*`. */
+        Assert.Null(ViewerDataService.ValidateNotificationRoute(Row(match)));
     }
 
     /* ---- the windows' source --------------------------------------------------------------------------------- */

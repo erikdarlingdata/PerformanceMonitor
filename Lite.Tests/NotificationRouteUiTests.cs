@@ -274,7 +274,7 @@ public sealed class NotificationRouteUiTests : IDisposable
         Assert.Equal("Not set", NotificationRouteUi.ChannelMarker(after, NotificationRouter.GenericChannel));
     }
 
-    /* #7999: the dialogs of BOTH products save through NotificationRouteKinds.MatchToSave, so this is the round trip for each. */
+    /* #7999: both dialogs save through NotificationRouteKinds.MatchToSave; this is the helper-plus-store round trip. The dialog itself is driven in NotificationRouteAnalysisAllDialogTests and ViewerNotificationRouteAnalysisAllDialogTests. */
     [Theory]
     [InlineData(null)]
     [InlineData(7101)]
@@ -310,6 +310,8 @@ public sealed class NotificationRouteUiTests : IDisposable
     [InlineData(null, "Analysis: queries", "Analysis: queries")]
     [InlineData("performance", "", "performance")]
     [InlineData("*", "", "*")]
+    [InlineData("performance", "analysis:  *", "performance")]
+    [InlineData("*", "Blocking", "*")]
     public void MatchToSave_KeepsEveryOtherChoiceAsTheDialogsSavedIt(string? tag, string typed, string expected)
     {
         Assert.Equal(expected, NotificationRouteKinds.MatchToSave(tag, typed));
