@@ -105,7 +105,8 @@ SELECT edition = @edition, granted = @granted, cached = @cached;";
     /// a session can end and its id be reused between them. The <c>KILL</c> text is built from the int parameter's decimal form only. After a real
     /// <c>KILL</c> it reads the session's request once (<c>command</c>, <c>percent_complete</c>), so a rollback shows. That read sits in TRY/CATCH, so
     /// nothing after the <c>KILL</c> can raise an error that would read as a failed kill: a read that fails answers <c>rollback_read = 0</c>, and the
-    /// kill is still <c>killed</c> with its rollback not read. No statement text and no input buffer are read.
+    /// kill is still <c>killed</c> with its rollback not read. No statement text and no input buffer are read. The session's current database (<c>database_id</c> and its name) is read
+    /// in the same batch, so the tool can refuse a session in a database the server's entry excludes before anything is killed.
     /// </summary>
     internal const string KillSql = @"
 DECLARE @edition bigint = CONVERT(bigint, SERVERPROPERTY('EngineEdition'));
@@ -120,6 +121,8 @@ DECLARE @status nvarchar(30) = NULL;
 DECLARE @open_tran int = NULL;
 DECLARE @last_end datetime = NULL;
 DECLARE @log_bytes bigint = NULL;
+DECLARE @database_id int = NULL;
+DECLARE @database_name nvarchar(128) = NULL;
 DECLARE @command nvarchar(32) = NULL;
 DECLARE @percent real = NULL;
 DECLARE @rollback_read bit = 1;
@@ -137,6 +140,8 @@ BEGIN
         @status = s.status,
         @open_tran = s.open_transaction_count,
         @last_end = s.last_request_end_time,
+        @database_id = s.database_id,
+        @database_name = DB_NAME(s.database_id),
         @log_bytes =
         (
             SELECT SUM(CONVERT(bigint, ddt.database_transaction_log_bytes_used))
@@ -191,7 +196,8 @@ BEGIN
 END;
 SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actual, login_name = @login_name, host_name = @host_name,
        program_name = @program_name, status = @status, open_transaction_count = @open_tran, last_request_end_time = @last_end,
-       log_bytes_used = @log_bytes, rollback_command = @command, percent_complete = @percent, rollback_read = @rollback_read;";
+       log_bytes_used = @log_bytes, rollback_command = @command, percent_complete = @percent, rollback_read = @rollback_read,
+       database_id = @database_id, database_name = @database_name;";
 
     /// <summary>Query Store plan rows: the plan asked about, and any plan of the query that is forced now.</summary>
     internal const string PlanFactsSql =
@@ -493,7 +499,9 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
                     reader.IsDBNull(6) ? null : reader.GetString(6),
                     reader.IsDBNull(7) ? null : Convert.ToInt32(reader.GetValue(7), CultureInfo.InvariantCulture),
                     reader.IsDBNull(8) ? null : reader.GetDateTime(8),
-                    reader.IsDBNull(9) ? null : Convert.ToInt64(reader.GetValue(9), CultureInfo.InvariantCulture));
+                    reader.IsDBNull(9) ? null : Convert.ToInt64(reader.GetValue(9), CultureInfo.InvariantCulture),
+                    reader.IsDBNull(13) ? null : Convert.ToInt32(reader.GetValue(13), CultureInfo.InvariantCulture),
+                    reader.IsDBNull(14) ? null : reader.GetString(14));
             }
 
             var rollbackCommand = reader.IsDBNull(10) ? null : reader.GetString(10);
@@ -697,11 +705,12 @@ internal static class KillOutcomes
 /// <summary>
 /// What the server's session view held for the session the kill named, read in the same batch as the decision (#5632, step 12). <c>LoginTime</c> is
 /// the session's actual value, so a reused id shows the new session's time. Times are the server's own clock, with no zone. No statement text and no
-/// input buffer: they are never read.
+/// input buffer: they are never read. <c>DatabaseId</c> and <c>DatabaseName</c> are the database the session is in now, read in the same batch; the tool
+/// refuses a session in a database the server's entry excludes.
 /// </summary>
 public sealed record KillSessionFacts(
     int SessionId, DateTime? LoginTime, string? LoginName, string? HostName, string? ProgramName, string? Status,
-    int? OpenTransactionCount, DateTime? LastRequestEndTime, long? LogBytesUsed);
+    int? OpenTransactionCount, DateTime? LastRequestEndTime, long? LogBytesUsed, int? DatabaseId = null, string? DatabaseName = null);
 
 /// <summary>
 /// What a SQL Server or Azure kill write expects of the session beyond its id and login time (#7109): the <c>last_request_end_time</c> the dry run

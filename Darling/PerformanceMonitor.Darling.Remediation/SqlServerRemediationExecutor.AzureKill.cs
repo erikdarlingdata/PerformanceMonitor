@@ -157,7 +157,8 @@ BEGIN
 END;
 SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actual, login_name = @login_name, host_name = @host_name,
        program_name = @program_name, status = @status, open_transaction_count = @open_tran, last_request_end_time = @last_end,
-       log_bytes_used = @log_bytes, rollback_command = @command, percent_complete = @percent, rollback_read = @rollback_read;";
+       log_bytes_used = @log_bytes, rollback_command = @command, percent_complete = @percent, rollback_read = @rollback_read,
+       database_id = @session_database_id, database_name = DB_NAME(@session_database_id);";
 
     /// <summary>The grants the remediation login's user needs in each database it may kill in, as the refusals and the README name them.</summary>
     internal const string AzureGrants = "GRANT VIEW DATABASE STATE TO <user>; GRANT KILL DATABASE CONNECTION TO <user>;";

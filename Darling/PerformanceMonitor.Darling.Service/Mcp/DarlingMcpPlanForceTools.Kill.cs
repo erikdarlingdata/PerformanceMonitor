@@ -74,7 +74,8 @@ public sealed partial class DarlingMcpPlanForceTools
             : executor.KillAzureSessionAsync(permit, sessionId, loginServerLocal, dryRun, ct, expected);
 
     /// <summary>
-    /// Prepare step, SQL Server and Azure SQL Database: the server's clock, its settings row, the Azure database checks and the dry-run batch.
+    /// Prepare step, SQL Server and Azure SQL Database: the server's clock, its settings row, the Azure database checks, the dry-run batch and, on SQL Server, the
+    /// exclusion list against the database the batch read the session in.
     /// <paramref name="postgres"/> is the store's read data source and <paramref name="owner"/> the store owner's. The caller records
     /// <see cref="KillPrepareStop.RecordReason"/> as a refusal on its request, then answers <see cref="KillPrepareStop.FixedAnswer"/>, or renders
     /// <see cref="KillPrepareStop.NotDone"/> with its own dry-run flag.
@@ -120,6 +121,16 @@ public sealed partial class DarlingMcpPlanForceTools
         }
 
         var facts = dry.Session;
+
+        /* SQL Server: the session's current database, read in the batch that bound login_time. A database the server's entry excludes is one Darling does not act in,
+           and the kill batch runs server-wide, so the exclusion list is applied here to the database the session is in, on a dry run and before a write alike.
+           Azure SQL Database checked the database it was asked about before the batch ran, and the batch itself refuses a session in another database. */
+        if (!azure && facts?.DatabaseName is { } sessionDatabase && IsExcludedDatabase(row.ExcludedDatabases, sessionDatabase))
+        {
+            var excluded = ExcludedDatabaseRefusal(sessionDatabase, $"Session {sessionId} is connected to that database, so it is not killed from here.");
+            return new SqlKillPrepared(null, executor, clock, dry, null, [], DarlingAgentActionGate.RefusalAnswer(excluded), excluded.Reason, null);
+        }
+
         var binding = new SqlKillBinding(
             sessionId,
             facts?.LoginTime is { } login ? clock.ToUtc(login) : loginUtc,
