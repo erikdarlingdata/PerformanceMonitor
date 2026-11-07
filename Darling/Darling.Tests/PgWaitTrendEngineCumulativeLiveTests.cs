@@ -105,6 +105,43 @@ public sealed class PgWaitTrendEngineCumulativeLiveTests
         });
     }
 
+    /// <summary>A window long enough to start the window-floor probe (over 90 minutes) on an Aurora target with no wait rows: the
+    /// hints window on the counters' table, not the sampler's, so an Aurora target is never told the store holds no sampler
+    /// collection.</summary>
+    [Fact]
+    public async Task AnAuroraTarget_WithNoWaitRows_OverADay_WindowsItsHintsOnTheCounters_NotTheSampler()
+    {
+        await RunAsync(MonitoredEngineKind.AuroraPostgres, async (connection, postgres, ct) =>
+        {
+            var root = Root(await DarlingMcpPgTrendTools.GetPgWaitTrend(postgres, ServerName, "DataFileRead", 24, AsOfText, cancellationToken: ct));
+
+            Assert.Equal("empty", root.GetProperty("status").GetString());
+            var hints = root.GetProperty("hints");
+            Assert.True(hints.GetProperty("window_truncated").GetBoolean());
+            var note = hints.GetProperty("truncation_note").GetString()!;
+            Assert.Contains("pg_wait_stats", note, StringComparison.Ordinal);
+            Assert.DoesNotContain("pg_wait_sampling", note, StringComparison.Ordinal);
+        });
+    }
+
+    /// <summary>A day's window over counters that start inside it: the answer says where the counters' coverage starts and that
+    /// the window reached further back than the store holds, read from the counters' table rather than the sampler's.</summary>
+    [Fact]
+    public async Task AnAuroraTarget_WithAWindowPastTheCountersStart_ReportsTheTruncation()
+    {
+        await RunAsync(MonitoredEngineKind.AuroraPostgres, async (connection, postgres, ct) =>
+        {
+            await SeedCountersAsync(connection, ct);
+
+            var root = Root(await DarlingMcpPgTrendTools.GetPgWaitTrend(postgres, ServerName, "DataFileRead", 24, AsOfText, cancellationToken: ct));
+
+            Assert.Equal("wait_trend", root.GetProperty("status").GetString());
+            Assert.Equal(2, root.GetProperty("point_count").GetInt32());
+            Assert.True(root.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(Stamp(T0.AddMinutes(5)), Stamp(root.GetProperty("effective_start")));
+        });
+    }
+
     /// <summary>A row of the followed event that returns after a skipped cycle carries the gap it spanned as its interval, twice the
     /// collection's cadence. The point credits every row's delta to the collection and divides by the cadence, the shortest
     /// interval any of its rows measured, so its rate is the sum of the per-row rates over that cadence, not the total over the

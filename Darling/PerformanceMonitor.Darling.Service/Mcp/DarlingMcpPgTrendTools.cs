@@ -61,6 +61,12 @@ public sealed class DarlingMcpPgTrendTools
                 ? await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "pg_wait_stats", cancellationToken)
                 : await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "pg_wait_sampling", cancellationToken);
 
+            /* The window-floor probe (#7010) windows on the rows the arm read: the web's listed source for this read is the sampler's
+               table, and on the engine arm that would report an Aurora target as holding no collection, or never as truncated. */
+            Task<McpWindowNotice> WindowNoticeAsync(bool emptyAnswer) => engineCounters
+                ? DarlingMcpWindowNotice.ReadForCollectorTableAsync(postgres, "pg_wait_stats", resolved.ServerName, start, windowEnd, emptyAnswer, logger, cancellationToken)
+                : DarlingMcpWindowNotice.ReadForToolAsync(postgres, "get_pg_wait_trend", resolved.ServerName, start, windowEnd, emptyAnswer, logger, cancellationToken);
+
             /* With no event named, follow the one that actually dominates this server rather than a name
                somebody guessed. Which one was chosen is reported, so the answer is never about a different
                event than the reader thinks. */
@@ -71,7 +77,7 @@ public sealed class DarlingMcpPgTrendTools
             if (string.IsNullOrWhiteSpace(chosen))
             {
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await NotCollectedAsync()
-                    ?? EmptyStatus(await EmptyHintsAsync(postgres, "get_pg_wait_trend", resolved.ServerName, start, windowEnd, logger, cancellationToken),
+                    ?? EmptyStatus((await WindowNoticeAsync(emptyAnswer: true)).AsHints(),
                         "empty",
                         engineCounters
                             ? $"No wait event accrued time on {resolved.DisplayName} in the last {hours_back} hour(s) on the engine's "
@@ -92,7 +98,7 @@ public sealed class DarlingMcpPgTrendTools
             if (points.Count == 0)
             {
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await NotCollectedAsync()
-                    ?? EmptyStatus(await EmptyHintsAsync(postgres, "get_pg_wait_trend", resolved.ServerName, start, windowEnd, logger, cancellationToken),
+                    ?? EmptyStatus((await WindowNoticeAsync(emptyAnswer: true)).AsHints(),
                         "empty",
                         engineCounters
                             ? $"No wait time for wait event '{chosen}' on {resolved.DisplayName} in the last {hours_back} hour(s) on "
@@ -119,8 +125,7 @@ public sealed class DarlingMcpPgTrendTools
 
             /* #7010: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote). A window of
                90 minutes or less starts no probe; a failed probe costs the notice, never the series. */
-            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
-                postgres, "get_pg_wait_trend", resolved.ServerName, start, windowEnd, emptyAnswer: false, logger, cancellationToken);
+            var notice = await WindowNoticeAsync(emptyAnswer: false);
 
             return DarlingMcpWindowNotice.Attach(JsonSerializer.Serialize(new
             {
