@@ -2723,6 +2723,48 @@ BEGIN
 END
 $do$;";
 
+    /* V253 (#7658): the Slack cards. One row per card the bot posted with buttons: the request and post key it was posted under, the channel
+       and ts Slack gave it, the kind of record its buttons act on and that record's id, the request's server, and the card's state. A press
+       names a card by channel and ts, and the service acts only on a card in this table; the row is decided once a press ends it. Owner-written
+       like the thread table: REVOKE ALL ... CASCADE from PUBLIC and each of the four roles that exists, SELECT back to admin alone. Managed
+       provisioning section 10e6 and provision-roles.sql step 3j6 do the same after their blanket grants. */
+    private const string V253Sql = @"
+CREATE TABLE IF NOT EXISTS config.investigation_slack_posts (
+    request_id uuid NOT NULL REFERENCES config.investigation_requests(request_id) ON DELETE CASCADE,
+    post_key text NOT NULL,
+    channel_id text NOT NULL,
+    message_ts text NOT NULL,
+    kind text NOT NULL,
+    record_id text NOT NULL DEFAULT '',
+    server_id integer NOT NULL,
+    state text NOT NULL DEFAULT 'live',
+    decided_by text,
+    decided_at timestamp,
+    posted_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
+    PRIMARY KEY (request_id, post_key),
+    UNIQUE (channel_id, message_ts)
+);
+
+REVOKE ALL ON config.investigation_slack_posts FROM PUBLIC CASCADE;
+
+DO $do$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'admin') THEN
+        REVOKE ALL ON config.investigation_slack_posts FROM admin CASCADE;
+        GRANT SELECT ON config.investigation_slack_posts TO admin;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'viewer') THEN
+        REVOKE ALL ON config.investigation_slack_posts FROM viewer CASCADE;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'web') THEN
+        REVOKE ALL ON config.investigation_slack_posts FROM web CASCADE;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'mcp') THEN
+        REVOKE ALL ON config.investigation_slack_posts FROM mcp CASCADE;
+    END IF;
+END
+$do$;";
+
     /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
     /// <c>DatabaseProtectionCollector</c> every 60 minutes (Darling only). One row per database per pass: the raw times (UTC), the
@@ -3233,6 +3275,7 @@ $rung$;";
         new Migration(250, "memory-pressure-node", V250Sql),
         new Migration(251, "compose-stamp-late-mark-offset-zero", V251Sql),
         new Migration(252, "slack-bot-threads", V252Sql),
+        new Migration(253, "slack-cards", V253Sql),
     };
 
     /// <summary>

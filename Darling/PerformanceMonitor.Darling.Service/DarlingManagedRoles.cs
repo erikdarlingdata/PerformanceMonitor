@@ -2147,6 +2147,10 @@ GRANT SELECT ON {config}.agent_action_proposals TO {admin}, {viewer}, {web};
 --     back to admin alone. No viewer, web or MCP read exists. The table has no sequence. provision-roles.sql step 3j5 mirrors it.
 REVOKE ALL ON {config}.investigation_request_threads FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
 GRANT SELECT ON {config}.investigation_request_threads TO {admin};
+-- 10e6. The Slack cards (V253, #7658): the channel and ts of each card the bot posted with buttons, and its state. Owner-written as the
+--       threads are, SELECT to admin alone. provision-roles.sql step 3j6 does the same.
+REVOKE ALL ON {config}.investigation_slack_posts FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
+GRANT SELECT ON {config}.investigation_slack_posts TO {admin};
 
 -- 10f. Phase C tables (V193, #5997): the evidence of a request, the daily deadlock signature counts and the signature
 --     merges. Only the store owner (the service) writes them. The default privileges would give admin INSERT/UPDATE/DELETE
@@ -4368,6 +4372,7 @@ CREATE OR REPLACE TRIGGER trg_investigation_request_alerts_owner_rows
             .Concat(ProposalEvents.OwnerOnly)
             .Append(InvestigationRequestStore.ProposalNoticeSent)
             .Append(InvestigationRequestStore.SlackThreadPosted)
+            .Append(InvestigationRequestStore.SlackPressed)
             .Append(InvestigationRequestStore.AskerJournalEvent)
             .Select(k => "'" + k + "'"));
 

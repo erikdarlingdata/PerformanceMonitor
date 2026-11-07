@@ -34,14 +34,20 @@ public sealed class SlackRequestThreadProbeTests
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
         var parameters = map.GetParameters();
         var threads = Array.FindIndex(parameters, p => p.Name == "hasSlackBotThreads");
+        var cards = Array.FindIndex(parameters, p => p.Name == "hasSlackCards");
         Assert.True(threads >= 0, "the probe has a hasSlackBotThreads sentinel");
-        Assert.Equal(parameters.Length - 1, threads);
+        Assert.True(cards >= 0, "the probe has a hasSlackCards sentinel (#7658)");
+        Assert.Equal(parameters.Length - 1, cards);
+        Assert.Equal(parameters.Length - 2, threads);
 
         var allTrue = Enumerable.Repeat((object)true, parameters.Length).ToArray();
-        Assert.Equal(252, (int)map.Invoke(null, allTrue)!);
+        Assert.Equal(253, (int)map.Invoke(null, allTrue)!);
         Assert.Equal(StorageVersion.SchemaVersion, (int)map.Invoke(null, allTrue)!);
 
-        var withoutThreads = (object[])allTrue.Clone();
+        var withoutCards = (object[])allTrue.Clone();
+        withoutCards[cards] = false;
+        Assert.Equal(252, (int)map.Invoke(null, withoutCards)!);
+        var withoutThreads = (object[])withoutCards.Clone();
         withoutThreads[threads] = false;
         Assert.Equal(251, (int)map.Invoke(null, withoutThreads)!);
     }
