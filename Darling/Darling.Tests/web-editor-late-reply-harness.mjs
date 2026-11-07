@@ -115,6 +115,19 @@ globalThis.fetch = async (url, init = {}) => {
 };
 process.on("unhandledRejection", (e) => { if (process.env.HARNESS_DEBUG) console.error(String(e && e.stack)); });
 
+/* The page's timers, tracked so the test can fire what is pending (the preview and check debounces) instead of waiting for its
+   wall-clock time: see firePendingTimers. The harness's own flush uses the untracked original. */
+const realSetTimeout = globalThis.setTimeout;
+const realClearTimeout = globalThis.clearTimeout;
+const pendingTimers = new Map();
+globalThis.setTimeout = (fn, ms, ...args) => {
+  const run = () => { pendingTimers.delete(handle); fn(...args); };
+  const handle = realSetTimeout(run, ms);
+  pendingTimers.set(handle, run);
+  return handle;
+};
+globalThis.clearTimeout = (handle) => { pendingTimers.delete(handle); realClearTimeout(handle); };
+
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "web-editor-late-reply-"));
 let editor;
 let alertEditor;
@@ -129,8 +142,15 @@ try {
 }
 
 const all = (n, out = []) => { out.push(n); for (const c of n.children) all(c, out); return out; };
-const flush = async () => { for (let i = 0; i < 40; i++) await new Promise((r) => setTimeout(r, 0)); };
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const flush = async () => { for (let i = 0; i < 40; i++) await new Promise((r) => realSetTimeout(r, 0)); };
+/* Fires every timer the page has pending, and whatever those schedule, until none is left. */
+async function firePendingTimers() {
+  for (let round = 0; pendingTimers.size; round++) {
+    if (round === 50) throw new Error("the page keeps scheduling timers, so they cannot be run down");
+    for (const [handle, run] of [...pendingTimers]) { realClearTimeout(handle); run(); }
+    await flush();
+  }
+}
 const cls = (n) => n.attrs.class || n.className || "";
 const byLabel = (root, label) => all(root).find((n) => n.attrs["aria-label"] === label);
 const byText = (root, tag, text) => all(root).find((n) => n.tag === tag && n.textContent === text);
@@ -139,8 +159,22 @@ const open = () => reads.filter((r) => !r.answered);
 const openChecks = () => checks.filter((c) => !c.answered);
 const rowsKeyOptions = (root) => { const box = all(root).find((n) => cls(n) === "vizcfg-box"); return box ? all(box).filter((n) => n.tag === "option").map((n) => n.attrs.value).filter((v) => v && /_rows$/.test(v)) : []; };
 
+/* Settles the composer before this one. Its preview timer (editor.js, PREVIEW_DEBOUNCE_MS after the last change) sends a read of
+   its panel's read at the same path a sample uses, and a sample the next composer sends for that path JOINS the open request
+   (util.js apiGetJoined) instead of reaching `reads`. So fire what is pending, answer what is open, and let the joined request
+   clear, until nothing of either is left. */
+async function settleReads() {
+  for (let round = 0; pendingTimers.size || open().length; round++) {
+    if (round === 50) throw new Error("the composer keeps starting reads, so it cannot be settled");
+    await firePendingTimers();
+    for (const r of open()) answer(r, {});
+    await flush();
+  }
+}
+
 /* A fresh dashboard composer with its first panel switched to a read panel. */
 async function readPanelEditor() {
+  await settleReads();
   reads.length = 0;
   const main = new FakeNode("main");
   await editor.renderEditor(main, "new");
@@ -196,13 +230,11 @@ const out = {};
   const warn = byLabel(main, "Warning threshold");
   warn.value = "10";
   warn.fire("input");
-  await sleep(450); /* past the 350 ms debounce: the first check has sent its validate */
-  await flush();
+  await firePendingTimers(); /* the check debounce fires: the first check has sent its validate */
   out.alertFirstChecks = openChecks().map((c) => c.kind + ":" + c.warn);
   warn.value = "20";
   warn.fire("input");
-  await sleep(450);
-  await flush();
+  await firePendingTimers();
   out.alertChecksAfterSecondEdit = openChecks().map((c) => c.kind + ":" + c.warn);
   out.alertPreviewWhileBothWait = preview();
   /* The OLDER validate answers valid first. */
