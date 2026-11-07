@@ -3276,7 +3276,172 @@ $rung$;";
         new Migration(251, "compose-stamp-late-mark-offset-zero", V251Sql),
         new Migration(252, "slack-bot-threads", V252Sql),
         new Migration(253, "slack-cards", V253Sql),
+        new Migration(254, "schema-tracking", V254Sql),
     };
+
+    /* V254 (#7643): schema tracking. Versioned table and view definitions, kept by the schema_objects collector (Darling only).
+       collect.schema_objects holds one row per version of an object: valid_from to valid_to, what changed it and who detected it, the
+       SHA-256 of its canonical definition, and the properties of a table or a view. History is keyed by a server, or by an availability group
+       for a database that belongs to one (exactly one of the two, a CHECK). The four child tables hold the columns, indexes, constraints and
+       triggers of a version, and go with it (ON DELETE CASCADE). collect.schema_capture_state is the per-server and per-database cursor of
+       the capture: the event session position, the recovery fork, the baseline and the last complete read. collect.schema_capture_passes is the
+       pass log, a collector table whose columns and index are exactly PgSchemaGenerator's output. Owner-written and read through the collect
+       schema's blanket SELECT, so no grant. New tables, no data moves. Every statement is idempotent. */
+    private const string V254Sql = @"
+CREATE TABLE IF NOT EXISTS collect.schema_capture_passes (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    history_key text,
+    pass_kind text,
+    reason text,
+    events_read integer,
+    objects_read integer,
+    versions_written integer,
+    drops_written integer,
+    complete boolean,
+    note text
+);
+
+CREATE INDEX IF NOT EXISTS idx_schema_capture_passes_time ON collect.schema_capture_passes(server_id, collection_time);
+
+CREATE TABLE IF NOT EXISTS collect.schema_objects (
+    version_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    server_id integer NULL,
+    ag_group_id uuid NULL,
+    ag_name text NULL,
+    database_name text NOT NULL,
+    object_id integer NOT NULL,
+    schema_name text NOT NULL,
+    object_name text NOT NULL,
+    object_type char(1) NOT NULL,
+    valid_from timestamp NOT NULL,
+    valid_to timestamp NULL,
+    change_kind text NOT NULL,
+    detected_by text NOT NULL,
+    detected_on_server_id integer NOT NULL,
+    modify_date timestamp NULL,
+    definition_hash bytea NOT NULL,
+    change_login text,
+    change_app text,
+    change_host text,
+    temporal_type text,
+    history_table text,
+    is_memory_optimized boolean,
+    durability text,
+    partition_scheme text,
+    partition_column text,
+    lock_escalation text,
+    is_schema_bound boolean,
+    is_indexed boolean,
+    view_definition text,
+    CONSTRAINT ck_schema_objects_history_key CHECK ((server_id IS NULL) <> (ag_group_id IS NULL))
+);
+
+CREATE INDEX IF NOT EXISTS idx_schema_objects_current_name
+    ON collect.schema_objects (server_id, ag_group_id, database_name, lower(object_name)) WHERE valid_to IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_schema_objects_object_history
+    ON collect.schema_objects (server_id, ag_group_id, database_name, object_id, valid_from);
+
+CREATE INDEX IF NOT EXISTS idx_schema_objects_closed
+    ON collect.schema_objects (valid_to) WHERE valid_to IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS collect.schema_columns (
+    version_id bigint NOT NULL REFERENCES collect.schema_objects (version_id) ON DELETE CASCADE,
+    is_current boolean NOT NULL,
+    ordinal integer NOT NULL,
+    name text NOT NULL,
+    type_name text NOT NULL,
+    max_length integer,
+    precision integer,
+    scale integer,
+    is_nullable boolean NOT NULL,
+    identity_seed numeric(38,0),
+    identity_increment numeric(38,0),
+    computed_definition text,
+    is_persisted boolean,
+    default_name text,
+    default_definition text,
+    collation_name text,
+    is_sparse boolean,
+    is_rowguidcol boolean
+);
+
+CREATE INDEX IF NOT EXISTS idx_schema_columns_version ON collect.schema_columns (version_id);
+
+CREATE INDEX IF NOT EXISTS idx_schema_columns_current_name ON collect.schema_columns (lower(name)) WHERE is_current;
+
+CREATE TABLE IF NOT EXISTS collect.schema_indexes (
+    version_id bigint NOT NULL REFERENCES collect.schema_objects (version_id) ON DELETE CASCADE,
+    is_current boolean NOT NULL,
+    index_id integer NOT NULL,
+    name text,
+    type_desc text NOT NULL,
+    is_unique boolean NOT NULL,
+    is_primary_key boolean NOT NULL,
+    is_unique_constraint boolean NOT NULL DEFAULT FALSE,
+    key_columns text,
+    included_columns text,
+    filter_definition text,
+    data_compression text,
+    is_disabled boolean NOT NULL DEFAULT FALSE
+);
+
+CREATE INDEX IF NOT EXISTS idx_schema_indexes_version ON collect.schema_indexes (version_id);
+
+CREATE TABLE IF NOT EXISTS collect.schema_constraints (
+    version_id bigint NOT NULL REFERENCES collect.schema_objects (version_id) ON DELETE CASCADE,
+    is_current boolean NOT NULL,
+    kind char(1) NOT NULL,
+    name text NOT NULL,
+    definition text,
+    fk_columns text,
+    referenced_schema text,
+    referenced_table text,
+    referenced_columns text,
+    delete_action text,
+    update_action text,
+    is_disabled boolean NOT NULL DEFAULT FALSE,
+    is_not_trusted boolean NOT NULL DEFAULT FALSE,
+    is_system_named boolean NOT NULL DEFAULT FALSE
+);
+
+CREATE INDEX IF NOT EXISTS idx_schema_constraints_version ON collect.schema_constraints (version_id);
+
+CREATE INDEX IF NOT EXISTS idx_schema_constraints_referenced_table
+    ON collect.schema_constraints (lower(referenced_table)) WHERE is_current AND kind = 'F';
+
+CREATE TABLE IF NOT EXISTS collect.schema_triggers (
+    version_id bigint NOT NULL REFERENCES collect.schema_objects (version_id) ON DELETE CASCADE,
+    is_current boolean NOT NULL,
+    name text NOT NULL,
+    is_instead_of boolean NOT NULL,
+    events text NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_schema_triggers_version ON collect.schema_triggers (version_id);
+
+CREATE TABLE IF NOT EXISTS collect.schema_capture_state (
+    server_id integer NOT NULL,
+    database_name text NOT NULL,
+    session_create_time timestamp,
+    last_event_sequence bigint,
+    last_event_time timestamp,
+    total_events_processed bigint,
+    recovery_fork_guid uuid,
+    history_server_id integer,
+    history_ag_group_id uuid,
+    was_primary boolean,
+    baseline_at timestamp,
+    last_complete_read_at timestamp,
+    last_seen_in_scope_at timestamp,
+    last_reconcile_at timestamp,
+    last_reconcile_reason text,
+    PRIMARY KEY (server_id, database_name)
+);";
 
     /// <summary>
     /// V235 (#7083): the blocking alert pages on blocked wait time. The shipped bars move: <c>blocking_count_threshold</c> 1 to 3,

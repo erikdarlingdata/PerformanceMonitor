@@ -736,6 +736,16 @@ ALTER TABLE IF EXISTS config.config_notification DROP COLUMN IF EXISTS slack_app
         // store that never had it.
         new(253, "hasSlackCards",
             @"DROP TABLE IF EXISTS config.investigation_slack_posts;"),
+        // V254 (#7643): the schema tracking tables. The probe's sentinel is the object table, so the rewind drops all seven (the four child tables
+        // reference it, so they go first) and a re-run of V254 makes them again. Safe on a store that never had them.
+        new(254, "hasSchemaTracking",
+            @"DROP TABLE IF EXISTS collect.schema_triggers;
+DROP TABLE IF EXISTS collect.schema_constraints;
+DROP TABLE IF EXISTS collect.schema_indexes;
+DROP TABLE IF EXISTS collect.schema_columns;
+DROP TABLE IF EXISTS collect.schema_objects;
+DROP TABLE IF EXISTS collect.schema_capture_state;
+DROP TABLE IF EXISTS collect.schema_capture_passes;"),
     ];
 
     /// <summary>

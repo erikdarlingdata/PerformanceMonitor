@@ -89,7 +89,7 @@ public sealed class SlackCardStoreLiveTests
     {
         await WithStoreAsync(async (connection, _, _, ct) =>
         {
-            Assert.Equal("253", await ScalarAsync(connection, "SELECT max(version) FROM darling_schema_version", ct));
+            Assert.Equal(StorageVersion.SchemaVersion.ToString(System.Globalization.CultureInfo.InvariantCulture), await ScalarAsync(connection, "SELECT max(version) FROM darling_schema_version", ct));
             Assert.Equal("True", await ScalarAsync(connection, "SELECT to_regclass('config.investigation_slack_posts') IS NOT NULL", ct));
             Assert.Equal("SELECT", await ScalarAsync(connection,
                 "SELECT string_agg(privilege_type, ',') FROM information_schema.role_table_grants WHERE table_schema = 'config' AND table_name = 'investigation_slack_posts' AND grantee = 'admin'", ct) ?? "SELECT");
@@ -97,7 +97,7 @@ public sealed class SlackCardStoreLiveTests
             await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 252, ct);
             Assert.Equal("False", await ScalarAsync(connection, "SELECT to_regclass('config.investigation_slack_posts') IS NOT NULL", ct));
             await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version > 252", ct);
-            Assert.Equal(1, await PgMigrations.MigrateAsync(connection, ct));
+            Assert.Equal(StorageVersion.SchemaVersion - 252, await PgMigrations.MigrateAsync(connection, ct));
             Assert.Equal("True", await ScalarAsync(connection, "SELECT to_regclass('config.investigation_slack_posts') IS NOT NULL", ct));
             Assert.Equal(0, await PgMigrations.MigrateAsync(connection, ct));
         });
@@ -493,7 +493,7 @@ public sealed class SlackCardGrantLiveTests
                makes the table under the default privileges the batch left and takes it back itself. */
             await RungRewindArtifacts.DropSentinelsAboveAsync(owner, 252, ct);
             await SlackCardStoreLiveTests.ExecAsync(owner, "DELETE FROM darling_schema_version WHERE version > 252", ct);
-            Assert.Equal(1, await PgMigrations.MigrateAsync(owner, ct));
+            Assert.Equal(StorageVersion.SchemaVersion - 252, await PgMigrations.MigrateAsync(owner, ct));
             await AssertCatalogAsync(owner, ct);
 
             await SlackCardStoreLiveTests.ExecAsync(owner,

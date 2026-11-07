@@ -37,14 +37,16 @@ public sealed class SlackRequestThreadProbeTests
         var cards = Array.FindIndex(parameters, p => p.Name == "hasSlackCards");
         Assert.True(threads >= 0, "the probe has a hasSlackBotThreads sentinel");
         Assert.True(cards >= 0, "the probe has a hasSlackCards sentinel (#7658)");
-        Assert.Equal(parameters.Length - 1, cards);
-        Assert.Equal(parameters.Length - 2, threads);
+        Assert.Equal(parameters.Length - 2, cards);
+        Assert.Equal(parameters.Length - 3, threads);
 
         var allTrue = Enumerable.Repeat((object)true, parameters.Length).ToArray();
-        Assert.Equal(253, (int)map.Invoke(null, allTrue)!);
+        Assert.Equal(254, (int)map.Invoke(null, allTrue)!);
         Assert.Equal(StorageVersion.SchemaVersion, (int)map.Invoke(null, allTrue)!);
 
         var withoutCards = (object[])allTrue.Clone();
+        withoutCards[parameters.Length - 1] = false;
+        Assert.Equal(253, (int)map.Invoke(null, withoutCards)!);
         withoutCards[cards] = false;
         Assert.Equal(252, (int)map.Invoke(null, withoutCards)!);
         var withoutThreads = (object[])withoutCards.Clone();
