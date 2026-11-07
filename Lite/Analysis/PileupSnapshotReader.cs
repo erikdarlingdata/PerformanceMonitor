@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -45,21 +46,33 @@ public class PileupSnapshotReader
     internal static string RawCut(string text) =>
         text.Length <= StatementTextCharacters ? text : text[..McpHelpers.TextElementCutLength(text, StatementTextCharacters)];
 
+    /// <summary>
+    /// The row cap of one window read, 50,000: about 900 qualifying sessions a snapshot across the 55-minute window the
+    /// sweep reads at a one-minute cadence, past what a busy server sustains and well short of what a runaway snapshot
+    /// would cost in statement text (2,000 blocked sessions a minute over that window is 110,000 rows). A tripwire, not a
+    /// working bound: <see cref="ReadWindowAsync"/> tells a read that filled it short of the baseline floor from one that
+    /// merely has that many rows (#8157). Darling's <c>PgPileupSnapshotReader</c> carries the same cap.
+    /// </summary>
+    public const int WindowRowCap = 50_000;
+
     private readonly DuckDbInitializer _duckDb;
     private readonly ILogger? _logger;
+    private readonly int _rowCap;
 
-    public PileupSnapshotReader(DuckDbInitializer duckDb, ILogger? logger = null)
+    public PileupSnapshotReader(DuckDbInitializer duckDb, ILogger? logger = null, int rowCap = WindowRowCap)
     {
         _duckDb = duckDb;
         _logger = logger;
+        _rowCap = rowCap;
     }
 
     /// <summary>
     /// The evaluation window's rows, newest first, or an empty list on a read fault — the pileup
     /// sweep is a per-collection best-effort evaluation; a failed read costs one log line and this
-    /// cycle, never the collection loop. The time floor is the read's only bound (#8157): a row cap
-    /// newest-first would fill before the floor on a server with a hundred or more qualifying sessions
-    /// a snapshot and hand the detector a baseline shorter than the one its finding states.
+    /// cycle, never the collection loop. The row cap (<see cref="WindowRowCap"/>) is a tripwire against a
+    /// runaway session count, not a working bound: a read that fills it short of the baseline floor the
+    /// finding would state returns the empty list too, with one log line, rather than hand the detector a
+    /// baseline shorter than the one its finding describes (#8157).
     /// </summary>
     public async Task<List<SameStatementPileupDetector.SnapshotRow>> ReadWindowAsync(
         int serverId, DateTime windowFloorUtc, CancellationToken cancellationToken)
@@ -69,8 +82,19 @@ public class PileupSnapshotReader
         {
             /* #7256: this read runs on every collection with a window of minutes. It reads the hot table alone when the Parquet
                archive of query_snapshots holds nothing that new, instead of opening every archive file. */
+            var capReached = false;
             rows.AddRange(await new LocalDataService(_duckDb).ReadWindowSkippingEmptyArchiveAsync(
                 "query_snapshots", "collection_time", windowFloorUtc, ReadAsync, cancellationToken));
+
+            if (capReached && !SameStatementPileupDetector.ReachesBaselineFloor(rows))
+            {
+                /* #8157: the cap tripped short of the baseline floor the finding would state. The detector would describe
+                   a baseline it never read, so this sweep evaluates nothing; the next sweep re-reads. */
+                _logger?.LogWarning(
+                    "[PileupSnapshotReader] pileup window read for server {ServerId} filled its {RowCap}-row cap and reached back only to {OldestUtc:u}, short of the {Minutes}-minute baseline the finding would state — this sweep's evaluation is skipped",
+                    serverId, _rowCap, rows.Min(r => r.CollectionTime), SameStatementPileupDetector.BaselineLookbackMinutes);
+                rows.Clear();
+            }
 
             async Task<List<SameStatementPileupDetector.SnapshotRow>> ReadAsync(string relation)
             {
@@ -99,10 +123,12 @@ AND   collection_time >= $2
 AND   session_id > 50
 AND   COALESCE(is_cdc_capture, FALSE) = FALSE
 AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
-ORDER BY collection_time DESC";
+ORDER BY collection_time DESC
+LIMIT $3";
             cmd.CommandText = cmd.CommandText.Replace("v_query_snapshots", relation, StringComparison.Ordinal);
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             cmd.Parameters.Add(new DuckDBParameter { Value = windowFloorUtc });
+            cmd.Parameters.Add(new DuckDBParameter { Value = _rowCap });
 
             using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
@@ -125,6 +151,11 @@ ORDER BY collection_time DESC";
                     PhysicalReads: reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11)),
                     PreviewText: McpHelpers.StatementPreview(rawText, StatementTextCharacters)));
             }
+            if (window.Count >= _rowCap)
+            {
+                capReached = true;
+            }
+
             return window;
             }
         }
