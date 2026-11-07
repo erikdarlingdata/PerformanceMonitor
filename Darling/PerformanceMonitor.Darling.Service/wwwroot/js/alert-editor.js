@@ -442,8 +442,9 @@ function buildAlertEditor(main, ctx) {
   });
 
   let checkTimer = null;
-  /* #7937: the number of the latest check. A validate or test reply from an earlier check is dropped, so a slow test of an
-     earlier definition cannot land over the "Checking…" strip of the one the author has since typed. */
+  /* #7937: the number of the latest run of the check, taken before the readiness gate, so a run that stops there still retires
+     the checks before it. A validate or test reply from an earlier check is dropped, so a slow test of an earlier definition
+     cannot land over the "Checking…" strip of the one the author has since typed, nor over the hint an incomplete rule shows. */
   let checkSeq = 0;
   function scheduleCheck() {
     clearTimeout(checkTimer);
@@ -466,12 +467,12 @@ function buildAlertEditor(main, ctx) {
      /api/alerts/test for the per-server current-value / would-fire table. Guarded by readyToCheck so an
      incomplete draft shows a neutral hint, not a stream of "required" errors. */
   async function runCheck() {
+    const seq = ++checkSeq;
     if (!readyToCheck(model)) {
       mount(previewBox, emptyStrip("Choose a metric and a warning threshold to preview what this rule would do."));
       return;
     }
     const def = modelToDefinition(model);
-    const seq = ++checkSeq;
     mount(previewBox, loadingStrip("Checking…"));
 
     const vres = await api.validateAlertRule(def);

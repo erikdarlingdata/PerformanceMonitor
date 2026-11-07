@@ -728,6 +728,9 @@ function buildReadPanelEditor(p, index, ctx, kindToggle) {
     p.read = readSelect.value;
     p.params = defaultParams(catalog, p.read);
     p.vizcfg = {};
+    /* #7937: the old read's sample is gone, so a chart picked before the new read's sample lands derives nothing from it, and the
+       fields are derived from the new sample when it lands. */
+    lastSample = null;
     rebuildParams();
     rebuildBody(); // reveal Parameters (or the "choose a read" hint) as prerequisites are met (M5)
     refreshHead();
