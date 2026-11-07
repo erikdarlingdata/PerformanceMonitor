@@ -366,20 +366,24 @@ public partial class FinOpsTab : UserControl
             RecommendationsNoDataMessage.Visibility = Visibility.Collapsed;
 
             var utilityConnectionString = _credentialResolver.GetUtilityConnectionString(selectedServer!);
-            System.Collections.Generic.List<PerformanceMonitorLite.Services.RecommendationRow> data;
-            string? skippedNote;
+            (System.Collections.Generic.List<PerformanceMonitorLite.Services.RecommendationRow> Rows, string? SkippedNote)? read = null;
+            Exception? failure = null;
             try
             {
-                (data, skippedNote) = await Task.Run(() => _dataService.GetRecommendationsWithNoteAsync(serverId, connectionString, utilityConnectionString, _currentServerMonthlyCost));
+                read = await Task.Run(() => _dataService.GetRecommendationsWithNoteAsync(serverId, connectionString, utilityConnectionString, _currentServerMonthlyCost));
             }
-            catch
+            catch (Exception ex)
             {
-                /* A failed read must not keep saying it is loading; a newer load's text is left to that load. */
-                if (_loads.Superseded(nameof(LoadRecommendationsAsync), gen)) throw;
-                RecommendationsCountIndicator.Text = "Recommendations could not be read";
-                throw;
+                failure = ex;
             }
             if (_loads.Superseded(nameof(LoadRecommendationsAsync), gen)) return;
+            if (failure is not null)
+            {
+                /* A failed read must not keep saying it is loading; the outer catch logs it. */
+                RecommendationsCountIndicator.Text = "Recommendations could not be read";
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+            }
+            var (data, skippedNote) = read!.Value;
             RecommendationsDataGrid.ItemsSource = data;
             /* #5558: databases this server holds only as an Availability Group secondary copy are left to the primary's findings. */
             RecommendationsSecondaryNoteText.Text = skippedNote ?? "";
