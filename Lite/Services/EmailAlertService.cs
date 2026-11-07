@@ -44,6 +44,12 @@ public class EmailAlertService : IFindingAlertSender
     private readonly Func<Guid, CancellationToken, Task<(InvestigationRequestRow Row, string? Brief)?>>? _readInvestigation;
     private readonly Func<McpDataDetail> _investigationDataDetail;
 
+    /// <summary>Test seam (#8142): the clock that stamps an alert row's time. Null reads <see cref="DateTime.UtcNow"/>. A test
+    /// anchors it inside one hour, because the recurring-skip journal writes one row per alert hour.</summary>
+    internal Func<DateTime>? ClockForTests { get; set; }
+
+    private DateTime UtcNow() => ClockForTests?.Invoke() ?? DateTime.UtcNow;
+
     /// <param name="investigations">
     /// #5820: the shared investigation dispatch core over Lite's investigation store. When set, an alert an agent route
     /// covers opens or joins an investigation request: after its history row is written, or before the channels post when
@@ -148,7 +154,7 @@ public class EmailAlertService : IFindingAlertSender
             /* #5820: the row's time is stamped once, here, so the investigation request names this exact row (Darling's
                DarlingAlertDeliverer does the same). The context is kept as the caller gave it: the route record added
                below belongs to the history row, not to the incident keys the request links. */
-            var alertTimeUtc = AlertHistoryEscalationSeed.TruncateToMicroseconds(DateTime.UtcNow);
+            var alertTimeUtc = AlertHistoryEscalationSeed.TruncateToMicroseconds(UtcNow());
 
             /* #5820 / #5821: the request is opened or joined BEFORE the channels post, for every alert, whether or not the
                generic webhook's template names {{investigation_json}} (Darling's DarlingAlertDeliverer does the same), so a
@@ -313,7 +319,7 @@ public class EmailAlertService : IFindingAlertSender
             for (var i = 0; i < named.Count; i++)
             {
                 var page = named[i];
-                pageTimes[i] = AlertHistoryEscalationSeed.TruncateToMicroseconds(DateTime.UtcNow);
+                pageTimes[i] = AlertHistoryEscalationSeed.TruncateToMicroseconds(UtcNow());
                 if (_investigations is not null)
                 {
                     await _investigations.OpenForWebhookAsync(
@@ -380,7 +386,7 @@ public class EmailAlertService : IFindingAlertSender
                 delivery,
                 false, detailText, AlertContextSerializer.Serialize(context))
             {
-                AlertTimeUtc = AlertHistoryEscalationSeed.TruncateToMicroseconds(DateTime.UtcNow),
+                AlertTimeUtc = AlertHistoryEscalationSeed.TruncateToMicroseconds(UtcNow()),
             });
             return delivery;
         }

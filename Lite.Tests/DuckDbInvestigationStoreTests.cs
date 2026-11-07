@@ -756,23 +756,33 @@ WHERE request_id = '{id}' AND event = 'link_recorded'"));
     /// <summary>#7217: the archive reset takes the write lock to delete and re-create the database, and the write lock waits
     /// only for readers that hold the read lock. A store read that opened its connection without the read lock was not waited
     /// for, so it could hold a connection open across the reset. Here a writer (the reset's lock) holds the write lock on its
-    /// own thread: a read started meanwhile must not open a connection until the writer releases.</summary>
+    /// own thread: a read started meanwhile must not open a connection until the writer releases.
+    /// <para>The write lock is process-wide, and the classes running alongside take it while they build their own databases.
+    /// A budgeted writer polls for it with no queue position for all but the last second of its budget (#7256), and the
+    /// writers those classes park on the lock win every handoff, so the writer here parks for its whole budget instead: it
+    /// holds the lock as soon as the current holder releases, as the reset's unbudgeted writer does, and its budget is the
+    /// only bound on the wait, so a timeout surfaces as its own exception naming the holders (#8142).</para></summary>
     [Theory]
     [MemberData(nameof(ReadNames))]
     public async Task EveryRead_WaitsForTheWriteLock_SoTheArchiveResetNeverRunsUnderAnOpenReadConnection(string name)
     {
-        using var held = new ManualResetEventSlim(false);
+        _db.WriteLockParkTail = TestLockBudget;
+        var held = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var release = new ManualResetEventSlim(false);
         var writer = Task.Factory.StartNew(() =>
         {
             using var writeLock = _db.AcquireWriteLock(TestLockBudget);
-            held.Set();
+            held.SetResult();
             release.Wait(TimeSpan.FromMinutes(1));
         }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
         try
         {
-            Assert.True(held.Wait(TimeSpan.FromSeconds(30)));
+            await Task.WhenAny(held.Task, writer);
+            if (writer.IsFaulted)
+            {
+                await writer;
+            }
 
             var read = Task.Run(() => ReadByName(name), CancellationToken.None);
             var finishedWhileLocked = await Task.WhenAny(read, Task.Delay(TimeSpan.FromMilliseconds(500), Ct)) == read;
@@ -780,7 +790,7 @@ WHERE request_id = '{id}' AND event = 'link_recorded'"));
 
             release.Set();
             await writer;
-            await read.WaitAsync(TimeSpan.FromSeconds(30), Ct);
+            await read.WaitAsync(TestLockBudget, Ct);
         }
         finally
         {

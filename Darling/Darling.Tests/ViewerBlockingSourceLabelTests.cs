@@ -18,8 +18,8 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #5244: the desktop viewer's blocking charts name the collector that answered, the same way Lite's do (<c>BlockingSourceLabel</c> is
-/// shared). The trend and severity reads tag each point with the arm that answered, and the Trends tab's Blocking Incidents chart and
-/// the Blocking Stats tab's two duration charts put it on the axis only when they draw rows. The Blocking Severity read also follows
+/// shared). The trend and severity reads tag each point with the arm that answered, and the Trends tab's Blocking Incidents chart puts it in
+/// its legend and the Blocking Stats tab's two duration charts put it in the card subtitle (#8151, ViewerChartCardsTests), only when they draw rows. The Blocking Severity read also follows
 /// the database filter now, like the Trends tab's count: the SQL binds <c>$5</c> on both arms, and the tab passes the chosen names to
 /// the read and to its data-start probe.
 /// </summary>
@@ -66,21 +66,6 @@ public sealed class ViewerBlockingSourceLabelTests
             Assert.Contains("source FROM bpr", sql, StringComparison.Ordinal);
             Assert.Contains("source FROM dmv WHERE NOT EXISTS (SELECT 1 FROM bpr)", sql, StringComparison.Ordinal);
         }
-    }
-
-    [Fact]
-    public void TheCharts_PutTheLabelOnTheAxisOnlyWhenTheyDrawRows()
-    {
-        var trend = Between(Tab, "void RenderBlockingTrendChart(", "void RenderDeadlockTrendChart(");
-        var duration = Between(Tab, "void RenderBlockingDurationChart(", "private void RenderBlockingTotalDurationChart(");
-        var total = Between(Tab, "private void RenderBlockingTotalDurationChart(", "private void RenderDeadlockWaitChart(");
-
-        Assert.Single(Occurrences(trend, "BlockingTrendLabels.LegendFor(sources)"));
-        Assert.Single(Occurrences(duration, "BlockingSourceLabel.For(\"Block Duration (ms)\", data.Select(d => d.Source))"));
-        Assert.Single(Occurrences(total, "BlockingSourceLabel.For(\"Total Block Duration (ms)\", data.Select(d => d.Source))"));
-        /* The zero-row branch returns before it: nothing answered, so nothing is named. */
-        foreach (var chart in new[] { trend, duration, total })
-            Assert.DoesNotContain("BlockingSourceLabel", chart[..chart.IndexOf("return;", StringComparison.Ordinal)], StringComparison.Ordinal);
     }
 
     [Fact]

@@ -474,6 +474,7 @@ public partial class FinOpsTab
 
         FinOpsPvsTrendChart.Visibility = Visibility.Visible;
         _chartHelper.ClearChart(FinOpsPvsTrendChart); // #8086: a reset also removes the last refresh's legend panel
+        ViewerChartCards.AttachChart(FinOpsPvsTrendChart); // #8151: the reset swapped in a new plot
         ChartStyle.ApplyThemeToChart(FinOpsPvsTrendChart);
 
         var seriesIndex = 0;
@@ -494,7 +495,7 @@ public partial class FinOpsTab
 
         FinOpsPvsTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         FinOpsPvsTrendChart.Plot.Axes.AutoScale();
-        FinOpsPvsTrendChart.Plot.YLabel("PVS Off-Row MB");
+        FinOpsPvsTrendChart.Plot.YLabel("MB");
         _chartHelper.ShowChartLegend(FinOpsPvsTrendChart); // #8086: beside or under the plot, never over it
         FinOpsPvsTrendChart.Refresh();
     }
