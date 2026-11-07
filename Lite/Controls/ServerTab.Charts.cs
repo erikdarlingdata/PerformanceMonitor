@@ -1548,14 +1548,21 @@ public partial class ServerTab : UserControl
     /// <summary>
     /// Clears a chart and removes any existing legend panel to prevent duplication.
     /// </summary>
-    private void ClearChart(ScottPlot.WPF.WpfPlot chart) => _chartHelper.ClearChart(chart);
+    private void ClearChart(ScottPlot.WPF.WpfPlot chart)
+    {
+        _chartHelper.ClearChart(chart);
+        MarkAllZero(chart); // #8144: a cleared chart has drawn nothing, so the card stops saying "0 throughout"
+    }
 
     /// <summary>
     /// Sets up an empty chart with dark theme, Y-axis label, legend, and "No Data" annotation.
     /// Matches Full Dashboard behavior for consistent UX.
     /// </summary>
     private void RefreshEmptyChart(ScottPlot.WPF.WpfPlot chart, string legendText, string yAxisLabel)
-        => _chartHelper.RefreshEmptyChart(chart, legendText, yAxisLabel);
+    {
+        _chartHelper.RefreshEmptyChart(chart, legendText, yAxisLabel);
+        MarkAllZero(chart); // #8144: a window with no rows is not a window of zeros
+    }
 
     /// <summary>
     /// Shows legend on chart and tracks it for proper cleanup on next refresh.
