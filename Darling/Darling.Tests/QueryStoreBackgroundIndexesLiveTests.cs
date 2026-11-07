@@ -322,16 +322,16 @@ ANALYZE collect.query_store_interval_wide;", ct);
            (it holds both columns the statement touches) answer with an index-only scan. On a table whose pages are not yet
            marked all-visible the planner prices that scan's heap fetches at random cost and takes the older index instead,
            whose order follows the heap. */
-        await ExecAsync(connection, "VACUUM (ANALYZE) collect.query_store_interval_wide", ct);
-        if (snapshotHolder is not null)
-        {
-            await ExecAsync(snapshotHolder, "COMMIT", ct);
-        }
-
-        /* The premise the plan depends on: the VACUUM marked the table's pages all-visible. */
-        var allVisible = Convert.ToInt64(await ScalarAsync(connection,
-            "SELECT COALESCE(SUM(c.relallvisible), 0) FROM pg_partition_tree('collect.query_store_interval_wide'::regclass) AS p JOIN pg_class AS c ON c.oid = p.relid WHERE p.isleaf", ct), CultureInfo.InvariantCulture);
-        Assert.True(allVisible > 0, "VACUUM marked no page all-visible, so the wide btree's index-only scan is priced at random heap fetches");
+        /* #8204: a vacuum cannot mark a page all-visible while a snapshot older than the seed is open anywhere in this
+           database (an autoanalyze over a catalog the migration churned, TimescaleDB's scheduler starting on the new
+           database), and the planner prices the wide btree's index-only scan by the share of pages marked. The stats on
+           this table are otherwise fixed (ANALYZE reads every row of a table this small), so the visibility map is the one
+           thing that varies between runs. Vacuum until every leaf page is marked, bounded, so the plan below is decided by
+           the indexes and not by whoever held a snapshot a moment ago. The premise the plan depends on is then exact. */
+        var (vacuumedPages, allVisible) = await VacuumUntilAllVisibleAsync(connection, "collect.query_store_interval_wide",
+            afterFirstPass: snapshotHolder is null ? null : () => ExecAsync(snapshotHolder, "COMMIT", ct), ct);
+        Assert.True(vacuumedPages > 0 && allVisible == vacuumedPages,
+            $"VACUUM left {vacuumedPages - allVisible} of {vacuumedPages} pages not all-visible after {VacuumPasses} passes, so the wide btree's index-only scan is priced at random heap fetches");
 
         /* The premise: two servers, and a table of many pages, so a pass over the table is a real alternative. */
         Assert.Equal(2L, await ScalarAsync(connection, "SELECT count(DISTINCT server_id) FROM collect.query_store_interval_wide", ct));
@@ -349,6 +349,33 @@ ANALYZE collect.query_store_interval_wide;", ct);
         Assert.Contains("Limit", plan.NodeTypes);
         Assert.Equal(new[] { wideName }, plan.IndexScansUnderLimit.Select(scan => scan.Index).Distinct().ToArray());
         Assert.All(plan.IndexScansUnderLimit, scan => Assert.Contains("server_id", scan.Cond, StringComparison.Ordinal));
+    }
+
+    /* The most VACUUM passes the pin spends on getting every leaf page marked all-visible before it reads the plan. */
+    private const int VacuumPasses = 10;
+
+    /* VACUUM (ANALYZE) over the table until the catalog shows every leaf page all-visible, up to VacuumPasses times, and the
+       page counts it ended on. afterFirstPass runs once, right after the first pass: the test that holds a snapshot through
+       that pass ends it there. */
+    private static async Task<(long Pages, long AllVisible)> VacuumUntilAllVisibleAsync(
+        NpgsqlConnection connection, string table, Func<Task>? afterFirstPass, CancellationToken ct)
+    {
+        long pages = 0;
+        long allVisible = -1;
+        for (var pass = 0; pass < VacuumPasses && allVisible != pages; pass++)
+        {
+            await ExecAsync(connection, $"VACUUM (ANALYZE) {table}", ct);
+            if (pass == 0 && afterFirstPass is not null)
+            {
+                await afterFirstPass();
+            }
+
+            pages = await LeafPagesAsync(connection, table, ct);
+            allVisible = Convert.ToInt64(await ScalarAsync(connection,
+                $"SELECT COALESCE(SUM(c.relallvisible), 0) FROM pg_partition_tree('{table}'::regclass) AS p JOIN pg_class AS c ON c.oid = p.relid WHERE p.isleaf", ct), CultureInfo.InvariantCulture);
+        }
+
+        return (pages, allVisible);
     }
 
     /* EXPLAIN of the product's own statement, its server bound as the product binds it: an integer parameter. */
