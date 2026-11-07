@@ -418,12 +418,13 @@ ORDER BY 1";
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            /* NULL stays NULL (#3541 A12): a bucket whose every collection was unrated is an unrated point. */
+            /* NULL stays NULL (#3541 A12): a bucket whose every collection was unrated is an unrated point, and its
+               count is null too (#8073): the executions summed are the rated collections', the rate's numerator. */
             items.Add(new QueryTrendPoint
             {
                 CollectionTime = reader.GetDateTime(0),
                 Value = reader.IsDBNull(1) ? null : ToDouble(reader.GetValue(1)),
-                ExecutionCount = reader.IsDBNull(2) ? null : (long)ToDouble(reader.GetValue(2)),
+                ExecutionCount = reader.IsDBNull(6) ? null : ToInt64(reader.GetValue(6)),
                 ExecutionsPerSecond = reader.IsDBNull(2) ? null : ToDouble(reader.GetValue(2)),
                 PeakElapsedMsPerSecond = reader.IsDBNull(3) ? null : ToDouble(reader.GetValue(3)),
                 FirstCollectionTime = reader.GetDateTime(4),
@@ -476,7 +477,8 @@ SELECT
     CAST(SUM(rated_executions) AS DOUBLE PRECISION) / SUM(rated_seconds) AS executions_per_second,
     MAX(elapsed_ms_per_second) AS peak_elapsed_ms_per_second,
     MIN(collection_time) AS first_collection_time,
-    COUNT(*) - COUNT(rated_seconds) AS unrated_collections
+    COUNT(*) - COUNT(rated_seconds) AS unrated_collections,
+    SUM(rated_executions) AS execution_count
 FROM rated{windowHasRows}
 GROUP BY 1
 ORDER BY 1";

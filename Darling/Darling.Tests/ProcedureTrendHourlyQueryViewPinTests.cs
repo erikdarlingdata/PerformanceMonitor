@@ -21,6 +21,8 @@ namespace Darling.Tests;
 /// statements are pinned here by SHA-256 of the text the code produced on origin/dev, before the procedure change, line endings
 /// normalised, so a change meant for the procedure grain cannot reach them. A deliberate change to the query views updates the
 /// hash with its reason in the commit.
+/// #8073 is one: the four BuildBucketedHourlyTrendSql statements gain a trailing <c>execution_count</c> column (the bucket's
+/// summed executions), so their hashes moved; the unbucketed BuildHourlyTrendSql statements are untouched.
 /// </summary>
 [Trait("Stage", "Guard")]
 public sealed class ProcedureTrendHourlyQueryViewPinTests
@@ -43,12 +45,12 @@ public sealed class ProcedureTrendHourlyQueryViewPinTests
     {
         ["BuildHourlyTrendSql(query_stats_hourly, unfiltered)"] = "94329B673BFAFA22248DA5D53EFE874662038CDED525C936579D54221C91F2E5",
         ["BuildHourlyTrendSql(query_stats_hourly, filtered)"] = "CCD84C371E46D72BF536118A8A492C0946552BF818E4B00518B6F8F3CEDDED09",
-        ["BuildBucketedHourlyTrendSql(query_stats_hourly, unfiltered)"] = "AA3776E17212DF0B3DC9C1A059C8D9BDE4988DA16E9883F5414A67608340F372",
-        ["BuildBucketedHourlyTrendSql(query_stats_hourly, filtered)"] = "5086B47CEC900CAC398A9702F37DAB86150C273DE015A5418B2754D96C5A6432",
+        ["BuildBucketedHourlyTrendSql(query_stats_hourly, unfiltered)"] = "C3091EE7C542801F7168ACBA36D3F6DE0E6A4C07C82C79AD1F6B4BDC4699ADE1",
+        ["BuildBucketedHourlyTrendSql(query_stats_hourly, filtered)"] = "92D63C82E239B226D4F20048D1D3C141596E09894AD0F000CEC99731254A8333",
         ["BuildHourlyTrendSql(query_store_stats_hourly, unfiltered)"] = "ABAC1BCC6EB7EA5160B70A8F4B44EDC799E151DB216D8A5BB705E986663688F2",
         ["BuildHourlyTrendSql(query_store_stats_hourly, filtered)"] = "44B2F1ACB7EFBBA3479A97E1504B6BD85E28523A3528743BC811FDBD805B927D",
-        ["BuildBucketedHourlyTrendSql(query_store_stats_hourly, unfiltered)"] = "E8F5E099757ABE0272508D5734C19486406522EB5A8C63DA6EDC4B2C58E8BB2C",
-        ["BuildBucketedHourlyTrendSql(query_store_stats_hourly, filtered)"] = "AD2CA98B90F33B449C946E2F8D7C55EB38F60E4CA2198302DD48A0BE1CA09225",
+        ["BuildBucketedHourlyTrendSql(query_store_stats_hourly, unfiltered)"] = "E20256B4BAB66E1201CB062D7228E414078CB0E5DADA9E34511819B3F429FF0C",
+        ["BuildBucketedHourlyTrendSql(query_store_stats_hourly, filtered)"] = "4A39E6069D31F2503D8D909939B4672FD2ED9B03BEBB4B45236FF15984FF82EF",
         ["QueryDurationTrendHourlySql(unfiltered)"] = "94329B673BFAFA22248DA5D53EFE874662038CDED525C936579D54221C91F2E5",
         ["QueryDurationTrendHourlySql(filtered)"] = "CCD84C371E46D72BF536118A8A492C0946552BF818E4B00518B6F8F3CEDDED09",
     };

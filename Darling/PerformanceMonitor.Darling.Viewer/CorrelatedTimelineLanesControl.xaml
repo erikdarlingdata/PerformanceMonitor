@@ -6,7 +6,7 @@
 
     <!-- #6652: five lanes keep a minimum height each; the control scrolls when they do not fit (1366x768). -->
     <ScrollViewer Margin="8" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-    <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="750">
+    <Grid x:Name="LanesGrid" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}">
         <Grid.RowDefinitions>
             <!-- 5 lanes, equal height -->
             <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
