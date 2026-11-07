@@ -48,19 +48,30 @@ public sealed record DarlingJobHistoryRow(
 /// instant: the SQL bounds the newest runs by it (widened by an hour, like the start) and the job stats exactly,
 /// and <see cref="DarlingJobHistoryReader.GetAsync"/> then cuts the runs exactly in C#.
 /// </summary>
-public sealed record JobHistoryFilter(string? JobName = null, int? RunStatus = null, string? Category = null, DateTime? UntilUtc = null, int? MinDurationSeconds = null, int? PerServerLimit = null)
+public sealed record JobHistoryFilter(string? JobName = null, int? RunStatus = null, string? Category = null, DateTime? UntilUtc = null, int? MinDurationSeconds = null, bool ShareCapPerServer = false)
 {
     private int UntilParam(int firstParam) => firstParam + (JobName is null ? 0 : 1) + (RunStatus is null ? 0 : 1) + (Category is null ? 0 : 1) + (MinDurationSeconds is null ? 0 : 1);
 
-    private int PerServerLimitParam(int firstParam) => UntilParam(firstParam) + (UntilUtc is null ? 0 : 1);
-
     /// <summary>
-    /// #8133: the per-server top-N's LIMIT. <see cref="PerServerLimit"/> set: its own parameter, the share of the row cap each
-    /// server gets on an All Servers read, so the page holds that many of every server's newest runs rather than the newest of
-    /// the fleet; unset: <paramref name="limitParam"/>, the row cap itself, and the statement text is unchanged.
+    /// #8133: the fleet-wide cut. With <see cref="ShareCapPerServer"/> each server's runs are numbered newest-first and the cut takes
+    /// every server's first share (the cap divided by the servers with rows in the window, rounded up) before the newest runs of the
+    /// rest, so a fleet that fits under the cap comes back whole and one busy server cannot fill the page alone. Without it the cut is
+    /// the newest runs of the whole fleet, and the statement text is unchanged.
     /// </summary>
-    internal string PerServerLimitSql(int firstParam, string limitParam) =>
-        PerServerLimit is null ? limitParam : $"${PerServerLimitParam(firstParam)}";
+    internal string BaseCutSql(string limitParam) => ShareCapPerServer
+        ? $@"    SELECT ranked.*
+    FROM (
+        SELECT
+            t.*,
+            row_number() OVER (PARTITION BY t.server_id ORDER BY t.run_datetime_local DESC, t.instance_id DESC) AS server_rank
+        FROM top_by_server AS t
+    ) AS ranked
+    ORDER BY ranked.server_rank > CEIL({limitParam}::numeric / (SELECT count(DISTINCT server_id) FROM top_by_server)), ranked.approx_run_utc DESC, ranked.instance_id DESC
+    LIMIT {limitParam}"
+        : $@"    SELECT *
+    FROM top_by_server
+    ORDER BY approx_run_utc DESC, instance_id DESC
+    LIMIT {limitParam}";
 
     /// <summary>The <c>AND</c> clauses for the set filters, numbering their parameters from <paramref name="firstParam"/>.</summary>
     public string Clauses(int firstParam)
@@ -128,11 +139,6 @@ public sealed record JobHistoryFilter(string? JobName = null, int? RunStatus = n
         if (UntilUtc is not null)
         {
             yield return new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(UntilUtc.Value, DateTimeKind.Unspecified) };
-        }
-
-        if (PerServerLimit is not null)
-        {
-            yield return new NpgsqlParameter<int> { TypedValue = PerServerLimit.Value };
         }
     }
 }
@@ -380,7 +386,7 @@ ORDER BY jh.category_name";
         var limitParam = scopedToServer ? "$4" : "$3";
         var filterSql = filter is null ? string.Empty : filter.Clauses(scopedToServer ? 5 : 4);
         var statsUntilSql = filter is null ? string.Empty : filter.StatsClause(scopedToServer ? 5 : 4);
-        var perServerLimitParam = filter is null ? limitParam : filter.PerServerLimitSql(scopedToServer ? 5 : 4, limitParam);
+        var baseCutSql = filter is null ? new JobHistoryFilter().BaseCutSql(limitParam) : filter.BaseCutSql(limitParam);
 
         return $@"
 WITH svr AS (
@@ -446,14 +452,11 @@ top_by_server AS (
         AND   jh.collection_time >= {floorParam}
         AND   jh.run_datetime >= $1 + make_interval(mins => so.offset_minutes) - interval '1 hour'{filterSql}
         ORDER BY jh.run_datetime DESC, jh.instance_id DESC
-        LIMIT {perServerLimitParam}
+        LIMIT {limitParam}
     ) AS top
 ),
 base AS (
-    SELECT *
-    FROM top_by_server
-    ORDER BY approx_run_utc DESC, instance_id DESC
-    LIMIT {limitParam}
+{baseCutSql}
 ),
 job_stats AS (
     SELECT
