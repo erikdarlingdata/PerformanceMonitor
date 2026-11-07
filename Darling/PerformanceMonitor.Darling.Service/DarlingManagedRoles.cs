@@ -5170,12 +5170,14 @@ WHERE u.rolname = current_user";
     /// readable by ordinary users (<see cref="DarlingFileSecurity.IsReadableByOrdinaryUsers"/>). A plaintext password
     /// others could read may already be theirs, so such a file is distrusted and regenerated, not re-hardened.
     ///
-    /// <para><b>What this cannot see.</b> Managed .NET cannot read a Unix file's owner, and this adds no native
-    /// interop to get it, so a file another user created with mode 0600 passes the mode check. What keeps anyone
-    /// else from creating one is the directory: the shipped <c>darling-credentials</c> named volume is seeded
-    /// root:root 0700 by the Dockerfile, and the service sets the directory owner-only again every start and
-    /// distrusts it when it cannot (<see cref="PrepareComposeCredentialDirectory"/>). A bind mount whose host
-    /// directory another host user owns or can write to is outside what either check can see.</para>
+    /// <para><b>What this does not check.</b> This method looks at the file's mode, not its owner, so a file another
+    /// user created with mode 0600 passes it. The owner of the credentials directory is checked at start (a
+    /// directory owned by another user stops collection), and <see cref="DarlingServiceKeyFile.UnexpectedOwnerReason"/>
+    /// checks the password key's owner. What keeps anyone else from creating a role credential file is the
+    /// directory: the shipped <c>darling-credentials</c> named volume is seeded owned by user 1654, mode 0700, by the
+    /// Dockerfile, and the service sets the directory owner-only again every start and distrusts it when it cannot
+    /// (<see cref="PrepareComposeCredentialDirectory"/>). A bind mount whose host directory another host user can
+    /// write to is outside what these checks can see.</para>
     /// </summary>
     internal static string? UntrustedComposeCredentialReason(FileInfo info)
     {

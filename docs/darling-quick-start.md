@@ -58,6 +58,8 @@ docker compose up -d
 
 The script ends with the dashboard address. To read the web token, run `cat secrets/web_token.txt`. If the script does not start, because the archive lost its execute bit, run `sh setup.sh`.
 
+The service runs as user 1654, not root. A fresh install needs nothing; an install that ran as root needs a one-off `chown` of its credentials volume first, which [Container user](darling/security.md#container-user) gives with the Kubernetes example.
+
 MCP is off in the sample, so compose does not mount `mcp_token`. To turn MCP on, uncomment `mcp_token` in the two places in `docker-compose.yml`, and set `mcp.enabled` to `true` in `darling.json`. To make the secret files by hand instead of with `setup.sh`, follow the list in [`compose/secrets/README.md`](../Darling/compose/secrets/README.md).
 
 The compose file in the compose archive names the image tag of its own release, for example `ghcr.io/erikdarlingdata/performancemonitor-darling:<version>`. It pulls the release it came from. The copy in the source tree names `:latest`, which is the newest release. To pin a release in that copy, change the `darling` service's `image:` line to that version's tag, for example `ghcr.io/erikdarlingdata/performancemonitor-darling:3.12.0`. Always write the full `ghcr.io/erikdarlingdata/` name. Without it, Docker looks on Docker Hub and the pull fails.

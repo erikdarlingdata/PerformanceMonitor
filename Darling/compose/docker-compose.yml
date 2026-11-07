@@ -22,7 +22,8 @@
 #      on its own (inside a container that would mean unreachable).
 #
 # Secrets never land in darling.json: the config references them (env:NAME / file:/path — #1804 stage 1),
-# and compose delivers them as env vars or mounted secret files. The web/MCP network blocks are honored
+# and compose delivers them as env vars or mounted secret files. Never put a secret inline in darling.json: the
+# service runs as user 1654, and setup.sh makes darling.json and secrets/* world-readable (0644) inside a 0700 secrets/. The web/MCP network blocks are honored
 # inside the container (the bind ladder's container gate, stage 2) — the port mappings below are the
 # exposure boundary, and both surfaces still REQUIRE their bearer token.
 
@@ -122,6 +123,7 @@ services:
     #   build: { context: ../.., dockerfile: Darling/Dockerfile }
     image: ghcr.io/erikdarlingdata/performancemonitor-darling:latest
     restart: unless-stopped
+    # user: "0:0"   # keeps the pre-1654 behaviour; only until the chown step in the release notes has run
     depends_on:
       store:
         condition: service_healthy
@@ -133,7 +135,10 @@ services:
     volumes:
       - ./darling.json:/config/darling.json:ro
       # #3914: the generated passwords of the admin/viewer/mcp roles the service provisions on the store above,
-      # one owner-only file each. The volume keeps them across a recreated container; without it they are
+      # one owner-only file each. The service runs as user 1654 (#8141), and this volume is seeded owned by that
+      # user, mode 0700. A volume an older (root) install made is root-owned: the service then stops collection and
+      # the container shows unhealthy until the chown step in the release notes has run.
+      # The volume keeps them across a recreated container; without it they are
       # regenerated and re-applied to the roles on every recreation, which works but re-keys them each time.
       # `docker compose exec darling cat /var/lib/darling/credentials/pg-admin-credential` shows the admin
       # password, for connecting a Darling Viewer or psql to the store as admin rather than as the owner.
