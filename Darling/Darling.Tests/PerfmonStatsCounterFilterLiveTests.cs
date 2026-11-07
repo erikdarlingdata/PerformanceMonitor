@@ -97,6 +97,64 @@ public sealed class PerfmonStatsCounterFilterLiveTests
         }
     }
 
+    /// <summary>
+    /// #8090 item 1: a filter that matches nothing in the latest snapshot answers a status word, as the trend does for the same name, so
+    /// <c>counters: []</c> is never the whole story. A counter_name no counter carries is <c>not_collected</c> and names the collected
+    /// counters; a known counter with an instance_name no row carries is <c>empty</c> and names the instances the counter has.
+    /// </summary>
+    [Fact]
+    public async Task AFilterThatMatchesNothing_AnswersAStatusWord_AndNamesWhatTheSnapshotHolds()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live get_perfmon_stats filter test.");
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var at = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-2);
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO perfmon_stats (collection_id, collection_time, server_id, server_name, object_name, counter_name, instance_name, cntr_value, delta_cntr_value, sample_interval_seconds) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                CollectionIdGenerator.Next(), at, ServerId, ServerName, "SQLServer:SQL Statistics", "Batch Requests/sec", "UserDb1", 1000L, 10L, 60);
+
+            using (var unknown = JsonDocument.Parse(await DarlingMcpDataTools.GetPerfmonStats(postgres, ServerName, counter_name: "No Such Counter")))
+            {
+                var root = unknown.RootElement;
+                Assert.True(root.TryGetProperty("status", out var status), "an unknown counter_name answered no status word: " + unknown.RootElement.GetRawText());
+                Assert.Equal("not_collected", status.GetString());
+                Assert.Contains("No Such Counter", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+                Assert.Contains("Batch Requests/sec", root.GetProperty("hints").GetProperty("collected_counters").EnumerateArray().Select(c => c.GetString()));
+            }
+
+            using (var noInstance = JsonDocument.Parse(await DarlingMcpDataTools.GetPerfmonStats(postgres, ServerName, counter_name: "Batch Requests/sec", instance_name: "NoSuchDb")))
+            {
+                var root = noInstance.RootElement;
+                Assert.True(root.TryGetProperty("status", out var status), "an unknown instance_name answered no status word: " + noInstance.RootElement.GetRawText());
+                Assert.Equal("empty", status.GetString());
+                Assert.Contains("UserDb1", root.GetProperty("hints").GetProperty("instance_names").EnumerateArray().Select(c => c.GetString()));
+            }
+
+            /* A filter that matches keeps the data shape, with no status word beside it. */
+            using (var hit = JsonDocument.Parse(await DarlingMcpDataTools.GetPerfmonStats(postgres, ServerName, counter_name: "Batch Requests/sec")))
+            {
+                Assert.False(hit.RootElement.TryGetProperty("status", out _));
+                Assert.Equal(1, hit.RootElement.GetProperty("counters_returned").GetInt32());
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) => await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(

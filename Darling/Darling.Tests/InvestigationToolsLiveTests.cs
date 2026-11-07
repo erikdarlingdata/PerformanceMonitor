@@ -628,6 +628,31 @@ FROM generate_series(1, " + (InvestigationToolCore.MaxLimit + 1) + ") AS i", ct)
         return Convert.ToString(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
     }
 
+    /// <summary>
+    /// #8090 item 4: <c>server_name</c> on a listed request is the registry's current name for its <c>server_id</c>, however the
+    /// opening alert labelled the server (one path labels it with the registry name, another with the host name). The label the
+    /// alert carried rides beside it as <c>opened_as</c> only when it differs, so two requests for one server never list under two names.
+    /// </summary>
+    [Fact]
+    public async Task List_NamesTheServerByItsRegistryName_WhateverLabelTheOpeningAlertCarried()
+    {
+        await RunAsync(async (store, dataSource, connection, ct) =>
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, 7, "alpha", ct);
+            var byRegistryName = (await store.OpenOrJoinAsync(Alert("blocking") with { ServerName = "alpha" }, ct)).RequestId!.Value;
+            var byHostName = (await store.OpenOrJoinAsync(Alert("resources") with { ServerName = "alpha.example.internal" }, ct)).RequestId!.Value;
+
+            var rows = Root(await DarlingMcpInvestigationTools.ListInvestigationRequests(dataSource, cancellationToken: ct))
+                .GetProperty("requests").EnumerateArray().ToDictionary(r => Guid.Parse(r.GetProperty("request_id").GetString()!));
+
+            Assert.Equal("alpha", rows[byRegistryName].GetProperty("server_name").GetString());
+            Assert.Equal("alpha", rows[byHostName].GetProperty("server_name").GetString());
+            Assert.Equal("alpha", rows[byHostName].GetProperty("display_name").GetString());
+            Assert.Equal("alpha.example.internal", rows[byHostName].GetProperty("opened_as").GetString());
+            Assert.False(rows[byRegistryName].TryGetProperty("opened_as", out _));
+        });
+    }
+
     private async Task RunAsync(Func<InvestigationRequestStore, NpgsqlDataSource, NpgsqlConnection, CancellationToken, Task> body)
     {
         var baseConnectionString = ConnectionString;

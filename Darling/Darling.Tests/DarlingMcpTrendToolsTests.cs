@@ -709,6 +709,23 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     }
 
     /// <summary>
+    /// #8090 item 2: a head inside the slack reports <c>effective_start</c> later than the start with <c>window_truncated</c> false,
+    /// so the sentence the payload ships with (<see cref="McpHelpers.WindowTruncatedDescription"/>, both SKUs) has to name the
+    /// slack in minutes, or a reader takes the two keys for a contradiction.
+    /// </summary>
+    [Fact]
+    public void WindowTruncatedDescription_NamesTheSlackTheTieredTrendsAllow()
+    {
+        var start = new DateTime(2026, 3, 4, 6, 0, 0, DateTimeKind.Unspecified);
+        var (effectiveStart, truncated) = DurationTrendRouting.DescribeCoverage(start.AddMinutes(40), start);
+        Assert.Equal(start.AddMinutes(40), effectiveStart);
+        Assert.False(truncated);
+
+        var minutes = (int)DurationTrendRouting.TruncationSlack.TotalMinutes;
+        Assert.Contains($"{minutes} minutes", McpHelpers.WindowTruncatedDescription, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// #2484: each probe must read the SAME table its trend reads. A probe on a different source could
     /// report a server as sampled for rows the trend can never see — the wrong branch in exactly the case
     /// the probe exists to get right. They are windowless by design: a time bound would make the probe
