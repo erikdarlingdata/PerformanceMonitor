@@ -76,6 +76,7 @@ public sealed class AnalysisPassTokenThreadingTests
     private static readonly Dictionary<string, string> s_exempt = new(StringComparer.Ordinal)
     {
         ["GetLatestFindingsAsync"] = "read-back: the viewer's Recommendations tab, no pass to abandon",
+        ["GetStoryPathsAsync"] = "read-back: the analysis page hold's wider-path seed (#8012), no pass to abandon",
         ["GetMutedStoriesAsync"] = "read-back: the viewer's mute registry read, no pass to abandon",
         ["MuteStoryAsync"] = "off-pass write: the MCP/viewer mute verb, no pass to abandon",
         ["UnmuteStoryAsync"] = "off-pass write: the viewer's unmute verb, no pass to abandon",
@@ -172,8 +173,8 @@ public sealed class AnalysisPassTokenThreadingTests
         Assert.Equal(s_exempt.Keys.OrderBy(k => k, StringComparer.Ordinal), untokenedBy.Keys.OrderBy(k => k, StringComparer.Ordinal));
 
         /* The counts are stated so a NEW untokened call inside an already-exempt method cannot ride in
-           on the exemption. 12 read-back calls across five methods, and the one finding INSERT. */
-        Assert.Equal(13, untokenedBy.Values.Sum());
+           on the exemption. 15 read-back calls across six methods, and the one finding INSERT. */
+        Assert.Equal(16, untokenedBy.Values.Sum());
         Assert.Equal(1, untokenedBy["InsertFindingAsync"]);
     }
 

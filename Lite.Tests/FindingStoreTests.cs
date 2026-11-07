@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Analysis.Recommendations;
 using PerformanceMonitorLite.Database;
@@ -88,6 +89,84 @@ public class FindingStoreTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 
         Assert.Equal(2, findings.Count);
         Assert.All(findings, f => Assert.Equal("incident_abc", f.IncidentId));
+    }
+
+    /// <summary>Stores one analysis run of <paramref name="serverId"/> at <paramref name="analysisTime"/>, one finding per story.</summary>
+    private static Task StoreRunAsync(FindingStore store, int serverId, DateTime analysisTime,
+        params (string Hash, string Root, string Path)[] stories)
+    {
+        var findings = stories.Select(s => new AnalysisFinding
+        {
+            FindingId = CollectionIdGenerator.Next(),
+            ServerId = serverId,
+            ServerName = "story-paths",
+            AnalysisTime = analysisTime,
+            Severity = 1.5,
+            Confidence = 0.8,
+            Category = "parameter_sensitivity",
+            StoryPath = s.Path,
+            StoryPathHash = s.Hash,
+            StoryText = s.Path,
+            RootFactKey = s.Root,
+            FactCount = s.Path.Split(" → ").Length,
+            TimeRangeStart = analysisTime.AddHours(-4),
+            TimeRangeEnd = analysisTime
+        }).ToList();
+        return store.InsertFindingsAsync(findings, new AnalysisContext
+        {
+            ServerId = serverId,
+            ServerName = "story-paths",
+            TimeRangeStart = analysisTime.AddHours(-4),
+            TimeRangeEnd = analysisTime
+        });
+    }
+
+    /// <summary>Calls the store's stored-story-paths read by name and reads each row's hash and path by name.</summary>
+    private static async Task<List<(string Hash, string Path)>> StoryPathsAsync(
+        System.Reflection.MethodInfo read, object store, int serverId, string rootFactKey)
+    {
+        var task = (Task)read.Invoke(store, new object[] { serverId, rootFactKey })!;
+        await task;
+        var rows = (System.Collections.IEnumerable)task.GetType().GetProperty("Result")!.GetValue(task)!;
+        var result = new List<(string, string)>();
+        foreach (var row in rows)
+        {
+            result.Add((
+                (string)row.GetType().GetProperty("StoryPathHash")!.GetValue(row)!,
+                (string)row.GetType().GetProperty("StoryPath")!.GetValue(row)!));
+        }
+        return result;
+    }
+
+    [Fact]
+    public async Task GetStoryPaths_ReturnsEachDistinctPathOfTheServerAndRoot_AcrossTheRetention()
+    {
+        /* #8012: the page hold's wider-path seed asks for the distinct story paths one server has stored under one
+           root, however old inside the findings retention and whatever other stories stored since. */
+        var read = typeof(FindingStore).GetMethod("GetStoryPathsAsync", new[] { typeof(int), typeof(string) });
+        Assert.True(read is not null,
+            "FindingStore has no GetStoryPathsAsync(serverId, rootFactKey): the distinct story paths of one server and root across the findings retention.");
+
+        var store = new FindingStore(_duckDb);
+        const int serverId = 8012;
+        const string wider = "PARAMETER_SENSITIVITY → QUERY_SPILLS → TEMPDB_USAGE";
+        const string shorter = "PARAMETER_SENSITIVITY → QUERY_SPILLS";
+        var threeDaysAgo = DateTime.UtcNow.AddDays(-3);
+        /* The same path in two runs is one answer. */
+        await StoreRunAsync(store, serverId, threeDaysAgo, ("aaaaaaaa11111111", "PARAMETER_SENSITIVITY", wider));
+        await StoreRunAsync(store, serverId, threeDaysAgo.AddHours(1), ("aaaaaaaa11111111", "PARAMETER_SENSITIVITY", wider));
+        /* Another root on the same server, and the same root on another server, are not. */
+        await StoreRunAsync(store, serverId, DateTime.UtcNow.AddMinutes(-30),
+            ("bbbbbbbb22222222", "PARAMETER_SENSITIVITY", shorter),
+            ("cccccccc33333333", "QUERY_SPILLS", "QUERY_SPILLS → TEMPDB_USAGE"));
+        await StoreRunAsync(store, serverId + 1, DateTime.UtcNow.AddMinutes(-30),
+            ("dddddddd44444444", "PARAMETER_SENSITIVITY", "PARAMETER_SENSITIVITY → CPU_SPIKE"));
+
+        var paths = await StoryPathsAsync(read!, store, serverId, "PARAMETER_SENSITIVITY");
+
+        Assert.Equal(
+            new[] { ("aaaaaaaa11111111", wider), ("bbbbbbbb22222222", shorter) },
+            paths.OrderBy(p => p.Hash, StringComparer.Ordinal).ToArray());
     }
 
     [Fact]
@@ -736,9 +815,13 @@ VALUES ($1, $2, $3, $4, $5, $6)";
            census needs no exemption for it either. Nine since #3916: GetMutedStoryHashesAsync, the mute
            registry re-read the analysis notification service makes at its hold-back flush, so a mute applied
            inside the window drops the queued page. A READ, under the read lock like the mute filter it
-           mirrors, taking the flush's own token (there is no analysis pass at flush time). The count is pinned
-           so a new lock site is a decision someone makes here, not a tidy-up. */
-        Assert.Equal(9, CountOf(source, "_duckDb.AcquireReadLock("));
+           mirrors, taking the flush's own token (there is no analysis pass at flush time). Ten since #8012:
+           GetStoryPathsAsync, the stored-story-paths read the analysis notification service makes to seed a
+           shorter path's page bucket from a wider path's page row. A READ off the pass, under the read lock like
+           every other reader here, so maintenance's exclusive lock waits for it instead of checkpointing or
+           compacting under its scan; untokened like the two read-backs, because its caller has no pass to
+           abandon. The count is pinned so a new lock site is a decision someone makes here, not a tidy-up. */
+        Assert.Equal(10, CountOf(source, "_duckDb.AcquireReadLock("));
 
         /* The explanation, at the class and at each write site — whichever one a reader lands on. */
         Assert.Contains("The read lock around the WRITES is deliberate (#2455)", source, StringComparison.Ordinal);
