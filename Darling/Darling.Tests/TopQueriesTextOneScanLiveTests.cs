@@ -191,6 +191,31 @@ public sealed class TopQueriesTextOneScanLiveTests
             Assert.Equal(10, mcpRows.Single(r => r.QueryHash == "0xE9").TotalExecutions);
         }, collectorEdges: true);
 
+    [Fact]
+    public Task TheHostObjectLens_ReadsTheOrphanDigestAndTheZeroIntervalRow_AsTheLookupDid() =>
+        WithSeedAsync(async (_, connectionString, serverId, now, ct) =>
+        {
+            /* #8138: the lens's pass 2 has the same two rows to get right as TopQueriesSql's (#8139): E8's newest digest has no
+               dimension row, so the text is the newest row's that resolves; E9's newest text-bearing row has interval 0, kept
+               out of every measure and still the text. Both are ad-hoc groups, so the lens keys them on their own hash. */
+            var expected = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["D3/0xE8/(null)"] = "a8136 e8 resolvable older",
+                ["D3/0xE9/(null)"] = "a8136 e9 newest zero interval",
+            };
+
+            await using var postgres = NpgsqlDataSource.Create(connectionString);
+            var rows = await DarlingDataReader.GetTopQueriesByCpuAsync(postgres, serverId, now.AddHours(-24), now.AddMinutes(5), Top, DatabaseFilter.All, rollUpByHostObject: true, cancellationToken: ct);
+            var texts = rows.ToDictionary(r => r.HostObjectName is null ? Key(r.DatabaseName, r.QueryHash, null) : $"{r.DatabaseName}/*/{r.HostObjectName}", r => r.QueryText, StringComparer.Ordinal);
+            foreach (var (key, text) in expected)
+            {
+                Assert.True(texts.TryGetValue(key, out var got), $"the host-object page has no row for {key}; it has [{string.Join(", ", texts.Keys)}]");
+                Assert.Equal(text, got);
+            }
+
+            Assert.Equal(10, rows.Single(r => r.QueryHash == "0xE9").TotalExecutions);
+        }, collectorEdges: true);
+
     private static string Key(string? database, string? hash, string? host) => $"{database ?? "(null)"}/{hash ?? "(null)"}/{host ?? "(null)"}";
 
     // ------------------------------------------------------------------ plan reading
