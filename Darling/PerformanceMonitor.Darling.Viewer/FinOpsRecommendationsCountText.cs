@@ -11,5 +11,5 @@ public static class FinOpsRecommendationsCountText
     /// <summary>What the count says when the read threw, so a failed read does not keep saying it is loading.</summary>
     public const string Failed = "Recommendations could not be read";
 
-    public static string For(int count) => count > 0 ? $"{count} recommendation(s)" : "no recommendations";
+    public static string For(int count) => count > 0 ? PerformanceMonitor.Common.CountText.Plural(count, "recommendation") : "no recommendations";
 }
