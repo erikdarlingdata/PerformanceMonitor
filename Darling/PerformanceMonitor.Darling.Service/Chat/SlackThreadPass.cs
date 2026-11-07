@@ -283,6 +283,9 @@ public sealed class SlackThreadPass
         }
     }
 
+    internal static SlackThreadPostContent Content(SlackThreadJournalRow row, IReadOnlyList<RequestChangeRow> changes, McpDataDetail mode, string baseUrl, bool buttons) =>
+        Content(row, changes, mode, baseUrl);
+
     /// <summary>PURE: the post of one journal row, at <paramref name="mode"/>. Every collected value goes through the builders' one escape.</summary>
     internal static SlackThreadPostContent Content(SlackThreadJournalRow row, IReadOnlyList<RequestChangeRow> changes, McpDataDetail mode, string baseUrl)
     {

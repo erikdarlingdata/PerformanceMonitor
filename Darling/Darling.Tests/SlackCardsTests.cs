@@ -291,6 +291,34 @@ public sealed class SlackCardsTests
         Assert.Equal(3, Buttons(report).Count);
     }
 
+    /// <summary>A store with no app-level token is not listening, so a press on its card would reach another store's listener and be dropped:
+    /// its cards carry no buttons, name no record, and point at the web page instead. With the token the buttons are there.</summary>
+    [Fact]
+    public void WithoutAnAppToken_TheCardsCarryNoButtons_AndPointAtTheWebPage()
+    {
+        var proposal = Row("proposal_created", $$"""{"proposal_id":"{{Proposal}}","tool":"force_query_store_plan","state":"pending"}""");
+        var change = Row("action_done", """{"called_id":4242,"after":{"status":"muted"}}""",
+            calledDetail: """{"tool":"mute_alert","kind":"mute","target":{"id":"cpu","database":null}}""");
+        var report = Row("reported", null) with { Verdict = "plan regression", RootCause = "the plan changed" };
+        var note = Row(InvestigationRequestStore.NotePending, """{"note_id":31,"metric":"cpu"}""") with { JournalId = 31, Actor = "agent:a", Reason = "Index ix_a is unused", PostKey = "note:31" };
+
+        foreach (var row in new[] { proposal, change, report, note })
+        {
+            var silent = SlackThreadPass.Content(row, [], McpDataDetail.Full, "https://pm.example", buttons: false);
+            Assert.Null(ActionsBlock(silent));
+            Assert.Null(silent.Card);
+            Assert.DoesNotContain(SlackCards.PressAgain, AllText(silent));
+            Assert.Contains("web", AllText(silent), StringComparison.OrdinalIgnoreCase);
+
+            var listening = SlackThreadPass.Content(row, [], McpDataDetail.Full, "https://pm.example", buttons: true);
+            Assert.NotNull(ActionsBlock(listening));
+            Assert.NotNull(listening.Card);
+        }
+
+        /* The note's text still posts without buttons, so the thread shows what was proposed. */
+        Assert.Contains("ix_a", AllText(SlackThreadPass.Content(note, [], McpDataDetail.Full, "", buttons: false)));
+    }
+
     private static SlackThreadJournalRow Row(string eventKind, string? detail, string? calledDetail = null) =>
         new(100, eventKind, new DateTime(2026, 11, 6, 11, 0, 0, DateTimeKind.Utc), "service", null, detail, eventKind + ":100",
             Request, 1, 7, "srv-7", "cpu", "high", "alert", null, calledDetail, 0, null, null, new DateTime(2026, 11, 6, 10, 0, 0, DateTimeKind.Utc));
