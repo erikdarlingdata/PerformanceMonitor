@@ -319,14 +319,28 @@ public sealed class McpPlanAnalysisStatisticsLoadedTests
         });
     }
 
-    [Fact]
-    public void StatsLoaded_StaleAtCompile_FollowsTheSqrtThreshold()
+    [Theory]
+    [InlineData("10000", 2500, false)]
+    [InlineData("10000", 2501, true)]
+    [InlineData("100", 500, false)]
+    [InlineData("100", 501, true)]
+    [InlineData("0", 500, false)]
+    [InlineData("0", 501, true)]
+    [InlineData("500", 500, false)]
+    [InlineData("500", 501, true)]
+    [InlineData("501", 600, false)]
+    [InlineData("501", 601, true)]
+    [InlineData("19000", 4300, false)]
+    [InlineData("19000", 4301, true)]
+    [InlineData("20000", 4472, false)]
+    [InlineData("20000", 4473, true)]
+    [InlineData("100000", 10000, false)]
+    [InlineData("100000", 10001, true)]
+    public void StatsLoaded_StaleAtCompile_UsesTheFloorOf500ThenTheSmallerOfTwentyPercentAndSqrtTerms(string rows, int modifications, bool expected)
     {
-        using var below = Run(StatsXml(new[] { new Stat("Orders", "ST_o", 3162) }), new Scan("Orders", "10000"));
-        using var above = Run(StatsXml(new[] { new Stat("Orders", "ST_o", 3163) }), new Scan("Orders", "10000"));
+        using var doc = Run(StatsXml(new[] { new Stat("Orders", "ST_o", modifications) }), new Scan("Orders", rows));
 
-        Assert.False(Assert.Single(Rows(OnlyStatement(below))).GetProperty("stale_at_compile").GetBoolean());
-        Assert.True(Assert.Single(Rows(OnlyStatement(above))).GetProperty("stale_at_compile").GetBoolean());
+        Assert.Equal(expected, Assert.Single(Rows(OnlyStatement(doc))).GetProperty("stale_at_compile").GetBoolean());
     }
 
     [Fact]
@@ -337,16 +351,6 @@ public sealed class McpPlanAnalysisStatisticsLoadedTests
 
         Assert.Equal(JsonValueKind.Null, row.GetProperty("table_rows").ValueKind);
         Assert.Equal(JsonValueKind.Null, row.GetProperty("stale_at_compile").ValueKind);
-    }
-
-    [Fact]
-    public void StatsLoaded_StaleAtCompile_ZeroRows()
-    {
-        using var none = Run(StatsXml(new[] { new Stat("Orders", "ST_o", 0) }), new Scan("Orders", "0"));
-        using var one = Run(StatsXml(new[] { new Stat("Orders", "ST_o", 1) }), new Scan("Orders", "0"));
-
-        Assert.False(Assert.Single(Rows(OnlyStatement(none))).GetProperty("stale_at_compile").GetBoolean());
-        Assert.True(Assert.Single(Rows(OnlyStatement(one))).GetProperty("stale_at_compile").GetBoolean());
     }
 
     [Fact]

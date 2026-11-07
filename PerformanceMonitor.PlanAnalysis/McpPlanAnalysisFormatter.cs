@@ -254,9 +254,10 @@ public static class McpPlanAnalysisFormatter
                             table_rows = tableRows,
                             modified_percent = tableRows is > 0 ? Math.Round(i.ModificationCount * 100.0 / tableRows.Value, 1) : (double?)null,
                             /* A lead about the statistic's state at compile: the modification count is past the
-                               2016+ automatic update threshold sqrt(1000 x rows), with rows from the plan's
-                               TableCardinality. Not a cause of the estimate. */
-                            stale_at_compile = tableRows == null ? (bool?)null : i.ModificationCount > Math.Sqrt(1000.0 * tableRows.Value),
+                               2016+ automatic update threshold (compat 130+: 500 up to 500 rows, else the smaller
+                               of 500 + 20% of rows and sqrt(1000 x rows)), rows from the plan's TableCardinality.
+                               Not a cause of the estimate. */
+                            stale_at_compile = tableRows == null ? (bool?)null : i.ModificationCount > AutoUpdateThreshold(tableRows.Value),
                             last_update = i.LastUpdate,
                             sampling_percent = i.SamplingPercent
                         };
@@ -378,6 +379,13 @@ public static class McpPlanAnalysisFormatter
 
         return JsonSerializer.Serialize(result, McpHelpers.JsonOptions);
     }
+
+    /// <summary>
+    /// The SQL Server 2016+ automatic update threshold at compatibility level 130 or higher (#8147): 500 for 500 rows
+    /// or fewer, otherwise the smaller of 500 + 20% of the rows and sqrt(1000 x rows).
+    /// </summary>
+    private static double AutoUpdateThreshold(double rows) =>
+        rows <= 500 ? 500 : Math.Min(500 + 0.2 * rows, Math.Sqrt(1000.0 * rows));
 
     /// <summary>
     /// The row count of the statistic's table as the plan saw it (#8147): the largest <c>TableCardinality</c> among
