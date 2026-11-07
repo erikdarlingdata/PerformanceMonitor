@@ -385,6 +385,34 @@ public sealed class GridPolishRound2Tests
     }
 
     [Fact]
+    public void TheFirstSeenAndHighImpactDatabaseCells_EndInAnEllipsis_WhenTheTextIsWiderThanTheColumn()
+    {
+        var problems = new List<string>();
+        void Check(View view, string header)
+        {
+            var col = Col(view, header);
+            if (col.ValueNaturalWidth > col.CellWidth - 16 && !col.Trimmed)
+            {
+                problems.Add($"{view.Grid} at {view.Label}: '{header}' shows '{col.Value}' ({col.ValueNaturalWidth:0} px) in a {col.CellWidth:0} px cell with no ellipsis");
+            }
+        }
+
+        foreach (var view in Views("Server",
+            new Case("ServerConfigChangesGrid", typeof(ServerConfigChangeRow)),
+            new Case("DatabaseConfigChangesGrid", typeof(DatabaseConfigChangeRow))))
+        {
+            Check(view, "First Seen");
+        }
+
+        foreach (var view in Views("FinOps", new Case("HighImpactDataGrid", typeof(HighImpactQueryRow), new() { ["DatabaseName"] = LongName })))
+        {
+            Check(view, "Database");
+        }
+
+        Empty(problems, "Cut text without an ellipsis:");
+    }
+
+    [Fact]
     public void TheSchedulerIssuesGrid_HasNoBlankHeaderCell_RightOfItsLastColumn()
     {
         var problems = new List<string>();
