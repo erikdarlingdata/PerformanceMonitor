@@ -184,6 +184,7 @@ public partial class ServerTab : UserControl
     public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialResolver credentialResolver, int utcOffsetMinutes = 0, bool hasMsdbAccess = true, int sqlEngineEdition = 0, Func<bool>? isLongQueryTraceEnabled = null, AwsRdsKind awsRdsKind = AwsRdsKind.None)
     {
         InitializeComponent();
+        DataGridNumberHeaders.Apply(this); // #8223: a number column's header on the same edge as its values
         // #7385: the chart groups scroll below their floor; the wheel over a chart stays that chart's zoom.
         ChartLayout.KeepWheelOnPlot(
             QueryDurationTrendChart, ProcDurationTrendChart, QueryStoreDurationTrendChart, ExecutionCountTrendChart,

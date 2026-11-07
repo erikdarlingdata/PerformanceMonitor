@@ -133,6 +133,7 @@ public partial class ViewerServerTab : UserControl
             }
         }
         InitializeComponent();
+        DataGridNumberHeaders.Apply(this); // #8223: a number column's header on the same edge as its values
         ViewerChartCards.Attach(this); // #8151: "0 throughout" in a card whose chart plots only zeros
         ApplyTheme(WaitStatsChart);
         _chartHelper.RefreshEmptyChart(WaitStatsChart, "Wait Stats", ""); // #8086: not the default -10 to 10 axes before the first read
