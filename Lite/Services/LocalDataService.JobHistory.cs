@@ -129,7 +129,9 @@ public partial class LocalDataService
             (rank <= share ? guaranteed : rest).Add(row);
         }
 
-        return guaranteed.Concat(rest).Take(Math.Max(limit, 0)).ToList();
+        /* The choice is share-first; the page itself stays in the window's newest-first order, the way the Darling read re-sorts its cut. */
+        var chosen = new HashSet<JobHistoryRow>(guaranteed.Concat(rest).Take(Math.Max(limit, 0)), ReferenceEqualityComparer.Instance);
+        return windowed.Where(chosen.Contains).ToList();
     }
 
     /// <summary>This machine's zone, the last clock in the Job History chain. A seam for the tests, which name a fixed zone so a

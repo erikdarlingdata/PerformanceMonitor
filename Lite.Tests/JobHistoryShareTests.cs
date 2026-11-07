@@ -66,6 +66,18 @@ public sealed class JobHistoryShareTests
         Assert.Equal(2, five.Count(r => r.ServerId == Quiet));
     }
 
+    /// <summary>The share decides which runs are on the page; the page itself reads newest-first across servers, like every other read.</summary>
+    [Fact]
+    public void OverTheCap_ThePageIsStillNewestFirstAcrossServers()
+    {
+        /* Six busy runs and one quiet run at 08:30, cap five: the share is three, so the busy server's 09:00 run fills the last place,
+           and it belongs above the quiet 08:30 run on the page. */
+        var rows = Fleet().Where(r => r.ServerId == Busy || r.InstanceId == 200).ToList();
+        var page = LocalDataService.ApplyJobHistoryShare(LocalDataService.ApplyJobHistoryWindow(rows, Start, int.MaxValue), 5);
+        Assert.Equal(new[] { 100L, 101L, 102L, 103L, 200L }, page.Select(r => r.InstanceId).ToArray());
+        Assert.Equal(page.OrderByDescending(r => r.RunDateTimeUtc).Select(r => r.InstanceId), page.Select(r => r.InstanceId));
+    }
+
     [Fact]
     public void WithTheShareOff_ThePageIsTheNewestOfTheWholeFleet()
     {
