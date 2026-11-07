@@ -289,11 +289,13 @@ internal static class StaThreadProbe
                first use, which takes runtime locks the suspended thread could be holding. Nothing in that window allocates, for the same
                reason: the copy's memory is taken before it. Those four calls also suppress the GC transition, so no return inside the
                window polls for a collection: a collection that starts while a managed thread is held suspended waits for that thread,
-               and a poll here would wait for the collection, which is a deadlock of the whole process. */
+               and a poll here would wait for the collection, which is a deadlock of the whole process. The process handle the read
+               takes is read here too, before the window: GetCurrentProcess is an ordinary P/Invoke, and its return would poll. */
+            var process = GetCurrentProcess();
             _ = SuspendThread(IntPtr.Zero);
             _ = ResumeThread(IntPtr.Zero);
             _ = GetThreadContext(IntPtr.Zero, context);
-            _ = ReadMemory(0, scratch, 8);
+            _ = ReadMemory(process, 0, scratch, 8);
 
             thread = OpenThread(ThreadSuspendResume | ThreadGetContext | ThreadQueryInformation, false, threadId);
             if (thread == IntPtr.Zero)
@@ -304,7 +306,7 @@ internal static class StaThreadProbe
 
             /* The stack's bounds, from the thread's TEB: the copy is sized by the committed stack, and the walk ends at the stack's base. */
             if (NtQueryInformationThread(thread, 0, scratch, 48, out _) != 0
-                || !ReadMemory((ulong)Marshal.ReadInt64(scratch, 8) + 8, scratch + 32, 16))
+                || !ReadMemory(process, (ulong)Marshal.ReadInt64(scratch, 8) + 8, scratch + 32, 16))
             {
                 failure = "the thread's stack bounds could not be read";
                 return frames;
@@ -337,7 +339,7 @@ internal static class StaThreadProbe
                 if (gotContext)
                 {
                     rsp = (ulong)Marshal.ReadInt64(context, ContextRspOffset);
-                    gotStack = rsp >= stackLow && rsp < stackHigh && ReadMemory(rsp, snapshot + SnapshotSlack, (int)(stackHigh - rsp));
+                    gotStack = rsp >= stackLow && rsp < stackHigh && ReadMemory(process, rsp, snapshot + SnapshotSlack, (int)(stackHigh - rsp));
                 }
             }
             finally
@@ -429,8 +431,8 @@ internal static class StaThreadProbe
         }
     }
 
-    private static bool ReadMemory(ulong address, IntPtr buffer, int length) =>
-        ReadProcessMemory(GetCurrentProcess(), address, buffer, (nuint)length, out var read) && (int)read == length;
+    private static bool ReadMemory(IntPtr process, ulong address, IntPtr buffer, int length) =>
+        ReadProcessMemory(process, address, buffer, (nuint)length, out var read) && (int)read == length;
 
     /// <summary>dbghelp is single-threaded, so every call into it holds this.</summary>
     private static readonly object s_dbghelp = new();
