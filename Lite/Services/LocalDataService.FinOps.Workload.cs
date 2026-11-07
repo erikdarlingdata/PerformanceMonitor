@@ -520,9 +520,118 @@ LIMIT $3";
         }
     }
 
+    /// <summary>The scorer's per-measure keep count for the high-impact read: the top ten on each of its six measures.</summary>
+    private const int HighImpactTopN = 10;
+
+    /// <summary>
+    /// High-impact queries: 80/20 analysis across CPU/duration/reads/writes/memory/executions. Aggregates to query_hash
+    /// level, keeps the hashes the scorer can keep (the top $3 on each of its six measures), looks up the sample text
+    /// for those alone, and ships them to <see cref="HighImpactScorer"/> (#8117, the shape Darling's
+    /// HighImpactQueriesSql took in #8084 and #6803). $1 server_id, $2 cutoff, $3 the scorer's per-measure keep count.
+    /// Names <c>v_query_stats</c> wherever it reads the window, so the archive relation swap finds every read.
+    /// </summary>
+    internal const string HighImpactQueriesSql = @"
+WITH per_database AS
+(
+    -- One group per (hash, database): its CPU subtotal picks the hash's database (#7695).
+    SELECT query_hash, database_name,
+           SUM(delta_execution_count) AS executions,
+           SUM(delta_worker_time) AS worker_time,
+           SUM(delta_elapsed_time) AS elapsed_time,
+           SUM(delta_logical_reads) AS logical_reads,
+           SUM(delta_logical_writes) AS logical_writes
+    FROM v_query_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   query_hash IS NOT NULL AND query_hash != ''
+    AND   delta_execution_count > 0
+    GROUP BY query_hash, database_name
+),
+per_hash AS
+(
+    SELECT
+        query_hash,
+        -- #7695: the database that did the most CPU for the hash in the window, not the alphabetically first one. The
+        -- name breaks a tie, case-insensitively and then exactly, so a tie picks the same database every read.
+        (ARRAY_AGG(database_name ORDER BY worker_time DESC NULLS LAST, LOWER(database_name), database_name)
+            FILTER (WHERE database_name IS NOT NULL))[1] AS database_name,
+        SUM(executions) AS total_executions,
+        SUM(worker_time) AS total_worker_time,
+        SUM(elapsed_time) AS total_elapsed_time,
+        SUM(logical_reads) AS total_reads,
+        SUM(logical_writes) AS total_writes,
+        COUNT(DISTINCT database_name) AS database_count
+    FROM per_database
+    GROUP BY query_hash
+    HAVING SUM(executions) > 0
+),
+ranked AS
+(
+    -- The scorer keeps the top $3 hashes on each of its six measures and scores that union. Each rank breaks a tie the
+    -- way the scorer's stable sort over this statement's final order does: more CPU first, then query_hash. A NULL
+    -- measure ranks as the 0 the reader maps it to.
+    SELECT h.*, COALESCE(g.max_grant_kb, 0) AS peak_grant_kb,
+           ROW_NUMBER() OVER (ORDER BY COALESCE(h.total_worker_time, 0) DESC, h.total_worker_time DESC, h.query_hash) AS cpu_rank,
+           ROW_NUMBER() OVER (ORDER BY COALESCE(h.total_elapsed_time, 0) DESC, h.total_worker_time DESC, h.query_hash) AS duration_rank,
+           ROW_NUMBER() OVER (ORDER BY COALESCE(h.total_reads, 0) DESC, h.total_worker_time DESC, h.query_hash) AS reads_rank,
+           ROW_NUMBER() OVER (ORDER BY COALESCE(h.total_writes, 0) DESC, h.total_worker_time DESC, h.query_hash) AS writes_rank,
+           ROW_NUMBER() OVER (ORDER BY COALESCE(g.max_grant_kb, 0) DESC, h.total_worker_time DESC, h.query_hash) AS memory_rank,
+           ROW_NUMBER() OVER (ORDER BY h.total_executions DESC, h.total_worker_time DESC, h.query_hash) AS executions_rank
+    FROM per_hash AS h
+    -- #7166: max_grant_kb is a per-plan high-water mark since that plan was cached, so MAX across a hash's plans is
+    -- the largest grant any plan ever had (the max_dop trap, #3648). The reading is the hash's newest row's, the same
+    -- choice max_dop makes: newest collection first, newest plan first within it. Explicit NULLS LAST: DuckDB and
+    -- Postgres default DESC null placement differently.
+    LEFT JOIN LATERAL
+    (
+        SELECT qs.max_grant_kb
+        FROM v_query_stats AS qs
+        WHERE qs.server_id = $1
+        AND   qs.query_hash = h.query_hash
+        AND   qs.collection_time >= $2
+        AND   qs.delta_execution_count > 0
+        ORDER BY qs.collection_time DESC, qs.creation_time DESC NULLS LAST, qs.delta_worker_time DESC NULLS LAST
+        LIMIT 1
+    ) AS g ON true
+),
+kept AS
+(
+    SELECT *
+    FROM ranked
+    WHERE cpu_rank <= $3 OR duration_rank <= $3 OR reads_rank <= $3
+    OR    writes_rank <= $3 OR memory_rank <= $3 OR executions_rank <= $3
+)
+SELECT
+    k.query_hash,
+    k.database_name,
+    k.total_executions,
+    k.total_worker_time / 1000.0 AS total_cpu_ms,
+    k.total_elapsed_time / 1000.0 AS total_duration_ms,
+    k.total_reads,
+    k.total_writes,
+    k.peak_grant_kb / 1024.0 AS peak_memory_mb,
+    k.database_count,
+    -- The sample text for the kept hashes only (#6803), from each hash's busiest row in the window.
+    (SELECT LEFT(qs2.query_text, 200) FROM v_query_stats qs2
+     WHERE qs2.query_hash = k.query_hash
+     AND qs2.server_id = $1
+     AND qs2.collection_time >= $2
+     AND qs2.query_text IS NOT NULL AND qs2.query_text != ''
+     ORDER BY qs2.delta_execution_count DESC NULLS LAST
+     LIMIT 1) AS sample_query_text,
+    (SELECT qs2.query_text FROM v_query_stats qs2
+     WHERE qs2.query_hash = k.query_hash
+     AND qs2.server_id = $1
+     AND qs2.collection_time >= $2
+     AND qs2.query_text IS NOT NULL AND qs2.query_text != ''
+     ORDER BY qs2.delta_execution_count DESC NULLS LAST
+     LIMIT 1) AS full_query_text
+FROM kept AS k
+ORDER BY k.total_worker_time DESC, k.query_hash";
+
     /// <summary>
     /// Fetches high-impact queries — 80/20 analysis across CPU, duration, reads, writes, memory, executions.
-    /// Aggregates to query_hash level from DuckDB, then scores in C#.
+    /// Aggregates to query_hash level from DuckDB, keeps the hashes the scorer can keep, then scores in C#.
     /// </summary>
     public async Task<List<HighImpactQueryRow>> GetHighImpactQueriesAsync(int serverId, int hoursBack = 24)
     {
@@ -541,64 +650,13 @@ LIMIT $3";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-
-        // #7166: max_grant_kb is a per-plan high-water mark since that plan was cached, so MAX across a hash's plans is
-        // the largest grant any plan ever had (the max_dop trap, #3648). Rank each hash's rows newest-first and keep
-        // the newest row's reading, the same choice max_dop makes. Same CTE as Darling's HighImpactQueriesSql.
-        command.CommandText = @"
-WITH windowed AS
-(
-    SELECT query_hash, database_name, delta_execution_count, delta_worker_time, delta_elapsed_time,
-           delta_logical_reads, delta_logical_writes, max_grant_kb,
-           SUM(delta_worker_time) OVER (PARTITION BY query_hash, database_name) AS db_cpu,
-           ROW_NUMBER() OVER
-           (
-               PARTITION BY query_hash
-               ORDER BY collection_time DESC, creation_time DESC NULLS LAST, delta_worker_time DESC NULLS LAST
-           ) AS newest_rn
-    FROM v_query_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   query_hash IS NOT NULL AND query_hash != ''
-    AND   delta_execution_count > 0
-)
-SELECT
-    query_hash,
-    -- #7695: the database that did the most CPU for the hash in the window (its subtotal, db_cpu), not the alphabetically
-    -- first one. The name breaks a tie, case-insensitively and then exactly, so a tie picks the same database every read.
-    (ARRAY_AGG(database_name ORDER BY db_cpu DESC NULLS LAST, LOWER(database_name), database_name)
-        FILTER (WHERE database_name IS NOT NULL))[1] AS database_name,
-    SUM(delta_execution_count) AS total_executions,
-    SUM(delta_worker_time) / 1000.0 AS total_cpu_ms,
-    SUM(delta_elapsed_time) / 1000.0 AS total_duration_ms,
-    SUM(delta_logical_reads) AS total_reads,
-    SUM(delta_logical_writes) AS total_writes,
-    COALESCE(MAX(CASE WHEN newest_rn = 1 THEN max_grant_kb END), 0) / 1024.0 AS peak_memory_mb,
-    COUNT(DISTINCT database_name) AS database_count,
-    (SELECT LEFT(qs2.query_text, 200) FROM v_query_stats qs2
-     WHERE qs2.query_hash = qs.query_hash
-     AND qs2.server_id = $1
-     AND qs2.collection_time >= $2
-     AND qs2.query_text IS NOT NULL AND qs2.query_text != ''
-     ORDER BY qs2.delta_execution_count DESC NULLS LAST
-     LIMIT 1) AS sample_query_text,
-    (SELECT qs2.query_text FROM v_query_stats qs2
-     WHERE qs2.query_hash = qs.query_hash
-     AND qs2.server_id = $1
-     AND qs2.collection_time >= $2
-     AND qs2.query_text IS NOT NULL AND qs2.query_text != ''
-     ORDER BY qs2.delta_execution_count DESC NULLS LAST
-     LIMIT 1) AS full_query_text
-FROM windowed AS qs
-GROUP BY query_hash
-HAVING SUM(delta_execution_count) > 0
-ORDER BY SUM(delta_worker_time) DESC, query_hash";
-        command.CommandText = command.CommandText.Replace("v_query_stats", relation, StringComparison.Ordinal);
+        command.CommandText = HighImpactQueriesSql.Replace("v_query_stats", relation, StringComparison.Ordinal);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = cutoff });
+        command.Parameters.Add(new DuckDBParameter { Value = HighImpactTopN });
 
-        // Step 1: Read aggregated data
+        // Step 1: Read the hashes the scorer can keep
         var allRows = new List<HighImpactQueryRow>();
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
@@ -619,7 +677,7 @@ ORDER BY SUM(delta_worker_time) DESC, query_hash";
             });
         }
 
-        return HighImpactScorer.Score(allRows);
+        return HighImpactScorer.Score(allRows, HighImpactTopN);
         }
     }
 }

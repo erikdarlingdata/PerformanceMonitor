@@ -637,6 +637,26 @@ public class RunSchedulerTests
     }
 
     [Fact]
+    public async Task R14_exit_3_records_a_denied_also_name_from_skipped_optional()
+    {
+        using var r = new RunRoot(); r.SeedState();
+        var s = r.Settings(tweak: x => x with { Families = x.Families with { OptionalTables = ["config_notification", "plan_correction"] } });
+        var child = new FakeChild { ExitFor = c => FakeChild.Arg(c, "--dimension-origin") == "query_stats" ? 3 : 0 };
+        child.OnCall = c =>
+        {
+            if (FakeChild.Arg(c, "--dimension-origin") != "query_stats") return;
+            // A denied name never runs, so it is a skip in the manifest; an absent one is a skip the run accepts.
+            WriteOptionalManifest(r, c, """{"tables":[],"skipped_optional":[{"table":"config_notification","reason":"denied"},{"table":"plan_correction","reason":"absent"}]}""");
+        };
+        var (exit, output) = await Runs.Go(s, child, RunRoot.Utc(2026, 9, 28, 13, 20));
+        Assert.Equal(0, exit);
+        var e = Assert.Single(r.ReadState()["optional_failures"]!.AsArray())!;
+        Assert.Equal("config_notification", e["table"]!.GetValue<string>());
+        Assert.Equal("denied", e["error"]!.GetValue<string>());
+        Assert.Contains("optional table(s) failed for fresh", output);
+    }
+
+    [Fact]
     public async Task R14_optional_failures_keeps_the_newest_200()
     {
         using var r = new RunRoot();
