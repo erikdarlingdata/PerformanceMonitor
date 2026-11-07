@@ -44,10 +44,14 @@ internal static class DarlingRemovedServerSessions
     /// the state, so this is taken first, inside that lock. A server that stays is not taken, nor is one with no runtime
     /// (nothing to connect with) or one that is not SQL Server. A server whose trace was confirmed dropped has no
     /// long-query session to remove, so it is taken only when a database of it reads this install's own deadlock or
-    /// blocked-process session: the fallbacks do not depend on the trace.
+    /// blocked-process session (the fallbacks do not depend on the trace) or when its <c>schema_objects</c> collector is on
+    /// (<paramref name="schemaOn"/>, by store id; null reads as off), because that session does not depend on it either (#7643).
     /// </summary>
     internal static List<RemovedLongQueryServer> Capture(
-        IReadOnlyList<DarlingWorker.ServerLoopState> servers, IReadOnlyList<MonitoredServer> desired, DarlingCollectorRunner runner)
+        IReadOnlyList<DarlingWorker.ServerLoopState> servers,
+        IReadOnlyList<MonitoredServer> desired,
+        DarlingCollectorRunner runner,
+        Func<int, bool>? schemaOn = null)
     {
         var wanted = new HashSet<int>(desired.Select(server => server.ServerId));
         var removed = new List<RemovedLongQueryServer>();
@@ -65,7 +69,7 @@ internal static class DarlingRemovedServerSessions
             }
 
             var applied = state.LongQueryTraceApplied;
-            if (applied == false && !HoldsOwnFallback(runner, runtime))
+            if (applied == false && !HoldsOwnFallback(runner, runtime) && schemaOn?.Invoke(runtime.ServerId) != true)
             {
                 continue;
             }
@@ -87,7 +91,8 @@ internal static class DarlingRemovedServerSessions
     /// is the registry as the reload left it, so the removed server is not among them and holds nothing back; its own id
     /// is never another registration's. <paramref name="traceOn"/> says whether another registration's long-query trace is
     /// on, and <paramref name="instanceGuard"/> is asked for an on-premises server only. One attempt for the whole step: the
-    /// caller's token is the timeout.
+    /// caller's token is the timeout. <paramref name="schemaOn"/> and <paramref name="schemaInstanceGuard"/> are the same two for the
+    /// <c>schema_objects</c> collector (#7643); unset, the schema-changes session is not touched.
     /// </summary>
     internal static async Task DropAsync(
         RemovedLongQueryServer removed,
@@ -96,12 +101,15 @@ internal static class DarlingRemovedServerSessions
         Func<int, bool> traceOn,
         Func<CancellationToken, Task<LongQueryTraceInstanceGuard>> instanceGuard,
         ILogger logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<int, bool>? schemaOn = null,
+        Func<CancellationToken, Task<LongQueryTraceInstanceGuard>>? schemaInstanceGuard = null)
     {
         var others = (remaining ?? Array.Empty<MonitoredServer>()).Where(other => other.ServerId != removed.Runtime.ServerId).ToList();
         await DropLongQuerySessionAsync(removed, runner, others, traceOn, instanceGuard, logger, cancellationToken);
         await DropOwnFallbacksAsync(removed, runner, others, logger, cancellationToken);
-        await DropSchemaSessionAsync(removed, runner, logger, cancellationToken);
+        await DropSchemaSessionAsync(
+            removed, runner, others, schemaOn ?? (_ => false), schemaInstanceGuard ?? (_ => Task.FromResult(LongQueryTraceInstanceGuard.NoKeepers)), logger, cancellationToken);
     }
 
     /// <summary>
@@ -172,20 +180,28 @@ internal static class DarlingRemovedServerSessions
         }
     }
 
-
     /// <summary>
-    /// This install's schema-changes session (#7643), dropped with the server: on Azure SQL Database from each listed database but
-    /// master, elsewhere from the server. Nothing is opened for an install with no id. Like the other drops here it never throws:
-    /// the failure is logged, because a session left behind never stops the removal. The session is made by the schema pass, so a
-    /// server that never ran it finds nothing and the drop is a no-op.
+    /// This install's schema-changes session (#7643), dropped with the server when its <c>schema_objects</c> collector is on for it
+    /// (<paramref name="schemaOn"/>): the pass that makes the session runs only then, and a collector turned off earlier is
+    /// dropped by the disable path. The session is per install, not per registration, so it stays where another registration of
+    /// this install keeps it with that collector on, by the long-query drop's rules: on premises when the instance guard
+    /// (<paramref name="instanceGuard"/>, built on <paramref name="schemaOn"/>) says one may; on Azure SQL Database in the databases
+    /// that registration keeps. Elsewhere it is dropped from the server, or from each listed database but master. Nothing is opened
+    /// for an install with no id. It never throws: the failure is logged, because a session left behind never stops the removal.
     /// </summary>
     private static async Task DropSchemaSessionAsync(
-        RemovedLongQueryServer removed, DarlingCollectorRunner runner, ILogger logger, CancellationToken cancellationToken)
+        RemovedLongQueryServer removed,
+        DarlingCollectorRunner runner,
+        IReadOnlyList<MonitoredServer> others,
+        Func<int, bool> schemaOn,
+        Func<CancellationToken, Task<LongQueryTraceInstanceGuard>> instanceGuard,
+        ILogger logger,
+        CancellationToken cancellationToken)
     {
         var server = removed.Runtime;
         var name = server.Config.DisplayName;
         var sessionName = SchemaChangesXeSession.TryNameFor(runner.InstallId);
-        if (sessionName is null)
+        if (sessionName is null || !schemaOn(server.ServerId))
         {
             return;
         }
@@ -195,21 +211,31 @@ internal static class DarlingRemovedServerSessions
             cancellationToken.ThrowIfCancellationRequested();
             if (!server.Target.IsAzureSqlDb)
             {
-                using var connection = new SqlConnection(DarlingXeSessions.WithoutReadOnlyIntent(server.ConnectionString));
-                await connection.OpenAsync(cancellationToken);
-                await DarlingSchemaXeSession.DropAsync(connection, sessionName, databaseScoped: false, cancellationToken);
+                var skipReason = (await instanceGuard(cancellationToken)).RemovalSkipReason();
+                if (skipReason is not null)
+                {
+                    logger.LogInformation("[{Server}] The schema-changes XE session was left in place on removal: {Reason}.", name, skipReason);
+                    return;
+                }
+
+                await DropSchemaSessionInAsync(server, runner, string.Empty, sessionName, cancellationToken);
                 logger.LogInformation("[{Server}] Dropped the schema-changes XE session of the removed server", name);
                 return;
             }
 
-            var databases = await runner.ListLongQueryTraceDatabasesAsync(server, allDatabases: true, databaseScope: null, cancellationToken);
-            foreach (var database in databases.Where(database => !string.Equals(database, "master", StringComparison.OrdinalIgnoreCase)))
+            var registrations = DarlingWorker.LongQueryTraceRegistrations(
+                server.Config.Host, others, schemaOn, otherId => runner.DatabaseScopeFor(SchemaObjectsCollector.Instance.Name, otherId));
+            var separatelyMonitored = DarlingWorker.LongQueryTraceServerSeparatelyMonitored(server.Config.Host, others);
+            var listed = await runner.ListLongQueryTraceDatabasesAsync(server, allDatabases: true, databaseScope: null, cancellationToken);
+            var keptElsewhere = LongQueryTraceDatabases.KeptElsewhere(
+                server.ServerId.ToString(CultureInfo.InvariantCulture), server.Config.Host, listed, registrations, separatelyMonitored);
+            var drop = LongQueryTraceDatabases.Plan(enabled: false, listed, Array.Empty<string>(), separatelyMonitored, keptElsewhere).Drop;
+            foreach (var database in drop)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
-                    using var connection = await runner.OpenAzureDatabaseConnectionAsync(server, database, cancellationToken);
-                    await DarlingSchemaXeSession.DropAsync(connection, sessionName, databaseScoped: true, cancellationToken);
+                    await DropSchemaSessionInAsync(server, runner, database, sessionName, cancellationToken);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -231,7 +257,29 @@ internal static class DarlingRemovedServerSessions
                 "[{Server}] Could not drop the schema-changes XE session of the removed server; it may remain on the server: {Message}", name, ex.Message);
         }
     }
-    /// <summary>
+
+    /// <summary>One drop: in <paramref name="database"/> on Azure SQL Database, or the server's own scope for the empty name.</summary>
+    private static async Task DropSchemaSessionInAsync(
+        ServerRuntime server, DarlingCollectorRunner runner, string database, string sessionName, CancellationToken cancellationToken)
+    {
+        if (runner.SchemaSessionDropForTests is { } drop)
+        {
+            await drop(server, database, sessionName, cancellationToken);
+            return;
+        }
+
+        if (database.Length == 0)
+        {
+            using var connection = new SqlConnection(DarlingXeSessions.WithoutReadOnlyIntent(server.ConnectionString));
+            await connection.OpenAsync(cancellationToken);
+            await DarlingSchemaXeSession.DropAsync(connection, sessionName, databaseScoped: false, cancellationToken);
+            return;
+        }
+
+        using var azure = await runner.OpenAzureDatabaseConnectionAsync(server, database, cancellationToken);
+        await DarlingSchemaXeSession.DropAsync(azure, sessionName, databaseScoped: true, cancellationToken);
+    }
+
     /// The deadlock and blocked-process sessions this install chose for itself in the removed server's Azure SQL Database
     /// databases (<see cref="AlwaysOnXeChoices.OwnDatabases"/>): each is dropped by this install's own name, unless another
     /// registration of the same logical server reads its own session in that database. A database of the same name on

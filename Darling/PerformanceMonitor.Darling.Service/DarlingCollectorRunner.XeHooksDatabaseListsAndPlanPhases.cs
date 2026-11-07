@@ -126,6 +126,12 @@ public sealed partial class DarlingCollectorRunner
     internal Func<ServerRuntime, string, LongQueryTraceReplicaState>? LongQueryTraceReplicaStateForTests { get; set; }
 
     /// <summary>
+    /// Replaces the connection a removal opens to drop the schema-changes session (#7643): called with the server, the database
+    /// (the empty name for the server's own scope) and the session name. Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, string, string, CancellationToken, Task>? SchemaSessionDropForTests { get; set; }
+
+    /// <summary>
     /// The databases the long-query trace works in on Azure SQL Database. With <paramref name="allDatabases"/>, every
     /// online database with no exclusions and no scope; otherwise the monitored ones, narrowed by
     /// <paramref name="databaseScope"/>. A registration that names a database gets that database either way.

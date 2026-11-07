@@ -440,6 +440,126 @@ public sealed class LongQueryTraceRemovalTests : IAsyncDisposable
         Assert.Empty(choices.OwnDatabases(key, AlwaysOnXeSessionKind.Deadlock));
     }
 
+    /* ── the schema-changes session (#7643): dropped only when it is ours to drop ── */
+
+    private static readonly string OwnSchemaSession = SchemaChangesXeSession.NameFor(InstallIdValue);
+
+    /// <summary>The removal with the <c>schema_objects</c> collector on for the given ids; returns the databases the schema drop ran in (empty name: the server's own scope).</summary>
+    private static async Task<List<string>> RemoveWithSchemaAsync(
+        Rig rig, IEnumerable<int> schemaOn, LongQueryTraceInstanceGuard? schemaGuard = null, bool traceOnForOthers = false)
+    {
+        var dropped = new List<string>();
+        rig.Runner.SchemaSessionDropForTests = (_, database, sessionName, _) =>
+        {
+            Assert.Equal(OwnSchemaSession, sessionName);
+            dropped.Add(database);
+            return Task.CompletedTask;
+        };
+        var on = new HashSet<int>(schemaOn);
+        await DarlingRemovedServerSessions.DropAsync(
+            rig.Removed, rig.Runner, rig.Remaining, id => traceOnForOthers && rig.TraceOn.Contains(id), _ => Task.FromResult(rig.Guard), rig.Logger, CancellationToken.None,
+            on.Contains, _ => Task.FromResult(schemaGuard ?? LongQueryTraceInstanceGuard.NoKeepers));
+        return dropped;
+    }
+
+    [Fact]
+    public async Task SchemaSessionRemoval_Azure_DropsEveryListedDatabaseButMaster_WhenNoOtherRegistrationKeepsIt_EvenWithTheTraceOff()
+    {
+        var rig = BuildRig();
+        rig.TraceApplied = false;
+
+        var dropped = await RemoveWithSchemaAsync(rig, new[] { rig.Config.ServerId });
+
+        Assert.Equal(new[] { "alpha", "beta", "gamma" }, dropped);
+        Assert.Empty(rig.Calls);
+    }
+
+    [Fact]
+    public async Task SchemaSessionRemoval_Azure_LeavesTheDatabasesAnotherRegistrationWithTheSchemaCollectorOnKeeps()
+    {
+        var rig = BuildRig();
+        var other = Another(Host, "alpha", "gamma");
+        rig.Remaining.Add(other);
+
+        var dropped = await RemoveWithSchemaAsync(rig, new[] { rig.Config.ServerId, other.ServerId });
+
+        Assert.Equal(new[] { "alpha", "gamma" }, dropped);
+    }
+
+    [Fact]
+    public async Task SchemaSessionRemoval_Azure_IsNotKeptByARegistrationThatOnlyHasTheLongQueryTraceOn()
+    {
+        var rig = BuildRig();
+        var other = Another(Host, "alpha", "gamma");
+        rig.Remaining.Add(other);
+        rig.TraceOn.Add(other.ServerId);
+
+        var dropped = await RemoveWithSchemaAsync(rig, new[] { rig.Config.ServerId }, traceOnForOthers: true);
+
+        Assert.Equal(new[] { "alpha", "beta", "gamma" }, dropped);
+    }
+
+    [Fact]
+    public async Task SchemaSessionRemoval_OnPremises_DropsTheServerScopedSession_Once()
+    {
+        var rig = BuildRig(azureSqlDatabase: false);
+
+        var dropped = await RemoveWithSchemaAsync(rig, new[] { rig.Config.ServerId });
+
+        Assert.Equal(new[] { string.Empty }, dropped);
+    }
+
+    [Fact]
+    public async Task SchemaSessionRemoval_OnPremises_LeavesTheSession_WhileAnotherRegistrationOfTheSameInstanceKeepsIt_AndSaysSo()
+    {
+        var rig = BuildRig(azureSqlDatabase: false);
+        var guard = new LongQueryTraceInstanceGuard("sql01", new[] { Instance(traceOn: true, "SQL01") });
+
+        var dropped = await RemoveWithSchemaAsync(rig, new[] { rig.Config.ServerId }, guard);
+
+        Assert.Empty(dropped);
+        Assert.Contains(rig.Logger.Entries, e =>
+            e.Level == LogLevel.Information
+            && e.Message.Contains("schema-changes", StringComparison.Ordinal)
+            && e.Message.Contains("keeps it on the same instance", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SchemaSessionRemoval_WithTheSchemaCollectorOffForTheServer_TouchesNothing(bool azureSqlDatabase)
+    {
+        var rig = BuildRig(azureSqlDatabase);
+
+        var dropped = await RemoveWithSchemaAsync(rig, Array.Empty<int>());
+
+        Assert.Empty(dropped);
+    }
+
+    [Fact]
+    public async Task SchemaSessionRemoval_ForAnInstallWithNoId_TouchesNothing()
+    {
+        var rig = BuildRig(installId: null);
+
+        var dropped = await RemoveWithSchemaAsync(rig, new[] { rig.Config.ServerId });
+
+        Assert.Empty(dropped);
+    }
+
+    /// <summary>A removed server with the long-query trace off and the schema collector on is captured for the schema drop; with both off it is still skipped.</summary>
+    [Fact]
+    public void Capture_TakesAServerWhoseTraceIsOff_WhenItsSchemaCollectorIsOn_AndSkipsOneWithBothOff()
+    {
+        var rig = BuildRig();
+
+        var removed = Assert.Single(DarlingRemovedServerSessions.Capture(
+            new[] { StateOf(rig, applied: false) }, Array.Empty<MonitoredServer>(), rig.Runner, id => id == rig.Config.ServerId));
+        Assert.False(removed.LongQueryTraceApplied);
+
+        Assert.Empty(DarlingRemovedServerSessions.Capture(
+            new[] { StateOf(rig, applied: false) }, Array.Empty<MonitoredServer>(), rig.Runner, _ => false));
+    }
+
     /* ── what the registry forgets: the capture ── */
 
     private static DarlingWorker.ServerLoopState StateOf(Rig rig, bool? applied, bool withRuntime = true) =>

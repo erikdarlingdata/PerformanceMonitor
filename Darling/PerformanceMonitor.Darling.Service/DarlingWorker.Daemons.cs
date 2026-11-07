@@ -1378,7 +1378,7 @@ public sealed partial class DarlingWorker
         {
             /* #4961: the reconcile clears a removed server's runtime and drops its state in one synchronous step, so what the
                drop below needs (the definition, the runtime, the long-query latch) is taken first. */
-            removedServers = DarlingRemovedServerSessions.Capture(servers, view.EnabledServers, runner);
+            removedServers = DarlingRemovedServerSessions.Capture(servers, view.EnabledServers, runner, SchemaObjectsOn);
             ReconcileServers(servers, view.EnabledServers);
 
             /* #5452: an assumed-role session is kept only while an enabled server names its role and external ID. */
@@ -1410,6 +1410,10 @@ public sealed partial class DarlingWorker
         return view.ConfigVersion;
     }
 
+    /// <summary>Whether the <c>schema_objects</c> collector is enabled for a registration, by store id: its own override or else the install's default (#7643).</summary>
+    private bool SchemaObjectsOn(int serverId) =>
+        StoreConfigProvider.ResolveSchedule(SchemaObjectsCollector.Instance.Name, serverId, _scheduleOverrides).Enabled;
+
     /// <summary>
     /// The removed servers of one reload drop this install's sessions on them (#4961), one at a time, each in one attempt
     /// within <see cref="DarlingRemovedServerSessions.Timeout"/>. The registry already holds the servers that remain, so
@@ -1425,6 +1429,7 @@ public sealed partial class DarlingWorker
 
         var remaining = _registryState.Read()?.Servers;
         bool TraceOn(int otherId) => StoreConfigProvider.ResolveSchedule("long_query_completions", otherId, _scheduleOverrides).Enabled;
+        bool SchemaOn(int otherId) => SchemaObjectsOn(otherId);
         foreach (var removed in removedServers)
         {
             using var sessionDrop = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
@@ -1438,7 +1443,10 @@ public sealed partial class DarlingWorker
                 token => LongQueryTraceInstanceGuardFor(
                     removed.Runtime.ServerId, remaining, TraceOn, (otherId, carrier) => runner.GetCollectorStateAsync(otherId, carrier, token)),
                 _logger,
-                sessionDrop.Token);
+                sessionDrop.Token,
+                SchemaOn,
+                token => LongQueryTraceInstanceGuardFor(
+                    removed.Runtime.ServerId, remaining, SchemaOn, (otherId, carrier) => runner.GetCollectorStateAsync(otherId, carrier, token)));
         }
     }
 
