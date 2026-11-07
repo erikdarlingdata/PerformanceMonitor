@@ -1,0 +1,91 @@
+<UserControl x:Class="PerformanceMonitorLite.Controls.SidebarFooter"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- #8169: the sidebar footer as the Viewer has it. Four icon buttons (Add Server, Manage Servers, Investigations,
+         Settings) in a 2x2 block and a "More" menu with the other nine actions. Each action keeps the accessible name its
+         button had, so screen readers and the UI walk find it. The window wires the events; this control owns the layout. -->
+    <UserControl.Resources>
+        <Style x:Key="FooterIcon" TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="Segoe MDL2 Assets"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Margin" Value="0,0,6,0"/>
+        </Style>
+        <Style x:Key="FooterButton" TargetType="Button">
+            <Setter Property="Padding" Value="6,4"/>
+            <Setter Property="Margin" Value="2"/>
+            <Setter Property="HorizontalContentAlignment" Value="Left"/>
+        </Style>
+    </UserControl.Resources>
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <Button x:Name="AddServerButton" Grid.Row="0" Grid.Column="0" Style="{StaticResource FooterButton}" Click="AddServer_Click"
+                AutomationProperties.Name="Add Server">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="&#xE710;" Style="{StaticResource FooterIcon}"/>
+                <TextBlock Text="Add Server" VerticalAlignment="Center"/>
+            </StackPanel>
+        </Button>
+        <Button x:Name="ManageServersButton" Grid.Row="0" Grid.Column="1" Style="{StaticResource FooterButton}" Click="ManageServers_Click"
+                AutomationProperties.Name="Manage Servers">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="&#xE770;" Style="{StaticResource FooterIcon}"/>
+                <TextBlock Text="Manage Servers" VerticalAlignment="Center"/>
+            </StackPanel>
+        </Button>
+        <Button x:Name="InvestigationsButton" Grid.Row="1" Grid.Column="0" Style="{StaticResource FooterButton}" Click="Investigations_Click"
+                AutomationProperties.Name="Investigations"
+                ToolTip="Read-only list of the investigation requests agents were asked to look into, with their reports and journal (#5904)">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="&#xE721;" Style="{StaticResource FooterIcon}"/>
+                <TextBlock Text="Investigations" VerticalAlignment="Center"/>
+            </StackPanel>
+        </Button>
+        <Button x:Name="SettingsButton" Grid.Row="1" Grid.Column="1" Style="{StaticResource FooterButton}" Click="Settings_Click"
+                AutomationProperties.Name="Settings">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="&#xE713;" Style="{StaticResource FooterIcon}"/>
+                <TextBlock Text="Settings" VerticalAlignment="Center"/>
+            </StackPanel>
+        </Button>
+
+        <Button x:Name="MoreButton" Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2" Style="{StaticResource FooterButton}" Click="More_Click"
+                AutomationProperties.Name="More" ToolTip="Tags, import, logs, plan viewer and about">
+            <Button.ContextMenu>
+                <ContextMenu x:Name="MoreMenu" Placement="Top">
+                    <MenuItem x:Name="AddMultipleServersItem" AutomationProperties.Name="Add Multiple Servers…" Header="Add Multiple Servers…" Click="AddMultipleServers_Click"
+                              ToolTip="Paste a list of servers and add them all at once with shared credentials"/>
+                    <MenuItem x:Name="ManageTagsItem" AutomationProperties.Name="Manage Tags" Header="Manage Tags" Click="ManageTags_Click"/>
+                    <MenuItem x:Name="ManageQueryTagsItem" AutomationProperties.Name="Manage Query Tags" Header="Manage Query Tags" Click="ManageQueryTags_Click"
+                              ToolTip="Tag queries by hand or by rule"/>
+                    <MenuItem x:Name="OpenPlanViewerItem" AutomationProperties.Name="Open Plan Viewer" Header="Open Plan Viewer" Click="OpenPlanViewer_Click"
+                              ToolTip="Open or paste an execution plan (independent of any server)"/>
+                    <Separator/>
+                    <MenuItem x:Name="ImportDataItem" AutomationProperties.Name="Import Data" Header="Import Data" Click="ImportData_Click"
+                              ToolTip="Import historical data from a previous Lite install"/>
+                    <MenuItem x:Name="ImportSettingsItem" AutomationProperties.Name="Import Settings" Header="Import Settings" Click="ImportSettings_Click"
+                              ToolTip="Import server connections and settings from a previous Lite install"/>
+                    <Separator/>
+                    <MenuItem x:Name="ViewLogItem" AutomationProperties.Name="View Log" Header="View Log" Click="ViewLog_Click"
+                              ToolTip="Open the current application log file"/>
+                    <MenuItem x:Name="OpenLogFolderItem" AutomationProperties.Name="Open Log Folder" Header="Open Log Folder" Click="OpenLogFolder_Click"
+                              ToolTip="Open the log folder in Explorer (for grabbing logs to attach to bug reports)"/>
+                    <MenuItem x:Name="AboutItem" AutomationProperties.Name="About" Header="About" Click="About_Click"/>
+                </ContextMenu>
+            </Button.ContextMenu>
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="&#xE712;" Style="{StaticResource FooterIcon}"/>
+                <TextBlock Text="More" VerticalAlignment="Center"/>
+            </StackPanel>
+        </Button>
+    </Grid>
+</UserControl>

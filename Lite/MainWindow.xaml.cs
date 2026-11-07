@@ -2193,8 +2193,8 @@ public partial class MainWindow : Window
         }
 
         /* Prevent double-clicks */
-        ImportDataButton.IsEnabled = false;
-        ImportDataButtonText.Text = "Importing...";
+        Sidebar.ImportDataMenuItem.IsEnabled = false;
+        Sidebar.ImportDataMenuItem.Header = "Importing...";
         StatusText.Text = "Importing data from previous install...";
 
         try
@@ -2267,8 +2267,8 @@ public partial class MainWindow : Window
         }
         finally
         {
-            ImportDataButton.IsEnabled = true;
-            ImportDataButtonText.Text = "Import Data";
+            Sidebar.ImportDataMenuItem.IsEnabled = true;
+            Sidebar.ImportDataMenuItem.Header = "Import Data";
         }
     }
 
@@ -2447,6 +2447,7 @@ public partial class MainWindow : Window
             SidebarColumn.Width = new GridLength(40);
             SidebarTitle.Visibility = Visibility.Collapsed;
             SidebarSubtitle.Visibility = Visibility.Collapsed;
+            ServerSearchRow.Visibility = Visibility.Collapsed;
             if (sender is System.Windows.Controls.Button btn) btn.Content = "»";
         }
         else
@@ -2454,6 +2455,7 @@ public partial class MainWindow : Window
             SidebarColumn.Width = new GridLength(280);
             SidebarTitle.Visibility = Visibility.Visible;
             SidebarSubtitle.Visibility = Visibility.Visible;
+            ServerSearchRow.Visibility = Visibility.Visible;
             if (sender is System.Windows.Controls.Button btn) btn.Content = "«";
         }
     }
