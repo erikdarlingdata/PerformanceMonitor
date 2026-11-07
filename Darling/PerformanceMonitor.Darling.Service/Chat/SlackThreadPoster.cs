@@ -112,9 +112,11 @@ public sealed class SlackThreadPoster
     private readonly ILogger<SlackThreadPoster> _logger;
     private readonly SlackPostThrottle _throttle;
     private readonly Func<DateTime> _utcNow;
+    private readonly ISlackCardStore? _cards;
 
     /// <param name="throttle">Where a 429's block is recorded; the pass that drives this poster shares it. A new one when null.</param>
     /// <param name="utcNow">The clock the block's end is measured from.</param>
+    /// <param name="cards">Where a delivered card with buttons is saved (#7658), so a press on it is recognized. Null saves none.</param>
     public SlackThreadPoster(ISlackRequestThreadStore store, ISlackBotPosts posts, ILogger<SlackThreadPoster> logger,
         SlackPostThrottle? throttle = null, Func<DateTime>? utcNow = null, ISlackCardStore? cards = null)
     {
@@ -123,6 +125,7 @@ public sealed class SlackThreadPoster
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _throttle = throttle ?? new SlackPostThrottle();
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
+        _cards = cards;
     }
 
     /// <summary>The throttle this poster records a 429 in.</summary>
@@ -195,6 +198,19 @@ public sealed class SlackThreadPoster
             /* A follow-up's request post replied in its parent's thread: the thread is saved as the follow-up's own, so a follow-up of
                the follow-up finds it with one lookup and the chain lands in the root's thread. */
             await _store.SaveAsync(new SlackRequestThread(target.RequestId, thread.ChannelId, thread.ThreadTs), cancellationToken);
+        }
+
+        /* A card with buttons is saved under the channel and ts Slack gave it (#7658): a press names the card by them, and only a stored card acts. */
+        if (content.Card is { } card && _cards is not null)
+        {
+            if (string.IsNullOrWhiteSpace(result.Ts))
+            {
+                _logger.LogWarning("Slack card {PostKey} for investigation request {RequestId} delivered without a ts; its buttons cannot act.", postKey, target.RequestId);
+            }
+            else
+            {
+                await _cards.SaveCardAsync(new SlackCard(target.RequestId, postKey, result.Channel ?? channel, result.Ts, card.Kind, card.RecordId, target.ServerId), cancellationToken);
+            }
         }
 
         return SlackThreadPostOutcome.Posted;

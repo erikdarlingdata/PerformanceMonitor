@@ -20,7 +20,8 @@ namespace PerformanceMonitor.Darling.Service.Chat;
 /// it (<c>alert</c>, <c>follow_up</c>, ...) and the web dashboard's base URL, empty for no link.</summary>
 public sealed record SlackRequestFacts(Guid RequestId, string ServerName, string Metric, string Severity, string Trigger, string BaseUrl);
 
-/// <summary>#7656: one post as it goes to Slack: the plain <c>text</c> (what a notification and a search show) and the blocks.</summary>
+/// <summary>#7656: one post as it goes to Slack: the plain <c>text</c> (what a notification and a search show) and the blocks. <see cref="Card"/>
+/// (#7658) names the record the post's buttons act on, so the poster saves the card once Slack gives it a ts; null for a post with no buttons.</summary>
 public sealed record SlackThreadPostContent(string Text, IReadOnlyList<object> Blocks, SlackCardFacts? Card = null);
 
 /// <summary>
@@ -87,7 +88,11 @@ public static class SlackThreadPosts
     /// <summary>The report, with the #6979 notice's content and its Slack bounds: the lead (verdict, server, metric) in one section, then
     /// the notice's own body blocks (the root cause's first line at the mode in a section of its own, the changes in another, each
     /// bounded after escaping), then the links. No section passes Slack's 3,000-character text limit.</summary>
-    public static SlackThreadPostContent ReportPost(ReportNoticeContent content, McpDataDetail mode)
+    public static SlackThreadPostContent ReportPost(ReportNoticeContent content, McpDataDetail mode) => ReportPost(content, mode, verdictButtons: false);
+
+    /// <summary>The report with the verdict buttons (#7658): right, partly and wrong, each carrying the request id, with the line that says
+    /// corrections go on the web feedback form (the request page), and the press-again line.</summary>
+    public static SlackThreadPostContent ReportPost(ReportNoticeContent content, McpDataDetail mode, bool verdictButtons)
     {
         ArgumentNullException.ThrowIfNull(content);
         var verdict = Bounded(content.Verdict, 100);
@@ -100,37 +105,110 @@ public static class SlackThreadPosts
         blocks.AddRange(WebhookAlertService.ReportNoticeSlackBodyBlocks(content with { RootCauseFirstLine = rootCause }));
         var (requestUrl, changesUrl) = WebhookAlertService.ReportNoticeLinks(content);
         AddLinks(blocks, (requestUrl, "Open the request"), (changesUrl, "Open the agent changes"));
-        return new SlackThreadPostContent($"Agent report: {verdict} on {server}", blocks);
+        if (!verdictButtons)
+        {
+            return new SlackThreadPostContent($"Agent report: {verdict} on {server}", blocks);
+        }
+
+        var id = content.RequestId.ToString("D");
+        blocks.Add(SlackCards.Actions("report:" + id,
+            SlackCards.Button(SlackCardActions.VerdictRight, "Right", id),
+            SlackCards.Button(SlackCardActions.VerdictPartly, "Partly right", id),
+            SlackCards.Button(SlackCardActions.VerdictWrong, "Wrong", id)));
+        blocks.Add(SlackCards.Context("Mark the verdict. Corrections go on the web feedback form" + (requestUrl is null ? "." : ", on the request page.") + " " + SlackCards.PressAgain));
+        return new SlackThreadPostContent($"Agent report: {verdict} on {server}", blocks, new SlackCardFacts(SlackCardKinds.Report, id));
     }
 
-    public static SlackThreadPostContent ReportPost(ReportNoticeContent content, McpDataDetail mode, bool verdictButtons) => ReportPost(content, mode);
-
-    public static SlackThreadPostContent ChangePost(string tool, string objectText, string result, McpDataDetail mode, long? undoCalledId, string? kind) =>
-        ChangePost(tool, objectText, result, mode);
-
-    public static SlackThreadPostContent NotePost(long noteId, string author, string noteText, string serverName, string? metric, McpDataDetail mode) =>
-        new("Note proposed", [Section("*Note proposed*")]);
-
-    public static SlackThreadPostContent ConfirmAnswer(string message, IReadOnlyList<string> lines, string confirmActionId, string confirmLabel, string confirmValue, string? style) =>
-        new(message, [Section(message)]);
-
-    public static SlackThreadPostContent DecidedCard(string headline, string outcome, string decidedBy, string? link) =>
-        new(headline, [Section(headline)]);
-
-    public static SlackThreadPostContent ProposalPost(string tool, string serverName, string state, string? statement, string? proposalUrl, McpDataDetail mode,
-        DateTime? expiresUtc, Guid? pendingProposalId) =>
-        ProposalPost(tool, serverName, state, statement, proposalUrl, mode, expiresUtc);
-
     /// <summary>One agent change: the tool, the object at the mode, and how it ended.</summary>
-    public static SlackThreadPostContent ChangePost(string tool, string objectText, string result, McpDataDetail mode)
+    public static SlackThreadPostContent ChangePost(string tool, string objectText, string result, McpDataDetail mode) =>
+        ChangePost(tool, objectText, result, mode, null, null);
+
+    /// <summary>One agent change with its Undo button (#7658) when <paramref name="undoCalledId"/> names a done change whose <paramref name="kind"/>
+    /// has an undo (<see cref="SlackCards.HasUndo"/>): the Level 2 changes and the plan changes, never a kill.</summary>
+    public static SlackThreadPostContent ChangePost(string tool, string objectText, string result, McpDataDetail mode, long? undoCalledId, string? kind)
     {
         var line = ChangeLine(tool, objectText, result, mode);
-        return new SlackThreadPostContent("Agent change: " + Bounded(tool, 50) + " " + Bounded(result, 50), [Section("*Agent change*\n" + line)]);
+        var text = "Agent change: " + Bounded(tool, 50) + " " + Bounded(result, 50);
+        var blocks = new List<object> { Section("*Agent change*\n" + line) };
+        if (undoCalledId is not long calledId || !SlackCards.HasUndo(kind))
+        {
+            return new SlackThreadPostContent(text, blocks);
+        }
+
+        var id = calledId.ToString(CultureInfo.InvariantCulture);
+        blocks.Add(SlackCards.Actions("change:" + id, SlackCards.Button(SlackCardActions.UndoFirst, "Undo", id)));
+        blocks.Add(SlackCards.Context("Undo takes two presses: the first shows what runs, the second confirms. " + SlackCards.PressAgain));
+        return new SlackThreadPostContent(text, blocks, new SlackCardFacts(SlackCardKinds.Change, id));
+    }
+
+    /// <summary>A pending note written from a request (#7658): the author, the server and metric, the note at the mode, and the Approve and Reject
+    /// buttons carrying the note id. A fleet note is not posted; the web and the Viewer decide it.</summary>
+    public static SlackThreadPostContent NotePost(long noteId, string author, string noteText, string serverName, string? metric, McpDataDetail mode)
+    {
+        var id = noteId.ToString(CultureInfo.InvariantCulture);
+        var lines = new List<string> { "*Note proposed*", "*By:* " + Bounded(author, TextLimit), "*Server:* " + Bounded(serverName, TextLimit) };
+        if (!string.IsNullOrWhiteSpace(metric))
+        {
+            lines.Add("*Metric:* " + Bounded(metric, TextLimit));
+        }
+
+        if (mode != McpDataDetail.MetadataOnly)
+        {
+            var shown = mode == McpDataDetail.MaskLiterals ? McpDataDetailMasker.MaskLiterals(noteText) : noteText;
+            lines.Add(Bounded(shown, StatementLimit));
+        }
+        else
+        {
+            lines.Add("_The note's text is withheld at this store's data detail setting._");
+        }
+
+        var blocks = new List<object>
+        {
+            Section(string.Join("\n", lines)),
+            SlackCards.Actions("note:" + id,
+                SlackCards.Button(SlackCardActions.NoteApprove, "Approve note", id, "primary"),
+                SlackCards.Button(SlackCardActions.NoteReject, "Reject note", id, "danger")),
+            SlackCards.Context("An approved note goes into future briefs. " + SlackCards.PressAgain),
+        };
+        return new SlackThreadPostContent("Note proposed by " + Bounded(author, TextLimit) + " on " + Bounded(serverName, TextLimit), blocks,
+            new SlackCardFacts(SlackCardKinds.Note, id));
+    }
+
+    /// <summary>The answer a first press gets (#7658), shown to the presser alone: the message, the facts or the statement, and the Confirm button whose
+    /// <paramref name="confirmValue"/> names the card.</summary>
+    public static SlackThreadPostContent ConfirmAnswer(string message, IReadOnlyList<string> lines, string confirmActionId, string confirmLabel, string confirmValue, string? style)
+    {
+        var blocks = new List<object> { Section(Bounded(message, TextLimit)) };
+        if (lines.Count > 0)
+        {
+            blocks.Add(Section(string.Join("\n", lines)));
+        }
+
+        blocks.Add(SlackCards.Actions("confirm", SlackCards.Button(confirmActionId, confirmLabel, confirmValue, style)));
+        blocks.Add(SlackCards.Context("Only you see this. The same person makes both presses. " + SlackCards.PressAgain));
+        return new SlackThreadPostContent(message, blocks);
+    }
+
+    /// <summary>The card after its decision (#7658): the headline, how it ended and who decided, with the record's link. No buttons.</summary>
+    public static SlackThreadPostContent DecidedCard(string headline, string outcome, string decidedBy, string? link)
+    {
+        var head = Bounded(headline, TextLimit);
+        var state = Bounded(outcome, 100);
+        var who = Bounded(decidedBy, TextLimit);
+        var blocks = new List<object> { Section($"*{head}*\n*Outcome:* {state}\n*Decided by:* {who}") };
+        AddLink(blocks, link, "Open");
+        return new SlackThreadPostContent($"{head}: {state} by {who}", blocks);
     }
 
     /// <summary>A proposal, when it is made and at each decision: the kind, the server, the state, when it expires (the card, when it is
     /// made), the statement at the mode (<c>metadataOnly</c> withholds it and the link stands in), and the link to the proposal page.</summary>
-    public static SlackThreadPostContent ProposalPost(string tool, string serverName, string state, string? statement, string? proposalUrl, McpDataDetail mode, DateTime? expiresUtc = null)
+    public static SlackThreadPostContent ProposalPost(string tool, string serverName, string state, string? statement, string? proposalUrl, McpDataDetail mode, DateTime? expiresUtc = null) =>
+        ProposalPost(tool, serverName, state, statement, proposalUrl, mode, expiresUtc, null);
+
+    /// <summary>The proposal card with its buttons (#7658): Approve and Refuse, each carrying the proposal id, when <paramref name="pendingProposalId"/>
+    /// names the pending proposal the card is made for. Approve takes two presses; the first answers the presser alone with the facts.</summary>
+    public static SlackThreadPostContent ProposalPost(string tool, string serverName, string state, string? statement, string? proposalUrl, McpDataDetail mode,
+        DateTime? expiresUtc, Guid? pendingProposalId)
     {
         var kind = Bounded(tool, 50);
         var server = Bounded(serverName, TextLimit);
@@ -149,7 +227,17 @@ public static class SlackThreadPosts
 
         var blocks = new List<object> { Section(string.Join("\n", lines)) };
         AddLink(blocks, proposalUrl, "Open the proposal");
-        return new SlackThreadPostContent($"Proposed action: {kind} on {server} ({stateText})", blocks);
+        if (pendingProposalId is not Guid proposalId)
+        {
+            return new SlackThreadPostContent($"Proposed action: {kind} on {server} ({stateText})", blocks);
+        }
+
+        var id = proposalId.ToString("D");
+        blocks.Add(SlackCards.Actions("proposal:" + id,
+            SlackCards.Button(SlackCardActions.ProposalApproveFirst, "Approve", id, "primary"),
+            SlackCards.Button(SlackCardActions.ProposalRefuse, "Refuse", id, "danger")));
+        blocks.Add(SlackCards.Context("Approve takes two presses: the first shows the facts to you alone, the second confirms. " + SlackCards.PressAgain));
+        return new SlackThreadPostContent($"Proposed action: {kind} on {server} ({stateText})", blocks, new SlackCardFacts(SlackCardKinds.Proposal, id));
     }
 
     /// <summary>How a request ended without a resolution: closed by a person, expired, or out of claims. <paramref name="actor"/> is the

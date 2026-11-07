@@ -1081,11 +1081,18 @@ public sealed partial class DarlingWorker
         /* #7657: the Socket Mode listener's host reads the opened app-level token through this publication: a token set means listen,
            blank means off, and a change is seen on the host's next poll. The bot token learns the workspace id at connect, and the
            routes decide which channels this store owns. */
-        _slackListenerState?.Publish(() => alertSettings.SlackAppToken, () => alertSettings.SlackBotToken, () => alertSettings.NotificationRoutes);
+        /* #7658: the buttons. The listener's handler acts on the cards the poster saved, on the owner connection: the proposal presses, a person's
+           undo, a verdict and a note decision, each answered to the presser alone and each edited into the card once decided. */
+        _slackListenerState?.Publish(() => alertSettings.SlackAppToken, () => alertSettings.SlackBotToken, () => alertSettings.NotificationRoutes,
+            () => new PerformanceMonitor.Darling.Service.Chat.SlackInteractionHandler(
+                investigationStore,
+                new PerformanceMonitor.Darling.Service.Chat.StoreSlackPressCommands(investigationPostgres, investigationStore, _logger),
+                slackBotPosts, _logger, dataDetail, () => alertSettings.TriageBaseUrl));
         var slackThreads = new PerformanceMonitor.Darling.Service.Chat.SlackThreadPass(
             investigationStore, investigationStore,
             new PerformanceMonitor.Darling.Service.Chat.SlackThreadPoster(
-                investigationStore, slackBotPosts, _loggerFactory.CreateLogger<PerformanceMonitor.Darling.Service.Chat.SlackThreadPoster>(), slackThrottle),
+                investigationStore, slackBotPosts, _loggerFactory.CreateLogger<PerformanceMonitor.Darling.Service.Chat.SlackThreadPoster>(), slackThrottle,
+                cards: investigationStore),
             slackThrottle, () => alertSettings.NotificationRoutes, _logger, dataDetail, () => alertSettings.TriageBaseUrl,
             ready: slackBotPosts.HasToken);
         var investigationEvents = new PerformanceMonitor.Darling.Service.Investigations.InvestigationEventDelivery(

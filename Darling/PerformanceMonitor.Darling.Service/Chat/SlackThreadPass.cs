@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -26,7 +27,7 @@ namespace PerformanceMonitor.Darling.Service.Chat;
 /// post; a blank token means the pass is not ready and posts nothing, so every row waits unmarked for one. The client is rebuilt only
 /// when the token changes.
 /// </summary>
-public sealed class SettingsSlackBotPosts(Func<string> token, string? apiBase = null) : ISlackBotPosts
+public sealed class SettingsSlackBotPosts(Func<string> token, string? apiBase = null, string? responseUrlHost = null) : ISlackBotPosts, ISlackCardApi
 {
     private readonly object _lock = new();
     private string _tokenInUse = "";
@@ -36,27 +37,42 @@ public sealed class SettingsSlackBotPosts(Func<string> token, string? apiBase = 
     public bool HasToken() => !string.IsNullOrWhiteSpace(token());
 
     /// <inheritdoc />
-    public Task<SlackPostResult> PostAsync(string channel, string text, IReadOnlyList<object>? blocks, string? threadTs, CancellationToken cancellationToken)
+    public Task<SlackPostResult> PostAsync(string channel, string text, IReadOnlyList<object>? blocks, string? threadTs, CancellationToken cancellationToken) =>
+        Client() is { } client
+            ? client.PostAsync(channel, text, blocks, threadTs, cancellationToken)
+            : Task.FromResult(new SlackPostResult(false, null, null, "no bot token"));
+
+    /// <inheritdoc />
+    public Task<SlackPostResult> UpdateAsync(string channel, string ts, string text, IReadOnlyList<object>? blocks, CancellationToken cancellationToken) =>
+        Client() is { } client
+            ? client.UpdateAsync(channel, ts, text, blocks, cancellationToken)
+            : Task.FromResult(new SlackPostResult(false, null, null, "no bot token"));
+
+    /// <inheritdoc />
+    public Task<SlackPostResult> RespondAsync(Uri responseUrl, string text, IReadOnlyList<object>? blocks, CancellationToken cancellationToken) =>
+        Client() is { } client
+            ? client.RespondAsync(responseUrl, text, blocks, cancellationToken)
+            : Task.FromResult(new SlackPostResult(false, null, null, "no bot token"));
+
+    /* The client is rebuilt only when the token changes; null while no token is set. */
+    private SlackBotClient? Client()
     {
         var current = (token() ?? "").Trim();
         if (current.Length == 0)
         {
-            return Task.FromResult(new SlackPostResult(false, null, null, "no bot token"));
+            return null;
         }
 
-        SlackBotClient client;
         lock (_lock)
         {
             if (_client is null || !string.Equals(_tokenInUse, current, StringComparison.Ordinal))
             {
-                _client = new SlackBotClient(current, apiBase);
+                _client = new SlackBotClient(current, apiBase, null, responseUrlHost);
                 _tokenInUse = current;
             }
 
-            client = _client;
+            return _client;
         }
-
-        return client.PostAsync(channel, text, blocks, threadTs, cancellationToken);
     }
 }
 
@@ -165,7 +181,8 @@ public sealed class SlackThreadPass
         var blockedChannels = new HashSet<string>(StringComparer.Ordinal);
         foreach (var row in rows)
         {
-            if (!s_posted.Contains(row.Event) && !string.Equals(row.Event, ActionUnknown, StringComparison.Ordinal))
+            if (!s_posted.Contains(row.Event) && !string.Equals(row.Event, ActionUnknown, StringComparison.Ordinal)
+                && !string.Equals(row.Event, InvestigationRequestStore.NotePending, StringComparison.Ordinal))
             {
                 continue;
             }
@@ -285,7 +302,9 @@ public sealed class SlackThreadPass
                     new ReportNoticeContent(row.RequestId, row.Verdict ?? row.Reason ?? "", row.ServerName, row.Metric, row.RootCause,
                         changes.Select(c => new ReportNoticeChange(c.Tool, InvestigationEventDelivery.ChangeObject(c.TargetId, c.Database, mode), ResultWord(c.Result))).ToList(),
                         baseUrl),
-                    mode);
+                    mode, verdictButtons: true);
+            case InvestigationRequestStore.NotePending:
+                return SlackThreadPosts.NotePost(row.JournalId, row.Actor, row.Reason ?? "", row.ServerName, Text(detail?["metric"]), mode);
             case "action_done":
             case "action_failed":
             case "action_undone":
@@ -303,7 +322,12 @@ public sealed class SlackThreadPass
                         "action_undone" => "undone" + ByWord(row.Actor),
                         _ => "result unknown",
                     };
-                    return SlackThreadPosts.ChangePost(Text(called?["tool"]) ?? "change", objectText, word, mode);
+                    /* A done change carries Undo (#7658) when its kind has an undo path: the called row's id is the record the button acts on. */
+                    long? undoCalledId = string.Equals(row.Event, "action_done", StringComparison.Ordinal)
+                        && long.TryParse(Text(detail?["called_id"]), NumberStyles.None, CultureInfo.InvariantCulture, out var calledId)
+                        ? calledId
+                        : null;
+                    return SlackThreadPosts.ChangePost(Text(called?["tool"]) ?? "change", objectText, word, mode, undoCalledId, Text(called?["kind"]));
                 }
 
             case InvestigationEvents.Resolved:
@@ -329,7 +353,9 @@ public sealed class SlackThreadPass
                     var expiresUtc = string.Equals(row.Event, "proposal_created", StringComparison.Ordinal)
                         ? row.EventTimeUtc.AddMinutes(ProposalRules.ExpiryMinutes)
                         : (DateTime?)null;
-                    return SlackThreadPosts.ProposalPost(Text(detail?["tool"]) ?? "action", row.ServerName, stateText, null, proposalUrl, mode, expiresUtc);
+                    /* The card made for a new proposal carries the Approve and Refuse buttons (#7658); a decision row carries none. */
+                    var pendingProposal = string.Equals(row.Event, "proposal_created", StringComparison.Ordinal) && proposalId != Guid.Empty ? proposalId : (Guid?)null;
+                    return SlackThreadPosts.ProposalPost(Text(detail?["tool"]) ?? "action", row.ServerName, stateText, null, proposalUrl, mode, expiresUtc, pendingProposal);
                 }
         }
     }

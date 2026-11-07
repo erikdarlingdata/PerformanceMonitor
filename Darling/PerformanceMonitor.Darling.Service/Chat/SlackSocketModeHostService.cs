@@ -24,17 +24,19 @@ namespace PerformanceMonitor.Darling.Service.Chat;
 public sealed class SlackListenerRuntimeState
 {
     /// <summary>The published readers; each is read when needed, so a token saved later is seen without a restart.</summary>
-    public sealed record Published(Func<string> AppToken, Func<string> BotToken, Func<IReadOnlyList<NotificationRoute>> Routes);
+    public sealed record Published(Func<string> AppToken, Func<string> BotToken, Func<IReadOnlyList<NotificationRoute>> Routes,
+        Func<ISlackEventHandlers>? Handlers = null);
 
     private volatile Published? _current;
 
     /// <summary>Publishes the readers (worker only).</summary>
-    public void Publish(Func<string> appToken, Func<string> botToken, Func<IReadOnlyList<NotificationRoute>> routes)
+    /// <param name="handlers">Builds the handlers a listener dispatches to (#7658: the buttons); null means the logging handlers that drop everything.</param>
+    public void Publish(Func<string> appToken, Func<string> botToken, Func<IReadOnlyList<NotificationRoute>> routes, Func<ISlackEventHandlers>? handlers = null)
     {
         ArgumentNullException.ThrowIfNull(appToken);
         ArgumentNullException.ThrowIfNull(botToken);
         ArgumentNullException.ThrowIfNull(routes);
-        _current = new Published(appToken, botToken, routes);
+        _current = new Published(appToken, botToken, routes, handlers);
     }
 
     /// <summary>The latest publication, or null before the first.</summary>
@@ -220,7 +222,7 @@ public sealed class SlackSocketModeHostService : BackgroundService
         _status = new SlackListenerStatus(_now);
         _listener = new SlackSocketModeListener(
             _transport, published.AppToken, published.BotToken, published.Routes,
-            new LoggingSlackEventHandlers(_logger), _status, _logger);
+            published.Handlers?.Invoke() ?? new LoggingSlackEventHandlers(_logger), _status, _logger);
         _listenerStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _tokenInUse = token;
         _lastStatusLog = _now();

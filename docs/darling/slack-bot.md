@@ -49,6 +49,14 @@ The listener holds two Socket Mode connections. Slack sends each event to one of
 
 Slack sends a `disconnect` about every five hours on each connection; the listener opens a new connection at once. A connection that fails is retried with a backoff that grows to a minute. Nothing is persisted: a restart loses what was queued, and Slack's own retry covers a reply sent while no connection was open. A press made while no connection was open is lost, and the card says to press again.
 
+## Buttons
+
+Four cards in a request's thread carry buttons. A new proposal carries Approve and Refuse. A done agent change carries Undo when its kind has an undo path: a mute, a custom rule, a threshold override, a signature merge, a plan force or unforce, and a plan guide made or dropped. A kill, an eviction and a recompile have no undo and get no button. The agent's report carries three verdict buttons, right, partly right and wrong; corrections go on the web feedback form, on the request page. A pending note written from a request carries Approve note and Reject note; a fleet note (one with no server) is decided on the web or in the Viewer only.
+
+Approve and Undo take two presses. The first press answers the presser alone, through Slack's ephemeral reply, with the facts of a fresh dry run (a proposal) or the statement the undo would run (a change), and a Confirm button. The second press, by the same person, runs it. The grant is checked at the confirming press. Refuse, a verdict and a note decision take one press. Every refusal is ephemeral too, and every press writes a journal row with the person and the Slack identity used. Once a card is decided, the service edits it: the buttons go, and the card says how it ended and who decided.
+
+Who may press: a person mapped on the People page to the Slack identity (the workspace id and the user id) who holds the grant for the server: `approve` with the action's kind for a proposal, `undo`, `feedback` or `decide_note`. A press by anyone else is refused, and so is a press from another workspace in a shared channel, or on a message this store did not post. A press on a proposal, change or note that is no longer pending does nothing and says so. The service acts only on cards it posted, stored by channel and ts in `config.investigation_slack_posts` (owner-written, admin reads).
+
 ## Health
 
 The service logs the listener's start and stop, each connection's open and close with Slack's reason, the first drop of each kind by the workspace and app filters, and a counters line every ten minutes.
