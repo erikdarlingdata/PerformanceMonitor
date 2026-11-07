@@ -27,13 +27,14 @@ Save the tokens only through the setup page: the Slack bot tokens form under the
 
 Token rotation stays off. A rotating bot token starts `xoxe.xoxb-` and expires every twelve hours, and this product has no refresh flow.
 
-## Stores that share the app
+## One Slack app per store for buttons and mentions
 
-Several stores can post through one app into one workspace. Each store's listener receives every event the app receives, so the stores split the work by channel:
+Socket Mode hands each event to one of the app's open connections. Two stores listening on one app would each acknowledge and drop the other's events, and Slack never retries an acknowledged event, so forwarding is not built. The rule:
 
-- A store acts only on events from channels set as a bot channel on its own routes. Everything else it drops and counts.
-- Inside a request thread it does not own, it stays silent.
-- Give each store a bot channel of its own. Then "a mention outside a request thread" is answered by the one store whose channel it is. If two stores share a bot channel, both stay silent outside request threads.
+- Each store that listens (buttons and mentions) needs a Slack app of its own, with its own app-level token.
+- Posting receives no events, so several stores can share one app's bot token for the request threads. On a shared app, set the app-level token on one store only; the other stores post threads, with no buttons or mentions.
+- A store still acts only on events from channels set as a bot channel on its own routes, and stays silent in threads it does not own.
+- When events keep arriving for channels no route of this store owns, the service logs one warning every ten minutes naming the likely cause: another store set the app-level token on the same app.
 
 Two stores on one store database work as well: a press changes state only while the record is pending, a message is unique by its channel and ts, and a post writes its once mark before it sends.
 
@@ -47,7 +48,7 @@ The listener holds two Socket Mode connections. Slack sends each event to one of
 4. a channel no route of this store names;
 5. an event already seen by its type, channel and ts, one of Slack's retries.
 
-Slack sends a `disconnect` about every five hours on each connection; the listener opens a new connection at once. A connection that fails is retried with a backoff that grows to a minute. Nothing is persisted: a restart loses what was queued, and Slack's own retry covers a reply sent while no connection was open. A press made while no connection was open is lost, and the card says to press again.
+The Web API calls and the WebSocket follow the system proxy (the HTTPS_PROXY variables or the operating system's setting), as the alert webhook and the bot's posts do; the tokens have no proxy setting of their own. Slack sends a `disconnect` about every five hours on each connection; the listener opens a new connection at once. A connection that fails is retried with a backoff that grows to a minute. Nothing is persisted: a restart loses what was queued, and Slack's own retry covers a reply sent while no connection was open. A press made while no connection was open is lost, and the card says to press again.
 
 ## Health
 

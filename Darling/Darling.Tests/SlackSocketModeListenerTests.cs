@@ -15,6 +15,7 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitor.Darling.Service.Chat;
 using PerformanceMonitor.Notifications;
@@ -232,6 +233,8 @@ internal sealed class Counter
 /// listener is cancelled, so a failing connect loop does not spin; the test reads the waits it asked for.</summary>
 internal sealed class FakeBackoffClock
 {
+    private readonly ConcurrentQueue<TaskCompletionSource> _pending = new();
+
     public ConcurrentQueue<TimeSpan> Waits { get; } = new();
 
     public Counter Calls { get; } = new();
@@ -239,11 +242,36 @@ internal sealed class FakeBackoffClock
     public Task DelayAsync(TimeSpan wait, CancellationToken cancellationToken)
     {
         Waits.Enqueue(wait);
-        Calls.Increment();
         var blocked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         cancellationToken.Register(() => blocked.TrySetCanceled(cancellationToken));
+        _pending.Enqueue(blocked);
+        Calls.Increment();
         return blocked.Task;
     }
+
+    /// <summary>Lets the oldest pending wait end, as the clock reaching it would.</summary>
+    public void ReleaseOne()
+    {
+        if (_pending.TryDequeue(out var waiter))
+        {
+            waiter.TrySetResult();
+        }
+    }
+}
+
+/// <summary>A logger that keeps every line, so a test counts the warnings the listener writes.</summary>
+internal sealed class RecordingLogger : ILogger
+{
+    public ConcurrentQueue<(LogLevel Level, string Message)> Entries { get; } = new();
+
+    public IEnumerable<string> Warnings => Entries.Where(e => e.Level == LogLevel.Warning).Select(e => e.Message);
+
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+    public bool IsEnabled(LogLevel logLevel) => true;
+
+    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+        Entries.Enqueue((logLevel, formatter(state, exception)));
 }
 
 public sealed class SlackSocketModeListenerTests
@@ -258,16 +286,18 @@ public sealed class SlackSocketModeListenerTests
         channels.Select((c, i) => new NotificationRoute(100 + i, "Route " + i, "", "", "", "", "", Enabled: true) { SlackBotChannel = c }).ToList();
 
     private static (SlackSocketModeListener Listener, FakeSocketModeTransport Transport, RecordingSlackHandlers Handlers, SlackListenerStatus Status, FakeBackoffClock Clock) Build(
-        bool block = false, int connections = 2, int queueCapacity = SlackSocketModeListener.DefaultQueueCapacity, FakeSocketModeTransport? transport = null, params string[] owned)
+        bool block = false, int connections = 2, int queueCapacity = SlackSocketModeListener.DefaultQueueCapacity, FakeSocketModeTransport? transport = null,
+        bool defaultBackoff = false, Func<DateTime>? nowUtc = null, ILogger? logger = null, params string[] owned)
     {
         transport ??= new FakeSocketModeTransport();
+        nowUtc ??= static () => new DateTime(2026, 11, 6, 12, 0, 0, DateTimeKind.Utc);
         var handlers = new RecordingSlackHandlers { Block = block };
-        var status = new SlackListenerStatus(() => new DateTime(2026, 11, 6, 12, 0, 0, DateTimeKind.Utc));
+        var status = new SlackListenerStatus(nowUtc);
         var clock = new FakeBackoffClock();
         var routes = Routes(owned.Length == 0 ? new[] { OwnedChannel } : owned);
         var listener = new SlackSocketModeListener(
-            transport, () => "app-token-a", () => "bot-token-a", () => routes, handlers, status, NullLogger.Instance,
-            connections, queueCapacity, backoff: attempt => TimeSpan.FromSeconds(attempt), delay: clock.DelayAsync);
+            transport, () => "app-token-a", () => "bot-token-a", () => routes, handlers, status, logger ?? NullLogger.Instance,
+            connections, queueCapacity, backoff: defaultBackoff ? null : attempt => TimeSpan.FromSeconds(attempt), delay: clock.DelayAsync, nowUtc: nowUtc);
         return (listener, transport, handlers, status, clock);
     }
 
@@ -644,6 +674,66 @@ public sealed class SlackSocketModeListenerTests
     }
 
     [Fact]
+    public async Task Warns_once_per_window_while_events_keep_arriving_for_channels_no_route_owns()
+    {
+        var now = new DateTime(2026, 11, 6, 12, 0, 0, DateTimeKind.Utc);
+        var log = new RecordingLogger();
+        var (listener, transport, handlers, status, _) = Build(nowUtc: () => now, logger: log);
+        var (run, stop) = await StartAsync(listener, transport);
+        var socket = transport.Sockets[0];
+        /* Two unowned events, then an owned one: the consumer is sequential, so once the owned one is handled both drops are judged. */
+        socket.Feed(MessageEnvelope("e1", channel: OtherChannel, ts: "1700000000.000001"));
+        socket.Feed(MessageEnvelope("e2", channel: OtherChannel, ts: "1700000000.000002"));
+        socket.Feed(MessageEnvelope("e3", ts: "1700000000.000003"));
+        await handlers.WhenHandled(1).WaitAsync(Guard);
+        var first = Assert.Single(log.Warnings);
+        Assert.Contains("another store sharing this Slack app", first, StringComparison.Ordinal);
+        Assert.Contains("dropped 1 event(s)", first, StringComparison.Ordinal);
+
+        /* Inside the window: more drops, no new line. */
+        now = now.AddMinutes(9);
+        socket.Feed(MessageEnvelope("e4", channel: OtherChannel, ts: "1700000000.000004"));
+        socket.Feed(MessageEnvelope("e5", ts: "1700000000.000005"));
+        await handlers.WhenHandled(2).WaitAsync(Guard);
+        Assert.Single(log.Warnings);
+
+        /* After the window: one more line, carrying the drops since the last one. */
+        now = now.AddMinutes(2);
+        socket.Feed(MessageEnvelope("e6", channel: OtherChannel, ts: "1700000000.000006"));
+        socket.Feed(MessageEnvelope("e7", ts: "1700000000.000007"));
+        await handlers.WhenHandled(3).WaitAsync(Guard);
+        await StopAsync(run, stop);
+        Assert.Equal(2, log.Warnings.Count());
+        Assert.Contains("dropped 3 event(s)", log.Warnings.Last(), StringComparison.Ordinal);
+        Assert.Equal(4, status.Read().DroppedByReason["channel"]);
+    }
+
+    [Fact]
+    public async Task Starts_the_backoff_over_after_a_healthy_hello()
+    {
+        var (listener, transport, handlers, _, clock) = Build(defaultBackoff: true);
+        var (run, stop) = await StartAsync(listener, transport);
+        var first = transport.Sockets[0];
+        first.CloseFromPeer();
+        await clock.Calls.WhenAtLeast(1).WaitAsync(Guard);
+        Assert.Equal(TimeSpan.FromSeconds(2), clock.Waits.ElementAt(0));
+
+        /* The clock reaches the wait; the connection reopens, says hello and carries an event, then closes again. */
+        clock.ReleaseOne();
+        await transport.WhenConnected(3).WaitAsync(Guard);
+        var second = transport.Sockets[2];
+        second.Feed(Hello());
+        second.Feed(MessageEnvelope("e1"));
+        await handlers.WhenHandled(1).WaitAsync(Guard);
+        second.CloseFromPeer();
+        await clock.Calls.WhenAtLeast(2).WaitAsync(Guard);
+
+        /* A healthy connection resets the count: the second retry waits 2 seconds again, not 4. */
+        Assert.Equal(TimeSpan.FromSeconds(2), clock.Waits.ElementAt(1));
+        await StopAsync(run, stop);
+    }
+
+    [Fact]
     public void Default_backoff_doubles_to_a_minute()
     {
         Assert.Equal(TimeSpan.FromSeconds(2), SlackSocketModeListener.DefaultBackoff(1));
@@ -770,15 +860,61 @@ public sealed class SlackEnvelopeFilterTests
 public sealed class SlackSocketModeHostTests
 {
     [Fact]
-    public void A_blank_app_token_means_off()
+    public void A_blank_app_token_means_off_and_either_token_changing_restarts()
     {
-        Assert.Equal(SlackSocketModeHostService.SupervisorAction.None, SlackSocketModeHostService.DecideAction(false, "", ""));
-        Assert.Equal(SlackSocketModeHostService.SupervisorAction.None, SlackSocketModeHostService.DecideAction(false, "", "   "));
-        Assert.Equal(SlackSocketModeHostService.SupervisorAction.None, SlackSocketModeHostService.DecideAction(false, "", null));
-        Assert.Equal(SlackSocketModeHostService.SupervisorAction.Start, SlackSocketModeHostService.DecideAction(false, "", "app-token-a"));
-        Assert.Equal(SlackSocketModeHostService.SupervisorAction.Stop, SlackSocketModeHostService.DecideAction(true, "app-token-a", ""));
-        Assert.Equal(SlackSocketModeHostService.SupervisorAction.None, SlackSocketModeHostService.DecideAction(true, "app-token-a", " app-token-a "));
-        Assert.Equal(SlackSocketModeHostService.SupervisorAction.Restart, SlackSocketModeHostService.DecideAction(true, "app-token-a", "app-token-b"));
+        const string Bot = "bot-token-a";
+        Assert.Equal(SlackSocketModeHostService.SupervisorAction.None, SlackSocketModeHostService.DecideAction(false, "", "", "", Bot));
+        Assert.Equal(SlackSocketModeHostService.SupervisorAction.None, SlackSocketModeHostService.DecideAction(false, "", "", "   ", Bot));
+        Assert.Equal(SlackSocketModeHostService.SupervisorAction.None, SlackSocketModeHostService.DecideAction(false, "", "", null, null));
+        Assert.Equal(SlackSocketModeHostService.SupervisorAction.Start, SlackSocketModeHostService.DecideAction(false, "", "", "app-token-a", Bot));
+        Assert.Equal(SlackSocketModeHostService.SupervisorAction.Start, SlackSocketModeHostService.DecideAction(false, "", "", "app-token-a", ""));
+        Assert.Equal(SlackSocketModeHostService.SupervisorAction.Stop, SlackSocketModeHostService.DecideAction(true, "app-token-a", Bot, "", Bot));
+        Assert.Equal(SlackSocketModeHostService.SupervisorAction.None, SlackSocketModeHostService.DecideAction(true, "app-token-a", Bot, " app-token-a ", Bot));
+        Assert.Equal(SlackSocketModeHostService.SupervisorAction.Restart, SlackSocketModeHostService.DecideAction(true, "app-token-a", Bot, "app-token-b", Bot));
+        Assert.Equal(SlackSocketModeHostService.SupervisorAction.Restart, SlackSocketModeHostService.DecideAction(true, "app-token-a", Bot, "app-token-a", "bot-token-b"));
+        Assert.Equal(SlackSocketModeHostService.SupervisorAction.Restart, SlackSocketModeHostService.DecideAction(true, "app-token-a", Bot, "app-token-a", ""));
+    }
+
+    [Fact]
+    public async Task The_host_restarts_the_listener_when_the_bot_token_changes_and_learns_the_ids_again()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "darling-slack-listener-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var transport = new FakeSocketModeTransport();
+            var state = new SlackListenerRuntimeState();
+            var bot = "bot-token-a";
+            var routes = new List<NotificationRoute>();
+            var host = new SlackSocketModeHostService(NullLogger<SlackSocketModeHostService>.Instance, state, transport, directory,
+                delay: static (_, _) => Task.CompletedTask, nowUtc: () => new DateTime(2026, 11, 6, 13, 0, 0, DateTimeKind.Utc));
+            state.Publish(() => "app-token-a", () => bot, () => routes);
+            await host.TickAsync(CancellationToken.None);
+            Assert.True(host.IsRunning);
+            await transport.WhenConnected(2).WaitAsync(TimeSpan.FromSeconds(30));
+            var firstStatus = host.CurrentStatus;
+
+            bot = "bot-token-b";
+            await host.TickAsync(CancellationToken.None);
+            Assert.True(host.IsRunning);
+            await transport.WhenConnected(4).WaitAsync(TimeSpan.FromSeconds(30));
+            Assert.NotSame(firstStatus, host.CurrentStatus);
+            Assert.Equal(2, transport.AuthCalls);
+            Assert.Equal(new[] { "bot-token-a", "bot-token-b" }, transport.BotTokensSeen.ToArray());
+            Assert.All(transport.Sockets.Take(2), s => Assert.True(s.Closed));
+
+            /* The same tokens again: nothing restarts. */
+            await host.TickAsync(CancellationToken.None);
+            Assert.Equal(2, transport.AuthCalls);
+            Assert.Equal(4, transport.Sockets.Count);
+            host.Dispose();
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
     }
 
     [Fact]

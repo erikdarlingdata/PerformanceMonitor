@@ -44,7 +44,7 @@ public sealed class SlackListenerRuntimeState
 /// <summary>
 /// #7657: the hosted service that owns the Socket Mode listener's lifetime. The app-level token alone turns the listener on: every
 /// <see cref="SupervisorPollInterval"/> the supervisor reads the opened token the worker published, starts the listener when a token
-/// is set and none runs, stops it when the token is cleared, and restarts it when the token changed (<see cref="DecideAction"/>). A
+/// is set and none runs, stops it when the token is cleared, and restarts it when either token changed (<see cref="DecideAction"/>). A
 /// blank token means off; there is no other setting. The supervisor also logs the listener's counters and writes them to the status
 /// file the diagnostics bundle reads (<see cref="SlackListenerStatusFile"/>). Registered always and self-gating, as the other hosts are.
 /// </summary>
@@ -86,6 +86,7 @@ public sealed class SlackSocketModeHostService : BackgroundService
     private CancellationTokenSource? _listenerStop;
     private Task? _run;
     private string _tokenInUse = "";
+    private string _botTokenInUse = "";
     private string? _lastWritten;
     private DateTime _lastStatusLog = DateTime.MinValue;
 
@@ -119,8 +120,9 @@ public sealed class SlackSocketModeHostService : BackgroundService
     /// <summary>The running listener's counters, or null when none runs.</summary>
     public SlackListenerStatus? CurrentStatus => _status;
 
-    /// <summary>PURE: the supervisor's verdict. A blank <paramref name="token"/> means off.</summary>
-    public static SupervisorAction DecideAction(bool running, string? tokenInUse, string? token)
+    /// <summary>PURE: the supervisor's verdict. A blank app-level <paramref name="token"/> means off. A change to either token while
+    /// the listener runs restarts it, so the workspace and app ids are learned again with the new bot token.</summary>
+    public static SupervisorAction DecideAction(bool running, string? tokenInUse, string? botTokenInUse, string? token, string? botToken)
     {
         var wanted = (token ?? "").Trim();
         if (!running)
@@ -133,7 +135,9 @@ public sealed class SlackSocketModeHostService : BackgroundService
             return SupervisorAction.Stop;
         }
 
-        return string.Equals(wanted, (tokenInUse ?? "").Trim(), StringComparison.Ordinal) ? SupervisorAction.None : SupervisorAction.Restart;
+        var same = string.Equals(wanted, (tokenInUse ?? "").Trim(), StringComparison.Ordinal)
+            && string.Equals((botToken ?? "").Trim(), (botTokenInUse ?? "").Trim(), StringComparison.Ordinal);
+        return same ? SupervisorAction.None : SupervisorAction.Restart;
     }
 
     /// <inheritdoc />
@@ -177,31 +181,33 @@ public sealed class SlackSocketModeHostService : BackgroundService
     {
         var published = _state.Read();
         var token = "";
+        var botToken = "";
         if (published is not null)
         {
             try
             {
                 token = (published.AppToken() ?? "").Trim();
+                botToken = (published.BotToken() ?? "").Trim();
             }
             catch (Exception ex)
             {
-                _logger.LogDebug(ex, "Slack listener supervisor could not read the app token; treated as blank");
+                _logger.LogDebug(ex, "Slack listener supervisor could not read the tokens; treated as blank");
             }
         }
 
-        switch (DecideAction(IsRunning, _tokenInUse, token))
+        switch (DecideAction(IsRunning, _tokenInUse, _botTokenInUse, token, botToken))
         {
             case SupervisorAction.Start:
-                StartListener(published!, token, cancellationToken);
+                StartListener(published!, token, botToken, cancellationToken);
                 break;
             case SupervisorAction.Stop:
                 _logger.LogInformation("Slack listener stopping: the app-level token was cleared");
                 await StopListenerAsync();
                 break;
             case SupervisorAction.Restart:
-                _logger.LogInformation("Slack listener restarting: the app-level token changed");
+                _logger.LogInformation("Slack listener restarting: a token changed, so the workspace and app ids are learned again");
                 await StopListenerAsync();
-                StartListener(published!, token, cancellationToken);
+                StartListener(published!, token, botToken, cancellationToken);
                 break;
         }
 
@@ -215,14 +221,15 @@ public sealed class SlackSocketModeHostService : BackgroundService
         PublishStatus();
     }
 
-    private void StartListener(SlackListenerRuntimeState.Published published, string token, CancellationToken cancellationToken)
+    private void StartListener(SlackListenerRuntimeState.Published published, string token, string botToken, CancellationToken cancellationToken)
     {
         _status = new SlackListenerStatus(_now);
         _listener = new SlackSocketModeListener(
             _transport, published.AppToken, published.BotToken, published.Routes,
-            new LoggingSlackEventHandlers(_logger), _status, _logger);
+            new LoggingSlackEventHandlers(_logger), _status, _logger, nowUtc: _now);
         _listenerStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _tokenInUse = token;
+        _botTokenInUse = botToken;
         _lastStatusLog = _now();
         _run = _listener.RunAsync(_listenerStop.Token);
     }
@@ -260,6 +267,7 @@ public sealed class SlackSocketModeHostService : BackgroundService
             _listenerStop = null;
             _listener = null;
             _tokenInUse = "";
+            _botTokenInUse = "";
             _status?.Stopped();
             PublishStatus();
         }
