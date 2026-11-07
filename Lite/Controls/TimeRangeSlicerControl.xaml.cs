@@ -41,6 +41,9 @@ public partial class TimeRangeSlicerControl : UserControl
     private const double HandleWidthPx = 8;
     private const double HandleGripWidthPx = 20;
     private const double MinRangeNorm = 0.02; // minimum ~2% of total span
+    /// <summary>The strip's height in a normal window, and in a short one (<see cref="ShortWindow"/>). 70 leaves 34 for the chart between the 16 and 20 paddings.</summary>
+    internal const double FullHeight = 130;
+    internal const double CompactHeight = 70;
     private const double ChartPaddingTop = 16;
     private const double ChartPaddingBottom = 20;
 
@@ -71,6 +74,8 @@ public partial class TimeRangeSlicerControl : UserControl
     {
         InitializeComponent();
         SlicerBorder.SizeChanged += (_, _) => Redraw();
+        // #8219: a short window (900x600) gets the compact strip; the handles and the time labels keep their room (the paddings below).
+        ShortWindow.Track(this, () => SlicerBorder.Height = ShortWindow.IsShort(this) ? CompactHeight : FullHeight);
         IsVisibleChanged += (_, _) => { if (IsVisible) Redraw(); };
     }
 
