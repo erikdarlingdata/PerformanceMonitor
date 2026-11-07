@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -35,6 +36,20 @@ public static class TabStripOverflow
             typeof(bool),
             typeof(TabStripOverflow),
             new PropertyMetadata(false, OnEnabledChanged));
+
+    /// <summary>
+    /// #8222: the space around the tab row inside the control (left, top, right, bottom), read by the theme's template. A row that sits
+    /// inside a page with no margin of its own sets it so every sub-tab row starts at the same left offset.
+    /// </summary>
+    public static readonly DependencyProperty HeaderMarginProperty =
+        DependencyProperty.RegisterAttached(
+            "HeaderMargin",
+            typeof(Thickness),
+            typeof(TabStripOverflow),
+            new PropertyMetadata(new Thickness(0)));
+
+    public static Thickness GetHeaderMargin(DependencyObject obj) => (Thickness)obj.GetValue(HeaderMarginProperty);
+    public static void SetHeaderMargin(DependencyObject obj, Thickness value) => obj.SetValue(HeaderMarginProperty, value);
 
     public static bool GetEnabled(DependencyObject obj) => (bool)obj.GetValue(EnabledProperty);
     public static void SetEnabled(DependencyObject obj, bool value) => obj.SetValue(EnabledProperty, value);
@@ -67,6 +82,15 @@ public static class TabStripOverflow
         }
     }
 
+    private sealed class StripState
+    {
+        public bool Pending;
+        public bool EnsureSelected;
+        public bool Wired;
+    }
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<TabControl, StripState> States = new();
+
     private static void Wire(TabControl tabs)
     {
         tabs.ApplyTemplate();
@@ -77,34 +101,178 @@ public static class TabStripOverflow
             return;
         }
 
-        scroll.ScrollChanged -= OnScrollChanged;
-        scroll.ScrollChanged += OnScrollChanged;
         scroll.PreviewMouseWheel -= OnPreviewMouseWheel;
         scroll.PreviewMouseWheel += OnPreviewMouseWheel;
         button.Click -= OnOverflowClick;
         button.Click += OnOverflowClick;
-        UpdateButton(scroll, button);
-    }
 
-    private static void OnScrollChanged(object sender, ScrollChangedEventArgs e)
-    {
-        if (sender is ScrollViewer scroll && scroll.TemplatedParent is TabControl tabs
-            && tabs.Template?.FindName(OverflowButtonPartName, tabs) is Button button)
+        var state = States.GetOrCreateValue(tabs);
+        if (!state.Wired)
         {
-            UpdateButton(scroll, button);
+            state.Wired = true;
+            /* The row's width and the tabs' widths are what decide where it can start and end. */
+            if (scroll.Parent is FrameworkElement host)
+            {
+                host.SizeChanged += (_, _) => Schedule(tabs, ensureSelected: false);
+            }
+
+            if (scroll.Content is FrameworkElement panel)
+            {
+                panel.SizeChanged += (_, _) => Schedule(tabs, ensureSelected: false);
+                /* A focused or clicked tab asks to be brought into view, and the stock scroll would stop on any pixel, cutting a
+                   name at the edge. Only the selected tab's request is answered, by the snap below. */
+                panel.AddHandler(FrameworkElement.RequestBringIntoViewEvent, new RequestBringIntoViewEventHandler((_, args) =>
+                {
+                    args.Handled = true;
+                    if (args.TargetObject is TabItem { IsSelected: true })
+                    {
+                        Schedule(tabs, ensureSelected: true);
+                    }
+                }));
+            }
         }
+
+        Schedule(tabs, ensureSelected: true);
     }
 
-    private static void UpdateButton(ScrollViewer scroll, Button button)
+    /// <summary>Applies the snap once layout has settled; several triggers in one pass share one run.</summary>
+    private static void Schedule(TabControl tabs, bool ensureSelected)
     {
-        button.Visibility = scroll.ScrollableWidth > FitSlack ? Visibility.Visible : Visibility.Collapsed;
+        var state = States.GetOrCreateValue(tabs);
+        state.EnsureSelected |= ensureSelected;
+        if (state.Pending)
+        {
+            return;
+        }
+
+        state.Pending = true;
+        tabs.Dispatcher.BeginInvoke(new Action(() =>
+        {
+            state.Pending = false;
+            var ensure = state.EnsureSelected;
+            state.EnsureSelected = false;
+            Apply(tabs, ensure, 0);
+        }), System.Windows.Threading.DispatcherPriority.Loaded);
+    }
+
+    /// <summary>
+    /// Lays the row out in whole tabs. A row that holds every tab shows no button. A row that does not shows the button, starts at a
+    /// tab's left edge (the nearest to where it was, moved <paramref name="step"/> tabs, and far enough to bring the selected tab
+    /// in when <paramref name="ensureSelected"/>), and is exactly as wide as the whole tabs that fit, so no name is cut at either edge.
+    /// </summary>
+    private static void Apply(TabControl tabs, bool ensureSelected, int step)
+    {
+        if (!tabs.IsLoaded
+            || tabs.Template?.FindName(ScrollPartName, tabs) is not ScrollViewer scroll
+            || tabs.Template?.FindName(OverflowButtonPartName, tabs) is not Button button
+            || scroll.Parent is not FrameworkElement host
+            || scroll.Content is not FrameworkElement panel
+            || host.ActualWidth <= 0)
+        {
+            return;
+        }
+
+        var visible = tabs.Items.OfType<TabItem>().Where(t => t.Visibility == Visibility.Visible && t.IsArrangeValid && t.RenderSize.Width > 0).ToList();
+        if (visible.Count == 0)
+        {
+            return;
+        }
+
+        var lefts = new double[visible.Count];
+        var rights = new double[visible.Count];
+        for (var i = 0; i < visible.Count; i++)
+        {
+            var bounds = visible[i].TransformToAncestor(panel).TransformBounds(new Rect(visible[i].RenderSize));
+            lefts[i] = bounds.Left;
+            rights[i] = bounds.Right;
+        }
+
+        var total = rights.Max();
+        if (total <= host.ActualWidth + FitSlack)
+        {
+            if (button.Visibility != Visibility.Collapsed)
+            {
+                button.Visibility = Visibility.Collapsed;
+            }
+
+            if (!double.IsNaN(scroll.Width))
+            {
+                scroll.ClearValue(FrameworkElement.WidthProperty);
+                scroll.ClearValue(FrameworkElement.HorizontalAlignmentProperty);
+                scroll.UpdateLayout();
+            }
+
+            scroll.ScrollToHorizontalOffset(0);
+            return;
+        }
+
+        button.Visibility = Visibility.Visible;
+        button.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        var available = host.ActualWidth - button.DesiredSize.Width;
+
+        var first = 0;
+        for (var i = 1; i < visible.Count; i++)
+        {
+            if (Math.Abs(lefts[i] - scroll.HorizontalOffset) < Math.Abs(lefts[first] - scroll.HorizontalOffset))
+            {
+                first = i;
+            }
+        }
+
+        first = Math.Clamp(first + step, 0, visible.Count - 1);
+        var selected = visible.FindIndex(t => t.IsSelected);
+        if (ensureSelected && selected >= 0)
+        {
+            if (selected < first)
+            {
+                first = selected;
+            }
+
+            while (first < selected && rights[selected] - lefts[first] > available + FitSlack)
+            {
+                first++;
+            }
+        }
+
+        /* Never start so far along that the row ends short of the last tab with room to spare. */
+        var lastStart = visible.Count - 1;
+        while (lastStart > 0 && total - lefts[lastStart - 1] <= available + FitSlack)
+        {
+            lastStart--;
+        }
+
+        first = Math.Min(first, lastStart);
+
+        var last = first;
+        while (last + 1 < visible.Count && rights[last + 1] - lefts[first] <= available + FitSlack)
+        {
+            last++;
+        }
+
+        var width = Math.Min(rights[last] - lefts[first], available);
+        if (scroll.HorizontalAlignment != HorizontalAlignment.Left)
+        {
+            scroll.HorizontalAlignment = HorizontalAlignment.Left;
+        }
+
+        if (double.IsNaN(scroll.Width) || Math.Abs(scroll.Width - width) > 0.01)
+        {
+            scroll.Width = width;
+            scroll.UpdateLayout();
+        }
+
+        if (Math.Abs(scroll.HorizontalOffset - lefts[first]) > 0.01)
+        {
+            scroll.ScrollToHorizontalOffset(lefts[first]);
+        }
     }
 
     private static void OnPreviewMouseWheel(object sender, MouseWheelEventArgs e)
     {
-        if (sender is ScrollViewer scroll && scroll.ScrollableWidth > FitSlack)
+        if (sender is ScrollViewer { TemplatedParent: TabControl tabs }
+            && tabs.Template?.FindName(OverflowButtonPartName, tabs) is Button { Visibility: Visibility.Visible })
         {
-            scroll.ScrollToHorizontalOffset(scroll.HorizontalOffset - e.Delta);
+            Apply(tabs, ensureSelected: false, e.Delta < 0 ? 1 : -1);
             e.Handled = true;
         }
     }
@@ -112,9 +280,9 @@ public static class TabStripOverflow
     private static void OnSelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         /* The event bubbles up from a nested TabControl in the tab's content; only this strip's own selection scrolls it. */
-        if (sender is TabControl tabs && ReferenceEquals(e.OriginalSource, tabs) && tabs.SelectedItem is TabItem selected)
+        if (sender is TabControl tabs && ReferenceEquals(e.OriginalSource, tabs))
         {
-            selected.Dispatcher.BeginInvoke(new Action(selected.BringIntoView), System.Windows.Threading.DispatcherPriority.Loaded);
+            Schedule(tabs, ensureSelected: true);
         }
     }
 
@@ -133,7 +301,7 @@ public static class TabStripOverflow
             item.Click += (_, _) =>
             {
                 tabs.SelectedItem = target;
-                target.BringIntoView();
+                Schedule(tabs, ensureSelected: true);
             };
             menu.Items.Add(item);
         }
