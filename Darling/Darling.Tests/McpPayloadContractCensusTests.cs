@@ -1628,6 +1628,8 @@ public sealed class McpPayloadContractCensusTests
             "#4198: get_collection_log's own wide field — error_message is a 500-character preview by default (a seeded store measured 90,514 bytes for 200 rows at the old 200-row default), full_text opts back into the whole (up to 4000-character, DarlingObservability.LogCollectionAsync's own write-time ceiling) field"),
         ("run_note_truncated", ["DarlingMcpDataTools.cs", "McpHealthTools.cs"],
             "#7416: get_collection_log's run_note — what a SUCCESS run left in the stored message column (error_message holds only the error of a run that did not succeed) — previews to the same 500 characters as error_message; full_text returns it whole"),
+        ("view_definition_truncated", ["DarlingMcpSchemaTools.cs"],
+            "#7643: get_object_definition's view_definition — a stored view's text, which can run to megabytes — is cut to MaxViewDefinitionChars (8,192) with view_definition_length beside it; a size bound under the 32 KB response budget, not a preview with an opt-in"),
         ("last_error_truncated", ["DarlingMcpDataTools.cs", "McpHealthTools.cs"],
             "#4198: get_collection_health's PartialCollectionHealthRow.last_error preview, the row that fails IsCollectionHealthCompactEligible — the same ErrorMessagePreviewLength (500 chars) get_collection_log's error_message_truncated previews to, so a caller never learns two truncation lengths for what is fundamentally the same raw error text; full_detail=true opts back into the whole field"),
         ("output_finding_truncated", ["DarlingMcpDataTools.cs", "McpHealthTools.cs"],

@@ -47,6 +47,9 @@ public sealed class DarlingMcpSchemaTools
     public const int MaxFindLimit = 100;
     public const int MinTextLength = 3;
 
+    /// <summary>The most of a view's text get_object_definition returns: a quarter of the response budget, so its JSON escaping still fits.</summary>
+    public const int MaxViewDefinitionChars = McpResponseBudget.DefaultBytes / 4;
+
     /// <summary>The time a definition text search may run: 4 s, as <c>find_queries_by_text</c> gives each source.</summary>
     public const int BudgetMilliseconds = DarlingMcpFindQueriesByTextTools.BudgetMilliseconds;
 
@@ -55,7 +58,7 @@ public sealed class DarlingMcpSchemaTools
         "turn it on with enable_collector (collector schema_objects) and read again after its first pass.";
 
     [McpServerTool(Name = "get_object_definition"), Description(
-        "Gets the stored definition of one table or view of a database, from the schema history: its columns, indexes, constraints and triggers, the times of the version shown, versions_kept and history_starts_at. object_name is 'schema.name', or a bare name when only one object has it. Without as_of it is the current version (a dropped object answers with its last definition and dropped_at); with as_of it is the version that held at that instant, and an as_of before the history starts answers with the oldest version and a note. Columns are paged (column_offset, column_limit) and cut to the response budget; columns_returned and next_column_offset say what is left. A database of an availability group answers from the group's history whichever replica server_name names (resolved_from_ag). Expression text (check_definition, computed_definition, default_definition, filter_definition, view_definition) is masked by mcp.dataDetail; names, types and structure are not. status not_collected: the schema_objects collector has never run for the server.")]
+        "Gets the stored definition of one table or view of a database, from the schema history: its columns, indexes, constraints and triggers, the times of the version shown, versions_kept and history_starts_at. object_name is 'schema.name', or a bare name when only one object has it. Without as_of it is the current version (a dropped object answers with its last definition and dropped_at); with as_of it is the version that held at that instant, and an as_of before the history starts answers with the oldest version and a note (status empty when the first version is its creation). Columns are paged (column_offset, column_limit) and cut to the response budget; columns_returned and next_column_offset say what is left. A view's text longer than 8,192 characters is cut there, with view_definition_truncated and view_definition_length. A database of an availability group answers from the group's history whichever replica server_name names (resolved_from_ag). Expression text (check_definition, computed_definition, default_definition, filter_definition, view_definition) is masked by mcp.dataDetail; names, types and structure are not. status not_collected: the schema_objects collector has never run for the server.")]
     public static Task<string> GetObjectDefinition(
         NpgsqlDataSource postgres,
         [Description("Database name.")] string database_name,
@@ -143,6 +146,10 @@ public sealed class DarlingMcpSchemaTools
             var totalColumns = definition.Columns.Count;
             var agName = version.AgName ?? key.AgName;
 
+            /* A view's text is not paged like its columns: past half the response budget it is cut, and the answer says so with its length. */
+            var viewText = definition.View?.ViewDefinition;
+            var viewTextCut = viewText is not null && viewText.Length > MaxViewDefinitionChars;
+
             string Build(int n)
             {
                 var shown = page.Take(n).ToList();
@@ -189,7 +196,14 @@ public sealed class DarlingMcpSchemaTools
                             lock_escalation = tp.LockEscalation,
                         }
                         : definition.View is { } vp
-                            ? new { is_schema_bound = vp.IsSchemaBound, is_indexed = vp.IsIndexed, view_definition = vp.ViewDefinition }
+                            ? new
+                            {
+                                is_schema_bound = vp.IsSchemaBound,
+                                is_indexed = vp.IsIndexed,
+                                view_definition = viewTextCut ? viewText![..MaxViewDefinitionChars] : viewText,
+                                view_definition_truncated = viewTextCut,
+                                view_definition_length = viewText?.Length,
+                            }
                             : null,
                     column_count = totalColumns,
                     column_offset,
@@ -525,6 +539,12 @@ public sealed class DarlingMcpSchemaTools
         if (covering is not null)
         {
             return covering;
+        }
+
+        if (at < live[0].ValidFrom && live[0].ChangeKind == "created")
+        {
+            note = "The object did not exist at as_of: it was created at " + Utc(live[0].ValidFrom) + ".";
+            return null;
         }
 
         if (at < live[0].ValidFrom)

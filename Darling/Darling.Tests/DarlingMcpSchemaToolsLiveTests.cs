@@ -240,6 +240,42 @@ public sealed class DarlingMcpSchemaToolsLiveTests
     }
 
     [Fact]
+    public async Task GetObjectDefinition_AsOfBeforeTheObjectWasCreated_IsEmpty()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            await Baseline(s, ct, Table(10, "Orders", new[] { "Id" }));
+            await SchemaVersionStore.ApplyAsync(
+                s.Connection, Write(new[] { Table(10, "Orders", new[] { "Id" }), Table(12, "Returns", new[] { "Id" }) }, s_t0.AddHours(2), by: "xe_event"), ct);
+
+            using var answer = JsonDocument.Parse(await Definition(s, ct, "dbo.Returns", asOf: Iso(s_t0.AddHours(1))));
+
+            Assert.Equal("empty", answer.RootElement.GetProperty("status").GetString());
+            Assert.Contains("created at", answer.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task GetObjectDefinition_HugeViewText_IsCutToTheBudgetAndSaysSo()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            var body = "SELECT 1 AS Id /*" + new string('x', 2_000_000) + "*/";
+            await Baseline(s, ct, View(20, "BigView", body));
+
+            var json = await Definition(s, ct, "dbo.BigView");
+            var answer = await Parse(Task.FromResult(json));
+
+            Assert.True(json.Length < McpResponseBudget.DefaultBytes, json.Length.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            var properties = answer.GetProperty("properties");
+            Assert.True(properties.GetProperty("view_definition_truncated").GetBoolean());
+            Assert.Equal(body.Length, properties.GetProperty("view_definition_length").GetInt32());
+            Assert.StartsWith("SELECT 1 AS Id", properties.GetProperty("view_definition").GetString(), StringComparison.Ordinal);
+            Assert.Equal(new[] { "Id" }, Names(answer.GetProperty("columns"), "name"));
+        });
+    }
+
+    [Fact]
     public async Task GetObjectDefinition_DroppedObject_AnswersItsLastDefinitionWithDroppedAt()
     {
         await WithStoreAsync(async (s, ct) =>
