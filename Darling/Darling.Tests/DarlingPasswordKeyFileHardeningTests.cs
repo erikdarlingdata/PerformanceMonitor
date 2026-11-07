@@ -74,7 +74,7 @@ public sealed class DarlingPasswordKeyFileHardeningTests
                 var generated = DarlingPasswordKeyFile.Generate(directory, () => (byte[])Key3072.Value.Clone(), NullLogger.Instance);
 
                 Assert.NotNull(generated.Refusal);
-                Assert.Contains("another user", generated.Refusal, StringComparison.Ordinal);
+                Assert.Contains("owned by user", generated.Refusal, StringComparison.Ordinal);
                 Assert.Null(generated.Pkcs8);
                 Assert.Empty(Directory.GetFileSystemEntries(directory));
             }

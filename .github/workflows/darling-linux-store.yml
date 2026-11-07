@@ -14,7 +14,8 @@ name: Darling Linux store
 #      name the way out (#6791: it could not measure the store's volume from another host), `--free-space 41G` must dry-run,
 #      run and then find nothing left to do (#6071: the verb refused to run on Linux at all);
 #   4. the password key on Linux, in the image with `--self-check-password-key` (#5366, #8006): the Unix owner, link-count
-#      and file-identity calls, the Linux crypto path and the passwordKey source, none of which the Windows tests reach.
+#      and file-identity calls, the Linux crypto path and the passwordKey source, none of which the Windows tests reach. It
+#      runs twice: as root, for the passwordKey owner cases only root can set up, and as UID 1654, the image's user (#8141).
 #
 # Triggers: the nightly (nightly.yml calls this as a reusable workflow), a manual dispatch, and a pull request that touches
 # the files this checks most directly. The pull request workflow (pr.yml) is the one per-PR CI system (#6656); this narrow
@@ -46,6 +47,11 @@ on:
       - 'Darling/PerformanceMonitor.Darling.Storage/PgSchemaGenerator.cs'
       - 'Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs'
       - 'Darling/PerformanceMonitor.Darling.Storage/RollupBackfill.cs'
+      - '.github/scripts/darling-nonroot-legs.sh'
+      - 'Darling/compose/setup.sh'
+      - 'Darling/PerformanceMonitor.Darling.Service/DarlingManagedRoles.cs'
+      - 'Darling/PerformanceMonitor.Darling.Service/DarlingServiceKeyFile.cs'
+      - 'Darling/PerformanceMonitor.Darling.Service/DarlingWorker.Bootstrap.cs'
 
 permissions:
   contents: read
@@ -104,7 +110,10 @@ jobs:
       # #5366, #8006: the test project runs on Windows, so the Unix file checks behind the password key (owner, link count, file
       # identity), the Linux crypto path and the passwordKey source (base64, PEM, a Kubernetes-style ..data link, env:) run
       # here, inside the image the service ships in. It ran in build.yml until that became release-only (#6656), and was then
-      # skipped on every run. The vector is mounted read-only; any failure exits non-zero and fails the job.
+      # skipped on every run. The vector is mounted read-only; any failure exits non-zero and fails the job. It runs as root
+      # (--user 0:0): the image runs as UID 1654 (#8141), and only root can give a file to another user, so as 1654 the
+      # passwordKey owner cases would be skipped. The run as the image's own user is "Check the password key on Linux as
+      # UID 1654" below.
       - name: Check the password key on Linux (self-check verb in the built image)
         timeout-minutes: 3
         shell: bash
@@ -112,7 +121,7 @@ jobs:
           set -euo pipefail
           vector="${GITHUB_WORKSPACE}/Darling/Darling.Tests/Fixtures/PasswordSeal/linux-self-check-vector.json"
           test -f "${vector}"
-          docker run --rm -v "${vector}:/vector/linux-self-check-vector.json:ro" "${DARLING_IMAGE}" \
+          docker run --rm --user 0:0 -v "${vector}:/vector/linux-self-check-vector.json:ro" "${DARLING_IMAGE}" \
             --self-check-password-key /vector/linux-self-check-vector.json
 
       - name: Start the store (a TimescaleDB container with a non-superuser owner)
@@ -202,6 +211,26 @@ jobs:
           docker logs darling 2>&1 | tail -n 60
           exit 1
 
+      # #8141: the image runs as UID 1654, not root.
+      - name: Check the service runs as UID 1654
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker exec darling id -u)" = 1654
+
+      - name: Check the password key on Linux as UID 1654
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          vector="${GITHUB_WORKSPACE}/Darling/Darling.Tests/Fixtures/PasswordSeal/linux-self-check-vector.json"
+          test -f "${vector}"
+          docker run --rm --user 1654:1654 \
+            -v "${vector}:/vector/linux-self-check-vector.json:ro" \
+            "${DARLING_IMAGE}" \
+            --self-check-password-key /vector/linux-self-check-vector.json
+
       # A rollup short of its source: raw query_stats rows 9 to 12 days old, written straight into the raw table, so no
       # refresh covers them (the INSERT of RollupBackfillLiveTests.SeedHourlyQueryStatsAsync, over a fixed window). The
       # verb returns early on a store with nothing to back fill, so without this the free-space step would never run.
@@ -284,3 +313,41 @@ jobs:
           echo "::endgroup::"
           docker rm -f darling store >/dev/null 2>&1 || true
           docker network rm darling-store-net >/dev/null 2>&1 || true
+
+  # #8141: the fresh, upgrade (from the previous release, which runs as root) and missed-chown paths of a compose-shaped
+  # deployment, each on its own store. Parallel to linux-store: it shares nothing with it.
+  compose-nonroot:
+    name: Darling compose non-root
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build container image
+        timeout-minutes: 12
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Darling/Dockerfile
+          tags: ${{ env.DARLING_IMAGE }}
+          load: true
+          cache-from: type=gha
+          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}
+
+      # Pinned, not :latest: the legs need an image that still runs as root, and 3.12.0 is the last release that does (#8141).
+      - name: Pull the previous release image
+        timeout-minutes: 5
+        run: docker pull ghcr.io/erikdarlingdata/performancemonitor-darling:3.12.0
+
+      - name: Run the fresh, upgrade and missed-step legs
+        timeout-minutes: 12
+        shell: bash
+        run: bash .github/scripts/darling-nonroot-legs.sh "${DARLING_IMAGE}" ghcr.io/erikdarlingdata/performancemonitor-darling:3.12.0

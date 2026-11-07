@@ -208,7 +208,11 @@ public static class DarlingLogHashKeyFile
         Generated: false,
         Refusal: $"PostgreSQL log events will not be collected: the store's log-hash key {path} cannot be used because {reason}. "
             + "The service does not replace this key on its own, because a new key gives every stored log event a new identity. "
-            + "If only this service could have written or read it, restrict it to the service account (on Windows, --harden-files run elevated does that) and restart; otherwise, or to start a new key, delete it and restart, and the service generates a new one.");
+            + (reason.StartsWith(DarlingServiceKeyFile.UnreadableDirectoryLead, StringComparison.Ordinal)
+                /* #8141: the key is likely there, behind a directory the service's user cannot list; the chown in the
+                   reason keeps it, and deleting it would give every stored log event a new identity for nothing. */
+                ? "Run the command above, then restart; the key is kept."
+                : "If only this service could have written or read it, restrict it to the service account (on Windows, --harden-files run elevated does that) and restart; otherwise, or to start a new key, delete it and restart, and the service generates a new one."));
 
     /// <summary>
     /// The refusal when the DIRECTORY is what cannot be trusted (#4004 review, round 3). The key file's own remedies

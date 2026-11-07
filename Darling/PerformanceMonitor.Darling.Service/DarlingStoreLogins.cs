@@ -401,6 +401,14 @@ internal static class DarlingStoreLogins
         EarlierComposeCredential? earlierViewer = null;
         if (configured is null && inContainer && verdict is { Provisioned: false, CredentialDirectory: { } directory })
         {
+            /* #8141: a credentials directory another user owns stopped collection; its role credentials are behind it,
+               so the surface stays down like one whose role login is refused, never the owner. */
+            if (DarlingManagedRoles.ComposeCredentialDirectoryOwnershipRefusal(directory) is { } refusal)
+            {
+                logger.LogWarning("{What} not started this attempt: {Reason}", what, refusal.Sentence);
+                return null;
+            }
+
             earlier = DarlingManagedRoles.ReadEarlierComposeCredential(directory, ComposeRole(surface), logger);
             if (surface == Surface.Web && earlier.Password is null)
             {
