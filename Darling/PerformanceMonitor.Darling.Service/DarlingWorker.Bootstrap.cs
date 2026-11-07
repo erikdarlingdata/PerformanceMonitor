@@ -280,10 +280,13 @@ public sealed partial class DarlingWorker
             _logger.LogWarning("{Warning}", triageLinkWarning);
         }
 
-        /* #8141: a credentials directory another user owns, or one the service's user cannot list, stops the start
-           here, before the store is opened: nothing is provisioned and no key loads. A narrow exception to "a key
-           problem never stops the start", because every later step would read the directory as empty and replace
-           what is in it. */
+        /* #8141: a credentials directory another user owns (its owner is not the service's user, and the service
+           is not root), or one whose owner cannot be read because a parent cannot be searched, stops the start
+           here, before the store is opened: nothing is provisioned and no key loads. A directory the service
+           owns does not stop it, even one it cannot list (the start sets it owner-only again), and neither does
+           an owner lookup that fails for any other reason (cannot tell). A narrow exception to "a key problem
+           never stops the start", because every later step would read the directory as empty and replace what
+           is in it. */
         if (!config.Postgres.Managed
             && Hosting.DarlingHostBinding.IsRunningInContainer
             && DarlingManagedRoles.ComposeCredentialDirectoryOwnershipRefusal(DarlingManagedRoles.ComposeStoreCredentialDirectory) is { } refusal)
