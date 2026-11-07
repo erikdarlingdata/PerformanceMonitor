@@ -48,13 +48,12 @@ public sealed class PgLockStatsCaptureDenominatorLiveTests
 
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
-        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
-        await connection.OpenAsync(ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
         await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
 
         await SeedRunsAsync(connection, ct, "pg_lock_stats", "SUCCESS", WindowStart, 1, 60, lockRuns: [10, 11, 12]);
 
-        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await using var dataSource = StoreDataSource(scratch);
         var rows = await DarlingPgLockStatsReader.GetPgLockStatsAsync(dataSource, ServerId, WindowStart, WindowEnd, 50, ct);
 
         var row = Assert.Single(rows);
@@ -72,13 +71,12 @@ public sealed class PgLockStatsCaptureDenominatorLiveTests
 
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
-        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
-        await connection.OpenAsync(ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
         await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
 
         await SeedRunsAsync(connection, ct, "pg_lock_stats", "SUCCESS", WindowStart, 1, 60, lockRuns: [10, 11, 12]);
 
-        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await using var dataSource = StoreDataSource(scratch);
         var json = await DarlingMcpPgServerStateTools.GetPgLockStats(
             dataSource, ServerName, hours_back: 1, limit: 25, as_of: WebDataStartNote.FormatWindowEnd(WindowEnd), cancellationToken: ct);
 
@@ -98,8 +96,7 @@ public sealed class PgLockStatsCaptureDenominatorLiveTests
 
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
-        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
-        await connection.OpenAsync(ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
         await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
 
         /* The 60 runs that count, and four kinds that must not: another collector's successful runs in the window, this
@@ -110,7 +107,7 @@ public sealed class PgLockStatsCaptureDenominatorLiveTests
         await SeedRunsAsync(connection, ct, "pg_lock_stats", "SKIPPED", WindowStart.AddSeconds(45), 1, 10, lockRuns: [], logIdBase: 3_000);
         await SeedRunsAsync(connection, ct, "pg_lock_stats", "SUCCESS", WindowStart.AddHours(-1), 1, 59, lockRuns: [], logIdBase: 4_000);
 
-        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await using var dataSource = StoreDataSource(scratch);
         var rows = await DarlingPgLockStatsReader.GetPgLockStatsAsync(dataSource, ServerId, WindowStart, WindowEnd, 50, ct);
 
         var row = Assert.Single(rows);
@@ -126,21 +123,40 @@ public sealed class PgLockStatsCaptureDenominatorLiveTests
 
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
-        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
-        await connection.OpenAsync(ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
         await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
 
         /* Lock rows from three captures and no collection_log row at all: a store whose log has a gap over the window. The
            denominator cannot be zero with a numerator of three, so it falls back to the three capture times the rows show. */
         await SeedLockRowsAsync(connection, ct, WindowStart, [10, 11, 12]);
 
-        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await using var dataSource = StoreDataSource(scratch);
         var rows = await DarlingPgLockStatsReader.GetPgLockStatsAsync(dataSource, ServerId, WindowStart, WindowEnd, 50, ct);
 
         var row = Assert.Single(rows);
         Assert.Equal(3, row.Captures);
         Assert.Equal(3, row.TotalCaptures);
     }
+
+    /// <summary>
+    /// A seed session on the scratch store with the store's <c>search_path</c> SET, never inherited (the #8013 trap): a
+    /// cloned scratch database does not carry the template's database-default <c>search_path</c>, and a pooled physical
+    /// session keeps the path it was opened with for its whole life, so on either the bare table names the seeds and
+    /// <see cref="DarlingMcpTestData.RegisterServerAsync"/> use resolve to nothing (42P01).
+    /// </summary>
+    private static async Task<NpgsqlConnection> OpenStoreAsync(ScratchPostgres scratch, CancellationToken ct)
+    {
+        var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var setPath = new NpgsqlCommand("SET search_path = " + PgSchemaGenerator.SearchPath, connection);
+        await setPath.ExecuteNonQueryAsync(ct);
+        return connection;
+    }
+
+    /// <summary>The reader's data source over the scratch store, with the store's <c>search_path</c> on every session it
+    /// opens, as the service's own pool has it: the reader's SQL names its tables bare.</summary>
+    private static NpgsqlDataSource StoreDataSource(ScratchPostgres scratch) =>
+        NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath });
 
     /// <summary>
     /// The issue's seed: <paramref name="count"/> runs of <paramref name="collector"/> one <paramref name="stepMinutes"/> apart
