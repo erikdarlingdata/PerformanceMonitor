@@ -5973,6 +5973,11 @@ internal interface IUnixDirectoryModes
 
     /// <summary>The user id this process runs as, for comparing with <see cref="UnixFileOwner.UserId"/>.</summary>
     uint EffectiveUserId => 0;
+
+    /// <summary>Whether the file at <paramref name="path"/>, every link followed, is a regular file (#8006): not a
+    /// directory, a device, a FIFO or a socket. Null when that cannot be told here (Windows, a stand-in that does not
+    /// model it).</summary>
+    bool? IsRegularFile(string path) => null;
 }
 
 /// <summary>Who owns a file and how many names it has (#5366).</summary>
@@ -5991,4 +5996,6 @@ internal sealed class PlatformUnixDirectoryModes : IUnixDirectoryModes
     public UnixFileOwner? OwnerOf(string path) => FileIdentity.UnixOwnerOf(path);
 
     public uint EffectiveUserId => FileIdentity.EffectiveUserId();
+
+    public bool? IsRegularFile(string path) => FileIdentity.UnixIsRegularFile(path);
 }

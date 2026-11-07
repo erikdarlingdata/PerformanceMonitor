@@ -39,6 +39,10 @@ internal sealed record PasswordKeyStartOptions
 
     /// <summary>This service host's name in the state table. Null means the machine name.</summary>
     public string? ServiceHost { get; init; }
+
+    /// <summary>The <c>passwordKey</c> reference (#8006) the key is loaded from instead of the key file. Null means the key
+    /// file in the credentials directory.</summary>
+    public string? KeySetting { get; init; }
 }
 
 /// <summary>
@@ -58,6 +62,7 @@ internal sealed class DarlingPasswordKeyRuntime
     private readonly string? _heldKeyId;
     private readonly bool _windows;
     private readonly Func<string, bool> _canOpen;
+    private readonly bool _fromSetting;
     private string? _sweepState;
     private bool _sweepReadFailed;
     private volatile bool _pinsWaiting;
@@ -67,9 +72,10 @@ internal sealed class DarlingPasswordKeyRuntime
     private DarlingPasswordKeyRuntime(
         NpgsqlDataSource postgres, ILogger logger, Action<IPasswordKeyRing> setRing, string serviceHost,
         IPasswordKeyRing ring, IPasswordKeyRing? held, byte[]? heldSpki, string? heldKeyId, string state, string? note,
-        bool windows, Func<string, bool> canOpen)
+        bool windows, Func<string, bool> canOpen, bool fromSetting = false)
     {
         _postgres = postgres;
+        _fromSetting = fromSetting;
         _windows = windows;
         _canOpen = canOpen;
         _logger = logger;
@@ -86,7 +92,8 @@ internal sealed class DarlingPasswordKeyRuntime
     /// <summary>The ring this start decided on: keyed when the key could be used, otherwise refusing with the reason.</summary>
     public IPasswordKeyRing Ring { get; }
 
-    /// <summary>The state written for this host: <c>ok</c>, <c>missing</c>, <c>mismatch</c> or <c>refused</c>.</summary>
+    /// <summary>The state written for this host: <c>ok</c>, <c>missing</c>, <c>mismatch</c>, <c>refused</c> or, with
+    /// <c>passwordKey</c> after a reset, <c>reset_pending</c>.</summary>
     public string State { get; }
 
     /// <summary>The note written with <see cref="State"/>: the refusal reason, or the open-directory warning, or null.</summary>
@@ -122,7 +129,11 @@ internal sealed class DarlingPasswordKeyRuntime
             return refused;
         }
 
-        return await StartAsync(directory, postgres, logger, ct).ConfigureAwait(false);
+        // Validate's rule: a blank passwordKey is no setting at all, so the start is exactly the key-file start.
+        var options = string.IsNullOrWhiteSpace(config.PasswordKey)
+            ? null
+            : new PasswordKeyStartOptions { KeySetting = config.PasswordKey };
+        return await StartAsync(directory, postgres, logger, ct, options).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -146,7 +157,7 @@ internal sealed class DarlingPasswordKeyRuntime
         PasswordPrivateKey? held = null;
         try
         {
-            var outcome = await DecideAndActAsync(directory, postgres, logger, selfTest, host, ct).ConfigureAwait(false);
+            var outcome = await DecideAndActAsync(directory, postgres, logger, selfTest, host, options.KeySetting, ct).ConfigureAwait(false);
             held = outcome.Key;
             IPasswordKeyRing ring;
             if (held is not null && outcome.State == "ok")
@@ -162,11 +173,11 @@ internal sealed class DarlingPasswordKeyRuntime
 
             setRing(ring);
             await WriteStateAsync(postgres, logger, host, outcome.KeyId, outcome.State, outcome.Note, ct).ConfigureAwait(false);
-            LogOutcome(logger, outcome, directory);
+            LogOutcome(logger, outcome, options.KeySetting is null ? directory : DarlingPasswordKeySource.SettingName, options.KeySetting is not null);
 
             var runtime = new DarlingPasswordKeyRuntime(
                 postgres, logger, setRing, host, ring, held is null ? null : ring, held?.PublicKey.Spki, held?.PublicKey.KeyId,
-                outcome.State, outcome.Note, windows, canOpen);
+                outcome.State, outcome.Note, windows, canOpen, fromSetting: options.KeySetting is not null);
             await runtime.RunPinStepAsync(ServiceCommandDeadlines.BootstrapSeconds, ct).ConfigureAwait(false);
             return runtime;
         }
@@ -246,13 +257,18 @@ internal sealed class DarlingPasswordKeyRuntime
             }
             else if (current is null)
             {
-                problem = "The password key was reset. Restart the service: it will make a new password key, and the saved passwords must be entered again.";
+                // A key from passwordKey is the operator's: a restart alone would load the same reset key again.
+                problem = _fromSetting
+                    ? DarlingPasswordKeyState.SettingSweepResetReason
+                    : "The password key was reset. Restart the service: it will make a new password key, and the saved passwords must be entered again.";
                 state = "reset_pending";
             }
             else if (!current.Spki.AsSpan().SequenceEqual(_heldSpki))
             {
-                problem = $"The store now publishes the password key {PasswordSeal.DisplayKeyId(PasswordSeal.KeyIdFor(current.Spki))}, not the key this service holds " +
-                    $"({PasswordSeal.DisplayKeyId(_heldKeyId ?? "")}). Restart the service, or restore the credentials volume that holds the key.";
+                problem = _fromSetting
+                    ? DarlingPasswordKeyState.SettingSweepMismatchReason(PasswordSeal.KeyIdFor(current.Spki), _heldKeyId ?? "")
+                    : $"The store now publishes the password key {PasswordSeal.DisplayKeyId(PasswordSeal.KeyIdFor(current.Spki))}, not the key this service holds " +
+                        $"({PasswordSeal.DisplayKeyId(_heldKeyId ?? "")}). Restart the service, or restore the credentials volume that holds the key.";
                 state = "mismatch";
             }
 
@@ -285,11 +301,15 @@ internal sealed class DarlingPasswordKeyRuntime
         }
     }
 
-    private sealed record Outcome(PasswordPrivateKey? Key, string State, string? Note, string? KeyId, bool Generated, bool TriggersOk, string? Warning);
+    /// <summary>What the start decided and did. <paramref name="Published"/> is true when this start published the key it
+    /// loaded (<see cref="PasswordKeyAction.PublishFile"/>), so the log can tell a passwordKey bootstrap from a reload.</summary>
+    private sealed record Outcome(
+        PasswordPrivateKey? Key, string State, string? Note, string? KeyId, bool Generated, bool TriggersOk, string? Warning,
+        bool Published = false);
 
     private static async Task<Outcome> DecideAndActAsync(
         string directory, NpgsqlDataSource postgres, ILogger logger, Func<PasswordPrivateKey, PublishedKey, bool> selfTest,
-        string host, CancellationToken ct)
+        string host, string? keySetting, CancellationToken ct)
     {
         await using var c = await postgres.OpenConnectionAsync(ct).ConfigureAwait(false);
 
@@ -302,7 +322,15 @@ internal sealed class DarlingPasswordKeyRuntime
         await DarlingPasswordKeyStore.WriteServiceStateAsync(
             c, host, null, "loading", null, ServiceCommandDeadlines.BootstrapSeconds, ct).ConfigureAwait(false);
 
-        var load = DarlingPasswordKeyFile.Load(directory, logger);
+        if (keySetting is not null)
+        {
+            NoteLeftoverKeyFiles(directory, logger);
+        }
+
+        // With passwordKey set the key comes only from the setting: never from, and never written to, the directory.
+        var load = keySetting is null
+            ? DarlingPasswordKeyFile.Load(directory, logger)
+            : DarlingPasswordKeySource.LoadFromSetting(keySetting, directory, logger);
         PasswordPrivateKey? fileKey = null;
         string? unusable = null;
         if (load.Untrusted)
@@ -323,7 +351,9 @@ internal sealed class DarlingPasswordKeyRuntime
                 }
                 catch (PasswordSealException)
                 {
-                    unusable = $"The password key file in {directory} is not a usable RSA-3072 key.";
+                    unusable = keySetting is null
+                        ? $"The password key file in {directory} is not a usable RSA-3072 key."
+                        : $"The password key from {DarlingPasswordKeySource.SettingName} is not a usable RSA-3072 key.";
                 }
                 finally
                 {
@@ -346,7 +376,8 @@ internal sealed class DarlingPasswordKeyRuntime
                 FileSpki: fileKey?.PublicKey.Spki,
                 FoundAfterOpenDirectory: load.FoundAfterOpenDirectory,
                 StoreCurrent: storeCurrent,
-                FileKeyRetiredInStore: retiredInStore);
+                FileKeyRetiredInStore: retiredInStore,
+                FromSetting: keySetting is not null);
             var decision = DarlingPasswordKeyState.Decide(facts);
 
             if (decision.RetireFileFirst)
@@ -411,7 +442,7 @@ internal sealed class DarlingPasswordKeyRuntime
                     }
 
                     ownsFileKey = false;
-                    return new Outcome(fileKey, "ok", null, fileKey!.PublicKey.KeyId, false, true, null);
+                    return new Outcome(fileKey, "ok", null, fileKey!.PublicKey.KeyId, false, true, null, Published: true);
                 }
 
                 case PasswordKeyAction.Generate:
@@ -439,6 +470,9 @@ internal sealed class DarlingPasswordKeyRuntime
                     return new Outcome(made, "ok", null, made.PublicKey.KeyId, true, true, null);
                 }
 
+                case PasswordKeyAction.AwaitNewKey:
+                    return new Outcome(null, "reset_pending", decision.Reason, fileKey?.PublicKey.KeyId, false, true, null);
+
                 default:
                     return new Outcome(null, "refused", "The service's password key cannot be used.", null, false, true, null);
             }
@@ -448,6 +482,37 @@ internal sealed class DarlingPasswordKeyRuntime
             if (ownsFileKey)
             {
                 fileKey?.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
+    /// With <c>passwordKey</c> set, says once per start for each key file still in the credentials directory that it is
+    /// not used. The file is only looked at, never read, renamed or retired: the operator removes it once the key from
+    /// the setting is in use.
+    /// </summary>
+    private static void NoteLeftoverKeyFiles(string directory, ILogger logger)
+    {
+        foreach (var name in new[] { DarlingPasswordKeyFile.UnixFileName, DarlingPasswordKeyFile.WindowsFileName })
+        {
+            var path = Path.Combine(directory, name);
+            bool found;
+            try
+            {
+                found = DarlingServiceKeyFile.AnythingAt(path);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                // The note is advice only, and the file is not used either way, so the start goes on without it.
+                logger.LogDebug("Whether a password key file is at {Path} could not be checked: {Message}", path, ex.Message);
+                found = false;
+            }
+
+            if (found)
+            {
+                logger.LogInformation(
+                    "passwordKey is set, so the password key file {Path} is not used. Delete it once the service logs the key as loaded from passwordKey.",
+                    path);
             }
         }
     }
@@ -481,7 +546,7 @@ internal sealed class DarlingPasswordKeyRuntime
         }
     }
 
-    private static void LogOutcome(ILogger logger, Outcome outcome, string directory)
+    private static void LogOutcome(ILogger logger, Outcome outcome, string directory, bool fromSetting)
     {
         if (outcome.State == "ok" && outcome.KeyId is not null)
         {
@@ -489,6 +554,12 @@ internal sealed class DarlingPasswordKeyRuntime
             if (outcome.Generated)
             {
                 logger.LogInformation("Password key {KeyId} generated in {Directory}", id, directory);
+            }
+            else if (outcome.Published && fromSetting)
+            {
+                /* #8006: only with passwordKey. A key file the store did not publish yet is also published here, and that
+                   start keeps today's "loaded from {Directory}" line. */
+                logger.LogInformation("Password key {KeyId} published from {Setting}", id, DarlingPasswordKeySource.SettingName);
             }
             else
             {
