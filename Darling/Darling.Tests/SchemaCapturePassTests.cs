@@ -406,7 +406,34 @@ public sealed class SchemaCapturePassTests
             rig.Source.Reads.Clear();
             await rig.PassAsync(server, ct);
             Assert.Equal(2, rig.Source.Reads.Count);
-            Assert.Equal("2", await rig.ScalarAsync("SELECT count(*) FROM collect.schema_capture_passes WHERE reason = 'returned_to_scope'", ct));
+            Assert.Equal("2", await rig.ScalarAsync("SELECT count(*) FROM collect.schema_capture_passes WHERE reason = 'session_started'", ct));
+        });
+    }
+
+    [Fact]
+    public async Task Pass_SessionGrantedLater_ReconcilesAndRecordsTheAlterMadeMeanwhile()
+    {
+        await WithRigAsync(async (rig, ct) =>
+        {
+            Seed(rig.Source);
+            rig.Source.Session = new SchemaSessionState(false, null, "Permission denied (error 262).", true);
+            var server = rig.Server();
+            await rig.PassAsync(server, ct);
+
+            /* A table changes while no session runs; then the grant is fixed and the session starts. */
+            rig.Source.Catalog[Reports] = [Table(200, "Monthly", "Id", "Extra")];
+            rig.Source.Session = new SchemaSessionState(true, s_created, null, false);
+            rig.Source.Reads.Clear();
+            await rig.PassAsync(server, ct);
+
+            Assert.Equal(2, rig.Source.Reads.Count);
+            Assert.Equal("1", await Versions(rig, "change_kind = 'altered' AND detected_by = 'reconcile' AND database_name = 'ReportsDb'", ct));
+            Assert.Equal("2", await rig.ScalarAsync("SELECT count(*) FROM collect.schema_capture_passes WHERE reason = 'session_started'", ct));
+
+            /* Once, not on every pass. */
+            rig.Source.Reads.Clear();
+            await rig.PassAsync(server, ct);
+            Assert.Empty(rig.Source.Reads);
         });
     }
 

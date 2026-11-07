@@ -156,6 +156,13 @@ public static class SchemaWorkPlanner
             return Make(probe, SchemaDatabaseWork.Skip, NoChangeTrackingPrefix + (session.FaultMessage ?? "the schema-changes session is not running."), key);
         }
 
+        /* A session that runs now where an earlier pass left no create time (the server row has a pass stamp) never ran for this server (the grant was missing at the baseline), or was dropped
+           and its position cleared. What changed before it started was recorded by nothing, so every database is read in full, once. */
+        if (serverState is { SessionCreateTime: null, LastSeenInScopeAt: not null } && session.CreateTimeUtc is not null)
+        {
+            return Reconcile(probe, "session_started", key, events);
+        }
+
         if (restarted)
         {
             return Reconcile(probe, "session_restarted", key, events);

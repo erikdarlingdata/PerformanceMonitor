@@ -137,6 +137,20 @@ public class SchemaWorkPlannerTests
     }
 
     [Fact]
+    public void Planner_SessionStartedAfterRunningWithout_ReconcilesEveryInScopeDatabase()
+    {
+        /* The stored server row holds no create time: the baseline ran with the session down. */
+        var server = Server() with { SessionCreateTime = null, LastEventSequence = null, LastEventTime = null, TotalEventsProcessed = null };
+
+        var plans = Plan(
+            [Probe("SalesDb"), Probe("OpsDb")], States(Db("SalesDb"), Db("OpsDb")), Batch(0), server: server);
+
+        Assert.All(plans, p => Assert.Equal("session_started", p.Reason));
+        Assert.All(plans, p => Assert.Equal(SchemaDatabaseWork.Reconcile, p.Work));
+        Assert.Equal(2, plans.Count);
+    }
+
+    [Fact]
     public void Planner_SessionCreateTimeJitterOfAFewMilliseconds_IsNotARestart()
     {
         var session = new SchemaSessionState(true, Session1.AddMilliseconds(3), null, false);
