@@ -735,6 +735,90 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
         }
     }
 
+    /// <summary>#8078: <c>sample_interval_seconds</c> is a per-row figure. A wait type that returns after missing some passes stores the
+    /// seconds since its own previous sighting, several cadences, while its siblings in the same collection store one cadence. The total
+    /// credits each collection's whole stored wait over the collection's cadence, so the returning type's longer interval never re-rates
+    /// its siblings and none of its wait is lost: the hour's total equals the sum of the three per-type hour rates the per-type read
+    /// gives over the same rows (500 + 100 + 2), every one-minute point reads the two steady types' 600 or 610 where the third type's
+    /// 600 ms lands, and the total is never below one type's own trend.</summary>
+    [Fact]
+    public async Task TotalWaits_CreditsEachCollectionsWholeWaitOverItsCadence_SoTheTotalEqualsTheSumOfItsTypes()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live server-trend test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            /* The hour before the top of the current hour: sixty one-minute collections that one 60-minute bucket holds whole. */
+            var now = DateTime.UtcNow;
+            var end = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Utc);
+            var start = end.AddHours(-1);
+            const string Insert = "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms, sample_interval_seconds) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)";
+            for (var m = 0; m < 60; m++)
+            {
+                var t = DarlingMcpTestData.Naive(start.AddMinutes(m));
+                await DarlingMcpTestData.ExecAsync(connection, ct, Insert, CollectionIdGenerator.Next(), t, ServerId, ServerName, "SOS_SCHEDULER_YIELD", 100L, 30000L, 60);
+                await DarlingMcpTestData.ExecAsync(connection, ct, Insert, CollectionIdGenerator.Next(), t, ServerId, ServerName, "PAGEIOLATCH_SH", 50L, 6000L, 60);
+                if (m % 5 == 4)
+                {
+                    /* Seen every fifth pass only: 600 ms over the 300 s since its own previous sighting, 2 ms/s. */
+                    await DarlingMcpTestData.ExecAsync(connection, ct, Insert, CollectionIdGenerator.Next(), t, ServerId, ServerName, "CXCONSUMER", 1L, 600L, 300);
+                }
+            }
+
+            var asOf = end.ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+            var hour = JsonDocument.Parse(await DarlingMcpServerTrendTools.GetServerTrend(postgres, "total_waits", ServerName, 1, asOf, bucket_minutes: 60)).RootElement;
+            var hourPoint = Assert.Single(hour.GetProperty("trend").EnumerateArray());
+            var hourRate = hourPoint.GetProperty("wait_time_ms_per_second").GetDouble();
+
+            /* Each type alone over the same rows and the same hour, through the per-type read: 500, 100 and 2 ms/s. The total of every
+               type is their sum, and cannot read below the busiest of them. */
+            async Task<double> PartAsync(string waitType)
+            {
+                await using var partCommand = postgres.CreateCommand(DarlingDataReader.WaitTrendBucketedSql);
+                partCommand.Parameters.Add(new NpgsqlParameter { Value = ServerId });
+                partCommand.Parameters.Add(new NpgsqlParameter { Value = waitType });
+                partCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DarlingMcpTestData.Naive(start) });
+                partCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DarlingMcpTestData.Naive(end) });
+                partCommand.Parameters.Add(new NpgsqlParameter { Value = 60 });
+                await using var part = await partCommand.ExecuteReaderAsync(ct);
+                Assert.True(await part.ReadAsync(ct));
+                return part.GetDouble(1);
+            }
+
+            var sos = await PartAsync("SOS_SCHEDULER_YIELD");
+            var pageio = await PartAsync("PAGEIOLATCH_SH");
+            var cx = await PartAsync("CXCONSUMER");
+            Assert.Equal(500.0, sos, 2);
+            Assert.Equal(100.0, pageio, 2);
+            Assert.Equal(2.0, cx, 2);
+            Assert.Equal(sos + pageio + cx, hourRate, 2);
+            Assert.True(hourRate >= sos, $"the total of every wait type reads {hourRate} ms/s, below SOS_SCHEDULER_YIELD alone at {sos}");
+
+            var minutes = JsonDocument.Parse(await DarlingMcpServerTrendTools.GetServerTrend(postgres, "total_waits", ServerName, 1, asOf)).RootElement;
+            var points = minutes.GetProperty("trend").EnumerateArray().Select(p => p.GetProperty("wait_time_ms_per_second").GetDouble()).ToArray();
+            Assert.Equal(60, points.Length);
+            Assert.All(points, p => Assert.True(Math.Abs(p - 600) < 0.01 || Math.Abs(p - 610) < 0.01, $"a one-minute point reads {p} ms/s"));
+            Assert.Equal(sos + pageio + cx, points.Average(), 2);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) => await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         var sql = string.Join(" ", Tables.Select(t => $"DELETE FROM {t} WHERE server_id = {ServerId};")) + $" DELETE FROM servers WHERE server_id = {ServerId};";
