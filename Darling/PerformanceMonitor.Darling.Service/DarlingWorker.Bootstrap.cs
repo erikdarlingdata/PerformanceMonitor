@@ -104,6 +104,9 @@ public sealed partial class DarlingWorker
             {
                 configPath = DarlingConfig.ResolveConfigPath();
                 config = DarlingConfig.Load();
+                /* #8006 review: a passwordKey env: variable leaves the environment here, before the managed store below
+                   or anything else this process starts can inherit it. Does nothing without the setting. */
+                DarlingPasswordKeySource.CaptureForService(config);
                 _analyzerConfig = config.Analyzer ?? PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default;
                 /* #7674: the trigram index option is read by get_store_metrics and by the all-servers find_queries_by_text refusal from process
                    start, long before the migrations finish (and for good when they fail). Set it the moment the file loads, not when the

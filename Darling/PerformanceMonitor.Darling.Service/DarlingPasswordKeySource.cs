@@ -96,6 +96,71 @@ public static class DarlingPasswordKeySource
         return DarlingPasswordKeyFile.Load(DarlingLogHashKeyFile.DirectoryFor(config, configPath), logger);
     }
 
+    /* The env: keys this service process captured, by variable name. Private and never logged or serialised: nothing in
+       the config, the diagnostics bundle or a sentence can reach it, and only the env: branch of Load reads it. */
+    private static readonly object s_capturedLock = new();
+    private static readonly Dictionary<string, string> s_captured = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// #8006 review: with <c>passwordKey: env:NAME</c>, reads the variable once into a private holder and removes it from
+    /// this process's environment, so no process the service starts afterwards (the managed PostgreSQL's pg_ctl and
+    /// postgres, icacls, PowerShell) inherits the key. <see cref="LoadFromSetting"/> then reads the held value for that
+    /// name. The service calls it right after each load of darling.json, before that path starts any child process:
+    /// clearing after the key is read would be too late, because the managed store starts first. The CLI verbs never
+    /// call it: they are short-lived, start no managed store, and read the variable directly as before.
+    ///
+    /// <para>Does nothing without the setting, for a <c>file:</c> reference or a literal (the reference rule
+    /// <see cref="Load"/> uses), and for a variable that is unset or blank, so the later load refuses it with the same
+    /// sentence as before. A second call for a name already captured finds the variable gone and keeps the held value.</para>
+    /// </summary>
+    internal static void CaptureForService(DarlingConfig config)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+
+        var reference = config.PasswordKey;
+        if (string.IsNullOrWhiteSpace(reference) || !DarlingSecretSource.IsReference(reference)
+            || !reference.StartsWith(EnvPrefix, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var name = reference.Substring(EnvPrefix.Length).Trim();
+        if (name.Length == 0)
+        {
+            return;
+        }
+
+        /* Locked: the worker and the MCP and web hosts load darling.json in parallel, and each captures after its load. */
+        lock (s_capturedLock)
+        {
+            var value = Environment.GetEnvironmentVariable(name);
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return;
+            }
+
+            s_captured[name] = value;
+            Environment.SetEnvironmentVariable(name, null);
+        }
+    }
+
+    /// <summary>Drops a captured value, for the tests that capture a variable of their own.</summary>
+    internal static void ForgetCaptured(string name)
+    {
+        lock (s_capturedLock)
+        {
+            s_captured.Remove(name);
+        }
+    }
+
+    private static string? Captured(string name)
+    {
+        lock (s_capturedLock)
+        {
+            return s_captured.TryGetValue(name, out var value) ? value : null;
+        }
+    }
+
     /// <summary>
     /// The lines <c>--validate-config</c> prints about <c>passwordKey</c>: none when the setting is unset. Otherwise one
     /// <c>WARNING: </c> line for each check a <c>file:</c> key failed that does not stop it loading (the same Warnings the
@@ -218,6 +283,12 @@ public static class DarlingPasswordKeySource
                 }
 
                 text = read.Text;
+            }
+            else if (Captured(named) is { } captured)
+            {
+                /* The service took the variable out of its environment at start (CaptureForService); the held value goes
+                   through the same parse as a value read from the environment. */
+                text = captured;
             }
             else
             {
