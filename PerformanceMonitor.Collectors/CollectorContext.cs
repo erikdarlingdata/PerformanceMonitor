@@ -105,6 +105,19 @@ public sealed class CollectorContext
     public string? CurrentDatabaseName { get; set; }
 
     /// <summary>
+    /// The ring-buffer <c>max_events_limit</c> the host's setting asks for (#8146). The loss note flags a session whose
+    /// own limit is below it, because a session keeps the limit it was created with. The literal 1000 stands until
+    /// Task 4 replaces it with <c>RingBufferTarget.DefaultMaxEvents</c>.
+    /// </summary>
+    public long RingBufferMaxEvents { get; init; } = 1000;
+
+    /// <summary>
+    /// True when this server's registration is an Azure SQL Database logical server, where the deadlock session is
+    /// per-database and loss accounting does not apply (#8146).
+    /// </summary>
+    public bool AzureRegistrationIsLogicalServer { get; init; }
+
+    /// <summary>
     /// Extension name to the schema it was created in, read from <c>pg_catalog.pg_extension</c> on the connection
     /// that is about to run the query (#6143). Null until the host has read it; the per-database path reads it again
     /// for each database, because an extension is created per database.
@@ -347,6 +360,45 @@ public sealed class CollectorContext
     /// <exception cref="ArgumentException">The label is not a legal count name.</exception>
     public void Measure(string label, long value)
     {
+        ValidateMeasurementLabel(label);
+
+        for (var i = 0; i < _measurements.Count; i++)
+        {
+            if (string.Equals(_measurements[i].Label, label, StringComparison.Ordinal))
+            {
+                _measurements[i] = new CollectorMeasurement(label, _measurements[i].Value + value);
+                return;
+            }
+        }
+
+        _measurements.Add(new CollectorMeasurement(label, value));
+    }
+
+    /// <summary>
+    /// Records <paramref name="value"/> under <paramref name="label"/>, keeping the LARGER of it and any value already
+    /// recorded. For a figure that is a span or a level rather than a count (#8146: the loss window and the event limit
+    /// across the databases of one run), where <see cref="Measure"/>'s sum would report a span nobody waited. Same label
+    /// rules as <see cref="Measure"/>.
+    /// </summary>
+    /// <exception cref="ArgumentException">The label is not a legal count name.</exception>
+    public void MeasureMax(string label, long value)
+    {
+        ValidateMeasurementLabel(label);
+
+        for (var i = 0; i < _measurements.Count; i++)
+        {
+            if (string.Equals(_measurements[i].Label, label, StringComparison.Ordinal))
+            {
+                _measurements[i] = new CollectorMeasurement(label, Math.Max(_measurements[i].Value, value));
+                return;
+            }
+        }
+
+        _measurements.Add(new CollectorMeasurement(label, value));
+    }
+
+    private static void ValidateMeasurementLabel(string label)
+    {
         if (!CollectorMeasurementNote.IsValidLabel(label))
         {
             throw new ArgumentException(
@@ -365,17 +417,6 @@ public sealed class CollectorContext
                 + "counter, is not readable by anything.",
                 nameof(label));
         }
-
-        for (var i = 0; i < _measurements.Count; i++)
-        {
-            if (string.Equals(_measurements[i].Label, label, StringComparison.Ordinal))
-            {
-                _measurements[i] = new CollectorMeasurement(label, _measurements[i].Value + value);
-                return;
-            }
-        }
-
-        _measurements.Add(new CollectorMeasurement(label, value));
     }
 
     /// <summary>Values the statement filter withheld this cycle because they were named or their match timed out

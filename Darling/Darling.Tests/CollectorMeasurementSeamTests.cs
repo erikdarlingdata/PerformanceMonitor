@@ -599,6 +599,16 @@ public class CollectorMeasurementSeamTests
                 RingBufferXml.TruncatedMeasurement,
                 RingBufferXml.EventsHiddenMeasurement,
                 RingBufferXml.NewestVisibleAgeMeasurement,
+                /* #8146: events a ring buffer evicted, or its session dropped, before a collector read them. Measured through
+                   RingBufferLossAccounting.Apply on behalf of deadlocks, blocked_process_report and long_query_completions, which
+                   is why the consts live in RingBufferLossAccounting.cs beside the .Measure( calls. Written only when a run lost
+                   events (the window and limit go through MeasureMax, which this scan does not read). */
+                RingBufferLossAccounting.EvictedMeasurement,
+                RingBufferLossAccounting.DroppedMeasurement,
+                RingBufferLossAccounting.UnknownMeasurement,
+                RingBufferLossAccounting.AtLeastMeasurement,
+                RingBufferLossAccounting.MemoryCappedMeasurement,
+                RingBufferLossAccounting.LimitBelowSettingMeasurement,
                 /* #6441 part 2: which source system_health_events read this pass. The event count on an event_file read (0 on a
                    quiet pass), the fallback flag on a ring-buffer read. Declared in SystemHealthEventsCollector.cs beside its
                    .Measure( calls. */
