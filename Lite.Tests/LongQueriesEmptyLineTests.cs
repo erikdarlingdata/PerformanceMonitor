@@ -12,7 +12,6 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Ui;
-using PerformanceMonitorLite.Controls;
 using Xunit;
 
 namespace PerformanceMonitorLite.Tests;
@@ -32,14 +31,14 @@ public sealed class LongQueriesEmptyLineTests
     [InlineData(false)]
     public void TheGridsEmptyText_IsOneSentence_ThatDoesNotRepeatTheBanner(bool traceEnabled)
     {
-        var text = LongQueriesEmptyText.Text(traceEnabled, ServerTab.LongQueriesSwitchLocation);
+        var text = LongQueriesEmptyText.Text(traceEnabled);
 
         Assert.EndsWith(".", text);
         Assert.Single(text.Split(new[] { ". ", "! ", "? " }, StringSplitOptions.RemoveEmptyEntries));
         Assert.DoesNotContain('\n', text);
         Assert.DoesNotContain("Turn it on", text, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("long_query_completions", text, StringComparison.Ordinal);
-        Assert.DoesNotContain(ServerTab.LongQueriesSwitchLocation, text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Settings →", text, StringComparison.Ordinal);
         if (!traceEnabled)
         {
             Assert.Contains("trace is off", text, StringComparison.OrdinalIgnoreCase);
@@ -51,7 +50,7 @@ public sealed class LongQueriesEmptyLineTests
     [InlineData(false)]
     public void TheGridsEmptyText_SitsOnOneLine_InTheEmptyHintStyle(bool traceEnabled)
     {
-        var text = LongQueriesEmptyText.Text(traceEnabled, ServerTab.LongQueriesSwitchLocation);
+        var text = LongQueriesEmptyText.Text(traceEnabled);
 
         var (lines, width) = StaTestThread.Run(() => WithStyles(() =>
         {
