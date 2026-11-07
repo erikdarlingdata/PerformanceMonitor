@@ -271,7 +271,7 @@
         </Border>
 
         <!-- Main Tab Control -->
-        <TabControl Grid.Row="1" x:Name="MainTabControl" Background="{DynamicResource BackgroundBrush}"
+        <TabControl Grid.Row="1" x:Name="MainTabControl" Style="{DynamicResource ServerTabStripStyle}" Background="{DynamicResource BackgroundBrush}"
                     BorderThickness="0" Padding="0" SelectionChanged="MainTabControl_SelectionChanged">
 
             <!-- Overview Tab — Correlated Timeline Lanes -->
@@ -1509,11 +1509,56 @@
 
             <!-- CPU Tab -->
             <TabItem Header="CPU">
-                <Grid Margin="8">
-                    <ui:ChartPanel Title="CPU">
-                        <ScottPlot:WpfPlot x:Name="CpuChart"/>
-                    </ui:ChartPanel>
-                </Grid>
+                <TabControl x:Name="CpuSubTabControl" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
+                    <TabItem Header="CPU Utilization">
+                        <Grid Margin="8">
+                            <ui:ChartPanel Title="CPU">
+                                <ScottPlot:WpfPlot x:Name="CpuChart"/>
+                            </ui:ChartPanel>
+                        </Grid>
+                    </TabItem>
+
+                    <!-- CPU Scheduler sub-tab (#8169: under CPU, as in the Viewer) — the Lite port of Darling's CPU Scheduler surface
+                         (cpu_scheduler_stats, a point-in-time collector). The runnable/blocked/queued pressure trend on top; a
+                         latest-snapshot metric/value grid below whose warning rows highlight (the collector's own CASE-computed
+                         pressure flags). Loads when this sub-tab is shown (RefreshCpuAsync, CpuSubTabControl). -->
+                    <TabItem Header="CPU Scheduler">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8"><!-- #8098: scrolls when the chart cannot keep its minimum height above the snapshot grid -->
+                        <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="420">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="2*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <ui:ChartPanel Title="CPU Scheduler" Grid.Row="0">
+                                <ScottPlot:WpfPlot x:Name="CpuSchedulerChart"/>
+                            </ui:ChartPanel>
+                            <!-- Metric/value latest-snapshot grid: a single-row point-in-time collector has no
+                                 natural top-N, so its snapshot is a labelled metric list; warning rows highlight. -->
+                            <DataGrid Grid.Row="1" x:Name="CpuSchedulerGrid"
+                                      AutoGenerateColumns="False" IsReadOnly="True"
+                                      HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                                      CanUserSortColumns="False" Margin="0,8,0,0">
+                                <DataGrid.RowStyle>
+                                    <Style TargetType="DataGridRow" BasedOn="{StaticResource GridRowStyle}">
+                                        <Setter Property="ToolTip" Value="{Binding Hint}"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsWarning}" Value="True">
+                                                <Setter Property="Background" Value="#33FF6B6B"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </DataGrid.RowStyle>
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Metric" Binding="{Binding Metric}" Width="2*"/>
+                                    <DataGridTextColumn Header="Value" Binding="{Binding Value}" Width="*"/>
+                                    <DataGridTextColumn Header="Collected" Binding="{Binding CollectionTimeLocal}" Width="150" SortMemberPath="CollectionTime"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <!-- Shown only where the cpu_scheduler_stats collector does not run (Azure SQL Database). -->
+                            <TextBlock Grid.Row="1" x:Name="CpuSchedulerNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
+                        </Grid></ScrollViewer>
+                    </TabItem>
+                </TabControl>
             </TabItem>
 
             <!-- Memory Tab -->
@@ -1682,6 +1727,40 @@
                         </Grid>
                     </TabItem>
 
+
+                    <!-- Plan Cache sub-tab (#8169: under Memory, as in the Viewer) — the Lite port of Darling's Plan Cache surface
+                         (plan_cache_stats). The single-use vs multi-use plan-cache size (MB) trend on top (the single-use bloat
+                         signal) over a summary strip (true total plans + oldest-plan age + derived bloat badge). Loads when this
+                         sub-tab is shown (RefreshMemoryAsync, MemorySubTabControl). -->
+                    <TabItem Header="Plan Cache">
+                        <Grid Margin="8">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <ui:ChartPanel Title="Plan Cache Size" Grid.Row="0">
+                                <ScottPlot:WpfPlot x:Name="PlanCacheChart"/>
+                            </ui:ChartPanel>
+                            <Border Grid.Row="1" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12,8" Margin="0,8,0,0">
+                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                    <TextBlock Text="Total Plans:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                    <TextBlock x:Name="PlanCacheTotalPlansText" Text="--" VerticalAlignment="Center" Margin="0,0,20,0"/>
+                                    <TextBlock Text="Oldest Plan Age:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                    <TextBlock x:Name="PlanCacheOldestPlanText" Text="--" VerticalAlignment="Center" Margin="0,0,20,0"/>
+                                    <!-- #7445: the compiled single-use figure that decides Bloat Level (parse trees left out). -->
+                                    <TextBlock Text="Compiled Single-Use:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                    <TextBlock x:Name="PlanCacheCompiledSingleUseText" Text="--" VerticalAlignment="Center" Margin="0,0,20,0"/>
+                                    <!-- Derived single-use bloat badge + forced-parameterization hint (install/47
+                                         report.plan_cache_bloat parity): a client-side CASE on single-use/total plans. -->
+                                    <TextBlock Text="Bloat Level:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                    <TextBlock x:Name="PlanCacheBloatLevelText" Text="--" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,20,0"/>
+                                    <TextBlock x:Name="PlanCacheRecommendationText" Text="" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,20,0"/>
+                                    <TextBlock Text="Collected:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                    <TextBlock x:Name="PlanCacheCollectedText" Text="--" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+                    </TabItem>
                 </TabControl>
             </TabItem>
 
@@ -2669,80 +2748,7 @@
                 </Grid></ScrollViewer>
             </TabItem>
 
-            <!-- CPU Scheduler Tab — the Lite port of Darling's CPU Scheduler surface (cpu_scheduler_stats,
-                 a point-in-time collector). The runnable/blocked/queued pressure trend on top; a
-                 latest-snapshot metric/value grid below whose warning rows highlight (the collector's own
-                 CASE-computed pressure flags). Loads on tab activation via RefreshVisibleTabAsync (index 14). -->
-            <TabItem Header="CPU Scheduler">
-                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8"><!-- #8098: scrolls when the chart cannot keep its minimum height above the snapshot grid -->
-                <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="420">
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="2*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
-                        <RowDefinition Height="*"/>
-                    </Grid.RowDefinitions>
-                    <ui:ChartPanel Title="CPU Scheduler" Grid.Row="0">
-                        <ScottPlot:WpfPlot x:Name="CpuSchedulerChart"/>
-                    </ui:ChartPanel>
-                    <!-- Metric/value latest-snapshot grid: a single-row point-in-time collector has no
-                         natural top-N, so its snapshot is a labelled metric list; warning rows highlight. -->
-                    <DataGrid Grid.Row="1" x:Name="CpuSchedulerGrid"
-                              AutoGenerateColumns="False" IsReadOnly="True"
-                              HeadersVisibility="Column" GridLinesVisibility="Horizontal"
-                              CanUserSortColumns="False" Margin="0,8,0,0">
-                        <DataGrid.RowStyle>
-                            <Style TargetType="DataGridRow" BasedOn="{StaticResource GridRowStyle}">
-                                <Setter Property="ToolTip" Value="{Binding Hint}"/>
-                                <Style.Triggers>
-                                    <DataTrigger Binding="{Binding IsWarning}" Value="True">
-                                        <Setter Property="Background" Value="#33FF6B6B"/>
-                                    </DataTrigger>
-                                </Style.Triggers>
-                            </Style>
-                        </DataGrid.RowStyle>
-                        <DataGrid.Columns>
-                            <DataGridTextColumn Header="Metric" Binding="{Binding Metric}" Width="2*"/>
-                            <DataGridTextColumn Header="Value" Binding="{Binding Value}" Width="*"/>
-                            <DataGridTextColumn Header="Collected" Binding="{Binding CollectionTimeLocal}" Width="150" SortMemberPath="CollectionTime"/>
-                        </DataGrid.Columns>
-                    </DataGrid>
-                    <!-- Shown only where the cpu_scheduler_stats collector does not run (Azure SQL Database). -->
-                    <TextBlock Grid.Row="1" x:Name="CpuSchedulerNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
-                </Grid></ScrollViewer>
-            </TabItem>
 
-            <!-- Plan Cache Tab — the Lite port of Darling's Plan Cache surface (plan_cache_stats). The
-                 single-use vs multi-use plan-cache size (MB) trend on top (the single-use bloat signal)
-                 over a summary strip (true total plans + oldest-plan age + derived bloat badge).
-                 RefreshVisibleTabAsync index 15. -->
-            <TabItem Header="Plan Cache">
-                <Grid Margin="8">
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="*"/>
-                        <RowDefinition Height="Auto"/>
-                    </Grid.RowDefinitions>
-                    <ui:ChartPanel Title="Plan Cache Size" Grid.Row="0">
-                        <ScottPlot:WpfPlot x:Name="PlanCacheChart"/>
-                    </ui:ChartPanel>
-                    <Border Grid.Row="1" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12,8" Margin="0,8,0,0">
-                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                            <TextBlock Text="Total Plans:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                            <TextBlock x:Name="PlanCacheTotalPlansText" Text="--" VerticalAlignment="Center" Margin="0,0,20,0"/>
-                            <TextBlock Text="Oldest Plan Age:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                            <TextBlock x:Name="PlanCacheOldestPlanText" Text="--" VerticalAlignment="Center" Margin="0,0,20,0"/>
-                            <!-- #7445: the compiled single-use figure that decides Bloat Level (parse trees left out). -->
-                            <TextBlock Text="Compiled Single-Use:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                            <TextBlock x:Name="PlanCacheCompiledSingleUseText" Text="--" VerticalAlignment="Center" Margin="0,0,20,0"/>
-                            <!-- Derived single-use bloat badge + forced-parameterization hint (install/47
-                                 report.plan_cache_bloat parity): a client-side CASE on single-use/total plans. -->
-                            <TextBlock Text="Bloat Level:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                            <TextBlock x:Name="PlanCacheBloatLevelText" Text="--" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,20,0"/>
-                            <TextBlock x:Name="PlanCacheRecommendationText" Text="" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,20,0"/>
-                            <TextBlock Text="Collected:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                            <TextBlock x:Name="PlanCacheCollectedText" Text="--" VerticalAlignment="Center"/>
-                        </StackPanel>
-                    </Border>
-                </Grid>
-            </TabItem>
 
             <!-- Session Stats Tab — the Lite port of Darling's Session Stats surface (session_summary_stats,
                  the server-wide SUMMARY collector). A session-status count trend (Total / Running / Sleeping /
