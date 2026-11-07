@@ -189,6 +189,13 @@ internal sealed class StaHost
     /// </summary>
     internal TimeSpan StartUpGuard { get; set; } = TimeSpan.FromSeconds(180);
 
+    /// <summary>
+    /// #7600: when given, the start-up does not return until this is set, after its window has shown and closed, so a host test can make the start-up
+    /// overrun <see cref="StartUpGuard"/> for certain. The engine's own cost cannot be relied on for that: in a process where an earlier host has loaded
+    /// it, the window shows and closes in 0 ms, inside even a 1 ms guard. Null for the suites' shared host.
+    /// </summary>
+    internal ManualResetEventSlim? StartUpHold { get; init; }
+
     /* A SemaphoreSlim, not a Monitor: a test may be async, so the releasing thread is not promised to be the taking one. */
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly object _startLock = new();
@@ -302,9 +309,13 @@ internal sealed class StaHost
         return new Releaser(_gate);
     }
 
-    /// <summary>Ends the host thread's dispatcher. Only for a host a test made for itself.</summary>
+    /// <summary>Ends the host thread's dispatcher, once a start-up still in flight (one a host test holds, then releases on its way out) has returned. Only for a host a test made for itself.</summary>
     internal void Shutdown() =>
-        (_dispatcher ?? (_starting is { IsCompletedSuccessfully: true } started ? started.Result : null))?.BeginInvokeShutdown(DispatcherPriority.Send);
+        _starting?.ContinueWith(
+            started => started.Result.BeginInvokeShutdown(DispatcherPriority.Send),
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnRanToCompletion,
+            TaskScheduler.Default);
 
     private static string GuardText(TimeSpan guard) => guard < TimeSpan.FromSeconds(1) ? $"{guard.TotalMilliseconds:0} ms" : $"{guard.TotalSeconds:0} s";
 
@@ -626,6 +637,12 @@ internal sealed class StaHost
             dispatcher.BeginInvoke(DispatcherPriority.Send, new Action(() =>
             {
                 StartRenderEngine();
+                if (StartUpHold is { } hold)
+                {
+                    Step("holding the start-up for the host's own test until it releases it");
+                    hold.Wait();
+                }
+
                 started.SetResult(dispatcher);
             }));
             Dispatcher.Run();

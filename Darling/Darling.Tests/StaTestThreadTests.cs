@@ -294,9 +294,11 @@ public sealed class StaTestThreadTests
     [Fact]
     public void TheRenderEngineIsStartedBeforeTheFirstBody_AndAStartUpThatOverrunsTheGuard_IsNamedAsItself()
     {
-        /* A start-up guard no window can be shown and closed within, so the start-up overruns it and the first call names the start-up, not this
-           body, whose own hang guard stays at its default. */
-        var host = new StaHost { StartUpGuard = TimeSpan.FromMilliseconds(1) };
+        /* The start-up is held until this test releases it, so it overruns the 1 ms guard whatever the engine costs here: in a process where an
+           earlier host has loaded the engine, the window shows and closes in 0 ms, inside even a 1 ms guard. The first call then names the start-up,
+           not this body, whose own hang guard stays at its default. */
+        using var hold = new ManualResetEventSlim();
+        var host = new StaHost { StartUpGuard = TimeSpan.FromMilliseconds(1), StartUpHold = hold };
         try
         {
             var ran = false;
@@ -305,7 +307,8 @@ public sealed class StaTestThreadTests
             Assert.StartsWith("WPF's render engine did not start within 1 ms", timedOut.Message);
             Assert.Contains("render engine start-up", host.StuckTest);
 
-            /* Once the start-up has finished the host runs bodies again, and each begins with the engine already loaded. */
+            /* Released, the start-up returns, the host runs bodies again, and each begins with the engine already loaded. */
+            hold.Set();
             var loadedAtBodyStart = false;
             Assert.True(
                 SpinWait.SpinUntil(() => RunsAfterRefusals(host, () => loadedAtBodyStart = RenderEngineIsLoaded()), TimeSpan.FromSeconds(60)),
@@ -314,6 +317,7 @@ public sealed class StaTestThreadTests
         }
         finally
         {
+            hold.Set();
             host.Shutdown();
         }
     }
