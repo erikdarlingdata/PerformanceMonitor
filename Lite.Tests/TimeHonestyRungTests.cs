@@ -751,7 +751,8 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
     /// #4766 and #7908: the MCP tool keeps its payload shape, exactly the keys it publishes with no UTC stamp among
     /// them, and stamps every point in the server's clock, while its buckets are cut on each sample's instant, as
     /// Darling's <c>CpuUtilizationBucketedSql</c> cuts them. So the two readings of the repeated hour are TWO points,
-    /// each a bucket of one sample, both stamped 01:30 on the server's clock and in instant order. The change of
+    /// each a bucket of one sample, in instant order, and they SHARE the wall-clock stamp 01:30: #7908 replaces the
+    /// one-point result #4766 kept here on purpose, because that point averaged two real hours into one. The change of
     /// 2 November 2025 stands in for the 2026 one because <c>as_of</c> refuses an instant that has not happened yet;
     /// the wall time and the two instants are the same.
     /// </summary>
