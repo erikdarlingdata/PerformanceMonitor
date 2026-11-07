@@ -48,10 +48,11 @@ public sealed class PgPileupSnapshotReader
     /// $1 server_id, $2 window floor (naive UTC — <c>collection_time</c> is stamped host-UTC by the
     /// collector runner and stored naive). The text comes back WHOLE (#5320): <see cref="ReadWindowAsync"/> cuts it to
     /// <see cref="StatementTextCharacters"/> code points, the bound identity fallback and the drill-down preview
-    /// need, and judges the whole statement with the sensitive-statement filter before the cut that is printed. Bounded output: the window is
-    /// <see cref="SameStatementPileupDetector.BaselineLookbackMinutes"/> of a one-minute-cadence
-    /// collector, ~50–150 rows on a busy server; the LIMIT is a tripwire against a misbehaving
-    /// snapshot (a runaway session count), not a working cap.
+    /// need, and judges the whole statement with the sensitive-statement filter before the cut that is printed. The time
+    /// floor is the read's only bound (#8157): the caller passes <see cref="SameStatementPileupDetector.BaselineLookbackMinutes"/>
+    /// plus the staleness margin of a one-minute-cadence collector, so the rows are the window's sessions over that
+    /// span. A row cap newest-first would fill before the floor on a server with a hundred or more qualifying sessions
+    /// a snapshot and hand the detector a baseline shorter than the one its finding states.
     /// </summary>
     public const string PileupWindowSql = $@"
 SELECT collection_time,
@@ -72,8 +73,7 @@ AND   collection_time >= $2
 AND   session_id > 50
 AND   COALESCE(is_cdc_capture, FALSE) = FALSE
 AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
-ORDER BY collection_time DESC
-LIMIT 5000";
+ORDER BY collection_time DESC";
 
     public PgPileupSnapshotReader(NpgsqlDataSource postgres, ILogger? logger = null)
     {

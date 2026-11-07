@@ -57,8 +57,9 @@ public class PileupSnapshotReader
     /// <summary>
     /// The evaluation window's rows, newest first, or an empty list on a read fault — the pileup
     /// sweep is a per-collection best-effort evaluation; a failed read costs one log line and this
-    /// cycle, never the collection loop. The LIMIT is a tripwire against a misbehaving snapshot,
-    /// not a working cap (the window is ~50–150 rows at the one-minute default cadence).
+    /// cycle, never the collection loop. The time floor is the read's only bound (#8157): a row cap
+    /// newest-first would fill before the floor on a server with a hundred or more qualifying sessions
+    /// a snapshot and hand the detector a baseline shorter than the one its finding states.
     /// </summary>
     public async Task<List<SameStatementPileupDetector.SnapshotRow>> ReadWindowAsync(
         int serverId, DateTime windowFloorUtc, CancellationToken cancellationToken)
@@ -98,8 +99,7 @@ AND   collection_time >= $2
 AND   session_id > 50
 AND   COALESCE(is_cdc_capture, FALSE) = FALSE
 AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
-ORDER BY collection_time DESC
-LIMIT 5000";
+ORDER BY collection_time DESC";
             cmd.CommandText = cmd.CommandText.Replace("v_query_snapshots", relation, StringComparison.Ordinal);
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             cmd.Parameters.Add(new DuckDBParameter { Value = windowFloorUtc });
