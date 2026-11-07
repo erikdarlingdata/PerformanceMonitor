@@ -97,6 +97,11 @@ internal static class DarlingProcessServices
        darling.json's web.enabled (default OFF), same config-free posture as the worker and MCP host. */
     services.AddHostedService<DarlingWebHostService>();
 
+    /* #7657: the Slack Socket Mode listener. Registered always and self-gating on the opened app-level token the worker publishes:
+       a token set means listen, blank means off. The state is the seam the worker publishes the token and route readers through. */
+    services.AddSingleton<PerformanceMonitor.Darling.Service.Chat.SlackListenerRuntimeState>();
+    services.AddHostedService<PerformanceMonitor.Darling.Service.Chat.SlackSocketModeHostService>();
+
     /* #6840: the front door. The directory, its secrets and the hosted service that refreshes it are registered always and
        cost nothing unless darling.json's frontDoor.enabled is set (the service gates itself, like the hosts above). The block
        is read from the file on first use, and a file that cannot be read gives the disabled block: the worker reports the
