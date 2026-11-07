@@ -179,19 +179,10 @@ public sealed class ViewerFinOpsSqlTests
         Assert.DoesNotContain("qs2", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY query_hash", sql, StringComparison.Ordinal);
 
-        /* The lookup picks each kept hash's busiest row on the base table and resolves the #1767 payload dimensions for
-           that one row (#8117): query_text_dim for the text, query_plan_dim for the plan as text or as gzip bytes (#2069:
-           post-V54 plans are gzip bytes with the text NULL). It cannot read the resolving view: that joins every row of
-           the hash to the dimension before the pick. The inline columns still serve rows written before the dimensions
-           existed, so on a store with both shapes neither form goes empty. */
+        /* The lookup is a second statement over the kept hashes, passed as $3. What it reads and how it resolves each
+           hash's text and plan are behaviour, pinned live by FinOpsHighImpactBoundedReadLiveTests. */
         var lookup = DarlingFinOpsHighImpactReader.HighImpactSampleLookupSql;
-        Assert.DoesNotContain("v_query_stats", lookup, StringComparison.Ordinal);
-        Assert.Contains("FROM collect.query_stats", lookup, StringComparison.Ordinal);
-        Assert.Contains(PayloadDimensions.QueryTextDimTable, lookup, StringComparison.Ordinal);
-        Assert.Contains(PayloadDimensions.QueryPlanDimTable, lookup, StringComparison.Ordinal);
-        Assert.Contains(PayloadDimensions.CompressedContentColumn, lookup, StringComparison.Ordinal);
         Assert.Contains("unnest($3::text[])", lookup, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY qs.delta_execution_count DESC NULLS LAST", lookup, StringComparison.Ordinal);
 
         var ddl = PgSchemaGenerator.CreateTable(QueryStatsCollector.Instance);
         foreach (var col in new[]
