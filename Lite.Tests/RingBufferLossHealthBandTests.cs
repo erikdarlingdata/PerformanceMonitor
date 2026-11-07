@@ -1,3 +1,11 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor Lite.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
 using System;
 using PerformanceMonitor.Common;
 using Xunit;
@@ -5,7 +13,7 @@ using Xunit;
 namespace Lite.Tests;
 
 /* #8146: collection health bands a run that lost ring-buffer events and explains it. */
-public class RingBufferLossHealthBandTests
+public sealed class RingBufferLossHealthBandTests
 {
     private const string Evicted = "ring_buffer_evicted=12 ring_buffer_loss_window_s=60 ring_buffer_events_limit=1000";
     private const string Dropped = "xe_session_dropped=7 ring_buffer_loss_window_s=60 ring_buffer_events_limit=1000";
