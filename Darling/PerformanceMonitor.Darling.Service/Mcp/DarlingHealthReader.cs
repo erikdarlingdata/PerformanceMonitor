@@ -524,6 +524,8 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
            horizon is a property of the store. DailySummaryRetention.HorizonFor documents the date arithmetic. */
         var fleetOverrides = await ReadFleetRetentionOverridesAsync(postgres, cancellationToken);
         var shortestRetentionDays = ShortestSignalRetentionDays(fleetOverrides);
+        /* The default arm is the viewer calendar's exact HorizonFor(DateTime.UtcNow, ...) call, which
+           ViewerCalendarRetentionPortTests reads in both readers, so the test clock stands beside it, not inside it. */
         var horizon = ClockForTests is { } clock
             ? DailySummaryRetention.HorizonFor(clock(), shortestRetentionDays)
             : DailySummaryRetention.HorizonFor(DateTime.UtcNow, shortestRetentionDays);
