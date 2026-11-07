@@ -524,7 +524,9 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
            horizon is a property of the store. DailySummaryRetention.HorizonFor documents the date arithmetic. */
         var fleetOverrides = await ReadFleetRetentionOverridesAsync(postgres, cancellationToken);
         var shortestRetentionDays = ShortestSignalRetentionDays(fleetOverrides);
-        var horizon = DailySummaryRetention.HorizonFor(ReaderUtcNow(), shortestRetentionDays);
+        var horizon = ClockForTests is { } clock
+            ? DailySummaryRetention.HorizonFor(clock(), shortestRetentionDays)
+            : DailySummaryRetention.HorizonFor(DateTime.UtcNow, shortestRetentionDays);
 
         /* #3653 (Q12): tier over the legacy pair above; the hourly RELATION by the supply rule — the
            interval-honest successor where it reaches as far back as the legacy for this window. The viewer's
