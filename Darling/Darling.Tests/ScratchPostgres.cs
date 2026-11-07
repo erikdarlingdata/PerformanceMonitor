@@ -202,13 +202,12 @@ internal sealed class ScratchPostgres : IAsyncDisposable
 
         try
         {
-            await using var admin = new NpgsqlConnection(UnpooledAdminConnectionString(baseConnectionString));
-            await admin.OpenAsync(cancellationToken);
+            await using var admin = await LeaseAdminAsync(UnpooledAdminConnectionString(baseConnectionString), cancellationToken);
             await using var create = new NpgsqlCommand(
                 template is not null ? $"CREATE DATABASE \"{databaseName}\" TEMPLATE \"{template}\""
                 : cCollation ? $"CREATE DATABASE \"{databaseName}\" TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'"
                 : $"CREATE DATABASE \"{databaseName}\"",
-                admin);
+                admin.Connection);
             await create.ExecuteNonQueryAsync(cancellationToken);
         }
         catch
@@ -323,9 +322,8 @@ internal sealed class ScratchPostgres : IAsyncDisposable
                 }
             }
 
-            await using var admin = new NpgsqlConnection(UnpooledAdminConnectionString(baseConnectionString));
-            await admin.OpenAsync();
-            await using var close = new NpgsqlCommand($"ALTER DATABASE \"{template.DatabaseName}\" WITH ALLOW_CONNECTIONS false", admin);
+            await using var admin = await LeaseAdminAsync(UnpooledAdminConnectionString(baseConnectionString), CancellationToken.None);
+            await using var close = new NpgsqlCommand($"ALTER DATABASE \"{template.DatabaseName}\" WITH ALLOW_CONNECTIONS false", admin.Connection);
             await close.ExecuteNonQueryAsync();
         }
         catch
@@ -496,9 +494,8 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     private static async Task DropAsync(string adminConnectionString, string databaseName)
     {
         await QuiesceTimescaleJobsAsync(adminConnectionString, databaseName);
-        await using var admin = new NpgsqlConnection(UnpooledAdminConnectionString(adminConnectionString));
-        await admin.OpenAsync();
-        await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)", admin);
+        await using var admin = await LeaseAdminAsync(UnpooledAdminConnectionString(adminConnectionString), CancellationToken.None);
+        await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)", admin.Connection);
         await drop.ExecuteNonQueryAsync();
         Remembered.TryRemove(databaseName, out _);
     }
@@ -570,9 +567,69 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     /// <c>DROP DATABASE ... WITH (FORCE)</c> on a scratch database and, half a second later, the
     /// <c>CALL run_job(...)</c> of the retired-baseline race test. With pooling off, the backend that ran a create or a
     /// drop ends when the connection closes, and no other test ever runs on it.
+    /// <para>#8206: the factory keeps the connections it opens with this string and runs its next create or drop on one of
+    /// them (<see cref="LeaseAdminAsync"/>), so a leg that mints hundreds of scratch databases no longer pays a fresh socket,
+    /// and an ephemeral port left in TIME_WAIT, per create and per drop: a leg ran its runner out of ports (WSAENOBUFS on a
+    /// connect). The connections stay unpooled, so Npgsql never hands one to a test, and only the factory runs on them. The
+    /// application name is what tells them apart in pg_stat_activity.</para>
     /// </summary>
     internal static string UnpooledAdminConnectionString(string adminConnectionString) =>
-        new NpgsqlConnectionStringBuilder(adminConnectionString) { Pooling = false }.ConnectionString;
+        new NpgsqlConnectionStringBuilder(adminConnectionString) { Pooling = false, ApplicationName = AdminApplicationName }.ConnectionString;
+
+    /// <summary>The application name of the factory's admin connections (#8206).</summary>
+    internal const string AdminApplicationName = "darling-tests-scratch-admin";
+
+    /// <summary>The factory's open admin connections not in use, per unpooled admin connection string.</summary>
+    private static readonly ConcurrentDictionary<string, ConcurrentBag<NpgsqlConnection>> IdleAdminConnections = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// An open admin connection on <paramref name="unpooledAdminConnectionString"/>: one the factory opened earlier and has
+    /// finished with when there is one still open, a new one otherwise. Disposing the lease hands the connection back when it
+    /// is still open and closes it when it is not.
+    /// </summary>
+    private static async Task<AdminLease> LeaseAdminAsync(string unpooledAdminConnectionString, CancellationToken cancellationToken)
+    {
+        var idle = IdleAdminConnections.GetOrAdd(unpooledAdminConnectionString, static _ => new ConcurrentBag<NpgsqlConnection>());
+        while (idle.TryTake(out var reused))
+        {
+            if (reused.FullState == System.Data.ConnectionState.Open)
+            {
+                return new AdminLease(reused, idle);
+            }
+
+            await reused.DisposeAsync();
+        }
+
+        var connection = new NpgsqlConnection(unpooledAdminConnectionString);
+        try
+        {
+            await connection.OpenAsync(cancellationToken);
+        }
+        catch
+        {
+            await connection.DisposeAsync();
+            throw;
+        }
+
+        return new AdminLease(connection, idle);
+    }
+
+    private sealed class AdminLease(NpgsqlConnection connection, ConcurrentBag<NpgsqlConnection> idle) : IAsyncDisposable
+    {
+        public NpgsqlConnection Connection { get; } = connection;
+
+        public async ValueTask DisposeAsync()
+        {
+            if (Connection.FullState == System.Data.ConnectionState.Open)
+            {
+                idle.Add(Connection);
+            }
+            else
+            {
+                await Connection.DisposeAsync();
+            }
+        }
+    }
 
     /// <summary>The admin connection string with the exit drain's own connect and command timeouts, and no pooling: one connection per drop.</summary>
     internal static string ExitDrainConnectionString(string adminConnectionString) =>

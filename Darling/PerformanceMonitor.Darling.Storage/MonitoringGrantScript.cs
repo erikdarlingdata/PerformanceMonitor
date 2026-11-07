@@ -47,12 +47,25 @@ public enum GrantScope
 /// One grant. <see cref="Required"/> is false for the grants docs/permissions.md marks "Optional" (ALTER TRACE, ALTER SETTINGS, the
 /// msdb job reads): the script includes them, the connection test does not warn about them. <see cref="RdsRefused"/> marks a grant
 /// Amazon RDS for SQL Server refuses to its master user (#6889): the RDS form of the script leaves it out and the connection test on an
-/// RDS target does not ask for it.
+/// RDS target does not ask for it. <see cref="ObjectCreatedOnFirstUse"/> marks an msdb table SQL Server creates the first time a feature
+/// is configured (dbo.cdc_jobs, on the first CDC configuration): a GRANT on a missing object raises error 15151, so <see cref="Statement"/>
+/// wraps the grant in an OBJECT_ID guard and the script runs clean on a server that has never used the feature.
 /// </summary>
-public sealed record GrantEntry(GrantSet Set, GrantScope Scope, string Permission, string? OnObject, bool Required, string Why, bool RdsRefused = false)
+public sealed record GrantEntry(
+    GrantSet Set, GrantScope Scope, string Permission, string? OnObject, bool Required, string Why, bool RdsRefused = false,
+    bool ObjectCreatedOnFirstUse = false)
 {
-    /// <summary>The statement that grants this to <paramref name="principal"/> (a bare name, bracket-quoted here).</summary>
-    public string Statement(string principal) => GrantPrefix + MonitoringGrantScript.QuoteName(principal) + ";";
+    /// <summary>
+    /// The statement that grants this to <paramref name="principal"/> (a bare name, bracket-quoted here). For an object the server creates
+    /// on first use, the GRANT sits inside <c>IF OBJECT_ID(N'...') IS NOT NULL BEGIN ... END;</c>.
+    /// </summary>
+    public string Statement(string principal)
+    {
+        var grant = GrantPrefix + MonitoringGrantScript.QuoteName(principal) + ";";
+        return ObjectCreatedOnFirstUse
+            ? "IF OBJECT_ID(N'" + OnObject + "') IS NOT NULL\nBEGIN\n    " + grant + "\nEND;"
+            : grant;
+    }
 
     /// <summary>The statement up to the principal: <c>GRANT ... TO </c>, for a script that quotes the principal itself.</summary>
     public string GrantPrefix => OnObject is null ? $"GRANT {Permission} TO " : $"GRANT {Permission} ON {OnObject} TO ";
@@ -134,6 +147,9 @@ public static class MonitoringGrantScript
         new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.syssessions", false, "Optional: SQL Agent job monitoring.", RdsRefused: true),
         new(GrantSet.Base, GrantScope.Msdb, "EXECUTE", "dbo.agent_datetime", false, "Optional: SQL Agent job monitoring.", RdsRefused: true),
         new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.backupset", false, "Optional: the last full and log backup per database. Without it the database_protection collector records a permissions skip.", RdsRefused: true),
+        new(GrantSet.Base, GrantScope.Msdb, "SELECT", "dbo.cdc_jobs", false,
+            "Optional: leaves CDC capture jobs out of the query snapshots and the Long-Running Query alert. msdb grants public no SELECT on this table, and creates it the first time CDC is configured, so the grant is guarded: run the script again after CDC is first enabled.",
+            RdsRefused: true, ObjectCreatedOnFirstUse: true),
         new(GrantSet.FinOps, GrantScope.EachDatabase, "VIEW DATABASE STATE", null, true, "FinOps Index Analysis runs sp_IndexCleanup in each database you inspect."),
         new(GrantSet.FinOps, GrantScope.EachDatabase, "VIEW DEFINITION", null, true, "FinOps Index Analysis."),
         new(GrantSet.FinOps, GrantScope.EachDatabase, "SELECT", "sys.sql_expression_dependencies", true,
@@ -436,7 +452,7 @@ public static class MonitoringGrantScript
 
         if (awsRds)
         {
-            Line("/* Optional: SQL Agent job history. RDS refuses the grants on sysjobsteps, sysjobschedules, syscategories, sysalerts, sysnotifications, syssessions, agent_datetime and backupset, so they are left out: a Long-Running Query alert cannot name the Agent job and step, Running Jobs and Agent Status do not collect on RDS, and Agent alerts and their operators are not collected on RDS. Job History is complete without them apart from the job category, which shows as empty (the collector reads it as NULL when the login cannot read syscategories). The backup history grant is refused too, but a login with a user in msdb can read msdb.dbo.backupset without it, so the backups and CHECKDB view still fills. */");
+            Line("/* Optional: SQL Agent job history. RDS refuses the grants on sysjobsteps, sysjobschedules, syscategories, sysalerts, sysnotifications, syssessions, agent_datetime and backupset, so they are left out: a Long-Running Query alert cannot name the Agent job and step, Running Jobs and Agent Status do not collect on RDS, and Agent alerts and their operators are not collected on RDS. Job History is complete without them apart from the job category, which shows as empty (the collector reads it as NULL when the login cannot read syscategories). The backup history grant is refused too, but a login with a user in msdb can read msdb.dbo.backupset without it, so the backups and CHECKDB view still fills. The cdc_jobs grant is left out as well, since RDS lets its master user grant only those three job tables: on an RDS instance with CDC configured, the query snapshots collector matches CDC capture jobs by name instead. */");
         }
         else
         {

@@ -108,6 +108,94 @@ public sealed class ViewerServerTabChartLayoutTests
             Assert.True(failures.Count == 0, $"{failures.Count} chart layout defects at {width}x{height} (x{dpi}):{Environment.NewLine}" + string.Join(Environment.NewLine, failures));
         });
 
+    /// <summary>#8220: the sizes the app's minimum window and a common laptop screen give, in DIPs.</summary>
+    public static TheoryData<int, int> AppWindows => new() { { 900, 600 }, { 1280, 800 } };
+
+    /// <summary>#8220: the legend rule on the Viewer's server tab hosted the way the main window hosts it, every keyed chart fed twelve series (the
+    /// most any chart lists). At the minimum window each plot keeps 120 DIPs, a side legend leaves the plot 60% of the width, and no legend leaves
+    /// more than 15% of the width empty.</summary>
+    [Theory]
+    [MemberData(nameof(AppWindows))]
+    public void EveryChartLegend_FollowsTheRule_AtTheAppWindow(int width, int height) =>
+        StaTestThread.Run(() =>
+        {
+            var failures = new List<string>();
+            WithTheme(() =>
+            {
+                var tab = NewTab();
+                var window = new Window { Content = ChartLayoutProbe.HostLikeMainWindow(tab), Width = width, Height = height, Left = 0, Top = 0 };
+                window.Show();
+                try
+                {
+                    var window24 = (ValueTuple<DateTime, DateTime>)typeof(ViewerServerTab).GetMethod("GetWindowUtc", Instance)!.Invoke(tab, null)!;
+                    var dataStart = window24.Item2.AddHours(-6);
+                    tab.ServerDataStartUtc = dataStart;
+                    var (_, fedFailed) = ChartLayoutProbe.FeedRenderMethods(
+                        tab,
+                        m => (m.Name.StartsWith("Render", StringComparison.Ordinal) || m.Name.StartsWith("Update", StringComparison.Ordinal)) && m.Name.Contains("Chart", StringComparison.Ordinal),
+                        (type, dateIndex) => type == typeof(DateTime)
+                            ? (dateIndex == 0 ? window24.Item1 : window24.Item2)
+                            : type.IsGenericType && type.GetGenericTypeDefinition() == typeof(List<>)
+                                ? ChartLayoutProbe.MakeRows(type.GetGenericArguments()[0], dataStart, window24.Item2, 12)
+                                : null);
+                    failures.AddRange(fedFailed.Select(f => $"feeding {f}"));
+                    var (found, readings) = ChartLayoutProbe.MeasureAllLegends(window, tab, "viewer-legend", $"{width}x{height}");
+                    failures.AddRange(found);
+                    foreach (var reading in readings)
+                    {
+                        _output.WriteLine(reading);
+                    }
+                }
+                finally
+                {
+                    window.Close();
+                }
+            });
+
+            Assert.True(failures.Count == 0, $"{failures.Count} legend defects at {width}x{height}:{Environment.NewLine}" + string.Join(Environment.NewLine, failures));
+        });
+
+    /// <summary>#8220: the charts whose legend is long or beside the plot, filled with the series they really list, at their real place in the
+    /// Viewer's tab hosted the way the main window hosts it. The same floors and shares as Lite's test.</summary>
+    [Theory]
+    [MemberData(nameof(AppWindows))]
+    public void TheLongLegendCharts_FollowTheRule_AtTheAppWindow(int width, int height) =>
+        StaTestThread.Run(() =>
+        {
+            var failures = new List<string>();
+            WithTheme(() =>
+            {
+                var tab = NewTab();
+                var window = new Window { Content = ChartLayoutProbe.HostLikeMainWindow(tab), Width = width, Height = height, Left = 0, Top = 0 };
+                window.Show();
+                try
+                {
+                    var (found, readings) = ChartLayoutProbe.MeasureHeavyLegends(window, tab, ChartLayoutProbe.HeavyLegendCharts, "viewer-heavy", $"{width}x{height}");
+                    failures.AddRange(found);
+                    foreach (var reading in readings)
+                    {
+                        _output.WriteLine(reading);
+                    }
+                }
+                finally
+                {
+                    window.Close();
+                }
+            });
+
+            Assert.True(failures.Count == 0, $"{failures.Count} legend defects at {width}x{height}:{Environment.NewLine}" + string.Join(Environment.NewLine, failures));
+        });
+
+    private static ViewerServerTab NewTab()
+    {
+        var tab = new ViewerServerTab(
+            new ViewerDataService("Host=127.0.0.1;Port=1;Database=darling;Username=darling"),
+            new DarlingServer(1, "chart-layout-test", "chart-layout-test", true, null));
+        // Switching to a tab would start that tab's load against a server that is not there: the refresh loop bounces instead.
+        typeof(ViewerServerTab).GetField("_refreshInFlight", Instance)!.SetValue(tab, true);
+        return tab;
+    }
+
     private static void WithTheme(Action body)
     {
         var app = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };

@@ -237,6 +237,12 @@ public sealed class AgentSetupWebLiveTests
             Assert.Equal($"blocking|{ServerId}|1|5|40|20|300|true", await ScalarAsync(owner,
                 $"SELECT metric_match || '|' || scope_server_id || '|' || agent_level || '|' || agent_max_per_hour || '|' || agent_max_per_day || '|' || agent_lease_minutes || '|' || agent_expiry_minutes || '|' || enabled::text FROM config_notification_routes WHERE route_id = {id}", ct));
 
+            /* #7999: any spelling of the every-analysis-finding match is stored as `Analysis: *`, fleet-wide. */
+            var analysisAll = await Send("POST", "/api/notification-routes", Json, "{\"metric_match\":\"  analysis:   * \",\"agent_level\":1}");
+            Assert.Equal(200, analysisAll.Status);
+            Assert.Equal("Analysis: *", await ScalarAsync(owner,
+                $"SELECT metric_match FROM config_notification_routes WHERE route_id = {(int)analysisAll.Body!["route_id"]!}", ct));
+
             /* Edit: only the fields sent change, and a route's saved email destination is carried forward untouched. */
             var seeded = await SeedRouteAsync(owner, "Analysis: Waits", ct);
             var edited = await Send("PUT", $"/api/notification-routes/{seeded}", Json,
