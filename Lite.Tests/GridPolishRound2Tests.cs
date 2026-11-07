@@ -42,7 +42,7 @@ public sealed class GridPolishRound2Tests
 
     private const string LongName = "Granted Workspace Memory (KB) of the very long counter name that no column of any width is wide enough to show in full";
 
-    private sealed record View(string Label, string Grid, double Window, double Viewport, List<GridPolishProbe.Col> Cols);
+    private sealed record View(string Label, string Grid, double Window, double Viewport, List<GridPolishProbe.Col> Cols, GridPolishProbe.Filler? Filler = null);
 
     private sealed record Case(string Grid, Type Row, Dictionary<string, object?>? Values = null);
 
@@ -82,7 +82,8 @@ public sealed class GridPolishRound2Tests
                         {
                             var rows = GridPolishProbe.Rows(c.Row, 3, c.Values);
                             var cols = GridPolishProbe.Measure(grid, rows, GridWidth(window), GridPolishProbe.PngPath(tabKind, c.Grid, theme, window));
-                            found.Add(new View($"{theme} {window:0}", c.Grid, window, GridWidth(window), cols));
+                            var filler = GridPolishProbe.MeasureFiller(grid, rows, GridWidth(window));
+                            found.Add(new View($"{theme} {window:0}", c.Grid, window, GridWidth(window), cols, filler));
                         }
                     }
 
@@ -381,5 +382,42 @@ public sealed class GridPolishRound2Tests
         Assert.True(decimals.Count == 1 && decimals[0] == 1, "One decimal in every percentage of the summary: " + string.Join(" | ", percentages));
         var line = shown.Last();
         Assert.False(line.Contains("  ", StringComparison.Ordinal), "A double space in the CPU line: " + line);
+    }
+
+    [Fact]
+    public void TheSchedulerIssuesGrid_HasNoBlankHeaderCell_RightOfItsLastColumn()
+    {
+        var problems = new List<string>();
+        foreach (var view in Views("Server", new Case("SchedulerIssuesGrid", typeof(SchedulerIssueRow))))
+        {
+            var last = view.Cols[^1];
+            var blank = view.Viewport - (last.Left + last.Width);
+            if (blank > 1 && view.Filler is { BorderRight: > 0 } filler)
+            {
+                problems.Add($"{view.Label}: a {blank:0} px blank header cell with a {filler.BorderRight:0} px right border follows '{last.Header}'");
+            }
+        }
+
+        Empty(problems, "A blank header cell shows after the last column:");
+    }
+
+    [Fact]
+    public void TheProvisioningTrendGrid_ShowsEveryCpuPercentageWithOneDecimal()
+    {
+        var problems = new List<string>();
+        var values = new Dictionary<string, object?> { ["AvgCpuPct"] = 37.3m, ["P95CpuPct"] = 41.2m, ["MaxCpuPct"] = 98 };
+        foreach (var view in Views("FinOps", new Case("ProvisioningTrendGrid", typeof(ProvisioningTrendRow), values)))
+        {
+            foreach (var header in new[] { "Avg SQL Server CPU %", "P95 SQL Server CPU %", "Max SQL Server CPU %" })
+            {
+                var shown = Col(view, header).Value;
+                if (shown is null || !System.Text.RegularExpressions.Regex.IsMatch(shown, @"^\d+\.\d$"))
+                {
+                    problems.Add($"{view.Label}: '{header}' shows '{shown}'");
+                }
+            }
+        }
+
+        Empty(problems, "Percentages in the provisioning trend do not share one format:");
     }
 }

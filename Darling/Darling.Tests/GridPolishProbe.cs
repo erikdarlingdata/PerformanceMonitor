@@ -47,12 +47,36 @@ internal static class GridPolishProbe
         internal double ValueNaturalWidth;
         internal double ValueBoxWidth;
         internal double CellWidth;
+        /// <summary>How far the grid scrolls sideways (the same for every column of one grid): a column ending past the viewport is reachable when it ends within this much more.</summary>
+        internal double Scrollable;
 
         public override string ToString() => $"'{Header}' left {Left:0} width {Width:0} filter {Filter}";
     }
 
     /// <summary>Shows <paramref name="grid"/> alone at <paramref name="width"/> px with <paramref name="rows"/> bound and reads its columns.</summary>
-    internal static List<Col> Measure(DataGrid grid, IList rows, double width, string? png = null)
+    internal static List<Col> Measure(DataGrid grid, IList rows, double width, string? png = null) =>
+        Layout(grid, rows, width, Read, png);
+
+    /// <summary>The grid's trailing filler header (the blank header cell right of the last column, when the columns do not fill the grid): its width and the right border it draws.</summary>
+    internal sealed record Filler(double Width, double BorderRight);
+
+    /// <summary>Shows the grid, binds <paramref name="rows"/>, and reads the filler header; null when the grid has none (its columns fill it).</summary>
+    internal static Filler? MeasureFiller(DataGrid grid, IList rows, double width, string? png = null) =>
+        Layout(grid, rows, width, ReadFiller, png);
+
+    private static Filler? ReadFiller(DataGrid grid)
+    {
+        var header = ClippedTextProbe.Descendants(grid).OfType<DataGridColumnHeader>().FirstOrDefault(h => h.Column is null);
+        if (header is null || header.ActualWidth < 1)
+        {
+            return null;
+        }
+
+        var border = ClippedTextProbe.Descendants(header).OfType<Border>().FirstOrDefault();
+        return new Filler(header.ActualWidth, border?.BorderThickness.Right ?? 0);
+    }
+
+    private static T Layout<T>(DataGrid grid, IList rows, double width, Func<DataGrid, T> read, string? png)
     {
         var window = new Window { Content = grid, Width = width, Height = 600, Left = 0, Top = 0 };
         window.Show();
@@ -61,13 +85,13 @@ internal static class GridPolishProbe
             ClippedTextProbe.Settle(window);
             grid.ItemsSource = rows;
             ClippedTextProbe.Settle(window);
-            var cols = Read(grid);
+            var found = read(grid);
             if (png is not null)
             {
                 Png(grid, png);
             }
 
-            return cols;
+            return found;
         }
         finally
         {
@@ -92,6 +116,7 @@ internal static class GridPolishProbe
     private static List<Col> Read(DataGrid grid)
     {
         var found = new List<Col>();
+        var scrollable = (grid.Template?.FindName("DG_ScrollViewer", grid) as ScrollViewer)?.ScrollableWidth ?? 0;
         var all = ClippedTextProbe.Descendants(grid).ToList();
         var row = all.OfType<DataGridRow>().OrderBy(r => r.GetIndex()).FirstOrDefault();
         var cells = row is null ? new List<DataGridCell>() : ClippedTextProbe.Descendants(row).OfType<DataGridCell>().ToList();
@@ -105,6 +130,7 @@ internal static class GridPolishProbe
                 Filter = ClippedTextProbe.Descendants(header).OfType<Button>().Any(b => b.Tag is string),
                 Left = header.TransformToAncestor(grid).Transform(new Point(0, 0)).X,
                 Width = header.ActualWidth,
+                Scrollable = scrollable,
             };
 
             var contentRight = 0.0;
