@@ -170,6 +170,33 @@ VALUES ($1, $2, $3, $4, 45, 30, $5, 'email', NULL, $6, FALSE, NULL, NULL)",
         });
     }
 
+    /// <summary>The reader hands the server's own zone (its newest <c>server_properties</c> row) to the streak rule: with a stored
+    /// Eastern clock, an Agent job at 02:00 local that fired at 06:00 UTC after the spring change of 2026 and at 07:00 UTC before it
+    /// (03:00 EDT on the Sunday, when the clock skipped 02:00) is a streak of 7; read in UTC, as a server with no stored clock is,
+    /// it would be 3.</summary>
+    [Fact]
+    public async Task TheStreak_FollowsTheServersZone_AcrossASpringForwardSunday()
+    {
+        await RunAsync(async (dataSource, connection, ct) =>
+        {
+            var anchor = new DateTime(2026, 3, 12, 6, 0, 0, DateTimeKind.Utc); // Thursday, 02:00 EDT
+            await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, utc_offset_minutes, time_zone_id)
+VALUES ($1, $2, $3, $4, $5, $6)",
+                -7_626_001, DarlingMcpTestData.Naive(anchor.AddHours(-1)), ServerId, ServerName, -240, "Eastern Standard Time");
+            var requestId = await OpenAsync(dataSource, anchor, ct);
+            foreach (var day in new[] { 1, 2, 3 })
+                await FireAsync(connection, anchor.AddDays(-day), ct);                 // 02:00 EDT
+            foreach (var day in new[] { 4, 5, 6, 7 })
+                await FireAsync(connection, anchor.AddDays(-day).AddHours(1), ct);     // 07:00 UTC: 03:00 EDT on the Sunday, 02:00 EST before it
+
+            var recurrence = await ReadAsync(dataSource, requestId, anchor, ct);
+            Assert.Equal(7, recurrence.StreakDays);
+            Assert.Equal(7, recurrence.Fired);
+            Assert.Equal(7, recurrence.FiredDates.Count);
+        });
+    }
+
     /// <summary>A 23:50 alert counts a 00:10 fire (20 minutes later by the clock, across midnight) and a 23:35 fire, not a
     /// 00:21 one (31 minutes). The clock test wraps at midnight.</summary>
     [Fact]
