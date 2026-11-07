@@ -201,7 +201,7 @@ public sealed class McpToolGuideHeadsSqlTailQueryStoreHealthTests
         Assert.DoesNotContain("42 servers", wire, StringComparison.Ordinal);
         Assert.DoesNotContain("production store class", wire, StringComparison.Ordinal);
         Assert.Contains("ALL was the engine default on SQL Server 2016 and 2017.", served.Tail!, StringComparison.Ordinal);
-        Assert.Contains("by get_query_store_clutter as its churn", served.Tail!, StringComparison.Ordinal);
+        Assert.Contains("by Darling's get_query_store_clutter as its churn", served.Tail!, StringComparison.Ordinal);
     }
 
     /// <summary>D6: the original description was already byte-identical on Darling and Lite, so the tail (the

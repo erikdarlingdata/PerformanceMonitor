@@ -52,7 +52,7 @@ public sealed partial class DarlingMcpPlanForceTools
             if (!ModuleRecompileStatement.TryNormalize(module_name, out var module))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, RemediationResult.Reasons.BadModuleName,
-                    "module_name is the two-part schema.name of a procedure, function or trigger, as get_procedure_stats returns it. Nothing was run.", agentTokenName, namedAgentNames, ct);
+                    "module_name is the two-part schema.name of a procedure, function or trigger, as get_top_procedures_by_cpu returns it in full_name. Nothing was run.", agentTokenName, namedAgentNames, ct);
             }
 
             var database = database_name?.Trim();
@@ -151,13 +151,13 @@ public sealed partial class DarlingMcpPlanForceTools
     [McpServerTool(Name = "recompile_module"), Description(
         "Agent arm, SQL Server only: marks ONE procedure, function or trigger for recompile with sys.sp_recompile, so its next run compiles a new plan. Dry run by default: returns the exact statement and what the object is, and writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's recompile_module switch and remediation login (with ALTER on the object); ships off. " +
         "<<GUIDE>>" +
-        "module_name is the two-part schema.name from get_procedure_stats or get_top_procedures_by_cpu; database_name is the database it lives in. The object name is resolved in that database first and goes to the server as a parameter, never as batch text. There is no undo: the next run compiles a new plan, so a done answer carries undo null. " +
+        "module_name is the two-part schema.name get_top_procedures_by_cpu returns as full_name; database_name is the database it lives in. The object name is resolved in that database first and goes to the server as a parameter, never as batch text. There is no undo: the next run compiles a new plan, so a done answer carries undo null. " +
         "This tool blocks only a call that cannot do anything: bad_module_name, bad_database, module_not_found (the name does not resolve in that database), not_a_module (a table, a view or another kind of object), recompile_permission_denied (the login lacks ALTER on the object). " +
         "mcp.allowWrites never bypasses the gate, and a dry run needs it too (it signs in with the remediation login). The change is journaled in Agent changes (kind module_recompile). Answers status dry_run, done, refused (reason) or failed, with statement, before and journal_id.")]
     public static Task<string> RecompileModule(
         NpgsqlDataSource postgres,
         [Description("The database the procedure, function or trigger is in.")] string database_name,
-        [Description("The two-part schema.name of the procedure, function or trigger, as get_procedure_stats returns it.")] string module_name,
+        [Description("The two-part schema.name of the procedure, function or trigger, as get_top_procedures_by_cpu returns it in full_name.")] string module_name,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Required: the agent_action object (request_id, claim_id, agent_id, reason, evidence); see the tool guide. The reason is recorded with the change.")] string? agent_action = null,
         [Description("Default true: return the exact statement and what the object is, write nothing. Pass false to write.")] bool dry_run = true,
