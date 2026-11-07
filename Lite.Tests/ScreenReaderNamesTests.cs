@@ -210,4 +210,33 @@ public class ScreenReaderNamesTests
 
         Assert.True(offenders.Count == 0, string.Join("\n", offenders));
     }
+
+    [Theory]
+    [InlineData("Lite/Controls/RecommendationsTab.xaml")]
+    [InlineData("Lite/Controls/FinOpsTab.xaml")]
+    public void TheServerBox_HasAName_AndItsItemsAreNamedByTheServer(string relative)
+    {
+        var text = File.ReadAllText(Path.Combine(RepoRoot(), relative));
+        var start = text.IndexOf("<ComboBox x:Name=\"ServerSelector\"", StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        var box = text.Substring(start, text.IndexOf('>', start) - start);
+
+        Assert.Contains("AutomationProperties.Name=\"Server\"", box, StringComparison.Ordinal);
+        // #8221: the item name lives in each theme's ServerSelectorItemStyle (a style in the tab kept the theme it loaded under).
+        Assert.Contains("ItemContainerStyle=\"{DynamicResource ServerSelectorItemStyle}\"", box, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("DarkTheme")]
+    [InlineData("LightTheme")]
+    [InlineData("CoolBreezeTheme")]
+    public void EveryTheme_NamesTheServerBoxItemsByTheServer(string theme)
+    {
+        var text = File.ReadAllText(Path.Combine(RepoRoot(), "Lite/Themes/" + theme + ".xaml"));
+        var start = text.IndexOf("<Style x:Key=\"ServerSelectorItemStyle\" TargetType=\"ComboBoxItem\"", StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        var style = text.Substring(start, text.IndexOf("</Style>", start, StringComparison.Ordinal) - start);
+
+        Assert.Contains("<Setter Property=\"AutomationProperties.Name\" Value=\"{Binding DisplayNameWithIntent, Mode=OneTime}\"/>", style, StringComparison.Ordinal);
+    }
 }

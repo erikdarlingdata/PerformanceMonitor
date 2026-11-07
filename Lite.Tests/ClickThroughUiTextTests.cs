@@ -133,7 +133,13 @@ public sealed class ClickThroughUiTextTests : IDisposable
 
         Assert.Contains("AutomationProperties.Name\" Value=\"{Binding AutomationName", main, StringComparison.Ordinal);
         Assert.Contains("AutomationProperties.Name=\"{Binding DisplayName}\"", card, StringComparison.Ordinal);
-        Assert.Contains("AutomationProperties.Name\" Value=\"{Binding DisplayNameWithIntent", finOps, StringComparison.Ordinal);
+        // #8221: the item name moved from the tab into each theme's ServerSelectorItemStyle; the tab points its combo at that style.
+        Assert.Contains("ItemContainerStyle=\"{DynamicResource ServerSelectorItemStyle}\"", finOps, StringComparison.Ordinal);
+        foreach (var theme in new[] { "Dark", "Light", "CoolBreeze" })
+        {
+            var themeText = File.ReadAllText(FindRepoFile($@"Lite\Themes\{theme}Theme.xaml"));
+            Assert.Contains("AutomationProperties.Name\" Value=\"{Binding DisplayNameWithIntent", themeText, StringComparison.Ordinal);
+        }
     }
 
     [Fact]

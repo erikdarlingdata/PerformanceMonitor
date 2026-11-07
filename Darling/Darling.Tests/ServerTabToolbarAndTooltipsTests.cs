@@ -146,11 +146,13 @@ public sealed class ServerTabToolbarAndTooltipsTests
 
         foreach (var header in new[] { "Detail", "Est. Savings ($/mo)" })
         {
-            var at = xaml.IndexOf($"<DataGridTextColumn Header=\"{header}\"", StringComparison.Ordinal);
-            Assert.True(at > 0, $"{app}: column {header} not found");
-            var column = xaml[at..xaml.IndexOf("</DataGridTextColumn>", at, StringComparison.Ordinal)];
+            // #8221: the header is a filter button plus the title in a StackPanel; the tooltip sits on that panel so it shows over the button and the title.
+            var title = xaml.IndexOf($"<TextBlock Text=\"{header}\"", StringComparison.Ordinal);
+            Assert.True(title > 0, $"{app}: column {header} not found");
+            var panel = xaml.LastIndexOf("<StackPanel Orientation=\"Horizontal\"", title, StringComparison.Ordinal);
+            var openingTag = xaml[panel..xaml.IndexOf('>', panel)];
 
-            Assert.Matches(@"<DataGridTextColumn\.HeaderStyle>.*<Setter Property=""ToolTip"" Value=""[^""]{20,}""", column.Replace("\r\n", " ").Replace("\n", " "));
+            Assert.Matches(@"ToolTip=""[^""]{20,}""", openingTag);
         }
     }
 
