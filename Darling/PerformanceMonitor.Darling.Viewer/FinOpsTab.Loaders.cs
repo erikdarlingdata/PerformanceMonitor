@@ -462,6 +462,8 @@ public partial class FinOpsTab
     /// when there are no points — an ADR-less server gets no dead chart. Series colours rotate the
     /// shared chart palette by series index so a redraw is stable.
     /// </summary>
+    private readonly ChartRenderHelper _chartHelper = new();
+
     private void RenderPvsTrendChart(List<PvsTrendPoint> trend)
     {
         if (trend.Count == 0)
@@ -471,7 +473,8 @@ public partial class FinOpsTab
         }
 
         FinOpsPvsTrendChart.Visibility = Visibility.Visible;
-        FinOpsPvsTrendChart.Plot.Clear();
+        _chartHelper.ClearChart(FinOpsPvsTrendChart); // #8086: a reset also removes the last refresh's legend panel
+        ChartStyle.ApplyThemeToChart(FinOpsPvsTrendChart);
 
         var seriesIndex = 0;
         foreach (var series in trend.GroupBy(t => t.DatabaseName).OrderByDescending(g => g.Max(t => t.PvsSizeMb)))
@@ -489,11 +492,10 @@ public partial class FinOpsTab
                 : series.Key;
         }
 
-        FinOpsPvsTrendChart.Plot.Legend.IsVisible = true;
         FinOpsPvsTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         FinOpsPvsTrendChart.Plot.Axes.AutoScale();
         FinOpsPvsTrendChart.Plot.YLabel("PVS Off-Row MB");
-        ChartStyle.ApplyThemeToChart(FinOpsPvsTrendChart);
+        _chartHelper.ShowChartLegend(FinOpsPvsTrendChart); // #8086: beside or under the plot, never over it
         FinOpsPvsTrendChart.Refresh();
     }
 

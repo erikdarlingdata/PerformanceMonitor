@@ -45,13 +45,47 @@ public sealed class ChartRenderHelper
     /// </summary>
     public void ShowChartLegend(ScottPlot.WPF.WpfPlot chart)
     {
-        var panel = chart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
+        /* #8086: the edge is chosen from the control's size NOW, so the first render already has the right chrome and no
+           extra pass is needed. A control with no size yet (a tab not shown) keeps the legend under the axis. */
+        ChartStyle.FloorAllZeroYAxis(chart.Plot);
+        var edge = LegendEdgeFor(chart.ActualWidth, chart.ActualHeight, chart.Plot.Legend.GetItems().Length);
+        var panel = chart.Plot.ShowLegend(edge);
         _legendPanels[chart] = panel;
         var legend = chart.Plot.Legend;
         legend.FontSize = 13;
-        legend.Orientation = ScottPlot.Orientation.Horizontal;
-        legend.TightHorizontalWrapping = true;
+        // No frame and no fill: the legend sits on the figure's own background, outside the plot.
+        legend.BackgroundColor = ScottPlot.Colors.Transparent;
+        legend.OutlineColor = ScottPlot.Colors.Transparent;
+        legend.OutlineWidth = 0;
+        legend.ShadowColor = ScottPlot.Colors.Transparent;
+        if (edge == ScottPlot.Edge.Right)
+        {
+            legend.Orientation = ScottPlot.Orientation.Vertical;
+            panel.Alignment = ScottPlot.Alignment.MiddleLeft;
+        }
+        else
+        {
+            legend.Orientation = ScottPlot.Orientation.Horizontal;
+            legend.TightHorizontalWrapping = true;
+        }
+
         chart.Plot.Layout.LayoutEngine = new WrappedLegendLayout(panel);
+    }
+
+    /// <summary>Most series a right-edge legend lists; more than this and the legend goes under the axis.</summary>
+    internal const int MaxRightLegendSeries = 12;
+
+    /// <summary>
+    /// #8086: the right edge when the chart is at least three times as wide as it is tall and has at most
+    /// <see cref="MaxRightLegendSeries"/> series (and the chart is tall enough to list them), else under the axis. Pure, so the
+    /// rule can be tested without a control.
+    /// </summary>
+    internal static ScottPlot.Edge LegendEdgeFor(double width, double height, int series)
+    {
+        if (width <= 0 || height <= 0 || series < 1 || series > MaxRightLegendSeries) return ScottPlot.Edge.Bottom;
+        /* A vertical legend is about 20 px a row at the 13 px font; one taller than the chart would be cut off. */
+        if (series * 20.0 + 40 > height) return ScottPlot.Edge.Bottom;
+        return width >= 3 * height ? ScottPlot.Edge.Right : ScottPlot.Edge.Bottom;
     }
 
     /// <summary>
@@ -61,28 +95,43 @@ public sealed class ChartRenderHelper
     public void SetLegendPanel(ScottPlot.WPF.WpfPlot chart, ScottPlot.IPanel? panel) => _legendPanels[chart] = panel;
 
     /// <summary>
-    /// Sets up an empty chart with dark theme, Y-axis label, and a centered "No Data" annotation. #7385: no legend box (the
-    /// name is already in the plot), and no tick labels, so the chart's own frame is small; <see cref="ChartGroupAligner"/>
-    /// gives it its neighbors' frame when it sits in a group.
+    /// Sets up an empty chart: one centered, muted sentence and nothing else (#8086): no axes, no grid, no data box and no legend.
+    /// <see cref="ChartGroupAligner"/> leaves it out of its group, since there is no plot rectangle to share.
     /// </summary>
     public void RefreshEmptyChart(ScottPlot.WPF.WpfPlot chart, string legendText, string yAxisLabel)
     {
         ChartStyle.ReapplyAxisColors(chart);
 
-        /* Add centered "No Data" text */
-        var text = chart.Plot.Add.Text($"{legendText}\nNo Data", 0, 0);
-        text.LabelFontColor = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
+        var name = string.IsNullOrWhiteSpace(legendText) ? "data" : $"{legendText} data";
+        var sentence = $"No {name} in this window";
+        /* One sentence; on a narrow chart it breaks before the tail rather than running off the edge. */
+        var label = sentence.Length > 36 ? $"No {name}\nin this window" : sentence;
+        var text = chart.Plot.Add.Text(label, 0, 0);
+        text.LabelFontColor = MutedTextColor();
         text.LabelFontSize = 14;
+        text.LabelItalic = false;
         text.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
 
-        /* Configure axes */
-        chart.Plot.HideGrid();
         chart.Plot.Axes.SetLimitsX(-1, 1);
         chart.Plot.Axes.SetLimitsY(-1, 1);
-        chart.Plot.Axes.Bottom.TickGenerator = new ScottPlot.TickGenerators.EmptyTickGenerator();
-        chart.Plot.Axes.Left.TickGenerator = new ScottPlot.TickGenerators.EmptyTickGenerator();
         chart.Plot.YLabel(yAxisLabel);
+        chart.Plot.HideAxesAndGrid();
+        // The data area takes the figure's own color, so no box is left behind the sentence.
+        chart.Plot.DataBackground.Color = chart.Plot.FigureBackground.Color;
+        ChartGroupAligner.MarkEmpty(chart.Plot);
 
         chart.Refresh();
+    }
+
+    /// <summary>The theme's muted text color (the one the XAML empty hints use), or the palette's placeholder grey when no theme is loaded.</summary>
+    private static ScottPlot.Color MutedTextColor()
+    {
+        if (System.Windows.Application.Current?.TryFindResource("ForegroundMutedBrush") is System.Windows.Media.SolidColorBrush brush)
+        {
+            var c = brush.Color;
+            return new ScottPlot.Color(c.R, c.G, c.B, c.A);
+        }
+
+        return ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
     }
 }

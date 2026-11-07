@@ -174,9 +174,9 @@ internal static class ChartLayoutProbe
         {
             problems.Add($"plot is {data.Height:0.#} px tall in a {figureH:0.#} px chart, under the {ChartLayout.MinPlotAreaHeight} px floor");
         }
-        else if (data.Height < figureH * 0.3)
+        else if (data.Height < figureH * ChartLayout.MinPlotShare)
         {
-            problems.Add($"plot is {data.Height:0.#} px tall, under 30% of its {figureH:0.#} px chart");
+            problems.Add($"plot is {data.Height:0.#} px tall, under 55% of its {figureH:0.#} px chart");
         }
 
         if (data.Width < 60)

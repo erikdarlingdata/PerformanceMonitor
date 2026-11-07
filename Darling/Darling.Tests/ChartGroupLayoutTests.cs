@@ -23,7 +23,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #7385: charts shown together share one plot rectangle, a long legend wraps at the chart's width instead of stacking one
-/// line per series, an empty chart has its neighbors' frame and no legend box, and a block of charts takes its column count and
+/// line per series, an empty chart is one sentence with no axes and is left out of the group, and no chart has a legend frame, and a block of charts takes its column count and
 /// height from the space it has. Every test drives real renders and a real measure and arrange on an STA thread.
 /// </summary>
 public sealed class ChartGroupLayoutTests
@@ -161,7 +161,7 @@ public sealed class ChartGroupLayoutTests
 
     [Theory]
     [MemberData(nameof(Windows))]
-    public void ChartsInAGroup_ShareOnePlotRectangle_IncludingTheEmptyOne(int width, int height, double dpi) =>
+    public void ChartsInAGroup_ShareOnePlotRectangle_ExceptTheEmptyOne(int width, int height, double dpi) =>
         StaTestThread.Run(() =>
         {
             var (_, panel, charts) = Host(width, height, dpi, maxColumns: 2);
@@ -169,7 +169,7 @@ public sealed class ChartGroupLayoutTests
             MaybeSavePng($"group-{width}x{height}-x{dpi}", panel, charts);
 
             var first = Data(charts[0]);
-            foreach (var chart in charts)
+            foreach (var chart in charts.Where(c => !ChartGroupAligner.IsEmptyState(c.Plot)))
             {
                 var r = Data(chart);
                 Assert.True(Math.Abs(r.Left - first.Left) <= 1.5 && Math.Abs(r.Top - first.Top) <= 1.5
@@ -257,6 +257,7 @@ public sealed class ChartGroupLayoutTests
             foreach (var chart in charts)
             {
                 var r = Data(chart);
+                if (ChartGroupAligner.IsEmptyState(chart.Plot)) continue; // one sentence, no plot rectangle to share
                 Assert.True(Math.Abs(r.Left - first.Left) <= 1.5 && Math.Abs(r.Width - first.Width) <= 1.5 && Math.Abs(r.Height - first.Height) <= 5, // the middle row has 4 px more margin than the outer ones
                     $"stacked plot rectangles differ: {first.Left:0.#},{first.Top:0.#} {first.Width:0.#}x{first.Height:0.#} vs {r.Left:0.#},{r.Top:0.#} {r.Width:0.#}x{r.Height:0.#}");
                 Assert.True(r.Height >= ChartLayout.MinPlotAreaHeight - 0.5, $"plot {r.Height:0.#} px is under {ChartLayout.MinPlotAreaHeight}");
@@ -286,14 +287,16 @@ public sealed class ChartGroupLayoutTests
         });
 
     [Fact]
-    public void AnEmptyChart_HasNoLegendBox_AndStillSaysNoData() =>
+    public void AnEmptyChart_IsOneSentence_WithNoAxesLegendOrBox() =>
         StaTestThread.Run(() =>
         {
             var chart = EmptyChart(1.0);
             using (chart.Plot.GetImage(600, 300)) { }
 
             Assert.Empty(chart.Plot.Axes.GetPanels().OfType<ScottPlot.Panels.LegendPanel>());
-            Assert.Contains(chart.Plot.PlottableList.OfType<ScottPlot.Plottables.Text>(), t => t.LabelText.Contains("No Data") && t.LabelText.Contains("Execution Count"));
+            Assert.Contains(chart.Plot.PlottableList.OfType<ScottPlot.Plottables.Text>(), t => t.LabelText.Contains("No Execution Count data") && !t.LabelItalic);
+            Assert.All(chart.Plot.Axes.GetAxes(), a => Assert.False(a.IsVisible));
+            Assert.Equal(chart.Plot.FigureBackground.Color, chart.Plot.DataBackground.Color);
         });
 
     [Fact]
@@ -352,4 +355,38 @@ public sealed class ChartGroupLayoutTests
             Assert.True(boxes[0].ActualHeight >= 180, "the floor holds on a small window");
             Assert.True(boxes[1].ActualHeight > boxes[0].ActualHeight * 1.5, $"a tall window gives taller grids: {boxes[0].ActualHeight} then {boxes[1].ActualHeight}");
         });
+
+    // #8086: a legend goes on the right edge only on a chart at least three times as wide as tall with at most twelve series, else under the axis.
+    [Theory]
+    [InlineData(1200, 300, 4, true)]
+    [InlineData(900, 300, 12, true)]
+    [InlineData(1200, 300, 13, false)]
+    [InlineData(1200, 400, 4, true)]
+    [InlineData(1100, 400, 4, false)]
+    [InlineData(700, 350, 4, false)]
+    [InlineData(1200, 200, 12, false)]
+    [InlineData(0, 0, 4, false)]
+    public void TheLegendEdge_FollowsTheChartShape(double width, double height, int series, bool right) =>
+        Assert.Equal(right ? Edge.Right : Edge.Bottom, ChartRenderHelper.LegendEdgeFor(width, height, series));
+
+    [Fact]
+    public void ARightLegend_GetsItsWholeWidth_InTheFirstRender()
+    {
+        var plot = new Plot();
+        for (var s = 0; s < 4; s++)
+        {
+            plot.Add.Scatter(new double[] { 1, 2, 3 }, new double[] { s, s + 1, s + 2 }).LegendText = $"Read latency of file number {s}";
+        }
+
+        var panel = plot.ShowLegend(Edge.Right);
+        plot.Legend.Orientation = Orientation.Vertical;
+        plot.Layout.LayoutEngine = new WrappedLegendLayout(panel);
+        using (plot.GetImage(1200, 300)) { }
+
+        var layout = plot.RenderManager.LastRender.Layout;
+        using var paint = Paint.NewDisposablePaint();
+        var needed = plot.Legend.GetLayout(new PixelSize(float.PositiveInfinity, layout.DataRect.Height), paint).LegendRect.Width + panel.Padding.Horizontal;
+        Assert.True(layout.PanelSizes[panel] >= needed - 0.5f, $"legend panel {layout.PanelSizes[panel]:0.#} px is under the {needed:0.#} px its entries need");
+        Assert.True(layout.DataRect.Width > 600, "the plot keeps most of the width");
+    }
 }
