@@ -64,7 +64,7 @@ public sealed class PasswordKeyValidateConfigAccountTests
 
     /// <summary>Runs the verb with a <c>file:</c> key in a folder the current user owns and can only read, which nothing but
     /// the folder's owner makes untrusted, and puts the current user back as the account judged afterwards.</summary>
-    private static async Task<Run> ValidateAsync(Func<string, SecurityIdentifier?> registeredServiceAccount, string? passwordKey = null)
+    private static async Task<Run> ValidateAsync(Func<string, SecurityIdentifier?> registeredServiceAccount)
     {
         var dir = Directory.CreateTempSubdirectory("password-key-validate-account-").FullName;
         var keyFolder = Path.Combine(dir, "keys");
@@ -103,7 +103,7 @@ public sealed class PasswordKeyValidateConfigAccountTests
             File.WriteAllText(
                 configPath,
                 "{\"postgres\":{\"connectionString\":" + JsonSerializer.Serialize(connectionString) + "},"
-                + "\"passwordKey\":" + JsonSerializer.Serialize(passwordKey ?? "file:" + keyPath) + "}");
+                + "\"passwordKey\":" + JsonSerializer.Serialize("file:" + keyPath) + "}");
 
             using var output = new StringWriter();
             using var error = new StringWriter();
@@ -117,8 +117,7 @@ public sealed class PasswordKeyValidateConfigAccountTests
                 DarlingFileSecurity.HardenForAccount(CurrentUser);
             }
 
-            var text = output.ToString();
-                        return new Run(text, keyPath, keyFolder);
+            return new Run(output.ToString(), keyPath, keyFolder);
         }
         finally
         {
