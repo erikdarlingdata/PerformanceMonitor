@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace PerformanceMonitor.Common;
 
@@ -126,6 +127,40 @@ public sealed record InvestigationAlertRecurrence(
 
     /// <summary>#6261: the streak filled the whole look-back, so it is a floor, not an exact count.</summary>
     public bool StreakAtLeastDaysWindow => StreakDays >= Days;
+
+    /// <summary>
+    /// The recurrence of <paramref name="metricName"/> from the metric's fires in the look-back, by the one rule both stores' readers
+    /// share: <see cref="InvestigationAlertStreak.DaysAgo(DateTime, DateTime, TimeZoneInfo?)"/> says which fires count and toward
+    /// which day, in the server's <paramref name="zone"/>. The stores' SQL only bounds the rows (the <see cref="Days"/> days before the
+    /// anchor, up to <see cref="WindowMinutes"/> minutes before it); the clock test is here, so a zone the SQL cannot see still
+    /// reaches it and the two stores cannot disagree. Dates are the fires' UTC dates, newest first, each once per list.
+    /// </summary>
+    public static InvestigationAlertRecurrence FromFires(string metricName, DateTime aroundUtc,
+        IEnumerable<(DateTime FireUtc, bool Muted)> fires, TimeZoneInfo? zone)
+    {
+        int fired = 0, muted = 0;
+        var firedDates = new List<DateOnly>();
+        var mutedDates = new List<DateOnly>();
+        var daysAgo = new List<int>();
+        foreach (var fire in fires.OrderByDescending(f => f.FireUtc))
+        {
+            var day = InvestigationAlertStreak.DaysAgo(aroundUtc, fire.FireUtc, zone);
+            if (day is null) continue;
+            var date = DateOnly.FromDateTime(fire.FireUtc);
+            if (fire.Muted)
+            {
+                muted++;
+                if (!mutedDates.Contains(date)) mutedDates.Add(date);
+            }
+            else
+            {
+                fired++;
+                if (!firedDates.Contains(date)) firedDates.Add(date);
+            }
+            daysAgo.Add(day.Value);
+        }
+        return new InvestigationAlertRecurrence(metricName, aroundUtc, fired, muted, firedDates, mutedDates, daysAgo);
+    }
 
     /// <summary>Minutes either side of the first alert's clock time that still count as the same time of day.</summary>
     public const int WindowMinutes = 30;
