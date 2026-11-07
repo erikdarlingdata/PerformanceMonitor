@@ -109,6 +109,27 @@ public class CustomAlertRuleHealthTests
         Assert.Null(ctx.DatabaseName);
     }
 
+    [Fact]
+    public void ClassifyRules_SavedServersListWithoutMode_IsBroken_WithTheScopeError()
+    {
+        // #8077: a saved rule whose scope names servers but no mode is not loaded as a fleet-wide rule. It is
+        // reported broken, with the parser's own words, so the health alert says what to fix.
+        var rows = new List<CustomAlertRule>
+        {
+            Rule(1, "healthy", ValidJson()),
+            Rule(2, "list without a mode", ValidJson("\"scope\":{\"servers\":[\"alpha\",\"beta\"]}")),
+        };
+
+        var (parsed, broken) = CustomAlertEvaluator.ClassifyRules(rows);
+
+        Assert.Single(parsed);
+        Assert.Equal(1, parsed[0].Row.Id);
+
+        var issue = Assert.Single(broken);
+        Assert.Equal(2, issue.RuleId);
+        Assert.Contains("'scope.mode'", issue.Reason);
+    }
+
     // ─────────────────────────── ClassifyNeverFiring (armed but never fires) ───────────────────────────
 
     [Fact]
