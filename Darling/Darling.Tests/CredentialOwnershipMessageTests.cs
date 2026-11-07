@@ -186,4 +186,70 @@ public sealed class CredentialOwnershipMessageTests
             + "(on Kubernetes, run the one-off root Job under Container user in docs/darling/security.md instead)",
             DarlingManagedRoles.CredentialOwnershipFix(1654, "/var/lib/darling"));
     }
+
+    private const string ComposeSecretKey = "/run/secrets/password_key";
+
+    [Fact]
+    public void PasswordKeyFile_DeniedAndOwnedByAnotherUser_NamesBothUsersAndThePlainChown()
+    {
+        var modes = new StandInUnixModes { EffectiveUserId = 1654 };
+        modes.ReportOwner(ComposeSecretKey, 1000);
+
+        using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
+        {
+            var refusal = DarlingPasswordKeyFileReader.CouldNotRead(ComposeSecretKey, new UnauthorizedAccessException("denied"));
+
+            Assert.StartsWith("passwordKey: secret file '/run/secrets/password_key' could not be read: denied", refusal);
+            Assert.Contains("owned by user 1000, not by user 1654", refusal);
+            Assert.Contains("chown -R 1654:1654 '/run/secrets/password_key'", refusal);
+            Assert.Contains("on the host", refusal);
+            Assert.DoesNotContain("docker compose run", refusal);
+            Assert.DoesNotContain("missing", refusal);
+        }
+    }
+
+    [Fact]
+    public void PasswordKeyFile_DeniedButOwnedByTheService_GivesNoChown()
+    {
+        var modes = new StandInUnixModes { EffectiveUserId = 1654 };
+        modes.ReportOwner(ComposeSecretKey, 1654);
+
+        using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
+        {
+            var refusal = DarlingPasswordKeyFileReader.CouldNotRead(ComposeSecretKey, new UnauthorizedAccessException("denied"));
+
+            Assert.Equal("passwordKey: secret file '/run/secrets/password_key' could not be read: denied", refusal);
+        }
+    }
+
+    [Fact]
+    public void PasswordKeyFile_NotFound_GivesNoChown()
+    {
+        var modes = new StandInUnixModes { EffectiveUserId = 1654 };
+        modes.ReportOwner(ComposeSecretKey, 1000);
+
+        using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
+        {
+            var refusal = DarlingPasswordKeyFileReader.CouldNotRead(ComposeSecretKey, new FileNotFoundException("gone"));
+
+            Assert.Equal("passwordKey: secret file '/run/secrets/password_key' could not be read: gone", refusal);
+        }
+    }
+
+    [Fact]
+    public void PasswordKeyFile_DeniedOutsideTheSecretsMount_GivesThePlainChownWithoutTheHostNote()
+    {
+        const string path = "/opt/keys/password_key";
+        var modes = new StandInUnixModes { EffectiveUserId = 1654 };
+        modes.ReportOwner(path, 0);
+
+        using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
+        {
+            var refusal = DarlingPasswordKeyFileReader.CouldNotRead(path, new UnauthorizedAccessException("denied"));
+
+            Assert.Contains("owned by user 0, not by user 1654", refusal);
+            Assert.Contains("chown -R 1654:1654 '/opt/keys/password_key'", refusal);
+            Assert.DoesNotContain("on the host", refusal);
+        }
+    }
 }
