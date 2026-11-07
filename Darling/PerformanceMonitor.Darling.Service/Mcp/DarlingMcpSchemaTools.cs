@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -47,8 +48,43 @@ public sealed class DarlingMcpSchemaTools
     public const int MaxFindLimit = 100;
     public const int MinTextLength = 3;
 
-    /// <summary>The most of a view's text get_object_definition returns: a quarter of the response budget, so its JSON escaping still fits.</summary>
-    public const int MaxViewDefinitionChars = McpResponseBudget.DefaultBytes / 4;
+    /// <summary>
+    /// The most of a view's text get_object_definition returns, measured as the JSON it serializes to: a quarter of the response
+    /// budget. The default encoder writes every non-ASCII character as a six-byte <c>\uXXXX</c>, so a character count would not bound it.
+    /// </summary>
+    public const int MaxViewDefinitionJsonBytes = McpResponseBudget.DefaultBytes / 4;
+
+    /// <summary>
+    /// How much of <paramref name="text"/> fits <see cref="MaxViewDefinitionJsonBytes"/> once serialized, cut back to a text-element
+    /// boundary so a surrogate pair or a combining sequence is never split (REVIEW-TRAPS #3625). Every character costs at least one
+    /// byte, so the search never looks past the first <see cref="MaxViewDefinitionJsonBytes"/> characters.
+    /// </summary>
+    internal static int ViewTextCutLength(string text)
+    {
+        static int JsonBytes(string value) => Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(value, McpHelpers.JsonOptions));
+
+        if (text.Length <= MaxViewDefinitionJsonBytes && JsonBytes(text) <= MaxViewDefinitionJsonBytes)
+        {
+            return text.Length;
+        }
+
+        var low = 0;
+        var high = Math.Min(text.Length, MaxViewDefinitionJsonBytes);
+        while (low < high)
+        {
+            var middle = (low + high + 1) / 2;
+            if (JsonBytes(text[..middle]) <= MaxViewDefinitionJsonBytes)
+            {
+                low = middle;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        return McpHelpers.TextElementCutLength(text, low);
+    }
 
     /// <summary>The time a definition text search may run: 4 s, as <c>find_queries_by_text</c> gives each source.</summary>
     public const int BudgetMilliseconds = DarlingMcpFindQueriesByTextTools.BudgetMilliseconds;
@@ -58,7 +94,7 @@ public sealed class DarlingMcpSchemaTools
         "turn it on with enable_collector (collector schema_objects) and read again after its first pass.";
 
     [McpServerTool(Name = "get_object_definition"), Description(
-        "Gets the stored definition of one table or view of a database, from the schema history: its columns, indexes, constraints and triggers, the times of the version shown, versions_kept and history_starts_at. object_name is 'schema.name', or a bare name when only one object has it. Without as_of it is the current version (a dropped object answers with its last definition and dropped_at); with as_of it is the version that held at that instant, and an as_of before the history starts answers with the oldest version and a note (status empty when the first version is its creation). Columns are paged (column_offset, column_limit) and cut to the response budget; columns_returned and next_column_offset say what is left. A view's text longer than 8,192 characters is cut there, with view_definition_truncated and view_definition_length. A database of an availability group answers from the group's history whichever replica server_name names (resolved_from_ag). Expression text (check_definition, computed_definition, default_definition, filter_definition, view_definition) is masked by mcp.dataDetail; names, types and structure are not. status not_collected: the schema_objects collector has never run for the server.")]
+        "Gets the stored definition of one table or view of a database, from the schema history: its columns, indexes, constraints and triggers, the times of the version shown, versions_kept and history_starts_at. object_name is 'schema.name', or a bare name when only one object has it. Without as_of it is the current version (a dropped object answers with its last definition and dropped_at); with as_of it is the version that held at that instant, and an as_of before the history starts answers with the oldest version and a note (status empty when the oldest kept version is its creation). Columns are paged (column_offset, column_limit) and cut to the response budget; columns_returned and next_column_offset say what is left. A view's text past 8 KB of JSON is cut on a character boundary, with view_definition_truncated and view_definition_length. A database of an availability group answers from the group's history whichever replica server_name names (resolved_from_ag). Expression text (check_definition, computed_definition, default_definition, filter_definition, view_definition) is masked by mcp.dataDetail; names, types and structure are not. status not_collected: the schema_objects collector has never run for the server.")]
     public static Task<string> GetObjectDefinition(
         NpgsqlDataSource postgres,
         [Description("Database name.")] string database_name,
@@ -146,9 +182,11 @@ public sealed class DarlingMcpSchemaTools
             var totalColumns = definition.Columns.Count;
             var agName = version.AgName ?? key.AgName;
 
-            /* A view's text is not paged like its columns: past half the response budget it is cut, and the answer says so with its length. */
+            /* A view's text is not paged like its columns: past a quarter of the response budget, as JSON, it is cut on a text element, and
+               the answer says so with its length. */
             var viewText = definition.View?.ViewDefinition;
-            var viewTextCut = viewText is not null && viewText.Length > MaxViewDefinitionChars;
+            var viewTextKeep = viewText is null ? 0 : ViewTextCutLength(viewText);
+            var viewTextCut = viewText is not null && viewTextKeep < viewText.Length;
 
             string Build(int n)
             {
@@ -200,7 +238,7 @@ public sealed class DarlingMcpSchemaTools
                             {
                                 is_schema_bound = vp.IsSchemaBound,
                                 is_indexed = vp.IsIndexed,
-                                view_definition = viewTextCut ? viewText![..MaxViewDefinitionChars] : viewText,
+                                view_definition = viewTextCut ? viewText![..viewTextKeep] : viewText,
                                 view_definition_truncated = viewTextCut,
                                 view_definition_length = viewText?.Length,
                             }
@@ -543,7 +581,8 @@ public sealed class DarlingMcpSchemaTools
 
         if (at < live[0].ValidFrom && live[0].ChangeKind == "created")
         {
-            note = "The object did not exist at as_of: it was created at " + Utc(live[0].ValidFrom) + ".";
+            note = "No kept version holds at as_of: the oldest kept version of the object is its creation at " + Utc(live[0].ValidFrom)
+                + ". An older line of the same name may have aged out of the history.";
             return null;
         }
 

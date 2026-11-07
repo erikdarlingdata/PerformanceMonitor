@@ -250,8 +250,36 @@ public sealed class DarlingMcpSchemaToolsLiveTests
 
             using var answer = JsonDocument.Parse(await Definition(s, ct, "dbo.Returns", asOf: Iso(s_t0.AddHours(1))));
 
+            /* Retention may have removed an older line of the same name, so the answer says what is kept, not that nothing existed. */
             Assert.Equal("empty", answer.RootElement.GetProperty("status").GetString());
-            Assert.Contains("created at", answer.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+            var message = answer.RootElement.GetProperty("message").GetString();
+            Assert.Contains("No kept version holds at as_of", message, StringComparison.Ordinal);
+            Assert.Contains("its creation at", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("did not exist", message, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task GetObjectDefinition_NonAsciiViewText_IsCutOnATextElementWithinTheBudget()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            /* A surrogate pair, then a letter with a combining accent: text elements of two UTF-16 units each, every one JSON-escaped. */
+            var body = string.Concat(Enumerable.Repeat("\U0001F600é", 200_000));
+            await Baseline(s, ct, View(21, "WideView", body));
+
+            var json = await Definition(s, ct, "dbo.WideView");
+            var properties = (await Parse(Task.FromResult(json))).GetProperty("properties");
+            var cut = properties.GetProperty("view_definition").GetString()!;
+
+            Assert.True(json.Length < McpResponseBudget.DefaultBytes, json.Length.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            Assert.True(properties.GetProperty("view_definition_truncated").GetBoolean());
+            Assert.Equal(body.Length, properties.GetProperty("view_definition_length").GetInt32());
+            Assert.NotEmpty(cut);
+            Assert.StartsWith(cut, body, StringComparison.Ordinal);
+            Assert.Contains(cut.Length, System.Globalization.StringInfo.ParseCombiningCharacters(body[..(cut.Length + 4)]));
+            Assert.True(
+                System.Text.Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(cut, McpHelpers.JsonOptions)) <= DarlingMcpSchemaTools.MaxViewDefinitionJsonBytes);
         });
     }
 

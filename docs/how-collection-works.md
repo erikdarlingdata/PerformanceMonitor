@@ -188,7 +188,7 @@ Limits worth knowing:
 - Only writable databases are tracked: a standalone database, an Availability Group primary or an Azure SQL Database. Secondaries, standby, restoring, read-only and snapshot databases are skipped. An Availability Group database keeps one history under the group, not one per replica.
 - Trigger DDL reconciles its database, because the event names the trigger and not the table it belongs to. A rename reconciles its database too, so the old name is closed and the new one opened in one pass.
 - The Azure SQL Database path (one session and one history per database) is covered by fakes only and has not been run against a real Azure instance.
-- Closed versions are kept 30 days (the collector's retention). A current version stays while a pass still sees its database. When no pass has seen a database for the whole retention window (it was dropped or renamed, its server was removed, it left the collector's scope, or its history moved to another key), its whole history is removed, current versions too, with its state rows. See [Retention](#retention).
+- Closed versions are kept 30 days (the collector's retention). A current version stays while a pass still sees its database. When no pass has seen a database for the whole retention window (it was dropped or renamed, its server was removed, or it left the collector's scope), its whole history is removed, current versions too, with its state rows. A database that joins or leaves an Availability Group starts a new history under its new key, and the old key's history goes at the next daily purge, because no state row points at it any more; the definitions stay right, since the new key begins with a baseline. See [Retention](#retention).
 
 ---
 
