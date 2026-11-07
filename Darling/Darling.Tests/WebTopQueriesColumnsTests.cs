@@ -143,8 +143,7 @@ public sealed class WebTopQueriesColumnsTests
             "min_used_threads", "max_used_threads", "total_clr_time", "plan_generation_num", "worker_time_per_second",
         }, cols.Skip(cols.IndexOf("last_execution_time")).ToArray());
         Assert.Contains("distinct_query_hashes", select, StringComparison.Ordinal);
-        /* #8139: the aggregate behind last_execution_time is not spelled here; TopQueriesTextOneScanLiveTests and the row-identity
-           check of the PR pin what the column holds. */
+        Assert.Contains("MAX(last_execution_time) AS last_execution_time", sql, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -1150,7 +1150,8 @@ internal static class DarlingDataReader
                DISTINCT FROM terms make the match exact. A winner is unique per key, so no row repeats. */
             /* #4394 and #8139: the interval filter sits on each measure, not on the pass, so the text pick below sees
                every row of the group as the lookup it replaced did, a first-sighting, reset or gap row (interval 0)
-               included, while no measure takes such a row into a sum, an extreme, a handle or a count. */
+               included, while no measure takes such a row into a sum, an extreme, a handle or a count;
+               last_execution_time is an observation and stays over every row. */
             SELECT
                 database_name,
                 query_hash,
@@ -1172,7 +1173,9 @@ internal static class DarlingDataReader
                 MAX(query_plan_hash) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS query_plan_hash,
                 MAX(sql_handle) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS sql_handle,
                 MAX(plan_handle) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS plan_handle,
-                MAX(last_execution_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS last_execution_time,
+                /* An observation, not a measure: the newest time the plan ran, read over every row of the group, a
+                   zero-interval row included, as the Viewer reads it. */
+                MAX(last_execution_time) AS last_execution_time,
                 MAX(creation_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS creation_time,
                 MIN(min_physical_reads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_physical_reads,
                 MAX(max_physical_reads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_physical_reads,

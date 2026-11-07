@@ -158,20 +158,17 @@ public sealed class TopRankingTwoPassTests
         })
         {
             var text = filter.Replace("{TimescaleSupport.IntervalHonestSourceFilter}", "sample_interval_seconds IS DISTINCT FROM 0", StringComparison.Ordinal);
-            /* once per pass: pass 1 and pass 2 each carry the filter, so the count is taken over the two passes, which end
-               where the text lookup begins. What the lookup and the orphan fallback read (#8136, #8139) is pinned by
-               TopQueriesTextOneScanLiveTests through the plan. TopQueriesSql's pass 2 applies the interval filter to each
-               measure rather than to the pass (#8139), so for it that filter is a presence in the passes, not a count. */
-            var lookupAt = sql.IndexOf("latest_text AS MATERIALIZED (", StringComparison.Ordinal);
-            var passes = lookupAt < 0 ? sql : sql[..lookupAt];
+            /* once per pass; the queries' one latest-text lookup (#5309) scopes by server and reads the window too, and for
+               TopQueriesSql that read is now the orphan fallback (#8139: the lookup itself reads the ranked rows and the dimension) */
+            var lookup = name != "TopProceduresSql" && (filter == "server_id = $1" || filter.StartsWith("collection_time", StringComparison.Ordinal));
             if (name == "TopQueriesSql" && filter.StartsWith("{TimescaleSupport", StringComparison.Ordinal))
             {
-                Assert.Contains(text, passes, StringComparison.Ordinal);
+                /* #8139: TopQueriesSql's pass 2 carries the interval filter on each measure aggregate, not on the pass, so a plain count is one per pass plus one per measure; at least one per pass is the exact part. */
+                Assert.True(Regex.Matches(sql, Regex.Escape(text)).Count >= 2, $"{name}: the interval filter is not in both passes");
+                continue;
             }
-            else
-            {
-                Assert.Equal(2, Regex.Matches(passes, Regex.Escape(text)).Count);
-            }
+
+            Assert.Equal(lookup ? 3 : 2, Regex.Matches(sql, Regex.Escape(text)).Count);
         }
 
         var p2 = sql[sql.IndexOf("JOIN winners AS w", StringComparison.Ordinal)..];
