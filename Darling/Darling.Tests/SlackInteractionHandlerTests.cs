@@ -13,6 +13,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Chat;
@@ -101,6 +102,9 @@ public sealed class SlackInteractionHandlerTests
         public string UndoStatement { get; set; } = "Undo the agent's mute: the alert fires again.";
         public bool NoteDecides { get; set; } = true;
 
+        /// <summary>When set, the verdict command throws it, as a store or network failure inside a command would.</summary>
+        public Exception? VerdictFails { get; set; }
+
         public Task<SlackPerson?> FindPersonAsync(string teamId, string userId, CancellationToken ct) =>
             Task.FromResult(People.TryGetValue(teamId + ":" + userId, out var p) ? p : null);
 
@@ -151,6 +155,8 @@ public sealed class SlackInteractionHandlerTests
 
         public Task<InvestigationFeedbackResult> RecordVerdictAsync(Guid requestId, string verdict, string author, CancellationToken ct)
         {
+            if (VerdictFails is not null)
+                throw VerdictFails;
             Verdicts.Add((requestId, verdict, author));
             return Task.FromResult(new InvestigationFeedbackResult(InvestigationFeedbackOutcome.Recorded, null));
         }
@@ -184,7 +190,7 @@ public sealed class SlackInteractionHandlerTests
     private static SlackCard NoteCard() => new(Request, "note:31", Channel, CardTs, SlackCardKinds.Note, "31", 7);
 
     private static (SlackInteractionHandler Handler, FakeCards Cards, FakeCommands Commands, RecordingApi Api) Build(SlackCard? card, bool mapped = true,
-        McpDataDetail detail = McpDataDetail.Full)
+        McpDataDetail detail = McpDataDetail.Full, ILogger? logger = null)
     {
         var cards = new FakeCards();
         if (card is not null)
@@ -193,7 +199,7 @@ public sealed class SlackInteractionHandlerTests
         if (mapped)
             commands.People[Team + ":" + User] = Erik;
         var api = new RecordingApi();
-        var handler = new SlackInteractionHandler(cards, commands, api, NullLogger.Instance, detail, () => "https://pm.example", () => Now);
+        var handler = new SlackInteractionHandler(cards, commands, api, logger ?? NullLogger.Instance, detail, () => "https://pm.example", () => Now);
         return (handler, cards, commands, api);
     }
 
@@ -366,6 +372,73 @@ public sealed class SlackInteractionHandlerTests
         Assert.Equal(SlackInteractionHandler.Disabled, api.Responses[1].Text);
         Assert.Empty(commands.ProposalCalls);
         Assert.Equal(("person:7", "disabled"), (commands.Journal[1].Actor, commands.Journal[1].Detail["outcome"]!.GetValue<string>()));
+    }
+
+    [Fact]
+    public async Task APressOnACardAlreadyDecided_IsRefusedWithWhoDecidedAndWhen_RunsNothing_AndIsJournaled()
+    {
+        var decidedAt = new DateTime(2026, 11, 6, 11, 30, 0, DateTimeKind.Utc);
+        var (handler, cards, commands, api) = Build(ReportCard() with { State = SlackCardStates.Decided, DecidedBy = "person:9", DecidedAtUtc = decidedAt });
+        var ct = TestContext.Current.CancellationToken;
+        commands.Grants.Add((7, PersonCapabilities.Feedback, null));
+        commands.Grants.Add((7, PersonCapabilities.Undo, null));
+
+        /* A decided report card keeps its buttons only when its edit failed; a verdict pressed there would record again. */
+        await handler.HandleInteractiveAsync(Press(SlackCardActions.VerdictRight, Request.ToString("D")), ct);
+
+        var answer = Assert.Single(api.Responses);
+        Assert.Contains("already decided", answer.Text);
+        Assert.Contains("person:9", answer.Text);
+        Assert.Contains("2026-11-06 11:30", answer.Text);
+        Assert.Empty(commands.Verdicts);
+        Assert.Equal(0, commands.GrantChecks);
+        Assert.Empty(api.Updates);
+        Assert.Empty(cards.Decided);
+        var row = Assert.Single(commands.Journal);
+        Assert.Equal((Request, 7, "person:7", SlackCardActions.VerdictRight, "decided"), (row.Request, row.Server, row.Actor, row.Action, row.Detail["outcome"]!.GetValue<string>()));
+        Assert.Equal("slack:" + Team + ":" + User, row.Detail["identity"]!.GetValue<string>());
+
+        /* The confirming press of an undo on a decided change card runs nothing either, and the person who decided it reads as "you". */
+        const string changeTs = "1700000000.000201";
+        cards.With(ChangeCard() with { MessageTs = changeTs, State = SlackCardStates.Decided, DecidedBy = "person:7", DecidedAtUtc = decidedAt });
+        await handler.HandleInteractiveAsync(Press(SlackCardActions.UndoConfirm, new SlackConfirmValue("4242", Channel, changeTs, "abc").Format(), ts: "9.9"), ct);
+
+        Assert.Contains("already decided by you", api.Responses[1].Text);
+        Assert.Empty(commands.UndoCalls);
+        Assert.Equal(0, commands.GrantChecks);
+        Assert.Empty(api.Updates);
+        Assert.Equal(2, commands.Journal.Count);
+        Assert.Equal((SlackCardActions.UndoConfirm, "decided"), (commands.Journal[1].Action, commands.Journal[1].Detail["outcome"]!.GetValue<string>()));
+    }
+
+    [Fact]
+    public async Task AFailedPress_IsAnsweredInPlainWordsWithoutTheExceptionText_AndTheLogCarriesTheExceptionWithTheRequestAndTheCard()
+    {
+        var log = new CapturingTestLogger();
+        var (handler, cards, commands, api) = Build(ReportCard(), logger: log);
+        var ct = TestContext.Current.CancellationToken;
+        commands.Grants.Add((7, PersonCapabilities.Feedback, null));
+        commands.VerdictFails = new InvalidOperationException("relation \"config.investigation_feedback\" does not exist; constraint fk_feedback_request");
+
+        await handler.HandleInteractiveAsync(Press(SlackCardActions.VerdictRight, Request.ToString("D")), ct);
+
+        var answer = Assert.Single(api.Responses);
+        Assert.Contains("could not be completed", answer.Text);
+        Assert.Contains("service log", answer.Text);
+        Assert.Contains(SlackCards.PressAgain, answer.Text);
+        Assert.DoesNotContain("investigation_feedback", answer.Text + answer.BlocksJson);
+        Assert.DoesNotContain("fk_feedback_request", answer.Text + answer.BlocksJson);
+        Assert.Empty(commands.Verdicts);
+        Assert.Empty(api.Updates);
+        Assert.Empty(cards.Decided);
+
+        Assert.Same(commands.VerdictFails, Assert.Single(log.ExceptionsAtLevel(LogLevel.Warning)));
+        var line = Assert.Single(log.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal));
+        Assert.Contains(SlackCardActions.VerdictRight, line);
+        Assert.Contains(Request.ToString("D"), line);
+        Assert.Contains(Channel, line);
+        Assert.Contains(CardTs, line);
+        Assert.Contains("person:7", line);
     }
 
     [Fact]

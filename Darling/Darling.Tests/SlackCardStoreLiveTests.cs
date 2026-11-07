@@ -7,10 +7,13 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Chat;
@@ -260,6 +263,62 @@ public sealed class SlackCardStoreLiveTests
             var refusal = await store.RefuseProposalAsync(created.ProposalId, approver, hooks, "again", ct);
             Assert.Equal(InvestigationRequestStore.ProposalPressCodes.NotPending, refusal!.Reason);
             Assert.Equal(InvestigationRequestStore.ProposalPressCodes.NotFound, (await store.RefuseProposalAsync(Guid.NewGuid(), approver, hooks, null, ct))!.Reason);
+        });
+    }
+
+    [Fact]
+    public async Task AnUndoConfirm_RunsOnlyTheStatementThePersonWasShown_AndIsRefusedWhenTheServerWouldNowRunAnotherOne()
+    {
+        await WithStoreAsync(async (connection, source, store, ct) =>
+        {
+            /* A plan force the agent made, journaled as the tool journals it: a plan change, whose undo reads the server before it decides. */
+            var detail = new JsonObject
+            {
+                ["tool"] = "force_query_store_plan", ["kind"] = AgentChangeKinds.PlanForce,
+                ["target"] = new JsonObject { ["id"] = "5", ["server_id"] = 7, ["database"] = "Sales" },
+                ["before"] = new JsonObject { ["database"] = "Sales", ["query_id"] = 9, ["plan_id"] = 5, ["forced_plan"] = null },
+            };
+            var calledId = long.Parse((await ScalarAsync(connection,
+                $"INSERT INTO config.investigation_journal (event_time, request_id, server_id, event, actor, detail) VALUES (now(), '{s_request}', 7, 'action_called', 'agent:agent-a', '{detail.ToJsonString()}'::jsonb) RETURNING journal_id", ct))!,
+                CultureInfo.InvariantCulture);
+
+            /* The monitored server, stood in at the one seam that reads it: the statement the undo would run now, and every read and write asked of it. */
+            const string unforce = "EXEC [Sales].sys.sp_query_store_unforce_plan @query_id = 9, @plan_id = 5;";
+            const string reforce = "EXEC [Sales].sys.sp_query_store_force_plan @query_id = 9, @plan_id = 3;";
+            var statementNow = unforce;
+            var server = new List<(long CalledId, string Login, bool Confirm, string? Shown)>();
+            var commands = new StoreSlackPressCommands(source, store, NullLogger.Instance, null, (id, login, confirm, shown, _) =>
+            {
+                server.Add((id, login, confirm, shown));
+                return Task.FromResult(confirm
+                    ? new PlanUndoAnswer(PlanUndoAnswer.Undone, null, "Undone.", statementNow)
+                    : new PlanUndoAnswer(PlanUndoAnswer.Confirm, null, "This unforces the plan.", statementNow));
+            });
+
+            var shown = await commands.UndoAsync(calledId, "7", confirm: false, null, ct);
+            Assert.Equal((SlackUndoStep.Confirm, unforce), (shown.Status, shown.Statement));
+            Assert.Equal([false], server.Select(s => s.Confirm));
+            var hash = SlackConfirmValue.HashOf(unforce);
+
+            /* The server changed between the show and the Confirm, so the undo would run another statement: the press is refused and nothing runs. */
+            statementNow = reforce;
+            var stale = await commands.UndoAsync(calledId, "7", confirm: true, hash, ct);
+            Assert.Equal((SlackUndoStep.Refused, "statement_changed"), (stale.Status, stale.Code));
+            Assert.Equal(reforce, stale.Statement);
+            Assert.DoesNotContain(server, s => s.Confirm);
+
+            /* A Confirm that carries no hash is refused the same way. */
+            var bare = await commands.UndoAsync(calledId, "7", confirm: true, null, ct);
+            Assert.Equal((SlackUndoStep.Refused, "statement_changed"), (bare.Status, bare.Code));
+            Assert.DoesNotContain(server, s => s.Confirm);
+            Assert.Equal("0", await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'action_undone'", ct));
+
+            /* The server would run the statement the person saw: the write goes to the server with that statement and no other. */
+            statementNow = unforce;
+            var done = await commands.UndoAsync(calledId, "7", confirm: true, hash, ct);
+            Assert.Equal(SlackUndoStep.Undone, done.Status);
+            var write = Assert.Single(server, s => s.Confirm);
+            Assert.Equal((calledId, "7", unforce), (write.CalledId, write.Login, write.Shown));
         });
     }
 
