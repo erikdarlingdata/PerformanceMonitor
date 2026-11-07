@@ -249,18 +249,27 @@ public sealed class ViewerGridPolishRound2Tests
             }
         }
 
+        /* "between <time> and <time>" is the real First Seen text of a change found between two captures: 160 px is narrower than it. */
+        foreach (var view in Views("Server",
+            new Case("ServerConfigChangesGrid", typeof(ServerConfigChangeRow)),
+            new Case("DatabaseConfigChangesGrid", typeof(DatabaseConfigChangeRow))))
+        {
+            CutText(problems, view, "First Seen", expected: Col(view, "First Seen").Value);
+        }
+
         Empty(problems, "Text cut with no ellipsis or no tooltip:");
     }
 
-    private static void CutText(List<string> problems, View view, string header)
+    private static void CutText(List<string> problems, View view, string header, string? expected = null)
     {
+        expected ??= LongName;
         var col = Col(view, header);
         if (col.ValueNaturalWidth <= col.CellWidth - 16)
         {
             return;
         }
 
-        if (!col.Trimmed || col.Tooltip != LongName)
+        if (!col.Trimmed || col.Tooltip != expected)
         {
             problems.Add($"{view.Grid} at {view.Label}: '{header}' is cut at {col.CellWidth - 16:0} px of {col.ValueNaturalWidth:0}, trimmed {col.Trimmed}, tooltip {(col.Tooltip is null ? "none" : "set")}");
         }
