@@ -222,7 +222,7 @@ public class OptionalTableExporterTests
     }
 
     [Fact]
-    public async Task Snapshot_table_is_skipped_and_the_reader_factory_is_never_called_off_midnight()
+    public async Task Snapshot_table_is_skipped_and_the_reader_factory_is_never_called_off_midnight_once_the_day_is_exported()
     {
         var outDir = NewOutDir();
         try
@@ -235,12 +235,15 @@ public class OptionalTableExporterTests
             }
 
             var thirteenHundred = new DateTime(2026, 9, 27, 13, 0, 0, DateTimeKind.Utc);
-            var request = new OptionalExportRequest("servers", TimeColumn: null, IsSnapshot: true, thirteenHundred, thirteenHundred.AddHours(1));
+            var request = new OptionalExportRequest("servers", TimeColumn: null, IsSnapshot: true, thirteenHundred, thirteenHundred.AddHours(1))
+            {
+                DayAlreadyExported = true,
+            };
 
             var result = await OptionalTableExporter.ExportAsync(request, "store_a", outDir, ReaderFactory, CancellationToken.None);
 
             Assert.False(factoryCalled);
-            Assert.Equal("skipped: not the daily snapshot window", result.SkippedReason);
+            Assert.Equal("skipped: the daily snapshot for 2026-09-27 is already exported", result.SkippedReason);
             Assert.Equal(0, result.RowCount);
             Assert.Empty(result.Parts);
         }
