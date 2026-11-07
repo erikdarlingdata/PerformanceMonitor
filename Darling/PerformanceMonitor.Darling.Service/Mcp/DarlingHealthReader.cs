@@ -463,6 +463,13 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
     /// puts the wall clock back.</summary>
     internal static void UseRangeCacheClockForTests(Func<DateTime> clock) => RangeCache = new(clock);
 
+    /// <summary>Test-only. The clock behind the reader's own wall-clock reads: the retention horizon and the default
+    /// summary date. Null reads <see cref="DateTime.UtcNow"/>. A live test that seeds from one instant sets this to that
+    /// instant, so a midnight between its seeding and the read cannot move the horizon or today's row by a day.</summary>
+    internal static Func<DateTime>? ClockForTests { get; set; }
+
+    private static DateTime ReaderUtcNow() => ClockForTests?.Invoke() ?? DateTime.UtcNow;
+
     /// <summary>One <see cref="DailySummaryReadRow"/> per collected day in the half-open [fromDate, toDate)
     /// window (the viewer's <c>GetDailySummaryRangeAsync</c>).
     ///
@@ -517,7 +524,9 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
            horizon is a property of the store. DailySummaryRetention.HorizonFor documents the date arithmetic. */
         var fleetOverrides = await ReadFleetRetentionOverridesAsync(postgres, cancellationToken);
         var shortestRetentionDays = ShortestSignalRetentionDays(fleetOverrides);
-        var horizon = DailySummaryRetention.HorizonFor(DateTime.UtcNow, shortestRetentionDays);
+        var horizon = ClockForTests is { } clock
+            ? DailySummaryRetention.HorizonFor(clock(), shortestRetentionDays)
+            : DailySummaryRetention.HorizonFor(DateTime.UtcNow, shortestRetentionDays);
 
         /* #3653 (Q12): tier over the legacy pair above; the hourly RELATION by the supply rule — the
            interval-honest successor where it reaches as far back as the legacy for this window. The viewer's
@@ -720,7 +729,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
         NpgsqlDataSource postgres, int serverId, DateTime? summaryDate = null,
         IReadOnlyList<string>? separatelyMonitored = null, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
-        var targetDate = summaryDate?.Date ?? DateTime.UtcNow.Date;
+        var targetDate = summaryDate?.Date ?? ReaderUtcNow().Date;
         var range = await GetDailySummaryRangeAsync(
             postgres, serverId, targetDate, targetDate.AddDays(1), cancellationToken: cancellationToken,
             separatelyMonitored: separatelyMonitored, logger: logger);
