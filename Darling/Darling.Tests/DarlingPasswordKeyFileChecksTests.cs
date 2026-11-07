@@ -374,6 +374,48 @@ public sealed class DarlingPasswordKeyFileChecksTests
     }
 
     /// <summary>
+    /// #8006 review: the Windows steps docs/darling/security.md gives for a <c>file:</c> key's folder, run on the layout
+    /// above, leave a folder and a file that pass every check, so the key loads with no warning. The test's own account
+    /// stands in for the service's: the check trusts the account it runs as. The owner step runs only from an elevated
+    /// token, as the docs say; without one the folder stays the test account's, which the check trusts here.
+    /// </summary>
+    [Fact]
+    public void OnWindows_AFolderLockedDownAsTheDocsSay_LoadsTheKeyWithNoWarning()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "icacls and folder ACLs are Windows-only.");
+
+        var (pkcs8, keyId) = NewKey();
+        var secret = Convert.ToBase64String(pkcs8);
+        var root = UnderADriveRootsGrant();
+        try
+        {
+            var (keys, path) = AKeyLockedDownByTheFileStepAlone(root, secret);
+            AssertRefused(DarlingPasswordKeySource.LoadFromSetting("file:" + path, null, NullLogger.Instance), "file:" + path, secret, "is not trusted");
+
+            Assert.Equal(0, Icacls(keys, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", $"*{CurrentUserSid}:(OI)(CI)RX"));
+            Assert.Equal(0, Icacls(path, "/reset"));
+            if (IsElevated)
+            {
+                Assert.Equal(0, Icacls(keys, "/setowner", "*S-1-5-32-544", "/T"));
+            }
+
+            var logger = new CapturingTestLogger();
+            var load = DarlingPasswordKeySource.LoadFromSetting("file:" + path, null, logger);
+
+            Assert.Null(load.Refusal);
+            Assert.NotNull(load.Pkcs8);
+            Assert.Equal(keyId, KeyIdOf(load.Pkcs8));
+            CryptographicOperations.ZeroMemory(load.Pkcs8);
+            Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(pkcs8);
+            RemoveTree(root);
+        }
+    }
+
+    /// <summary>
     /// #8006 review: on Windows the folder the path is written in and the folder the file really is in must each pass the
     /// folder check, and each refuses on its own. Junctions stand in for links, as they need no privilege. One sits in an
     /// open folder and leads to the locked folder that holds the key: the path's own folder is the junction, which takes
@@ -488,6 +530,9 @@ public sealed class DarlingPasswordKeyFileChecksTests
     }
 
     private static string CurrentUserSid => WindowsIdentity.GetCurrent().User!.Value;
+
+    /// <summary>Whether this process holds the Administrators group, which only an elevated token does.</summary>
+    private static bool IsElevated => new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
 
     private static string AccountName(SecurityIdentifier sid) => sid.Translate(typeof(NTAccount)).Value;
 
