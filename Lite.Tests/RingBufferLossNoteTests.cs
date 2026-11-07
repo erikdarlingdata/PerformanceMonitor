@@ -81,7 +81,8 @@ public sealed class RingBufferLossNoteTests
     {
         var text = RingBufferLossNote.Describe(CountCap + " ring_buffer_limit_below_setting=1");
 
-        Assert.Contains("long-query session is recreated automatically after its next read", text);
+        Assert.Contains("long-query session is recreated with the setting once, after its next read", text);
+        Assert.Contains("only in the databases its sessions are created in", text);
         Assert.Contains("--drop-xe-sessions", text);
         Assert.Contains("lite-extended-events.md", text);
         Assert.Contains("the next ensure recreates it with the setting", text);
@@ -89,7 +90,7 @@ public sealed class RingBufferLossNoteTests
 
         var clean = RingBufferLossNote.Describe(CountCap);
         Assert.DoesNotContain("--drop-xe-sessions", clean);
-        Assert.DoesNotContain("recreated automatically", clean);
+        Assert.DoesNotContain("recreated with the setting once", clean);
     }
 
     [Fact]

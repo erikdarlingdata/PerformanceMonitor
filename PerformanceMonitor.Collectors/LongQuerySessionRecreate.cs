@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -27,25 +28,43 @@ public sealed record LongQuerySessionRecreateRequest(string? DatabaseName, long 
 public static class LongQuerySessionRecreate
 {
     /// <summary>
-    /// Stages a recreate request with the item (<see cref="CollectorContext.StagedItemSessionRecreate"/>) when the session's
-    /// limit is known, above 0 and below the setting. A missing session (null) or one with no count limit (0) asks for nothing.
-    /// Staged, not applied: the host recreates the session only after this item's rows were written, so the events just read
-    /// are stored before the session that held them is dropped.
+    /// Stages a recreate request with the item (<see cref="CollectorContext.StagedItemSessionRecreate"/>) when the session runs
+    /// and its limit is above 0 and below the setting. Staged, not applied: the host recreates the session only after this
+    /// item's rows were written, so the events just read are stored before the session that held them is dropped.
+    ///
+    /// <para>A session that does not run asks for nothing. The position fragment reports 1000 for the limit of a session it
+    /// cannot find (<see cref="RingBufferXml"/>), so only <see cref="RingBufferObservation.Created"/>, which comes from the
+    /// running session, tells a real limit from that default. A missing session is the reconcile's to create, in the places it
+    /// creates sessions; a stopped one is started by it and read again. A limit of 0 is no count limit at all.</para>
     /// </summary>
     public static void StageWhenBelowSetting(CollectorContext context, RingBufferObservation observation)
     {
-        if (observation.Limit is { } limit && limit > 0 && limit < context.RingBufferMaxEvents)
+        if (observation.Created is not null
+            && observation.Limit is { } limit
+            && limit > 0
+            && limit < context.RingBufferMaxEvents)
         {
             context.StagedItemSessionRecreate = new LongQuerySessionRecreateRequest(context.CurrentDatabaseName, limit);
         }
     }
+
+    /// <summary>
+    /// Whether the host may recreate the session a request names: always for the server's session, and on Azure SQL Database
+    /// only in a database the long-query create list keeps after <see cref="XeSessionDatabaseList.Apply"/>. The read list is not
+    /// narrowed by the server's XE session database list, so a database left off it can still hold an older own session; that
+    /// session is left alone, as the list promises.
+    /// </summary>
+    public static bool IsOnCreateList(LongQuerySessionRecreateRequest request, IEnumerable<string>? xeSessionDatabases) =>
+        request.DatabaseName is not { } database || XeSessionDatabaseList.Apply(new[] { database }, xeSessionDatabases).Count > 0;
 }
 
 /// <summary>
-/// #8146: at most one recreate attempt per session every <see cref="Interval"/>, held in memory per server and database. An
-/// engine that accepts the create but keeps its own limit (or a create retried without the option) leaves the session below
-/// the setting, and without this the session would be dropped and created on every run. An attempt counts when it starts,
-/// so a failed one waits the interval too. A restart forgets it, so a new process tries once.
+/// #8146: when a recreate of the own long-query session may run, held in memory per server, database and target limit.
+///
+/// <para>An attempt that completed is final for its key for the life of the process: an engine that refuses or ignores the
+/// option leaves the session below the setting, and recreating it again would lose the events that arrive in between, every
+/// time, for nothing. An attempt that failed may run again after <see cref="Interval"/>. A restart starts fresh, and so does a
+/// changed setting value, because the target limit is part of the key.</para>
 /// </summary>
 public sealed class LongQuerySessionRecreateThrottle
 {
@@ -54,15 +73,21 @@ public sealed class LongQuerySessionRecreateThrottle
     /// <summary>The same hour as the long-query trace's own create pass (<see cref="LongQueryTraceDatabases.RetryInterval"/>).</summary>
     public static TimeSpan Interval => LongQueryTraceDatabases.RetryInterval;
 
-    /// <summary>True, and the attempt recorded, when no attempt for this server and database started within <see cref="Interval"/> of <paramref name="utcNow"/>.</summary>
-    public bool TryBegin(string serverKey, string? databaseName, DateTime utcNow)
+    private static string KeyFor(string serverKey, string? databaseName, long targetLimit) =>
+        serverKey + "\n" + (databaseName ?? string.Empty) + "\n" + targetLimit.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// True, and the attempt recorded, when this key has no completed attempt and no failed one that started within
+    /// <see cref="Interval"/> of <paramref name="utcNow"/>.
+    /// </summary>
+    public bool TryBegin(string serverKey, string? databaseName, long targetLimit, DateTime utcNow)
     {
-        var key = serverKey + "\n" + (databaseName ?? string.Empty);
+        var key = KeyFor(serverKey, databaseName, targetLimit);
         while (true)
         {
             if (_lastAttemptUtc.TryGetValue(key, out var last))
             {
-                if (utcNow - last < Interval)
+                if (last == DateTime.MaxValue || utcNow - last < Interval)
                 {
                     return false;
                 }
@@ -78,4 +103,8 @@ public sealed class LongQuerySessionRecreateThrottle
             }
         }
     }
+
+    /// <summary>Records that the attempt <see cref="TryBegin"/> allowed completed, so this key is never tried again in this process.</summary>
+    public void Completed(string serverKey, string? databaseName, long targetLimit) =>
+        _lastAttemptUtc[KeyFor(serverKey, databaseName, targetLimit)] = DateTime.MaxValue;
 }

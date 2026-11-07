@@ -1821,9 +1821,15 @@ END;", connection);
     /// start. Only the own long-query session is named here; the shared deadlock and blocked-process sessions are never
     /// dropped or altered.
     ///
-    /// <para>At most one attempt per session an hour (<see cref="LongQuerySessionRecreateThrottle"/>). A failure is logged at
-    /// Warning and never fails the run: the session is either still there as it was, or missing, and the worker's hourly
-    /// create pass (<see cref="LongQueryTracePass.CreateOnly"/>) creates a missing session with the setting.</para>
+    /// <para>On Azure SQL Database only a database on the long-query create list is recreated
+    /// (<see cref="LongQuerySessionRecreate.IsOnCreateList"/>): an older own session in a database left off the list is left
+    /// alone.</para>
+    ///
+    /// <para>A completed attempt is final for its server, database and setting value for the life of the process, so an engine
+    /// that refuses or ignores the option is not recreated again; a failed one is tried again after an hour
+    /// (<see cref="LongQuerySessionRecreateThrottle"/>). A failure is logged at Warning and never fails the run: the session is
+    /// either still there as it was, or missing, and the worker's hourly create pass (<see cref="LongQueryTracePass.CreateOnly"/>)
+    /// creates a missing session with the setting.</para>
     /// </summary>
     internal static async Task RecreateLongQuerySessionsBelowSettingAsync(
         ServerRuntime server, DarlingCollectorRunner runner, IReadOnlyList<LongQuerySessionRecreateRequest> requests, ILogger? logger, CancellationToken cancellationToken)
@@ -1834,6 +1840,8 @@ END;", connection);
             return;
         }
 
+        var limit = runner.RingBufferMaxEvents;
+        var serverKey = server.ServerId.ToString(CultureInfo.InvariantCulture);
         foreach (var request in requests)
         {
             /* A database-scoped session lives only on Azure SQL Database, and the server's own everywhere else. */
@@ -1842,17 +1850,25 @@ END;", connection);
                 continue;
             }
 
-            if (!runner.LongQuerySessionRecreateThrottle.TryBegin(server.ServerId.ToString(CultureInfo.InvariantCulture), request.DatabaseName, DateTime.UtcNow))
+            if (!LongQuerySessionRecreate.IsOnCreateList(request, server.Config.XeSessionDatabases))
             {
                 continue;
             }
 
+            var utcNow = runner.LongQuerySessionRecreateUtcNowForTests?.Invoke() ?? DateTime.UtcNow;
+            if (!runner.LongQuerySessionRecreateThrottle.TryBegin(serverKey, request.DatabaseName, limit, utcNow))
+            {
+                continue;
+            }
+
+            var where = request.DatabaseName is { } database ? $"[{server.Config.DisplayName}] [{database}]" : $"[{server.Config.DisplayName}]";
             try
             {
+                var startPending = false;
                 if (request.DatabaseName is { } databaseName)
                 {
                     await DropSessionInDatabaseAsync(server, runner, sessionName, databaseName, cancellationToken);
-                    await EnsureLongQueryCompletionsInDatabaseAsync(server, runner, databaseName, sessionName, logger, cancellationToken);
+                    startPending = await EnsureLongQueryCompletionsInDatabaseAsync(server, runner, databaseName, sessionName, logger, cancellationToken);
                 }
                 else
                 {
@@ -1860,16 +1876,29 @@ END;", connection);
                     await EnsureLongQueryCompletionsOnServerAsync(server, runner, sessionName, logger, cancellationToken);
                 }
 
-                logger?.LogInformation(
-                    "[{Server}] [{Database}] Recreated long-query session {Session} to apply max_events_limit {Limit} (was {Was})",
-                    server.Config.DisplayName, request.DatabaseName ?? "server", sessionName, runner.RingBufferMaxEvents, request.CurrentLimit);
+                runner.LongQuerySessionRecreateThrottle.Completed(serverKey, request.DatabaseName, limit);
+
+                /* #8146: a registration with read-only intent created the definition, and its replica refused the start because
+                   it does not show the definition yet; the next sweep's ensure starts it. Say so rather than "recreated". */
+                if (startPending)
+                {
+                    logger?.LogInformation(
+                        "{Where} Recreated long-query session {Session} to apply max_events_limit {Limit} (was {Was}); the replica refused its start for now, and the next ensure starts it",
+                        where, sessionName, limit, request.CurrentLimit);
+                }
+                else
+                {
+                    logger?.LogInformation(
+                        "{Where} Recreated long-query session {Session} to apply max_events_limit {Limit} (was {Was})",
+                        where, sessionName, limit, request.CurrentLimit);
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 logger?.LogWarning(
                     ex,
-                    "[{Server}] [{Database}] Failed to recreate long-query session {Session} to apply max_events_limit {Limit} (was {Was}); the hourly create pass creates it if it is missing: {Message}",
-                    server.Config.DisplayName, request.DatabaseName ?? "server", sessionName, runner.RingBufferMaxEvents, request.CurrentLimit, AlwaysOnXeSessions.DescribeFailure(ex));
+                    "{Where} Failed to recreate long-query session {Session} to apply max_events_limit {Limit} (was {Was}); the next ensure creates it if it is missing, and the recreate is tried again in an hour: {Message}",
+                    where, sessionName, limit, request.CurrentLimit, AlwaysOnXeSessions.DescribeFailure(ex));
             }
         }
     }

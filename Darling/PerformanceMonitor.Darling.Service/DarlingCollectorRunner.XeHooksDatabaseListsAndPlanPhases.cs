@@ -93,8 +93,11 @@ public sealed partial class DarlingCollectorRunner
     /// </summary>
     internal ILegacyLongQueryRecords? LegacyLongQueryRecordsForTests { get; set; }
 
-    /// <summary>#8146: one recreate attempt of this install's own long-query session per server and database per hour, for the life of the process.</summary>
+    /// <summary>#8146: when this install's own long-query session may be recreated: once per server, database and setting value for the life of the process, and again an hour after a failed attempt.</summary>
     internal LongQuerySessionRecreateThrottle LongQuerySessionRecreateThrottle { get; } = new();
+
+    /// <summary>#8146: replaces the clock the long-query recreate's throttle reads. Null in production.</summary>
+    internal Func<DateTime>? LongQuerySessionRecreateUtcNowForTests { get; set; }
 
     private DarlingLegacyLongQuerySession? _legacyLongQuery;
 

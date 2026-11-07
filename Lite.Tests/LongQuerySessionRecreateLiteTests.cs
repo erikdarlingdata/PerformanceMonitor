@@ -54,7 +54,15 @@ public sealed class LongQuerySessionRecreateLiteTests : IDisposable
             initializer.Dispose();
         }
 
-        try { Directory.Delete(_dir, recursive: true); } catch (IOException) { /* temp dir */ }
+        try
+        {
+            Directory.Delete(_dir, recursive: true);
+        }
+        catch (IOException ex)
+        {
+            /* A leftover temp folder fails nothing; say so rather than hide it. */
+            TestContext.Current.SendDiagnosticMessage($"Could not delete {_dir}: {ex.Message}");
+        }
     }
 
     private sealed class Rig
@@ -63,6 +71,7 @@ public sealed class LongQuerySessionRecreateLiteTests : IDisposable
         public required ServerConnection Server { get; init; }
         public required string OwnSession { get; init; }
         public List<(string Database, LongQueryTraceStep Step, string Session)> Steps { get; } = new();
+        public DateTime Clock { get; set; } = ReadAt;
     }
 
     private async Task<Rig> BuildRigAsync(int engineEdition, string? database = null, bool readOnlyIntent = false)
@@ -91,6 +100,7 @@ public sealed class LongQuerySessionRecreateLiteTests : IDisposable
             OwnSession = LongQueryCompletionsCollector.XeSessionNameFor(LongQueryCompletionsCollector.LiteProduct, service.GetInstallId()),
         };
 
+        service.LongQueryTraceUtcNowForTests = () => rig.Clock;
         service.LongQueryTraceStepOverrideForTests = (_, database, _, step, session, _) =>
         {
             rig.Steps.Add((database, step, session));
@@ -212,6 +222,87 @@ public sealed class LongQuerySessionRecreateLiteTests : IDisposable
                 ("alpha", LongQueryTraceStep.CreateDefinition, rig.OwnSession),
                 ("alpha", LongQueryTraceStep.Start, rig.OwnSession),
             },
+            rig.Steps);
+    }
+
+    /// <summary>
+    /// An engine that refuses or ignores the option leaves the session below the setting after a recreate that completed.
+    /// That recreate is final for the process: the same read two hours later sends nothing.
+    /// </summary>
+    [Fact]
+    public async Task ACompletedRecreate_IsNotRepeated_HoursLater()
+    {
+        var rig = await BuildRigAsync(engineEdition: 3);
+        rig.Service.ServerReaderOverrideForTests = _ => LimitRead("SO");
+
+        await rig.Service.RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, rig.Server, CancellationToken.None);
+        Assert.Equal(2, rig.Steps.Count);
+
+        rig.Clock = ReadAt.AddHours(2);
+        await rig.Service.RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, rig.Server, CancellationToken.None);
+        Assert.Equal(2, rig.Steps.Count);
+    }
+
+    [Fact]
+    public async Task AFailedRecreate_IsTriedAgainAfterTheHour()
+    {
+        var rig = await BuildRigAsync(engineEdition: 3);
+        rig.Service.ServerReaderOverrideForTests = _ => LimitRead("SO");
+        var refuse = true;
+        rig.Service.LongQueryTraceStepOverrideForTests = (_, database, _, step, session, _) =>
+        {
+            rig.Steps.Add((database, step, session));
+            return refuse && step == LongQueryTraceStep.CreateAndStart
+                ? Task.FromException(new InvalidOperationException("The create was refused."))
+                : Task.CompletedTask;
+        };
+
+        await rig.Service.RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, rig.Server, CancellationToken.None);
+        Assert.Equal(2, rig.Steps.Count);
+
+        rig.Clock = ReadAt.AddMinutes(30);
+        await rig.Service.RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, rig.Server, CancellationToken.None);
+        Assert.Equal(2, rig.Steps.Count);
+
+        refuse = false;
+        rig.Clock = ReadAt.AddHours(2);
+        await rig.Service.RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, rig.Server, CancellationToken.None);
+        Assert.Equal(4, rig.Steps.Count);
+    }
+
+    [Fact]
+    public async Task AChangedSettingValue_IsAppliedOnceMore()
+    {
+        var rig = await BuildRigAsync(engineEdition: 3);
+        rig.Service.ServerReaderOverrideForTests = _ => LimitRead("SO");
+
+        await rig.Service.RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, rig.Server, CancellationToken.None);
+        Assert.Equal(2, rig.Steps.Count);
+
+        App.XeRingBufferMaxEvents = 8000;
+        AppLogger.DrainBufferedLines();
+        await rig.Service.RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, rig.Server, CancellationToken.None);
+
+        Assert.Equal(4, rig.Steps.Count);
+        Assert.Contains(Lines(rig), line => line.Contains("max_events_limit 8000 (was 1000)", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The server's XE session database list keeps beta off the long-query create list. The read still reaches beta, but its
+    /// older own session is left alone: no step names beta.
+    /// </summary>
+    [Fact]
+    public async Task Azure_ADatabaseOffTheXeSessionDatabaseList_IsNotRecreated()
+    {
+        var rig = await BuildRigAsync(engineEdition: 5);
+        rig.Server.XeSessionDatabases = new List<string> { "alpha" };
+        rig.Service.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(new List<string> { "alpha", "beta" });
+        rig.Service.AzureDatabaseReaderOverrideForTests = (database, _) => LimitRead(database);
+
+        await rig.Service.RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, rig.Server, CancellationToken.None);
+
+        Assert.Equal(
+            new[] { ("alpha", LongQueryTraceStep.Drop, rig.OwnSession), ("alpha", LongQueryTraceStep.CreateAndStart, rig.OwnSession) },
             rig.Steps);
     }
 }

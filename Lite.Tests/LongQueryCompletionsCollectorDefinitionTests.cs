@@ -729,16 +729,17 @@ public sealed class LongQueryCompletionsCollectorDefinitionTests
     }
 
     /* #8146: a live session whose limit is below the setting asks the host to recreate this install's own session, staged
-       with the item so it lands only with the item's write. A missing session (NULL) or one with no count limit (0) does not. */
+       with the item so it lands only with the item's write. A missing session does not: production reads it as limit 1000
+       (the fragment's default) with no create_time, total, held or dropped. Nor does one with no count limit (0). */
     [Theory]
-    [InlineData(1000L, true)]
-    [InlineData(5000L, false)]
-    [InlineData(null, false)]
-    [InlineData(0L, false)]
-    public async Task ReadAsync_SessionLimitBelowSetting_StagesARecreate(long? sessionLimit, bool expected)
+    [InlineData(1000L, true, true)]
+    [InlineData(5000L, true, false)]
+    [InlineData(1000L, false, false)]
+    [InlineData(0L, true, false)]
+    public async Task ReadAsync_SessionLimitBelowSetting_StagesARecreate(long sessionLimit, bool sessionRuns, bool expected)
     {
         var context = LimitContext(databaseName: null);
-        using var reader = LimitRead(sessionLimit is { } limit ? limit : DBNull.Value);
+        using var reader = sessionRuns ? LimitRead(sessionLimit) : MissingSessionRead();
 
         await LongQueryCompletionsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 
@@ -799,6 +800,13 @@ public sealed class LongQueryCompletionsCollectorDefinitionTests
         FakeCollectorDataReader.WithResultSets(
             Array.Empty<object[]>(),
             new[] { new object[] { false, 0L, DBNull.Value, 40L, 10L, s_ringCreated, 0L, sessionLimit, s_ringReadAt } });
+
+    /* The trailing row RingBufferXml's position fragment returns for a session it cannot find: every session column NULL, the
+       limit at its 1000 default. */
+    private static FakeCollectorDataReader MissingSessionRead() =>
+        FakeCollectorDataReader.WithResultSets(
+            Array.Empty<object[]>(),
+            new[] { new object[] { false, 0L, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, 1000L, s_ringReadAt } });
 
     [Fact]
     public void LongQuery_DeclaresRingPositionStateKey()

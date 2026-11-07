@@ -1055,7 +1055,8 @@ END;", connection);
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    /* #8146: one recreate attempt of this install's own long-query session per server and database per hour. */
+    /* #8146: when this install's own long-query session may be recreated: once per server, database and setting value for the
+       life of the process, and again an hour after a failed attempt. */
     private readonly LongQuerySessionRecreateThrottle _longQuerySessionRecreateThrottle = new();
 
     /// <summary>
@@ -1066,9 +1067,14 @@ END;", connection);
     /// for a registration with read-only intent), then the create with the setting and the start. Only the own long-query
     /// session is named here; the shared deadlock and blocked-process sessions are never dropped or altered.
     ///
-    /// <para>At most one attempt per session an hour (<see cref="LongQuerySessionRecreateThrottle"/>). A failure is logged at
-    /// Warning and never fails the run: the session is either still there as it was, or missing, and the next cycle's
-    /// reconcile creates a missing session with the setting.</para>
+    /// <para>On Azure SQL Database only a database on the long-query create list is recreated
+    /// (<see cref="LongQuerySessionRecreate.IsOnCreateList"/>): an older own session in a database left off the list is left
+    /// alone.</para>
+    ///
+    /// <para>A completed attempt is final for its server, database and setting value for the life of the process, so an engine
+    /// that refuses or ignores the option is not recreated again; a failed one is tried again after an hour
+    /// (<see cref="LongQuerySessionRecreateThrottle"/>). A failure is logged at Warning and never fails the run: the session is
+    /// either still there as it was, or missing, and the next cycle's reconcile creates a missing session with the setting.</para>
     /// </summary>
     private async Task RecreateLongQuerySessionsBelowSettingAsync(
         ServerConnection server, bool isAzureSqlDatabase, IReadOnlyList<LongQuerySessionRecreateRequest> requests, CancellationToken cancellationToken)
@@ -1088,8 +1094,13 @@ END;", connection);
                 continue;
             }
 
+            if (!LongQuerySessionRecreate.IsOnCreateList(request, server.XeSessionDatabases))
+            {
+                continue;
+            }
+
             var utcNow = LongQueryTraceUtcNowForTests?.Invoke() ?? DateTime.UtcNow;
-            if (!_longQuerySessionRecreateThrottle.TryBegin(server.Id, request.DatabaseName, utcNow))
+            if (!_longQuerySessionRecreateThrottle.TryBegin(server.Id, request.DatabaseName, limit, utcNow))
             {
                 continue;
             }
@@ -1107,11 +1118,12 @@ END;", connection);
                     await EnsureLongQueryCompletionsXeSessionOnServerAsync(server, sessionName, cancellationToken);
                 }
 
+                _longQuerySessionRecreateThrottle.Completed(server.Id, request.DatabaseName, limit);
                 AppLogger.Info("XeSession", $"{where} Recreated long-query session {sessionName} to apply max_events_limit {limit} (was {request.CurrentLimit})");
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                AppLogger.Warn("XeSession", $"{where} Failed to recreate long-query session {sessionName} to apply max_events_limit {limit} (was {request.CurrentLimit}); the next cycle's reconcile creates it if it is missing: {ex.Message}");
+                AppLogger.Warn("XeSession", $"{where} Failed to recreate long-query session {sessionName} to apply max_events_limit {limit} (was {request.CurrentLimit}); the next ensure creates it if it is missing, and the recreate is tried again in an hour: {AlwaysOnXeSessions.DescribeFailure(ex)}");
             }
         }
     }

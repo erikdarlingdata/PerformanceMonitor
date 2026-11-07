@@ -37,7 +37,10 @@ public sealed class LongQuerySessionRecreateRunnerLiveTests
     private static readonly DateTime Created = new(2026, 11, 7, 6, 0, 0, DateTimeKind.Utc);
     private static readonly DateTime ReadAt = new(2026, 11, 7, 9, 0, 0, DateTimeKind.Utc);
 
-    private sealed record Rig(DarlingCollectorRunner Runner, List<(string Database, LongQueryTraceStep Step, string Session)> Steps, CapturingTestLogger Logger);
+    private sealed record Rig(DarlingCollectorRunner Runner, List<(string Database, LongQueryTraceStep Step, string Session)> Steps, CapturingTestLogger Logger)
+    {
+        public DateTime Clock { get; set; } = ReadAt;
+    }
 
     [Fact]
     public async Task OnPrem_ALimitBelowTheSetting_RecreatesTheOwnSession_AndASecondRequestWithinTheHourSendsNothing()
@@ -144,6 +147,116 @@ public sealed class LongQuerySessionRecreateRunnerLiveTests
         });
     }
 
+    /// <summary>
+    /// An engine that refuses or ignores the option leaves the session below the setting after a recreate that completed.
+    /// That recreate is final for the process: the same read two hours later sends nothing.
+    /// </summary>
+    [Fact]
+    public async Task ACompletedRecreate_IsNotRepeated_HoursLater()
+    {
+        await WithRunnerAsync(async (rig, ct) =>
+        {
+            var server = OnPremServer();
+
+            await rig.Runner.RunAsync(LongQueryCompletionsCollector.Instance, server, ct);
+            Assert.Equal(2, rig.Steps.Count);
+
+            rig.Clock = ReadAt.AddHours(2);
+            await rig.Runner.RunAsync(LongQueryCompletionsCollector.Instance, server, ct);
+            Assert.Equal(2, rig.Steps.Count);
+        });
+    }
+
+    [Fact]
+    public async Task AFailedRecreate_IsTriedAgainAfterTheHour()
+    {
+        await WithRunnerAsync(async (rig, ct) =>
+        {
+            var refuse = true;
+            rig.Runner.LongQueryTraceStepOverrideForTests = (_, database, _, step, session, _) =>
+            {
+                rig.Steps.Add((database, step, session));
+                return refuse && step == LongQueryTraceStep.CreateAndStart
+                    ? Task.FromException(new InvalidOperationException("The create was refused."))
+                    : Task.CompletedTask;
+            };
+            var server = OnPremServer();
+
+            await rig.Runner.RunAsync(LongQueryCompletionsCollector.Instance, server, ct);
+            Assert.Equal(2, rig.Steps.Count);
+
+            rig.Clock = ReadAt.AddMinutes(30);
+            await rig.Runner.RunAsync(LongQueryCompletionsCollector.Instance, server, ct);
+            Assert.Equal(2, rig.Steps.Count);
+
+            refuse = false;
+            rig.Clock = ReadAt.AddHours(2);
+            await rig.Runner.RunAsync(LongQueryCompletionsCollector.Instance, server, ct);
+            Assert.Equal(4, rig.Steps.Count);
+        });
+    }
+
+    /// <summary>
+    /// The server's XE session database list keeps beta off the long-query create list. The read still reaches beta, but its
+    /// older own session is left alone: no step names beta.
+    /// </summary>
+    [Fact]
+    public async Task Azure_ADatabaseOffTheXeSessionDatabaseList_IsNotRecreated()
+    {
+        await WithRunnerAsync(async (rig, ct) =>
+        {
+            rig.Runner.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(new List<string> { "alpha", "beta" });
+            var server = new ServerRuntime
+            {
+                Config = new MonitoredServer { Name = "lqrecreate", Host = "lqrecreate.database.windows.net", XeSessionDatabases = new List<string> { "alpha" } },
+                ConnectionString = "Server=azure;Database=master",
+                Target = new CollectorTargetInfo { IsAzureSqlDb = true, Engine = CollectorTargetEngine.SqlServer },
+                StorageName = "lqrecreate",
+                ServerId = LiveServerId,
+            };
+
+            await rig.Runner.RunAsync(LongQueryCompletionsCollector.Instance, server, ct);
+
+            Assert.Equal(
+                new[] { ("alpha", LongQueryTraceStep.Drop, OwnSession), ("alpha", LongQueryTraceStep.CreateAndStart, OwnSession) },
+                rig.Steps);
+        });
+    }
+
+    /// <summary>
+    /// A registration with read-only intent whose replica refuses the start (it does not show the new definition yet): the
+    /// log says the start is pending, not that the session was recreated and runs.
+    /// </summary>
+    [Fact]
+    public async Task Azure_ReadOnlyIntent_AStartTheReplicaRefuses_IsLoggedAsPending()
+    {
+        await WithRunnerAsync(async (rig, ct) =>
+        {
+            rig.Runner.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(new List<string> { "alpha" });
+            rig.Runner.LongQueryTraceStepOverrideForTests = (_, database, _, step, session, _) =>
+            {
+                rig.Steps.Add((database, step, session));
+                return step == LongQueryTraceStep.Start
+                    ? Task.FromException(LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.Create(
+                        LongQueryTraceDatabases.EventSessionNotVisibleErrorNumber, 16, "Cannot alter the event session, because it does not exist or you do not have permission."))
+                    : Task.CompletedTask;
+            };
+            var server = new ServerRuntime
+            {
+                Config = new MonitoredServer { Name = "lqrecreate", Host = "lqrecreate.database.windows.net", Database = "alpha", ReadOnlyIntent = true },
+                ConnectionString = "Server=azure;Database=alpha;ApplicationIntent=ReadOnly",
+                Target = new CollectorTargetInfo { IsAzureSqlDb = true, Engine = CollectorTargetEngine.SqlServer },
+                StorageName = "lqrecreate",
+                ServerId = LiveServerId,
+            };
+
+            await rig.Runner.RunAsync(LongQueryCompletionsCollector.Instance, server, ct);
+
+            Assert.Contains("the replica refused its start for now", rig.Logger.Joined, StringComparison.Ordinal);
+            Assert.Equal(0, rig.Logger.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+        });
+    }
+
     private static ServerRuntime OnPremServer() => new()
     {
         Config = new MonitoredServer { Name = "lqrecreate", Host = "lqrecreate-sql" },
@@ -172,6 +285,7 @@ public sealed class LongQuerySessionRecreateRunnerLiveTests
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator(), logger: logger, installId: () => InstallId, xeRingBufferMaxEvents: 5000);
         var rig = new Rig(runner, new List<(string, LongQueryTraceStep, string)>(), logger);
         runner.TargetProviderOverrideForTests = _ => new FakeTargetProvider();
+        runner.LongQuerySessionRecreateUtcNowForTests = () => rig.Clock;
         runner.LongQueryTraceStepOverrideForTests = (_, database, _, step, session, _) =>
         {
             rig.Steps.Add((database, step, session));

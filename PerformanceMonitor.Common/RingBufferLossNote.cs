@@ -159,7 +159,7 @@ public static class RingBufferLossNote
 
             /* #8146: the steps that apply it. Only the install's own long-query session is recreated for this; the shared
                sessions are the operator's call, because other installs read them too. */
-            text += " The install's own long-query session is recreated automatically after its next read."
+            text += " The install's own long-query session is recreated with the setting once, after its next read (once per start and per setting value; a failed attempt is tried again an hour later; on Azure SQL Database only in the databases its sessions are created in). If it still shows a lower limit after that, the engine did not take the option."
                 + " To apply it to the shared deadlock or blocked-process session, drop that session (Darling: --drop-xe-sessions;"
                 + " Lite: the drop SQL in lite-extended-events.md) and the next ensure recreates it with the setting;"
                 + " another install watching the same server may recreate it first with its own value.";

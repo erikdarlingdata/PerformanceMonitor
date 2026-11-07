@@ -21,7 +21,7 @@ The ring buffer of the long-query, deadlock and blocked-process sessions is crea
 
 The limit applies when a session is created, so a session keeps the limit it was created with. The deadlock and blocked-process sessions are shared by name across installs, so when two installs with different settings watch one server, whichever created the session wins. The loss note shows the session's actual limit.
 
-This install's own long-query session is recreated automatically: when a read finds its limit below the setting, Lite drops it, creates it with the setting and starts it, right after that read's rows are stored, at most once an hour for each session (per database on Azure SQL Database). Lite never drops or alters the shared deadlock and blocked-process sessions for this.
+This install's own long-query session is recreated automatically: when a read finds it running below the setting, Lite drops it, creates it with the setting and starts it, right after that read's rows are stored. On Azure SQL Database this is per database, and only in the databases on the long-query create list; a session in a database left off the server's list of databases that get Extended Events sessions is left alone. A recreate that completes is not repeated while Lite runs, for that session and setting value; a failed one is tried again an hour later. Lite never drops or alters the shared deadlock and blocked-process sessions for this.
 
 To recreate a shared session with the current value, drop it and let Lite create it again. Run these only when no other install needs the session kept, because every install that monitors the server uses these names. Lite creates a missing session the next time its collector runs.
 
