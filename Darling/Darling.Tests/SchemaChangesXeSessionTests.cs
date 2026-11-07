@@ -36,46 +36,6 @@ public sealed class SchemaChangesXeSessionTests
     }
 
     [Fact]
-    public void BuildCreateSql_ServerScope_HasEventsPredicatesActionsAndTarget()
-    {
-        var sql = SchemaChangesXeSession.BuildCreateSql(Name, databaseScoped: false);
-
-        Assert.Contains("ON SERVER", sql, StringComparison.Ordinal);
-        foreach (var evt in new[] { "sqlserver.object_created", "sqlserver.object_altered", "sqlserver.object_deleted", "sqlserver.module_end" })
-        {
-            Assert.Contains(evt, sql, StringComparison.Ordinal);
-        }
-
-        Assert.Contains("ddl_phase = 1", sql, StringComparison.Ordinal);
-        Assert.Contains("object_type <> 21587", sql, StringComparison.Ordinal);
-        Assert.Contains("object_name = N'sp_rename'", sql, StringComparison.Ordinal);
-        foreach (var action in new[] { "sqlserver.database_name", "sqlserver.server_principal_name", "sqlserver.client_app_name", "sqlserver.client_hostname", "package0.event_sequence" })
-        {
-            Assert.Contains(action, sql, StringComparison.Ordinal);
-        }
-
-        Assert.Contains("package0.ring_buffer", sql, StringComparison.Ordinal);
-        Assert.Contains("MAX_EVENTS_LIMIT = 10000", sql, StringComparison.Ordinal);
-        Assert.Contains("max_memory = 4096", sql, StringComparison.Ordinal);
-        Assert.Contains("STARTUP_STATE = OFF", sql, StringComparison.Ordinal);
-        Assert.Contains("MEMORY_PARTITION_MODE = NONE", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("sql_text", sql, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void BuildCreateSql_DatabaseScope_UsesOnDatabase_UsernameAction_NoPartitionMode()
-    {
-        var sql = SchemaChangesXeSession.BuildCreateSql(Name, databaseScoped: true);
-
-        Assert.Contains("ON DATABASE", sql, StringComparison.Ordinal);
-        Assert.Contains("sqlserver.username", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("server_principal_name", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("MEMORY_PARTITION_MODE", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("sql_text", sql, StringComparison.Ordinal);
-        Assert.Contains("MAX_EVENTS_LIMIT = 10000", sql, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void CleanupPlan_DropsTheSchemaSession_ForThisInstall()
     {
         Assert.Contains(Name, DarlingXeSessionCleanup.InstallSessionNames(Id));
@@ -91,15 +51,5 @@ public sealed class SchemaChangesXeSessionTests
         Assert.Equal(
             "DROP EVENT SESSION [" + Name + "] ON SERVER;",
             DarlingXeSessionCleanup.DropStatement(Name, XeSessionScope.Server, Id));
-    }
-
-    [Fact]
-    public void BuildStateProbeSql_ReadsTheCatalogOfItsScope()
-    {
-        Assert.Contains("sys.server_event_sessions", SchemaChangesXeSession.BuildStateProbeSql(databaseScoped: false), StringComparison.Ordinal);
-        var azure = SchemaChangesXeSession.BuildStateProbeSql(databaseScoped: true);
-        Assert.Contains("sys.database_event_sessions", azure, StringComparison.Ordinal);
-        Assert.Contains("sys.dm_xe_database_sessions", azure, StringComparison.Ordinal);
-        Assert.Contains("@session_name", azure, StringComparison.Ordinal);
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 Erik Darling, Darling Data\b LLC
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
  *
@@ -19,9 +19,9 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #7643 on a\b live store: the schema\b version writer. A baseline writes baseline versions, an unchanged read writes nothing, a\b changed
-/// definition closes the old version and opens a\b new one with current children, a\b recreated object keeps its history, a\b rename and a\b
-/// drop are versions of their own, and a\b history key shared by two servers of one availability group is one history.
+/// #7643 on a live store: the schema version writer. A baseline writes baseline versions, an unchanged read writes nothing, a changed
+/// definition closes the old version and opens a new one with current children, a recreated object keeps its history, a rename and a
+/// drop are versions of their own, and a history key shared by two servers of one availability group is one history.
 /// </summary>
 /* #1776 own-store: each test mints its own scratch database through ScratchPostgres. */
 public sealed class SchemaVersionStoreLiveTests
@@ -34,7 +34,7 @@ public sealed class SchemaVersionStoreLiveTests
     {
         var ct = TestContext.Current.CancellationToken;
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to run the schema\b version store live tests.");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to run the schema version store live tests.");
         await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
         var bodySucceeded = false;
         try
@@ -311,7 +311,7 @@ public sealed class SchemaVersionStoreLiveTests
             await SchemaVersionStore.ApplyAsync(c, Write(new[] { t }, s_t0, baseline: true, by: "baseline"), ct);
 
             var keys = await Scalar(c, "SELECT key_columns FROM collect.schema_indexes WHERE name = 'IX_Odd'", ct);
-            Assert.Equal(new[] { "a,b", "a\\b" },SchemaCatalogReader.SplitList(keys));
+            Assert.Equal(new[] { "a,b", "a\\b" }, SchemaCatalogReader.SplitList(keys));
             var included = await Scalar(c, "SELECT included_columns FROM collect.schema_indexes WHERE name = 'IX_Odd'", ct);
             Assert.Equal(new[] { "plain" }, SchemaCatalogReader.SplitList(included));
         });

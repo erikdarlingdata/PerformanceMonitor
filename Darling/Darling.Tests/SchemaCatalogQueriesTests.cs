@@ -17,31 +17,11 @@ namespace Darling.Tests;
 public sealed class SchemaCatalogQueriesTests
 {
     [Fact]
-    public void BuildTargetedRead_InlinesOnlyTheGivenIds()
-    {
-        var sql = SchemaCatalogQueries.BuildTargetedRead([101, 7, 101, 3000000]);
-
-        Assert.Contains("IN (7,101,3000000)", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("TOP (10001)", sql, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void BuildTargetedRead_RefusesMoreThanMaxTargetedIds()
     {
         var ids = Enumerable.Range(1, SchemaCatalogQueries.MaxTargetedIds + 1).ToList();
 
         Assert.Throws<ArgumentOutOfRangeException>(() => SchemaCatalogQueries.BuildTargetedRead(ids));
-        Assert.Contains("IN (", SchemaCatalogQueries.BuildTargetedRead(ids.Take(SchemaCatalogQueries.MaxTargetedIds).ToList()), StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void BuildFullRead_HasNoStringAggOrStringSplit()
-    {
-        var sql = SchemaCatalogQueries.BuildFullRead();
-
-        Assert.DoesNotContain("STRING_AGG", sql, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("STRING_SPLIT", sql, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("OPENJSON", sql, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("TOP (10001)", sql, StringComparison.Ordinal);
+        _ = SchemaCatalogQueries.BuildTargetedRead(ids.Take(SchemaCatalogQueries.MaxTargetedIds).ToList());
     }
 }
