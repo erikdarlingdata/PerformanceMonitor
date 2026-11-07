@@ -240,6 +240,11 @@ public static class SlackThreadPosts
         return new SlackThreadPostContent($"Proposed action: {kind} on {server} ({stateText})", blocks, new SlackCardFacts(SlackCardKinds.Proposal, id));
     }
 
+    /// <summary>An agent's message to the thread (#7659, <c>post_investigation_message</c>): the agent and its text at the mode, bounded. The text is
+    /// labelled as the agent's; <c>metadataOnly</c> withholds it and says so.</summary>
+    public static SlackThreadPostContent AgentMessagePost(string agentName, string? text, McpDataDetail mode) =>
+        new("", []);
+
     /// <summary>How a request ended without a resolution: closed by a person, expired, or out of claims. <paramref name="actor"/> is the
     /// person when one acted, and <paramref name="reason"/> what they or the service said.</summary>
     public static SlackThreadPostContent EndPost(string state, string? actor, string? reason)

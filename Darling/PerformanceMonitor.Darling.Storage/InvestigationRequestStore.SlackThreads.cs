@@ -51,7 +51,7 @@ public interface ISlackRequestThreadStore
 public sealed record SlackThreadJournalRow(
     long JournalId, string Event, DateTime EventTimeUtc, string Actor, string? Reason, string? DetailJson, string PostKey,
     Guid RequestId, int RouteId, int ServerId, string ServerName, string Metric, string Severity, string Trigger, Guid? FollowUpOf,
-    string? CalledDetailJson, int ClaimNo, string? Verdict, string? RootCause, DateTime OpenedAtUtc);
+    string? CalledDetailJson, int ClaimNo, string? Verdict, string? RootCause, DateTime OpenedAtUtc, Guid? ChatThreadOf = null);
 
 /// <summary>#7656: where the thread pass reads the rows to post. The store implements it; a test stands its own in.</summary>
 public interface ISlackThreadRowSource
