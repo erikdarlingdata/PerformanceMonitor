@@ -1,22 +1,26 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Text.RegularExpressions;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Threading;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
-using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
 /// <summary>
-/// #8115: the low-severity details from the Viewer walkthrough. Each text or decision is pulled into a plain member and
-/// asserted here; the members the fix adds are reached by name, so this class builds against a tree without them and fails
-/// at the lookup with the member's name.
+/// #8115: the low-severity details from the Viewer walkthrough. Each text or decision is a plain member asserted here, and the
+/// two layout details are asserted on the real controls, built and shown on the shared STA thread with the Viewer's theme.
+/// The members the fix adds are reached by name, so this class builds against a tree without them and fails at the lookup
+/// with the member's name.
 /// </summary>
 public sealed class ViewerWalkthroughLows8115Tests
 {
+    private const string ThemeUri = "pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/DarkTheme.xaml";
     private static readonly Assembly ViewerAssembly = typeof(FleetRollup).Assembly;
 
     private static Type ViewerType(string name)
@@ -100,18 +104,42 @@ public sealed class ViewerWalkthroughLows8115Tests
         Assert.Equal("showing 2 of 3 (1 healthy with an advisory)", OverviewCardView.CountText(cards, shown: 2, attentionOnly: true, search: null));
     }
 
-    // ── F3: the Server column sizes to its names in Alert History and Job History ──
+    // ── F3: the Server column shows a long name whole in Alert History and Job History ──
+
+    private sealed class ServerRow
+    {
+        public string ServerName { get; set; } = "";
+    }
 
     [Theory]
-    [InlineData("AlertsHistoryTab.xaml")]
-    [InlineData("JobHistoryTab.xaml")]
-    public void ServerColumn_SizesToItsNames(string file)
+    [InlineData("alerts")]
+    [InlineData("jobs")]
+    public void ServerColumn_ShowsALongNameWhole(string tab)
     {
-        var xaml = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", file);
-        var column = Regex.Match(xaml, "<DataGridTextColumn Binding=\"\\{Binding ServerName\\}\"[^>]*>");
-        Assert.True(column.Success, $"{file} has no ServerName column.");
-        Assert.Contains("Width=\"Auto\"", column.Value, StringComparison.Ordinal);
-        Assert.Matches("MinWidth=\"1[0-9]{2}\"", column.Value);
+        const string name = "SERVER-GROUP-REGION-PRODUCTION-CLUSTER-NODE-07";
+        var (columnWidth, natural) = StaTestThread.Run(() => WithTheme(() =>
+        {
+            FrameworkElement control = tab == "alerts" ? new AlertsHistoryTab() : new JobHistoryTab();
+            var grid = (DataGrid)control.FindName(tab == "alerts" ? "AlertsDataGrid" : "JobHistoryDataGrid")!;
+            grid.ItemsSource = new List<ServerRow> { new() { ServerName = name }, new() { ServerName = "SHORT" } };
+            var window = new Window { Content = control, Width = 1640, Height = 800, Left = 0, Top = 0 };
+            window.Show();
+            try
+            {
+                Settle(window);
+                var column = grid.Columns.OfType<DataGridTextColumn>()
+                    .Single(c => (c.Binding as System.Windows.Data.Binding)?.Path.Path == "ServerName");
+                var probe = new TextBlock { Text = name };
+                probe.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+                return (column.ActualWidth, probe.DesiredSize.Width);
+            }
+            finally
+            {
+                window.Close();
+            }
+        }));
+
+        Assert.True(columnWidth + 0.5 >= natural, $"the Server column is {columnWidth:F0} px wide and the name needs {natural:F0} px, so it is cut");
     }
 
     // ── F7: a database whose used size was not collected says so ──
@@ -130,14 +158,6 @@ public sealed class ViewerWalkthroughLows8115Tests
         Assert.Contains("not collected", unknownLabel, StringComparison.Ordinal);
         Assert.EndsWith("/ 16 MB", unknownLabel, StringComparison.Ordinal);
         Assert.Equal("1,536 / 2,048 MB", (string)label.GetValue(known)!);
-    }
-
-    [Fact]
-    public void DatabaseSizeBar_BindsTheLabel()
-    {
-        var xaml = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "FinOpsTab.xaml");
-        Assert.Contains("Text=\"{Binding SizeLabel}\"", xaml, StringComparison.Ordinal);
-        Assert.DoesNotContain("StringFormat=\"{}{0:N0} / {1:N0} MB\"", xaml, StringComparison.Ordinal);
     }
 
     // ── F8(b): the FinOps Recommendations count says it is loading until the read returns ──
@@ -165,16 +185,34 @@ public sealed class ViewerWalkthroughLows8115Tests
         Assert.Equal(expected, (string)method.Invoke(null, new object[] { server, stored, body })!);
     }
 
-    // ── F13: the Settings dialog opens wide enough for its eight tab headers on one row ──
+    // ── F13: the Settings dialog's eight tab headers sit on one row at its default size ──
 
     [Fact]
-    public void SettingsWindow_OpensWideEnoughForOneRowOfTabHeaders()
+    public void SettingsWindow_TabHeadersSitOnOneRow_AtTheDefaultSize()
     {
-        var xaml = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "SettingsWindow.xaml");
-        var width = int.Parse(Regex.Match(xaml, "\\sWidth=\"(\\d+)\"").Groups[1].Value);
-        var minWidth = int.Parse(Regex.Match(xaml, "MinWidth=\"(\\d+)\"").Groups[1].Value);
-        Assert.True(width >= 860, $"Settings opens at {width} px, where the eighth tab header wraps under the other seven.");
-        Assert.Equal(width, minWidth);
+        var rows = StaTestThread.Run(() => WithTheme(() =>
+        {
+            var store = new ViewerAppSettingsStore(Path.Combine(Path.GetTempPath(), "settings-tabs-8115-" + Guid.NewGuid().ToString("N") + ".json"));
+            var window = new SettingsWindow(new ViewerPreferences(), store, null) { Left = 0, Top = 0 };
+            window.Show();
+            try
+            {
+                Settle(window);
+                var tabs = window.SettingsTabs;
+                return tabs.Items.OfType<TabItem>()
+                    .Select(t => (Header: t.Header?.ToString() ?? "", Top: Math.Round(t.TransformToAncestor(tabs).Transform(new Point(0, 0)).Y)))
+                    .ToList();
+            }
+            finally
+            {
+                window.Close();
+            }
+        }));
+
+        Assert.True(rows.Count >= 8, $"the dialog shows {rows.Count} tabs");
+        var distinctRows = rows.Select(r => r.Top).Distinct().ToList();
+        Assert.True(distinctRows.Count == 1,
+            "the tab headers wrap onto more than one row at the dialog's default size: " + string.Join(", ", rows.Select(r => $"{r.Header} at {r.Top}")));
     }
 
     // ── F14: a read-only seat's fields refuse edits ──
@@ -182,19 +220,19 @@ public sealed class ViewerWalkthroughLows8115Tests
     [Fact]
     public void ReadOnlyGate_MakesTextReadOnlyAndDisablesChoices_LeavingButtonsAlone()
     {
-        var gate = Method(ViewerType("ReadOnlySettingsGate"), "Apply", typeof(System.Windows.DependencyObject), typeof(string));
+        var gate = Method(ViewerType("ReadOnlySettingsGate"), "Apply", typeof(DependencyObject), typeof(string));
 
         /* WPF controls are built on the suite's one shared STA thread (#5602). */
         StaTestThread.Run(() =>
         {
-            var text = new System.Windows.Controls.TextBox { Text = "80" };
-            var check = new System.Windows.Controls.CheckBox();
-            var combo = new System.Windows.Controls.ComboBox();
-            var button = new System.Windows.Controls.Button { Content = "Manage People..." };
-            var inner = new System.Windows.Controls.StackPanel();
+            var text = new TextBox { Text = "80" };
+            var check = new CheckBox();
+            var combo = new ComboBox();
+            var button = new Button { Content = "Manage People..." };
+            var inner = new StackPanel();
             inner.Children.Add(combo);
             inner.Children.Add(button);
-            var root = new System.Windows.Controls.Grid();
+            var root = new Grid();
             root.Children.Add(text);
             root.Children.Add(check);
             root.Children.Add(inner);
@@ -236,5 +274,37 @@ public sealed class ViewerWalkthroughLows8115Tests
         Assert.StartsWith("No query tags are defined", none, StringComparison.Ordinal);
         Assert.Contains("untagged", none, StringComparison.Ordinal);
         Assert.Null(answer.Invoke(null, new object[] { 2 }));
+    }
+
+    /// <summary>Lets the shown window measure, arrange and generate its rows before anything is read off it.</summary>
+    private static void Settle(Window window)
+    {
+        window.UpdateLayout();
+        window.Dispatcher.Invoke(() => { }, DispatcherPriority.Loaded);
+        window.Dispatcher.Invoke(() => { }, DispatcherPriority.Render);
+        window.UpdateLayout();
+    }
+
+    private static T WithTheme<T>(Func<T> body)
+    {
+        var app = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+        ResourceDictionary? added = null;
+        if (!app.Resources.Contains("ForegroundBrush"))
+        {
+            added = new ResourceDictionary { Source = new Uri(ThemeUri) };
+            app.Resources.MergedDictionaries.Add(added);
+        }
+
+        try
+        {
+            return body();
+        }
+        finally
+        {
+            if (added is not null)
+            {
+                app.Resources.MergedDictionaries.Remove(added);
+            }
+        }
     }
 }

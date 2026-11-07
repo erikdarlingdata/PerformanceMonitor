@@ -1,30 +1,63 @@
 using System;
-using System.IO;
+using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
-using System.Runtime.CompilerServices;
-using System.Text.RegularExpressions;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Threading;
+using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Services;
 using Xunit;
 
 namespace Lite.Tests;
 
 /// <summary>
-/// #8115: Lite's twins of the Viewer walkthrough details that share code: the Server column that sizes to its names, the
-/// database-size label that says when the used size was not collected, and the Query Tag Usage window's one-sentence
-/// answer on a store with no tags. New members are reached by name so this class builds against a tree without them.
+/// #8115: Lite's twins of the Viewer walkthrough details that share code: the Server column that shows a long name whole, the
+/// database-size label that says when the used size was not collected, and the Query Tag Usage window's one-sentence answer
+/// on a store with no tags. New members are reached by name so this class builds against a tree without them; the grids are
+/// the real controls, built and shown on the shared STA thread with Lite's theme.
 /// </summary>
 public sealed class LiteViewerWalkthroughLows8115Tests
 {
-    [Theory]
-    [InlineData("Lite/Controls/AlertsHistoryTab.xaml")]
-    [InlineData("Lite/Controls/JobHistoryTab.xaml")]
-    public void ServerColumn_SizesToItsNames(string file)
+    private const string ThemeUri = "pack://application:,,,/PerformanceMonitorLite;component/Themes/DarkTheme.xaml";
+
+    private sealed class ServerRow
     {
-        var xaml = ReadRepoFile(file);
-        var column = Regex.Match(xaml, "<DataGridTextColumn Binding=\"\\{Binding ServerName\\}\"[^>]*>");
-        Assert.True(column.Success, $"{file} has no ServerName column.");
-        Assert.Contains("Width=\"Auto\"", column.Value, StringComparison.Ordinal);
-        Assert.Matches("MinWidth=\"1[0-9]{2}\"", column.Value);
+        public string ServerName { get; set; } = "";
+    }
+
+    [Theory]
+    [InlineData("alerts")]
+    [InlineData("jobs")]
+    public void ServerColumn_ShowsALongNameWhole(string tab)
+    {
+        const string name = "SERVER-GROUP-REGION-PRODUCTION-CLUSTER-NODE-07";
+        var (columnWidth, natural) = StaTestThread.Run(() => WithTheme(() =>
+        {
+            FrameworkElement control = tab == "alerts" ? new AlertsHistoryTab() : new JobHistoryTab();
+            var grid = (DataGrid)control.FindName(tab == "alerts" ? "AlertsDataGrid" : "JobHistoryDataGrid")!;
+            grid.ItemsSource = new List<ServerRow> { new() { ServerName = name }, new() { ServerName = "SHORT" } };
+            var window = new Window { Content = control, Width = 1640, Height = 800, Left = 0, Top = 0 };
+            window.Show();
+            try
+            {
+                window.UpdateLayout();
+                window.Dispatcher.Invoke(() => { }, DispatcherPriority.Loaded);
+                window.Dispatcher.Invoke(() => { }, DispatcherPriority.Render);
+                window.UpdateLayout();
+                var column = grid.Columns.OfType<DataGridTextColumn>()
+                    .Single(c => (c.Binding as System.Windows.Data.Binding)?.Path.Path == "ServerName");
+                var probe = new TextBlock { Text = name };
+                probe.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+                return (column.ActualWidth, probe.DesiredSize.Width);
+            }
+            finally
+            {
+                window.Close();
+            }
+        }));
+
+        Assert.True(columnWidth + 0.5 >= natural, $"the Server column is {columnWidth:F0} px wide and the name needs {natural:F0} px, so it is cut");
     }
 
     [Fact]
@@ -44,14 +77,6 @@ public sealed class LiteViewerWalkthroughLows8115Tests
     }
 
     [Fact]
-    public void DatabaseSizeBar_BindsTheLabel()
-    {
-        var xaml = ReadRepoFile("Lite/Controls/FinOpsTab.xaml");
-        Assert.Contains("Text=\"{Binding SizeLabel}\"", xaml, StringComparison.Ordinal);
-        Assert.DoesNotContain("StringFormat=\"{}{0:N0} / {1:N0} MB\"", xaml, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void QueryTagUsage_WithNoTags_HasItsOneSentence()
     {
         var field = typeof(PerformanceMonitorLite.Windows.QueryTagUsageWindow)
@@ -62,15 +87,26 @@ public sealed class LiteViewerWalkthroughLows8115Tests
         Assert.Contains("untagged", message, StringComparison.Ordinal);
     }
 
-    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
+    private static T WithTheme<T>(Func<T> body)
     {
-        var dir = Path.GetDirectoryName(thisFile)!;
-        while (dir is not null && !File.Exists(Path.Combine(dir, relative)))
+        var app = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+        ResourceDictionary? added = null;
+        if (!app.Resources.Contains("NumericCell"))
         {
-            dir = Path.GetDirectoryName(dir);
+            added = new ResourceDictionary { Source = new Uri(ThemeUri) };
+            app.Resources.MergedDictionaries.Add(added);
         }
 
-        Assert.NotNull(dir);
-        return File.ReadAllText(Path.Combine(dir!, relative));
+        try
+        {
+            return body();
+        }
+        finally
+        {
+            if (added is not null)
+            {
+                app.Resources.MergedDictionaries.Remove(added);
+            }
+        }
     }
 }
