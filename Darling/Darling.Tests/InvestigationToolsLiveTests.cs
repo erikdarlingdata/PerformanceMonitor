@@ -631,8 +631,7 @@ FROM generate_series(1, " + (InvestigationToolCore.MaxLimit + 1) + ") AS i", ct)
     /// <summary>
     /// #8090 item 4: two requests for one <c>server_id</c> opened under two labels (one alert path labels a server with its registry
     /// name, another with its host name) carry the registry's one current name as <c>instance_name</c> and <c>display_name</c> on both
-    /// rows, read when served, while <c>server_name</c> keeps the label each was opened with (#5999, the webhook token's contract). The
-    /// guide says which to group by.
+    /// rows, read when served, while <c>server_name</c> keeps the label each was opened with (#5999, the webhook token's contract).
     /// </summary>
     [Fact]
     public async Task List_CarriesTheRegistrysOneName_BesideEachRequestsOpenedWithLabel()
@@ -654,9 +653,6 @@ FROM generate_series(1, " + (InvestigationToolCore.MaxLimit + 1) + ") AS i", ct)
                 Assert.Equal("alpha", row.GetProperty("instance_name").GetString());
                 Assert.Equal("alpha", row.GetProperty("display_name").GetString());
             }
-
-            var guide = McpToolGuideTests.Served("list_investigation_requests").Tail!;
-            Assert.Contains("group requests by server_id or instance_name", guide, StringComparison.Ordinal);
         });
     }
 

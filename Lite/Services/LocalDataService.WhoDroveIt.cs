@@ -184,8 +184,9 @@ ORDER BY p.rk";
     /// figures can add up to more than the caller's. <c>elapsed_ms</c> is cut to the window at each capture (#8090): the lesser of the cumulative
     /// figure and the milliseconds from the window start to the capture, so a request that began before the window counts only the elapsed
     /// inside it (the start key is still derived from the uncut figure). WAITFOR shells are dropped, as get_active_queries drops them, and so is
-    /// the sp_server_diagnostics session (#8090), the health-check request that runs for the life of the instance and that the long-running-query
-    /// alert drops by the same text match: left in, its elapsed takes the whole of <c>total_elapsed_ms</c>. The totals are window
+    /// the sp_server_diagnostics session (#8090), the health-check request that runs for the life of the instance, matched as the
+    /// long-running-query alert matches it, on the wait type (it usually sits in SP_SERVER_DIAGNOSTICS_SLEEP) and on the statement text (it
+    /// also does Extended Events work, where the wait alone misses it): left in, its elapsed takes the whole of <c>total_elapsed_ms</c>. The totals are window
     /// functions over every group BEFORE the cap, so a share is a share of the window.
     /// </summary>
     internal const string LoadByCallerSql = $@"
@@ -207,6 +208,7 @@ WITH snap AS (
     AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
     AND   (query_text IS NULL OR query_text NOT LIKE 'WAITFOR%')
     AND   (query_text IS NULL OR query_text NOT ILIKE '%sp_server_diagnostics%')
+    AND   (wait_type IS NULL OR wait_type NOT LIKE '%SP_SERVER_DIAGNOSTICS%')
 ),
 req AS (
     SELECT host_name, program_name, login_name, session_id, request_start,

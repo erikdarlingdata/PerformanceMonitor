@@ -632,16 +632,26 @@ internal static class TrendPayloads
         {
             return McpHelpers.Status(
                 "not_collected",
-                $"No counter named '{counterName}' is in the latest snapshot. It may not be a counter this server collects: hints.collected_counters lists the {collectedCounters.Count} that are.",
-                new { captured_at = capturedAt, collected_counters = collectedCounters });
+                $"No counter named '{counterName}' is in the latest snapshot. It may not be a counter this server collects: hints.collected_counters lists {HintCount(collectedCounters)}.",
+                new { captured_at = capturedAt, collected_counters = collectedCounters.Take(PerfmonMissHintNames), collected_counters_total = collectedCounters.Count });
         }
 
         var scope = counterName is null ? "No counter in the latest snapshot has" : $"Counter '{counterName}' has no";
         return McpHelpers.Status(
             "empty",
-            $"{scope} an instance named '{instanceName}': hints.instance_names lists the {counterInstances.Count} there are.",
-            new { captured_at = capturedAt, instance_names = counterInstances });
+            $"{scope} an instance named '{instanceName}': hints.instance_names lists {HintCount(counterInstances)}.",
+            new { captured_at = capturedAt, instance_names = counterInstances.Take(PerfmonMissHintNames), instance_names_total = counterInstances.Count });
     }
+
+    /// <summary>
+    /// How many names a <see cref="PerfmonLatestMiss"/> hint list carries (#8090). A busy instance holds hundreds of counters and, with
+    /// <c>instance_name</c> set and no <c>counter_name</c>, every instance of every counter, which would put the miss envelope over the
+    /// response target <see cref="PerfmonLatestReply"/> keeps (#6180). The list is cut here and its <c>*_total</c> says how many there are.
+    /// </summary>
+    public const int PerfmonMissHintNames = 100;
+
+    private static string HintCount(IReadOnlyList<string> names) =>
+        names.Count > PerfmonMissHintNames ? $"the first {PerfmonMissHintNames} of the {names.Count} there are" : $"the {names.Count} there are";
 
     /// <summary>
     /// One row of <c>get_perfmon_stats</c>' latest snapshot, both SKUs. <c>value</c> is the stored counter (a rate

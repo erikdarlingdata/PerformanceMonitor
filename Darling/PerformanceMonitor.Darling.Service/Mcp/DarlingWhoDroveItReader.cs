@@ -267,8 +267,9 @@ internal static class DarlingWhoDroveItReader
     /// capture, so a request that began before the window counts only the elapsed inside it, never its whole lifetime (the start key is still
     /// derived from the uncut figure). A request that runs several statements adds its figure to each statement's per-hash total, so the per-statement
     /// figures can add up to more than the caller's. The WAITFOR shells get_active_queries drops are dropped here too, and so is the
-    /// sp_server_diagnostics session (#8090), the health-check request that runs for the life of the instance and that the long-running-query alert
-    /// drops by the same text match: left in, its elapsed is days wide at every capture and takes the whole of <c>total_elapsed_ms</c>. The totals are window functions over every
+    /// sp_server_diagnostics session (#8090), the health-check request that runs for the life of the instance, matched as the long-running-query
+    /// alert matches it, on the wait type (it usually sits in SP_SERVER_DIAGNOSTICS_SLEEP) and on the statement text (it also does Extended Events
+    /// work, where the wait alone misses it): left in, its elapsed is days wide at every capture and takes the whole of <c>total_elapsed_ms</c>. The totals are window functions over every
     /// group BEFORE the cap, so a share is a share of the window. Statement text is fetched in the same pass, for the top statements only.
     /// Reads query_snapshots by (server_id, collection_time) range; no index is added.
     /// </summary>
@@ -290,6 +291,7 @@ internal static class DarlingWhoDroveItReader
             AND   collection_time <= $3
             AND   (query_text IS NULL OR query_text NOT LIKE 'WAITFOR%')
             AND   (query_text IS NULL OR query_text NOT ILIKE '%sp_server_diagnostics%')
+            AND   (wait_type IS NULL OR wait_type NOT LIKE '%SP_SERVER_DIAGNOSTICS%')
             AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
         ),
         req AS (
