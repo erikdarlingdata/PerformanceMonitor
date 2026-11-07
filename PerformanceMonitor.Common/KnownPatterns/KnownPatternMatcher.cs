@@ -37,9 +37,10 @@ public static class KnownPatternMatcher
     /// The two SQL copies of the function spell the same number.</summary>
     public const int MaxEntries = 500;
 
-    /// <summary>The window an entry gets when its writer names none: the same half-width the investigation brief's recurrence count uses
-    /// (<c>InvestigationAlertRecurrence.WindowMinutes</c>), so "recurs at this time" means the same thing in both.</summary>
-    public const int DefaultWindowMinutes = InvestigationAlertRecurrence.WindowMinutes;
+    /// <summary>The window an entry gets when its writer names none: the same-time band the investigation brief's recurrence count
+    /// uses (<c>InvestigationAlertRecurrence.SameTimeMinutes</c>), so "recurs at this time" means the same thing in both. An entry
+    /// names its own time zone and is matched in it, so it needs none of the DST hour the recurrence window carries.</summary>
+    public const int DefaultWindowMinutes = InvestigationAlertRecurrence.SameTimeMinutes;
 
     /// <summary>The widest window a write accepts: half a day either side already covers every time of day.</summary>
     public const int MaxWindowMinutes = 720;

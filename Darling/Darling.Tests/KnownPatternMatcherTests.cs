@@ -149,6 +149,6 @@ public sealed class KnownPatternMatcherTests
     [Fact]
     public void The_default_window_is_the_one_the_investigation_recurrence_count_uses()
     {
-        Assert.Equal(PerformanceMonitor.Common.InvestigationAlertRecurrence.WindowMinutes, KnownPatternMatcher.DefaultWindowMinutes);
+        Assert.Equal(PerformanceMonitor.Common.InvestigationAlertRecurrence.SameTimeMinutes, KnownPatternMatcher.DefaultWindowMinutes);
     }
 }

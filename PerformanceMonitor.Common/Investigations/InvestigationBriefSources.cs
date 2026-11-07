@@ -127,8 +127,18 @@ public sealed record InvestigationAlertRecurrence(
     /// <summary>#6261: the streak filled the whole look-back, so it is a floor, not an exact count.</summary>
     public bool StreakAtLeastDaysWindow => StreakDays >= Days;
 
-    /// <summary>Minutes either side of the first alert's clock time that still count as the same time of day.</summary>
-    public const int WindowMinutes = 30;
+    /// <summary>Minutes either side of a clock time that are the same time of day, before any clock shift.</summary>
+    public const int SameTimeMinutes = 30;
+
+    /// <summary>The hour a schedule kept in a server's local clock (an Agent job at 02:00 local) moves in UTC at a DST change.
+    /// The stores keep fires in UTC and know no server zone, so the hour is allowed on every day rather than only across a
+    /// change; otherwise the streak of such a schedule reads 0 or 1 for the week after each change.</summary>
+    public const int DstShiftMinutes = 60;
+
+    /// <summary>Minutes either side of the first alert's clock time that still count as the same time of day: the same-time
+    /// band plus the DST hour. Every reader of the recurrence (both stores' brief SQL and <see cref="InvestigationAlertStreak"/>)
+    /// measures this one window, and the brief publishes it as <c>window_minutes</c>.</summary>
+    public const int WindowMinutes = SameTimeMinutes + DstShiftMinutes;
 
     /// <summary>How many days before the first alert the count reaches.</summary>
     public const int Days = 7;

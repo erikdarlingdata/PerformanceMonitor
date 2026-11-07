@@ -46,10 +46,11 @@ public sealed class InvestigationAlertStreakTests
     [InlineData(-1 * 24 * 60, 1)]                     // the same clock time a day back
     [InlineData(-1 * 24 * 60 - 29, 1)]                // 29 minutes before it, a day back
     [InlineData(-1 * 24 * 60 + 29, 1)]                // 29 minutes after it, a day back
-    [InlineData(-1 * 24 * 60 - 30, 1)]                // the window's edge counts
-    [InlineData(-1 * 24 * 60 - 31, null)]             // one past it does not
+    [InlineData(-1 * 24 * 60 - 30, 1)]                // the same-time band's edge
     [InlineData(-1 * 24 * 60 - 60, 1)]                // an hour early: a local-clock schedule after a DST change
     [InlineData(-1 * 24 * 60 + 60, 1)]                // an hour late: the same, the other way
+    [InlineData(-1 * 24 * 60 - 90, 1)]                // the window's edge (the band plus the DST hour) counts
+    [InlineData(-1 * 24 * 60 - 91, null)]             // one past it does not
     [InlineData(-3 * 24 * 60, 3)]
     [InlineData(-7 * 24 * 60, 7)]                     // exactly Days back is still inside the look-back
     [InlineData(-7 * 24 * 60 - 1, null)]              // one minute older is not
@@ -57,8 +58,10 @@ public sealed class InvestigationAlertStreakTests
     [InlineData(0, null)]                             // the alert's own row
     [InlineData(5, null)]                             // after it
     [InlineData(-10, null)]                           // this incident's own rise, 10 minutes before
-    [InlineData(-30, null)]                           // the window's length before the anchor is still the rise
-    [InlineData(-31, null)]                           // and a fire 31 minutes before is not the same time of day
+    [InlineData(-30, null)]                           // half an hour before the anchor is still the rise
+    [InlineData(-31, null)]                           // so is a fire 31 minutes before
+    [InlineData(-90, null)]                           // the window's length before the anchor is still the rise
+    [InlineData(-91, null)]                           // and a fire 91 minutes before is not the same time of day
     public void DaysAgo_PlacesAFireOnTheDayItCountsFor_OrOnNone(int minutesFromAnchor, int? expected) =>
         Assert.Equal(expected, InvestigationAlertStreak.DaysAgo(Anchor, Anchor.AddMinutes(minutesFromAnchor)));
 
