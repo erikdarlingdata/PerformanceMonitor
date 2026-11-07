@@ -225,7 +225,7 @@ public class ServerTabEmptyStateAndNamesTests
 
         Assert.Equal("example-sql-01", peerName);
         Assert.Equal(System.Windows.Automation.Peers.AutomationControlType.Group, controlType);
-        Assert.Contains("<controls:OverviewCardBorder", RepoFile("Lite/MainWindow.xaml"), StringComparison.Ordinal);
+        Assert.Contains("<controls:OverviewCardBorder", RepoFile("Lite/Controls/ServerOverviewCard.xaml"), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -355,8 +355,8 @@ public class ServerTabEmptyStateAndNamesTests
         var xaml = RepoFile(file);
 
         Assert.Contains("Text=\"I/O Latency ms\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("<Run Text=\"events\"/>", xaml, StringComparison.Ordinal);
-        Assert.DoesNotContain("<Run Text=\"events\" FontWeight", xaml, StringComparison.Ordinal);
+        /* #8162: each lane label is one caption (PanelSubtitleText) now, so the blocking lane's unit is part of its text, not a Run. */
+        Assert.Contains("Text=\"Blocking &amp; Deadlocking events\"", xaml, StringComparison.Ordinal);
         Assert.Contains("Text=\"CPU %\"", xaml, StringComparison.Ordinal);
         Assert.Contains("Text=\"Buffer Pool MB\"", xaml, StringComparison.Ordinal);
     }

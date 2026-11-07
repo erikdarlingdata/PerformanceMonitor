@@ -319,7 +319,7 @@ public class ServerCollectionFreshnessTests
     [Fact]
     public void TheCardsLastCollectRowIsBoundToTheBand()
     {
-        var xaml = ParitySource.ReadFile("Lite/MainWindow.xaml");
+        var xaml = ParitySource.ReadFile("Lite/Controls/ServerOverviewCard.xaml");
         var row = RowFour(xaml);
 
         Assert.Contains("{Binding LastCollectionBrush}", row, StringComparison.Ordinal);

@@ -215,6 +215,13 @@ public static class PeopleText
     public const string NoPeopleNote =
         "No people yet. Add a person, then map the identities they sign in with and give them grants. An approve grant lets that person approve the actions an agent proposes, only for the kinds and the scope it names. The other grants are not read yet.";
 
+    /// <summary>#8115: the empty state on a read-only seat, which hides every Add button, so it does not give a step this seat cannot take.</summary>
+    public const string NoPeopleReadOnlyNote =
+        "No people yet. A read-write seat can add a person, map the identities they sign in with and give them grants. An approve grant lets that person approve the actions an agent proposes, only for the kinds and the scope it names.";
+
+    /// <summary>The empty-list sentence for the seat: <see cref="NoPeopleReadOnlyNote"/> when the connection is read-only, else <see cref="NoPeopleNote"/>.</summary>
+    public static string EmptyNote(bool readOnly) => readOnly ? NoPeopleReadOnlyNote : NoPeopleNote;
+
     /// <summary>True when a store at <paramref name="storeVersion"/> has the people tables. A probe that could not answer (null) reads as yes, like every other fail-open rung check, and a failed read then says what went wrong.</summary>
     public static bool StoreHasPeople(int? storeVersion) => storeVersion is not int v || v >= StoreSchemaVersion;
 
