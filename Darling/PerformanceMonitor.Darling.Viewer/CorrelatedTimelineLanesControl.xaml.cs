@@ -60,6 +60,11 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         InitializeComponent();
         // #6652: the lanes scroll at small sizes; the wheel over a lane stays that lane's zoom.
         PerformanceMonitor.Ui.ChartLayout.KeepWheelOnPlot(CpuChart, WaitStatsChart, BlockingChart, MemoryChart, FileIoChart);
+        /* #8104: the lanes grid's Height follows the scroll viewer's viewport, and WPF clamps an explicit Height only by the
+           element's own MinHeight, whatever its rows ask for. The floor is therefore the rows' total, the rule the shared
+           ChartLayout guard applies to the chart tabs' grids, so the scroll viewer's extent holds every lane and scrolls when
+           the viewport is shorter, instead of clipping the last lane under the window with no scrollbar. */
+        LanesGrid.MinHeight = LanesGrid.RowDefinitions.Sum(r => r.MinHeight);
         /* No Unloaded → Dispose() handler: WPF fires Unloaded for transient
            reasons (tab virtualization, layout rebuilds) and Dispose() clears
            the crosshair manager's lane list, permanently breaking the crosshair

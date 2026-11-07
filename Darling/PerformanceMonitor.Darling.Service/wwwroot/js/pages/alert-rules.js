@@ -223,7 +223,7 @@ function ruleCard(r) {
   const chips = el("div", { class: "vc-chips" });
   const card = el("a", { class: "view-card card", href: storeHash("#/alert-rule/") + encodeURIComponent(r.id) }, [
     el("div", { class: "vc-name" }, [
-      el("span", { class: "vc-name-text", text: r.name }),
+      el("span", { class: "vc-name-text", text: r.name, title: r.name }),
       r.enabled === false ? el("span", { class: "paused-badge", text: "Paused" }) : null,
       r.expired ? el("span", { class: "paused-badge", text: "Expired" }) : null,
     ]),

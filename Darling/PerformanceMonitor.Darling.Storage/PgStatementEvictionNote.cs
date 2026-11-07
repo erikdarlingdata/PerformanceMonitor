@@ -17,6 +17,17 @@ public static class PgStatementEvictionNote
     {
         if (info is null || !info.Known || info.EvictionPasses is null)
         {
+            /* #8075: on Aurora the collector reads aurora_stat_statements(), which needs no extension, so the counter's
+               view is what a missing extension costs there. The reader sets the flag only when the registry says Aurora
+               and the extension inventory shows pg_stat_statements created in no database it saw; everywhere else the
+               view's own two preconditions are the causes left. */
+            if (info is { AuroraWithoutExtension: true })
+            {
+                return "Eviction count unknown for this target: pg_stat_statements is not created in the collector's database. "
+                     + "Aurora's aurora_stat_statements() serves the statements without it, but the eviction counter lives in "
+                     + "the extension's pg_stat_statements_info; CREATE EXTENSION pg_stat_statements in that database to read it.";
+            }
+
             return "Eviction count unknown for this target (pg_stat_statements_info is absent: PostgreSQL before 14, "
                  + "or the extension is below 1.9; ALTER EXTENSION pg_stat_statements UPDATE adds it).";
         }

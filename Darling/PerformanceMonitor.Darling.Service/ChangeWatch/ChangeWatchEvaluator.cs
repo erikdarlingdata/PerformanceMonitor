@@ -60,30 +60,39 @@ public sealed partial class ChangeWatchEvaluator
     /// <summary>The queries read for a change that is not a plan change: the top by total duration in the after-window.</summary>
     public const int TopQueries = 20;
 
-    /* Total wait time per second over the time actually collected (#6234). wait_stats holds one row per wait type per collection, every one
-       carrying the collection's sample_interval_seconds, so the interval counts once per collection_time. A collection whose stored interval
-       is 0 (the first sighting or a counter reset: no delta is knowable) adds nothing, and a legacy row with no stored interval falls back
-       to the gap since the previous collection. The rate is the window's delta over those seconds, so a gap in collection thins the window's
-       coverage instead of its rate, and the first row after a gap, which carries the whole gap's delta over the gap's seconds, stays a rate.
-       A collection whose interval began before the window's start counts only the part inside the window: its seconds are clipped to the time
-       since the start and its wait time is scaled by the same share (the delta is taken as spread evenly over the interval), so a collection
-       that follows a long gap does not carry the gap's waits into the window or inflate its coverage.
+    /* Total wait time per second over the time actually collected (#6234). wait_stats holds one row per wait type per collection, each
+       carrying its own sample_interval_seconds, the seconds since that wait type's previous sighting (#8078): a type that returns after
+       missing some passes stores several cadences while its siblings store one, and its delta is the whole of that type's wait since it was
+       last seen. The collection credits every rated row's positive delta whole, over the collection's cadence, the shortest interval any of
+       its rows measured, so no wait is lost and the window's total equals the sum of the per-type rates over the same rows. A row whose
+       interval is 0 (the first sighting or a counter reset: no delta is knowable) adds nothing, a collection whose every row is 0 covers no
+       seconds, and a legacy collection with no stored interval on any row falls back to the gap since the previous collection. The rate is
+       the window's delta over those seconds, so a gap in collection thins the window's coverage instead of its rate, and the first row after
+       a gap, which carries the whole gap's delta over the gap's seconds, stays a rate. A row whose own interval began before the window's
+       start counts only the part inside the window (the delta is taken as spread evenly over the interval), and the collection's seconds are
+       clipped to the time since the start, so a collection that follows a long gap, or a returning type whose interval reaches back past the
+       start, does not carry pre-window waits into the window or inflate its coverage.
        Columns: the rate, the seconds covered, the collections read. */
     private const string WaitSql = @"
 WITH c AS (
     SELECT collection_time,
-           sum(CASE WHEN delta_wait_time_ms > 0 THEN delta_wait_time_ms ELSE 0 END)::double precision AS wait_ms,
-           max(sample_interval_seconds) AS stored_seconds
+           sum(CASE WHEN delta_wait_time_ms > 0 THEN delta_wait_time_ms ELSE 0 END)::double precision AS total_wait_ms,
+           sum(CASE WHEN delta_wait_time_ms > 0 AND sample_interval_seconds > 0
+                    THEN delta_wait_time_ms::double precision * least(1.0, extract(epoch FROM collection_time - $2)::double precision / NULLIF(sample_interval_seconds, 0))
+               END) AS clipped_wait_ms,
+           min(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0) AS cadence_seconds,
+           max(sample_interval_seconds) IS NULL AS unstored
     FROM v_wait_stats
     WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3
     GROUP BY collection_time
 ), d AS (
-    SELECT collection_time, wait_ms,
-           coalesce(stored_seconds::double precision,
-                    extract(epoch FROM collection_time - lag(collection_time) OVER (ORDER BY collection_time))::double precision) AS seconds
+    SELECT collection_time, unstored,
+           CASE WHEN unstored THEN total_wait_ms ELSE coalesce(clipped_wait_ms, 0) END AS wait_ms,
+           CASE WHEN unstored THEN extract(epoch FROM collection_time - lag(collection_time) OVER (ORDER BY collection_time))::double precision
+                ELSE cadence_seconds::double precision END AS seconds
     FROM c
 ), e AS (
-    SELECT wait_ms * f.share AS wait_ms, seconds * f.share AS seconds
+    SELECT CASE WHEN unstored THEN wait_ms * f.share ELSE wait_ms END AS wait_ms, seconds * f.share AS seconds
     FROM d
     CROSS JOIN LATERAL (SELECT CASE WHEN seconds > 0
                                     THEN least(1.0, extract(epoch FROM collection_time - $2)::double precision / seconds)

@@ -63,26 +63,36 @@ public sealed partial class ChangeWatchEvaluator
         return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
     }
 
-    /* The Aurora wait collector's wait time and the seconds it covered in a window, and how many collections it holds (#6234): one interval per
-       collection_time (every wait row of a collection carries the same sample_interval_seconds; 0 means no delta was knowable, NULL a legacy
-       row that falls back to the gap since the previous collection). A collection whose interval began before the window's start counts only
-       the part inside the window: its seconds are clipped to the time since the start and its wait time is scaled by the same share, so a
-       collection after a long gap does not carry the gap's waits into the window or inflate its coverage. Columns: wait time in ms (positive
-       deltas only), seconds covered, collections. */
+    /* The Aurora wait collector's wait time and the seconds it covered in a window, and how many collections it holds (#6234). Each
+       (wait_type, wait_event) row carries its own sample_interval_seconds, the seconds since that event's previous sighting (#8078): an event
+       that returns after missing some passes stores several cadences while its siblings store one, and its delta is the whole of that event's
+       wait since it was last seen. The collection credits every rated row's positive delta whole, over the collection's cadence, the shortest
+       interval any of its rows measured, so no wait is lost and the window's total equals the sum of the per-event rates. A row whose
+       interval is 0 (no delta was knowable) adds nothing, a collection whose every row is 0 covers no seconds, and a legacy collection with no
+       stored interval on any row falls back to the gap since the previous collection. A row whose own interval began before the window's
+       start counts only the part inside the window, and the collection's seconds are clipped to the time since the start, so a collection
+       after a long gap, or a returning event whose interval reaches back past the start, does not carry pre-window waits into the window or
+       inflate its coverage. Columns: wait time in ms (positive deltas only), seconds covered, collections. */
     private const string PgWaitStatsSql = @"
 WITH c AS (
-    SELECT collection_time, max(sample_interval_seconds) AS stored_seconds,
-           sum(CASE WHEN delta_wait_time_us > 0 THEN delta_wait_time_us ELSE 0 END)::double precision / 1000.0 AS wait_ms
+    SELECT collection_time,
+           sum(CASE WHEN delta_wait_time_us > 0 THEN delta_wait_time_us ELSE 0 END)::double precision / 1000.0 AS total_wait_ms,
+           sum(CASE WHEN delta_wait_time_us > 0 AND sample_interval_seconds > 0
+                    THEN delta_wait_time_us::double precision * least(1.0, extract(epoch FROM collection_time - $2)::double precision / NULLIF(sample_interval_seconds, 0))
+               END) / 1000.0 AS clipped_wait_ms,
+           min(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0) AS cadence_seconds,
+           max(sample_interval_seconds) IS NULL AS unstored
     FROM pg_wait_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
     GROUP BY collection_time
 ), d AS (
-    SELECT collection_time, wait_ms,
-           coalesce(stored_seconds::double precision,
-                    extract(epoch FROM collection_time - lag(collection_time) OVER (ORDER BY collection_time))::double precision) AS seconds
+    SELECT collection_time, unstored,
+           CASE WHEN unstored THEN total_wait_ms ELSE coalesce(clipped_wait_ms, 0) END AS wait_ms,
+           CASE WHEN unstored THEN extract(epoch FROM collection_time - lag(collection_time) OVER (ORDER BY collection_time))::double precision
+                ELSE cadence_seconds::double precision END AS seconds
     FROM c
 ), e AS (
-    SELECT wait_ms * f.share AS wait_ms, seconds * f.share AS seconds
+    SELECT CASE WHEN unstored THEN wait_ms * f.share ELSE wait_ms END AS wait_ms, seconds * f.share AS seconds
     FROM d
     CROSS JOIN LATERAL (SELECT CASE WHEN seconds > 0
                                     THEN least(1.0, extract(epoch FROM collection_time - $2)::double precision / seconds)
