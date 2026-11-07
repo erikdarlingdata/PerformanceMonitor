@@ -92,7 +92,23 @@ internal static class ChartLayoutProbe
         for (var pass = 0; pass < 3; pass++)
         {
             window.UpdateLayout();
-            Dispatcher.CurrentDispatcher.Invoke(() => { }, DispatcherPriority.ContextIdle);
+            WaitForIdle();
+        }
+    }
+
+    /// <summary>
+    /// #8220: waits until the dispatcher has nothing queued above idle, and FAILS when it never does. A chart that re-decides its legend from a
+    /// size its own decision changes (a row minimum that follows the chrome, which follows the decision) queues a layout and a render after every
+    /// pass, so an unbounded idle wait never returned and the test sat until its 180 s guard. That is a frozen window in the app.
+    /// </summary>
+    public static void WaitForIdle()
+    {
+        var dispatcher = Dispatcher.CurrentDispatcher;
+        var idle = dispatcher.BeginInvoke(() => { }, DispatcherPriority.ContextIdle);
+        if (idle.Wait(TimeSpan.FromSeconds(10)) != DispatcherOperationStatus.Completed)
+        {
+            idle.Abort();
+            throw new InvalidOperationException("the layout never settled: the window kept laying out and rendering for 10 s (a size, legend placement and row minimum feedback loop)");
         }
     }
 
