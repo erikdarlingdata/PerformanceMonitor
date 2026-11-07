@@ -1544,6 +1544,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpFindDatabaseTools>()
             /* #7610: find_queries_by_text, which statements on one server contain a piece of text (Query Store text and the raw tier's plan-cache text). */
             .WithGeminiCompatibleTools<DarlingMcpFindQueriesByTextTools>()
+            /* #7643: get_object_definition, get_schema_changes and find_schema_objects, the table and view definitions the schema_objects collector keeps and what changed in them. */
+            .WithGeminiCompatibleTools<DarlingMcpSchemaTools>()
             /* #7609: get_query_fleet_summary, one statement's cost on every server. */
             .WithGeminiCompatibleTools<DarlingMcpQueryFleetSummaryTools>()
             /* #5983: get_resource_use_by_tag, resource use rolled up by query tag (wave 2 of #5971). */
