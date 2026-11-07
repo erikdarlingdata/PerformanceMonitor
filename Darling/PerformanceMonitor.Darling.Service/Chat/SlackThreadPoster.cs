@@ -116,7 +116,7 @@ public sealed class SlackThreadPoster
     /// <param name="throttle">Where a 429's block is recorded; the pass that drives this poster shares it. A new one when null.</param>
     /// <param name="utcNow">The clock the block's end is measured from.</param>
     public SlackThreadPoster(ISlackRequestThreadStore store, ISlackBotPosts posts, ILogger<SlackThreadPoster> logger,
-        SlackPostThrottle? throttle = null, Func<DateTime>? utcNow = null)
+        SlackPostThrottle? throttle = null, Func<DateTime>? utcNow = null, ISlackCardStore? cards = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _posts = posts ?? throw new ArgumentNullException(nameof(posts));

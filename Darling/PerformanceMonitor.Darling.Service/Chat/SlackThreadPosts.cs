@@ -21,7 +21,7 @@ namespace PerformanceMonitor.Darling.Service.Chat;
 public sealed record SlackRequestFacts(Guid RequestId, string ServerName, string Metric, string Severity, string Trigger, string BaseUrl);
 
 /// <summary>#7656: one post as it goes to Slack: the plain <c>text</c> (what a notification and a search show) and the blocks.</summary>
-public sealed record SlackThreadPostContent(string Text, IReadOnlyList<object> Blocks);
+public sealed record SlackThreadPostContent(string Text, IReadOnlyList<object> Blocks, SlackCardFacts? Card = null);
 
 /// <summary>
 /// #7656: the posts of a request's thread, built from service data. Every collected value (a server name, a metric, an agent's text,
@@ -102,6 +102,24 @@ public static class SlackThreadPosts
         AddLinks(blocks, (requestUrl, "Open the request"), (changesUrl, "Open the agent changes"));
         return new SlackThreadPostContent($"Agent report: {verdict} on {server}", blocks);
     }
+
+    public static SlackThreadPostContent ReportPost(ReportNoticeContent content, McpDataDetail mode, bool verdictButtons) => ReportPost(content, mode);
+
+    public static SlackThreadPostContent ChangePost(string tool, string objectText, string result, McpDataDetail mode, long? undoCalledId, string? kind) =>
+        ChangePost(tool, objectText, result, mode);
+
+    public static SlackThreadPostContent NotePost(long noteId, string author, string noteText, string serverName, string? metric, McpDataDetail mode) =>
+        new("Note proposed", [Section("*Note proposed*")]);
+
+    public static SlackThreadPostContent ConfirmAnswer(string message, IReadOnlyList<string> lines, string confirmActionId, string confirmLabel, string confirmValue, string? style) =>
+        new(message, [Section(message)]);
+
+    public static SlackThreadPostContent DecidedCard(string headline, string outcome, string decidedBy, string? link) =>
+        new(headline, [Section(headline)]);
+
+    public static SlackThreadPostContent ProposalPost(string tool, string serverName, string state, string? statement, string? proposalUrl, McpDataDetail mode,
+        DateTime? expiresUtc, Guid? pendingProposalId) =>
+        ProposalPost(tool, serverName, state, statement, proposalUrl, mode, expiresUtc);
 
     /// <summary>One agent change: the tool, the object at the mode, and how it ended.</summary>
     public static SlackThreadPostContent ChangePost(string tool, string objectText, string result, McpDataDetail mode)

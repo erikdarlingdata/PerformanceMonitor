@@ -33,6 +33,14 @@ public interface ISlackBotPosts
     Task<SlackPostResult> PostAsync(string channel, string text, IReadOnlyList<object>? blocks, string? threadTs, CancellationToken cancellationToken);
 }
 
+/// <summary>#7658: the two calls a press answer needs: a card edit and an ephemeral answer through the payload's response_url.</summary>
+public interface ISlackCardApi
+{
+    Task<SlackPostResult> UpdateAsync(string channel, string ts, string text, IReadOnlyList<object>? blocks, CancellationToken cancellationToken);
+
+    Task<SlackPostResult> RespondAsync(Uri responseUrl, string text, IReadOnlyList<object>? blocks, CancellationToken cancellationToken);
+}
+
 /// <summary>
 /// #7656: the Slack Web API client of the bot: <c>chat.postMessage</c> with the bot token as a bearer header. Every post sets
 /// <c>unfurl_links</c> and <c>unfurl_media</c> to false, so Slack fetches no URL an agent wrote (the design's security points).
@@ -96,6 +104,12 @@ public sealed class SlackBotClient : ISlackBotPosts
             return new SlackPostResult(false, null, null, Redact(ex.GetBaseException().Message, _token));
         }
     }
+
+    internal static bool IsAllowedResponseUrl(Uri responseUrl, string host) => false;
+
+    internal static string BuildUpdateBody(string channel, string ts, string text, IReadOnlyList<object>? blocks) => "{}";
+
+    internal static string BuildResponseBody(string text, IReadOnlyList<object>? blocks) => "{}";
 
     /// <summary>PURE: the <c>chat.postMessage</c> body. <c>thread_ts</c> only when given, so a parent post opens a thread and a
     /// reply joins one. <c>unfurl_links</c> and <c>unfurl_media</c> are always false.</summary>
