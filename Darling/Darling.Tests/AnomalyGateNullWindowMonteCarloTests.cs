@@ -104,16 +104,14 @@ public class AnomalyGateNullWindowMonteCarloTests(ITestOutputHelper output)
         var rateLong = MeasureFireRate(nLong, TimeSpan.FromHours(24), seed: 4059);
         output.WriteLine($"N={nShort}@4h rate={rateShort:0.#####} vs N={nLong}@24h rate={rateLong:0.#####}");
 
-        // Design's tolerance rule, named per the brief: agree within 20% OF EACH OTHER when both rates are
-        // non-trivial, or both sit below 1e-3 (at a nominal ~5% per-sample tail and N in the hundreds, the
-        // window-level null rate at k=2.0 is itself a few percent, not 1e-3 — the "both tiny" arm is the
-        // escape hatch for a cutoff so high the trial count above can't resolve a nonzero rate at all, not
-        // the branch this test expects to take).
-        if (rateShort < 1e-3 && rateLong < 1e-3)
-        {
-            Assert.True(true, $"both rates below 1e-3: 4h={rateShort:0.#####}, 24h(as {nLong}={rateLong:0.#####}) — trivially equalized");
-            return;
-        }
+        // Design's tolerance rule, named per the brief: agree within 20% OF EACH OTHER. At a nominal ~5% per-sample
+        // tail and N in the hundreds, the window-level null rate at k=2.0 is itself a few percent, not 1e-3, so
+        // both rates sitting below 1e-3 is not a trivially equalized pair: it means the peak clause has stopped
+        // firing at the classical cutoff (a regression this trial count cannot resolve a rate for), and that
+        // fails here with the measured rates rather than passing by default.
+        Assert.True(rateShort >= 1e-3 || rateLong >= 1e-3,
+            $"both rates below 1e-3: N={nShort}@4h rate={rateShort:0.#####}, N={nLong}@24h rate={rateLong:0.#####} — the peak clause "
+            + $"no longer fires at the classical cutoff ({trials} trials/window, seeds 4058/4059), so there is no rate to equalize.");
 
         var larger = Math.Max(rateShort, rateLong);
         var smaller = Math.Min(rateShort, rateLong);
