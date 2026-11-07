@@ -810,7 +810,7 @@ jobs:
         run: |
           set -uo pipefail
 
-          python -I .github/scripts/ci-verdict-issues.py rerun-flakes --repo "${GITHUB_REPOSITORY}" --server-url "${GITHUB_SERVER_URL}" \
+          python -I .github/scripts/ci-verdict-issues.py rerun-passes --repo "${GITHUB_REPOSITORY}" --server-url "${GITHUB_SERVER_URL}" \
             --event "${GITHUB_EVENT_NAME}" --state "${STATE}" --run-id "${GITHUB_RUN_ID}" --run-attempt "${RUN_ATTEMPT}" \
             --pr-number "${PR_NUMBER}" --head-sha "${HEAD_SHA}"
 

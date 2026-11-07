@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """The issues PR CI's verdict job files (#8202). Two commands, both called from pr.yml's verdict job with github.token:
 
-  rerun-flakes   A pull request run whose verdict passed on run_attempt 2 or later. Every earlier attempt's failed test leg
+  rerun-passes   A pull request run whose verdict passed on run_attempt 2 or later. Every earlier attempt's failed test leg
                  is read for its [FAIL] lines, and one issue per failing test names the pull request, the head sha, the
                  leg, and the run, attempt and job URLs. An open issue with the same title gets a comment instead of a
-                 second issue, and the `flake` label goes on a new issue when the repository has that label. It reports
-                 only: every failure of its own is a warning and exit 0, so it never fails the pull request.
+                 second issue. It reports only: every failure of its own is a warning and exit 0, so it never fails the
+                 pull request.
 
   dev-red-body   The body of the "dev is red" issue for a red dev push: the sha, the run, the failed jobs, and every dev
                  commit from the red sha back to (not including) the last dev commit whose `CI result` status is success,
@@ -25,9 +25,8 @@ PAGE = 100
 # The newest dev commits looked at for the swept list. A sweep is 1 to about 40 commits; the cap bounds the status reads.
 MAX_COMMITS = 300
 MAX_ISSUE_PAGES = 10
-TITLE_PREFIX = "Flaky test: "
+TITLE_PREFIX = "Test passed only on a rerun: "
 TITLE_LIMIT = 256
-FLAKE_LABEL = "flake"
 # xunit's console line for a failed test: optional timestamp, the test's display name, " [FAIL]".
 FAIL_LINE = re.compile(r"^(?:\S+Z\s+)?\s*(?P<test>\S.*?)\s+\[FAIL\]\s*$")
 # The squash title's trailing "(#N)" is the pull request.
@@ -97,7 +96,7 @@ def paged(fetcher, path, key=None, max_pages=None):
     return items
 
 
-# --- rerun-flakes: the decisions ---------------------------------------------------------------------------------------
+# --- rerun-passes: the decisions ---------------------------------------------------------------------------------------
 
 
 def should_report(event_name, state, run_attempt):
@@ -112,7 +111,7 @@ def should_report(event_name, state, run_attempt):
 
 
 def failed_test_legs(jobs):
-    """The test legs that failed. A build, exporter, plan or verdict failure is not a flaky test."""
+    """The test legs that failed. A build, exporter, plan or verdict failure names no test."""
     return [j for j in jobs if str(j.get("name", "")).startswith("Test leg") and j.get("conclusion") == "failure"]
 
 
@@ -128,7 +127,7 @@ def failing_tests(log_text):
     return seen
 
 
-def flake_title(test):
+def rerun_title(test):
     title = TITLE_PREFIX + test
     if len(title) > TITLE_LIMIT:
         title = TITLE_PREFIX + "..." + test[-(TITLE_LIMIT - len(TITLE_PREFIX) - 3):]
@@ -139,7 +138,7 @@ def attempt_url(run_url, attempt):
     return f"{run_url}/attempts/{attempt}"
 
 
-def flake_body(test, pr_number, head_sha, run_url, run_attempt, occurrences):
+def rerun_body(test, pr_number, head_sha, run_url, run_attempt, occurrences):
     lines = [
         f"`{test}` failed on an earlier attempt of a run that passed on a rerun.",
         "",
@@ -163,7 +162,7 @@ def find_open_issue(issues, title):
     return None
 
 
-def rerun_flakes(args, fetcher, write):
+def rerun_passes(args, fetcher, write):
     if not should_report(args.event, args.state, args.run_attempt):
         print(f"Nothing to report: event={args.event} state={args.state!r} run_attempt={args.run_attempt!r}.")
         return
@@ -182,20 +181,16 @@ def rerun_flakes(args, fetcher, write):
     if not by_test:
         print("No earlier attempt failed a test leg on a named test.")
         return
-    labels = {str(lb.get("name", "")).lower() for lb in paged(fetcher, f"repos/{args.repo}/labels")}
     open_issues = paged(fetcher, f"repos/{args.repo}/issues?state=open", max_pages=MAX_ISSUE_PAGES)
     for test, occurrences in by_test.items():
-        title = flake_title(test)
-        body = flake_body(test, args.pr_number, args.head_sha, run_url, int(args.run_attempt), occurrences)
+        title = rerun_title(test)
+        body = rerun_body(test, args.pr_number, args.head_sha, run_url, int(args.run_attempt), occurrences)
         existing = find_open_issue(open_issues, title)
         if existing is not None:
             write(["issue", "comment", str(existing), "--repo", args.repo], body)
             print(f"Commented on #{existing} for {test}.")
         else:
-            cmd = ["issue", "create", "--repo", args.repo, "--title", title]
-            if FLAKE_LABEL in labels:
-                cmd += ["--label", FLAKE_LABEL]
-            write(cmd, body)
+            write(["issue", "create", "--repo", args.repo, "--title", title], body)
             print(f"Filed an issue for {test}.")
 
 
@@ -257,7 +252,7 @@ def dev_red_body(repo, red_sha, run_url, failed, fetcher):
 def parse(argv):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="command", required=True)
-    r = sub.add_parser("rerun-flakes")
+    r = sub.add_parser("rerun-passes")
     r.add_argument("--repo", required=True)
     r.add_argument("--server-url", required=True)
     r.add_argument("--event", required=True)
@@ -278,11 +273,11 @@ def parse(argv):
 def run(argv, fetcher=None, write=gh_write):
     args = parse(argv)
     fetcher = fetcher if fetcher is not None else GhFetcher()
-    if args.command == "rerun-flakes":
+    if args.command == "rerun-passes":
         try:
-            rerun_flakes(args, fetcher, write)
+            rerun_passes(args, fetcher, write)
         except Exception as e:  # noqa: BLE001 - this step reports and never fails the pull request
-            print(f"::warning title=Rerun flakes not reported::{type(e).__name__}: {e}")
+            print(f"::warning title=Rerun report not written::{type(e).__name__}: {e}")
         return 0
     body = dev_red_body(args.repo, args.red_sha, args.run_url, args.failed, fetcher)
     with open(args.out, "w", encoding="utf-8", newline="\n") as fh:

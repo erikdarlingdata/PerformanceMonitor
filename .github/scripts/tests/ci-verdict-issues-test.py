@@ -92,8 +92,6 @@ def attempt_jobs(attempt, jobs):
     return page(f"repos/{REPO}/actions/runs/{RUN_ID}/attempts/{attempt}/jobs", jobs, key="jobs")
 
 
-LABELS_FLAKE = page(f"repos/{REPO}/labels", [{"name": "bug"}, {"name": "flake"}])
-LABELS_PLAIN = page(f"repos/{REPO}/labels", [{"name": "bug"}])
 NO_ISSUES = page(f"repos/{REPO}/issues?state=open", [])
 
 # --- should_report ---------------------------------------------------------------------------------------------------
@@ -125,15 +123,15 @@ check("legs: only a test leg that failed", [j["id"] for j in vi.failed_test_legs
 
 # --- titles and bodies -----------------------------------------------------------------------------------------------
 
-check("title: names the test", vi.flake_title(TEST_A), f"Flaky test: {TEST_A}")
+check("title: names the test", vi.rerun_title(TEST_A), f"Test passed only on a rerun: {TEST_A}")
 long_name = "A." * 200 + "Method"
-title = vi.flake_title(long_name)
+title = vi.rerun_title(long_name)
 check("title: a long name keeps its tail and fits a GitHub title", (len(title) <= 256, title.endswith("Method")), (True, True))
-check("title: the same test gives the same title", vi.flake_title(long_name), title)
+check("title: the same test gives the same title", vi.rerun_title(long_name), title)
 
 occurrences = [vi.Occurrence(attempt=1, leg="Test leg 6/16", job_url=f"{SERVER}/{REPO}/actions/runs/{RUN_ID}/job/3"),
                vi.Occurrence(attempt=2, leg="Test leg 6/16", job_url=f"{SERVER}/{REPO}/actions/runs/{RUN_ID}/job/9")]
-body = vi.flake_body(TEST_A, pr_number="8145", head_sha=HEAD, run_url=f"{SERVER}/{REPO}/actions/runs/{RUN_ID}", run_attempt=3,
+body = vi.rerun_body(TEST_A, pr_number="8145", head_sha=HEAD, run_url=f"{SERVER}/{REPO}/actions/runs/{RUN_ID}", run_attempt=3,
                      occurrences=occurrences)
 for needle in (f"`{TEST_A}`", "#8145", HEAD, "attempt 3", f"{SERVER}/{REPO}/actions/runs/{RUN_ID}",
                f"{SERVER}/{REPO}/actions/runs/{RUN_ID}/attempts/1", f"{SERVER}/{REPO}/actions/runs/{RUN_ID}/attempts/2",
@@ -141,13 +139,13 @@ for needle in (f"`{TEST_A}`", "#8145", HEAD, "attempt 3", f"{SERVER}/{REPO}/acti
     check(f"body: carries {needle[:40]}", needle in body, True)
 check("body: one line per earlier attempt", body.count("- attempt "), 2)
 
-issues = [{"number": 10, "title": "dev is red"}, {"number": 11, "title": vi.flake_title(TEST_A)},
-          {"number": 12, "title": vi.flake_title(TEST_B), "pull_request": {"url": "x"}}]
-check("open issue: found by its exact title", vi.find_open_issue(issues, vi.flake_title(TEST_A)), 11)
-check("open issue: a pull request with that title is not an issue", vi.find_open_issue(issues, vi.flake_title(TEST_B)), None)
-check("open issue: none", vi.find_open_issue(issues, "Flaky test: Other"), None)
+issues = [{"number": 10, "title": "dev is red"}, {"number": 11, "title": vi.rerun_title(TEST_A)},
+          {"number": 12, "title": vi.rerun_title(TEST_B), "pull_request": {"url": "x"}}]
+check("open issue: found by its exact title", vi.find_open_issue(issues, vi.rerun_title(TEST_A)), 11)
+check("open issue: a pull request with that title is not an issue", vi.find_open_issue(issues, vi.rerun_title(TEST_B)), None)
+check("open issue: none", vi.find_open_issue(issues, "Test passed only on a rerun: Other"), None)
 
-# --- rerun-flakes end to end -----------------------------------------------------------------------------------------
+# --- rerun-passes end to end -----------------------------------------------------------------------------------------
 
 
 def rerun(attempt, pages, texts, state="success", event="pull_request"):
@@ -155,7 +153,7 @@ def rerun(attempt, pages, texts, state="success", event="pull_request"):
     rec = Recorder()
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
-        code = vi.run(["rerun-flakes", "--repo", REPO, "--server-url", SERVER, "--event", event, "--state", state,
+        code = vi.run(["rerun-passes", "--repo", REPO, "--server-url", SERVER, "--event", event, "--state", state,
                        "--run-id", RUN_ID, "--run-attempt", str(attempt), "--pr-number", "8145", "--head-sha", HEAD],
                       fetcher=stub, write=rec)
     return code, stub, rec, out.getvalue()
@@ -166,12 +164,11 @@ log_b = {f"repos/{REPO}/actions/jobs/9/logs": f"{TS} {TEST_B} [FAIL]\n"}
 
 # The shape of #8145: attempt 1 failed leg 6 on one test, attempt 2 failed leg 6 on another, attempt 3 passed.
 pages = {**attempt_jobs(1, [job(1, "CI plan", "success", 1), job(3, "Test leg 6/16", "failure", 1), job(4, "Test leg 7/16", "success", 1)]),
-         **attempt_jobs(2, [job(9, "Test leg 6/16", "failure", 2)]), **LABELS_FLAKE, **NO_ISSUES}
+         **attempt_jobs(2, [job(9, "Test leg 6/16", "failure", 2)]), **NO_ISSUES}
 code, stub, rec, out = rerun(3, pages, {**log_a, **log_b})
 check("rerun: exits 0", code, 0)
 check("rerun: one issue per failing test", [c[0][:2] for c in rec.calls], [["issue", "create"], ["issue", "create"]])
-check("rerun: the titles", sorted(c[0][c[0].index("--title") + 1] for c in rec.calls), sorted([vi.flake_title(TEST_A), vi.flake_title(TEST_B)]))
-check("rerun: the flake label when the repository has it", all("flake" in c[0] for c in rec.calls), True)
+check("rerun: the titles", sorted(c[0][c[0].index("--title") + 1] for c in rec.calls), sorted([vi.rerun_title(TEST_A), vi.rerun_title(TEST_B)]))
 check("rerun: the body names the attempt and the leg", all("Test leg 6/16" in c[1] and "attempt" in c[1] for c in rec.calls), True)
 check("rerun: the attempts read are the earlier ones only",
       sorted(p for p in stub.reads if "/attempts/" in p),
@@ -180,34 +177,28 @@ check("rerun: only the failed legs' logs are read", sorted(p for p in stub.reads
 
 # The same test in both attempts: one issue, two occurrences.
 pages_same = {**attempt_jobs(1, [job(3, "Test leg 6/16", "failure", 1)]), **attempt_jobs(2, [job(9, "Test leg 6/16", "failure", 2)]),
-              **LABELS_FLAKE, **NO_ISSUES}
+              **NO_ISSUES}
 code, stub, rec, out = rerun(3, pages_same, {**log_a, f"repos/{REPO}/actions/jobs/9/logs": LEG_LOG})
 check("rerun: the same test twice is one issue", len(rec.calls), 1)
 check("rerun: with both attempts in it", rec.calls[0][1].count("- attempt ") if rec.calls else 0, 2)
 
 # An open issue for the test: a comment on it, not a second issue.
-open_issue = page(f"repos/{REPO}/issues?state=open", [{"number": 77, "title": vi.flake_title(TEST_A)}])
-pages_open = {**attempt_jobs(1, [job(3, "Test leg 6/16", "failure", 1)]), **LABELS_FLAKE, **open_issue}
+open_issue = page(f"repos/{REPO}/issues?state=open", [{"number": 77, "title": vi.rerun_title(TEST_A)}])
+pages_open = {**attempt_jobs(1, [job(3, "Test leg 6/16", "failure", 1)]), **open_issue}
 code, stub, rec, out = rerun(2, pages_open, log_a)
 check("rerun: an open issue for the test gets a comment", [c[0][:3] for c in rec.calls], [["issue", "comment", "77"]])
 check("rerun: the comment names the pull request and the head", "#8145" in rec.calls[0][1] and HEAD in rec.calls[0][1], True)
 
-# No flake label in the repository: the issue is filed without one.
-pages_plain = {**attempt_jobs(1, [job(3, "Test leg 6/16", "failure", 1)]), **LABELS_PLAIN, **NO_ISSUES}
-code, stub, rec, out = rerun(2, pages_plain, log_a)
-check("rerun: no label when the repository has none", any("--label" in c[0] for c in rec.calls), False)
-check("rerun: the issue is still filed", len(rec.calls), 1)
-
 # A failed leg whose log names no test (a crash, a timeout): nothing is filed, the leg is named in a notice.
-pages_crash = {**attempt_jobs(1, [job(3, "Test leg 6/16", "failure", 1)]), **LABELS_FLAKE, **NO_ISSUES}
+pages_crash = {**attempt_jobs(1, [job(3, "Test leg 6/16", "failure", 1)]), **NO_ISSUES}
 code, stub, rec, out = rerun(2, pages_crash, {f"repos/{REPO}/actions/jobs/3/logs": "Fatal error. exit -1073741819\n"})
 check("rerun: a leg with no named test files nothing", rec.calls, [])
 check("rerun: and says so", "Test leg 6/16" in out and "::notice" in out, True)
 
 # A failed earlier attempt with no failed test leg (a build failure): nothing to report.
-pages_build = {**attempt_jobs(1, [job(2, "Build the test projects", "failure", 1)]), **LABELS_FLAKE, **NO_ISSUES}
+pages_build = {**attempt_jobs(1, [job(2, "Build the test projects", "failure", 1)]), **NO_ISSUES}
 code, stub, rec, out = rerun(2, pages_build, {})
-check("rerun: a build failure is not a flaky test", (code, rec.calls), (0, []))
+check("rerun: a build failure files nothing", (code, rec.calls), (0, []))
 
 # The first attempt, a push, or a failed verdict: no reads and no writes.
 for attempt, state, event, name in ((1, "success", "pull_request", "attempt 1"), (2, "failure", "pull_request", "a failure"),
@@ -216,7 +207,7 @@ for attempt, state, event, name in ((1, "success", "pull_request", "attempt 1"),
     check(f"rerun: {name} reads nothing", (code, stub.reads, rec.calls), (0, [], []))
 
 # A read that fails: a warning, exit 0, nothing written. The pull request is never failed by this step.
-code, stub, rec, out = rerun(2, {**LABELS_FLAKE, **NO_ISSUES}, {})
+code, stub, rec, out = rerun(2, NO_ISSUES, {})
 check("rerun: a failed read writes nothing and exits 0", (code, rec.calls), (0, []))
 check("rerun: and warns", "::warning" in out, True)
 
