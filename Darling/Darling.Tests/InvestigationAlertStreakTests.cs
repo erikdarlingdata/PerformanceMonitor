@@ -48,6 +48,8 @@ public sealed class InvestigationAlertStreakTests
     [InlineData(-1 * 24 * 60 + 29, 1)]                // 29 minutes after it, a day back
     [InlineData(-1 * 24 * 60 - 30, 1)]                // the window's edge counts
     [InlineData(-1 * 24 * 60 - 31, null)]             // one past it does not
+    [InlineData(-1 * 24 * 60 - 60, 1)]                // an hour early: a local-clock schedule after a DST change
+    [InlineData(-1 * 24 * 60 + 60, 1)]                // an hour late: the same, the other way
     [InlineData(-3 * 24 * 60, 3)]
     [InlineData(-7 * 24 * 60, 7)]                     // exactly Days back is still inside the look-back
     [InlineData(-7 * 24 * 60 - 1, null)]              // one minute older is not
@@ -105,6 +107,28 @@ public sealed class InvestigationAlertStreakTests
         };
         Assert.Equal(2, InvestigationAlertStreak.ForAlert(Anchor, fires));
         Assert.Equal(0, InvestigationAlertStreak.ForAlert(Anchor, Array.Empty<DateTime>()));
+    }
+
+    /// <summary>A recurrence kept in a server's local clock moves an hour in UTC at a DST change. An Agent job at 02:00 Eastern
+    /// fires at 06:00 UTC after the second Sunday of March 2026 and at 07:00 UTC before it; on the Sunday itself the clock skips
+    /// 02:00, so the job runs at 03:00 local, which is 07:00 UTC again. The seven fires before a Thursday 02:00 alert are one
+    /// streak, not a streak of three with four fires an hour off.</summary>
+    [Fact]
+    public void ALocalClockRecurrence_KeepsItsStreak_AcrossASpringForwardSunday()
+    {
+        var anchor = new DateTime(2026, 3, 12, 6, 0, 0, DateTimeKind.Utc); // Thursday, 02:00 EDT
+        var fires = new[]
+        {
+            new DateTime(2026, 3, 11, 6, 0, 0, DateTimeKind.Utc), // day 1, 02:00 EDT
+            new DateTime(2026, 3, 10, 6, 0, 0, DateTimeKind.Utc), // day 2
+            new DateTime(2026, 3, 9, 6, 0, 0, DateTimeKind.Utc),  // day 3
+            new DateTime(2026, 3, 8, 7, 0, 0, DateTimeKind.Utc),  // day 4, the Sunday: no 02:00, the job ran at 03:00 EDT
+            new DateTime(2026, 3, 7, 7, 0, 0, DateTimeKind.Utc),  // day 5, 02:00 EST
+            new DateTime(2026, 3, 6, 7, 0, 0, DateTimeKind.Utc),  // day 6
+            new DateTime(2026, 3, 5, 7, 0, 0, DateTimeKind.Utc),  // day 7
+        };
+
+        Assert.Equal(7, InvestigationAlertStreak.ForAlert(anchor, fires));
     }
 
     [Fact]
