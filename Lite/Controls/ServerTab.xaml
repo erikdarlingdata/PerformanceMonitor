@@ -271,7 +271,7 @@
         </Border>
 
         <!-- Main Tab Control -->
-        <TabControl Grid.Row="1" x:Name="MainTabControl" Background="{DynamicResource BackgroundBrush}"
+        <TabControl Grid.Row="1" x:Name="MainTabControl" Style="{DynamicResource ServerTabStripStyle}" Background="{DynamicResource BackgroundBrush}"
                     BorderThickness="0" Padding="0" SelectionChanged="MainTabControl_SelectionChanged">
 
             <!-- Overview Tab — Correlated Timeline Lanes -->

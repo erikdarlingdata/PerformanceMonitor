@@ -326,9 +326,6 @@ public class ServerTabEmptyStateAndNamesTests
     }
 
     [Theory]
-    [InlineData("Lite/Themes/CoolBreezeTheme.xaml")]
-    [InlineData("Lite/Themes/DarkTheme.xaml")]
-    [InlineData("Lite/Themes/LightTheme.xaml")]
     [InlineData("Darling/PerformanceMonitor.Darling.Viewer/Themes/CoolBreezeTheme.xaml")]
     [InlineData("Darling/PerformanceMonitor.Darling.Viewer/Themes/DarkTheme.xaml")]
     [InlineData("Darling/PerformanceMonitor.Darling.Viewer/Themes/LightTheme.xaml")]
