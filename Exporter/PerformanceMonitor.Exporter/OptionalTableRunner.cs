@@ -667,7 +667,12 @@ public static class OptionalTableRunner
         }
     }
 
-    private static ManifestTableEntry BuildQuerySnapshotsEntry(
+    /// <summary>
+    /// One `query_snapshots` run output's manifest entry. <paramref name="outputPath"/> is the file's on-disk path
+    /// under `&lt;out&gt;/&lt;store&gt;/&lt;outputTable&gt;/`; the entry names it the way every other entry does, as
+    /// `&lt;table&gt;/&lt;file&gt;` relative to the store folder, always with `/`.
+    /// </summary>
+    internal static ManifestTableEntry BuildQuerySnapshotsEntry(
         OptionalTable table, string outputTable, string outputPath, long rowCount, string? part,
         string? timeColumn, string kind, long? unparsedPlanRows)
     {
@@ -676,7 +681,7 @@ public static class OptionalTableRunner
         return new ManifestTableEntry
         {
             Table = outputTable,
-            OutputFile = Path.GetFileName(outputPath),
+            OutputFile = $"{outputTable}/{Path.GetFileName(outputPath)}",
             RowCount = rowCount,
             ByteSize = byteSize,
             Sha256 = sha256,
