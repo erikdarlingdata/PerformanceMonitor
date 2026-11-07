@@ -3,8 +3,9 @@
 # is POSTGRES_USER, as Darling/compose/docker-compose.yml has it, so the service provisions its least-privilege roles):
 #   fresh        a new volume: the service starts as 1654 and owns a 700 credentials directory with every key file.
 #   upgrade      a volume the previous (root) release wrote, handed over with the documented chown: same password key, and no
-#                role credential the volume already held is generated again.
-#   missed-step  the same volume WITHOUT the chown: the service stops, says what to run, and regenerates nothing.
+#                role credential the volume already held, nor the log-hash key, is generated again.
+#   missed-step  the same volume WITHOUT the chown: the service stops, says what to run, and regenerates nothing; the web
+#                dashboard (turned on for this leg) stays down instead of connecting as the store owner.
 # Usage: darling-nonroot-legs.sh <image> <previous-image>
 set -euo pipefail
 
@@ -95,7 +96,7 @@ start_service() {
     -e DARLING_STORE_CONNECTION -e DARLING_STOPPED_MARKER=/tmp/darling-stopped \
     -v "$(host_path "${config_file}"):/config/darling.json:ro" \
     -v "${vol}:/var/lib/darling" \
-    "$@" "${img}" >/dev/null
+    "$@" "${img}" >/dev/null || fail "could not start ${c} from ${img}"
 }
 
 # wait_log <container> <extended regex>: the log-grep loop, capped at 180 s; fails when the container exits first.
@@ -126,11 +127,11 @@ new_store fresh
 start_service "${prefix}-fresh-svc" "${image}"
 wait_log "${prefix}-fresh-svc" 'Least-privilege roles ready'
 wait_log "${prefix}-fresh-svc" 'Retention evaluation at startup'
-uid="$(docker exec "${prefix}-fresh-svc" id -u)"
+uid="$(docker exec "${prefix}-fresh-svc" id -u)" || fail "could not run id -u in the service container"
 [ "${uid}" = 1654 ] || fail "the service runs as uid ${uid}, expected 1654"
-mode="$(docker exec "${prefix}-fresh-svc" stat -c '%u %a' /var/lib/darling/credentials)"
+mode="$(docker exec "${prefix}-fresh-svc" stat -c '%u %a' /var/lib/darling/credentials)" || fail "could not stat the credentials directory"
 [ "${mode}" = "1654 700" ] || fail "credentials directory is '${mode}', expected '1654 700'"
-files="$(docker exec "${prefix}-fresh-svc" ls /var/lib/darling/credentials)"
+files="$(docker exec "${prefix}-fresh-svc" ls /var/lib/darling/credentials)" || fail "could not list the credentials directory"
 for f in password-key log-hash-key pg-admin-credential pg-viewer-credential pg-mcp-credential pg-web-credential; do
   grep -qx -- "${f}" <<<"${files}" || fail "credentials directory has no ${f} (has: $(echo "${files}" | tr '\n' ' '))"
 done
@@ -148,9 +149,13 @@ wait_log "${prefix}-upgrade-old" 'Password key [0-9A-F]{4}-[0-9A-F]{4}'
 old_fp="$(fingerprint "${prefix}-upgrade-old")"
 [ -n "${old_fp}" ] || fail "the previous image logged no password key fingerprint"
 docker stop "${prefix}-upgrade-old" >/dev/null
-held="$(docker run --rm --user 0 --entrypoint ls -v "${vol}:/var/lib/darling" "${image}" /var/lib/darling/credentials | grep -E '^pg-.*-credential$' || true)"
+before="$(docker run --rm --user 0 --entrypoint ls -v "${vol}:/var/lib/darling" "${image}" /var/lib/darling/credentials)" \
+  || fail "could not list the previous image's credentials volume"
+held="$(grep -E '^pg-.*-credential$' <<<"${before}" || true)"
 [ -n "${held}" ] || fail "the previous image left no pg-*-credential file in the volume"
-docker run --rm --user 0 --entrypoint chown -v "${vol}:/var/lib/darling" "${image}" -R 1654:1654 /var/lib/darling >/dev/null
+grep -qx 'log-hash-key' <<<"${before}" || fail "the previous image left no log-hash-key in the volume"
+docker run --rm --user 0 --entrypoint chown -v "${vol}:/var/lib/darling" "${image}" -R 1654:1654 /var/lib/darling >/dev/null \
+  || fail "the documented chown failed"
 start_service "${prefix}-upgrade-new" "${image}"
 wait_log "${prefix}-upgrade-new" 'Least-privilege roles ready'
 wait_log "${prefix}-upgrade-new" 'Retention evaluation at startup'
@@ -162,6 +167,10 @@ for f in ${held}; do
     fail "the upgrade generated ${f} again"
   fi
 done
+wait_log "${prefix}-upgrade-new" "Loaded the store's log-hash key"
+if log_of "${prefix}-upgrade-new" | grep -qF "Generated the store's log-hash key"; then
+  fail "the upgrade generated the log-hash key again"
+fi
 echo "ok: upgrade (fingerprint ${new_fp}, kept: $(echo ${held}))"
 docker rm -f "${prefix}-upgrade-old" "${prefix}-upgrade-new" "${store}" >/dev/null
 docker volume rm -f "${vol}" >/dev/null
@@ -172,8 +181,20 @@ leg="missed-step"
 new_store missed
 start_service "${prefix}-missed-old" "${previous}"
 wait_log "${prefix}-missed-old" 'Retention evaluation at startup'
-docker stop "${prefix}-missed-old" >/dev/null
-start_service "${prefix}-missed-new" "${image}"
+docker stop "${prefix}-missed-old" >/dev/null || fail "could not stop ${prefix}-missed-old"
+# The web dashboard on, with a token from a file in the leg's temp dir: its host must stay down, not connect as the owner.
+token_file="${work}/missed/web_token"
+head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > "${token_file}"
+chmod 644 "${token_file}"
+cat > "${config_file}" <<'JSON'
+{
+  "postgres": { "managed": false, "connectionString": "env:DARLING_STORE_CONNECTION" },
+  "servers": [],
+  "web": { "enabled": true, "network": { "token": "file:/run/secrets/web_token" } },
+  "mcp": { "enabled": false }
+}
+JSON
+start_service "${prefix}-missed-new" "${image}" -v "$(host_path "${token_file}"):/run/secrets/web_token:ro"
 wait_log "${prefix}-missed-new" 'belongs to user 0, but the service runs as user 1654'
 log="$(log_of "${prefix}-missed-new")"
 grep -qF 'chown darling -R 1654:1654 /var/lib/darling' <<<"${log}" || fail "the log does not name the chown command"
@@ -190,4 +211,7 @@ done
 log="$(log_of "${prefix}-missed-new")"
 if grep -qF -- '--reset-password-key' <<<"${log}"; then fail "the log suggests --reset-password-key"; fi
 if grep -qF "Generated the compose store's" <<<"${log}"; then fail "the service generated a credential on a volume it cannot write"; fi
+wait_log "${prefix}-missed-new" 'web dashboard not started this attempt: The credentials directory /var/lib/darling/credentials belongs to user 0'
+log="$(log_of "${prefix}-missed-new")"
+if grep -qF 'connects to the store as the owner' <<<"${log}"; then fail "the web dashboard connected as the store owner"; fi
 echo "ok: missed-step"

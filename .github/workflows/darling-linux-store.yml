@@ -312,11 +312,12 @@ jobs:
           cache-from: type=gha
           cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}
 
+      # Pinned, not :latest: the legs need an image that still runs as root, and 3.12.0 is the last release that does (#8141).
       - name: Pull the previous release image
         timeout-minutes: 5
-        run: docker pull ghcr.io/erikdarlingdata/performancemonitor-darling:latest
+        run: docker pull ghcr.io/erikdarlingdata/performancemonitor-darling:3.12.0
 
       - name: Run the fresh, upgrade and missed-step legs
         timeout-minutes: 12
         shell: bash
-        run: bash .github/scripts/darling-nonroot-legs.sh "${DARLING_IMAGE}" ghcr.io/erikdarlingdata/performancemonitor-darling:latest
+        run: bash .github/scripts/darling-nonroot-legs.sh "${DARLING_IMAGE}" ghcr.io/erikdarlingdata/performancemonitor-darling:3.12.0
