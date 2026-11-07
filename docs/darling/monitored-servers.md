@@ -25,6 +25,7 @@ Each Darling install has an eight-character id. The service makes it at start an
 ### The sessions
 
 - `PerformanceMonitor_Darling_<id>_LongQueryCompletions` is this install's long-query trace. The service creates it while the opt-in `long_query_completions` collector is on. It is created with `STARTUP_STATE = OFF`, so it stays stopped after a server restart. Each check starts it again when it finds it stopped.
+- `PerformanceMonitor_Darling_<id>_SchemaChanges` records committed table, view, index and trigger DDL (`object_created`, `object_altered`, `object_deleted` and `sp_rename`), so the schema pass reads only the objects that changed. It carries the database, login, application and host of each change and no statement text. It has a 4 MB ring buffer capped at 10,000 events and `STARTUP_STATE = OFF`, so the service starts it again when it finds it stopped. A restart or a full buffer leaves a gap, which the pass closes by reading the whole database.
 - `PerformanceMonitor_Deadlock`, `PerformanceMonitor_BlockedProcess` and `PerformanceMonitor_Attention` keep their shared names, because Lite and other installs read them too. The service never drops them. It checks them at connect and then once an hour. It creates a missing one and starts a stopped one, so a deliberate stop lasts less than an hour.
 - On Azure SQL Database, a shared session can stay unusable after a start. The service then creates `PerformanceMonitor_Darling_<id>_Deadlock`, `PerformanceMonitor_Darling_<id>_BlockedProcess` or `PerformanceMonitor_Darling_<id>_Attention` in that database, with `STARTUP_STATE = OFF`, and reads that one. When the shared session works again, the service switches back and drops its own fallback.
 
@@ -34,7 +35,7 @@ Earlier versions shared one session, `PerformanceMonitor_LongQueryCompletions`, 
 
 ### Removing a server
 
-Removing a server drops this install's sessions on it. These are the long-query session and its own deadlock and blocked-process fallbacks. The service makes one attempt, within 15 seconds. A failed drop is logged and never stops the removal.
+Removing a server drops this install's sessions on it. These are the long-query session, the schema-changes session and its own deadlock and blocked-process fallbacks. The service makes one attempt, within 15 seconds. A failed drop is logged and never stops the removal.
 
 The service leaves a session that another registration of this install keeps. On premises, it also leaves the session when it cannot tell whether another registration of this install shares the instance. That happens when the instance name of this server is not known. The service logs the reason. The two shared sessions stay on the server. The [`--drop-xe-sessions`](collector-settings.md#drop-the-extended-events-sessions-a-removed-server-left-behind---drop-xe-sessions) section shows how to drop them.
 
