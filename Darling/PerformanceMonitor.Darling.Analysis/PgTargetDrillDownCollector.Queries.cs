@@ -45,6 +45,11 @@ public sealed partial class PgTargetDrillDownCollector
     /// <para>The text is <c>pg_statement_text</c>'s — normalised, captured hourly, never live SQL (the V86
     /// privacy design) — NULL when none has been captured yet. Only shapes that wrote at least one temp block
     /// in the window are returned (<c>HAVING</c>): a statement with no spill is not an offender.</para>
+    ///
+    /// <para>#8054: the text is joined AFTER the ranking and the cap, in a wrapper over the ranked offenders, so the
+    /// store is read once per returned row, never once per sample. The text store is keyed on
+    /// <c>(server_id, queryid)</c>, the list's own grain, so the join is one primary-key lookup per row and cannot
+    /// multiply one. The hash is <c>hashtext()</c> over that whole text, the figure the detail read also computes.</para>
     /// </summary>
     public const string PgTargetTempSpillStatementsSql = @"
 WITH stmt_series AS (
@@ -63,23 +68,37 @@ WITH stmt_series AS (
         PARTITION BY queryid, database_id, user_id, toplevel
         ORDER BY collection_time
     )
+),
+/* #8054: the ranked offenders, every figure but the text. The text is joined onto these rows below, after the
+   ORDER BY and the LIMIT, so the store is read once per returned row and never per sample. */
+ranked AS (
+    SELECT
+        s.queryid,
+        CAST(COALESCE(SUM(s.d_temp_blks_written), 0) AS bigint)      AS temp_blks_written,
+        CAST(COALESCE(SUM(s.d_temp_blks_read), 0) AS bigint)         AS temp_blks_read,
+        CAST(COALESCE(SUM(s.delta_calls), 0) AS bigint)              AS calls,
+        CAST(COALESCE(SUM(s.delta_total_exec_time_ms), 0) AS bigint) AS total_exec_ms,
+        COUNT(DISTINCT s.database_id)                                AS database_count
+    FROM stmt_series AS s
+    GROUP BY s.queryid
+    HAVING SUM(s.d_temp_blks_written) > 0
+    ORDER BY SUM(s.d_temp_blks_written) DESC
+    LIMIT $4
 )
 SELECT
-    s.queryid,
-    CAST(COALESCE(SUM(s.d_temp_blks_written), 0) AS bigint)      AS temp_blks_written,
-    CAST(COALESCE(SUM(s.d_temp_blks_read), 0) AS bigint)         AS temp_blks_read,
-    CAST(COALESCE(SUM(s.delta_calls), 0) AS bigint)              AS calls,
-    CAST(COALESCE(SUM(s.delta_total_exec_time_ms), 0) AS bigint) AS total_exec_ms,
-    COUNT(DISTINCT s.database_id)                                AS database_count,
-    MAX(t.query_text)                                            AS query_text,
-    hashtext(MAX(t.query_text))                                  AS text_hash
-FROM stmt_series AS s
+    r.queryid,
+    r.temp_blks_written,
+    r.temp_blks_read,
+    r.calls,
+    r.total_exec_ms,
+    r.database_count,
+    t.query_text                                                 AS query_text,
+    hashtext(t.query_text)                                       AS text_hash
+FROM ranked AS r
 LEFT JOIN pg_statement_text AS t
        ON  t.server_id = $1
-       AND t.queryid = s.queryid
-GROUP BY s.queryid
-HAVING SUM(s.d_temp_blks_written) > 0
-ORDER BY SUM(s.d_temp_blks_written) DESC
+       AND t.queryid = r.queryid
+ORDER BY r.temp_blks_written DESC
 LIMIT $4";
 
     /// <summary>
