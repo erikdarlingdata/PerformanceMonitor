@@ -1159,7 +1159,9 @@ AND   collection_time <= $3
 AND   last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE" + dbClause + excludeClause + (tags is null ? "" : QueryTagReadScope.ObjectToken("database_name", "schema_name", "object_name")) + @"
 GROUP BY database_name, schema_name, object_name, object_type
 HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
-ORDER BY SUM(delta_worker_time) DESC
+/* #7908: the ranking ends on the whole group key, so procedures tied at the cut (zero CPU on a quiet window) come back in
+   one order every time, as the queries read and Darling's procedures read do. */
+ORDER BY SUM(delta_worker_time) DESC, database_name, schema_name, object_name, object_type
 LIMIT $4";
         if (tags is not null)
         {
