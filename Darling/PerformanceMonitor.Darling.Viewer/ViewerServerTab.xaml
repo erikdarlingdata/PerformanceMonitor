@@ -4230,7 +4230,14 @@
                         </Grid>
                     </TabItem>
                     <TabItem Header="Duration Trends">
-                        <scottplot:WpfPlot x:Name="CollectorDurationChart" Margin="4"/>
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #8086: scrolls when the legend leaves the plot under its share of the chart -->
+                            <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="260">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                                </Grid.RowDefinitions>
+                                <scottplot:WpfPlot x:Name="CollectorDurationChart" Margin="4"/>
+                            </Grid>
+                        </ScrollViewer>
                     </TabItem>
                 </TabControl>
             </Grid>

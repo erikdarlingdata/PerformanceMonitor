@@ -824,6 +824,8 @@ public partial class FinOpsTab : UserControl
     /// X is each sample's UTC instant (#4766); <paramref name="displayZone"/> words the ticks, and is read on
     /// every render pass.
     /// </summary>
+    private readonly ChartRenderHelper _chartHelper = new();
+
     private void RenderPvsTrendChart(System.Collections.Generic.List<PvsTrendPoint> trend, Func<TimeZoneInfo> displayZone)
     {
         if (trend.Count == 0)
@@ -833,7 +835,8 @@ public partial class FinOpsTab : UserControl
         }
 
         PvsTrendChart.Visibility = Visibility.Visible;
-        PvsTrendChart.Plot.Clear();
+        _chartHelper.ClearChart(PvsTrendChart); // #8086: a reset also removes the last refresh's legend panel
+        ChartStyle.ApplyThemeToChart(PvsTrendChart);
 
         var seriesIndex = 0;
         /* #3653: an unmeasured point (null size) is not plotted — not as 0, not interpolated across. A series
@@ -853,11 +856,10 @@ public partial class FinOpsTab : UserControl
                 : series.Key;
         }
 
-        PvsTrendChart.Plot.Legend.IsVisible = true;
         PvsTrendChart.Plot.Axes.DateTimeTicksBottomUtc(displayZone);
         PvsTrendChart.Plot.Axes.AutoScale();
         PvsTrendChart.Plot.YLabel("PVS Off-Row MB");
-        ChartStyle.ApplyThemeToChart(PvsTrendChart);
+        _chartHelper.ShowChartLegend(PvsTrendChart); // #8086: beside or under the plot, never over it
         PvsTrendChart.Refresh();
     }
 
