@@ -49,7 +49,7 @@ A manifest is one JSON object.
 | `straggler_warning` | always | The last count of open writing transactions that started before the window's cutoff. 0 means none. The exporter only records it. It never fails a run. |
 | `straggler_wait_seconds` | always | Seconds the straggler guard waited. |
 | `tables` | always | One entry per table. See below. |
-| `skipped_optional` | optional manifests | Optional tables that were asked for and skipped. Each has `table` and `reason`. The reason is `unknown` or `absent`. |
+| `skipped_optional` | optional manifests | Optional tables that were asked for and skipped, whatever their grain. Each has `table` and `reason`. The reason is `unknown`, `absent`, `denied`, or a sentence saying why the table did not run, such as its schema gate or a window that is not its own. |
 | `failed_optional` | optional manifests | Optional tables that were attempted and failed. Each has `table` and `error`. |
 
 Each entry in `tables` has these fields.

@@ -104,7 +104,7 @@ public static class OptionalTableRunner
             // below, which builds both outputs from one store read.
             if (table.Grain == ExportGrain.Hourly)
             {
-                var hourlyPartPath = await RunHourlyRollupAsync(connectionStringBuilder, options, table, entries, failed, output, ct).ConfigureAwait(false);
+                var hourlyPartPath = await RunHourlyRollupAsync(connectionStringBuilder, options, table, entries, skipped, failed, output, ct).ConfigureAwait(false);
                 if (hourlyPartPath is not null && table.Name == "pg_statement_stats")
                 {
                     pgStatementStatsPartPaths = [hourlyPartPath];
@@ -185,7 +185,7 @@ public static class OptionalTableRunner
             // through to the generic Event Window/Snapshot read below.
             if (table.Grain == ExportGrain.Change)
             {
-                await RunChangeOnlyAsync(connectionStringBuilder, options, table, entries, failed, output, ct).ConfigureAwait(false);
+                await RunChangeOnlyAsync(connectionStringBuilder, options, table, entries, skipped, failed, output, ct).ConfigureAwait(false);
                 continue;
             }
 
@@ -338,6 +338,7 @@ public static class OptionalTableRunner
         ExportOptions options,
         OptionalTable table,
         List<ManifestTableEntry> entries,
+        List<SkippedOptionalTable> skipped,
         List<FailedOptionalTable> failed,
         TextWriter output,
         CancellationToken ct)
@@ -348,6 +349,7 @@ public static class OptionalTableRunner
             await using var absentCheckConnection = await StoreConnectionFactory.OpenAsync(connectionStringBuilder, ct).ConfigureAwait(false);
             if (await IsAbsentAsync(absentCheckConnection, table, ct).ConfigureAwait(false))
             {
+                skipped.Add(new SkippedOptionalTable { Table = table.Name, Reason = "absent" });
                 output.WriteLine("  skipped: absent on this store");
                 return;
             }
@@ -689,6 +691,7 @@ public static class OptionalTableRunner
         ExportOptions options,
         OptionalTable table,
         List<ManifestTableEntry> entries,
+        List<SkippedOptionalTable> skipped,
         List<FailedOptionalTable> failed,
         TextWriter output,
         CancellationToken ct)
@@ -699,6 +702,7 @@ public static class OptionalTableRunner
             await using var absentCheckConnection = await StoreConnectionFactory.OpenAsync(connectionStringBuilder, ct).ConfigureAwait(false);
             if (await IsAbsentAsync(absentCheckConnection, table, ct).ConfigureAwait(false))
             {
+                skipped.Add(new SkippedOptionalTable { Table = table.Name, Reason = "absent" });
                 output.WriteLine($"  skipped: absent on this store");
                 return null;
             }
