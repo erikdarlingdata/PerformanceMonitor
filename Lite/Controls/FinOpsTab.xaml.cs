@@ -361,9 +361,29 @@ public partial class FinOpsTab : UserControl
                grid on the first server's answer. Caught in review on this change. */
             var gen = _loads.Claim(nameof(LoadRecommendationsAsync));
 
+            /* #8115: while the read runs the sub-tab says so; empty headers under the caption are otherwise the same picture as no findings. */
+            RecommendationsCountIndicator.Text = "Loading recommendations…";
+            RecommendationsNoDataMessage.Visibility = Visibility.Collapsed;
+
             var utilityConnectionString = _credentialResolver.GetUtilityConnectionString(selectedServer!);
-            var (data, skippedNote) = await Task.Run(() => _dataService.GetRecommendationsWithNoteAsync(serverId, connectionString, utilityConnectionString, _currentServerMonthlyCost));
+            (System.Collections.Generic.List<PerformanceMonitorLite.Services.RecommendationRow> Rows, string? SkippedNote)? read = null;
+            Exception? failure = null;
+            try
+            {
+                read = await Task.Run(() => _dataService.GetRecommendationsWithNoteAsync(serverId, connectionString, utilityConnectionString, _currentServerMonthlyCost));
+            }
+            catch (Exception ex)
+            {
+                failure = ex;
+            }
             if (_loads.Superseded(nameof(LoadRecommendationsAsync), gen)) return;
+            if (failure is not null)
+            {
+                /* A failed read must not keep saying it is loading; the outer catch logs it. */
+                RecommendationsCountIndicator.Text = "Recommendations could not be read";
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+            }
+            var (data, skippedNote) = read!.Value;
             RecommendationsDataGrid.ItemsSource = data;
             /* #5558: databases this server holds only as an Availability Group secondary copy are left to the primary's findings. */
             RecommendationsSecondaryNoteText.Text = skippedNote ?? "";

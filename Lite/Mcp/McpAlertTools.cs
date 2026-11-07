@@ -200,7 +200,7 @@ public sealed class McpAlertTools
                     severity_source = severitySource,
                     /* #3598: the Darling twin's routing provenance, read through the shared serializer for
                        parity of shape. A row's route names the channels the firing resolved to: route_id is the
-                       route that supplied each (null = the parent settings) and source is "Exact", "Family" or
+                       route that supplied each (null = the parent settings) and source is "Exact", "Category", "AnalysisAll", "Family" or
                        "Wildcard" for a route, "Default" for the parent (#5750). #4750: each destination also says what
                        the send to it did ("delivered", "failed" or "not attempted"; null on a row written
                        before that was recorded), so a channel that failed beside one that delivered shows
@@ -536,6 +536,7 @@ public sealed class McpAlertTools
         "for the alert's server, then one for a tag it is under, the deeper tag first, then a fleet-wide route), and " +
         "inside a scope an enabled route matching the metric EXACTLY, then an analysis finding's CATEGORY (metric_match " +
         "'Analysis: <category>', match_kind analysis_category: every finding of that category, whatever its hash), then " +
+        "EVERY analysis finding (metric_match 'Analysis: *', match_kind analysis_all: a finding of any category; allowed at any scope), then " +
         "its FAMILY, then * (scoped routes only), " +
         "then the parent; within a level the lowest route_id with a non-empty column wins. A recovery routes as its " +
         "firing. Routing sits AFTER the cooldown: it changes where a post lands, never whether it is sent. " +

@@ -249,7 +249,7 @@ internal static class DarlingMcpInstructions
     private const string BodyHead = """
         ## How Data Is Collected
 
-        The Darling service collects 24/7, every 1-15 minutes by collector. `server_name` resolves against the registry (exact, then partial). `analyze_server` needs 24+ hours of history (`wait_stats` for a SQL Server target, `pg_database_stats` for a PostgreSQL target) or returns `insufficient_data`.
+        The Darling service collects 24/7; most collectors every 1 to 15 minutes, some hourly or daily (`get_collector_schedules` gives each interval). `server_name` resolves against the registry (exact, then partial). `analyze_server` needs 24+ hours of history (`wait_stats` for a SQL Server target, `pg_database_stats` for a PostgreSQL target) or returns `insufficient_data`.
 
         ## Tools
         """;

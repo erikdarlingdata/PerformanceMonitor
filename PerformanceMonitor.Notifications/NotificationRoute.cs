@@ -32,8 +32,8 @@ namespace PerformanceMonitor.Notifications;
 /// </summary>
 /// <param name="RouteId">The identity key, for the ledger's provenance and the editors' updates.</param>
 /// <param name="MetricMatch">A family name (<see cref="AlertFamily.All"/>, matched case-insensitively) or an
-/// exact metric name, or <c>Analysis: {category}</c> for every analysis finding of one category (#5632). Exact wins
-/// over category, and category over family, at resolution.</param>
+/// exact metric name, or <c>Analysis: {category}</c> for every analysis finding of one category (#5632), or <c>Analysis: *</c> for every analysis finding (#7999). Exact wins
+/// over category, category over <c>Analysis: *</c>, and that over family, at resolution.</param>
 /// <param name="TeamsUrl">Teams incoming-webhook URL, or empty to inherit.</param>
 /// <param name="SlackUrl">Slack incoming-webhook URL, or empty to inherit.</param>
 /// <param name="GenericUrl">The generic JSON-POST endpoint, or empty to inherit. Headers, body template and
@@ -308,8 +308,40 @@ public sealed record NotificationRoute(
         }
 
         var category = match[AlertFamily.AnalysisMetricPrefix.Length..].Trim();
-        return category.Length == 0 ? null : category;
+        /* #7999: "Analysis: *" is the every-finding route, not a category named "*". */
+        return category.Length == 0 || string.Equals(category, WildcardMatch, StringComparison.Ordinal) ? null : category;
     }
+
+    /// <summary>The canonical spelling of the every-analysis-finding match (#7999): <c>Analysis: *</c>. Every writer stores this
+    /// text for any spelling <see cref="IsAnalysisAllMatch"/> accepts.</summary>
+    public const string AnalysisAllMatch = "Analysis: *";
+
+    /// <summary>Whether <paramref name="metricMatch"/> is the every-analysis-finding match (#7999): the <c>Analysis: </c> prefix
+    /// (any case, trimmed, the tolerance a category route gets) followed by exactly <c>*</c>. <c>Analysis:*</c> without the
+    /// space is neither this nor a category, the same as <c>Analysis:queries</c> today.</summary>
+    public static bool IsAnalysisAllMatch(string? metricMatch)
+    {
+        var match = metricMatch?.Trim();
+        return !string.IsNullOrEmpty(match)
+            && match.StartsWith(AlertFamily.AnalysisMetricPrefix, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(match[AlertFamily.AnalysisMetricPrefix.Length..].Trim(), WildcardMatch, StringComparison.Ordinal);
+    }
+
+    /// <summary>The text a writer should store for <paramref name="metricMatch"/> (#7999): <see cref="AnalysisAllMatch"/> for any
+    /// accepted spelling of the every-finding match, otherwise the input unchanged. One helper for the MCP writers, the web agent-setup form and both
+    /// edit dialogs, so no product canonicalises it differently.</summary>
+    public static string CanonicalMatch(string metricMatch) =>
+        IsAnalysisAllMatch(metricMatch) ? AnalysisAllMatch : metricMatch;
+
+    /// <summary>Whether this route is the every-analysis-finding route, <c>Analysis: *</c> (#7999).</summary>
+    public bool IsAnalysisAll => IsAnalysisAllMatch(MetricMatch);
+
+    /// <summary>Whether this route matches <paramref name="metricName"/> as an analysis finding of ANY category (#7999): the route
+    /// is <c>Analysis: *</c> and the metric has the finding shape, <c>Analysis: {category} [{hash8}]</c>. A digest title
+    /// (<c>Analysis Singles Digest</c>) and a name without the hash suffix are not findings. Less specific than a category route,
+    /// more specific than a family.</summary>
+    public bool MatchesAnalysisAll(string metricName) =>
+        IsAnalysisAll && AlertFamily.TryGetAnalysisCategory(metricName, out _);
 
     /// <summary>Whether this route matches <paramref name="metricName"/> by its analysis finding CATEGORY (#5632,
     /// ruling R5): the route is <c>Analysis: queries</c> and the metric is <c>Analysis: queries [1a2b3c4d]</c>. Less

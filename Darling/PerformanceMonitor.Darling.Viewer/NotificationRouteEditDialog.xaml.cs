@@ -18,7 +18,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>
 /// Add/Edit one notification route (#3598). The match combo is filled from <see cref="AlertFamily.All"/> plus
-/// one "Exact metric name…" entry, so the family list on screen IS the closed taxonomy the resolver matches
+/// one "Every analysis finding (Analysis: *)" entry (#7999) and one "Exact metric name…" entry, so the family list on screen IS the closed taxonomy the resolver matches
 /// against and cannot drift from it. Validation is the store's own
 /// (<see cref="ViewerDataService.ValidateNotificationRoute"/>), so a route this dialog accepts is one the
 /// store accepts. Since #5750 the dialog also picks the route's scope (all servers, one server, or a tag) and offers the
@@ -115,6 +115,8 @@ public partial class NotificationRouteEditDialog : Window
             FamilyCombo.Items.Add(new ComboBoxItem { Content = name, Tag = name });
         }
 
+        /* #7999: every analysis finding, at every scope. After the families so a family's index is still its position. */
+        FamilyCombo.Items.Add(new ComboBoxItem { Content = NotificationRouteKinds.AnalysisAllChoiceLabel, Tag = NotificationRoute.AnalysisAllMatch });
         FamilyCombo.Items.Add(new ComboBoxItem { Content = ExactMetricChoice, Tag = null });
 
         /* #5632: the agent channel, Inherit / Off / Investigate, and its four numbers. */
@@ -190,6 +192,10 @@ public partial class NotificationRouteEditDialog : Window
         {
             FamilyCombo.SelectedItem = _wildcardItem;
         }
+        else if (NotificationRoute.IsAnalysisAllMatch(Route.MetricMatch))
+        {
+            FamilyCombo.SelectedItem = FamilyCombo.Items.Cast<ComboBoxItem>().First(i => Equals(i.Tag, NotificationRoute.AnalysisAllMatch));
+        }
         else if (family is null)
         {
             FamilyCombo.SelectedIndex = FamilyCombo.Items.IndexOf(FamilyCombo.Items.Cast<ComboBoxItem>().First(i => i.Tag is null));
@@ -221,6 +227,7 @@ public partial class NotificationRouteEditDialog : Window
         FamilyDescriptionText.Text = SelectedMatch() switch
         {
             NotificationRoute.WildcardMatch => "Every alert for this scope that no more specific route of the same scope matches. Offered only with a server or a tag.",
+            NotificationRoute.AnalysisAllMatch => NotificationRouteKinds.AnalysisAllChoiceDescription,
             AlertFamily.SelfMonitor => "Alerts about the monitoring tool itself: its store, collectors, jobs and certificates (Compression Job Stuck, Collection Stopped, Store Disk Pressure, Retention Held, …).",
             AlertFamily.Reports => "Scheduled prose — the Collector Cost Digest, the Fleet Sweep Rollup, the Daily Digest (metric Analysis Singles Digest) and the Daily Health Report. Reports to read, not pages.",
             AlertFamily.AgentJobs => "SQL Server Agent: Failed Agent Job, Long-Running Job, Agent Not Running, Agent Alert Gaps.",
@@ -242,7 +249,7 @@ public partial class NotificationRouteEditDialog : Window
         return 0;
     }
 
-    /// <summary>The chosen family, the wildcard <c>*</c>, or null for "Exact metric name…".</summary>
+    /// <summary>The chosen family, the wildcard <c>*</c>, <c>Analysis: *</c> (every analysis finding), or null for "Exact metric name…".</summary>
     private string? SelectedMatch() => (FamilyCombo.SelectedItem as ComboBoxItem)?.Tag as string;
 
     private RouteScopeOption? SelectedScope() => ScopeCombo.SelectedItem as RouteScopeOption;
@@ -305,12 +312,9 @@ public partial class NotificationRouteEditDialog : Window
 
         ValidationText.Visibility = Visibility.Collapsed;
 
-        /* An exact name that is really a family spelled by hand is normalised to the family, so the grid and
-           the resolver agree about what kind of route this is. */
-        if (AlertFamily.NormalizeFamily(Route.MetricMatch) is { } family)
-        {
-            Route.MetricMatch = family;
-        }
+        /* An exact name that is really a family spelled by hand is normalised to the family, and any spelling of
+           "Analysis: *" to its canonical text (#7999), so the grid and the resolver agree about what kind of route this is. */
+        Route.MetricMatch = NotificationRouteKinds.MatchToSave(SelectedMatch(), Route.MetricMatch);
 
         DialogResult = true;
     }

@@ -184,6 +184,7 @@ public partial class ServerTab : UserControl
     public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialResolver credentialResolver, int utcOffsetMinutes = 0, bool hasMsdbAccess = true, int sqlEngineEdition = 0, Func<bool>? isLongQueryTraceEnabled = null, AwsRdsKind awsRdsKind = AwsRdsKind.None)
     {
         InitializeComponent();
+        PerformanceMonitor.Ui.ChartPairLayout.Attach(CurrentWaitsScroll, CurrentWaitsGrid, CurrentWaitsFirstCard, CurrentWaitsSecondCard, CurrentWaitsGrid.RowDefinitions[2]); // #8219: side by side when the tab is too short for both stacked
         // #7385: the chart groups scroll below their floor; the wheel over a chart stays that chart's zoom.
         ChartLayout.KeepWheelOnPlot(
             QueryDurationTrendChart, ProcDurationTrendChart, QueryStoreDurationTrendChart, ExecutionCountTrendChart,
@@ -194,7 +195,7 @@ public partial class ServerTab : UserControl
             CurrentWaitsDurationChart, CurrentWaitsBlockedChart, LatchStatsChart, SpinlockStatsChart,
             BadPagesChart, DumpRequestsChart, AccessViolationsChart, WriteAccessViolationsChart,
             NonYieldingTasksChart, LatchWarningsChart, SickSpinlocksChart, CpuComparisonChart,
-            MemoryChart, CpuSchedulerChart);
+            MemoryChart, CpuSchedulerChart, CpuChart);
         QueryTagFilterCombo.ItemsSource = new[] { PerformanceMonitorLite.Helpers.QueryTagGrid.AllChoice };
         QueryTagFilterCombo.SelectedIndex = 0;
         SetupBarCellMaxes();
@@ -548,7 +549,7 @@ public partial class ServerTab : UserControl
            instead of starting a second read. Programmatic selection changes are still skipped below by
            _suppressActiveQueriesAutoRefresh, the only flag that was ever meant to silence this handler. */
         if (e.Source != MainTabControl && e.Source != QueriesSubTabControl
-            && e.Source != MemorySubTabControl && e.Source != BlockingSubTabControl
+            && e.Source != CpuSubTabControl && e.Source != MemorySubTabControl && e.Source != BlockingSubTabControl
             && e.Source != SystemEventsSubTabControl && e.Source != ConfigChangesSubTabControl) return;
 
         UpdateCompareDropdownState();
