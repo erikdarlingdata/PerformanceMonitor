@@ -163,20 +163,19 @@ VALUES ($1, $2, $3, $4, 45, 30, $5, 'email', NULL, $6, FALSE, NULL, NULL)",
         });
     }
 
-    /// <summary>A 23:50 alert counts a 00:10 fire (20 minutes later by the clock, across midnight) and a 23:35 fire, not one a
-    /// minute past the window either way. The clock test wraps at midnight.</summary>
+    /// <summary>A 23:50 alert counts a 00:10 fire (20 minutes later by the clock, across midnight) and a 23:35 fire, not a
+    /// 00:21 one (31 minutes). The clock test wraps at midnight.</summary>
     [Fact]
     public async Task A_2350Alert_CountsA_0010Fire_AcrossMidnight()
     {
         await RunAsync(async (dataSource, connection, ct) =>
         {
-            const int W = InvestigationAlertRecurrence.WindowMinutes;
             var anchor = new DateTime(2026, 10, 10, 23, 50, 0, DateTimeKind.Utc);
             var requestId = await OpenAsync(dataSource, anchor, ct);
-            await FireAsync(connection, new DateTime(2026, 10, 9, 0, 10, 0, DateTimeKind.Utc), ct);                       // 00:10, counts
-            await FireAsync(connection, new DateTime(2026, 10, 8, 23, 35, 0, DateTimeKind.Utc), ct);                      // 23:35, counts
-            await FireAsync(connection, new DateTime(2026, 10, 6, 23, 50, 0, DateTimeKind.Utc).AddMinutes(W + 1), ct);    // one past, after, does not
-            await FireAsync(connection, new DateTime(2026, 10, 6, 23, 50, 0, DateTimeKind.Utc).AddMinutes(-(W + 1)), ct); // one past, before, does not
+            await FireAsync(connection, new DateTime(2026, 10, 9, 0, 10, 0, DateTimeKind.Utc), ct);   // 00:10, counts
+            await FireAsync(connection, new DateTime(2026, 10, 8, 23, 35, 0, DateTimeKind.Utc), ct);  // 23:35, counts
+            await FireAsync(connection, new DateTime(2026, 10, 7, 0, 21, 0, DateTimeKind.Utc), ct);   // 00:21, +31, does not
+            await FireAsync(connection, new DateTime(2026, 10, 6, 23, 19, 0, DateTimeKind.Utc), ct);  // 23:19, -31, does not
 
             var recurrence = await ReadAsync(dataSource, requestId, anchor, ct);
             Assert.Equal(2, recurrence.Fired);

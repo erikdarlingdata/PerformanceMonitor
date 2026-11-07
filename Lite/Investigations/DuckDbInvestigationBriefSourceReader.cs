@@ -15,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Analysis;
@@ -210,8 +211,9 @@ LIMIT $4";
        brief states another. What is not history: the first alert's own row and anything at or after it, and any fire in the
        WindowMinutes minutes before it (this incident's own rise); a fire about 24 hours earlier still counts. A metric with no
        rows still comes back (day NULL), so the brief says zero.
-       #6261: k is the whole day number the fire counts toward (1 = 24 hours before the anchor), the streak's unit, as in Darling's
-       read (the reason, and why a date can come on two rows, is there).
+       The SQL bounds the rows; the clock test (which fire counts, and toward which whole day) is InvestigationAlertRecurrence.FromFires
+       over InvestigationAlertStreak.DaysAgo in the server's zone, the one rule Darling's reader and get_alert_history share, so a
+       DST change the SQL cannot see still reaches it.
        Both investigation_request_alerts.alert_time and config_alert_log.alert_time are naive UTC, so the clock arithmetic rides
        no session time zone. The history is read through v_config_alert_log: ordinary archival moves rows older than
        ArchiveService.HotDataDays (7) days, the edge of this window, to Parquet. A resolution row (#6057) is written to the same
@@ -222,25 +224,18 @@ WITH anchor AS (
 ), m AS (
     SELECT DISTINCT metric_name FROM investigation_request_alerts WHERE request_id = $1
 )
-SELECT m.metric_name, a.t, f.day, f.muted, f.n, f.k
+SELECT m.metric_name, a.t, f.alert_time, f.muted
 FROM m
 CROSS JOIN anchor AS a
 LEFT JOIN LATERAL (
-    SELECT strftime(CAST(h.alert_time AS DATE), '%Y-%m-%d') AS day, h.muted, h.k, count(*) AS n
-    FROM (
-        SELECT cal.alert_time, cal.muted,
-               CAST(round((epoch_us(a.t) - epoch_us(cal.alert_time)) / 86400000000.0) AS INTEGER) AS k,
-               ((epoch_us(cal.alert_time) - epoch_us(a.t)) % 86400000000 + 86400000000) % 86400000000 AS d
-        FROM v_config_alert_log AS cal
-        WHERE cal.server_id = $2
-          AND cal.metric_name = m.metric_name
-          AND cal.alert_time >= a.t - INTERVAL " + InvestigationAlertRecurrence.Days + @" DAY
-          AND cal.alert_time < a.t - INTERVAL " + InvestigationAlertRecurrence.WindowMinutes + @" MINUTE
-    ) AS h
-    WHERE least(h.d, 86400000000 - h.d) <= " + (InvestigationAlertRecurrence.WindowMinutes * 60 * 1000000L) + @"
-    GROUP BY 1, 2, 3
+    SELECT cal.alert_time, cal.muted
+    FROM v_config_alert_log AS cal
+    WHERE cal.server_id = $2
+      AND cal.metric_name = m.metric_name
+      AND cal.alert_time >= a.t - INTERVAL " + InvestigationAlertRecurrence.Days + @" DAY
+      AND cal.alert_time < a.t - INTERVAL " + InvestigationAlertRecurrence.WindowMinutes + @" MINUTE
 ) AS f ON true
-ORDER BY m.metric_name, f.day DESC";
+ORDER BY m.metric_name, f.alert_time DESC";
 
     private readonly DuckDbInitializer _duckDb;
     private readonly FindingStore _findings;
@@ -448,23 +443,17 @@ ORDER BY m.metric_name, f.day DESC";
     private static void ReadRecurrence(DuckDBConnection connection, Guid requestId, int serverId,
         List<InvestigationAlertRecurrence> result, CancellationToken cancellationToken)
     {
+        var zone = ServerZone(connection, serverId);
         using var command = Command(connection, RecurrenceSql, requestId, serverId);
         using var reader = command.ExecuteReader();
         string? metric = null;
         DateTime around = default;
-        int fired = 0, muted = 0;
-        var firedDates = new List<DateOnly>();
-        var mutedDates = new List<DateOnly>();
-        var daysAgo = new List<int>();
+        var fires = new List<(DateTime FireUtc, bool Muted)>();
         void Flush()
         {
             if (metric is not null)
-                result.Add(new InvestigationAlertRecurrence(metric, around, fired, muted, firedDates, mutedDates, daysAgo));
-            firedDates = new List<DateOnly>();
-            mutedDates = new List<DateOnly>();
-            daysAgo = new List<int>();
-            fired = 0;
-            muted = 0;
+                result.Add(InvestigationAlertRecurrence.FromFires(metric, around, fires, zone));
+            fires = new List<(DateTime FireUtc, bool Muted)>();
         }
 
         while (reader.Read())
@@ -479,23 +468,27 @@ ORDER BY m.metric_name, f.day DESC";
             }
 
             if (reader.IsDBNull(2)) continue;
-            var count = (int)reader.GetInt64(4);
-            var date = DateOnly.ParseExact(reader.GetString(2), "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
-            if (reader.GetBoolean(3))
-            {
-                muted += count;
-                if (!mutedDates.Contains(date)) mutedDates.Add(date);
-            }
-            else
-            {
-                fired += count;
-                if (!firedDates.Contains(date)) firedDates.Add(date);
-            }
-
-            daysAgo.Add(reader.GetInt32(5));
+            fires.Add((Utc(reader, 2), reader.GetBoolean(3)));
         }
 
         Flush();
+    }
+
+    /// <summary>The server's own clock from its newest <c>server_properties</c> row that carries an offset (the hot table: a server
+    /// whose newest row has aged into the archive is read in UTC), so a schedule kept in its local time keeps its streak across a
+    /// DST change. Null when the store holds no offset for the server, which <see cref="InvestigationAlertStreak"/> reads as UTC.</summary>
+    private static TimeZoneInfo? ServerZone(DuckDBConnection connection, int serverId)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = LocalDataService.ServerClockSqlFor("server_properties");
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        using var reader = command.ExecuteReader();
+        if (!reader.Read() || reader.IsDBNull(0))
+            return null;
+
+        var offset = Convert.ToInt32(reader.GetValue(0), System.Globalization.CultureInfo.InvariantCulture);
+        var zoneId = reader.IsDBNull(1) ? null : reader.GetString(1);
+        return ServerClock.Resolve(zoneId, offset).AsTimeZone();
     }
 
     /// <summary>The latest findings for the server over 24 hours, collapsed per chain, the request's own story first, each

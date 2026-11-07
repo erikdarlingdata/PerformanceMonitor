@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -254,11 +255,15 @@ AND   a.alert_time <= $4";
             }
         }
 
+        /* Each server's own clock, so a schedule kept in its local time keeps its streak across a DST change; a server with no
+           stored clock is read in UTC. */
+        var clocks = await DarlingServerClocksReader.GetAsync(postgres, null, McpCommandDeadlines.ReadSeconds, cancellationToken);
+
         for (var i = 0; i < page.Count; i++)
         {
             if (AlertMetricClassifier.IsResolution(page[i].MetricName)) continue;
             streaks[i] = fires.TryGetValue((page[i].ServerId, page[i].MetricName), out var list)
-                ? InvestigationAlertStreak.ForAlert(page[i].AlertTime, list)
+                ? InvestigationAlertStreak.ForAlert(page[i].AlertTime, list, DarlingServerClocksReader.ClockFor(clocks, page[i].ServerId).AsTimeZone())
                 : 0;
         }
 
