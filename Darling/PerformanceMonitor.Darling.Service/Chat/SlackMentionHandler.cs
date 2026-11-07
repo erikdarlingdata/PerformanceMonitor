@@ -156,17 +156,14 @@ public sealed class SlackMentionHandler : ISlackEventHandlers
         var thread = inbound.ThreadTs is null ? null : await _store.FindThreadAsync(inbound.Channel, inbound.ThreadTs, cancellationToken);
         if (thread is null)
         {
-            /* Outside a request thread: answered once per thread (a top-level mention threads under itself), journaled with no text and no request. */
-            await SlackChatAnswering.AnswerOnceAsync(_store, _posts, _logger, null, route.RouteId, null, SlackChatAnswers.OutsideKind, SlackChatAnswers.OutsideThread,
-                inbound.Channel, threadTs, "slack_thread:none:" + inbound.Channel + ":" + threadTs + ":" + InvestigationRequestStore.ChatAnswerKey(SlackChatAnswers.OutsideKind), cancellationToken);
-            await JournalAsync(null, route.RouteId, null, identity, SlackChatAnswers.OutsideKind, inbound, identity, cancellationToken);
+            /* Outside a request thread (a top-level mention threads under itself): one answer and one journal row per person, channel and hour. */
+            await RefuseAsync(null, route.RouteId, null, inbound.Channel, threadTs, identity, identity, SlackChatAnswers.OutsideKind, SlackChatAnswers.OutsideThread, inbound, now, cancellationToken);
             return;
         }
 
         if (IsTooOld(thread.OpenedAtUtc, now))
         {
-            await AnswerOnceAsync(thread, SlackChatAnswers.OldKind, SlackChatAnswers.OldRequest, InvestigationRequestStore.ChatAnswerKey(SlackChatAnswers.OldKind), cancellationToken);
-            await JournalAsync(thread.ThreadRequestId, thread.RouteId, thread.ServerId, identity, SlackChatAnswers.OldKind, inbound, identity, cancellationToken);
+            await RefuseAsync(thread.ThreadRequestId, thread.RouteId, thread.ServerId, thread.ChannelId, thread.ThreadTs, identity, identity, SlackChatAnswers.OldKind, SlackChatAnswers.OldRequest, inbound, now, cancellationToken);
             return;
         }
 
@@ -174,20 +171,26 @@ public sealed class SlackMentionHandler : ISlackEventHandlers
         var level = person is { Enabled: true } ? await _store.RequestLevelAsync(person.PersonId, thread.ServerId, cancellationToken) : 0;
         if (person is null || level < 1)
         {
-            /* No ask grant: one answer per thread and identity, and a journal row with no text that names nobody as an asker. */
+            /* No ask grant: one answer and one journal row per person, channel and hour; the row carries no text and names nobody as an asker. */
             var actor = person is null ? identity : "person:" + person.PersonId.ToString(CultureInfo.InvariantCulture);
-            await AnswerOnceAsync(thread, SlackChatAnswers.NoGrantKind, SlackChatAnswers.NoGrant, InvestigationRequestStore.ChatAnswerKey(SlackChatAnswers.NoGrantKind + ":" + identity), cancellationToken);
-            await JournalAsync(thread.ThreadRequestId, thread.RouteId, thread.ServerId, actor, SlackChatAnswers.NoGrantKind, inbound, identity, cancellationToken);
+            await RefuseAsync(thread.ThreadRequestId, thread.RouteId, thread.ServerId, thread.ChannelId, thread.ThreadTs, actor, identity, SlackChatAnswers.NoGrantKind, SlackChatAnswers.NoGrant, inbound, now, cancellationToken);
             return;
         }
 
         var newest = await _store.NewestRequestAsync(thread, cancellationToken);
         var message = new SlackPersonMessage(inbound.Channel, inbound.Ts, inbound.ThreadTs!, thread.ThreadRequestId, person.PersonId, identity,
             Bound(StripBotMentions(text, inbound.BotUserId)));
-        if (await _store.SaveMessageAsync(message, cancellationToken) != SlackPersonMessageSaved.Saved)
+        switch (await _store.SaveMessageAsync(message, cancellationToken))
         {
-            /* The same mention again (app_mention and message, or Slack's retry on the other connection): the first one acted. */
-            return;
+            case SlackPersonMessageSaved.Duplicate:
+                /* The same mention again (app_mention and message, or Slack's retry on the other connection): the first one acted. */
+                return;
+            case SlackPersonMessageSaved.ThreadFull:
+            case SlackPersonMessageSaved.PersonFull:
+                /* The waiting caps: the message is not kept, and the person is told once an hour. */
+                await RefuseAsync(thread.ThreadRequestId, thread.RouteId, thread.ServerId, thread.ChannelId, thread.ThreadTs, "person:" + person.PersonId.ToString(CultureInfo.InvariantCulture),
+                    identity, SlackChatAnswers.WaitingFullKind, SlackChatAnswers.WaitingFull, inbound, now, cancellationToken);
+                return;
         }
 
         var asker = new SlackAsker(person.PersonId, identity, level);
@@ -210,6 +213,21 @@ public sealed class SlackMentionHandler : ISlackEventHandlers
                     answerCaps: true, cancellationToken);
                 return;
         }
+    }
+
+    /* A refusal (outside a thread, an old thread, no grant, the waiting caps) answers once per person, channel, kind and hour, and journals the mention
+       (no text) only when it answered, so a channel member cannot drive posts or journal rows by repeating. The mark is written before the send. */
+    private async Task RefuseAsync(Guid? requestId, int? routeId, int? serverId, string channel, string threadTs, string actor, string identity, string kind, string text,
+        SlackInboundEvent inbound, DateTime now, CancellationToken cancellationToken)
+    {
+        var answerKey = InvestigationRequestStore.ChatAnswerKey(kind + ":" + identity + ":" + now.ToString("yyyyMMddHH", CultureInfo.InvariantCulture));
+        var onceKey = "slack_thread:refusal:" + channel + ":" + answerKey;
+        if (!await SlackChatAnswering.AnswerOnceAsync(_store, _posts, _logger, requestId, routeId, serverId, kind, text, channel, threadTs, onceKey, cancellationToken, answerKey))
+        {
+            return;
+        }
+
+        await JournalAsync(requestId, routeId, serverId, actor, kind, inbound, identity, cancellationToken);
     }
 
     /// <summary>The acknowledgement's key: once per request in play, so a later request in the same thread gets its own first acknowledgement.</summary>

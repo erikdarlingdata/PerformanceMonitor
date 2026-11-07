@@ -511,10 +511,12 @@ public sealed partial class DarlingMcpInvestigationTools
 
             /* #7659: what granted people asked in the thread rides beside the brief, never inside it, read on the owner connection (the mcp login
                holds no SELECT on the message table). A request nobody asked in carries no key, so an alert claim answers as before. */
-            if (ownerStore is not null && await PersonRequestsAsync(ownerStore, requestId, cancellationToken) is { Requests: { } personRequests })
+            if (ownerStore is not null && await PersonRequestsAsync(ownerStore, requestId, cancellationToken) is { Requests: { } personRequests } people)
             {
                 answer["person_requests"] = personRequests;
                 answer["person_requests_rule"] = PersonRequestsRule;
+                if (people.Omitted > 0)
+                    answer["person_requests_omitted"] = people.Omitted;
             }
 
             return answer.ToJsonString(McpHelpers.JsonOptions);

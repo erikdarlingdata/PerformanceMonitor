@@ -254,6 +254,12 @@ WHERE g.person_id = $1
        OR g.scope_server_id = $2
        OR g.scope_tag_id IN (SELECT m.tag_id FROM config.server_tag_map AS m WHERE m.server_id = $2))";
 
+    /* The waiting rows of a thread, and of one person in it, read before a save: the caps hold a thread to WaitingPerThread and a person to WaitingPerPerson. */
+    internal const string WaitingCountsSql = @"
+SELECT count(*), count(*) FILTER (WHERE person_id = $2)
+FROM config.investigation_person_messages
+WHERE thread_request_id = $1 AND state = 'waiting'";
+
     /* The message's natural key is the channel and ts: the same mention arriving as app_mention and as message, or on both connections, inserts once. */
     internal const string SavePersonMessageSql = @"
 INSERT INTO config.investigation_person_messages (channel_id, ts, thread_ts, thread_request_id, person_id, identity, message_text, state, received_at)
@@ -316,11 +322,13 @@ GROUP BY m.thread_request_id, r.route_id, r.server_id, m.channel_id, m.thread_ts
 ORDER BY min(m.received_at)
 LIMIT $1";
 
+    /* The oldest waiting messages of a thread, at most the thread cap: rows past it wait for the next open. */
     internal const string WaitingMessagesSql = @"
 SELECT channel_id, ts, thread_ts, thread_request_id, person_id, identity, message_text, state, request_id, received_at
 FROM config.investigation_person_messages
 WHERE thread_request_id = $1 AND state = 'waiting'
-ORDER BY received_at, ts";
+ORDER BY received_at, ts
+LIMIT $2";
 
     /* The open chat requests older than $1 with no offline answer yet, with the thread they belong to. A day bounds the read. */
     internal const string UnclaimedChatRequestsSql = @"
@@ -335,13 +343,17 @@ WHERE r.trigger_kind = 'chat'
   AND NOT EXISTS (SELECT 1 FROM config.investigation_journal AS j WHERE j.once_key = 'slack_thread:' || r.request_id::text || ':chat_answer:offline')
 ORDER BY r.opened_at";
 
+    /* The newest messages of a request first, at most the row limit, with the request's whole count: the claim answer keeps the newest inside its
+       character ceiling and says how many it left out. */
     internal const string PersonRequestsSql = @"
-SELECT COALESCE(p.display_name, m.identity), m.person_id, m.message_text, r.server_id
+SELECT COALESCE(p.display_name, m.identity), m.person_id, m.message_text, r.server_id,
+       count(*) OVER () AS total
 FROM config.investigation_person_messages AS m
 JOIN config.investigation_requests AS r ON r.request_id = m.request_id
 LEFT JOIN config.person AS p ON p.person_id = m.person_id
 WHERE m.request_id = $1
-ORDER BY m.received_at, m.ts";
+ORDER BY m.received_at DESC, m.ts DESC
+LIMIT $2";
 
     internal const string PersonRequestGrantsSql = @"
 SELECT g.capability, g.kinds
@@ -400,6 +412,26 @@ FOR UPDATE";
     {
         ArgumentNullException.ThrowIfNull(message);
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        /* The caps, read before the insert: a thread holds WaitingPerThread waiting messages and a person WaitingPerPerson of them, so one asker cannot grow
+           a chat request or the claim answer without bound while a request is in play. A count and an insert, not a lock: two mentions in the same
+           instant can pass together, and the read limit bounds what reaches the agent either way. A duplicate is still answered as one. */
+        await using (var counts = Command(connection, null, WaitingCountsSql, P(message.ThreadRequestId),
+            new NpgsqlParameter<long?> { TypedValue = message.PersonId, NpgsqlDbType = NpgsqlDbType.Bigint }))
+        await using (var reader = await counts.ExecuteReaderAsync(cancellationToken))
+        {
+            await reader.ReadAsync(cancellationToken);
+            var thread = reader.GetInt64(0);
+            var person = reader.GetInt64(1);
+            if (thread >= SlackChatRules.WaitingPerThread || person >= SlackChatRules.WaitingPerPerson)
+            {
+                await reader.CloseAsync();
+                await using var seen = Command(connection, null, "SELECT EXISTS (SELECT 1 FROM config.investigation_person_messages WHERE channel_id = $1 AND ts = $2)", P(message.ChannelId), P(message.Ts));
+                if (await seen.ExecuteScalarAsync(cancellationToken) is true)
+                    return SlackPersonMessageSaved.Duplicate;
+                return person >= SlackChatRules.WaitingPerPerson ? SlackPersonMessageSaved.PersonFull : SlackPersonMessageSaved.ThreadFull;
+            }
+        }
+
         await using var command = Command(connection, null, SavePersonMessageSql,
             P(message.ChannelId), P(message.Ts), P(message.ThreadTs), P(message.ThreadRequestId),
             new NpgsqlParameter<long?> { TypedValue = message.PersonId, NpgsqlDbType = NpgsqlDbType.Bigint },
@@ -621,7 +653,7 @@ FOR UPDATE";
     public async Task<IReadOnlyList<SlackPersonMessage>> WaitingMessagesAsync(Guid threadRequestId, CancellationToken cancellationToken)
     {
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-        await using var command = Command(connection, null, WaitingMessagesSql, P(threadRequestId));
+        await using var command = Command(connection, null, WaitingMessagesSql, P(threadRequestId), P(SlackChatRules.WaitingPerThread));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         var rows = new List<SlackPersonMessage>();
         while (await reader.ReadAsync(cancellationToken))
@@ -654,15 +686,25 @@ FOR UPDATE";
     public async Task<PersonRequestsPage> ListPersonRequestsAsync(Guid requestId, CancellationToken cancellationToken)
     {
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        /* Newest first, at most the row limit; the character ceiling then keeps the newest that fit, and the rest of the request's count is what was left out. */
         var rows = new List<(string Name, long? PersonId, string Text, int ServerId)>();
-        await using (var command = Command(connection, null, PersonRequestsSql, P(requestId)))
+        long total = 0;
+        var characters = 0;
+        await using (var command = Command(connection, null, PersonRequestsSql, P(requestId), P(SlackChatRules.PersonRequestsRowLimit)))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
             {
-                rows.Add((reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetInt64(1), reader.GetString(2), reader.GetInt32(3)));
+                total = reader.GetInt64(4);
+                var text = reader.GetString(2);
+                if (characters + text.Length > SlackChatRules.PersonRequestsCharLimit && rows.Count > 0)
+                    break;
+                characters += text.Length;
+                rows.Add((reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetInt64(1), text, reader.GetInt32(3)));
             }
         }
+
+        rows.Reverse();
 
         var grants = new Dictionary<long, IReadOnlyList<string>>();
         var result = new List<PersonRequest>(rows.Count);
@@ -691,7 +733,7 @@ FOR UPDATE";
             result.Add(new PersonRequest(name, held, text));
         }
 
-        return new PersonRequestsPage(result, 0);
+        return new PersonRequestsPage(result, (int)Math.Max(0, total - rows.Count));
     }
 
     /// <summary>
