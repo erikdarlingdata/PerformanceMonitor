@@ -20,7 +20,8 @@ name: PR CI
 # and the dispatched run plans every area, sets `CI result` and a second status, `CI full suite`, on dev's tip, and skips when
 # that tip already carries a finished `CI full suite`. Branch protection on dev has `strict: false`, so two pull requests that
 # each pass alone can fail together; the hourly run is what catches that, within the hour and with a short commit range.
-# `gh workflow run pr.yml --ref dev` is the manual full run.
+# `gh workflow run pr.yml --ref dev` is the manual full run. On another ref it runs that branch's full suite and sets only
+# `CI result` on the branch's commit: `CI full suite` and the "dev is red" issue are written only when the ref is dev.
 
 on:
   push:
@@ -277,21 +278,22 @@ jobs:
           PY
 
       # Pending from the moment the plan says the run goes. A fork's read-only token cannot write it (the verdict job
-      # says so in one notice). A dev run that plans every area also marks `CI full suite` pending (#7819); the verdict job
-      # finishes both, and the hourly re-dispatch skips a commit whose `CI full suite` is finished.
+      # says so in one notice). A run on the dev ref that plans every area also marks `CI full suite` pending (#7819); the verdict
+      # job finishes both, and the hourly re-dispatch skips a commit whose `CI full suite` is finished. A pull request's ref is
+      # refs/pull/N/merge and a manual dispatch on another branch has that branch's ref, so neither writes `CI full suite`.
       - name: Set CI result to pending
         if: steps.plan.outputs.run == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT_NAME: ${{ github.event_name }}
+          ON_DEV: ${{ github.ref == 'refs/heads/dev' }}
           FULL_SUITE: ${{ steps.plan.outputs.full_suite }}
           TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           gh api "repos/${GITHUB_REPOSITORY}/statuses/${CI_RESULT_SHA}" -f state=pending -f context='CI result' \
             -f description='CI is running' -f target_url="${TARGET_URL}" > /dev/null
-          if [ "${EVENT_NAME}" != "pull_request" ] && [ "${FULL_SUITE}" = "true" ]; then
+          if [ "${ON_DEV}" = "true" ] && [ "${FULL_SUITE}" = "true" ]; then
             gh api "repos/${GITHUB_REPOSITORY}/statuses/${CI_RESULT_SHA}" -f state=pending -f context='CI full suite' \
               -f description='The full suite is running' -f target_url="${TARGET_URL}" > /dev/null
           fi
@@ -795,6 +797,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
           IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          ON_DEV: ${{ github.ref == 'refs/heads/dev' }}
           FULL_SUITE: ${{ needs.plan.outputs.full_suite }}
           PLAN_RESULT: ${{ needs.plan.result }}
           PLAN_OUTCOME: ${{ needs.plan.outputs.outcome }}
@@ -868,9 +871,10 @@ jobs:
 
           gh api "repos/${GITHUB_REPOSITORY}/statuses/${CI_RESULT_SHA}" -f state="${state}" -f context='CI result' \
             -f description="${desc:0:140}" -f target_url="${TARGET_URL}" > /dev/null
-          # #7819: a dev run that planned every area also finishes `CI full suite`, which the hourly re-dispatch's skip rule and
-          # the "dev is red" commit range read. A pull request never carries it.
-          if [ "${EVENT_NAME}" != "pull_request" ] && [ "${FULL_SUITE}" = "true" ]; then
+          # #7819: a run on the dev ref that planned every area also finishes `CI full suite`, which the hourly re-dispatch's skip
+          # rule and the "dev is red" commit range read. A pull request never carries it, and a manual dispatch on another ref
+          # sets only `CI result` on that branch's commit.
+          if [ "${ON_DEV}" = "true" ] && [ "${FULL_SUITE}" = "true" ]; then
             gh api "repos/${GITHUB_REPOSITORY}/statuses/${CI_RESULT_SHA}" -f state="${state}" -f context='CI full suite' \
               -f description="${desc:0:140}" -f target_url="${TARGET_URL}" > /dev/null
           fi
@@ -879,9 +883,10 @@ jobs:
       # (#7819): a green push that ran the map's classes says nothing about the classes it did not run, and the hourly full
       # run is at most an hour away. A failed full run names the commits since the last full run that passed; a failed push
       # names those since the last green dev run. Only a failure opens it: a cancelled or skipped-by-cancel run says nothing
-      # about the code.
+      # about the code. Only a run on the dev ref (a push, or a dispatch onto dev) touches the issue: a manual dispatch on
+      # another branch tests that branch and must neither open nor close it.
       - name: Open, update or close the "dev is red" issue
-        if: ${{ always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && steps.verdict.outputs.state != '' }}
+        if: ${{ always() && github.ref == 'refs/heads/dev' && steps.verdict.outputs.state != '' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
