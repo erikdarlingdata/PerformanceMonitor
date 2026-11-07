@@ -18,7 +18,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public static class ServerTrendSql
 {
-    /// <summary>Total wait time across ALL wait types as one per-second series: each row's delta over its own stored interval, the rates summed per collection (a collection whose every interval was unknowable is dropped, never read as 0), then each collection weighted by its cadence into the bucket as a time-weighted rate.</summary>
+    /// <summary>Total wait time across ALL wait types as one per-second series: each collection's whole stored wait over its cadence, the shortest interval any of its rows measured (a collection whose every interval was unknowable is dropped, never read as 0), then summed per bucket as a time-weighted rate, so the total equals the sum of the per-type trends over the same rows.</summary>
     public const string TotalWaits = $"""
         WITH per_collection AS
         (
@@ -26,14 +26,15 @@ public static class ServerTrendSql
                 collection_time,
                 /* #8078: sample_interval_seconds is a per-row figure, the seconds since that wait type's own previous
                    sighting. A type that returns after missing some passes stores several cadences while its siblings
-                   store one, so each row is rated over its OWN interval and the rates are summed; the collection's
-                   cadence, the shortest interval any of its rows measured, then weights the collection in the bucket,
-                   so the bucket's figure stays a summed wait over seconds rather than an average of per-collection
-                   rates. A row whose interval is 0 (a first sighting or a counter reset: no delta knowable) adds
-                   nothing, and a collection whose EVERY row is 0 (a restart) has no cadence, so the point is dropped
-                   rather than rendered as 0.00. A pre-V127 collection stored no interval on any row: its summed
-                   delta is rated over the LAG this read always used for those rows. */
-                SUM(CAST(delta_wait_time_ms AS double precision) / NULLIF(sample_interval_seconds, 0)) AS summed_row_rates,
+                   store one, and its delta is the whole of that type's wait since it was last seen. The collection
+                   credits every rated row's delta whole, over the collection's cadence, the shortest interval any of
+                   its rows measured, so no wait is lost and the bucket's total equals the sum of the per-type trends
+                   over the same rows; the returning type's wait lands on the collection that stored it. A row whose
+                   interval is 0 (a first sighting or a counter reset: no delta knowable) adds nothing, and a collection
+                   whose EVERY row is 0 (a restart) has no cadence, so the point is dropped rather than rendered as 0.00.
+                   A pre-V127 collection stored no interval on any row: its summed delta is rated over the LAG this
+                   read always used for those rows. */
+                SUM(delta_wait_time_ms) FILTER (WHERE sample_interval_seconds > 0) AS rated_total_ms,
                 MIN(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0) AS cadence_seconds,
                 MAX(sample_interval_seconds) IS NULL AS unstored,
                 SUM(delta_wait_time_ms) AS total_delta_ms,
@@ -49,7 +50,7 @@ public static class ServerTrendSql
             SELECT
                 collection_time,
                 CASE WHEN unstored THEN CASE WHEN lag_seconds > 0 THEN CAST(total_delta_ms AS double precision) END
-                     ELSE summed_row_rates * cadence_seconds END AS rated_delta_ms,
+                     ELSE CAST(rated_total_ms AS double precision) END AS rated_delta_ms,
                 CASE WHEN unstored THEN CASE WHEN lag_seconds > 0 THEN lag_seconds END
                      ELSE cadence_seconds END AS rated_seconds
             FROM per_collection
