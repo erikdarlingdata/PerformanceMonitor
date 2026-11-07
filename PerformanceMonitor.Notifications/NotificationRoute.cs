@@ -32,8 +32,8 @@ namespace PerformanceMonitor.Notifications;
 /// </summary>
 /// <param name="RouteId">The identity key, for the ledger's provenance and the editors' updates.</param>
 /// <param name="MetricMatch">A family name (<see cref="AlertFamily.All"/>, matched case-insensitively) or an
-/// exact metric name, or <c>Analysis: {category}</c> for every analysis finding of one category (#5632). Exact wins
-/// over category, and category over family, at resolution.</param>
+/// exact metric name, or <c>Analysis: {category}</c> for every analysis finding of one category (#5632), or <c>Analysis: *</c> for every analysis finding (#7999). Exact wins
+/// over category, category over <c>Analysis: *</c>, and that over family, at resolution.</param>
 /// <param name="TeamsUrl">Teams incoming-webhook URL, or empty to inherit.</param>
 /// <param name="SlackUrl">Slack incoming-webhook URL, or empty to inherit.</param>
 /// <param name="GenericUrl">The generic JSON-POST endpoint, or empty to inherit. Headers, body template and

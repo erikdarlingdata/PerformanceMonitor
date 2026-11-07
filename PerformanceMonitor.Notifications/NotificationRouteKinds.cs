@@ -34,6 +34,29 @@ public static class NotificationRouteKinds
     /// <summary><c>match_kind</c> for the every-analysis-finding route, <c>Analysis: *</c> (#7999): every finding of every category.</summary>
     public const string AnalysisAllKind = "analysis_all";
 
+    /// <summary>The label of the every-analysis-finding choice in both edit dialogs' Matches list (#7999). Offered at every scope,
+    /// unlike the every-metric choice. Its combo tag is <see cref="NotificationRoute.AnalysisAllMatch"/>.</summary>
+    public const string AnalysisAllChoiceLabel = "Every analysis finding (Analysis: *)";
+
+    /// <summary>The line the edit dialogs show under the Matches list for <see cref="AnalysisAllChoiceLabel"/> (#7999).</summary>
+    public const string AnalysisAllChoiceDescription =
+        "Every analysis finding of any category, at any scope. A route for one category (Analysis: <category>) or for the finding's own name wins over it; a family route and * lose to it.";
+
+    /// <summary>The <c>metric_match</c> text an edit dialog stores (#7999): the chosen combo tag, or the typed exact name when the
+    /// tag is null. An exact name that is really a family spelled by hand becomes the family, and any spelling of the
+    /// every-analysis-finding match becomes <see cref="NotificationRoute.AnalysisAllMatch"/>, so the list and the router agree
+    /// about what kind of route it is. No validation: a refusal is the writer's.</summary>
+    public static string MatchToSave(string? chosenTag, string? typedExact)
+    {
+        var match = chosenTag ?? (typedExact ?? "").Trim();
+        if (chosenTag is null && AlertFamily.NormalizeFamily(match) is { } family)
+        {
+            match = family;
+        }
+
+        return NotificationRoute.CanonicalMatch(match);
+    }
+
     /// <summary>Whether <paramref name="metricMatch"/> is the <c>*</c> match (the same rule as <see cref="NotificationRoute.IsWildcard"/>).</summary>
     public static bool IsWildcard(string? metricMatch) =>
         string.Equals(metricMatch?.Trim(), NotificationRoute.WildcardMatch, StringComparison.Ordinal);

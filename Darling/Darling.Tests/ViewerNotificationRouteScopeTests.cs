@@ -165,6 +165,16 @@ public sealed class ViewerNotificationRouteScopeTests
         Assert.Equal("Every metric", Row("*", server: 1).MatchKindDisplay);
         Assert.Equal("Family", Row("performance").MatchKindDisplay);
         Assert.Equal("Exact metric", Row("Deadlocks Detected").MatchKindDisplay);
+        Assert.Equal("Analysis category", Row("Analysis: queries").MatchKindDisplay);
+    }
+
+    [Theory]
+    [InlineData("Analysis: *")]
+    [InlineData("  analysis:   * ")]
+    public void TheKindColumn_NamesTheEveryAnalysisFindingMatch_AtAnyScope(string match)
+    {
+        Assert.Equal("Every analysis finding", Row(match).MatchKindDisplay);
+        Assert.Equal("Every analysis finding", Row(match, server: 1).MatchKindDisplay);
     }
 
     /* ---- the windows' source --------------------------------------------------------------------------------- */

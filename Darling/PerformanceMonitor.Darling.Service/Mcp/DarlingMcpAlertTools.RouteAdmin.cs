@@ -40,7 +40,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// </summary>
 public sealed partial class DarlingMcpAlertTools
 {
-    private const string MatchHelp = "a family (performance, self-monitor, reports, agent-jobs, external), 'Analysis: <category>', an exact metric name, or * (scoped routes only)";
+    private const string MatchHelp = "a family (performance, self-monitor, reports, agent-jobs, external), 'Analysis: <category>', 'Analysis: *' (every analysis finding, at any scope), an exact metric name, or * (scoped routes only)";
 
     [McpServerTool(Name = "create_notification_route"), Description(
         "Creates a notification route, optionally with its own destinations (Slack, Teams, generic webhook, PagerDuty, email). With none, each channel goes where it went before (the next matching route, else Settings). Changes shared alert configuration; the service delivers on it at its next sweep. Returns created (the route with its recipient list in full, and for each destination set whether it is saved: the host for Teams and Slack, never a URL or key) with the undo call, or invalid. Only an operator token sets the agent fields (levels 0 to 3)." +
@@ -786,12 +786,9 @@ public sealed partial class DarlingMcpAlertTools
         return args;
     }
 
-    /// <summary>The match as the Viewer's dialog stores it: an exact name that is really a family spelled by hand is the family.</summary>
-    private static string NormalizeRouteMatch(string? match)
-    {
-        var text = (match ?? "").Trim();
-        return AlertFamily.NormalizeFamily(text) ?? text;
-    }
+    /// <summary>The match as the Viewer's dialog stores it: an exact name that is really a family spelled by hand is the family, and
+    /// any spelling of the every-analysis-finding match is <c>Analysis: *</c> (#7999).</summary>
+    internal static string NormalizeRouteMatch(string? match) => NotificationRouteKinds.MatchToSave(null, match);
 
     private const string SeveritiesHelp = "critical, warning or both; both is the default and takes every alert. An alert that is not Critical counts as Warning. A route whose filter excludes an alert does not match it, and matching goes on to the next route and ends at the default channels";
 

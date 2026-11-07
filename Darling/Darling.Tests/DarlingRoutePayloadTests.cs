@@ -88,6 +88,35 @@ public sealed class DarlingRoutePayloadTests
     }
 
     [Fact]
+    public void AnAnalysisAllRoute_ReadsAnalysisAll_InThePerformanceFamily_AtAnyScope()
+    {
+        /* #7999 */
+        var fleet = Payload(new PgNotificationRouteStore.RouteSummary(12, "Analysis: *", "performance", new[] { "slack" }, "", true, DateTime.UtcNow));
+        Assert.Equal("analysis_all", fleet.GetProperty("match_kind").GetString());
+        Assert.Equal("performance", fleet.GetProperty("family").GetString());
+
+        var scoped = Payload(new PgNotificationRouteStore.RouteSummary(13, "Analysis: *", "performance", new[] { "slack" }, "", true, DateTime.UtcNow, 1, null));
+        Assert.Equal("analysis_all", scoped.GetProperty("match_kind").GetString());
+
+        var category = Payload(new PgNotificationRouteStore.RouteSummary(14, "Analysis: queries", "performance", new[] { "slack" }, "", true, DateTime.UtcNow));
+        Assert.Equal("analysis_category", category.GetProperty("match_kind").GetString());
+    }
+
+    [Theory]
+    [InlineData("Analysis: *", "Analysis: *")]
+    [InlineData("  analysis:   * ", "Analysis: *")]
+    [InlineData("ANALYSIS: *", "Analysis: *")]
+    [InlineData("Analysis: queries", "Analysis: queries")]
+    [InlineData("Analysis:*", "Analysis:*")]
+    [InlineData("PERFORMANCE", "performance")]
+    [InlineData(" High CPU ", "High CPU")]
+    [InlineData("*", "*")]
+    public void TheMcpWriters_StoreTheCanonicalMatch(string typed, string stored)
+    {
+        Assert.Equal(stored, DarlingMcpAlertTools.NormalizeRouteMatch(typed));
+    }
+
+    [Fact]
     public void BothDarlingRouteTools_ShareTheOneProjection()
     {
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs").ReplaceLineEndings("\n");

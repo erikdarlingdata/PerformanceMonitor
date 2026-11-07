@@ -543,6 +543,7 @@ public sealed class NotificationRouteRow
     public string MatchKindDisplay =>
         MetricMatch.Trim() == NotificationRoute.WildcardMatch ? "Every metric"
         : Family is not null ? "Family"
+        : NotificationRoute.IsAnalysisAllMatch(MetricMatch) ? "Every analysis finding"
         : NotificationRoute.AnalysisCategoryOf(MetricMatch) is not null ? "Analysis category"
         : "Exact metric";
 

@@ -115,6 +115,8 @@ public partial class NotificationRouteEditDialog : Window
             FamilyCombo.Items.Add(new ComboBoxItem { Content = name, Tag = name });
         }
 
+        /* #7999: every analysis finding, at every scope. After the families so a family's index is still its position. */
+        FamilyCombo.Items.Add(new ComboBoxItem { Content = NotificationRouteKinds.AnalysisAllChoiceLabel, Tag = NotificationRoute.AnalysisAllMatch });
         FamilyCombo.Items.Add(new ComboBoxItem { Content = ExactMetricChoice, Tag = null });
 
         /* #5632: the agent channel, Inherit / Off / Investigate, and its four numbers. */
@@ -190,6 +192,10 @@ public partial class NotificationRouteEditDialog : Window
         {
             FamilyCombo.SelectedItem = _wildcardItem;
         }
+        else if (NotificationRoute.IsAnalysisAllMatch(Route.MetricMatch))
+        {
+            FamilyCombo.SelectedItem = FamilyCombo.Items.Cast<ComboBoxItem>().First(i => Equals(i.Tag, NotificationRoute.AnalysisAllMatch));
+        }
         else if (family is null)
         {
             FamilyCombo.SelectedIndex = FamilyCombo.Items.IndexOf(FamilyCombo.Items.Cast<ComboBoxItem>().First(i => i.Tag is null));
@@ -221,6 +227,7 @@ public partial class NotificationRouteEditDialog : Window
         FamilyDescriptionText.Text = SelectedMatch() switch
         {
             NotificationRoute.WildcardMatch => "Every alert for this scope that no more specific route of the same scope matches. Offered only with a server or a tag.",
+            NotificationRoute.AnalysisAllMatch => NotificationRouteKinds.AnalysisAllChoiceDescription,
             AlertFamily.SelfMonitor => "Alerts about the monitoring tool itself: its store, collectors, jobs and certificates (Compression Job Stuck, Collection Stopped, Store Disk Pressure, Retention Held, …).",
             AlertFamily.Reports => "Scheduled prose — the Collector Cost Digest, the Fleet Sweep Rollup, the Daily Digest (metric Analysis Singles Digest) and the Daily Health Report. Reports to read, not pages.",
             AlertFamily.AgentJobs => "SQL Server Agent: Failed Agent Job, Long-Running Job, Agent Not Running, Agent Alert Gaps.",
@@ -305,12 +312,9 @@ public partial class NotificationRouteEditDialog : Window
 
         ValidationText.Visibility = Visibility.Collapsed;
 
-        /* An exact name that is really a family spelled by hand is normalised to the family, so the grid and
-           the resolver agree about what kind of route this is. */
-        if (AlertFamily.NormalizeFamily(Route.MetricMatch) is { } family)
-        {
-            Route.MetricMatch = family;
-        }
+        /* An exact name that is really a family spelled by hand is normalised to the family, and any spelling of
+           "Analysis: *" to its canonical text (#7999), so the grid and the resolver agree about what kind of route this is. */
+        Route.MetricMatch = NotificationRouteKinds.MatchToSave(SelectedMatch(), Route.MetricMatch);
 
         DialogResult = true;
     }
