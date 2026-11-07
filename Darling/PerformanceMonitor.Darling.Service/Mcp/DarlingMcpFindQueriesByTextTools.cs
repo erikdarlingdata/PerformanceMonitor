@@ -654,7 +654,8 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
                     return Stopped();
                 }
 
-                await using (var arm = new NpgsqlCommand("SET LOCAL statement_timeout = " + remaining.ToString(CultureInfo.InvariantCulture), connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
+                var armSql = "SET LOCAL statement_timeout = " + remaining.ToString(CultureInfo.InvariantCulture);
+                await using (var arm = new NpgsqlCommand(armSql, connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
                 {
                     await arm.ExecuteNonQueryAsync(cancellationToken);
                 }
