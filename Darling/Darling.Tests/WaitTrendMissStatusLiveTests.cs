@@ -22,8 +22,8 @@ namespace Darling.Tests;
 /// <summary>
 /// #6446: <c>get_wait_trend</c> on a wait type with no rows in the window, against a real store. The status word says
 /// whether the gap is permanent, so it follows the server's own rules: <c>empty</c> when the collector would store the
-/// wait type and nothing waited, <c>not_collected</c> only for a wait type the collector never stores (the ignored
-/// list), <c>unavailable</c> when no wait stats exist at all. Lite's twin is <c>WaitTrendMissStatusTests</c>.
+/// wait type and nothing waited, <c>not_collected</c> only for a wait type on the ignored list (the collector skips
+/// it), <c>unavailable</c> when no wait stats exist at all. Lite's twin is <c>WaitTrendMissStatusTests</c>.
 /// </summary>
 [Collection("live-postgres")]
 public sealed class WaitTrendMissStatusLiveTests
@@ -48,7 +48,7 @@ public sealed class WaitTrendMissStatusLiveTests
     });
 
     [Fact]
-    public Task AnIgnoredWaitType_IsNotCollected_AndSaysTheCollectorNeverStoresIt() => RunAsync(async (connection, postgres, ct) =>
+    public Task AnIgnoredWaitType_IsNotCollected_AndSaysItIsOnTheIgnoredList() => RunAsync(async (connection, postgres, ct) =>
     {
         await InsertWaitStatAsync(connection, ct, CollectedWait);
         Assert.Contains("SLEEP_TASK", IgnoredWaitDefaults.All);
@@ -56,7 +56,12 @@ public sealed class WaitTrendMissStatusLiveTests
         using var doc = JsonDocument.Parse(await DarlingMcpDataTools.GetWaitTrend(postgres, "SLEEP_TASK", ServerName, cancellationToken: ct));
 
         Assert.Equal("not_collected", doc.RootElement.GetProperty("status").GetString());
-        Assert.Contains("never stores", doc.RootElement.GetProperty("message").GetString());
+        var message = doc.RootElement.GetProperty("message").GetString()!;
+        Assert.Contains("ignored (benign) wait list", message, StringComparison.Ordinal);
+        /* #7880: the shared miss text no longer claims the collector never stores the type, because rows stored before
+           the type was ignored can exist; it says the type is not shown. */
+        Assert.DoesNotContain("never stores", message, StringComparison.Ordinal);
+        Assert.Contains("not shown", message, StringComparison.Ordinal);
     });
 
     [Fact]

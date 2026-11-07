@@ -20,7 +20,7 @@
 
 import { FILTERED, readScope } from "./database-filter-reads.js";
 import { plainText, shortEmptyLine } from "./plain-text.js";
-import { withPlotPoints } from "./trend-points.js";
+import { MEAN_ONLY_READS, TREND_POINT_READS, withPlotPoints } from "./trend-points.js";
 
 /* ─────────────────────────── DOM builders (textContent-only) ─────────────────────────── */
 
@@ -1133,7 +1133,27 @@ export function fmtPct(v, o) {
   const n = Number(v);
   if (!isFinite(n)) return "—";
   const places = placesFor(o);
-  return places > 0 ? fixed(n, places) + "%" : Math.round(n) + "%";
+  if (places > 0) return fixed(n, places) + "%";
+  /* #7945: a cell or tooltip percent under 1 keeps one significant digit (0.46 reads 0.5%, 0.04 reads 0.04%), so a small share never reads 0%. */
+  if (stepOf(o) == null && n !== 0 && Math.abs(n) < 1) return n.toLocaleString(undefined, { maximumSignificantDigits: 1 }) + "%";
+  return Math.round(n) + "%";
+}
+/* #7945: the value a cell or tooltip (no axis top, no step) picks its unit by. A value that rounds, at the decimals its unit prints (none in the
+   base unit, one above it), up to the next unit's base would read as that base (999.6 ms as "1,000 ms", 59.96 s as "60.0 s", 1,023.6 MB as
+   "1,024 MB"), so it is treated as the next unit and reads 1.0 s, 1.0 min or 1.0 GB. `bases` are the unit edges in the base unit, ascending.
+   A call with a step keeps its own value: an axis label takes its unit from the axis's top tick. */
+const MS_BASES = [1000, 60000, 3600000];
+const BYTE_BASES = [1024, 1024 * 1024, 1024 * 1024 * 1024];
+function cellBasis(n, o, bases) {
+  const abs = Math.abs(n);
+  if (stepOf(o) != null) return abs;
+  let basis = abs;
+  let per = 1;
+  for (const base of bases) {
+    if (basis < base && Number((abs / per).toFixed(per === 1 ? 0 : 1)) * per >= base) basis = base;
+    per = base;
+  }
+  return basis;
 }
 export function fmtMs(v, o) {
   if (v == null) return "—";
@@ -1142,7 +1162,7 @@ export function fmtMs(v, o) {
   /* #7586: an axis tick is printed in the unit of the axis's largest tick (o.axisMax), so one axis never reads "500 ms, 1.0 s, 1.5 s"; a
      tooltip or grid cell (no axisMax) picks the unit from its own value. */
   const top = axisTopOf(o);
-  const basis = top == null ? Math.abs(n) : top;
+  const basis = top == null ? cellBasis(n, o, MS_BASES) : top;
   /* #7726: a positive figure under 1 ms in a cell or tooltip (no axis step, no axis top) is printed in whole microseconds, so a query that
      ran a million times at 0.03 ms reads "32 µs" and not "0 ms". Exactly 0 stays "0 ms". An axis tick keeps its decimals of ms. */
   if (top == null && stepOf(o) == null && n > 0 && n < 1) {
@@ -1170,7 +1190,8 @@ export function fmtMb(v, o) {
   if (!isFinite(n)) return "—";
   /* #7555: an axis tick is printed in the unit of the axis's largest tick (o.axisMax), so one axis never reads "512 MB, 1.0 GB". */
   const top = axisTopOf(o);
-  if ((top == null ? n : top) < 1024) return fmtInt(n, stepArg(o)) + " MB";
+  const basis = top != null ? top : n < 0 ? n : cellBasis(n, o, [1024]);
+  if (basis < 1024) return fmtInt(n, stepArg(o)) + " MB";
   return top != null && n === 0 ? "0 GB" : fmtNum(n / 1024, placesFor(o, wholeStepMin(o, 1024), 1024)) + " GB";
 }
 /* #7555: the largest tick of the axis a label belongs to, which axisTickLabels hands each formatter as o.axisMax. Null for a tooltip or a
@@ -1245,7 +1266,7 @@ export function fmtBytes(v, o) {
   /* #7555: an axis tick (o.axisMax, the largest tick) prints in the axis's one unit, with the decimals its step needs. A cell or tooltip,
      called without options, keeps one decimal in the unit that fits its own value. */
   const top = axisTopOf(o);
-  const basis = top == null ? Math.abs(n) : top;
+  const basis = top == null ? cellBasis(n, o, BYTE_BASES) : top;
   if (basis < 1024) return fmtInt(n, stepArg(o)) + " B";
   const at = basis < 1024 * 1024 ? 1 : basis < 1024 * 1024 * 1024 ? 2 : 3;
   const per = Math.pow(1024, at);
@@ -1574,7 +1595,8 @@ export async function apiGetJoined(path, signal) {
     const shared = await Promise.race([entry.body, cancelled]);
     if (!shared || shared.aborted) return { kind: "aborted" };
     if (shared.transportError) return { kind: "error", message: shared.transportError };
-    return await classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw, retryAfter: shared.retryAfter });
+    /* #7945: the answer's url rides along so a failure with no message of its own can name the path (noMessageText). */
+    return await classifyResponse({ ok: shared.ok, status: shared.status, url: shared.url, text: async () => shared.raw, retryAfter: shared.retryAfter });
   } finally {
     if (signal && onAbort) signal.removeEventListener("abort", onAbort);
     if (entry) {
@@ -1621,7 +1643,7 @@ export async function apiGetFleet(store) {
 
     const shared = await request;
     if (shared.transportError) return { kind: "error", message: shared.transportError };
-    const res = await classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });
+    const res = await classifyResponse({ ok: shared.ok, status: shared.status, url: shared.url, text: async () => shared.raw });
     if (res.kind === "data") stampFleetWindow(res.data);
     return res;
   } finally {
@@ -1655,7 +1677,7 @@ export function windowPhrase(hours) {
 async function fetchBody(path, signal, store) {
   try {
     const resp = await fetch(path, { headers: storeHeaders({ Accept: "application/json" }, store), signal });
-    return { ok: resp.ok, status: resp.status, raw: await resp.text(), retryAfter: retryAfterOf(resp) };
+    return { ok: resp.ok, status: resp.status, url: resp.url, raw: await resp.text(), retryAfter: retryAfterOf(resp) };
   } catch (e) {
     if (e && e.name === "AbortError") return { aborted: true };
     return { transportError: networkErrorText(e) };
@@ -1806,15 +1828,20 @@ export function busyRetryAfter(res) {
   return res && res.kind === "error" && res.status === 429 ? Math.max(1, res.retryAfterSeconds || 5) : null;
 }
 
-/** The strip a page shows while it waits to send a read refused busy again. */
+/** The strip a page shows while it waits to send a read refused busy again. `busy-retry` marks it as a panel that has not drawn yet, so
+ *  a poll's in-place refresh (refresh-in-place.js) keeps the panel's current content until the second read answers (#7942). */
 export function busyRetryStrip(seconds) {
-  return noticeStrip("The service is running as many long reads as it allows. Retrying in " + seconds + (seconds === 1 ? " second…" : " seconds…"));
+  const strip = noticeStrip("The service is running as many long reads as it allows. Retrying in " + seconds + (seconds === 1 ? " second…" : " seconds…"));
+  strip.className += " busy-retry";
+  return strip;
 }
 
 /**
  * #6800: runs `read`, and when the service refuses it busy (429) calls `onBusy(seconds)`, waits the Retry-After the reply named and
  * runs it once more. The second answer is the caller's, whatever it is, so a second refusal shows as the error it is. An abort of
  * `signal` during the wait returns { kind: "aborted" } without the second read.
+ * #7942: the wait counts as a read of the page, on the scope current when it starts, so the poll loop neither stamps the page updated
+ * nor plans the next poll while the second read has not run. The hold ends as the second read starts and counts itself.
  */
 export async function retryOnceWhenBusy(read, onBusy, signal) {
   const first = await read();
@@ -1822,20 +1849,27 @@ export async function retryOnceWhenBusy(read, onBusy, signal) {
   if (seconds === null) return first;
   if (signal && signal.aborted) return { kind: "aborted" };
   if (onBusy) onBusy(seconds);
-  const waited = await new Promise((resolve) => {
-    let onAbort = null;
-    const timer = setTimeout(() => {
-      if (signal && onAbort) signal.removeEventListener("abort", onAbort);
-      resolve(true);
-    }, seconds * 1000);
-    if (signal) {
-      onAbort = () => {
-        clearTimeout(timer);
-        resolve(false);
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-    }
-  });
+  const scope = pageReads;
+  scope.n++;
+  let waited;
+  try {
+    waited = await new Promise((resolve) => {
+      let onAbort = null;
+      const timer = setTimeout(() => {
+        if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+        resolve(true);
+      }, seconds * 1000);
+      if (signal) {
+        onAbort = () => {
+          clearTimeout(timer);
+          resolve(false);
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+    });
+  } finally {
+    scope.n--;
+  }
   return waited ? read() : { kind: "aborted" };
 }
 
@@ -1958,6 +1992,7 @@ export function alertDeliveryState(a) {
 export function readTool(tool, params, signal, options) {
   const plan = planCustomRange(tool, params, !!(options && options.wholeWindow));
   const selection = params ? params[TRIM_TO] : undefined;
+  const bucketStarts = stampsBucketStarts(tool);
   /* #7661: a line chart over a rate read asks for about one point per 2 px of its plot (trend-points.js), so a day does not come back as 1-minute
      buckets the plot cannot show. Only a caller that draws that line says so, with `options.plotPx` (the measured or estimated plot of the panel);
      a table, a stat or any other caller passes none and its read keeps the old budget, and so does a read of a level (withPlotPoints). */
@@ -1965,8 +2000,8 @@ export function readTool(tool, params, signal, options) {
   const sized = withPlotPoints(tool, plan.params, plotPx);
   return apiGetJoined("/api/read/" + tool + buildQuery(withDatabaseFilter(tool, sized)), signal)
     .then(localizeWindowNote)
-    .then((res) => finishCustomRange(res, plan))
-    .then((res) => (selection && res && res.kind === "data" ? { ...res, data: trimToRange(res.data, selection.startMs, selection.endMs, 0) } : res));
+    .then((res) => finishCustomRange(res, plan, bucketStarts))
+    .then((res) => (selection && res && res.kind === "data" ? { ...res, data: trimToRange(res.data, selection.startMs, selection.endMs, 0, bucketStarts) } : res));
 }
 
 /** #6301: a read of an event list (blocking, deadlocks, active snapshots) that carries this key, as `{ startMs, endMs }`, has its rows cut to
@@ -2066,14 +2101,23 @@ function planCustomRange(tool, params, wholeWindow) {
   return { params: withEnd, range: { ...range, startMs: Math.max(range.startMs, range.endMs - kept * 3600000) }, ignored: false, narrowed: true };
 }
 
-function finishCustomRange(res, plan) {
+/* #7945: the reads whose rows are time buckets, each stamped at its bucket's START: the trend reads the charts draw and the heatmap's cells. The
+   stamp's name does not say so (get_cpu_utilization stamps its buckets under sample_time, the trends under time or collection_time, system_health
+   under event_time, the heatmap under time_bucket), so the read's name decides. A bucket that starts at a range's end lies wholly outside the range
+   and is cut; a row stamped at an instant (an event, a sample, a run) that lands on the end is inside it and kept. */
+function stampsBucketStarts(tool) {
+  return TREND_POINT_READS.has(tool) || MEAN_ONLY_READS.has(tool) || tool === "get_query_heatmap";
+}
+
+function finishCustomRange(res, plan, bucketStarts) {
   if (plan.ignored) return res && (res.kind === "data" || res.kind === "empty") ? { ...res, presetHours: Number(plan.params.hours) } : res;
   if (plan.narrowed && res && (res.kind === "data" || res.kind === "empty")) res = { ...res, keptCustom: true };
   if (!plan.range || !res || res.kind !== "data") return res;
-  return { ...res, data: trimToRange(res.data, plan.range.startMs, plan.range.asOf ? plan.range.endMs : Infinity, 0) };
+  return { ...res, data: trimToRange(res.data, plan.range.startMs, plan.range.asOf ? plan.range.endMs : Infinity, 0, bucketStarts) };
 }
 
-function trimToRange(node, startMs, endMs, depth) {
+/* `bucketStarts` (#7945, stampsBucketStarts): the rows are bucket starts, so the end is exclusive; otherwise a row at the end is inside the range. */
+function trimToRange(node, startMs, endMs, depth, bucketStarts) {
   if (!node || typeof node !== "object" || Array.isArray(node) || depth > 2) return node;
   let out = node;
   for (const [key, value] of Object.entries(node)) {
@@ -2084,12 +2128,12 @@ function trimToRange(node, startMs, endMs, depth) {
       if (field) {
         next = value.filter((r) => {
           const at = r && parseUtc(r[field]);
-          return !at || (at.getTime() >= startMs && at.getTime() <= endMs);
+          return !at || (at.getTime() >= startMs && (bucketStarts ? at.getTime() < endMs : at.getTime() <= endMs));
         });
         if (next.length === value.length) next = value;
       }
     } else {
-      next = trimToRange(value, startMs, endMs, depth + 1);
+      next = trimToRange(value, startMs, endMs, depth + 1, bucketStarts);
     }
     if (next !== value) {
       if (out === node) out = { ...node };

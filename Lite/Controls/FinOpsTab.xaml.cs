@@ -537,17 +537,18 @@ public partial class FinOpsTab : UserControl
         TotalMemoryText.Text = $"{data.TotalMemoryMb:N0} MB";
         BufferPoolText.Text = $"{data.BufferPoolMb:N0} MB";
 
-        /* Contextual explanation — one sentence describing WHY this classification */
+        /* Contextual explanation — one sentence describing WHY this classification. #7906: a window with no grant sample reads null for
+           the four grant figures; the verdict was judged with them as 0 (no grant pressure), and its sentence reads the same 0. */
         ClassificationExplanation.Text = data.ProvisioningStatus switch
         {
-            "RIGHT_SIZED" => ServerHardwareScope.RightSizedExplanation(data.AvgCpuPct, data.P95CpuPct, data.MaxCpuPct, data.GrantUtilizationPct, bpPct, azureSqlDb),
+            "RIGHT_SIZED" => ServerHardwareScope.RightSizedExplanation(data.AvgCpuPct, data.P95CpuPct, data.MaxCpuPct, data.GrantUtilizationPct ?? 0m, bpPct, azureSqlDb),
             "OVER_PROVISIONED" => ServerHardwareScope.OverProvisionedExplanation(data.AvgCpuPct, data.MaxCpuPct, bpPct, azureSqlDb),
             /* The reason comes from the same place as the verdict. This branch used to read
                "P95CpuPct > 85 ? CPU : memory ratio is {x} (threshold: 0.95)", so a server flagged for grant
                pressure or worker saturation would have been explained as a memory ratio that no longer
                decides anything, citing a threshold the code does not check (#2246). */
             "UNDER_PROVISIONED" => ProvisioningVerdict.UnderProvisionedReason(
-                data.P95CpuPct, data.MaxGrantWaiters, data.GrantTimeouts, data.ForcedGrants,
+                data.P95CpuPct, data.MaxGrantWaiters ?? 0L, data.GrantTimeouts ?? 0L, data.ForcedGrants ?? 0L,
                 data.MaxWorkersCount, data.CurrentWorkersCount,
                 (decimal)stolenPct, data.EngineEdition),
             ProvisioningVerdict.NotEnoughData => ProvisioningVerdict.NotEnoughDataExplanation(data.CpuSamples),

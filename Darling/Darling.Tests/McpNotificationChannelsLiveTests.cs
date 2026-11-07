@@ -237,7 +237,7 @@ public sealed class McpNotificationChannelsLiveTests
             }
 
             await using (var plain = mcp.CreateCommand(
-                "SELECT * FROM config.set_notification_channels(ARRAY['teams_url'], NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'https://teams.example.test/plain', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"))
+                "SELECT * FROM config.set_notification_channels(ARRAY['teams_url'], NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'https://teams.example.test/plain', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"))
             {
                 var refusedPlain = await Assert.ThrowsAsync<PostgresException>(() => plain.ExecuteNonQueryAsync(ct));
                 Assert.Equal("DL400", refusedPlain.SqlState);

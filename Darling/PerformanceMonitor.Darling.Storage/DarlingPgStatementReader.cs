@@ -98,6 +98,16 @@ public static class DarlingPgStatementReader
         "CASE WHEN COUNT(raw_wal_bytes) = 0 THEN NULL ELSE CAST(coalesce(SUM(d_wal_bytes), 0) AS bigint) END";
 
     /// <summary>
+    /// #7909: how far before a window's start the per-series seed lookup reaches for the series' latest stored row, the
+    /// baseline the first in-window sample's block and WAL increments are taken against. One chunk interval (one day),
+    /// so the lookup is one pass over at most two chunks beside the window's own, never a series' whole history; a
+    /// series idle for longer reads as one with no earlier row. <see cref="PgTopQueriesSql"/> and the PG_BAD_ACTOR
+    /// drill-down (<c>PgTargetDrillDownCollector.PgTargetBadActorDetailSql</c>) both splice this text, so the bound
+    /// lives once and the two reads difference a statement against the same row.
+    /// </summary>
+    public const string SeedLookbackSql = "INTERVAL '1 day'";
+
+    /// <summary>
     /// #7567: whether a (queryid, database_id) group is the monitoring service's own statement, as one aggregate over the
     /// differenced entries that carried time: every one's <c>(user_id, database_id)</c> must be in the <c>own_entries</c>
     /// list the text fetch stored for the queryid. Per entry, so the application's statement under another login is false.
@@ -111,7 +121,14 @@ public static class DarlingPgStatementReader
     /// Every counter is reported for the WINDOW, never as a lifetime total. Summing the cumulative
     /// counters directly would multiply each query's whole history by the number of snapshots in the
     /// window, so the time/call/row figures come from the stored delta columns and the block/WAL figures
-    /// are differenced here.
+    /// are differenced here. Every counter covers the same intervals (#7909): a stored delta is the interval
+    /// that ended at its sample, and the block and WAL increments cover those same intervals because a series'
+    /// first sample in the window is differenced against the series' latest stored row before the window (the
+    /// <c>seed</c> CTE), a sample the collector credited with its whole accrual (stored with
+    /// <c>delta_calls = calls</c>) contributes its cumulative figures, and a sample it could not measure
+    /// (<c>delta_calls = 0</c>) contributes nothing on any counter. A statement that ran in one collection
+    /// interval of the window has one stored row in it, because the collector stores nothing for a pass with
+    /// no new calls, and it ranks with that row's deltas and its increment since the row before the window.
     /// <para>The block and WAL columns keep no stored deltas, and reporting them as the window's MAX —
     /// which is what this read used to do — put a lifetime cumulative figure in the same row as a
     /// windowed one. A consumer has no way to see that: it reads <c>total_exec_time_ms</c> for the last
@@ -139,11 +156,17 @@ public static class DarlingPgStatementReader
     /// three-row page sum to 100% of "total" time by construction; this column is the honest denominator,
     /// and it is one extra pass over a result the query has already grouped and is about to sort — no
     /// second statement, no way to drift from the rows. Identical on every row, read once off the first.</para>
+    /// <para>#8054: the statement text is joined AFTER the ranking and the cap, in a wrapper over the ranked page, so
+    /// only the page's rows look it up. The text store is keyed on (server_id, queryid) with that pair as its PRIMARY
+    /// KEY, so the join is one index lookup per returned row and cannot multiply a row, including when one queryid
+    /// ranks under two databases: both rows carry the same text. Under the aggregate the store is joined only for
+    /// <c>own_entries</c>, the small column the <c>$5</c> service-statement filter reads before the cap; the text
+    /// itself is never carried per sample.</para>
     /// <para>$1 server_id, $2/$3 window (naive UTC), $4 row cap — a PARAMETER, bound to the caller's limit by
     /// the page read and to <see cref="PgTopQueriesGridRowCap"/> by the unpaged one.</para>
     /// </summary>
     public const string PgTopQueriesSql = $"""
-        WITH differenced AS (
+        WITH in_window AS (
             SELECT
                 queryid,
                 database_id,
@@ -151,6 +174,77 @@ public static class DarlingPgStatementReader
                 database_name,
                 collection_time,
                 user_id,
+                toplevel,
+                calls,
+                delta_calls,
+                delta_total_exec_time_ms,
+                delta_rows,
+                max_exec_time_ms,
+                max_exec_peakmem_bytes,
+                shared_blks_hit,
+                shared_blks_read,
+                storage_blks_read,
+                orcache_blks_hit,
+                temp_blks_read,
+                temp_blks_written,
+                wal_bytes
+            FROM pg_statement_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+        ),
+        /* #7909: each series' latest stored row before the window, the baseline the first in-window sample's block and
+           WAL increments are taken against. The collector stores a row only for a pass with new calls, and
+           pg_stat_statements advances the block and WAL counters only on a call, so that row carries the cumulative
+           figures every pass between it and the first in-window sample also saw, and the difference is exactly the
+           interval that sample's stored delta_calls covers. Without it a statement that ran in one collection interval
+           of the window, one stored row with its previous row hours earlier, would read 0 on every block and WAL figure.
+           Bounded to SeedLookbackSql (one day, the chunk interval) before the window start: one pass over at most two
+           chunks beside the window's own, filtered to the series the window holds, never the series' whole history. A
+           series idle for longer than that reads as one with no earlier row and starts its block figures at its second
+           in-window sample. */
+        seed AS (
+            SELECT DISTINCT ON (p.queryid, p.database_id, p.user_id, p.toplevel)
+                p.queryid,
+                p.database_id,
+                p.database_name,
+                p.collection_time,
+                p.user_id,
+                p.toplevel,
+                p.calls,
+                p.delta_calls,
+                p.delta_total_exec_time_ms,
+                p.delta_rows,
+                p.max_exec_time_ms,
+                p.max_exec_peakmem_bytes,
+                p.shared_blks_hit,
+                p.shared_blks_read,
+                p.storage_blks_read,
+                p.orcache_blks_hit,
+                p.temp_blks_read,
+                p.temp_blks_written,
+                p.wal_bytes
+            FROM pg_statement_stats AS p
+            WHERE p.server_id = $1
+            AND   p.collection_time < $2
+            AND   p.collection_time >= $2 - {SeedLookbackSql}
+            AND   EXISTS (SELECT 1
+                          FROM in_window AS w
+                          WHERE w.queryid = p.queryid
+                          AND   w.database_id = p.database_id
+                          AND   w.user_id = p.user_id
+                          AND   w.toplevel = p.toplevel)
+            ORDER BY p.queryid, p.database_id, p.user_id, p.toplevel, p.collection_time DESC
+        ),
+        differenced AS (
+            SELECT
+                queryid,
+                database_id,
+                database_name,
+                collection_time,
+                user_id,
+                /* The stored deltas, each the interval that ended at its sample, as the collector measured it against its
+                   previous pass. The block and WAL increments below cover the same intervals. */
                 delta_calls,
                 delta_total_exec_time_ms,
                 delta_rows,
@@ -164,22 +258,29 @@ public static class DarlingPgStatementReader
                 storage_blks_read AS raw_storage_blks_read,
                 orcache_blks_hit  AS raw_orcache_blks_hit,
                 wal_bytes         AS raw_wal_bytes,
-                GREATEST(shared_blks_hit    - LAG(shared_blks_hit)    OVER series, 0) AS d_shared_blks_hit,
-                GREATEST(shared_blks_read   - LAG(shared_blks_read)   OVER series, 0) AS d_shared_blks_read,
-                GREATEST(storage_blks_read  - LAG(storage_blks_read)  OVER series, 0) AS d_storage_blks_read,
-                GREATEST(orcache_blks_hit   - LAG(orcache_blks_hit)   OVER series, 0) AS d_orcache_blks_hit,
-                GREATEST(temp_blks_read     - LAG(temp_blks_read)     OVER series, 0) AS d_temp_blks_read,
-                GREATEST(temp_blks_written  - LAG(temp_blks_written)  OVER series, 0) AS d_temp_blks_written,
-                GREATEST(wal_bytes          - LAG(wal_bytes)          OVER series, 0) AS d_wal_bytes
-            FROM pg_statement_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
+                /* #7909: the increment follows how the collector classified the sample's interval. delta_calls equal to
+                   calls is a first sighting or a reset the collector could date, credited with the entry's whole accrual,
+                   so the block figure is the cumulative value too and there is nothing earlier to difference against.
+                   delta_calls of 0 is an interval the collector could not measure (a first sighting or reset it could not
+                   date, or a gap past its max-gap policy), and the block figure is 0 beside it. Otherwise the increment is
+                   the difference from the series' previous row, the seed row for the first in-window sample, clamped at 0
+                   so a reset between two measured samples drops that interval rather than going negative. */
+                CASE WHEN delta_calls = calls THEN shared_blks_hit   WHEN delta_calls = 0 THEN 0 ELSE GREATEST(shared_blks_hit   - LAG(shared_blks_hit)   OVER series, 0) END AS d_shared_blks_hit,
+                CASE WHEN delta_calls = calls THEN shared_blks_read  WHEN delta_calls = 0 THEN 0 ELSE GREATEST(shared_blks_read  - LAG(shared_blks_read)  OVER series, 0) END AS d_shared_blks_read,
+                CASE WHEN delta_calls = calls THEN storage_blks_read WHEN delta_calls = 0 THEN 0 ELSE GREATEST(storage_blks_read - LAG(storage_blks_read) OVER series, 0) END AS d_storage_blks_read,
+                CASE WHEN delta_calls = calls THEN orcache_blks_hit  WHEN delta_calls = 0 THEN 0 ELSE GREATEST(orcache_blks_hit  - LAG(orcache_blks_hit)  OVER series, 0) END AS d_orcache_blks_hit,
+                CASE WHEN delta_calls = calls THEN temp_blks_read    WHEN delta_calls = 0 THEN 0 ELSE GREATEST(temp_blks_read    - LAG(temp_blks_read)    OVER series, 0) END AS d_temp_blks_read,
+                CASE WHEN delta_calls = calls THEN temp_blks_written WHEN delta_calls = 0 THEN 0 ELSE GREATEST(temp_blks_written - LAG(temp_blks_written) OVER series, 0) END AS d_temp_blks_written,
+                CASE WHEN delta_calls = calls THEN wal_bytes         WHEN delta_calls = 0 THEN 0 ELSE GREATEST(wal_bytes         - LAG(wal_bytes)         OVER series, 0) END AS d_wal_bytes
+            FROM (SELECT * FROM in_window UNION ALL SELECT * FROM seed) AS samples
             WINDOW series AS (
                 PARTITION BY queryid, database_id, user_id, toplevel
                 ORDER BY collection_time
             )
-        )
+        ),
+        /* #8054: the ranked page, every figure a caller reads except the text. The text is joined onto these rows
+           below, after the ORDER BY and the LIMIT, so the store is read once per returned row and never per sample. */
+        ranked AS (
         SELECT
             /* #2554: QUALIFIED, and both of these references need it. The LEFT JOIN below puts
                t.queryid in scope alongside differenced.queryid, which made a bare `queryid`
@@ -193,8 +294,8 @@ public static class DarlingPgStatementReader
             CAST(SUM(delta_total_exec_time_ms) AS bigint) AS total_exec_time_ms,
             CAST(SUM(delta_rows) AS bigint) AS rows_returned,
             MAX(max_exec_time_ms) AS max_exec_time_ms,
-            /* coalesce to 0, not to the cumulative value: a series with a single sample in the window
-               has no measurable interval, and its increment happened before the window began. */
+            /* coalesce to 0, not to the cumulative value: a series with no row before the window and one sample in it
+               has no measurable interval unless the collector credited that sample (the CASE in the CTE above). */
             CAST(coalesce(SUM(d_shared_blks_hit), 0) AS bigint) AS shared_blks_hit,
             CAST(coalesce(SUM(d_shared_blks_read), 0) AS bigint) AS shared_blks_read,
             /* NULL when the source never reported it, 0 when it did and the window holds no interval.
@@ -209,11 +310,6 @@ public static class DarlingPgStatementReader
                0 when it did and the window holds no interval. */
             {WalBytesWindowSql} AS wal_bytes,
             CAST(MAX(max_exec_peakmem_bytes) AS bigint) AS max_exec_peakmem_bytes,
-            /* #2219: the statement text, from the (server_id, queryid) store. MAX rather than a join column
-               because the grain here is (queryid, database_id) while text is keyed on queryid alone — one text
-               per group by construction, so MAX picks it without widening the GROUP BY. LEFT JOIN, so a
-               queryid whose text has not been captured yet still ranks; it simply reads as null. */
-            MAX(t.query_text) AS query_text,
             /* #3541 A7: the WINDOW's total, not the page's - see the remarks. Window aggregate over the
                grouped rows, so it is evaluated before LIMIT and is the same on every row. */
             CAST(SUM(SUM(delta_total_exec_time_ms)) OVER () AS bigint) AS window_total_exec_time_ms,
@@ -227,14 +323,47 @@ public static class DarlingPgStatementReader
             (array_agg(differenced.database_name ORDER BY differenced.collection_time DESC)
                 FILTER (WHERE differenced.database_name IS NOT NULL))[1] AS database_name
         FROM differenced
+        /* #8054: joined here for own_entries alone, the small column the $5 filter in HAVING reads before the cap. The text
+           column is not referenced under the aggregate, so a stored statement's text is never fetched per sample. */
         LEFT JOIN collect.pg_statement_text AS t
                ON  t.server_id = $1
                AND t.queryid = differenced.queryid
+        /* #7909: the seed rows are the baseline for the first in-window sample and are not samples of the window. */
+        WHERE differenced.collection_time >= $2
         GROUP BY differenced.queryid, database_id
         HAVING SUM(delta_total_exec_time_ms) > 0
         /* $5 = include the service's own statements. Change Watch passes false, so the sampler cannot take one of its top-N slots (#7567). */
         AND   ($5 OR NOT {IsServiceStatementSql})
         ORDER BY SUM(delta_total_exec_time_ms) DESC
+        LIMIT $4
+        )
+        SELECT
+            ranked.queryid,
+            ranked.database_id,
+            ranked.calls,
+            ranked.total_exec_time_ms,
+            ranked.rows_returned,
+            ranked.max_exec_time_ms,
+            ranked.shared_blks_hit,
+            ranked.shared_blks_read,
+            ranked.storage_blks_read,
+            ranked.orcache_blks_hit,
+            ranked.temp_blks_read,
+            ranked.temp_blks_written,
+            ranked.wal_bytes,
+            ranked.max_exec_peakmem_bytes,
+            /* #2219: the statement text, from the (server_id, queryid) store, one index lookup per returned row (#8054).
+               LEFT JOIN, so a queryid whose text has not been captured yet still ranks; it simply reads as null. The
+               store is keyed on queryid alone, so a queryid that ranks under two databases carries the same text twice. */
+            txt.query_text,
+            ranked.window_total_exec_time_ms,
+            ranked.is_service_statement,
+            ranked.database_name
+        FROM ranked
+        LEFT JOIN collect.pg_statement_text AS txt
+               ON  txt.server_id = $1
+               AND txt.queryid = ranked.queryid
+        ORDER BY ranked.total_exec_time_ms DESC
         LIMIT $4
         """;
 
@@ -342,11 +471,41 @@ public static class DarlingPgStatementReader
         LIMIT 1
         """;
 
+    /// <summary>
+    /// #8075: whether an unknown counter is explained by the Aurora native path. The registry's engine kind for the server
+    /// (<see cref="MonitoredEngineKind"/> token), whether the extension inventory (<c>pg_extension_availability</c>) has
+    /// ever listed <c>pg_stat_statements</c> for it, and whether the latest row of any database it saw has the extension
+    /// created (<c>installed</c> or <c>outdated</c>). The inventory runs per database and does not mark the one the
+    /// statements collector connects to, so "created in no database" is the condition that is known, and "created
+    /// somewhere" makes no claim about the collector's database. $1 server_id.
+    /// </summary>
+    public const string StatementsExtensionStandingSql = """
+        SELECT s.engine_kind,
+               EXISTS (SELECT 1
+                       FROM pg_extension_availability AS a
+                       WHERE a.server_id = s.server_id
+                       AND   a.extension_name = 'pg_stat_statements') AS inventoried,
+               EXISTS (SELECT 1
+                       FROM (SELECT DISTINCT ON (database_name) state
+                             FROM pg_extension_availability
+                             WHERE server_id = s.server_id
+                             AND   extension_name = 'pg_stat_statements'
+                             ORDER BY database_name, collection_time DESC) AS latest
+                       WHERE latest.state IN ('installed', 'outdated')) AS created_somewhere
+        FROM servers AS s
+        WHERE s.server_id = $1
+        """;
+
     /// <summary>What the window's collection runs recorded about pg_stat_statements evictions.</summary>
     /// <param name="Known">True when at least one run in the window observed the counter. False means unknown, never zero.</param>
     /// <param name="EvictionPasses">Eviction passes in the window; null when <paramref name="Known"/> is false.</param>
     /// <param name="MaxEntries">The latest recorded pg_stat_statements.max, or null when not recorded.</param>
-    public sealed record PgEvictionInfo(bool Known, long? EvictionPasses, long? MaxEntries);
+    /// <param name="AuroraWithoutExtension">#8075: true when the counter is unknown, the registry says the target is Aurora,
+    /// and the latest extension inventory shows pg_stat_statements created in no database it saw. The collector reads
+    /// aurora_stat_statements() there, which needs no extension, so the counter's view (pg_stat_statements_info) is what the
+    /// missing extension costs. False when the counter is known, the engine is not Aurora, there is no inventory, or the
+    /// inventory shows the extension created somewhere, where no claim about the collector's database can be made.</param>
+    public sealed record PgEvictionInfo(bool Known, long? EvictionPasses, long? MaxEntries, bool AuroraWithoutExtension = false);
 
     /// <summary>#4677: the eviction disclosure inputs for one server and window.</summary>
     public static async Task<PgEvictionInfo> GetEvictionInfoAsync(
@@ -369,6 +528,23 @@ public static class DarlingPgStatementReader
             }
         }
 
+        /* #8075: only an unknown counter needs explaining, so the registry and the inventory are read only then. */
+        bool auroraWithoutExtension = false;
+        if (!known)
+        {
+            await using var command = postgres.CreateCommand(StatementsExtensionStandingSql);
+            command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+            command.Parameters.AddWithValue(serverId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                var engineKind = reader.IsDBNull(0) ? null : reader.GetString(0);
+                var inventoried = !reader.IsDBNull(1) && reader.GetBoolean(1);
+                var createdSomewhere = !reader.IsDBNull(2) && reader.GetBoolean(2);
+                auroraWithoutExtension = MonitoredEngineKind.IsAurora(engineKind) && inventoried && !createdSomewhere;
+            }
+        }
+
         long? max = null;
         await using (var command = postgres.CreateCommand(StatementsMaxSql))
         {
@@ -381,6 +557,6 @@ public static class DarlingPgStatementReader
             }
         }
 
-        return new PgEvictionInfo(known, passes, max);
+        return new PgEvictionInfo(known, passes, max, auroraWithoutExtension);
     }
 }

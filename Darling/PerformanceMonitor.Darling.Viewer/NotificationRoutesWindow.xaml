@@ -55,6 +55,8 @@
                     <!-- #6928: the severity filter, Both / Critical only / Warning only. -->
                     <DataGridTextColumn Header="Severity" Binding="{Binding SeveritiesDisplay}" Width="100"/>
                     <DataGridTextColumn Header="Report notice" Binding="{Binding ReportNoticeDisplay}" Width="160"/>
+                    <!-- #7656: the Slack channel id the bot posts the route's request threads into; blank for none. -->
+                    <DataGridTextColumn Header="Bot channel" Binding="{Binding SlackBotChannel}" Width="110"/>
                     <DataGridTextColumn Header="Channels set" Binding="{Binding ChannelsDisplay}" Width="*"/>
                     <!-- #5632: the agent channel, Inherit / Off / Investigate with its hourly and daily limits. -->
                     <DataGridTextColumn Header="Agent" Binding="{Binding AgentDisplay}" Width="150"/>

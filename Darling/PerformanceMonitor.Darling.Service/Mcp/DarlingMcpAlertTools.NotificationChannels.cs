@@ -39,7 +39,8 @@ public sealed partial class DarlingMcpAlertTools
         string? SmtpHost, int? SmtpPort, bool? SmtpSsl, string? SmtpUser, string? SmtpPassword, string? SmtpFrom, string? SmtpRecipients,
         string? Teams, string? TeamsProxy, string? Slack, string? SlackProxy,
         string? Generic, string? GenericHeaders, string? GenericBody, string? GenericProxy,
-        string? PagerDuty, bool? PagerDutyEu, string? PagerDutyProxy, bool? PagerDutyAutoResolve);
+        string? PagerDuty, bool? PagerDutyEu, string? PagerDutyProxy, bool? PagerDutyAutoResolve,
+        string? SlackBotToken = null, string? SlackAppToken = null);
 
     /// <summary>The settings of the notification row the <c>mcp</c> login may read (everything but the secrets).</summary>
     private sealed record ChannelSettings(
@@ -50,7 +51,8 @@ public sealed partial class DarlingMcpAlertTools
         "Sets the default notification channels (the Viewer's Settings > Notifications) that routes fall back to: SMTP, Teams, Slack, the generic webhook and PagerDuty. Only the fields you pass change; - clears a text field. Changes shared alert configuration. Returns updated with each setting before and after (a secret as set or not set, never its value) and an undo for the non-secret settings, or invalid or refused." +
         "<<GUIDE>>" +
         "Sets the channels that alerts go to when no route covers them. A field left out keeps its value; pass - to remove a text field (the SMTP password, user, host, recipients, a webhook URL, the headers, the body template, a proxy). " +
-        "Secrets (smtp_user, smtp_password, teams_webhook_url, slack_webhook_url, generic_webhook_url, generic_headers, pagerduty_routing_key) are sealed by the service the way the Viewer seals them and can never be read back: the answer says set or not set. " +
+        "Secrets (smtp_user, smtp_password, teams_webhook_url, slack_webhook_url, generic_webhook_url, generic_headers, pagerduty_routing_key, slack_bot_token, slack_app_token) are sealed by the service the way the Viewer seals them and can never be read back: the answer says set or not set. " +
+        "slack_bot_token (xoxb-) is what the Slack bot posts investigation threads with and slack_app_token (xapp-) is its app-level token; neither has a proxy. " +
         "The SMTP password is sealed for the host, port, SSL flag and user name, so smtp_password needs smtp_user in the same call (- for none); changing the host, port, SSL flag or user while a password is saved needs the password again. " +
         "A webhook value is sealed for its proxy: changing a proxy while its URL or key is saved needs the URL or key again. The generic headers are sealed for the generic URL as stored, so generic_headers goes with generic_webhook_url in the same call and a new generic URL needs the headers again; a saved signing key blocks a generic URL or proxy change until it is removed in the Viewer. " +
         "A URL must be an absolute http or https URL; a link-local or cloud instance address is refused. Recipients are comma separated plain addresses, at most 50. generic_headers is a JSON object, generic_body_template a template; the Viewer's checks apply. " +
@@ -78,6 +80,8 @@ public sealed partial class DarlingMcpAlertTools
         [Description("Send PagerDuty events to the EU region. Omit to keep.")] bool? pagerduty_eu_region = null,
         [Description("Proxy address for PagerDuty. Omit to keep; - removes it.")] string? pagerduty_proxy = null,
         [Description("Resolve the PagerDuty incident when the alert clears. Omit to keep.")] bool? pagerduty_auto_resolve = null,
+        [Description("Slack bot token (xoxb-) the Slack bot posts with. Secret. Omit to keep; - removes it.")] string? slack_bot_token = null,
+        [Description("Slack app-level token (xapp-). Secret. Omit to keep; - removes it.")] string? slack_app_token = null,
         ILogger? logger = null,
         PostgresConfig? postgresConfig = null,
         CancellationToken cancellationToken = default) =>
@@ -86,7 +90,7 @@ public sealed partial class DarlingMcpAlertTools
             new NotificationChannelsRequest(
                 smtp_host, smtp_port, smtp_ssl, smtp_user, smtp_password, smtp_from, smtp_recipients, teams_webhook_url, teams_proxy,
                 slack_webhook_url, slack_proxy, generic_webhook_url, generic_headers, generic_body_template, generic_proxy,
-                pagerduty_routing_key, pagerduty_eu_region, pagerduty_proxy, pagerduty_auto_resolve),
+                pagerduty_routing_key, pagerduty_eu_region, pagerduty_proxy, pagerduty_auto_resolve, slack_bot_token, slack_app_token),
             DarlingPasswordKey.Current, logger, cancellationToken, StoreRolesAreRunByOperator(postgresConfig));
 
     /// <summary>The settings write: read the stored settings, validate and seal, call the store function, read them again, in one transaction.</summary>
@@ -185,7 +189,7 @@ public sealed partial class DarlingMcpAlertTools
     {
         var (seal, refusal) = RouteSealer(ring);
         var columns = new List<string>();
-        var v = new object?[19];
+        var v = new object?[21];
 
         // A text setting: null or blank leaves it, - clears it, anything else is the new value (trimmed).
         string? Text(string? typed) => string.IsNullOrWhiteSpace(typed) ? null : typed.Trim() == NotificationRouteWriter.ClearMarker ? "" : typed.Trim();
@@ -331,6 +335,10 @@ public sealed partial class DarlingMcpAlertTools
         Secret(r.GenericHeaders, "generic_headers", "generic_headers", 12, "generic_headers", genericProxy, sealedGeneric, "generic webhook headers");
         Secret(r.PagerDuty, "pagerduty", "pagerduty_routing_key", 15, "pagerduty_routing_key", v[17] as string ?? stored.PagerDutyProxy, null, "PagerDuty routing key");
 
+        /* #7656: the Slack bot's tokens, sealed to their own slots on the settings row and to no proxy. */
+        Secret(r.SlackBotToken, PasswordBinding.SlackBotTokenSlot, "slack_bot_token", 19, "slack_bot_token", null, null, "Slack bot token");
+        Secret(r.SlackAppToken, PasswordBinding.SlackAppTokenSlot, "slack_app_token", 20, "slack_app_token", null, null, "Slack app-level token");
+
         if (r.PagerDutyEu is { } eu && eu != stored.PagerDutyEu)
         {
             columns.Add("pagerduty_use_eu_region");
@@ -349,7 +357,7 @@ public sealed partial class DarlingMcpAlertTools
     private static async Task<bool?[]> CallSetChannelsAsync(
         NpgsqlConnection connection, NpgsqlTransaction transaction, string[] columns, object?[] values, CancellationToken cancellationToken)
     {
-        const string sql = "SELECT * FROM config.set_notification_channels($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)";
+        const string sql = "SELECT * FROM config.set_notification_channels($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)";
         await using var command = new NpgsqlCommand(sql, connection) { Transaction = transaction };
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = columns });
@@ -361,6 +369,7 @@ public sealed partial class DarlingMcpAlertTools
             NpgsqlTypes.NpgsqlDbType.Text, NpgsqlTypes.NpgsqlDbType.Text, NpgsqlTypes.NpgsqlDbType.Text, NpgsqlTypes.NpgsqlDbType.Text,
             NpgsqlTypes.NpgsqlDbType.Text, NpgsqlTypes.NpgsqlDbType.Text, NpgsqlTypes.NpgsqlDbType.Text, NpgsqlTypes.NpgsqlDbType.Text,
             NpgsqlTypes.NpgsqlDbType.Text, NpgsqlTypes.NpgsqlDbType.Boolean, NpgsqlTypes.NpgsqlDbType.Text, NpgsqlTypes.NpgsqlDbType.Boolean,
+            NpgsqlTypes.NpgsqlDbType.Text, NpgsqlTypes.NpgsqlDbType.Text,
         };
         for (var i = 0; i < values.Length; i++)
         {
@@ -368,7 +377,7 @@ public sealed partial class DarlingMcpAlertTools
         }
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        var saved = new bool?[7];
+        var saved = new bool?[9];
         if (await reader.ReadAsync(cancellationToken))
         {
             for (var i = 0; i < saved.Length; i++)
@@ -415,8 +424,8 @@ public sealed partial class DarlingMcpAlertTools
     /// <summary>Each secret field named in the call, as set or not set before and after. Never a value.</summary>
     private static Dictionary<string, object?> SecretPayload(bool?[] previousSaved, Dictionary<string, string> secretNow)
     {
-        // previousSaved is in the function's return order: smtp user, smtp password, teams, slack, generic URL, generic headers, PagerDuty key.
-        var fields = new[] { "smtp_user", "smtp_password", "teams_webhook_url", "slack_webhook_url", "generic_webhook_url", "generic_headers", "pagerduty_routing_key" };
+        // previousSaved is in the function's return order: smtp user, smtp password, teams, slack, generic URL, generic headers, PagerDuty key, Slack bot token, Slack app-level token.
+        var fields = new[] { "smtp_user", "smtp_password", "teams_webhook_url", "slack_webhook_url", "generic_webhook_url", "generic_headers", "pagerduty_routing_key", "slack_bot_token", "slack_app_token" };
         var payload = new Dictionary<string, object?>();
         for (var i = 0; i < fields.Length; i++)
         {

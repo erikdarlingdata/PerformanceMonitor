@@ -74,6 +74,10 @@ public sealed class NotificationRouteDraft
     /// <summary>Whether a person who asked for an action may approve it on this route (V238, #7109). False by default.</summary>
     public bool ApprovalSinglePerson { get; set; }
 
+    /// <summary>The Slack channel id the bot posts this route's request threads into (V252, #7656), or blank for none. An id, never a name:
+    /// <see cref="SlackChannelId"/> is the shape.</summary>
+    public string SlackBotChannel { get; set; } = "";
+
     /// <summary>When the route was last saved, as the writer's screen read it (the store's <c>modified_at</c>, UTC). On a <c>stored</c> draft
     /// handed to <see cref="NotificationRouteWriter.SaveAsync"/> it is the version the save expects: a route saved by anyone since is refused
     /// as a conflict instead of overwritten (#6274). Null or <c>default</c> skips the check.</summary>
@@ -105,8 +109,8 @@ public static class NotificationRouteWriter
     /// <summary>Inserts one route. <c>route_id</c> is <c>GENERATED ALWAYS AS IDENTITY</c>, so it is never in the column list.</summary>
     public const string InsertSql = @"
 INSERT INTO config_notification_routes
-    (metric_match, " + DestinationColumns + @", enabled, scope_server_id, scope_tag_id, " + AgentColumns + @", send_resolutions, fallback_route_id, severities, report_notice, action_approval, approval_single_person, modified_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, (now() AT TIME ZONE 'UTC'))
+    (metric_match, " + DestinationColumns + @", enabled, scope_server_id, scope_tag_id, " + AgentColumns + @", send_resolutions, fallback_route_id, severities, report_notice, action_approval, approval_single_person, slack_bot_channel, modified_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, (now() AT TIME ZONE 'UTC'))
 RETURNING route_id";
 
     public const string UpdateSql = @"
@@ -131,6 +135,7 @@ UPDATE config_notification_routes SET
     report_notice = $19,
     action_approval = $20,
     approval_single_person = $21,
+    slack_bot_channel = $22,
     modified_at = (now() AT TIME ZONE 'UTC')
 WHERE route_id = $1";
 
@@ -232,7 +237,7 @@ WHERE route_id = $1";
     public const string SelectStoredSql =
         "SELECT route_id, metric_match, teams_url, slack_url, generic_url, pagerduty_routing_key, smtp_recipients, enabled, "
         + "scope_server_id, scope_tag_id, " + AgentColumns + ", send_resolutions, fallback_route_id, modified_at, severities, report_notice, "
-        + "action_approval, approval_single_person FROM config_notification_routes WHERE route_id = $1";
+        + "action_approval, approval_single_person, slack_bot_channel FROM config_notification_routes WHERE route_id = $1";
 
     /// <summary>The proxy of each webhook channel on the settings row (the row id 1 the Viewer reads).</summary>
     public const string SelectProxiesSql =
@@ -301,6 +306,11 @@ WHERE route_id = $1";
         if (row.ActionApproval?.Trim().ToLowerInvariant() is not (NotificationRouteKinds.ActionApprovalRequired or NotificationRouteKinds.ActionApprovalOff))
         {
             return "action_approval is required or off.";
+        }
+
+        if (SlackBotChannelRefusal(row.SlackBotChannel) is { } slackBotChannel)
+        {
+            return slackBotChannel;
         }
 
         if (row.AgentLevel is { } level && level is not (NotificationRoute.AgentLevelOff or NotificationRoute.AgentLevelInvestigate or NotificationRoute.AgentLevelAct or NotificationRoute.AgentLevelServerAct))
@@ -414,6 +424,10 @@ WHERE route_id = $1";
             ? null
             : "report_notice is off, needs_person_or_change or all.";
 
+    /// <summary>The sentence for a bot channel that is not a Slack channel id (#7656), else null. Blank is none and is fine. The one shape
+    /// rule is <see cref="SlackChannelId"/>; every writer refuses with the same words.</summary>
+    public static string? SlackBotChannelRefusal(string? slackBotChannel) => SlackChannelId.Refusal(slackBotChannel);
+
     /// <summary>Binds the agent columns, the resolution override and the fallback, in the order every insert and update takes them.</summary>
     public static void AddAgentColumns(NpgsqlCommand command, NotificationRouteDraft row)
     {
@@ -439,6 +453,8 @@ WHERE route_id = $1";
         /* #7109 (V238): the approval setting and single-person approval, bound after the report notice. */
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = NotificationRouteKinds.NormalizeActionApproval(row.ActionApproval) });
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.ApprovalSinglePerson });
+        /* #7656 (V252): the bot channel id, bound last. Blank is none. */
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = SlackChannelId.Normalize(row.SlackBotChannel) });
     }
 
     /// <summary>Binds an <c>integer</c> that may be SQL NULL.</summary>
@@ -666,6 +682,7 @@ WHERE route_id = $1";
             ReportNotice = reader.GetString(19),
             ActionApproval = NotificationRouteKinds.NormalizeActionApproval(reader.GetString(20)),
             ApprovalSinglePerson = reader.GetBoolean(21),
+            SlackBotChannel = reader.GetString(22),
         };
     }
 
@@ -760,7 +777,7 @@ WHERE route_id = $1";
         update.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = resolved.Enabled });                 // $8
         AddNullableInt(update, resolved.ScopeServerId);                                                      // $9
         AddNullableInt(update, resolved.ScopeTagId);                                                         // $10
-        AddAgentColumns(update, resolved);                                                                   // $11-$18
+        AddAgentColumns(update, resolved);                                                                   // $11-$22
         await update.ExecuteNonQueryAsync(cancellationToken);
         if (login is not null && AgentChange(before, resolved) is { } change)
         {
@@ -839,6 +856,8 @@ WHERE route_id = $1";
             /* #7109: whether a Level 3 action waits for a person, and whether the asker may approve it. */
             Compare("action_approval", NotificationRouteKinds.NormalizeActionApproval(before?.ActionApproval), NotificationRouteKinds.NormalizeActionApproval(after?.ActionApproval));
             Compare("approval_single_person", before?.ApprovalSinglePerson, after?.ApprovalSinglePerson);
+            /* #7656: the bot channel decides where the route's request threads go, and whether they go anywhere. */
+            Compare("slack_bot_channel", SlackChannelId.Normalize(before?.SlackBotChannel), SlackChannelId.Normalize(after?.SlackBotChannel));
         }
 
         Compare("agent_level", before?.AgentLevel, after?.AgentLevel);
@@ -871,6 +890,7 @@ WHERE route_id = $1";
             ["report_notice"] = NotificationRouteKinds.NormalizeReportNotice(row.ReportNotice),
             ["action_approval"] = NotificationRouteKinds.NormalizeActionApproval(row.ActionApproval),
             ["approval_single_person"] = row.ApprovalSinglePerson,
+            ["slack_bot_channel"] = SlackChannelId.Normalize(row.SlackBotChannel),
         };
 
         var detail = new System.Text.Json.Nodes.JsonObject { ["before"] = Describe(before), ["after"] = Describe(after) };

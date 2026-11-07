@@ -14,6 +14,7 @@ using System.Text.Json.Nodes;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -253,6 +254,64 @@ public sealed class AdminPendingNotesTests
         Assert.False(investigate.GetProperty("disabled").GetBoolean());
         Assert.True(investigate.GetProperty("hidden").GetBoolean());
         Assert.Equal("none", investigate.GetProperty("display").GetString());
+    }
+
+    /* #7656: the Routes list carries the bot channel id as stored (none when the field is missing), the editor reads it back from a route,
+       and the save sends it trimmed as slack_bot_channel. A channel name is refused by the form with the one sentence, before any request. */
+    [Fact]
+    public void TheRoutesList_ShowsTheBotChannel_AndTheEditorRoundTripsIt_Pure()
+    {
+        var data = JsonNode.Parse("""
+            {"routes":[
+              {"route_id":1,"metric_match":"blocking","slack_bot_channel":"C0123ABCDEF","enabled":true},
+              {"route_id":2,"metric_match":"performance","slack_bot_channel":"","enabled":true},
+              {"route_id":3,"metric_match":"reports","enabled":true}
+            ]}
+            """);
+        var rows = Pure("routeRows", data).EnumerateArray().ToArray();
+        Assert.Equal("C0123ABCDEF", rows[0].GetProperty("slack_bot_channel").GetString());
+        Assert.True(string.IsNullOrEmpty(rows[1].GetProperty("slack_bot_channel").GetString()));
+        Assert.True(string.IsNullOrEmpty(rows[2].GetProperty("slack_bot_channel").GetString()));
+
+        var columns = Pure("ROUTE_COLUMNS").EnumerateArray().ToList();
+        var keys = columns.Select(c => c.GetProperty("key").GetString()).ToList();
+        Assert.Equal(keys.IndexOf("report_notice") + 1, keys.IndexOf("slack_bot_channel"));
+        Assert.Equal("Bot channel", columns.Single(c => c.GetProperty("key").GetString() == "slack_bot_channel").GetProperty("label").GetString());
+
+        Assert.Equal("C0123ABCDEF", Pure("entriesFromRoute", new { route_id = 1, metric_match = "blocking", slack_bot_channel = "C0123ABCDEF" }).GetProperty("botChannel").GetString());
+        Assert.Equal("", Pure("entriesFromRoute", new { route_id = 1, metric_match = "blocking" }).GetProperty("botChannel").GetString());
+        Assert.Equal("", Pure("entriesFromRoute", (object?)null).GetProperty("botChannel").GetString());
+
+        JsonElement Built(string botChannel) => Pure("routePayload", new { id = (int?)null, match = "blocking", perHour = "10", perDay = "50", lease = "30", expiry = "120", fallback = "", scope = "", level = "", resolutions = "", enabled = true, severities = "both", reportNotice = "off", botChannel });
+        Assert.Equal("C0123ABCDEF", Built("  C0123ABCDEF ").GetProperty("payload").GetProperty("slack_bot_channel").GetString());
+        Assert.Equal("", Built("").GetProperty("payload").GetProperty("slack_bot_channel").GetString());
+        var refused = Built("#ops");
+        Assert.Equal(SlackChannelId.RefusalText, refused.GetProperty("error").GetString());
+        Assert.False(refused.TryGetProperty("payload", out _));
+    }
+
+    /* #7656: the editor opens on a stored route with its bot channel showing, and Save sends what was typed as slack_bot_channel. */
+    [Fact]
+    public void TheRouteEditor_ShowsTheStoredBotChannel_AndSavingSendsTheTypedOne()
+    {
+        var result = AdminServerEditBehaviourTests.Run("routeBotChannel:G9ZZZ");
+
+        Assert.Equal("C0123ABCDEF", result.GetProperty("botChannelShown").GetString());
+        var write = Assert.Single(result.GetProperty("writes").EnumerateArray().ToArray());
+        Assert.Equal("/api/notification-routes/7", write.GetProperty("url").GetString());
+        Assert.Equal("G9ZZZ", write.GetProperty("body").GetProperty("slack_bot_channel").GetString());
+    }
+
+    /* #7656: a channel name typed into the Bot channel box is refused by the form with the one sentence, and no write is sent. */
+    [Fact]
+    public void TheRouteEditor_RefusesAChannelName_WithTheSentence_AndSendsNothing()
+    {
+        var result = AdminServerEditBehaviourTests.Run("routeBotChannel:#ops");
+
+        Assert.Equal("C0123ABCDEF", result.GetProperty("botChannelShown").GetString());
+        Assert.Empty(result.GetProperty("writes").EnumerateArray());
+        Assert.Contains(result.GetProperty("strips").EnumerateArray().Select(s => s.GetString()),
+            s => s is not null && s.Contains(SlackChannelId.RefusalText, StringComparison.Ordinal));
     }
 
     /* #6936: Edit then Save on the Routes tab sends the version the form read (expected_modified_at), because the service refuses an edit

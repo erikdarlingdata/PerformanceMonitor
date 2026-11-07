@@ -442,6 +442,8 @@ public sealed class DarlingManagedRolesTests
             {
                 "smtp_encrypted_password", "smtp_username", "teams_url", "slack_url",
                 "generic_url", "generic_headers", "pagerduty_routing_key", "signing_key", "previous_signing_key",
+                /* V252 (#7656): the sealed Slack bot token and app-level token. Whoever holds the bot token posts as the bot. */
+                "slack_bot_token", "slack_app_token",
             },
             /* V131 (#3598): the sparse routes table mirrors the parent's destination columns under the same
                names, so the four webhook-class destinations are the same bearer secrets they are one table

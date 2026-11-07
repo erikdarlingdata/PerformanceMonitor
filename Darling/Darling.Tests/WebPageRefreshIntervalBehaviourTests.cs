@@ -160,4 +160,39 @@ public sealed class WebPageRefreshIntervalBehaviourTests
         Assert.Equal("hidden", r.GetProperty("intervalVisibilityOnFleet").GetString());
         Assert.Equal("", r.GetProperty("intervalVisibilityOnFinops").GetString());
     }
+
+    [Fact]
+    public void ResumeAndTabReturn_ReRenderThePageInTheSamePassAsTheShell_SoOneFleetReadServesBoth()
+    {
+        // #7935: whether the page may render is decided before the shell's reads start, since those count as page reads too. The page then
+        // renders at once and its /api/fleet joins the sidebar's (#3895), instead of waiting a tick and sending a second fleet roll-up.
+        var r = Run();
+        // Resume: the page renders in the same pass (its panel reads start as soon as the pass's fleet read answers, before any tick) and
+        // the one fleet read serves the sidebar and the page.
+        Assert.Equal(1, r.GetProperty("resumeFleetReads").GetInt32());
+        Assert.Equal(1, r.GetProperty("resumeRendersBeforeTick").GetInt32());
+        Assert.Equal(1, r.GetProperty("resumeRendersAfter").GetInt32());
+        Assert.Equal(1, r.GetProperty("resumeFleetReadsAfter").GetInt32());
+        // Tab return with the page due: the same, where a page decided after the shell's reads would render a tick later with its own fleet read.
+        Assert.Equal(1, r.GetProperty("returnFleetReads").GetInt32());
+        Assert.Equal(1, r.GetProperty("returnRendersBeforeTick").GetInt32());
+        Assert.Equal(1, r.GetProperty("returnRendersAfter").GetInt32());
+        Assert.Equal(1, r.GetProperty("returnFleetReadsAfter").GetInt32());
+    }
+
+    [Fact]
+    public void ATickDueForThePageAndTheShell_RendersThePageOnceInTheSamePass_WithOneFleetRead()
+    {
+        // #7935: the scheduler tick decides whether the page may render before the shell's reads start. A tick that finds both due
+        // renders the page in the same pass, so one /api/fleet serves the sidebar and the page, instead of the page waiting out the
+        // shell's reads and sending its own fleet read a tick later.
+        var r = Run();
+        Assert.Equal(1, r.GetProperty("tickShellReads").GetInt32());
+        Assert.Equal(1, r.GetProperty("tickFleetReads").GetInt32());
+        Assert.Equal(1, r.GetProperty("tickRendersBeforeTick").GetInt32());
+        Assert.Equal(1, r.GetProperty("tickFleetReadsAfter").GetInt32());
+        // #4191: the ticks that land while that render's reads are still in flight do not start it again, so no read is sent twice.
+        Assert.Equal(1, r.GetProperty("tickRendersAfter").GetInt32());
+        Assert.Empty(r.GetProperty("tickRepeatedReads").EnumerateArray());
+    }
 }

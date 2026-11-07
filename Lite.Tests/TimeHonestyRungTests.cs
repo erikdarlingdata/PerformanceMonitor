@@ -471,17 +471,20 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
             var oldLocalStart = now.AddHours(-1).AddMinutes(collectedOffset);
             Assert.True(rows[0].SampleTime < oldLocalStart, "the fixture must place B's local stamp where the offset-shifted window could not see it");
 
-            /* The MCP tool comes through the same read with the STORED offset, and emits the local stamps. */
+            /* The MCP tool comes through its own bucketed read (#7908): each bucket is cut on the sample's instant, a
+               UTC-cut bucket ahead of a server-local one at the same instant, and every point is stamped in the server's
+               clock. A and B are the same instant, so B (placed by its twin) comes first. */
             var json = await McpCpuTools.GetCpuUtilization(_dataService, _serverManager, "TimeHonestySrv", hours_back: 1, as_of: now.ToString("o"));
             using var doc = JsonDocument.Parse(json);
             var samples = doc.RootElement.GetProperty("samples").EnumerateArray().ToList();
             Assert.Equal(new[] { 22, 11 }, samples.Select(s => s.GetProperty("sql_server_cpu").GetInt32()).ToArray());
-            /* The tool buckets to the minute (its own downsample), so the emitted stamp is B's LOCAL stamp at
-               minute grain — the server's frame, not the twin. */
-            var localB = utcB.AddMinutes(sampleOffset);
-            Assert.Equal(
-                new DateTime(localB.Year, localB.Month, localB.Day, localB.Hour, localB.Minute, 0),
-                DateTime.Parse(samples[0].GetProperty("sample_time").GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind));
+            /* B's point is a one-minute UTC-cut bucket stamped at the wall-clock time the server's zone showed at its
+               instant (the stored offset's frame), not the hour-behind stamp its row carries; A's is its own local stamp,
+               the same minute. */
+            var wallAtB = utcB.AddMinutes(collectedOffset);
+            Assert.All(samples, s => Assert.Equal(
+                new DateTime(wallAtB.Year, wallAtB.Month, wallAtB.Day, wallAtB.Hour, wallAtB.Minute, 0),
+                DateTime.Parse(s.GetProperty("sample_time").GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind)));
         }
         finally
         {
@@ -745,14 +748,16 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
     }
 
     /// <summary>
-    /// #4766: the MCP tool does not move with the CPU read's new frame. It reads the same window through its own
-    /// bucketed statement in the server's clock, so the two readings of the repeated hour still share ONE point
-    /// (two samples in the bucket), and the payload keeps exactly the keys it published before, with no UTC stamp
-    /// among them. The change of 2 November 2025 stands in for the 2026 one because <c>as_of</c> refuses an instant
-    /// that has not happened yet; the wall time and the two instants are the same.
+    /// #4766 and #7908: the MCP tool keeps its payload shape, exactly the keys it publishes with no UTC stamp among
+    /// them, and stamps every point in the server's clock, while its buckets are cut on each sample's instant, as
+    /// Darling's <c>CpuUtilizationBucketedSql</c> cuts them. So the two readings of the repeated hour are TWO points,
+    /// each a bucket of one sample, in instant order, and they SHARE the wall-clock stamp 01:30: #7908 replaces the
+    /// one-point result #4766 kept here on purpose, because that point averaged two real hours into one. The change of
+    /// 2 November 2025 stands in for the 2026 one because <c>as_of</c> refuses an instant that has not happened yet;
+    /// the wall time and the two instants are the same.
     /// </summary>
     [Fact]
-    public async Task TheMcpCpuTool_KeepsItsShapeAndItsServerLocalBucket_ForTheRepeatedHour()
+    public async Task TheMcpCpuTool_KeepsItsShapeAndItsServerLocalStamps_AndKeepsTheRepeatedHourApart()
     {
         var wall = new DateTime(2025, 11, 2, 1, 30, 0);
         await SeedServerPropertiesAsync(_serverId, "TimeHonestySrv", -300, EasternZone);
@@ -767,14 +772,19 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
             new[] { "server", "hours_back", "bucket", "bucket_minutes", "aggregate_note", "note", "samples", "effective_start", "window_truncated", "truncation_note" },
             root.EnumerateObject().Select(p => p.Name).ToArray());
 
-        var sample = Assert.Single(root.GetProperty("samples").EnumerateArray());
-        Assert.Equal(
-            new[] { "sample_time", "sql_server_cpu", "other_process_cpu", "total_cpu", "idle_cpu", "peak_sql_server_cpu", "peak_total_cpu", "samples_in_bucket" },
-            sample.EnumerateObject().Select(p => p.Name).ToArray());
-        Assert.Equal(2, sample.GetProperty("samples_in_bucket").GetInt32());
-        Assert.Equal(40, sample.GetProperty("sql_server_cpu").GetInt32());
-        Assert.Equal(60, sample.GetProperty("peak_sql_server_cpu").GetInt32());
-        Assert.Equal(wall, DateTime.Parse(sample.GetProperty("sample_time").GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind));
+        var samples = root.GetProperty("samples").EnumerateArray().ToList();
+        Assert.Equal(2, samples.Count);
+        Assert.All(samples, sample =>
+        {
+            Assert.Equal(
+                new[] { "sample_time", "sql_server_cpu", "other_process_cpu", "total_cpu", "idle_cpu", "peak_sql_server_cpu", "peak_total_cpu", "samples_in_bucket" },
+                sample.EnumerateObject().Select(p => p.Name).ToArray());
+            Assert.Equal(1, sample.GetProperty("samples_in_bucket").GetInt32());
+            Assert.Equal(wall, DateTime.Parse(sample.GetProperty("sample_time").GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind));
+        });
+        /* 05:30 UTC (EDT) before 06:30 UTC (EST): the two readings in instant order, each its own peak, never averaged. */
+        Assert.Equal(new[] { 20, 60 }, samples.Select(s => s.GetProperty("sql_server_cpu").GetInt32()).ToArray());
+        Assert.Equal(new[] { 20, 60 }, samples.Select(s => s.GetProperty("peak_sql_server_cpu").GetInt32()).ToArray());
     }
 
     /// <summary>The properties read carries the pair, NULL zone included, and <c>get_server_properties</c>

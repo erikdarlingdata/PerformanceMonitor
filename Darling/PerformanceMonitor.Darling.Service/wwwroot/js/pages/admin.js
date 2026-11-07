@@ -38,6 +38,7 @@ import { buildAgentChanges, resetAgentChangesStatus } from "./admin-agent-change
 import { buildServerActions, resetServerActionsStatus, engineWord } from "./admin-server-actions.js";
 import { buildPeople, resetPeopleStatus } from "./admin-people.js";
 import { buildProfiles, nobodyCanApproveNodes, readAgentSetupAccess, routeColumns, routeEditorNodes, routeListOnlyNodes, routeUseText } from "./admin-agent-setup.js";
+import { slackBotTokenNodes } from "./admin-slack-bot.js";
 
 export const SERVER_COLUMNS = [
   { key: "display_name", label: "Display Name" },
@@ -100,6 +101,7 @@ export const ROUTE_COLUMNS = [
   { key: "applies_to", label: "Applies to" },
   { key: "severities", label: "Severity" },
   { key: "report_notice", label: "Report notice" },
+  { key: "slack_bot_channel", label: "Bot channel" },
   { key: "status", label: "Status" },
   { key: "channels", label: "Channels set", wrap: true },
   { key: "agent", label: "Agent" },
@@ -361,6 +363,8 @@ export function routeRows(data) {
     applies_to: routeScopeText(r),
     severities: routeSeveritiesText(r),
     report_notice: routeReportNoticeText(r),
+    /* #7656: the Slack channel id the bot posts the route's request threads into; blank when the route has none. */
+    slack_bot_channel: typeof r.slack_bot_channel === "string" ? r.slack_bot_channel : "",
     status: routeStatusText(r),
     channels: Array.isArray(r.configured_channels) ? r.configured_channels.filter((c) => !isSecretKey(c)).join(", ") : null,
     agent: routeAgentText(r),
@@ -1309,6 +1313,8 @@ async function buildRoutes(body, generation) {
   const signingNodes = signing && signing.kind === "data" ? signingStatusLines(signing.data).map((t) => noticeStrip(t)) : [];
   mount(body, [
     ...(access.routes ? routeEditorNodes(options) : routeListOnlyNodes(access.message, access.managed, access.adminWritesOff)),
+    /* #7656: the Slack bot's tokens, for the same seat that edits routes. */
+    ...(access.routes ? slackBotTokenNodes(options) : []),
     captionStrip(ROUTES_NOTE),
     ...signingNodes,
     ...nobodyCanApproveNodes(approvers),
@@ -1537,7 +1543,10 @@ async function buildFeedback(body, generation) {
   const data = res.data || {};
   const requests = Array.isArray(data.requests) ? data.requests : [];
   const families = Array.isArray(data.families) ? data.families : [];
-  const rerender = () => buildFeedback(body, generation);
+  /* #7953: the re-read after a feedback write runs under a new render generation, as every other tab's repaint does. The generation this
+     card was built under is stale once the 60 s poll has drawn, and a re-read under it would return at buildFeedback's first line and
+     draw nothing, leaving "No feedback yet." beside "Feedback recorded." until the next poll. */
+  const rerender = () => (shownTab === "feedback" && shownBody ? startBuilder("feedback", shownBody, ++renderGeneration) : undefined);
   const canRecord = session.can_edit === true && data.can_record === true;
   const nodes = [captionStrip(FEEDBACK_NOTE)];
   if (data.can_record !== true) nodes.push(captionStrip(feedbackListOnly(session.managed_store === true, session.admin_writes_off === true)));
@@ -2061,7 +2070,12 @@ function overrideActions(row) {
   });
   const remove = el("button", {
     class: "btn", type: "button", text: "Remove", "aria-label": "Remove " + row.key + " for " + row.scope_text, "data-action": "remove-override",
-    onClick: () => changeOverride("clear", { server: row.tag_id == null ? row.server_name : "", tag: row.tag_id == null ? "" : String(row.tag_id), key: row.key, database: row.database }),
+    onClick: () => {
+      /* #7954: Remove sits beside Edit, so it asks first and names what goes away, as the route Delete does. */
+      const where = row.scope_text + (row.database ? ", database " + row.database : "");
+      if (!window.confirm("Remove the " + row.key + " override for " + where + "? Its value " + row.value + " goes away and the global value applies at the engine's next reload.")) return undefined;
+      return changeOverride("clear", { server: row.tag_id == null ? row.server_name : "", tag: row.tag_id == null ? "" : String(row.tag_id), key: row.key, database: row.database });
+    },
   });
   return el("span", { class: "row-actions" }, [edit, remove]);
 }

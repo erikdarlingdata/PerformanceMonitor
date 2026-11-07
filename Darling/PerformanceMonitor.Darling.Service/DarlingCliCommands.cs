@@ -9895,18 +9895,62 @@ AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceComma
                 continue;
             }
 
+            /* #7981: which slices the engine already counts as built. Every planned slice sits below the
+               coverage floor, so the rollup holds nothing in it; when the invalidation log has no entry over it
+               either, a plain refresh does nothing there. That is the shape after a rollup's own retention has
+               dropped buckets it had built (dropping writes no invalidation), as on a store whose raw data has
+               an outage gap: every plain slice ran for nothing, and the forced fallback below did all the work
+               over the whole range. Such a slice runs forced from the start instead. Without the log, every
+               slice runs plain and the fallback still repairs a shortfall. */
+            IReadOnlyList<(long Lowest, long Greatest)>? invalidations = null;
+            try
+            {
+                invalidations = await RollupBackfill.ReadInvalidationLogAsync(connection, plan.View, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                error.WriteLine($"    NOTE: the invalidation log for {plan.View} could not be read ({FirstLineOf(ex.Message)}); every slice runs plain.");
+            }
+
+            var slices = RollupBackfill.Slices(plan.FromUtc, plan.ToUtc)
+                .Select(s => (s.FromUtc, s.ToUtc, Forced: invalidations is { Count: > 0 } && RollupBackfill.CountedAsBuilt(invalidations, s.FromUtc, s.ToUtc)))
+                .ToList();
+            var forcedSlices = slices.Count(s => s.Forced);
+            if (forcedSlices > 0)
+            {
+                output.WriteLine(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"    {forcedSlices:N0} of {plan.Slices:N0} slices run forced: the rollup counts them as built but holds nothing in them, so a plain refresh over them would do nothing. Its own retention dropping buckets it had built leaves this shape."));
+            }
+
             var completed = 0L;
             var sliceFailed = false;
-            foreach (var (from, to) in RollupBackfill.Slices(plan.FromUtc, plan.ToUtc))
+            var forceUnavailable = false;
+            foreach (var (from, to, forced) in slices)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                var force = forced && !forceUnavailable;
                 try
                 {
-                    var floor = await RollupBackfill.RunSliceAsync(connection, plan.View, from, to, disclosure, cancellationToken);
+                    DateTime? floor;
+                    try
+                    {
+                        floor = await RollupBackfill.RunSliceAsync(connection, plan.View, from, to, disclosure, cancellationToken, force: force);
+                    }
+                    catch (PostgresException ex) when (force && ex.SqlState == RollupBackfill.UndefinedFunctionSqlState)
+                    {
+                        /* force arrived in TimescaleDB 2.18. On an older bring-your-own store the slices run
+                           plain, said once, and a shortfall is reported below as on any such store. */
+                        forceUnavailable = true;
+                        force = false;
+                        error.WriteLine($"    forced refresh unavailable on this store ({FirstLineOf(ex.Message)}); the slices run plain.");
+                        floor = await RollupBackfill.RunSliceAsync(connection, plan.View, from, to, disclosure, cancellationToken);
+                    }
+
                     completed++;
                     output.WriteLine(string.Create(
                         CultureInfo.InvariantCulture,
-                        $"    [{completed:N0}/{plan.Slices:N0}] {from:yyyy-MM-dd} -> {to:yyyy-MM-dd}; coverage now starts {floor:yyyy-MM-dd HH:mm}"));
+                        $"    [{completed:N0}/{plan.Slices:N0}] {from:yyyy-MM-dd} -> {to:yyyy-MM-dd}{(force ? ", forced" : "")}; coverage now starts {floor:yyyy-MM-dd HH:mm}"));
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -9926,8 +9970,9 @@ AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceComma
 
             /* Short WITHOUT a slice having failed means the refreshes reported success over a range they did
                not materialize — the signature of an earlier pass cut short, whose invalidation records a plain
-               refresh will now skip straight over. That is the one case the forced form repairs, and the only
-               case it is worth paying for. */
+               refresh will now skip straight over. A slice the log showed as built already ran forced above;
+               this catches what the log did not show, and it is the only case the forced form is worth paying
+               for over the whole range. */
             if (!reached && !sliceFailed && after.SourceOldestUtc is not null)
             {
                 output.WriteLine($"    {plan.View} is still short after every slice; escalating to a forced refresh over the range.");

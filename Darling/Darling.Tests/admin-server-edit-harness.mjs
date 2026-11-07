@@ -1221,6 +1221,54 @@ try {
         familyRow: all(main, (n) => n.tag === "td").map((n) => n.textContent),
       };
     },
+    /* #7953: Record feedback with the PUT held, the 60 s poll's render (renderAdmin with { poll: true }) while it is in flight, then the PUT
+       answers "recorded" and from then on the list carries the new line. Returns the list reads and lines after the poll and after the
+       answer, and the status line, so a test can see the new line is on the page without another poll. */
+    feedbackPoll: async () => {
+      state.canEdit = true;
+      const id = "11111111-1111-1111-1111-111111111111";
+      let stored = false;
+      const report = () => ({
+        request_id: id, server_name: "alpha", family: "blocking", first_metric: "Blocking", opened_at_utc: "2026-10-01T00:00:00Z",
+        reported_at_utc: "2026-10-01T00:10:00Z", agent_id: "agent-a", report_verdict: "real", root_cause: "the nightly load blocks", summary: null,
+        feedback: stored ? [{ verdict: "wrong", corrected_verdict: null, missed_step: null, comment: "never a real block", author: "web", recorded_at_utc: "2026-10-01T01:00:00Z" }] : [],
+      });
+      state.responder = (method, url) => {
+        if (method === "GET" && url === "/api/investigation-feedback") {
+          return { status: 200, body: { hours_back: 168, can_record: true, requests_returned: 1, truncated: false,
+            families: [{ family: "blocking", reported: 1, with_feedback: stored ? 1 : 0, marked_wrong: 0, agent_false_positives: 0, false_positives: 0 }], requests: [report()] } };
+        }
+        if (method === "PUT" && url === "/api/investigation-feedback/" + id) { stored = true; return { status: 200, body: { status: "recorded", request_id: id, author: "web" } }; }
+        return { status: 404, body: { error: "no such request " + url } };
+      };
+      const reads = () => requests.filter((r) => r.method === "GET" && r.url === "/api/investigation-feedback").length;
+      const lines = () => byAttr(main, "data-fb-line").map((n) => n.textContent);
+      await mountPage("feedback");
+      const field = (name) => byAttr(main, "data-fb-field", name)[0];
+      field("verdict").value = "wrong";
+      await fire(field("verdict"), "change");
+      await typeInto(field("comment"), "never a real block");
+      /* Pressing the button moves the focus onto it, as a click does in a browser. */
+      const save = byAttr(main, "data-fb-save", id)[0];
+      save.focus();
+      /* The gate is read at fetch time, so set around the click it holds the PUT alone; the poll's list read, made after it is cleared, answers at once. */
+      let release;
+      state.gate = new Promise((r) => { release = r; });
+      const clicked = fire(save, "click");
+      await settle(30);
+      state.gate = null;
+      page.renderAdmin(main, "feedback", { poll: true });
+      await settle(30);
+      const afterPoll = { reads: reads(), lines: lines() };
+      release();
+      await clicked;
+      await settle(30);
+      return {
+        afterPoll,
+        afterAnswer: { reads: reads(), lines: lines(), status: byAttr(main, "data-fb-status").map((n) => n.textContent) },
+        writes: requests.filter((r) => r.method === "PUT").length,
+      };
+    },
     /* #5903: Approve on the Pending Notes tab. The page acts on the answer's reread flag: it reads the list again after an
        approval or a 404 (the list is stale) and does NOT after a 403 refusal or a 500 (the list is right, the person is told why). */
     decide: async (kind) => {
@@ -1258,6 +1306,58 @@ try {
         rowsAfter: approveIds(),
         status: byAttr(main, "data-note-status").map((n) => n.textContent),
       };
+    },
+    /* #7954: the Admin writes that ask before they go. The param is "<target>/<answer>": the target is override (Remove on a threshold
+       override), switchOff or switchOn (the service-wide agent switch), undo (a non-plan agent change) or peopleIdentity, peopleGrant,
+       peopleDisable (the People tab with Ann's details open); the answer, no or yes, is what window.confirm answers, or for switchOn which
+       button of the Turn on panel is pressed. Returns the confirm sentences asked, every PUT sent (url, body), and whether the Turn on panel
+       was on the page after the first press and after the answer. */
+    confirmWrites: async (param) => {
+      const [target, answer] = param.split("/");
+      state.canEdit = true;
+      state.confirmAnswer = answer === "yes";
+      state.responder = (method, url) => {
+        if (method === "GET" && url === "/api/fleet") return { status: 200, body: { cards: [{ server_id: 1, display_name: "Alpha" }], tags: [] } };
+        if (method === "GET" && url === "/api/threshold-overrides") {
+          return { status: 200, body: { can_edit: true, servers: [{ server_name: "alpha" }], tags: [], keys: [{ key: "cpu_percent", min: 1, max: 100 }],
+            overrides: [{ server_id: 1, server_name: "alpha", tag_id: null, key: "cpu_percent", database: null, value: 95, global_value: 90, set_by: "person:ann", request_id: null, updated_at: "2026-10-01T00:00:00Z" }] } };
+        }
+        if (method === "GET" && url === "/api/agent-changes") {
+          return { status: 200, body: { enabled: target !== "switchOn", can_decide: true, refusals: [], changes: [{
+            called_id: "c-1", called_at_utc: "2026-10-01T00:00:00Z", server_name: "alpha", server_id: 1, kind: "module_recompile", tool: "recompile_module", actor: "agent-a",
+            reason: "stale plan", result: "done", result_detail: null, undone_at_utc: null, undone_by: null, muted_alerts: 0, force_review: null, can_undo: true }] } };
+        }
+        if (method === "GET" && url === "/api/people") {
+          return { status: 200, body: { can_decide: true, signed_in_admin: true, sign_in_key: "key-of-this-session", people: [{
+            person_id: 1, display_name: "Ann", enabled: true, updated_by: "person:bob", updated_at_utc: "2026-10-01T00:00:00Z",
+            identities: [{ identity_id: 11, kind: "web", external_id: "abcdefghijklmnop" }],
+            grants: [{ grant_id: 21, capability: "approve", kinds: ["kill_session"], scope: "all" }] }] } };
+        }
+        if (method === "PUT") return { status: 200, body: { status: "updated", message: "Done." } };
+        return { status: 404, body: { error: "no such request " + url } };
+      };
+      const tab = target === "override" ? "overrides" : target.startsWith("people") ? "people" : "agent-changes";
+      await mountPage(tab);
+      if (tab === "people") await clickText(main, "Open");
+      const confirmsBefore = confirms.length;
+      const puts = () => requests.filter((r) => r.method === "PUT").map((r) => ({ url: r.url, body: r.body }));
+      const panels = () => byAttr(main, "role", "alertdialog").length;
+      const press = async (label) => {
+        const b = byAttr(main, "aria-label", label).find((n) => n.tag === "button") || buttons(main, label)[0];
+        if (!b) throw new Error("no button " + label);
+        await fire(b, "click");
+        await settle(30);
+      };
+      const labels = {
+        override: "Remove cpu_percent for alpha", switchOff: "Turn off agent changes", undo: "Undo agent change c-1",
+        peopleIdentity: "Remove Web sign-in abcdefgh...", peopleGrant: "Remove grant Approve server actions (Kill sessions), All servers", peopleDisable: "Disable Ann",
+        switchOn: "Turn on agent changes",
+      };
+      await press(labels[target]);
+      const panelShown = panels();
+      /* With no panel on the page there is nothing to answer; the result then shows the first press alone. */
+      if (target === "switchOn" && panelShown) await press(answer === "yes" ? "Turn them on" : "Cancel");
+      return { confirms: confirms.slice(confirmsBefore), writes: puts(), panelShown, panelAfter: panels() };
     },
     /* #7558: the Feedback tab with no reports in the window (param is the read's hours_back): returns the text the empty family table draws. */
     feedbackEmpty: async (hours) => {
@@ -1329,6 +1429,144 @@ try {
       await fire(byAttr(main, "data-action", "save-route")[0], "click");
       await settle(30);
       return { reportNoticeShown, noticeAtInherit, noticeAtInvestigate, noticeAtOff, writes: requests.filter((r) => r.method === "PUT").map((r) => ({ method: r.method, url: r.url, body: r.body })) };
+    },
+    /* #7656: the Bot channel box on the Routes tab. Edit on route 7 (stored with the bot channel C0123ABCDEF), type the param into the box,
+       Save: returns what the box showed before, the strips the page drew after, and the writes it sent. A channel id is sent trimmed as
+       slack_bot_channel; a channel name is refused by the form with the one sentence and no write goes out. */
+    routeBotChannel: async (param) => {
+      state.canEdit = true;
+      const route = { route_id: 7, metric_match: "blocking", match_kind: "exact_metric", family: "performance", configured_channels: [], smtp_recipients: [],
+        enabled: true, modified_at_utc: "2026-01-01T00:00:00.1234567Z", scope_server_id: null, scope_tag_id: null, agent_level: 1, agent_max_per_hour: 10,
+        agent_max_per_day: 50, agent_lease_minutes: 30, agent_expiry_minutes: 120, send_resolutions: null, fallback_route_id: null, severities: "both", report_notice: "off",
+        action_approval: "required", approval_single_person: false, slack_bot_channel: "C0123ABCDEF" };
+      state.responder = (method, url) => {
+        if (method === "GET" && url === "/api/read/get_notification_routes") return { status: 200, body: { routes: [route] } };
+        if (method === "GET" && url === "/api/agent-setup/access") return { status: 200, body: { can_edit_routes: true, can_edit_profiles: true } };
+        if (method === "PUT" && url === "/api/notification-routes/7") return { status: 200, body: { status: "updated", route_id: 7 } };
+        return { status: 404, body: { error: "no such request " + url } };
+      };
+      await mountPage("routes");
+      await fire(byAttr(main, "data-action", "edit-route")[0], "click");
+      await settle(30);
+      const box = field("botChannel");
+      const botChannelShown = box ? box.value : null;
+      if (box) await typeInto(box, param === undefined ? "" : param);
+      await fire(byAttr(main, "data-action", "save-route")[0], "click");
+      await settle(30);
+      return {
+        botChannelShown,
+        strips: all(main, (n) => n.classList.contains("strip")).map((n) => n.textContent),
+        writes: requests.filter((r) => r.method === "PUT").map((r) => ({ method: r.method, url: r.url, body: r.body })),
+      };
+    },
+    /* #7952: Edit on route 7, Severity changed, Save: the service answers 409 (the route was changed elsewhere) and from then on the routes
+       read carries the newer modified_at_utc. Returns, after the refusal, the strips and the Save button's label; after the Save on screen is
+       pressed once more, the expected_modified_at of every PUT so far; and after Edit then Save, the PUTs and the strips. A PUT whose
+       expected_modified_at is the newer version answers 200. */
+    routeConflict: async () => {
+      state.canEdit = true;
+      const older = "2026-01-01T00:00:00.1234567Z";
+      const newer = "2026-02-02T00:00:00.7654321Z";
+      let saves = 0;
+      const route = () => ({ route_id: 7, metric_match: "blocking", match_kind: "exact_metric", family: "performance", configured_channels: [], smtp_recipients: [],
+        enabled: true, modified_at_utc: saves === 0 ? older : newer, scope_server_id: null, scope_tag_id: null, agent_level: null, agent_max_per_hour: 10,
+        agent_max_per_day: 50, agent_lease_minutes: 30, agent_expiry_minutes: 120, send_resolutions: null, fallback_route_id: null, severities: "critical", report_notice: "off" });
+      state.responder = (method, url, sent) => {
+        if (method === "GET" && url === "/api/read/get_notification_routes") return { status: 200, body: { routes: [route()] } };
+        if (method === "GET" && url === "/api/agent-setup/access") return { status: 200, body: { can_edit_routes: true, can_edit_profiles: true } };
+        if (method === "PUT" && url === "/api/notification-routes/7") {
+          saves++;
+          if (sent.expected_modified_at !== newer) return { status: 409, body: { error: "This route was changed or removed since you opened it. Reload it and make the change again." } };
+          return { status: 200, body: { status: "updated", route_id: 7 } };
+        }
+        return { status: 404, body: { error: "no such request " + url } };
+      };
+      const strips = () => all(main, (n) => n.classList.contains("strip")).map((n) => n.className + "|" + n.textContent);
+      const saveLabel = () => byAttr(main, "data-action", "save-route").map((n) => n.textContent);
+      const puts = () => requests.filter((r) => r.method === "PUT").map((r) => r.body.expected_modified_at);
+      await mountPage("routes");
+      await fire(byAttr(main, "data-action", "edit-route")[0], "click");
+      await settle(30);
+      await typeInto(field("severities"), "warning");
+      await fire(byAttr(main, "data-action", "save-route")[0], "click");
+      await settle(30);
+      const afterRefusal = { strips: strips(), saveLabel: saveLabel(), puts: puts() };
+      await fire(byAttr(main, "data-action", "save-route")[0], "click");
+      await settle(30);
+      const afterSecondPress = { saveLabel: saveLabel(), puts: puts() };
+      await fire(byAttr(main, "data-action", "edit-route")[0], "click");
+      await settle(30);
+      await typeInto(field("severities"), "warning");
+      await fire(byAttr(main, "data-action", "save-route")[0], "click");
+      await settle(30);
+      return { afterRefusal, afterSecondPress, afterEditAndSave: { strips: strips(), saveLabel: saveLabel(), puts: puts() } };
+    },
+    /* #7952, #7954: a write whose button is disabled while it is in flight. The param is the button pressed: routeSave (Edit on route 7, Severity
+       changed, then Save), routeDelete (Delete on route 7, the confirm answered yes), profileSave (text typed, then Save profile), or on the Agent
+       changes tab agentSwitch (Turn off agent changes, the confirm answered yes) and agentUndo (Undo on change c-1, the confirm answered yes). The
+       write is held at the service; while it is held the button is pressed again, as a click (which a disabled button never receives) and forced
+       past the disabled state; then the answer lands. Returns, during the hold, whether the pressed button is disabled, the writes sent so far and
+       `tracked`, the disabled state of the Agent changes tab's switch and Undo buttons (null off that tab); after the second press, the writes; and
+       after the answer, the writes, whether the pressed button is disabled, and `tracked` again. */
+    inFlight: async (target) => {
+      const agent = target.startsWith("agent");
+      const route = { route_id: 7, metric_match: "blocking", match_kind: "exact_metric", family: "performance", configured_channels: [], smtp_recipients: [],
+        enabled: true, modified_at_utc: "2026-01-01T00:00:00.1234567Z", scope_server_id: null, scope_tag_id: null, agent_level: null, agent_max_per_hour: 10,
+        agent_max_per_day: 50, agent_lease_minutes: 30, agent_expiry_minutes: 120, send_resolutions: null, fallback_route_id: null, severities: "critical", report_notice: "off" };
+      let routes = [route];
+      if (agent) {
+        state.canEdit = true;
+        state.responder = (method, url) => {
+          if (method === "GET" && url === "/api/agent-changes") {
+            return { status: 200, body: { enabled: true, can_decide: true, refusals: [], changes: [{
+              called_id: "c-1", called_at_utc: "2026-10-01T00:00:00Z", server_name: "alpha", server_id: 1, kind: "module_recompile", tool: "recompile_module", actor: "agent-a",
+              reason: "stale plan", result: "done", result_detail: null, undone_at_utc: null, undone_by: null, muted_alerts: 0, force_review: null, can_undo: true }] } };
+          }
+          if (method === "PUT") return { status: 200, body: { status: "updated" } };
+          return { status: 404, body: { error: "no such request " + url } };
+        };
+      } else {
+        scopeSetup("ok", (method, url) => {
+          if (method === "GET" && url === "/api/read/get_notification_routes") return { status: 200, body: { routes } };
+          if (method === "GET" && url === "/api/environment-profiles") return { status: 200, body: { can_edit: true, max_length: 4000, profiles: [] } };
+          if (method === "PUT" && url === "/api/notification-routes/7") return { status: 200, body: { status: "updated", route_id: 7 } };
+          if (method === "DELETE" && url === "/api/notification-routes/7") { routes = []; return { status: 200, body: { status: "deleted", route_id: 7 } }; }
+          if (method === "PUT" && url === "/api/environment-profiles") return { status: 200, body: { status: "updated" } };
+          return null;
+        });
+      }
+      await mountPage(agent ? "agent-changes" : target === "profileSave" ? "profiles" : "routes");
+      const switchButton = () => buttons(main, "Turn off agent changes")[0] || null;
+      const undoButton = () => byAttr(main, "aria-label", "Undo agent change c-1").find((n) => n.tag === "button") || null;
+      let pressed;
+      if (target === "routeSave") {
+        await fire(byAttr(main, "data-action", "edit-route")[0], "click");
+        await settle(30);
+        await typeInto(field("severities"), "warning");
+        pressed = byAttr(main, "data-action", "save-route")[0];
+      } else if (target === "routeDelete") pressed = byAttr(main, "data-action", "delete-route")[0];
+      else if (target === "profileSave") {
+        await typeInto(byAttr(main, "data-field", "profile-text")[0], "Production fleet.");
+        pressed = byAttr(main, "data-action", "save-profile")[0];
+      } else if (target === "agentSwitch") pressed = switchButton();
+      else if (target === "agentUndo") pressed = undoButton();
+      if (!pressed) throw new Error("no button for " + target);
+      const writes = () => requests.filter((r) => r.method !== "GET").map((r) => r.method + " " + r.url);
+      const tracked = () => (agent ? { switch: switchButton() ? switchButton().disabled : null, undo: undoButton() ? undoButton().disabled : null } : null);
+      let release;
+      state.gate = new Promise((r) => { release = r; });
+      const first = fire(pressed, "click");
+      await settle(30);
+      const during = { disabled: pressed.disabled, writes: writes(), tracked: tracked() };
+      /* The second press is not awaited here: a write it wrongly sent would be held at the gate with the first, and lands with it. */
+      const again = Promise.all([fire(pressed, "click"), forceClick(pressed)]);
+      await settle(30);
+      const afterSecondPress = { writes: writes() };
+      state.gate = null;
+      release();
+      await Promise.all([first, again]);
+      await settle(30);
+      return { during, afterSecondPress, after: { disabled: pressed.disabled, writes: writes(), tracked: tracked() } };
     },
     /* #7611: the Database Protection ages on the Settings tab. The param is "<seat>" or "<seat>/<hours>,<minutes>,<hours>": the seat is
        `editor` or `readonly`, and the boxes are typed over with the values and Save is clicked. The reply says what the rows and boxes

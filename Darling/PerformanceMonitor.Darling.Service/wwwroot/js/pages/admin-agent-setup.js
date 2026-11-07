@@ -40,6 +40,28 @@ export const REPORT_NOTICE_CHOICES = [
 
 export const AGENT_LIMIT_DEFAULTS = { perHour: "20", perDay: "100", lease: "15", expiry: "240" };
 
+/** #7656: the shape of a Slack channel id, as the service checks it: C or G, then capital letters and digits. The value is trimmed first. */
+export const SLACK_CHANNEL_ID_SHAPE = /^[CG][A-Z0-9]{1,31}$/;
+export const SLACK_CHANNEL_ID_REFUSAL =
+  "The Slack bot channel is a channel id: C or G, then capital letters and digits (for example C0123ABCDEF), or blank for none. Not the channel's name.";
+
+/** Whether a bot channel box holds a channel id or nothing (blank is none, and fine). */
+export const slackChannelIdOk = (text) => String(text ?? "").trim() === "" || SLACK_CHANNEL_ID_SHAPE.test(String(text).trim());
+
+/** #7656: the bot setup text shown under the Slack bot channel box, one paragraph each, in the order a person does the work. */
+export const SLACK_BOT_SETUP_TEXT = [
+  "The bot posts one Slack thread per investigation request into this channel, as the bot, not through the alert webhook. Leave the box blank and this route opens no threads.",
+  "Requests that opened before you set the channel get no thread. A post not sent within 7 days of its event is never sent.",
+  "Make one Slack app and install it once with every scope it needs, so nobody reinstalls it later. Bot token scopes: chat:write, app_mentions:read, channels:history and groups:history. App-level token scope: connections:write. Save the bot token and the app-level token in the Slack bot tokens form under the routes here, or in the desktop Settings window.",
+  "Invite the bot to the channel. The bot posts only in channels it belongs to; a post to a channel it is not in fails with not_in_channel. A private channel works once the bot is invited.",
+  "Store the channel id, not the channel name. Names change; ids do not. An id starts with C or G and is shown in the channel's details in Slack.",
+  "Use a channel of its own for the bot. During an alert storm the alert webhook posts in bursts of 40 to 86 messages a minute, and request threads are hard to follow next to them. A shared channel still works.",
+  "After the app is reinstalled with new scopes, check every alert webhook still posts.",
+  "The data detail setting decides what the thread shows. Full, the default, posts literals such as names and values into the thread, and every member of the channel can read them.",
+  "One Slack app per store for buttons and mentions: Socket Mode hands each event to one of the app's open connections, so two stores listening on one app acknowledge and lose each other's events, and Slack never retries an acknowledged event. On a shared app, set the app-level token on one store only; the other stores post threads, with no buttons or mentions. A store still acts only on events from channels set on its own routes, and warns when events keep arriving for channels it does not own.",
+  "The app-level token turns the listener on: saved, the service holds two Socket Mode connections and hears presses and mentions in its channels; blank, it does not listen. Generate it on the app's Basic Information page under App-Level Tokens with the connections:write scope, and save it only here or in the desktop Settings window, never through an agent or an MCP call, where it would sit in the agent's transcript. The app manifest and the full setup are in docs/darling/slack-bot.md.",
+];
+
 export const routesListOnly = (managed, adminWritesOff) => adminListOnlyNote(managed, "routes are listed only", "To add, edit or delete a route", adminWritesOff);
 export const ROUTES_EDITING_NOTE =
   "Add, edit and delete a route's agent channel, match, scope and destinations here. A webhook URL or key is sealed when saved and never " +
@@ -78,7 +100,7 @@ export function entriesFromRoute(r) {
     return {
       id: null, match: "", scope: "", enabled: true, level: "", perHour: AGENT_LIMIT_DEFAULTS.perHour, perDay: AGENT_LIMIT_DEFAULTS.perDay,
       lease: AGENT_LIMIT_DEFAULTS.lease, expiry: AGENT_LIMIT_DEFAULTS.expiry, resolutions: "", fallback: "", severities: "both", reportNotice: "off",
-      approval: "required", singlePerson: "false",
+      approval: "required", singlePerson: "false", botChannel: "",
       saved: [], hooks: {}, removes: {}, recipients: "", recipientsWas: "", modifiedAt: null,
     };
   }
@@ -103,6 +125,8 @@ export function entriesFromRoute(r) {
     /* #7109: a route read without the field, or with a word this page does not know, edits as Required, the safe side. */
     approval: r.action_approval === "off" ? "off" : "required",
     singlePerson: r.approval_single_person === true ? "true" : "false",
+    /* #7656: the bot channel id; a route read without the field edits as none. */
+    botChannel: typeof r.slack_bot_channel === "string" ? r.slack_bot_channel : "",
     saved: Array.isArray(r.configured_channels) ? r.configured_channels : [],
     hooks: {},
     removes: {},
@@ -133,6 +157,8 @@ export function destinationPayload(entries) {
 export function routePayload(entries) {
   /* A blank match is refused by the service with this sentence (a 400); said here it costs no request. */
   if (String(entries.match).trim() === "") return { error: "Choose a family or enter an exact metric name." };
+  /* #7656: a bot channel that is not a channel id is refused by the service with this sentence; said here it costs no request. */
+  if (!slackChannelIdOk(entries.botChannel)) return { error: SLACK_CHANNEL_ID_REFUSAL };
   const whole = (label, text) => {
     const t = String(text).trim();
     return /^\d+$/.test(t) ? { value: Number(t) } : { error: label + " must be a whole number." };
@@ -169,6 +195,7 @@ export function routePayload(entries) {
       report_notice: entries.reportNotice === "needs_person_or_change" || entries.reportNotice === "all" ? entries.reportNotice : "off",
       action_approval: entries.approval === "off" ? "off" : "required",
       approval_single_person: entries.singlePerson === "true",
+      slack_bot_channel: String(entries.botChannel ?? "").trim(),
       ...(entries.id != null ? { expected_modified_at: entries.modifiedAt } : {}),
     },
   };
@@ -193,9 +220,11 @@ let routeBusy = false;
 
 const statusNode = (status) => (status ? (status.isError ? errorStrip(status.message) : noticeStrip(status.message)) : null);
 
-async function sendRoute(verb, entries, repaint) {
+/** `button` is the one pressed: it is disabled while the write runs, so a second press sends nothing, and enabled again before the repaint. */
+async function sendRoute(verb, entries, repaint, button) {
   if (routeBusy) return;
   routeBusy = true;
+  if (button) button.disabled = true;
   let out;
   try {
     if (verb === "delete") {
@@ -206,13 +235,19 @@ async function sendRoute(verb, entries, repaint) {
         out = { message: built.error, isError: true };
       } else {
         const path = entries.id == null ? "/api/notification-routes" : "/api/notification-routes/" + entries.id;
-        out = routeOutcome(verb, await apiWrite(entries.id == null ? "POST" : "PUT", path, built.payload));
+        const res = await apiWrite(entries.id == null ? "POST" : "PUT", path, built.payload);
+        out = routeOutcome(verb, res);
+        /* #7952: a 409 means the route was changed elsewhere since Edit was pressed, so the entries hold a stale version and every Save
+           sent from them is refused again. Dropping the entries makes the next draw read the current route and its version, as the profile
+           save does; the service's sentence stays in the status line, so the person sees the change and makes theirs again. */
+        if (res && res.status === 409) routeEntries = null;
       }
     }
   } catch (e) {
     out = { message: "Could not change the route: " + (e && e.message ? e.message : String(e)), isError: true };
   }
   routeBusy = false;
+  if (button) button.disabled = false;
   if (out.message) routeStatus = { message: out.message, isError: out.isError };
   if (out.isError === false) routeEntries = null;
   await repaint();
@@ -261,7 +296,11 @@ function routeForm(options) {
     expiry: text("expiry", entries.expiry, { inputmode: "numeric" }),
     resolutions: select("resolutions", [{ value: "", label: "Follow each channel" }, { value: "true", label: "Always send" }, { value: "false", label: "Never send" }], entries.resolutions),
     fallback: text("fallback", entries.fallback, { placeholder: "route number, blank = none" }),
+    /* #7656: the Slack channel id the bot posts the route's request threads into. The setup text sits under the box. */
+    botChannel: text("botChannel", entries.botChannel || "", { placeholder: "channel id such as C0123ABCDEF, blank = no threads", autocomplete: "off", spellcheck: "false" }),
   };
+  const botSetup = el("div", { class: "slack-bot-setup", "data-slack-bot-setup": "1" },
+    SLACK_BOT_SETUP_TEXT.map((line) => el("p", { class: "mute-label", text: line })));
   const enabled = el("input", { type: "checkbox", "data-field": "enabled" });
   enabled.checked = entries.enabled;
   /* #6979: a report notice fires for a request of this route, and only a route with its own agent level (Investigate, Act or Act on servers)
@@ -315,7 +354,7 @@ function routeForm(options) {
   for (const c of [...Object.values(controls), enabled, recipients, ...Object.values(hookBoxes), ...Object.values(removeBoxes)]) c.addEventListener("input", sync);
   const save = el("button", {
     class: "btn primary", type: "button", "data-action": "save-route", text: entries.id == null ? "Add route" : "Save route " + entries.id,
-    onClick: () => sendRoute("save", read(), options.repaint),
+    onClick: () => sendRoute("save", read(), options.repaint, save),
   });
   const parts = [
     field("Match:", controls.match), field("Applies to:", controls.scope), field("Severity:", controls.severities), field("Agent:", controls.level), el("label", { class: "tag-field" }, [el("span", { class: "mute-label", text: "Report notice:" }), controls.reportNotice, noticeHint]),
@@ -324,6 +363,7 @@ function routeForm(options) {
     field("Lease minutes:", controls.lease), field("Expiry minutes:", controls.expiry),
     field("Send resolutions:", controls.resolutions), field("Fallback route:", controls.fallback),
     ...hookFields, field("Email recipients:", recipients),
+    field("Slack bot channel:", controls.botChannel), botSetup,
     el("label", { class: "tag-field" }, [enabled, el("span", { text: " Enabled" })]), save,
   ];
   if (entries.id != null) {
@@ -367,7 +407,7 @@ export function routeColumns(base, options) {
       class: "btn", type: "button", text: "Delete", "aria-label": "Delete route " + row.route_id, "data-action": "delete-route",
       onClick: () => {
         if (!window.confirm("Delete route " + row.route_id + "? Routes that name it as their fallback lose that fallback. This cannot be undone.")) return undefined;
-        return sendRoute("delete", { id: row.route_id }, options.repaint);
+        return sendRoute("delete", { id: row.route_id }, options.repaint, remove);
       },
     });
     return el("span", { class: "row-actions" }, [edit, remove]);
@@ -479,6 +519,8 @@ function profileForm(profiles, fleet, maxLength, ctx) {
     onClick: async () => {
       if (profileBusy) return;
       profileBusy = true;
+      /* Disabled while the write runs, so a second press sends nothing; enabled again before the repaint. */
+      save.disabled = true;
       let out;
       try {
         /* The version the page read for this scope (#6274): a profile saved by someone else since is refused with 409, not overwritten.
@@ -495,6 +537,7 @@ function profileForm(profiles, fleet, maxLength, ctx) {
         out = { message: "Could not save the profile: " + (e && e.message ? e.message : String(e)), isError: true };
       }
       profileBusy = false;
+      save.disabled = false;
       if (out.message) profileStatus = { message: out.message, isError: out.isError };
       if (out.isError === false) profileText = null;
       await ctx.repaint();

@@ -358,6 +358,11 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
             _ => Task.FromResult<JsonNode?>(DiagnosticsBundleServiceLog.Read(logDirectory, searched, DateTime.Now.AddHours(-options.Hours), includeText)), cancellationToken);
         sections.Add(logSection with { AfterAlias = CapServiceLogMessages });
 
+        /* #7657: the Slack Socket Mode listener's counters, as the service last wrote them beside its log: connections open, the last
+           disconnect reason and time, the drops by filter, the queue depth and the last event time. Counts and reasons only. */
+        sections.Add(await DiagnosticsBundle.RunSectionAsync(PerformanceMonitor.Darling.Service.Chat.SlackListenerStatusFile.SectionName,
+            _ => Task.FromResult<JsonNode?>(PerformanceMonitor.Darling.Service.Chat.SlackListenerStatusFile.ReadSection(logDirectory)), cancellationToken));
+
         var failedSections = sections.Count(s => s.Failed && s.Name != "store_unreachable");
         var exit = postgres is null ? DiagnosticsBundleExitCode.StoreUnreachable
             : failedSections > 0 ? DiagnosticsBundleExitCode.PartialBundle : DiagnosticsBundleExitCode.Ok;

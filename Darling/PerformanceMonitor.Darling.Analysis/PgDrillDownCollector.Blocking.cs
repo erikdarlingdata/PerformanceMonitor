@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Analysis;
@@ -89,63 +90,58 @@ LIMIT 200";
        blocked-process-report XE captured nothing (AWS RDS). Worst-by-wait surfaces regardless of
        source; on a box with both, each may contribute (this is a top-5 list, not a count).
        The BPR arm windows on event_time with the EventWindowFloor ($4) beside it, like the fact it explains;
-       the DMV arm stays on collection_time because a snapshot's event_time IS its collection time. */
-    public const string TopBlockingChainsSql = @"
-SELECT collection_time, database_name, blocked_spid, blocking_spid,
-       wait_time_ms, lock_mode, blocked_sql, blocking_sql, contentious_object
-FROM
-(
-    SELECT collection_time, database_name, blocked_spid, blocking_spid,
+       the DMV arm stays on collection_time because a snapshot's event_time IS its collection time.
+
+       #7892: each arm is folded to WAITS through BlockingWaits.WaitsCteSql, the definition the BLOCKING_EVENTS
+       fact counts with. SQL Server writes a report for a still-blocked session every blocked process threshold
+       seconds, each with a longer wait_time_ms, and a DMV snapshot sees a wait once per sample, so a list of
+       reports ordered by wait time was five escalating reports of one wait under a finding that counted it once.
+       A row is the wait's longest report, and wait_reports is how many reports it collapsed. */
+    private static string BuildTopBlockingChainsSql(string bprWhere, string dmvWhere) => @"
+WITH " + BlockingWaits.WaitsCteSql(
+        BlockingWaits.SqlDialect.Postgres, "xe_waits",
+        @"SELECT collection_time, database_name, blocked_spid, blocking_spid, event_time,
            wait_time_ms, lock_mode,
            blocked_sql_text AS blocked_sql,
            blocking_sql_text AS blocking_sql,
            contentious_object
     FROM v_blocked_process_reports
-    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3 AND collection_time >= $4
-
-    UNION ALL
-
-    SELECT collection_time, database_name, blocked_spid, blocking_spid,
+    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3" + bprWhere, reportCount: true) + "," + BlockingWaits.WaitsCteSql(
+        BlockingWaits.SqlDialect.Postgres, "dmv_waits",
+        @"SELECT collection_time, database_name, blocked_spid, blocking_spid, event_time,
            wait_time_ms, lock_mode,
            blocked_sql_text AS blocked_sql,
            blocking_sql_text AS blocking_sql,
            contentious_object
     FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3" + dmvWhere, reportCount: true) + @"
+SELECT collection_time, database_name, blocked_spid, blocking_spid,
+       wait_time_ms, lock_mode, blocked_sql, blocking_sql, contentious_object, wait_reports
+FROM
+(
+    SELECT collection_time, database_name, blocked_spid, blocking_spid,
+           wait_time_ms, lock_mode, blocked_sql, blocking_sql, contentious_object, wait_reports
+    FROM xe_waits
+
+    UNION ALL
+
+    SELECT collection_time, database_name, blocked_spid, blocking_spid,
+           wait_time_ms, lock_mode, blocked_sql, blocking_sql, contentious_object, wait_reports
+    FROM dmv_waits
 ) AS combined
 ORDER BY wait_time_ms DESC
 LIMIT 5";
+
+    public static readonly string TopBlockingChainsSql = BuildTopBlockingChainsSql(@"
+    AND   collection_time >= $4", string.Empty);
 
     /// <summary>The same read for an Azure SQL Database master target: $4 is the databases monitored as their own
     /// targets, whose pairs are skipped on both arms (a NULL database still counts), and $5 the event-window floor
     /// (the list keeps its scoped number, so the floor is $4 in <see cref="TopBlockingChainsSql"/> and $5 here).</summary>
-    public const string TopBlockingChainsSkippingSeparateSql = @"
-SELECT collection_time, database_name, blocked_spid, blocking_spid,
-       wait_time_ms, lock_mode, blocked_sql, blocking_sql, contentious_object
-FROM
-(
-    SELECT collection_time, database_name, blocked_spid, blocking_spid,
-           wait_time_ms, lock_mode,
-           blocked_sql_text AS blocked_sql,
-           blocking_sql_text AS blocking_sql,
-           contentious_object
-    FROM v_blocked_process_reports
-    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3 AND collection_time >= $5
-    AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)))
-
-    UNION ALL
-
-    SELECT collection_time, database_name, blocked_spid, blocking_spid,
-           wait_time_ms, lock_mode,
-           blocked_sql_text AS blocked_sql,
-           blocking_sql_text AS blocking_sql,
-           contentious_object
-    FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
-    AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)))
-) AS combined
-ORDER BY wait_time_ms DESC
-LIMIT 5";
+    public static readonly string TopBlockingChainsSkippingSeparateSql = BuildTopBlockingChainsSql(@"
+    AND   collection_time >= $5
+    AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)))", @"
+    AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)))");
 
     private async Task CollectTopBlockingChains(AnalysisFinding finding, AnalysisContext context)
     {
@@ -174,7 +170,9 @@ LIMIT 5";
                 lock_mode = reader.IsDBNull(5) ? "" : reader.GetString(5),
                 blocked_sql = reader.IsDBNull(6) ? "" : StatementPreview(reader.GetString(6)),
                 blocking_sql = reader.IsDBNull(7) ? "" : StatementPreview(reader.GetString(7)),
-                contentious_object = reader.IsDBNull(8) ? "" : reader.GetString(8)
+                contentious_object = reader.IsDBNull(8) ? "" : reader.GetString(8),
+                /* #7892: the blocked-process reports, or DMV samples, this one wait collapsed. */
+                report_count = reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9))
             });
         }
 

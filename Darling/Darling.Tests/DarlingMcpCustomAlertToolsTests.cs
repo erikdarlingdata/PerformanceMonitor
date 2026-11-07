@@ -207,6 +207,36 @@ public sealed class DarlingMcpCustomAlertToolsSurfaceTests
         Assert.False(doc.RootElement.GetProperty("valid").GetBoolean(), result);
         Assert.Contains("tagId", doc.RootElement.GetProperty("error").GetString()!, StringComparison.OrdinalIgnoreCase);
     }
+    /// <summary>A servers list with no 'mode' (#8077): the shape the validator refuses rather than reads as 'all'.</summary>
+    private const string ServersWithoutModeRule =
+        "{\"metric\":{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"hours\":1}," +
+        "\"predicate\":{\"op\":\"ge\",\"warnThreshold\":1000},\"scope\":{\"servers\":[\"alpha\",\"beta\"]}}";
+
+    [Fact]
+    public async Task ValidateCustomAlertRule_ServersListWithoutMode_ReturnsValidFalse_NamingScopeMode()
+    {
+        /* The scope half is as strict as the metric half: a servers list without a mode is refused, never read
+           as 'all' with the list dropped. */
+        var result = await DarlingMcpCustomAlertTools.ValidateCustomAlertRule(ServersWithoutModeRule);
+        using var doc = JsonDocument.Parse(result);
+        Assert.False(doc.RootElement.GetProperty("valid").GetBoolean(), result);
+        Assert.Contains("'scope.mode'", doc.RootElement.GetProperty("error").GetString()!);
+    }
+
+    [Fact]
+    public async Task TestCustomAlertRule_ServersListWithoutMode_ReturnsInvalid_WithoutResolvingTheFleet()
+    {
+        /* test-now refuses the definition before it resolves any server, so the list is never widened to every
+           enabled server (the dead store would fail the call if the resolver were reached). */
+        await using var dead = NpgsqlDataSource.Create(DeadStore);
+        var result = await DarlingMcpCustomAlertTools.TestCustomAlertRule(dead, definition: ServersWithoutModeRule);
+        using var doc = JsonDocument.Parse(result);
+        Assert.True(
+            doc.RootElement.TryGetProperty("status", out var status) && status.GetString() == "invalid",
+            result);
+        Assert.Contains("'scope.mode'", doc.RootElement.GetProperty("message").GetString()!);
+    }
+
 
     [Fact]
     public async Task CreateCustomAlertRule_InvalidDefinition_ReturnsInvalid_WithoutTouchingTheStore()

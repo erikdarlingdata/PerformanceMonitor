@@ -15,6 +15,7 @@ Read these pages in this order. After the install, each page is complete on its 
 9. [Managed Bundled PostgreSQL](managed-postgresql.md): the store that the service runs for itself.
 10. [Configuration Reference](configuration.md): where each setting lives, `postgres`, `servers`, `peers`, `heartbeat` and `reads`.
 11. [Alert and notification settings](alerts-and-notifications.md): the `alerts`, `analysis`, `smtp` and `webhooks` blocks, and the notification routes.
+    - [The Slack bot](slack-bot.md): the one Slack app and its manifest, the bot and app-level tokens, the per-store bot channel, and the Socket Mode listener.
 12. [Agents and alert sources](agents-and-alert-sources.md): hand an alert to your own agent, practice requests, and logins for systems that send alerts.
 13. [MCP configuration](configuration-mcp.md): the `mcp` block.
 14. [MCP tools and their store tables](mcp-tool-tables.md): every MCP tool and the store tables that it reads or changes.

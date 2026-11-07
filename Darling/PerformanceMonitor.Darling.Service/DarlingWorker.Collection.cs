@@ -1008,7 +1008,11 @@ public sealed partial class DarlingWorker
             isStoryMuted: async (serverId, storyPathHash) =>
                 (await muteReadStore.GetMutedStoryHashesAsync(serverId)).Contains(storyPathHash),
             /* #7084 part 4: a finding that would page attaches to an engine alert still open on its server. */
-            findOpenEngineAlert: historyStore.FindOpenEngineAlertAsync);
+            findOpenEngineAlert: historyStore.FindOpenEngineAlertAsync,
+            /* #8012: a held story whose path loses a leaf is seeded from the wider path's page row. The wider path is
+               found among the distinct paths this server has stored under the same root across the findings
+               retention, so a restart long after the path shortened still finds it. */
+            getStoredStoryPaths: muteReadStore.GetStoryPathsAsync);
 
         /* #2138 phase 1: the auto force-plan bot, hooked onto the SCHEDULED analysis pass only (the
            interactive analyze_now command deliberately does not trigger it — an operator poking a
@@ -1069,6 +1073,30 @@ public sealed partial class DarlingWorker
            claims, to expired. It never reopens a lease; a claim's own WHERE takes a lapsed lease over. */
         /* #6003: after each sweep, the request events go out: the D8 fallback of a request that expired unclaimed, and the
            signed POST of every new event to its agent route; the pass wakes the MCP long-poll for what it found. */
+        /* #7656: the Slack bot posts each request's journal rows into one thread per request on a route with a bot channel. The bot
+           token is read from the opened settings on every post, so a token saved later is used without a restart; a blank token posts
+           nothing and leaves every row unmarked for when one is set. The throttle holds a 429's Retry-After across passes. */
+        var slackThrottle = new PerformanceMonitor.Darling.Service.Chat.SlackPostThrottle();
+        var slackBotPosts = new PerformanceMonitor.Darling.Service.Chat.SettingsSlackBotPosts(() => alertSettings.SlackBotToken);
+        /* #7657: the Socket Mode listener's host reads the opened app-level token through this publication: a token set means listen,
+           blank means off, and a change is seen on the host's next poll. The bot token learns the workspace id at connect, and the
+           routes decide which channels this store owns. */
+        /* #7658: the buttons. The listener's handler acts on the cards the poster saved, on the owner connection: the proposal presses, a person's
+           undo, a verdict and a note decision, each answered to the presser alone and each edited into the card once decided. */
+        _slackListenerState?.Publish(() => alertSettings.SlackAppToken, () => alertSettings.SlackBotToken, () => alertSettings.NotificationRoutes,
+            () => new PerformanceMonitor.Darling.Service.Chat.SlackInteractionHandler(
+                investigationStore,
+                new PerformanceMonitor.Darling.Service.Chat.StoreSlackPressCommands(investigationPostgres, investigationStore, _logger),
+                slackBotPosts, _logger, dataDetail, () => alertSettings.TriageBaseUrl));
+        var slackThreads = new PerformanceMonitor.Darling.Service.Chat.SlackThreadPass(
+            investigationStore, investigationStore,
+            new PerformanceMonitor.Darling.Service.Chat.SlackThreadPoster(
+                investigationStore, slackBotPosts, _loggerFactory.CreateLogger<PerformanceMonitor.Darling.Service.Chat.SlackThreadPoster>(), slackThrottle,
+                cards: investigationStore),
+            slackThrottle, () => alertSettings.NotificationRoutes, _logger, dataDetail, () => alertSettings.TriageBaseUrl,
+            ready: slackBotPosts.HasToken,
+            /* #7658: only a store that is listening (its app-level token is set) posts cards with buttons; the others point at the web page. */
+            buttons: () => !string.IsNullOrWhiteSpace(alertSettings.SlackAppToken));
         var investigationEvents = new PerformanceMonitor.Darling.Service.Investigations.InvestigationEventDelivery(
             investigationStore, () => alertSettings.NotificationRoutes,
             new PerformanceMonitor.Darling.Service.Investigations.ServiceInvestigationEventSends(
@@ -1077,7 +1105,7 @@ public sealed partial class DarlingWorker
             /* #6979: the report notice goes to the route's Slack and Teams destinations (the settings' channel when the route has none),
                masked at the level the MCP tools serve, with links only while the web dashboard serves (TriageBaseUrl is empty otherwise). */
             reportNotices: webhookAlertService, defaults: alertSettings, dataDetail: dataDetail,
-            baseUrl: () => alertSettings.TriageBaseUrl);
+            baseUrl: () => alertSettings.TriageBaseUrl, slackThreads: slackThreads);
         /* #6234: the change watch rides the sweep's tick; its first pass runs at start, so a watch whose window ended while the service was down is evaluated then. */
         var changeWatchPass = new PerformanceMonitor.Darling.Service.ChangeWatch.ChangeWatchPass(
             postgres,

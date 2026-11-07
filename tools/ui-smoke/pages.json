@@ -3,7 +3,8 @@
     "Pages the web UI smoke check loads (#5701). Every page gets the same checks (smoke.mjs): no console error, page error, failed request or /api/* answer >= 400; #main fills; the sidebar lists the seeded servers; the nav link for the route is active; no .strip.error or [role=alert]; no panel still loading or in error.",
     "Per page, 'expect' adds what the seed guarantees. A panel is found by its data-panel (the read name) or its data-title; data-panel is unambiguous only for a read that feeds one card, so key a fanout panel (several cards sharing one read) by title; 'state' is data (draws rows, a chart or tiles) or empty (shows its documented empty text); 'minRows' counts the rows of the first [data-grid] inside it. 'grids' does the same for the whole page (an Admin tab has no panel cards): 'minRows' or 'exactRows' on the Nth [data-grid] in #main.",
     "screenshot: a page with this key also gets a baseline PNG (shots.mjs, #5744; tools/ui-smoke/baselines/<name>.png). Its mask is a list of CSS selectors painted over before the compare, added to screenshotDefaults.mask (the status bar clock, the refresh hint, a chart tooltip): put in it anything whose text changes from run to run.",
-    "allowList: a console or request message that is known and harmless. Each entry needs an 'issue' number and a 'match' substring. It starts empty."
+    "allowList: a console or request message that is known and harmless. Each entry needs an 'issue' number and a 'match' substring. It starts empty.",
+    "expectedOffline: the servers seed.sql seeds as unreachable (#7590). Their fleet cards read Offline from the first poll, so the screenshot stage (shots.mjs, fleet-stale.mjs) waits for every OTHER card to turn collection stale and for each of these to read Offline (#8069)."
   ],
   "screenshotDefaults": {
     "mask": ["#statusbar .sb-updated", "#refresh-hint", ".chart-tooltip"]
@@ -13,6 +14,9 @@
     "ui-sql",
     "ui-pg",
     "ui-long-name-sql-server-production-east-region-cluster-demo-01-primary",
+    "ui-down-sql"
+  ],
+  "expectedOffline": [
     "ui-down-sql"
   ],
   "pages": [

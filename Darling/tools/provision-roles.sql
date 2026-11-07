@@ -693,6 +693,15 @@ $v233$;
 GRANT SELECT (action_approval, approval_single_person) ON config.config_notification_routes TO viewer;
 $v238$;
       END IF;
+      -- V252 (#7656): the route's Slack bot channel id, blank for none, and the time it was set (null when blank). Non-secret. Granted on their own
+      -- columns inside the routes table's guard, on the channel column the same rung adds, so a store below V252 still commits.
+      IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                 WHERE attrelid = 'config.config_notification_routes'::regclass
+                   AND attname = 'slack_bot_channel' AND NOT attisdropped) THEN
+         EXECUTE $v252$
+GRANT SELECT (slack_bot_channel, slack_bot_channel_set_at) ON config.config_notification_routes TO viewer;
+$v252$;
+      END IF;
    END IF;
 END $$;
 -- V187 (#5825): the four per-channel "send resolutions" flags. Non-secret (behaviour toggles, like
@@ -859,6 +868,15 @@ $v233$;
 GRANT SELECT (action_approval, approval_single_person) ON config.config_notification_routes TO web;
 $v238$;
       END IF;
+      -- V252 (#7656): the route's Slack bot channel id, blank for none, and the time it was set (null when blank). Non-secret. Guarded on the
+      -- channel column, which the same rung adds, so a store below V252 still commits.
+      IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                 WHERE attrelid = 'config.config_notification_routes'::regclass
+                   AND attname = 'slack_bot_channel' AND NOT attisdropped) THEN
+         EXECUTE $v252$
+GRANT SELECT (slack_bot_channel, slack_bot_channel_set_at) ON config.config_notification_routes TO web;
+$v252$;
+      END IF;
    END IF;
 END $$;
 -- V187 (#5825): the four per-channel "send resolutions" flags. Non-secret (behaviour toggles, like
@@ -1012,6 +1030,15 @@ $v233$;
          EXECUTE $v238$
 GRANT SELECT (action_approval, approval_single_person) ON config.config_notification_routes TO mcp;
 $v238$;
+      END IF;
+      -- V252 (#7656): the route's Slack bot channel id, blank for none, and the time it was set (null when blank). Non-secret. Guarded on the
+      -- channel column, which the same rung adds, so a store below V252 still commits.
+      IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                 WHERE attrelid = 'config.config_notification_routes'::regclass
+                   AND attname = 'slack_bot_channel' AND NOT attisdropped) THEN
+         EXECUTE $v252$
+GRANT SELECT (slack_bot_channel, slack_bot_channel_set_at) ON config.config_notification_routes TO mcp;
+$v252$;
       END IF;
    END IF;
 END $$;
@@ -1863,6 +1890,8 @@ BEGIN;
 DROP FUNCTION IF EXISTS config.create_notification_route(text, boolean, integer, integer, boolean, integer);
 -- #6979 (V233): p_report_notice joins the argument list, so the seven-argument function is dropped and stays uncallable. NULL is off.
 DROP FUNCTION IF EXISTS config.create_notification_route(text, boolean, integer, integer, boolean, integer, text);
+-- #7656 (V252): p_slack_bot_channel joins the argument list, so the eight-argument function is dropped and stays uncallable. NULL is none.
+DROP FUNCTION IF EXISTS config.create_notification_route(text, boolean, integer, integer, boolean, integer, text, text);
 CREATE OR REPLACE FUNCTION config.create_notification_route(
    p_metric_match text,
    p_enabled boolean,
@@ -1871,7 +1900,8 @@ CREATE OR REPLACE FUNCTION config.create_notification_route(
    p_send_resolutions boolean,
    p_fallback_route_id integer,
    p_severities text DEFAULT NULL,
-   p_report_notice text DEFAULT NULL)
+   p_report_notice text DEFAULT NULL,
+   p_slack_bot_channel text DEFAULT NULL)
 RETURNS integer
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -1881,6 +1911,7 @@ DECLARE
    v_match text := btrim(COALESCE(p_metric_match, ''));
    v_severities text := lower(btrim(COALESCE(p_severities, 'both')));
    v_report_notice text := lower(btrim(COALESCE(p_report_notice, 'off')));
+   v_slack_bot_channel text := btrim(COALESCE(p_slack_bot_channel, ''));
    v_id integer;
 BEGIN
    IF v_severities NOT IN ('both', 'critical', 'warning') THEN
@@ -1888,6 +1919,9 @@ BEGIN
    END IF;
    IF v_report_notice NOT IN ('off', 'needs_person_or_change', 'all') THEN
       RAISE EXCEPTION 'report_notice is off, needs_person_or_change or all.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_slack_bot_channel <> '' AND v_slack_bot_channel !~ '^[CG][A-Z0-9]{1,31}$' THEN
+      RAISE EXCEPTION 'The Slack bot channel is a channel id: C or G, then capital letters and digits (for example C0123ABCDEF), or blank for none. Not the channel''s name.' USING ERRCODE = 'DL400';
    END IF;
    IF v_match = '' THEN
       RAISE EXCEPTION 'Choose a family or enter an exact metric name.' USING ERRCODE = 'DL400';
@@ -1914,15 +1948,15 @@ BEGIN
    -- goes where it went before (the next matching route, else the Settings channels), and no caller of this function can name a URL, a key or an address list.
    -- The agent columns keep their defaults too: this function never makes an agent route.
    INSERT INTO config.config_notification_routes
-      (metric_match, enabled, scope_server_id, scope_tag_id, send_resolutions, fallback_route_id, severities, report_notice, modified_at)
+      (metric_match, enabled, scope_server_id, scope_tag_id, send_resolutions, fallback_route_id, severities, report_notice, slack_bot_channel, modified_at)
    VALUES
-      (v_match, COALESCE(p_enabled, true), p_scope_server_id, p_scope_tag_id, p_send_resolutions, p_fallback_route_id, v_severities, v_report_notice,
+      (v_match, COALESCE(p_enabled, true), p_scope_server_id, p_scope_tag_id, p_send_resolutions, p_fallback_route_id, v_severities, v_report_notice, v_slack_bot_channel,
        (now() AT TIME ZONE 'UTC'))
    RETURNING route_id INTO v_id;
    RETURN v_id;
 END
 $fn$;
-REVOKE ALL ON FUNCTION config.create_notification_route(text, boolean, integer, integer, boolean, integer, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION config.create_notification_route(text, boolean, integer, integer, boolean, integer, text, text, text) FROM PUBLIC;
 -- #6542 part 2: the actor is an argument now and the before row comes back, so the old signature is dropped and stays uncallable.
 DROP FUNCTION IF EXISTS config.update_notification_route(integer, text[], text, boolean, integer, integer, boolean, integer);
 -- #6928 (V229): p_severities joins the argument list, so the nine-argument function is dropped and stays uncallable. It is read only when
@@ -1931,6 +1965,9 @@ DROP FUNCTION IF EXISTS config.update_notification_route(integer, text, text[], 
 -- #6979 (V233): p_report_notice joins the argument list, so the ten-argument function is dropped and stays uncallable. It is read only when
 -- p_columns names report_notice.
 DROP FUNCTION IF EXISTS config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text);
+-- #7656 (V252): p_slack_bot_channel joins the argument list, so the eleven-argument function is dropped and stays uncallable. It is read only when
+-- p_columns names slack_bot_channel.
+DROP FUNCTION IF EXISTS config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text, text);
 CREATE OR REPLACE FUNCTION config.update_notification_route(
    p_route_id integer,
    p_actor text,
@@ -1942,7 +1979,8 @@ CREATE OR REPLACE FUNCTION config.update_notification_route(
    p_send_resolutions boolean,
    p_fallback_route_id integer,
    p_severities text DEFAULT NULL,
-   p_report_notice text DEFAULT NULL)
+   p_report_notice text DEFAULT NULL,
+   p_slack_bot_channel text DEFAULT NULL)
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -1961,11 +1999,12 @@ DECLARE
    v_fallback integer;
    v_severities text;
    v_report_notice text;
+   v_slack_bot_channel text;
 BEGIN
    IF p_columns IS NULL OR cardinality(p_columns) = 0
       OR EXISTS (SELECT 1 FROM unnest(p_columns) AS c(name)
-                 WHERE c.name IS NULL OR c.name NOT IN ('metric_match', 'enabled', 'scope', 'send_resolutions', 'fallback_route_id', 'severities', 'report_notice')) THEN
-      RAISE EXCEPTION 'The columns to change are metric_match, enabled, scope, send_resolutions, fallback_route_id, severities and report_notice.' USING ERRCODE = 'DL400';
+                 WHERE c.name IS NULL OR c.name NOT IN ('metric_match', 'enabled', 'scope', 'send_resolutions', 'fallback_route_id', 'severities', 'report_notice', 'slack_bot_channel')) THEN
+      RAISE EXCEPTION 'The columns to change are metric_match, enabled, scope, send_resolutions, fallback_route_id, severities, report_notice and slack_bot_channel.' USING ERRCODE = 'DL400';
    END IF;
    -- The row is read again here, under its lock, so the agent-route refusal and every check below are on what is stored now
    -- and not on what the caller read a moment ago.
@@ -2000,6 +2039,10 @@ BEGIN
    v_report_notice := CASE WHEN 'report_notice' = ANY (p_columns) THEN lower(btrim(COALESCE(p_report_notice, ''))) ELSE v_row.report_notice END;
    IF v_report_notice NOT IN ('off', 'needs_person_or_change', 'all') THEN
       RAISE EXCEPTION 'report_notice is off, needs_person_or_change or all.' USING ERRCODE = 'DL400';
+   END IF;
+   v_slack_bot_channel := CASE WHEN 'slack_bot_channel' = ANY (p_columns) THEN btrim(COALESCE(p_slack_bot_channel, '')) ELSE v_row.slack_bot_channel END;
+   IF v_slack_bot_channel <> '' AND v_slack_bot_channel !~ '^[CG][A-Z0-9]{1,31}$' THEN
+      RAISE EXCEPTION 'The Slack bot channel is a channel id: C or G, then capital letters and digits (for example C0123ABCDEF), or blank for none. Not the channel''s name.' USING ERRCODE = 'DL400';
    END IF;
    IF v_match = '' THEN
       RAISE EXCEPTION 'Choose a family or enter an exact metric name.' USING ERRCODE = 'DL400';
@@ -2043,6 +2086,7 @@ BEGIN
           fallback_route_id = v_fallback,
           severities = v_severities,
           report_notice = v_report_notice,
+          slack_bot_channel = v_slack_bot_channel,
           modified_at = (now() AT TIME ZONE 'UTC')
     WHERE route_id = p_route_id;
    -- The row as it was before this change, in the journal's words: set_notification_route_agent journals it as the before of a
@@ -2051,11 +2095,11 @@ BEGIN
       'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
       'agent_level', v_row.agent_level, 'agent_max_per_hour', v_row.agent_max_per_hour, 'agent_max_per_day', v_row.agent_max_per_day,
       'agent_lease_minutes', v_row.agent_lease_minutes, 'agent_expiry_minutes', v_row.agent_expiry_minutes, 'enabled', v_row.enabled,
-      'severities', v_row.severities, 'report_notice', v_row.report_notice,
+      'severities', v_row.severities, 'report_notice', v_row.report_notice, 'slack_bot_channel', v_row.slack_bot_channel,
       'action_approval', v_row.action_approval, 'approval_single_person', v_row.approval_single_person);
 END
 $fn$;
-REVOKE ALL ON FUNCTION config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text, text, text) FROM PUBLIC;
 -- #6542: a named operator token sets a route's agent level, its four limits and its fallback over MCP through this function, and
 -- the change is journaled as route_agent_changed under the token's name (operator:<name>), in the same transaction. Levels 0 to 3 are
 -- set here (MCP is full admin). A level 3 server action still needs that server's switch (config_server_actions) and its remediation login.
@@ -2168,6 +2212,10 @@ BEGIN
       IF (p_before ->> 'report_notice') IS DISTINCT FROM v_row.report_notice AND ((p_before ->> 'agent_level') IS NOT NULL OR v_level IS NOT NULL) THEN
          v_changed := array_append(v_changed, 'report_notice');
       END IF;
+      -- #7656: the Slack bot channel is where the route's bot posts, named like the report notice. Only a route with an agent setting.
+      IF (p_before ->> 'slack_bot_channel') IS DISTINCT FROM v_row.slack_bot_channel AND ((p_before ->> 'agent_level') IS NOT NULL OR v_level IS NOT NULL) THEN
+         v_changed := array_append(v_changed, 'slack_bot_channel');
+      END IF;
    END IF;
    -- #7109: the approval setting and single-person approval, named like the report notice. Only a route with an agent setting.
    IF v_approval IS DISTINCT FROM v_row.action_approval AND (v_row.agent_level IS NOT NULL OR v_level IS NOT NULL) THEN
@@ -2203,13 +2251,13 @@ BEGIN
          'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
          'agent_level', v_row.agent_level, 'agent_max_per_hour', v_row.agent_max_per_hour, 'agent_max_per_day', v_row.agent_max_per_day,
          'agent_lease_minutes', v_row.agent_lease_minutes, 'agent_expiry_minutes', v_row.agent_expiry_minutes, 'enabled', v_row.enabled,
-         'severities', v_row.severities, 'report_notice', v_row.report_notice,
+         'severities', v_row.severities, 'report_notice', v_row.report_notice, 'slack_bot_channel', v_row.slack_bot_channel,
          'action_approval', v_row.action_approval, 'approval_single_person', v_row.approval_single_person) END;
       v_after := jsonb_build_object(
          'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
          'agent_level', v_level, 'agent_max_per_hour', v_hour, 'agent_max_per_day', v_day,
          'agent_lease_minutes', v_lease, 'agent_expiry_minutes', v_expiry, 'enabled', v_row.enabled,
-         'severities', v_row.severities, 'report_notice', v_row.report_notice,
+         'severities', v_row.severities, 'report_notice', v_row.report_notice, 'slack_bot_channel', v_row.slack_bot_channel,
          'action_approval', v_approval, 'approval_single_person', v_single);
       INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, reason, detail)
       VALUES (now(), NULL, p_route_id, v_row.scope_server_id, 'route_agent_changed', p_actor,
@@ -2309,8 +2357,8 @@ BEGIN
 END
 $fn$;
 REVOKE ALL ON FUNCTION config.set_notification_route_destinations(integer, text, text[], text, text, text, text, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION config.create_notification_route(text, boolean, integer, integer, boolean, integer, text, text) TO mcp;
-GRANT EXECUTE ON FUNCTION config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text, text) TO mcp;
+GRANT EXECUTE ON FUNCTION config.create_notification_route(text, boolean, integer, integer, boolean, integer, text, text, text) TO mcp;
+GRANT EXECUTE ON FUNCTION config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text, text, text) TO mcp;
 GRANT EXECUTE ON FUNCTION config.set_notification_route_destinations(integer, text, text[], text, text, text, text, text) TO mcp;
 GRANT EXECUTE ON FUNCTION config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb, text, boolean) TO mcp;
 -- #6394: the MCP generate_webhook_signing_key and remove_webhook_signing_key tools. mcp holds no UPDATE on a signing key column of config.config_notification
@@ -2420,6 +2468,8 @@ GRANT EXECUTE ON FUNCTION config.clear_webhook_signing_key(integer) TO mcp;
 --     Viewer's refusals (a change to what a saved secret is tied to needs the secret again, a signing key blocks a URL or proxy change).
 --     It returns only whether each secret named in the call was saved before. The tool is served only under mcp.allowWrites with a token.
 --     Granted to mcp only.
+-- #7656: the signature without the Slack bot token parameters; the GRANT below names the current one.
+DROP FUNCTION IF EXISTS config.set_notification_channels(text[], text, integer, boolean, text, text, text, text, text, text, text, text, text, text, text, text, text, boolean, text, boolean);
 CREATE OR REPLACE FUNCTION config.set_notification_channels(
    p_columns text[],
    p_smtp_host text,
@@ -2440,9 +2490,12 @@ CREATE OR REPLACE FUNCTION config.set_notification_channels(
    p_pagerduty_routing_key text,
    p_pagerduty_use_eu_region boolean,
    p_pagerduty_proxy text,
-   p_pagerduty_auto_resolve boolean)
+   p_pagerduty_auto_resolve boolean,
+   p_slack_bot_token text,
+   p_slack_app_token text)
 RETURNS TABLE (prev_smtp_username_set boolean, prev_smtp_password_set boolean, prev_teams_url_set boolean, prev_slack_url_set boolean,
-               prev_generic_url_set boolean, prev_generic_headers_set boolean, prev_pagerduty_routing_key_set boolean)
+               prev_generic_url_set boolean, prev_generic_headers_set boolean, prev_pagerduty_routing_key_set boolean,
+               prev_slack_bot_token_set boolean, prev_slack_app_token_set boolean)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
@@ -2468,13 +2521,16 @@ DECLARE
    v_eu boolean;
    v_pd_proxy text;
    v_auto boolean;
+   v_bot_token text;
+   v_app_token text;
 BEGIN
    IF p_columns IS NULL OR cardinality(p_columns) = 0
       OR EXISTS (SELECT 1 FROM unnest(p_columns) AS c(name)
                  WHERE c.name IS NULL OR c.name NOT IN (
                     'smtp_host', 'smtp_port', 'smtp_use_ssl', 'smtp_username', 'smtp_encrypted_password', 'smtp_from_address', 'smtp_recipients',
                     'teams_url', 'teams_proxy', 'slack_url', 'slack_proxy', 'generic_url', 'generic_headers', 'generic_body_template',
-                    'generic_proxy', 'pagerduty_routing_key', 'pagerduty_use_eu_region', 'pagerduty_proxy', 'pagerduty_auto_resolve')) THEN
+                    'generic_proxy', 'pagerduty_routing_key', 'pagerduty_use_eu_region', 'pagerduty_proxy', 'pagerduty_auto_resolve',
+                    'slack_bot_token', 'slack_app_token')) THEN
       RAISE EXCEPTION 'The notification channel columns to change are the SMTP, Teams, Slack, generic webhook and PagerDuty settings.' USING ERRCODE = 'DL400';
    END IF;
    -- The row is read under its lock, so every check below is on what is stored now.
@@ -2501,6 +2557,8 @@ BEGIN
    v_eu := CASE WHEN 'pagerduty_use_eu_region' = ANY (p_columns) THEN COALESCE(p_pagerduty_use_eu_region, v_row.pagerduty_use_eu_region) ELSE v_row.pagerduty_use_eu_region END;
    v_pd_proxy := CASE WHEN 'pagerduty_proxy' = ANY (p_columns) THEN COALESCE(p_pagerduty_proxy, '') ELSE v_row.pagerduty_proxy END;
    v_auto := CASE WHEN 'pagerduty_auto_resolve' = ANY (p_columns) THEN COALESCE(p_pagerduty_auto_resolve, v_row.pagerduty_auto_resolve) ELSE v_row.pagerduty_auto_resolve END;
+   v_bot_token := CASE WHEN 'slack_bot_token' = ANY (p_columns) THEN COALESCE(p_slack_bot_token, '') ELSE v_row.slack_bot_token END;
+   v_app_token := CASE WHEN 'slack_app_token' = ANY (p_columns) THEN COALESCE(p_slack_app_token, '') ELSE v_row.slack_app_token END;
    IF v_port < 1 OR v_port > 65535 THEN
       RAISE EXCEPTION 'The SMTP port is between 1 and 65535.' USING ERRCODE = 'DL400';
    END IF;
@@ -2512,7 +2570,8 @@ BEGIN
    -- of sealed:v1:, the 16 character key id, base64, at most 16384 characters), so no caller of it can store a secret as text.
    IF EXISTS (SELECT 1
                 FROM (VALUES (v_password, COALESCE(v_row.smtp_encrypted_password, '')), (v_teams, v_row.teams_url), (v_slack, v_row.slack_url),
-                             (v_generic, v_row.generic_url), (v_headers, v_row.generic_headers), (v_key, v_row.pagerduty_routing_key))
+                             (v_generic, v_row.generic_url), (v_headers, v_row.generic_headers), (v_key, v_row.pagerduty_routing_key),
+                             (v_bot_token, v_row.slack_bot_token), (v_app_token, v_row.slack_app_token))
                      AS w(new_value, old_value)
                WHERE w.new_value <> w.old_value AND w.new_value <> ''
                  AND (length(w.new_value) > 16384
@@ -2590,6 +2649,8 @@ BEGIN
           pagerduty_use_eu_region = v_eu,
           pagerduty_proxy = v_pd_proxy,
           pagerduty_auto_resolve = v_auto,
+          slack_bot_token = v_bot_token,
+          slack_app_token = v_app_token,
           modified_at = (now() AT TIME ZONE 'UTC')
     WHERE id = 1;
    -- What was stored before comes back only as a flag for whether a secret was saved, and only for the columns this call names: the
@@ -2601,11 +2662,13 @@ BEGIN
       CASE WHEN 'slack_url' = ANY (p_columns) THEN v_row.slack_url <> '' END,
       CASE WHEN 'generic_url' = ANY (p_columns) THEN v_row.generic_url <> '' END,
       CASE WHEN 'generic_headers' = ANY (p_columns) THEN v_row.generic_headers <> '' END,
-      CASE WHEN 'pagerduty_routing_key' = ANY (p_columns) THEN v_row.pagerduty_routing_key <> '' END;
+      CASE WHEN 'pagerduty_routing_key' = ANY (p_columns) THEN v_row.pagerduty_routing_key <> '' END,
+      CASE WHEN 'slack_bot_token' = ANY (p_columns) THEN v_row.slack_bot_token <> '' END,
+      CASE WHEN 'slack_app_token' = ANY (p_columns) THEN v_row.slack_app_token <> '' END;
 END
 $fn$;
-REVOKE ALL ON FUNCTION config.set_notification_channels(text[], text, integer, boolean, text, text, text, text, text, text, text, text, text, text, text, text, text, boolean, text, boolean) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION config.set_notification_channels(text[], text, integer, boolean, text, text, text, text, text, text, text, text, text, text, text, text, text, boolean, text, boolean) TO mcp;
+REVOKE ALL ON FUNCTION config.set_notification_channels(text[], text, integer, boolean, text, text, text, text, text, text, text, text, text, text, text, text, text, boolean, text, boolean, text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION config.set_notification_channels(text[], text, integer, boolean, text, text, text, text, text, text, text, text, text, text, text, text, text, boolean, text, boolean, text, text) TO mcp;
 COMMIT;
 
 -- #6230: the MCP incident tools queue analyze_now, purge_now, test_connect, pause and resume through this function, the only way the
@@ -3520,7 +3583,7 @@ BEGIN
       RETURN NEW;
    END IF;
 
-   IF NEW.event IN ('opened', 'joined', 'resolved', 'expired', 'claims_exhausted', 'evidence_ready', 'follow_up', 'deadlock_digest', 'event_delivered', 'fallback_sent', 'server_action_switched', 'action_called', 'action_done', 'action_failed', 'person_added', 'person_renamed', 'person_enabled', 'person_disabled', 'person_identity_added', 'person_identity_removed', 'person_grant_added', 'person_grant_removed', 'proposal_created', 'proposal_first_press', 'proposal_approved', 'proposal_run', 'proposal_failed', 'proposal_unknown', 'proposal_refused', 'proposal_expired', 'proposal_superseded', 'proposal_voided', 'proposal_notice_sent', 'person_message') THEN
+   IF NEW.event IN ('opened', 'joined', 'resolved', 'expired', 'claims_exhausted', 'evidence_ready', 'follow_up', 'deadlock_digest', 'event_delivered', 'fallback_sent', 'server_action_switched', 'action_called', 'action_done', 'action_failed', 'person_added', 'person_renamed', 'person_enabled', 'person_disabled', 'person_identity_added', 'person_identity_removed', 'person_grant_added', 'person_grant_removed', 'proposal_created', 'proposal_first_press', 'proposal_approved', 'proposal_run', 'proposal_failed', 'proposal_unknown', 'proposal_refused', 'proposal_expired', 'proposal_superseded', 'proposal_voided', 'proposal_notice_sent', 'slack_thread_posted', 'slack_press', 'person_message') THEN
       IF NEW.event = 'opened'
          AND EXISTS (SELECT 1 FROM config.investigation_requests AS r
                      WHERE r.request_id = NEW.request_id AND r.practice_of IS NOT NULL
@@ -3682,6 +3745,36 @@ BEGIN
 
    REVOKE ALL ON config.agent_action_proposals FROM PUBLIC, admin, viewer, web, mcp CASCADE;
    GRANT SELECT ON config.agent_action_proposals TO admin, viewer, web;
+END $do$;
+
+-- 3j5. The request Slack threads (V252, #7656), mirroring managed provisioning's section 10e5: the channel and parent ts of each request's
+--     thread. NO role but the store owner (the service) writes them: REVOKE ALL ... CASCADE takes every privilege (the default privileges
+--     would give admin INSERT/UPDATE/DELETE on a table made after them), and SELECT goes back to admin alone. The table has no sequence. It
+--     is created by V252: on a store below it the block warns and skips, so the rest of the script still runs; re-run the script once the
+--     service has migrated the store.
+DO $do$
+BEGIN
+   IF pg_catalog.to_regclass('config.investigation_request_threads') IS NULL THEN
+      RAISE WARNING 'The request Slack thread table was not found, so its grants were skipped. Run this script again after the service has upgraded the store.';
+      RETURN;
+   END IF;
+
+   REVOKE ALL ON config.investigation_request_threads FROM PUBLIC, admin, viewer, web, mcp CASCADE;
+   GRANT SELECT ON config.investigation_request_threads TO admin;
+END $do$;
+
+-- 3j6. The Slack cards (V253, #7658), mirroring managed provisioning's section 10e6: the channel and ts of each card the bot posted with
+--     buttons, and its state. Owner-written as the threads are: REVOKE ALL ... CASCADE, then SELECT back to admin alone. The table has no
+--     sequence. It is created by V253: on a store below it the block warns and skips, so the rest of the script still runs.
+DO $do$
+BEGIN
+   IF pg_catalog.to_regclass('config.investigation_slack_posts') IS NULL THEN
+      RAISE WARNING 'The Slack card table was not found, so its grants were skipped. Run this script again after the service has upgraded the store.';
+      RETURN;
+   END IF;
+
+   REVOKE ALL ON config.investigation_slack_posts FROM PUBLIC, admin, viewer, web, mcp CASCADE;
+   GRANT SELECT ON config.investigation_slack_posts TO admin;
 END $do$;
 
 -- 3k. Query-tag tables (V192, #5977), mirroring managed provisioning's grants for them. mcp writes the three tables a person
@@ -3881,8 +3974,8 @@ BEGIN
    'config.request_snapshot_now(integer, text, text)',
    'config.request_active_queries_live(integer, text)',
    'config.request_analyze_now(integer, text)',
-   'config.create_notification_route(text, boolean, integer, integer, boolean, integer, text, text)',
-   'config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text, text)',
+   'config.create_notification_route(text, boolean, integer, integer, boolean, integer, text, text, text)',
+   'config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text, text, text)',
    'config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb, text, boolean)',
    'config.set_notification_route_destinations(integer, text, text[], text, text, text, text, text)',
    'config.request_mcp_command(text, integer, integer, text)',

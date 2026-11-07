@@ -150,11 +150,36 @@ internal static class TrendBuckets
     /// CPU/ACU pair (each with its own peak), the capacity trio and the six V136 host-memory columns.</summary>
     public const int PgCpuMaxPoints = 500;
 
+    /// <summary>Lite's <c>get_query_trend</c> (#7907): about 330 bytes a point, sixteen fields of one query's summed
+    /// deltas, weighted averages, DOP pair and plan facts.</summary>
+    public const int QueryTrendMaxPoints = 750;
+
     /// <summary>
     /// The fixed origin every bucketing read aligns to, as a SQL literal both dialects accept (PostgreSQL
     /// <c>date_bin</c>, DuckDB <c>time_bucket</c>). A midnight, so every ladder width lands on round clock times.
     /// </summary>
     public const string OriginSql = "TIMESTAMP '2000-01-01 00:00:00'";
+
+    /// <summary><see cref="OriginSql"/> as a value, parsed from that literal so the two cannot drift, for a read that
+    /// buckets rows it has already fetched. Unspecified kind, as the statements' naive timestamps are.</summary>
+    public static readonly DateTime Origin = DateTime.ParseExact(
+        OriginSql, @"'TIMESTAMP '\'yyyy-MM-dd HH:mm:ss\'", CultureInfo.InvariantCulture, DateTimeStyles.None);
+
+    /// <summary>
+    /// The bucket <paramref name="at"/> falls in, as the SQL statements compute it: <c>time_bucket</c> /
+    /// <c>date_bin</c> of a <paramref name="bucketMinutes"/>-wide grid from <see cref="Origin"/>, then clamped to
+    /// <paramref name="windowStart"/> so the first bucket is stamped where the window starts (#7907). Kinds are
+    /// ignored in the arithmetic; the result carries <paramref name="at"/>'s kind, or <paramref name="windowStart"/>'s
+    /// when the clamp applies.
+    /// </summary>
+    public static DateTime BucketStart(DateTime at, int bucketMinutes, DateTime windowStart)
+    {
+        var width = TimeSpan.FromMinutes(bucketMinutes).Ticks;
+        var sinceOrigin = at.Ticks - Origin.Ticks;
+        var floored = sinceOrigin >= 0 ? sinceOrigin / width : -((-sinceOrigin + width - 1) / width);
+        var start = DateTime.SpecifyKind(Origin.AddTicks(floored * width), at.Kind);
+        return start < windowStart ? windowStart : start;
+    }
 
     /// <summary>The <c>bucket_minutes</c> parameter's description, shared VERBATIM by every bucketed trend on both
     /// SKUs, and short on purpose: descriptions are paid for on every turn (#3898), and the payload's
@@ -360,7 +385,19 @@ internal static class TrendBuckets
         + "A level is averaged, never summed, and peak_* is the highest single sample inside the bucket, so a spike survives the rollup. "
         + Sizing(requested, budgetPoints);
 
-    /// <summary>The closing sentence both notes share: where the width came from, and how to ask for another.</summary>
+    /// <summary>
+    /// What a point of <c>get_query_trend</c> is, on both SKUs (#7907, #8063): the collections of one bucket, their counts
+    /// summed and their averages weighted by executions, the DOP pair and the plan facts from the plans that ran. Its own
+    /// sentence rather than <see cref="AggregateNote"/>, because this read's figures are sums and execution-weighted
+    /// averages, not rates over seconds, and it has no peak fields.
+    /// </summary>
+    public static string QueryTrendNote(int bucketMinutes, bool requested, int budgetPoints) =>
+        $"Each point holds the collections in one {Adjective(bucketMinutes)} bucket and is stamped at the bucket's start (the first point at the window's start); collection_count says how many. "
+        + "execution_count, cpu_ms, elapsed_ms, logical_reads, logical_writes, physical_reads, rows and spills are summed across those collections, and avg_cpu_ms and avg_elapsed_ms are those sums divided by the summed executions, so a busy collection weighs more than a quiet one. "
+        + "min_dop and max_dop are the extremes across the plans that ran in the bucket, query_plan_hash is null when more than one plan ran in it, and plan_count counts its distinct plans. "
+        + Sizing(requested, budgetPoints);
+
+    /// <summary>The closing sentence the notes share: where the width came from, and how to ask for another.</summary>
     public static string Sizing(bool requested, int budgetPoints, int? pointsOverTarget = null) =>
         pointsOverTarget is int served
             ? $"The width is the widest bucket ({MaxBucketMinutes} minutes), and even that could not bring this answer near {budgetPoints.ToString(CultureInfo.InvariantCulture)} points: it serves {served.ToString(CultureInfo.InvariantCulture)}. Narrow hours_back for fewer points."
