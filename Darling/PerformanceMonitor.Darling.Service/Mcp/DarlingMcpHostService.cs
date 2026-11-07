@@ -982,7 +982,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             else
             {
                 _logger.LogInformation(
-                    "Starting MCP server on http://localhost:{Port} (loopback only){TokenNote}: enabled/port from {Origin}",
+                    "Starting MCP server on http://localhost:{Port} (loopback only){TokenNote} — enabled/port from {Origin}",
                     effectivePort, requireTokenWhenLoopbackOnly ? ", token required" : "", origin);
                 if (requireTokenWhenLoopbackOnly)
                 {
@@ -1198,7 +1198,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             tlsServed ? "loopback also bound over plain HTTP" : "loopback also bound", tlsServed, primaryBind);
 
         return $"Starting MCP server on {scheme}://{DarlingListenUrl.FormatHost(primaryBind)}:{port} "
-            + $"(LAN-exposed to {allowedCidr.ToString()} behind a bearer token + in-app CIDR; {loopback}): "
+            + $"(LAN-exposed to {allowedCidr.ToString()} behind a bearer token + in-app CIDR; {loopback}) — "
             + $"enabled/port from {origin}; {fileFields} from darling.json mcp.network (file-only, restart-only)";
     }
 

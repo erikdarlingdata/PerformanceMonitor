@@ -1121,7 +1121,7 @@ public sealed class DarlingWebHostService : BackgroundService
                 // install-darling.ps1 waits for the start of this text, "Starting web dashboard on <scheme>://<host>:<port>" (#6470): keep those words.
                 _logger.LogInformation(
                     "Starting web dashboard on {Scheme}://{Listen}:{Port} (LAN-exposed to {Cidr} behind a token->cookie gate + in-app CIDR; "
-                    + "{Loopback}, which also requires the token): "
+                    + "{Loopback}, which also requires the token) — "
                     + "enabled/port from {Origin}; listen/allowFrom/token/tls from darling.json web.network (file-only, restart-only)",
                     serverCertificate is null ? "http" : "https", DarlingListenUrl.FormatHost(primaryBind), effectivePort, allowedCidr,
                     DarlingListenerTls.DescribeLoopbackListener(
@@ -1132,7 +1132,7 @@ public sealed class DarlingWebHostService : BackgroundService
             {
                 // install-darling.ps1 waits for the start of this text, "Starting web dashboard on <scheme>://<host>:<port>" (#6470): keep those words.
                 _logger.LogInformation(
-                    "Starting web dashboard on http://localhost:{Port} (loopback only){TokenNote}: enabled/port from {Origin}",
+                    "Starting web dashboard on http://localhost:{Port} (loopback only){TokenNote} — enabled/port from {Origin}",
                     effectivePort, requireTokenWhenLoopbackOnly ? ", token required" : "", origin);
                 if (requireTokenWhenLoopbackOnly)
                 {

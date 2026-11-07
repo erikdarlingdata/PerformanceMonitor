@@ -199,7 +199,7 @@ function namedTokenText(text) {
   let t = text;
 
   /* A pointer into the MCP answer's own `hints`, which the page never shows. */
-  t = t.replace(/\s*[—–-]+\s*see hints\.captures for which collectors ran and when/g, "");
+  t = t.replace(/\s*[:—–-]+\s*see hints\.captures for which collectors ran and when/g, "");
 
   /* The health sentence's denial flag, said in words. The "true" form carries its own explanation after the dash. */
   t = t.replace(/, and denied_since_last_success is true - the newest denial postdates the newest success,/g, ", and the newest denial is newer than the newest success,");
@@ -423,7 +423,7 @@ export function plainText(text) {
 
   /* "raise limit": the pages have no row-limit control. "...filter - raise limit to see more." and "...returned; raise limit
      (now 50) for more." lose the clause; ", or raise limit," and ", and raise limit if none ... shows one" lose theirs. */
-  t = t.replace(/\s*[;—–-]+\s*raise (?:the )?limit(?: \(now [\d,]+\))?(?: (?:to see|for) (?:more|the rest(?: of the rows)?))?(?=\.)/g, "");
+  t = t.replace(/\s*[;:—–-]+\s*raise (?:the )?limit(?: \(now [\d,]+\))?(?: (?:to see|for) (?:more|the rest(?: of the rows)?))?(?=\.)/g, "");
   t = t.replace(/Scope by server_name(?:, or raise limit,)? (to see the rest|to see them)\./g, "Select a single server $1.");
   t = t.replace(/, or raise (?:the )?limit(?=[.,])/g, "");
   t = t.replace(/, and raise limit if none of the databases returned shows one/g, "");
@@ -462,12 +462,12 @@ export function plainText(text) {
   t = t.replace(/dropped at collection by IgnoredWaitDefaults on both SKUs, and dropped again here by name if a row ever carried one/g, "dropped when they are collected, and dropped again here if one ever slipped through");
   /* #7690: the Extensions note and the Wait Trend empty text name a field and a tier of the read. The page names the panel and the sampler. */
   t = t.replace(/Per DATABASE, not per cluster: installed_version describes the database the row names\./g, "Each row describes one database, not the whole server: the installed version is the one in that database.");
-  t = t.replace(/\s[—–-]\s+read install_census for what is installed where, because it is aggregated per extension and no limit touches it/g, ". The Extension Install Census shows what is installed where, because it counts every extension and no limit touches it");
+  t = t.replace(/(?:\s[—–-]\s+|:\s+)read install_census for what is installed where, because it is aggregated per extension and no limit touches it/g, ". The Extension Install Census shows what is installed where, because it counts every extension and no limit touches it");
   t = t.replace(/\binstall_census\b/g, "the Extension Install Census");
   t = t.replace(/\bthe service_sampled tier\b/g, "the service sampler");
   t = t.replace(/\bservice_sampled\b/g, "service sampler");
   /* #7690: the Index Bloat note sets its pointer to the exact-measurement command off with a dash; the page says it as its own sentence. */
-  t = t.replace(/\s[—–-]\s+use (?:exact_measurement_command|the Measure It Exactly column) for that/g, ". Use the Measure It Exactly column for that");
+  t = t.replace(/(?:\s[—–-]\s+|:\s+)use (?:exact_measurement_command|the Measure It Exactly column) for that/g, ". Use the Measure It Exactly column for that");
   /* #7410: the Query Heatmap's empty text. */
   t = t.replace(/\bdatabase_name filter\b/g, "database filter");
   t = t.replace(/\ba SECOND cycle\b/g, "a second collection");

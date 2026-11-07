@@ -101,7 +101,7 @@ public sealed class McpQueryTools
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No query-stats group on {resolved.DisplayName} in the last {hours_back} hour(s) has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the whole window, so this is the window's answer rather than a page artefact, drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism when Query Store is on: find the statement in get_query_store_top (filter by database_name, match on query_hash) and pass that row's database_name and plan_id to analyze_query_store_plan (Lite keeps no plans, so analyze_query_plan cannot answer).",
+                        $"No query-stats group on {resolved.DisplayName} in the last {hours_back} hour(s) has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the whole window, so this is the window's answer rather than a page artefact: drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism when Query Store is on: find the statement in get_query_store_top (filter by database_name, match on query_hash) and pass that row's database_name and plan_id to analyze_query_store_plan (Lite keeps no plans, so analyze_query_plan cannot answer).",
                         new { filter_applied = filterApplied });
                 }
 

@@ -365,7 +365,7 @@ public static partial class PgTargetAdvice
     private static string SharedBuffersRemediation(Fact? knob, Fact? pressure)
     {
         var sb = new StringBuilder(720);
-        var current = knob is null ? "128 MB (assumed, no config snapshot)" : KnobMb(knob.Value);
+        var current = knob is null ? "128 MB (assumed: no config snapshot)" : KnobMb(knob.Value);
         var atDefault = knob is null || knob.Value <= PgTargetScorer.SharedBuffersInitdbDefaultMb;
         var fired = pressure is not null && pressure.BaseSeverity > 0;
 

@@ -40,10 +40,10 @@ public sealed partial class DarlingMcpFinOpsTools
     internal const int MaxIndexAnalysisRecommendations = 500;
 
     internal const string IndexAnalysisUptimeNote =
-        "Server uptime is under 14 days: index usage data may be incomplete, so some \"Unused Index\" findings could be premature.";
+        "Server uptime is under 14 days — index usage data may be incomplete, so some \"Unused Index\" findings could be premature.";
 
     internal const string IndexAnalysisDedupeNote =
-        "Dedupe-only mode is in effect: unused indexes were NOT flagged (server uptime is 7 days or less). Only duplicate/consolidation and compression findings are shown.";
+        "Dedupe-only mode is in effect — unused indexes were NOT flagged (server uptime is 7 days or less). Only duplicate/consolidation and compression findings are shown.";
 
     private static readonly string[] IndexAnalysisActions = ["COMPRESS", "DISABLE", "DROP CONSTRAINT", "MAKE UNIQUE", "MERGE", "REVIEW"];
 

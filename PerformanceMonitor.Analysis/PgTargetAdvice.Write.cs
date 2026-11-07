@@ -279,7 +279,7 @@ public static partial class PgTargetAdvice
     private static string MaxWalSizeRemediation(Fact? knob, Fact? pressure)
     {
         var sb = new StringBuilder(640);
-        var current = knob is null ? "1 GB (assumed, no config snapshot)" : KnobMb(knob.Value);
+        var current = knob is null ? "1 GB (assumed: no config snapshot)" : KnobMb(knob.Value);
 
         var perSec = KnobMeta(pressure, "wal_bytes_per_sec");
         var timeout = KnobMeta(pressure, "checkpoint_timeout_s") ?? KnobMeta(knob, "checkpoint_timeout_s");
