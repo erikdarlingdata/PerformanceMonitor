@@ -632,6 +632,11 @@ internal static class ChartLayoutProbe
             }
         }
 
+        if (rect.Height < LegendRuleMinPlotHeight - 0.5)
+        {
+            problems.Add($"the plot is {rect.Height:0.#} px tall, under the {LegendRuleMinPlotHeight} px floor");
+        }
+
         reading = $"plot {rect.Width:0}x{rect.Height:0}, {xTicks.Count} X labels (tightest gap {(minGap == double.MaxValue ? 0 : minGap):0} px), {yTicks.Count} Y labels (tightest gap {(minYGap == double.MaxValue ? 0 : minYGap):0} px)";
         return problems;
     }
