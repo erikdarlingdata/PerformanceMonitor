@@ -73,7 +73,7 @@ public sealed class ViewerOverviewBlockingLaneDataStartPinTests
         Assert.Contains("<RowDefinition Height=\"Auto\"/>", chart, StringComparison.Ordinal);
         Assert.Matches(@"x:Name=""BlockingLaneDataStartBanner""\s+Visibility=""Collapsed""", chart);
         Assert.Contains("Background=\"#22FFAA00\"", chart, StringComparison.Ordinal);
-        Assert.Contains("<ScottPlot:WpfPlot Grid.Row=\"1\" Grid.Column=\"1\" x:Name=\"BlockingChart\"/>", chart, StringComparison.Ordinal);
+        Assert.Contains("<ScottPlot:WpfPlot Grid.Row=\"1\" x:Name=\"BlockingChart\"/>", chart, StringComparison.Ordinal);
     }
 
     [Fact]

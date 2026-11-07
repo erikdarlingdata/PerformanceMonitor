@@ -110,6 +110,14 @@ public sealed class QueryTagUsageWindow : Window
                 return;
             }
 
+            /* #8115: with no tag defined every table would be one untagged row equal to its total, so the answer is one sentence. A scope that is all not-collected servers keeps the engine reason (#7374) ahead of this. */
+            if (QueryTagUsageText.NoTagsAnswer(data.Tags.Count) is { } noTags)
+            {
+                _message.Text = noTags;
+                _tables.Children.Clear();
+                return;
+            }
+
             var filter = QueryTagUsageView.FilterFor(data.Tags, _tag.SelectedItem as string);
             /* #7376: Query Store alone reads not_collected for a readable secondary Darling does not collect it from, with get_query_store_top's reason. */
             var queryStoreNotCollected = await _data.GetQueryStoreNotCollectedAsync(data, servers, notCollected);

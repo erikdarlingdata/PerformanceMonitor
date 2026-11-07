@@ -1,0 +1,152 @@
+<!-- #8162: the Overview's fleet card as its own control, so a test can render it. A double click opens the server: the Overview
+     that hosts the card wires MouseLeftButtonDown on it, which bubbles up from the border below, and reads the card's data. -->
+<UserControl x:Class="PerformanceMonitorLite.Controls.ServerOverviewCard"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:controls="clr-namespace:PerformanceMonitorLite.Controls">
+    <UserControl.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVisibility"/>
+    </UserControl.Resources>
+    <controls:OverviewCardBorder Background="{DynamicResource BackgroundLightBrush}"
+            BorderBrush="{Binding CardBorderBrush}"
+            BorderThickness="2" CornerRadius="6"
+            Margin="6"
+            Width="260" MinHeight="160"
+            Cursor="Hand"
+            AutomationProperties.Name="{Binding DisplayName}">
+        <Grid>
+            <StackPanel Margin="16">
+                <DockPanel Margin="0,0,0,4">
+                    <!-- Muted-bell silence indicator (#2031) + status dot, mirroring the sidebar row -->
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Viewbox Width="12" Height="12" Margin="0,0,6,0" VerticalAlignment="Center"
+                                 ToolTip="Alerts silenced for this server">
+                            <Viewbox.Style>
+                                <Style TargetType="Viewbox">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsSilenced}" Value="True">
+                                            <Setter Property="Visibility" Value="Visible"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Viewbox.Style>
+                            <Grid Width="24" Height="24">
+                                <Path Fill="{DynamicResource ForegroundMutedBrush}"
+                                      Data="M12,2 C10.9,2 10,2.9 10,4 L10,4.29 C7.12,5.14 5,7.83 5,11 L5,17 L3,19 L3,20 L21,20 L21,19 L19,17 L19,11 C19,7.83 16.88,5.14 14,4.29 L14,4 C14,2.9 13.1,2 12,2 Z M10,21 A2,2 0 0,0 14,21 Z"/>
+                                <Line X1="3" Y1="3" X2="21" Y2="21"
+                                      Stroke="{DynamicResource ForegroundMutedBrush}" StrokeThickness="2.4"/>
+                            </Grid>
+                        </Viewbox>
+                        <Ellipse Width="10" Height="10" Fill="{Binding StatusBrush}"
+                                 ToolTip="{Binding StatusTooltip}"
+                                 VerticalAlignment="Center"/>
+                    </StackPanel>
+                    <TextBlock Text="{Binding DisplayName}" AutomationProperties.AutomationId="OverviewServerCardName"
+                               Style="{DynamicResource PanelTitleText}" TextTrimming="CharacterEllipsis"/>
+                </DockPanel>
+                <!-- #2437 (the Lite half of #2422): the status line carries the
+                     reason it is that colour. It was a bare word — a reader saw
+                     "Warning" in amber and had to scan the metric rows guessing
+                     which one it meant, on every card. The tooltip is built from
+                     the card's OWN displays (StatusReason), so it cannot disagree
+                     with the rows directly underneath it, and it says which axis
+                     the word is about: in Lite "Warning" is failing COLLECTORS,
+                     while a card in metric trouble still says "Online".
+                     Background=Transparent is load-bearing: a TextBlock with a
+                     null Background hit-tests on its rendered glyphs alone, so
+                     the tooltip would appear over the letters of "Warning" and
+                     nowhere in the space around them. -->
+                <TextBlock Text="{Binding StatusDisplay}" Foreground="{Binding StatusBrush}"
+                           Background="Transparent" ToolTip="{Binding StatusTooltip}"
+                           FontSize="11" Margin="0,0,0,10"/>
+                <!-- Tag pills (#2020 2b-i): the server's tags as coloured chips,
+                     collapsed when it has none so untagged cards are unchanged. -->
+                <ItemsControl ItemsSource="{Binding TagPills}" Margin="0,0,0,10">
+                    <ItemsControl.Style>
+                        <Style TargetType="ItemsControl">
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding TagPills.Count}" Value="0">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </ItemsControl.Style>
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <WrapPanel/>
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Background="{Binding Fill}" CornerRadius="3"
+                                    Padding="6,1" Margin="0,0,4,4">
+                                <TextBlock Text="{Binding Name}" FontSize="10"
+                                           Foreground="{Binding TextBrush}"/>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <!-- Metric rows: [severity dot] [label] [value] [detail], the Viewer's card layout (#8162).
+                     CPU, Blocking and Deadlocks have a band in Lite, so each carries a dot in that band's colour.
+                     Memory has no band here and gets no dot rather than an invented one. -->
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- CPU: the detail column is the host's other-process share, when the server reports it -->
+                    <Ellipse Grid.Row="0" Grid.Column="0" Width="9" Height="9" Fill="{Binding CpuBrush}" VerticalAlignment="Center" Margin="0,2,6,2"/>
+                    <TextBlock Grid.Row="0" Grid.Column="1" Text="CPU:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"/>
+                    <TextBlock Grid.Row="0" Grid.Column="2" Text="{Binding CpuDisplay}" FontSize="11" Foreground="{Binding CpuBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
+                    <TextBlock Grid.Row="0" Grid.Column="3" Text="{Binding CpuDetail}" ToolTip="{Binding CpuDetail}" Background="Transparent" FontSize="11"
+                               Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"/>
+
+                    <!-- Memory: no band in Lite, so no dot -->
+                    <TextBlock Grid.Row="1" Grid.Column="1" Text="Memory:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"/>
+                    <TextBlock Grid.Row="1" Grid.Column="2" Text="{Binding MemoryDisplay}" FontSize="11" Foreground="{DynamicResource ForegroundBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
+
+                    <Ellipse Grid.Row="2" Grid.Column="0" Width="9" Height="9" Fill="{Binding BlockingBrush}" VerticalAlignment="Center" Margin="0,2,6,2"/>
+                    <TextBlock Grid.Row="2" Grid.Column="1" Text="Blocking:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"/>
+                    <TextBlock Grid.Row="2" Grid.Column="2" Text="{Binding BlockingDisplay}" FontSize="11" Foreground="{Binding BlockingBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
+
+                    <Ellipse Grid.Row="3" Grid.Column="0" Width="9" Height="9" Fill="{Binding DeadlockBrush}" VerticalAlignment="Center" Margin="0,2,6,2"/>
+                    <TextBlock Grid.Row="3" Grid.Column="1" Text="Deadlocks:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"/>
+                    <TextBlock Grid.Row="3" Grid.Column="2" Text="{Binding DeadlockDisplay}" FontSize="11" Foreground="{Binding DeadlockBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
+
+                    <!-- Last Collect is a BANDED row (#2452): its brush comes from the shared
+                         ServerHealthClassifier, and it carries a tooltip that says the band is about
+                         collection stopping rather than about the server's metrics. Like the Viewer's
+                         footer it has no dot. Background="Transparent" on both cells is load-bearing,
+                         not decoration: a TextBlock with a null Background hit-tests on its rendered
+                         glyphs alone, so the tooltip would appear over the letters and nowhere in
+                         the space around them (#2429). -->
+                    <TextBlock Grid.Row="4" Grid.Column="1" Text="Last Collect:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"
+                               Background="Transparent" ToolTip="{Binding CollectionFreshnessTooltip}"/>
+                    <TextBlock Grid.Row="4" Grid.Column="2" Grid.ColumnSpan="2" Text="{Binding LastCollectionDisplay}" FontSize="11" Foreground="{Binding LastCollectionBrush}" FontWeight="SemiBold" Margin="0,2,8,2"
+                               Background="Transparent" ToolTip="{Binding CollectionFreshnessTooltip}"/>
+                </Grid>
+            </StackPanel>
+            <!-- Offline overlay -->
+            <Border Background="#80000000" CornerRadius="6"
+                    Visibility="{Binding IsOffline, Converter={StaticResource BoolToVisibility}}">
+                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+                    <TextBlock Text="&#x2717;" FontSize="28" Foreground="{DynamicResource ErrorBrush}"
+                               HorizontalAlignment="Center"/>
+                    <TextBlock Text="Offline" FontSize="13" Foreground="{DynamicResource ErrorBrush}"
+                               FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,4,0,0"/>
+                </StackPanel>
+            </Border>
+        </Grid>
+    </controls:OverviewCardBorder>
+</UserControl>

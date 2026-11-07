@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -234,7 +235,8 @@ AND   a.alert_time <= $4";
         if (firing.Count == 0) return streaks;
 
         var pairs = firing.Select(r => (r.ServerId, r.MetricName)).Distinct().ToList();
-        var since = firing.Min(r => r.AlertTime).AddDays(-InvestigationAlertRecurrence.Days);
+        /* One day more than the look-back, so a fire a DST change moved an hour past it is read; DaysAgo applies the exact bound. */
+        var since = firing.Min(r => r.AlertTime).AddDays(-(InvestigationAlertRecurrence.Days + 1));
         var until = firing.Max(r => r.AlertTime);
 
         var fires = new Dictionary<(int, string), List<DateTime>>();
@@ -254,11 +256,15 @@ AND   a.alert_time <= $4";
             }
         }
 
+        /* Each server's own clock, so a schedule kept in its local time keeps its streak across a DST change; a server with no
+           stored clock is read in UTC. */
+        var clocks = await DarlingServerClocksReader.GetAsync(postgres, null, McpCommandDeadlines.ReadSeconds, cancellationToken);
+
         for (var i = 0; i < page.Count; i++)
         {
             if (AlertMetricClassifier.IsResolution(page[i].MetricName)) continue;
             streaks[i] = fires.TryGetValue((page[i].ServerId, page[i].MetricName), out var list)
-                ? InvestigationAlertStreak.ForAlert(page[i].AlertTime, list)
+                ? InvestigationAlertStreak.ForAlert(page[i].AlertTime, list, DarlingServerClocksReader.ClockFor(clocks, page[i].ServerId).AsTimeZone())
                 : 0;
         }
 
