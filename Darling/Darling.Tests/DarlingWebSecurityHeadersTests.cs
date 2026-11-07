@@ -78,11 +78,12 @@ public sealed class DarlingWebSecurityHeadersTests
         return app.GetTestServer();
     }
 
-    private static Task<HttpContext> Get(TestServer server, bool networkMode, string path, string? hostHeader = null, string? token = null)
+    private static Task<HttpContext> Get(TestServer server, bool networkMode, string path, string? hostHeader = null, string? token = null, string scheme = "http")
     {
         return server.SendAsync(ctx =>
         {
             ctx.Request.Method = "GET";
+            ctx.Request.Scheme = scheme;
             ctx.Request.Path = path;
             if (token is not null)
             {
@@ -121,7 +122,79 @@ public sealed class DarlingWebSecurityHeadersTests
         /* Network mode answers a request with no session with the sign-in page, which sets its own policy. */
         Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
         AssertDefaultHeaders(ctx, expectDefaultPolicy: !networkMode);
-        Assert.Equal("same-origin", ctx.Response.Headers["Cross-Origin-Opener-Policy"].ToString());
+        /* #8096: the opener policy goes only where a browser honours it. The loopback request (localhost) gets it; the network request
+           here is plain http on a LAN address, which a browser ignores and reports on its console, so it is not sent. */
+        if (networkMode)
+        {
+            Assert.False(ctx.Response.Headers.ContainsKey("Cross-Origin-Opener-Policy"));
+        }
+        else
+        {
+            Assert.Equal("same-origin", ctx.Response.Headers["Cross-Origin-Opener-Policy"].ToString());
+        }
+    }
+
+    /// <summary>#8096: a browser honours <c>Cross-Origin-Opener-Policy</c> only on a trustworthy origin (https, or a loopback name such as
+    /// localhost); on a plain-http LAN address it ignores the header and logs an error on every navigation, so the HTML page served there
+    /// carries no opener policy. The same page over https on the same address does.</summary>
+    [Theory]
+    [InlineData("http", false)]
+    [InlineData("https", true)]
+    public async Task HtmlShell_OnANetworkAddress_CarriesTheOpenerPolicy_OnlyOverHttps(string scheme, bool expectOpenerPolicy)
+    {
+        using var server = await BuildServer(networkMode: true);
+        var ctx = await Get(server, true, "/", scheme: scheme);
+
+        Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
+        Assert.StartsWith("text/html", ctx.Response.ContentType, StringComparison.Ordinal);
+        AssertDefaultHeaders(ctx, expectDefaultPolicy: false);
+        if (expectOpenerPolicy)
+        {
+            Assert.Equal("same-origin", ctx.Response.Headers["Cross-Origin-Opener-Policy"].ToString());
+        }
+        else
+        {
+            Assert.False(ctx.Response.Headers.ContainsKey("Cross-Origin-Opener-Policy"));
+        }
+    }
+
+    /// <summary>#8096: the middleware on its own, on an HTML page under a named host. Plain http: no opener policy, because the browser would
+    /// ignore it and log an error. https on the same host: the policy is sent. The other page-wide headers are sent either way.</summary>
+    [Theory]
+    [InlineData("http", false)]
+    [InlineData("https", true)]
+    public async Task AnHtmlPage_OnANamedHost_CarriesTheOpenerPolicy_OnlyOverHttps(string scheme, bool expectOpenerPolicy)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Logging.ClearProviders();
+        var app = builder.Build();
+        app.UseMiddleware<DarlingWebSecurityHeaders>(false);
+        app.Run(context => DarlingWebHostService.WriteSignedInLandingAsync(context, "/"));
+        await app.StartAsync();
+        using var server = app.GetTestServer();
+
+        var ctx = await server.SendAsync(c =>
+        {
+            c.Request.Method = "GET";
+            c.Request.Path = "/";
+            c.Request.Scheme = scheme;
+            c.Request.Host = new HostString("dashboard.example", 5153);
+        });
+
+        Assert.StartsWith("text/html", ctx.Response.ContentType, StringComparison.Ordinal);
+        Assert.Equal("DENY", ctx.Response.Headers.XFrameOptions.ToString());
+        Assert.Equal("no-referrer", ctx.Response.Headers["Referrer-Policy"].ToString());
+        if (expectOpenerPolicy)
+        {
+            Assert.Equal("same-origin", ctx.Response.Headers["Cross-Origin-Opener-Policy"].ToString());
+        }
+        else
+        {
+            Assert.False(ctx.Response.Headers.ContainsKey("Cross-Origin-Opener-Policy"));
+        }
+
+        await app.StopAsync();
     }
 
     /// <summary>The signed-in landing page (written after an SSO sign-in) goes through the same header middleware as every

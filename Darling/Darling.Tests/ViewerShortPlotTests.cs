@@ -265,7 +265,7 @@ public sealed class ViewerShortPlotTests
     public void RowMinimum_FollowsWhatTheLegendAndTicksTake()
     {
         Assert.Equal(ChartLayout.MinPlotHeight, ChartLayout.RowMinHeightFor(40));
-        Assert.Equal(171 + ChartLayout.MinPlotAreaHeight, ChartLayout.RowMinHeightFor(171));
+        Assert.Equal(171 / (1 - ChartLayout.MinPlotShare), ChartLayout.RowMinHeightFor(171), 6);
     }
 
     // ---- #6832: the fitted title stays inside the plot, clear of the top and bottom tick labels, and keeps its unit ----
