@@ -240,6 +240,34 @@ public sealed class MinWindowChromeTests
     }
 
     [Fact]
+    public void CurrentWaits_FollowsTheTabsHeightOnEveryResize_AndSettles()
+    {
+        /* The choice is made from the tab's own height, which neither layout changes, so a size always lands on the same layout. */
+        var found = RunTab("Dark", (w, tab) =>
+        {
+            var main = (TabControl)tab.FindName("MainTabControl");
+            SelectTab(main, "Blocking");
+            SelectTab((TabControl)tab.FindName("BlockingSubTabControl"), "Current Waits");
+            var results = new List<bool>();
+            foreach (var (width, height) in new[] { (900, 600), (1280, 800), (900, 600), (1280, 800), (1100, 650), (900, 600) })
+            {
+                Lay(w, width, height);
+                Lay(w, width, height);
+                var first = (FrameworkElement)tab.FindName("CurrentWaitsDurationChart");
+                var second = (FrameworkElement)tab.FindName("CurrentWaitsBlockedChart");
+                var a = first.TransformToAncestor(HostOf(w)).Transform(new Point(0, 0));
+                var b = second.TransformToAncestor(HostOf(w)).Transform(new Point(0, 0));
+                results.Add(b.Y < a.Y + first.ActualHeight);
+            }
+
+            return results;
+        });
+
+        /* 900x600 (tab 377 high) and 1100x650 (tab 427) cannot hold two stacked rows (460); 1280x800 can. */
+        Assert.Equal(new[] { true, false, true, false, true, true }, found.ToArray());
+    }
+
+    [Fact]
     public void TheTimeSlicer_IsCompactInAShortWindow_AndFullHeightWhenTheWindowGrows()
     {
         var (heights, problems) = RunTab("Dark", (w, tab) =>
