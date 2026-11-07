@@ -67,7 +67,8 @@ new_store() {
       -c timescaledb.max_background_workers=74 -c max_worker_processes=85 -c work_mem=16MB \
       -c timescaledb.telemetry_level=off >/dev/null
   for _ in $(seq 1 60); do
-    if docker logs "${store}" 2>&1 | grep -q 'PostgreSQL init process complete' \
+    slog="$(docker logs "${store}" 2>&1)" || true
+    if grep -q 'PostgreSQL init process complete' <<<"${slog}" \
       && docker exec "${store}" pg_isready -h 127.0.0.1 -U darling >/dev/null 2>&1; then
       ready=1
       break
@@ -101,9 +102,10 @@ start_service() {
 
 # wait_log <container> <extended regex>: the log-grep loop, capped at 180 s; fails when the container exits first.
 wait_log() {
-  local c="$1" re="$2"
+  local c="$1" re="$2" clog
   for _ in $(seq 1 90); do
-    if docker logs "${c}" 2>&1 | grep -Eq -- "${re}"; then
+    clog="$(docker logs "${c}" 2>&1)" || true
+    if grep -Eq -- "${re}" <<<"${clog}"; then
       return 0
     fi
     if [ "$(docker inspect -f '{{.State.Running}}' "${c}")" != "true" ]; then
@@ -116,7 +118,9 @@ wait_log() {
 
 # fingerprint <container>: the password key fingerprint of the container's log.
 fingerprint() {
-  docker logs "$1" 2>&1 | grep 'Password key' | grep -Eo "${fp_re}" | head -n 1 || true
+  local flog
+  flog="$(docker logs "$1" 2>&1)" || true
+  grep 'Password key' <<<"${flog}" | grep -Eo "${fp_re}" | head -n 1 || true
 }
 
 log_of() { docker logs "$1" 2>&1; }
@@ -162,13 +166,16 @@ wait_log "${prefix}-upgrade-new" 'Retention evaluation at startup'
 wait_log "${prefix}-upgrade-new" 'Password key [0-9A-F]{4}-[0-9A-F]{4}'
 new_fp="$(fingerprint "${prefix}-upgrade-new")"
 [ "${new_fp}" = "${old_fp}" ] || fail "password key fingerprint changed: '${old_fp}' -> '${new_fp}'"
+unew_log="$(log_of "${prefix}-upgrade-new")"
+generated="$(grep -F "Generated the compose store's" <<<"${unew_log}" || true)"
 for f in ${held}; do
-  if log_of "${prefix}-upgrade-new" | grep -F "Generated the compose store's" | grep -qF "/${f})"; then
+  if grep -qF "/${f})" <<<"${generated}"; then
     fail "the upgrade generated ${f} again"
   fi
 done
 wait_log "${prefix}-upgrade-new" "Loaded the store's log-hash key"
-if log_of "${prefix}-upgrade-new" | grep -qF "Generated the store's log-hash key"; then
+unew_log="$(log_of "${prefix}-upgrade-new")"
+if grep -qF "Generated the store's log-hash key" <<<"${unew_log}"; then
   fail "the upgrade generated the log-hash key again"
 fi
 echo "ok: upgrade (fingerprint ${new_fp}, kept: $(echo ${held}))"
