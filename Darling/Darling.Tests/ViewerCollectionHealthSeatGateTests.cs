@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -72,10 +73,16 @@ public sealed class ViewerCollectionHealthSeatGateTests
                     new() { CollectorName = "blocking" },
                 };
                 grid.UpdateLayout();
+                grid.ScrollIntoView(grid.Items[0]);
+                grid.UpdateLayout();
 
                 var row = grid.ItemContainerGenerator.ContainerFromIndex(0) as DataGridRow;
                 Assert.True(row is not null, "The Health Summary grid drew no row for its two collectors, so there is no Run now button to read.");
-                var rowButton = grid.Columns[0].GetCellContent(row!) as Button;
+                /* A template column's cell content is the presenter that hosts the template; the button is inside it. */
+                var cellContent = grid.Columns[0].GetCellContent(row!);
+                Assert.True(cellContent is not null, "The first Health Summary column drew no cell for the first row.");
+                cellContent!.UpdateLayout();
+                var rowButton = cellContent as Button ?? FindDescendant<Button>(cellContent);
                 Assert.True(rowButton is not null, "The first Health Summary column did not draw its Run now button.");
 
                 return new TabState(
@@ -95,6 +102,25 @@ public sealed class ViewerCollectionHealthSeatGateTests
     }
 
     private static ButtonState Read(Button button) => new(button.IsEnabled, button.ToolTip, ToolTipService.GetShowOnDisabled(button));
+
+    private static T? FindDescendant<T>(DependencyObject root) where T : DependencyObject
+    {
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is T match)
+            {
+                return match;
+            }
+
+            if (FindDescendant<T>(child) is { } deeper)
+            {
+                return deeper;
+            }
+        }
+
+        return null;
+    }
 
     /// <summary>Alert History's sentence shape: what the seat cannot do, then how to connect with a login that can.</summary>
     private static void AssertReadOnlyReason(object? toolTip, string about)
