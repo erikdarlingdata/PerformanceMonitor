@@ -8,13 +8,10 @@
 
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
 using Darling.Tests;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Services;
@@ -97,7 +94,7 @@ public sealed class FinOpsPvsLayoutTests
                     found.Add($"PvsTrendChart: {problem}");
                 }
 
-                SaveWindow(window, $"{theme}-{width}x{height}");
+                ChartLayoutProbe.SaveWindow(window, $"{theme}-{width}x{height}");
                 return found;
             }
             finally
@@ -120,24 +117,6 @@ public sealed class FinOpsPvsLayoutTests
         }
 
         return null;
-    }
-
-    /// <summary>Saves the whole window for looking at it. Set CHART_LAYOUT_PNG_DIR to a folder.</summary>
-    internal static void SaveWindow(Window window, string name)
-    {
-        var dir = Environment.GetEnvironmentVariable("CHART_LAYOUT_PNG_DIR");
-        if (string.IsNullOrEmpty(dir) || window.Content is not FrameworkElement content)
-        {
-            return;
-        }
-
-        Directory.CreateDirectory(dir);
-        var bitmap = new RenderTargetBitmap((int)content.ActualWidth, (int)content.ActualHeight, 96, 96, PixelFormats.Pbgra32);
-        bitmap.Render(content);
-        var encoder = new PngBitmapEncoder();
-        encoder.Frames.Add(BitmapFrame.Create(bitmap));
-        using var stream = File.Create(Path.Combine(dir, $"window-{name}.png"));
-        encoder.Save(stream);
     }
 
     private static T WithTheme<T>(string theme, Func<T> body)

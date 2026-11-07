@@ -567,6 +567,24 @@ internal static class ChartLayoutProbe
         }
     }
 
+    /// <summary>Saves the whole hosted window for looking at it. Set CHART_LAYOUT_PNG_DIR to a folder.</summary>
+    public static void SaveWindow(Window window, string name)
+    {
+        var dir = Environment.GetEnvironmentVariable("CHART_LAYOUT_PNG_DIR");
+        if (string.IsNullOrEmpty(dir) || window.Content is not FrameworkElement content)
+        {
+            return;
+        }
+
+        Directory.CreateDirectory(dir);
+        var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap((int)content.ActualWidth, (int)content.ActualHeight, 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(content);
+        var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+        encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
+        using var stream = File.Create(Path.Combine(dir, $"window-{name}.png"));
+        encoder.Save(stream);
+    }
+
     // ---- Feeding a chart through its own render method with a made-up reply ----
 
     /// <summary>Builds a list of made-up rows of <paramref name="rowType"/>: times ramp from <paramref name="from"/> to
