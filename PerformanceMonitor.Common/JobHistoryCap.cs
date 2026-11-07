@@ -6,6 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+
 namespace PerformanceMonitor.Common;
 
 /// <summary>
@@ -50,4 +52,12 @@ public static class JobHistoryCap
         var label = Label(readCount, cap);
         return label.Length > 0 ? $"{shownCount} {noun} ({label})" : $"{shownCount} {noun}";
     }
+
+    /// <summary>
+    /// #8133: the share of the All Servers read's cap each server gets, so one server that runs a job every minute cannot fill
+    /// the page with its own newest steps while the quieter servers' day goes unshown. The cap divided by the servers the read
+    /// can see, rounded up and never below one; the whole cap when no server count is known.
+    /// </summary>
+    public static int PerServerShare(int cap, int serverCount) =>
+        serverCount <= 0 ? cap : Math.Max(1, (cap + serverCount - 1) / serverCount);
 }

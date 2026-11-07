@@ -321,6 +321,18 @@ internal static class DarlingMcpWindowNotice
             requestedStart, windowEnd, table, emptyAnswer: emptyAnswer, logger: logger, cancellationToken: cancellationToken);
     }
 
+    /// <summary>
+    /// #8074: <see cref="ReadForToolAsync"/> for a tool whose source depends on the target: the probe and the notice take
+    /// <paramref name="collectorTable"/> instead of the read's listed source, so an arm that reads a different table than the one
+    /// the web lists for the read (the wait trend's engine counters) is windowed on the rows it actually read.
+    /// </summary>
+    internal static Task<McpWindowNotice> ReadForCollectorTableAsync(
+        NpgsqlDataSource postgres, string collectorTable, string serverName, DateTime requestedStart, DateTime windowEnd,
+        bool emptyAnswer, ILogger? logger, CancellationToken cancellationToken) =>
+        ReadAsync(
+            () => Probe(postgres, DataWindowFloor.Source.ForCollectorTable(collectorTable), serverName, requestedStart, windowEnd, cancellationToken),
+            requestedStart, windowEnd, collectorTable, emptyAnswer: emptyAnswer, logger: logger, cancellationToken: cancellationToken);
+
     /// <summary>A data answer already serialized: without the three window-floor keys when the probe failed, else as is.</summary>
     internal static string Finish(string json, McpWindowNotice notice) =>
         notice.IsUnavailable ? WithoutKeys(json) : json;

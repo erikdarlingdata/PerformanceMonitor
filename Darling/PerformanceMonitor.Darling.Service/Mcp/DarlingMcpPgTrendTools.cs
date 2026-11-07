@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -28,7 +29,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgTrendTools
 {
-    [McpServerTool(Name = "get_pg_wait_trend"), Description("Gets a time series for ONE PostgreSQL wait event: how much the server waited on it in each collection interval, normalised per second. Use get_pg_wait_sampling first to find which events dominate, then this to see whether one is growing. Summed across the queries that waited, because this answers a question about the SERVER - per-query attribution for a single window is what get_pg_wait_sampling already gives. The figures are estimates from a sampling profiler (samples x profile period), not measured durations, so treat the SHAPE as the finding rather than the absolute number. backend_count is null on a point with no samples, and where it is given it counts the distinct backends the profiler has recorded for the event: since the profile last started on the pg_wait_sampling extension (a running total that only rises until a reset, not the backends that waited in that interval), and in the last window on the service's own sampler. An interval where pg_wait_sampling's profile was reset - by pg_wait_sampling_reset_profile() or a server restart - is flagged, and reports everything since the reset rather than a misleadingly quiet interval.")]
+    [McpServerTool(Name = "get_pg_wait_trend"), Description("Gets a time series for ONE PostgreSQL wait event: how much the server waited on it in each collection interval, normalised per second. Served on every PostgreSQL target from the wait instrument that target collects, and instrument says which. On Amazon Aurora PostgreSQL that is engine_cumulative: the per-collection deltas of the engine's own cumulative wait counters (the pg_wait_stats collector), MEASURED wait time, with backend_count always null because the counters do not carry it. Elsewhere it is the sampled arm, extension_sampled or service_sampled: estimates from a sampling profiler (samples x profile period), not measured durations, so treat the SHAPE as the finding rather than the absolute number. Use get_pg_wait_stats (Aurora) or get_pg_wait_sampling (other targets) first to find which events dominate, then this to see whether one is growing. Summed across the queries that waited, because this answers a question about the SERVER - per-query attribution for a single window is what those two reads already give. On the sampled arm backend_count is null on a point with no samples, and where it is given it counts the distinct backends the profiler has recorded for the event: since the profile last started on the pg_wait_sampling extension (a running total that only rises until a reset, not the backends that waited in that interval), and in the last window on the service's own sampler. An interval where pg_wait_sampling's profile was reset - by pg_wait_sampling_reset_profile() or a server restart - is flagged, and reports everything since the reset rather than a misleadingly quiet interval; on engine_cumulative the collector re-baselines at a reset, so no point spans one.")]
     public static async Task<string> GetPgWaitTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -48,54 +49,83 @@ public sealed class DarlingMcpPgTrendTools
         {
             var start = windowEnd.AddHours(-hours_back);
 
+            /* #8074: the arm this target's wait history is on. Aurora's sampler collector is gated off and its wait history is the
+               engine's cumulative counters in pg_wait_stats, so the sampler rows alone answer nothing there. The empty paths ask
+               about the arm's own collector, so an Aurora target with no rows is an honest empty rather than a permanent gap
+               pointing at a window read. */
+            var arm = await DarlingPgTrendReader.GetWaitTrendArmAsync(postgres, resolved.ServerId, cancellationToken);
+            var engineCounters = arm == DarlingPgTrendReader.PgWaitTrendArm.EngineCumulative;
+
+            /* The capability question goes to the arm's own collector, each named as a literal so the wiring census can read it. */
+            async Task<string?> NotCollectedAsync() => engineCounters
+                ? await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "pg_wait_stats", cancellationToken)
+                : await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "pg_wait_sampling", cancellationToken);
+
+            /* The window-floor probe (#7010) windows on the rows the arm read: the web's listed source for this read is the sampler's
+               table, and on the engine arm that would report an Aurora target as holding no collection, or never as truncated. */
+            Task<McpWindowNotice> WindowNoticeAsync(bool emptyAnswer) => engineCounters
+                ? DarlingMcpWindowNotice.ReadForCollectorTableAsync(postgres, "pg_wait_stats", resolved.ServerName, start, windowEnd, emptyAnswer, logger, cancellationToken)
+                : DarlingMcpWindowNotice.ReadForToolAsync(postgres, "get_pg_wait_trend", resolved.ServerName, start, windowEnd, emptyAnswer, logger, cancellationToken);
+
             /* With no event named, follow the one that actually dominates this server rather than a name
                somebody guessed. Which one was chosen is reported, so the answer is never about a different
                event than the reader thinks. */
             var chosen = string.IsNullOrWhiteSpace(wait_event)
-                ? await DarlingPgTrendReader.GetDominantWaitEventAsync(postgres, resolved.ServerId, start, windowEnd, cancellationToken)
+                ? await DarlingPgTrendReader.GetDominantWaitEventAsync(postgres, resolved.ServerId, start, windowEnd, arm, cancellationToken)
                 : wait_event.Trim();
 
             if (string.IsNullOrWhiteSpace(chosen))
             {
-                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.DisplayName, "pg_wait_sampling", cancellationToken)
-                    ?? EmptyStatus(await EmptyHintsAsync(postgres, "get_pg_wait_trend", resolved.ServerName, start, windowEnd, logger, cancellationToken),
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await NotCollectedAsync()
+                    ?? EmptyStatus((await WindowNoticeAsync(emptyAnswer: true)).AsHints(),
                         "empty",
-                        $"No wait event gained samples on {resolved.DisplayName} in the last {hours_back} "
-                        + "hour(s), so there is nothing to follow: none was sampled, or the window holds a "
-                        + "single collection (a trend needs at least two to difference)."
-                        + DarlingMcpPgWaitSamplingTools.DescribeInstrumentForEmpty(
-                            await DarlingPgWaitSamplingReader.GetWaitInstrumentAsync(postgres, resolved.ServerId, cancellationToken))
-                        + " get_pg_extensions reports whether the pg_wait_sampling extension is loaded."), cancellationToken, start);
+                        engineCounters
+                            ? $"No wait event accrued time on {resolved.DisplayName} in the last {hours_back} hour(s) on the engine's "
+                              + "cumulative wait counters, so there is nothing to follow: nothing waited, or the window holds only "
+                              + "each event's first collection (the collector measures an interval from the second one on). "
+                              + "get_pg_wait_stats lists the events this server does record."
+                            : $"No wait event gained samples on {resolved.DisplayName} in the last {hours_back} "
+                              + "hour(s), so there is nothing to follow: none was sampled, or the window holds a "
+                              + "single collection (a trend needs at least two to difference)."
+                              + DarlingMcpPgWaitSamplingTools.DescribeInstrumentForEmpty(
+                                  await DarlingPgWaitSamplingReader.GetWaitInstrumentAsync(postgres, resolved.ServerId, cancellationToken))
+                              + " get_pg_extensions reports whether the pg_wait_sampling extension is loaded."), cancellationToken, start);
             }
 
             var points = await DarlingPgTrendReader.GetWaitTrendAsync(
-                postgres, resolved.ServerId, chosen, start, windowEnd, cancellationToken);
+                postgres, resolved.ServerId, chosen, start, windowEnd, arm, cancellationToken);
 
             if (points.Count == 0)
             {
-                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.DisplayName, "pg_wait_sampling", cancellationToken)
-                    ?? EmptyStatus(await EmptyHintsAsync(postgres, "get_pg_wait_trend", resolved.ServerName, start, windowEnd, logger, cancellationToken),
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await NotCollectedAsync()
+                    ?? EmptyStatus((await WindowNoticeAsync(emptyAnswer: true)).AsHints(),
                         "empty",
-                        $"No samples for wait event '{chosen}' on {resolved.DisplayName} in the last "
-                        + $"{hours_back} hour(s). A trend needs at least TWO snapshots to difference, so a "
-                        + "window holding one collection is legitimately empty here even when the event is "
-                        + "being sampled. get_pg_wait_sampling lists the events this server does record."), cancellationToken, start);
+                        engineCounters
+                            ? $"No wait time for wait event '{chosen}' on {resolved.DisplayName} in the last {hours_back} hour(s) on "
+                              + "the engine's cumulative wait counters. A point needs a collection with a measured interval, so a "
+                              + "window holding only the event's first collection is legitimately empty here even when the event "
+                              + "is being counted. get_pg_wait_stats lists the events this server does record."
+                            : $"No samples for wait event '{chosen}' on {resolved.DisplayName} in the last "
+                              + $"{hours_back} hour(s). A trend needs at least TWO snapshots to difference, so a "
+                              + "window holding one collection is legitimately empty here even when the event is "
+                              + "being sampled. get_pg_wait_sampling lists the events this server does record."), cancellationToken, start);
             }
 
             var resets = points.Count(p => p.CounterReset);
 
             /* #7876: the instrument the NEWEST cycle recorded, on the data path as well as the empty one. The same recorded token
                get_pg_wait_sampling echoes. It is not derived from the rows: a NULL sampled_ms means either the extension arm or a
-               row from before V133, so the rows cannot name the arm, and a window from before a switch can hold the other one's. */
-            var instrument = DarlingMcpPgWaitSamplingTools.InstrumentToken(
-                await DarlingPgWaitSamplingReader.GetWaitInstrumentAsync(postgres, resolved.ServerId, cancellationToken));
+               row from before V133, so the rows cannot name the arm, and a window from before a switch can hold the other one's.
+               #8074: on the engine_cumulative arm no sampler cycle records a token (the collector is gated off), and the arm itself
+               is the instrument. */
+            var instrument = engineCounters
+                ? PgWaitInstrument.EngineCumulative
+                : DarlingMcpPgWaitSamplingTools.InstrumentToken(
+                    await DarlingPgWaitSamplingReader.GetWaitInstrumentAsync(postgres, resolved.ServerId, cancellationToken));
 
             /* #7010: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote). A window of
                90 minutes or less starts no probe; a failed probe costs the notice, never the series. */
-            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
-                postgres, "get_pg_wait_trend", resolved.ServerName, start, windowEnd, emptyAnswer: false, logger, cancellationToken);
+            var notice = await WindowNoticeAsync(emptyAnswer: false);
 
             return DarlingMcpWindowNotice.Attach(JsonSerializer.Serialize(new
             {
@@ -104,36 +134,52 @@ public sealed class DarlingMcpPgTrendTools
                 /* Said plainly when it was not asked for, so a caller never reads this as an answer about
                    the event they had in mind. */
                 wait_event_source = string.IsNullOrWhiteSpace(wait_event)
-                    ? "chosen automatically: the most-sampled event in this window that is an actual WAIT. "
-                      + "The CPU class - pg_wait_sampling's 'Running', meaning the backend was not waiting - "
-                      + "is excluded from the choice because it dominates any healthy server's profile and "
-                      + "would answer the opposite of the question. Name it explicitly to follow it."
+                    ? engineCounters
+                        ? "chosen automatically: the event with the most wait time in this window on the engine's cumulative "
+                          + "counters. Background-worker and client-idle waits never reach those rows, so nothing is excluded "
+                          + "from the choice. Name an event explicitly to follow it."
+                        : "chosen automatically: the most-sampled event in this window that is an actual WAIT. "
+                          + "The CPU class - pg_wait_sampling's 'Running', meaning the backend was not waiting - "
+                          + "is excluded from the choice because it dominates any healthy server's profile and "
+                          + "would answer the opposite of the question. Name it explicitly to follow it."
                     : "as requested",
                 hours_back,
                 status = "wait_trend",
                 instrument,
                 point_count = points.Count,
                 counter_reset_count = resets,
-                note = "estimated_wait_ms_per_second is samples x the profiler's period, over the time the "
-                     + "profiler was watching - the interval's length on the pg_wait_sampling extension, and on "
-                     + "the service_sampled instrument the seconds each collection actually sampled (30 of every "
-                     + "300), the same denominator analyze_server uses. An estimate from a sampling profiler, not "
-                     + "a measured duration, so the shape over time is the finding rather than the absolute value. "
-                     + "The instrument key is the instrument the newest collection cycle recorded for this server "
-                     + "(unknown when no collection has recorded it). Each point's rate is worked out from what that "
-                     + "point's own cycle observed, so the rates stay right across a switch of instrument, but a window "
-                     + "from before a switch can hold the other instrument's rows. Per SECOND because "
-                     + "collection intervals are not uniform: a restart or a slow cycle stretches one, and a "
-                     + "per-interval total would render that as a spike. backend_count is null on a point with no samples, "
-                     + "because no backend waited on the event in that interval. On a point with samples it is the number of "
-                     + "distinct backends the profiler has recorded for this event: since the profile last started on the "
-                     + "pg_wait_sampling extension, a running total that only rises until a reset and is NOT how many waited in "
-                     + "the interval, and in the last window on the service's own sampler."
-                     + (resets > 0
-                         ? $"  {resets} interval(s) span a profile RESET - pg_wait_sampling_reset_profile() "
-                           + "or a server restart - and report everything since the reset rather than a "
-                           + "quiet interval, which is what clamping the difference at zero would have shown."
-                         : string.Empty),
+                note = engineCounters
+                    ? "estimated_wait_ms_per_second keeps the sampled arm's key but is MEASURED here: the wait time the engine's "
+                      + "cumulative wait counters (the pg_wait_stats collector) accrued for the event "
+                      + "between two collections, over the seconds between them, so the value is a duration rather than an estimate "
+                      + "from samples. sample_count is the number of waits that completed in the interval, not profiler samples. "
+                      + "backend_count is null on every point, because the native counters do not carry it. counter_reset is false "
+                      + "on every point: the collector re-baselines at a counter reset or a restart and writes no interval for that "
+                      + "collection, so that collection is not a point and no point spans a reset. A collection with no measured "
+                      + "interval (the event's first sighting, or the one after a reset or a gap) is the series' left edge, not a "
+                      + "point. Per SECOND because collection intervals are not uniform: a restart or a slow cycle stretches one, "
+                      + "and a per-interval total would render that as a spike. The instrument key is engine_cumulative because "
+                      + "the registry says this target is Aurora PostgreSQL, the fact that gates the collector."
+                    : "estimated_wait_ms_per_second is samples x the profiler's period, over the time the "
+                      + "profiler was watching - the interval's length on the pg_wait_sampling extension, and on "
+                      + "the service_sampled instrument the seconds each collection actually sampled (30 of every "
+                      + "300), the same denominator analyze_server uses. An estimate from a sampling profiler, not "
+                      + "a measured duration, so the shape over time is the finding rather than the absolute value. "
+                      + "The instrument key is the instrument the newest collection cycle recorded for this server "
+                      + "(unknown when no collection has recorded it). Each point's rate is worked out from what that "
+                      + "point's own cycle observed, so the rates stay right across a switch of instrument, but a window "
+                      + "from before a switch can hold the other instrument's rows. Per SECOND because "
+                      + "collection intervals are not uniform: a restart or a slow cycle stretches one, and a "
+                      + "per-interval total would render that as a spike. backend_count is null on a point with no samples, "
+                      + "because no backend waited on the event in that interval. On a point with samples it is the number of "
+                      + "distinct backends the profiler has recorded for this event: since the profile last started on the "
+                      + "pg_wait_sampling extension, a running total that only rises until a reset and is NOT how many waited in "
+                      + "the interval, and in the last window on the service's own sampler."
+                      + (resets > 0
+                          ? $"  {resets} interval(s) span a profile RESET - pg_wait_sampling_reset_profile() "
+                            + "or a server restart - and report everything since the reset rather than a "
+                            + "quiet interval, which is what clamping the difference at zero would have shown."
+                          : string.Empty),
                 points = points.Select(p => new
                 {
                     collection_time = p.CollectionTimeUtc,

@@ -1036,6 +1036,13 @@
                             </StackPanel>
                         </Border>
 
+                        <!-- Shown while the first fleet read is in flight (FleetOverviewLoadingText.Shows), so an empty card area
+                             is not the same picture as an empty fleet. -->
+                        <TextBlock x:Name="OverviewLoadingText" DockPanel.Dock="Top"
+                                   Text="{x:Static local:FleetOverviewLoadingText.Loading}"
+                                   FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                   HorizontalAlignment="Center" Margin="0,24,0,0" Visibility="Collapsed"/>
+
                         <ScrollViewer VerticalScrollBarVisibility="Auto">
                         <ui:InvokableItemsControl x:Name="OverviewItemsControl" ItemInvoked="OverviewItemsControl_ItemInvoked">
                             <ItemsControl.ItemsPanel>

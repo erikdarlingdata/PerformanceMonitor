@@ -188,6 +188,12 @@ const scenarios = {
     const root = await build("waits");
     return { wait: describe(byTitle("Wait Trend")), keys: texts(root, "annotation-legend") };
   },
+  /* #8074: an Aurora answer names engine_cumulative and carries no backend counts; the caption must say what those figures are. */
+  waitAurora: async () => {
+    bodies = { get_pg_wait_trend: { wait_event: "DataFileRead", wait_event_source: "as requested", instrument: "engine_cumulative", points: waitPoints(false).map((p) => ({ ...p, backend_count: null })) } };
+    const root = await build("waits");
+    return { wait: describe(byTitle("Wait Trend")), subtitles: texts(root, "panel-sub") };
+  },
   io: async () => {
     bodies = { get_pg_io_trend: { points: ioPoints(true, true) } };
     const root = await build("io");

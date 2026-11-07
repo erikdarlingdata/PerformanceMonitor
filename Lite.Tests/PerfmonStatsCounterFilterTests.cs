@@ -96,6 +96,44 @@ public sealed class PerfmonStatsCounterFilterTests : IClassFixture<SharedDuckDbF
         }
     }
 
+    /// <summary>
+    /// #8090 item 1: a filter that matches nothing in the latest snapshot answers a status word, as the trend does for the same name.
+    /// A counter_name no counter carries is <c>not_collected</c> and names the collected counters; a known counter with an
+    /// instance_name no row carries is <c>empty</c> and names the instances the counter has. Darling's twin is in
+    /// <c>PerfmonStatsCounterFilterLiveTests</c>.
+    /// </summary>
+    [Fact]
+    public async Task AFilterThatMatchesNothing_AnswersAStatusWord_AndNamesWhatTheSnapshotHolds()
+    {
+        var service = new LocalDataService(_duckDb);
+        var at = DateTime.UtcNow.AddMinutes(-2);
+        await SeedPerfmonAsync(at, "SQLServer:SQL Statistics", "Batch Requests/sec", "UserDb1", 1000);
+
+        using (var unknown = JsonDocument.Parse(await McpPerfmonTools.GetPerfmonStats(service, _serverManager, ServerName, counter_name: "No Such Counter")))
+        {
+            var root = unknown.RootElement;
+            Assert.True(root.TryGetProperty("status", out var status), "an unknown counter_name answered no status word: " + root.GetRawText());
+            Assert.Equal("not_collected", status.GetString());
+            Assert.Contains("No Such Counter", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.Contains("Batch Requests/sec", root.GetProperty("hints").GetProperty("collected_counters").EnumerateArray().Select(c => c.GetString()));
+        }
+
+        using (var noInstance = JsonDocument.Parse(await McpPerfmonTools.GetPerfmonStats(service, _serverManager, ServerName, counter_name: "Batch Requests/sec", instance_name: "NoSuchDb")))
+        {
+            var root = noInstance.RootElement;
+            Assert.True(root.TryGetProperty("status", out var status), "an unknown instance_name answered no status word: " + root.GetRawText());
+            Assert.Equal("empty", status.GetString());
+            Assert.Contains("UserDb1", root.GetProperty("hints").GetProperty("instance_names").EnumerateArray().Select(c => c.GetString()));
+        }
+
+        /* A filter that matches keeps the data shape, with no status word beside it. */
+        using (var hit = JsonDocument.Parse(await McpPerfmonTools.GetPerfmonStats(service, _serverManager, ServerName, counter_name: "Batch Requests/sec")))
+        {
+            Assert.False(hit.RootElement.TryGetProperty("status", out _));
+            Assert.Equal(1, hit.RootElement.GetProperty("counters_returned").GetInt32());
+        }
+    }
+
     private async Task<DuckDBConnection> SeedConnectionAsync()
     {
         if (_seedConn is null)

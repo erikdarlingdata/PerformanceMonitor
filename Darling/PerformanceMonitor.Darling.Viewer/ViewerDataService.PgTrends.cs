@@ -45,17 +45,19 @@ public sealed partial class ViewerDataService
         return bucketMinutes;
     }
 
-    /// <summary>The wait trend of the window's dominant wait event (the web's default subject).</summary>
+    /// <summary>The wait trend of the window's dominant wait event (the web's default subject), from the arm this server's
+    /// wait history is on (#8074): the engine's cumulative counters on an Aurora target, the sampler elsewhere.</summary>
     public async Task<PgTrend<DarlingPgTrendReader.PgWaitTrendPoint>> GetPgWaitTrendAsync(
         int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
-        var chosen = await DarlingPgTrendReader.GetDominantWaitEventAsync(_dataSource, serverId, startUtc, endUtc, cancellationToken);
+        var arm = await DarlingPgTrendReader.GetWaitTrendArmAsync(_dataSource, serverId, cancellationToken);
+        var chosen = await DarlingPgTrendReader.GetDominantWaitEventAsync(_dataSource, serverId, startUtc, endUtc, arm, cancellationToken);
         if (string.IsNullOrWhiteSpace(chosen))
         {
             return NoPgTrend<DarlingPgTrendReader.PgWaitTrendPoint>(0);
         }
 
-        var points = await DarlingPgTrendReader.GetWaitTrendAsync(_dataSource, serverId, chosen, startUtc, endUtc, cancellationToken);
+        var points = await DarlingPgTrendReader.GetWaitTrendAsync(_dataSource, serverId, chosen, startUtc, endUtc, arm, cancellationToken);
         return new(chosen, 0, points);
     }
 
