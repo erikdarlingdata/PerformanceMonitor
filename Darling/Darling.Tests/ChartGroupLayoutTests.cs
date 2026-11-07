@@ -271,7 +271,7 @@ public sealed class ChartGroupLayoutTests
             var narrow = DataChart(1.0, "Read Ops/sec", "", 4, 100, longNames: true);
             var wide = DataChart(1.0, "Read Ops/sec", "", 4, 100, longNames: true);
             using (narrow.Plot.GetImage(360, 420)) { }
-            using (wide.Plot.GetImage(1900, 420)) { }
+            using (wide.Plot.GetImage(1900, 700)) { } // #8220: 1900x420 is wide enough for a side legend, which is a column, not a line
 
             var rowHeight = wide.Plot.Legend.LastRenderSize.Height;
             Assert.True(narrow.Plot.Legend.LastRenderSize.Height > rowHeight * 1.5f,
@@ -356,18 +356,65 @@ public sealed class ChartGroupLayoutTests
             Assert.True(boxes[1].ActualHeight > boxes[0].ActualHeight * 1.5, $"a tall window gives taller grids: {boxes[0].ActualHeight} then {boxes[1].ActualHeight}");
         });
 
-    // #8086: a legend goes on the right edge only on a chart at least three times as wide as tall with at most twelve series, else under the axis.
+    private static (Plot Plot, ScottPlot.Panels.LegendPanel Panel) LegendPlot(int series, int nameLength)
+    {
+        var plot = new Plot();
+        for (var s = 0; s < series; s++)
+        {
+            plot.Add.Scatter(new double[] { 1, 2, 3 }, new double[] { s, s + 1, s + 2 }).LegendText = $"{s:00} ".PadRight(nameLength, 'x');
+        }
+
+        var panel = plot.ShowLegend(Edge.Bottom);
+        plot.Layout.LayoutEngine = new WrappedLegendLayout(panel);
+        return (plot, panel);
+    }
+
+    // #8220: the legend goes beside the plot only when that leaves the plot 60% of the chart's width and the whole column fits the plot's height,
+    // otherwise under it.
     [Theory]
-    [InlineData(1200, 300, 4, true)]
-    [InlineData(900, 300, 12, true)]
-    [InlineData(1200, 300, 13, false)]
-    [InlineData(1200, 400, 4, true)]
-    [InlineData(1100, 400, 4, false)]
-    [InlineData(700, 350, 4, false)]
-    [InlineData(1200, 200, 12, false)]
-    [InlineData(0, 0, 4, false)]
-    public void TheLegendEdge_FollowsTheChartShape(double width, double height, int series, bool right) =>
-        Assert.Equal(right ? Edge.Right : Edge.Bottom, ChartRenderHelper.LegendEdgeFor(width, height, series));
+    [InlineData(1200, 400, 4, 12, Edge.Right)]
+    [InlineData(1200, 300, 4, 12, Edge.Right)]
+    [InlineData(500, 300, 4, 30, Edge.Bottom)]
+    [InlineData(1200, 300, 13, 12, Edge.Bottom)]
+    [InlineData(1200, 200, 5, 12, Edge.Right)]
+    public void TheLegendEdge_FollowsTheChartSize(int width, int height, int series, int nameLength, Edge expected)
+    {
+        var (plot, panel) = LegendPlot(series, nameLength);
+        using (plot.GetImage(width, height)) { }
+        var data = plot.RenderManager.LastRender.DataRect;
+        Assert.Equal(expected, panel.Edge);
+        if (panel.Edge == Edge.Right) Assert.True(data.Width >= 0.6 * width - 0.5, $"a side legend leaves the plot {data.Width:0.#} of {width} px");
+    }
+
+    // #8220: the same plot, drawn again at another size, puts the legend where that size needs it (the placement follows a resize).
+    [Fact]
+    public void TheLegend_MovesWhenTheChartIsResized()
+    {
+        var (plot, panel) = LegendPlot(4, 12);
+        using (plot.GetImage(1200, 400)) { }
+        Assert.Equal(Edge.Right, panel.Edge);
+        using (plot.GetImage(420, 400)) { }
+        Assert.Equal(Edge.Bottom, panel.Edge);
+        using (plot.GetImage(1200, 400)) { }
+        Assert.Equal(Edge.Right, panel.Edge);
+    }
+
+    // #8220: a legend that would take the plot under 120 px shows as one row of whole entries and "+N more", and never grows past one row.
+    [Theory]
+    [InlineData(700, 260, 20)]
+    [InlineData(700, 230, 41)]
+    public void ALongLegend_ShrinksToOneRow_BeforeItTakesThePlotUnder120(int width, int height, int series)
+    {
+        var (plot, panel) = LegendPlot(series, 18);
+        using (plot.GetImage(width, height)) { }
+        var data = plot.RenderManager.LastRender.DataRect;
+        Assert.Equal(Edge.Bottom, panel.Edge);
+        Assert.True(data.Height >= 120 - 0.5, $"the plot is {data.Height:0.#} px tall");
+        var shown = plot.Legend.GetItems();
+        Assert.True(shown.Length < series, "not every entry is listed beside the plot");
+        Assert.Single(shown, i => i.Plottable is null); // the one entry that stands for the ones left out
+        Assert.True(plot.RenderManager.LastRender.Layout.PanelSizes[panel] >= plot.Legend.LastRenderSize.Height + panel.Padding.Vertical - 0.5f, "the one row is not cut");
+    }
 
     [Fact]
     public void ARightLegend_GetsItsWholeWidth_InTheFirstRender()

@@ -75,7 +75,7 @@ public partial class PeopleWindow : Window
             var rows = PersonViewRow.From(result.People);
             PeopleGrid.ItemsSource = rows;
             PeopleGrid.SelectedItem = rows.FirstOrDefault(r => r.PersonId == selectedId) ?? (rows.Count > 0 ? rows[0] : null);
-            EmptyMessage.Text = PeopleText.NoPeopleNote;
+            EmptyMessage.Text = PeopleText.EmptyNote(_readOnly);
             EmptyMessage.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             ShowDetail();
             if (_readOnly)

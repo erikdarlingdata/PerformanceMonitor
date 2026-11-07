@@ -251,7 +251,7 @@ public static class DarlingOwnedSecrets
     }
 
     /// <summary>The path with every symbolic link followed (capped; null on a cycle or an unresolvable path).</summary>
-    private static string? RealPath(string path)
+    internal static string? RealPath(string path)
     {
         try
         {
@@ -308,7 +308,9 @@ public static class DarlingOwnedSecrets
         }
     }
 
-    private static bool Covers(string directory, string path)
+    /// <summary>True when <paramref name="path"/> is <paramref name="directory"/> or under it, compared with the owned set's case
+    /// rule (<see cref="PathComparison"/>).</summary>
+    internal static bool Covers(string directory, string path)
     {
         var dir = Path.TrimEndingDirectorySeparator(directory);
         if (path.Equals(dir, PathComparison) || path.Equals(directory, PathComparison))
@@ -682,6 +684,59 @@ internal static class FileIdentity
         }
 
         return DecodeUnixOwner(buffer, layout);
+    }
+
+    private const uint StatxType = 0x1;
+    private const int FileTypeMask = 0xF000;
+    private const int RegularFileType = 0x8000;
+
+    /// <summary>
+    /// Whether the file at <paramref name="path"/>, every link followed, is a regular file (#8006): a <c>passwordKey</c>
+    /// key is never read from a directory, a device, a FIFO (whose open would wait for a writer) or a socket. Null only
+    /// when nothing is there. The file type is <c>stx_mode</c> (2 bytes at 28) on Linux and <c>st_mode</c> (2 bytes at 4)
+    /// on macOS. Anything else throws with a sentence naming the file, as <see cref="UnixOwnerOf"/> does.
+    /// </summary>
+    internal static bool? UnixIsRegularFile(string path)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return null;
+        }
+
+        var layout = OperatingSystem.IsLinux() ? UnixStatLayout.Statx
+            : OperatingSystem.IsMacOS() ? UnixStatLayout.MacOs
+            : throw new PlatformNotSupportedException($"The file type of '{path}' cannot be read on this operating system.");
+        var buffer = new byte[512];
+        int result;
+        try
+        {
+            result = layout == UnixStatLayout.Statx
+                ? Statx(AtFdcwd, path, 0, StatxType, buffer)
+                : RuntimeInformation.ProcessArchitecture == Architecture.X64 ? StatMacIntel(path, buffer) : Stat(path, buffer);
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+        {
+            throw new PlatformNotSupportedException($"The file type of '{path}' cannot be read: this system does not offer the call that reports it.", ex);
+        }
+
+        if (result != 0)
+        {
+            var errno = Marshal.GetLastPInvokeError();
+            return errno switch
+            {
+                Enoent or Enotdir => null,
+                Eacces => throw new UnauthorizedAccessException($"Access to '{path}' was denied (errno 13)."),
+                _ => throw new IOException($"The file type of '{path}' could not be read (errno {errno})."),
+            };
+        }
+
+        if (layout == UnixStatLayout.Statx && (BitConverter.ToUInt32(buffer, 0) & StatxType) != StatxType)
+        {
+            throw new IOException($"The file type of '{path}' could not be read: the file system did not report it.");
+        }
+
+        var mode = BitConverter.ToUInt16(buffer, layout == UnixStatLayout.Statx ? 28 : 4);
+        return (mode & FileTypeMask) == RegularFileType;
     }
 
     /// <summary>The user id this process runs as. Only called on a platform that has one.</summary>

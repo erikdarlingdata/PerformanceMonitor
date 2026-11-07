@@ -181,7 +181,7 @@ internal static partial class ChartGroupAligner
         var floor = 0.0;
         foreach (var m in members)
         {
-            if (ChartLayout.ChromeHeight(m.Plot) is { } chrome) floor = Math.Max(floor, Math.Ceiling(ChartLayout.RowMinHeightFor(chrome)));
+            if (ChartLayout.RowMinHeightFor(m.Plot) is { } min) floor = Math.Max(floor, Math.Ceiling(min));
         }
         if (Math.Abs(panel.ContentMinHeight - floor) > 0.5) panel.ContentMinHeight = floor;
     }
