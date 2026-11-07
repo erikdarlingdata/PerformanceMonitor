@@ -19,14 +19,6 @@ using PerformanceMonitor.Collectors;
 namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
-/// What an ensure of the schema-changes session left (#7643). <see cref="Running"/> is whether the session runs now.
-/// <see cref="CreateTimeUtc"/> is when it last started, which moves on every start: a pass that stored the last value sees a
-/// restart, and with it a gap in what the session saw. <see cref="FaultMessage"/> is set when the ensure failed, and
-/// <see cref="FaultIsPermission"/> says the failure was a permission denial.
-/// </summary>
-public sealed record SchemaSessionState(bool Running, DateTime? CreateTimeUtc, string? FaultMessage, bool FaultIsPermission);
-
-/// <summary>
 /// The lifecycle of the schema-changes session (#7643), over one connection: on premises the connection is to the server, on Azure
 /// SQL Database to the database the session lives in. Probe, then start the session that exists or create and start the one that
 /// does not. The statements come from <see cref="SchemaChangesXeSession"/>; failures are classified like the other captures'

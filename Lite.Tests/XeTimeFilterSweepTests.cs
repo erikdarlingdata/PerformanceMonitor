@@ -101,6 +101,22 @@ public sealed class XeTimeFilterSweepTests
             + "less than it appears to.");
     }
 
+    /* The schema-changes read (#7643) is not in CollectorCatalog (its collector reads the probe, and the pass reads events itself), so
+       the catalog sweep cannot reach it: its statement is swept here for both scopes. */
+    [Fact]
+    public void SchemaEventQueryFiltersEventsByTimeInsideTheXQuery()
+    {
+        var name = SchemaChangesXeSession.NameFor("0a1b2c3d");
+
+        foreach (var databaseScoped in new[] { false, true })
+        {
+            var text = SchemaEventQuery.Build(name, databaseScoped);
+
+            Assert.DoesNotMatch(ValueTimeFilter, text);
+            Assert.Contains("evt.exist('@timestamp[. > sql:variable(\"@cutoff_time\")]') = 1", text, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public void ThePatternCatchesEveryShapeThisSweepRetired()
     {
