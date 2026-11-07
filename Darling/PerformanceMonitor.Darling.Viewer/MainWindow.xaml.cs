@@ -924,7 +924,7 @@ public partial class MainWindow : Window
         _viewerMuteRules.Add(rule);
         StatusText.Text =
             $"Snoozed {metricName} on {serverName} for {label} — tray toasts stop now; the service applies it within "
-            + $"{ViewerDataService.ServiceReloadTickSeconds} s — {DateTime.Now:HH:mm:ss}";
+            + $"{ViewerDataService.ServiceReloadTickSeconds} s — {ViewerTimeHelper.RefreshedStamp()}";
     }
 
     /// <summary>
@@ -1238,7 +1238,7 @@ public partial class MainWindow : Window
             }
             else
             {
-                StatusText.Text = $"connected — no servers registered yet ({DateTime.Now:HH:mm:ss})";
+                StatusText.Text = $"connected — no servers registered yet ({ViewerTimeHelper.RefreshedStamp()})";
             }
 
             /* Seed the sidebar status dots + the status bar's collector-health / collection / database-size
@@ -1319,7 +1319,7 @@ public partial class MainWindow : Window
 
     /// <summary>#6136: the status bar names the tab that was just refreshed. Alert History, Job History and the other tabs that set no
     /// text of their own kept reading "overview - refreshed ..." from the last Overview load.</summary>
-    private void StampRefreshed(string tabName) => StatusText.Text = $"{tabName} — refreshed {DateTime.Now:HH:mm:ss}";
+    private void StampRefreshed(string tabName) => StatusText.Text = $"{tabName} — refreshed {ViewerTimeHelper.RefreshedStamp()}";
 
     private async Task LoadVisibleTabAsync()
     {
@@ -1819,7 +1819,7 @@ public partial class MainWindow : Window
         _overviewRegisteredCount = list.Count;
         ApplyFleetRollup(OverviewCardView.BuildRollup(cards, totals, list.Count, OverviewSearchBox?.Text));
 
-        StatusText.Text = $"overview — refreshed {DateTime.Now:HH:mm:ss}";
+        StatusText.Text = $"overview — refreshed {ViewerTimeHelper.RefreshedStamp()}";
     }
 
     /// <summary>
@@ -2090,7 +2090,7 @@ public partial class MainWindow : Window
         /* #6135: an offline server's findings are the last it collected; say so beside the time they came from. */
         RecommendationsStatusText.Text = RecommendationsViewModel.WithOfflineNote(
             RecommendationsStatusText.Text, server.CardStatus == ServerCollectionStatus.Offline);
-        StatusText.Text = $"{server.DisplayName} — refreshed {DateTime.Now:HH:mm:ss}";
+        StatusText.Text = $"{server.DisplayName} — refreshed {ViewerTimeHelper.RefreshedStamp()}";
     }
 
     /// <summary>Swaps the visible content region to match the view-model's state (mirrors Lite's ApplyViewModel).</summary>

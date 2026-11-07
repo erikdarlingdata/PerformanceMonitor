@@ -19,6 +19,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// The words and the command arguments of the Collection Health tab's "Run all collectors now" and per-collector "Run now"
 /// (#6382). They are the web dashboard's pair (#5941, <c>pages/collector-run.js</c>): the same <c>snapshot_now</c> command, with the
 /// same optional <c>{"collectors":[...]}</c> argument, and the same result text, so the two surfaces say the same thing about the same run.
+/// Also the seat gate of the tab's three write buttons (#8103): whether each is on, and what its tooltip says, from the seat, the server's
+/// connection and a run in flight, so the tab and its tests take the state from one place.
 /// </summary>
 internal static class ViewerCollectorRun
 {
@@ -37,8 +39,48 @@ internal static class ViewerCollectorRun
     /// <summary>What the status line says when the Viewer stopped waiting (the web's wording; the Collection Log sub-tab is below the buttons).</summary>
     public const string StillRunningText = "The run is still going. Open the Collection Log below in a minute to see its result.";
 
-    /// <summary>What a read-only seat is told (the web's 403 sentence; the Viewer shows it on click, as Purge Now does).</summary>
+    /// <summary>What the status line says to a read-only seat whose click got through (the web's 403 sentence), the backstop behind the disabled buttons.</summary>
     public const string ReadOnlyText = "This account has read-only access, so it cannot run collectors.";
+
+    /// <summary>"Run all collectors now"'s tooltip while the seat can write and the server is reachable.</summary>
+    public const string RunAllReadyTip = "Runs every enabled collector for this server once, now. Disabled collectors are skipped. Schedules do not change.";
+
+    /// <summary>A row's "Run now" tooltip while the seat can write.</summary>
+    public const string RunOneReadyTip = "Runs this collector once, now, even if it is disabled. Its schedule and enabled state do not change.";
+
+    /// <summary>
+    /// #8103: the tooltip of a run button that is off on a read-only seat, in the sentence shape Alert History's Dismiss buttons use: what the
+    /// seat cannot do, then how to connect with a login that can.
+    /// </summary>
+    public const string ReadOnlyRunTip = "This viewer is connected read-only, so it cannot run collectors. " + ViewerReadOnlyException.HowToConnectAsAdmin;
+
+    /// <summary>#8103: the tooltip of "Purge Now..." when it is off on a read-only seat.</summary>
+    public const string ReadOnlyPurgeTip = "This viewer is connected read-only, so it cannot run the retention purge. " + ViewerReadOnlyException.HowToConnectAsAdmin;
+
+    /// <summary>
+    /// #8103: the state of "Run all collectors now", applied as the tab is built and whenever the server's connection state is redrawn, so a
+    /// read-only seat sees the button off with the reason before it clicks. The seat is said first: no reconnect of the server makes a read-only
+    /// seat able to write. A writable seat's button is off with <see cref="ViewerServerTab.OfflineRunTip"/> while the service has no connection
+    /// to the server (a run would be skipped), and off with its ready tip while a run is in flight.
+    /// </summary>
+    /// <param name="readOnly"><see cref="ViewerDataService.IsReadOnly"/>.</param>
+    /// <param name="serverDown">Whether the service's connect to this server has failed.</param>
+    /// <param name="runActive">Whether a run is in flight.</param>
+    public static (bool IsEnabled, string ToolTip) RunAllState(bool readOnly, bool serverDown, bool runActive) =>
+        readOnly ? (false, ReadOnlyRunTip)
+        : serverDown ? (false, ViewerServerTab.OfflineRunTip)
+        : (!runActive, RunAllReadyTip);
+
+    /// <summary>
+    /// #8103: a row's "Run now": off with the reason on a read-only seat, else on with its tip. It does not follow the server's connection;
+    /// a click while the server is offline says so on the status line.
+    /// </summary>
+    public static (bool IsEnabled, string ToolTip) RunOneState(bool readOnly) =>
+        readOnly ? (false, ReadOnlyRunTip) : (true, RunOneReadyTip);
+
+    /// <summary>#8103: "Purge Now...": off with the reason on a read-only seat, else on with no tooltip.</summary>
+    public static (bool IsEnabled, string? ToolTip) PurgeState(bool readOnly) =>
+        readOnly ? (false, ReadOnlyPurgeTip) : (true, null);
 
     /// <summary>
     /// The status line for a finished command. A failed run reads "Not run: " and the service's own error, else its result status,
