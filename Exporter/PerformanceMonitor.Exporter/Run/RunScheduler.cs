@@ -30,6 +30,11 @@ public sealed class RunScheduler(
             return ExitRefused;
         }
 
+        foreach (var warning in settings.Warnings())
+        {
+            output.WriteLine($"warning: {warning}");
+        }
+
         var nowUtc = (options.NowUtc ?? clock()).ToUniversalTime();
         var (loaded, stateError) = ScheduleState.Load(settings.StatePath);
         if (options.PlanOnly) return PlanOnly(nowUtc, loaded, stateError);

@@ -42,6 +42,11 @@ public sealed class ExportRunner
         // read's connection is even reused for data.
         await RunChunkGuardPreflightAsync(connectionStringBuilder, options, ct).ConfigureAwait(false);
 
+        // A registry optional name given to --tables is an optional table: it runs through OptionalTableRunner below,
+        // with its column policy, schema gate and chunk guard, and lands in the optional manifest. Only core names run
+        // through the core exporters here and land in the core manifest.
+        var (coreTables, optionalNames) = SplitTables(options);
+
         var tableEntries = new List<ManifestTableEntry>();
 
         // one run-scoped Query Store raw-window cache, built at most once, lazily, by
@@ -62,7 +67,7 @@ public sealed class ExportRunner
         // Every requested system_health table is produced by one pass over the store, so they
         // are pulled out of the per-table loop below and handled once, up front, in whatever
         // order they were requested.
-        var requestedSystemHealthTables = options.Tables.Where(SystemHealthTables.All.Contains).ToArray();
+        var requestedSystemHealthTables = coreTables.Where(SystemHealthTables.All.Contains).ToArray();
         if (requestedSystemHealthTables.Length > 0)
         {
             output.WriteLine($"Exporting {string.Join(", ", requestedSystemHealthTables)}...");
@@ -75,7 +80,7 @@ public sealed class ExportRunner
             }
         }
 
-        foreach (var table in options.Tables)
+        foreach (var table in coreTables)
         {
             if (SystemHealthTables.All.Contains(table))
             {
@@ -140,62 +145,83 @@ public sealed class ExportRunner
             output.WriteLine($"  {entry.RowCount} rows, {entry.ByteSize} bytes -> {entry.OutputFile}");
         }
 
-        // Core tables get their time_column/kind/key_columns from the loader-mirrored map, not from the optional
-        // registry -- every entry above came from a core exporter.
-        var coreTableEntries = tableEntries.Select(CoreTableMetadata.WithMetadata).ToList();
-
-        var manifest = new Manifest
+        // A --tables list of optional names only has no core export, so no core manifest: the optional manifest below
+        // is the run's record.
+        if (coreTables.Length > 0)
         {
-            Store = options.Store,
-            FromUtc = options.FromUtc,
-            ToUtc = options.ToUtc,
-            ExporterVersion = ExporterVersion.Current,
-            DarlingSchemaVersion = darlingSchemaVersion,
-            Tables = coreTableEntries,
-            StragglerWarning = stragglerResult.LastCount,
-            StragglerWaitSeconds = stragglerResult.WaitSeconds,
-        };
+            // Core tables get their time_column/kind/key_columns from the loader-mirrored map, not from the optional
+            // registry -- every entry above came from a core exporter.
+            var coreTableEntries = tableEntries.Select(CoreTableMetadata.WithMetadata).ToList();
 
-        // The core manifest is written -- and uploaded, if requested -- before any optional table starts. A broken
-        // optional table can never block or corrupt the core export's own record of success.
-        var manifestPath = OutputPaths.ManifestFilePath(options.OutDir, options.Store, options.FromUtc, options.ToUtc, options.Tables, options.DimensionOrigin);
-        await ManifestWriter.WriteAsync(manifest, manifestPath, ct).ConfigureAwait(false);
-        output.WriteLine($"Manifest written to {manifestPath}");
+            var manifest = new Manifest
+            {
+                Store = options.Store,
+                FromUtc = options.FromUtc,
+                ToUtc = options.ToUtc,
+                ExporterVersion = ExporterVersion.Current,
+                DarlingSchemaVersion = darlingSchemaVersion,
+                Tables = coreTableEntries,
+                StragglerWarning = stragglerResult.LastCount,
+                StragglerWaitSeconds = stragglerResult.WaitSeconds,
+            };
 
-        if (options.Upload is not null)
-        {
-            var settings = UploadSettings.FromUri(options.Upload, options.AwsRegion);
-            await using var uploader = UploaderFactory.Create(settings);
-            await RunUpload.UploadRunAsync(uploader, settings.Layout, options, manifest, manifestPath, output, ct).ConfigureAwait(false);
-            output.WriteLine($"Uploaded to {settings.Display}");
+            // The core manifest is written -- and uploaded, if requested -- before any optional table starts. A broken
+            // optional table can never block or corrupt the core export's own record of success.
+            var manifestPath = OutputPaths.ManifestFilePath(options.OutDir, options.Store, options.FromUtc, options.ToUtc, coreTables, options.DimensionOrigin);
+            await ManifestWriter.WriteAsync(manifest, manifestPath, ct).ConfigureAwait(false);
+            output.WriteLine($"Manifest written to {manifestPath}");
+
+            if (options.Upload is not null)
+            {
+                var settings = UploadSettings.FromUri(options.Upload, options.AwsRegion);
+                await using var uploader = UploaderFactory.Create(settings);
+                await RunUpload.UploadRunAsync(uploader, settings.Layout, options, manifest, manifestPath, output, ct).ConfigureAwait(false);
+                output.WriteLine($"Uploaded to {settings.Display}");
+            }
+
+            // Every table the run touched has now succeeded (and, if --upload was given, the
+            // upload has too): only now is it safe to record this run's dimension keys as
+            // exported, so a run that fails partway through records nothing and a later retry
+            // still fetches the content it did not get to write.
+            RecordExportedDimensionKeys(options);
         }
 
-        // Every table the run touched has now succeeded (and, if --upload was given, the
-        // upload has too): only now is it safe to record this run's dimension keys as
-        // exported, so a run that fails partway through records nothing and a later retry
-        // still fetches the content it did not get to write.
-        RecordExportedDimensionKeys(options);
-
-        if (options.Also.Length == 0)
+        if (optionalNames.Length == 0)
         {
             return 0;
         }
 
-        return await RunOptionalTablesAsync(connectionStringBuilder, options, output, darlingSchemaVersion, ct).ConfigureAwait(false);
+        return await RunOptionalTablesAsync(connectionStringBuilder, options, optionalNames, output, darlingSchemaVersion, ct).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// Runs every `--also` table, one at a time in registry order, after the core manifest already exists. Writes the
-    /// separate optional manifest (never colliding with the core manifest's name -- see <see
-    /// cref="OutputPaths.TableSetTag"/>) and returns exit code 3 when at least one requested optional table failed, or
-    /// 0 when every optional table either succeeded or was cleanly skipped.
+    /// Splits a run's table set into the core names (<see cref="ExportOptions.AllTables"/>) and the optional names:
+    /// every `--also` name plus every registry name given to `--tables`. A registry name in `--tables` is routed
+    /// exactly like an `--also` name, so its column policy, schema gate and chunk guard apply.
+    /// </summary>
+    public static (string[] CoreTables, string[] OptionalNames) SplitTables(ExportOptions options)
+    {
+        var optionalInTables = options.Tables
+            .Where(t => !ExportOptions.AllTables.Contains(t) && OptionalTables.TryGet(t) is not null)
+            .ToArray();
+        var coreTables = options.Tables.Where(t => !optionalInTables.Contains(t)).ToArray();
+        var optionalNames = options.Also.Concat(optionalInTables).Distinct(StringComparer.Ordinal).ToArray();
+        return (coreTables, optionalNames);
+    }
+
+    /// <summary>
+    /// Runs every optional table (<paramref name="optionalNames"/>: the `--also` names plus the registry names given
+    /// to `--tables`), one at a time in registry order, after the core manifest already exists. Writes the separate
+    /// optional manifest (never colliding with the core manifest's name -- see <see cref="OutputPaths.TableSetTag"/>)
+    /// and returns exit code 3 when at least one requested optional table failed, or 0 when every optional table
+    /// either succeeded or was cleanly skipped.
     /// </summary>
     private static async Task<int> RunOptionalTablesAsync(
-        NpgsqlConnectionStringBuilder connectionStringBuilder, ExportOptions options, TextWriter output, int? darlingSchemaVersion, CancellationToken ct)
+        NpgsqlConnectionStringBuilder connectionStringBuilder, ExportOptions options, string[] optionalNames, TextWriter output, int? darlingSchemaVersion, CancellationToken ct)
     {
-        var (known, unknown) = OptionalTableRunner.Resolve(options.Also, OptionalTables.TryGet);
+        var (known, unknown) = OptionalTableRunner.Resolve(optionalNames, OptionalTables.TryGet);
         var runResult = await OptionalTableRunner.RunAsync(connectionStringBuilder, options, known, unknown, output, ct, darlingSchemaVersion).ConfigureAwait(false);
-        await PublishOptionalRunAsync(options, runResult, output, ct).ConfigureAwait(false);
+        await PublishOptionalRunAsync(options, runResult, output, ct, optionalNames: optionalNames).ConfigureAwait(false);
         return runResult.Failed.Count > 0 || runResult.DeniedCount > 0 ? 3 : 0;
     }
 
@@ -204,10 +230,11 @@ public sealed class ExportRunner
     /// only then records the run's new `pg_statement_text` keys. The keys follow the upload, as the core path's dimension
     /// keys do: a failed upload records nothing, so the next run fetches that text again instead of skipping it as known.
     /// <paramref name="createUploader"/> exists for tests; the default is <see cref="UploaderFactory.Create"/>.
+    /// <paramref name="optionalNames"/> names the manifest: the run's optional names, which default to `--also` alone.
     /// </summary>
     public static async Task PublishOptionalRunAsync(
         ExportOptions options, OptionalRunResult runResult, TextWriter output, CancellationToken ct,
-        Func<UploadSettings, IUploader>? createUploader = null)
+        Func<UploadSettings, IUploader>? createUploader = null, IReadOnlyCollection<string>? optionalNames = null)
     {
         var optionalManifest = new Manifest
         {
@@ -222,7 +249,7 @@ public sealed class ExportRunner
         };
 
         var optionalManifestPath = OutputPaths.ManifestFilePath(
-            options.OutDir, options.Store, options.FromUtc, options.ToUtc, options.Also, dimensionOrigin: null);
+            options.OutDir, options.Store, options.FromUtc, options.ToUtc, optionalNames ?? options.Also, dimensionOrigin: null);
         await ManifestWriter.WriteAsync(optionalManifest, optionalManifestPath, ct).ConfigureAwait(false);
         output.WriteLine($"Optional manifest written to {optionalManifestPath}");
 
@@ -273,8 +300,9 @@ public sealed class ExportRunner
     private static async Task<int> RunDryRunAsync(ExportOptions options, TextWriter output, CancellationToken ct)
     {
         NpgsqlConnectionStringBuilder? connectionStringBuilder = null;
+        var (coreTables, optionalNames) = SplitTables(options);
 
-        foreach (var table in options.Tables)
+        foreach (var table in coreTables)
         {
             output.WriteLine($"-- {table}");
 
@@ -299,9 +327,9 @@ public sealed class ExportRunner
             output.WriteLine(SqlBuilder.BuildSelect(table, rawColumns));
         }
 
-        // --dry-run prints every --also table's SQL too, using each table's full registry column set rather than a
-        // live discovery -- dry-run never needs a real connection to do this.
-        foreach (var name in options.Also)
+        // --dry-run prints every optional table's SQL too (--also names and registry names given to --tables), with
+        // the table's column policy applied to its discovered columns, exactly as the optional runner sends it.
+        foreach (var name in optionalNames)
         {
             output.WriteLine($"-- {name} (optional)");
             var table = OptionalTables.TryGet(name);
@@ -316,11 +344,11 @@ public sealed class ExportRunner
             await using var command = new NpgsqlCommand(SqlBuilder.OptionalColumnDiscoverySql, optionalConnection);
             command.Parameters.AddWithValue("schema", table.Schema);
             command.Parameters.AddWithValue("table", table.Name);
-            var columns = new List<string>();
+            var columns = new List<DiscoveredColumn>();
             await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
             {
-                columns.Add(reader.GetString(0));
+                columns.Add(new DiscoveredColumn(reader.GetString(0), reader.GetString(1), reader.GetString(2)));
             }
 
             if (columns.Count == 0)
@@ -329,7 +357,7 @@ public sealed class ExportRunner
                 continue;
             }
 
-            output.WriteLine(SqlBuilder.BuildOptionalSelect(table, columns));
+            output.WriteLine(SqlBuilder.BuildOptionalSelect(table, columns, ColumnPolicies.For(table.Name)));
         }
 
         return 0;

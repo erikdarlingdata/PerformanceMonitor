@@ -154,6 +154,8 @@ The `system_health_*` tables are parsed from the SQL Server `system_health` sess
 
 Optional tables are off unless the config or the command line names them.
 
+An optional table is exported the same way wherever it is named: `--also`, `optional_tables` in the config, `--tables` on a manual run, or `families.fresh.tables`. It gets its column policy, its schema gate and its chunk guard, and its entry is in the optional manifest, never in the core manifest. A run whose `--tables` names only optional tables writes an optional manifest and no core manifest.
+
 | Table | Kind | Grain | Time column | Key columns |
 |---|---|---|---|---|
 | `plan_correction` | window | change | `collection_time` | none |
