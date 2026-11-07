@@ -1103,8 +1103,9 @@ public sealed class FleetRollup
     {
         if (shown > 0)
         {
-            /* #8115: the Healthy tile keeps a server listed for an advisory tile, so the count says how many of its servers are that kind. */
-            return FleetAttentionText.ShowingText(shown, total, healthyWithAdvisories);
+            /* #8115: the Healthy tile keeps a server listed for an advisory tile, so the count says how many of its servers are that kind,
+               in the web fleet page's words. */
+            return $"showing {shown} of {total}" + FleetAttentionText.AdvisorySplit(healthyWithAdvisories);
         }
 
         /* Nothing left to show. On a populated fleet that is the honest all-clear; with no cards at all it

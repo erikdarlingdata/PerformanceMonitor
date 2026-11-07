@@ -31,7 +31,7 @@ public sealed class LiteViewerWalkthroughLows8115Tests
     [InlineData("jobs")]
     public void ServerColumn_ShowsALongNameWhole(string tab)
     {
-        const string name = "SERVER-GROUP-REGION-PRODUCTION-CLUSTER-NODE-07";
+        const string name = "SERVER-GROUP-REGION-PRODUCTION-CLUSTER-PRIMARY-REPLICA";
         var (columnWidth, natural) = StaTestThread.Run(() => WithTheme(() =>
         {
             FrameworkElement control = tab == "alerts" ? new AlertsHistoryTab() : new JobHistoryTab();

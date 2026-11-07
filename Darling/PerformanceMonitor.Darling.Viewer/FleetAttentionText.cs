@@ -16,10 +16,6 @@ public static class FleetAttentionText
             ? $" ({healthyWithAdvisories} healthy with {(healthyWithAdvisories == 1 ? "an advisory" : "advisories")})"
             : "";
 
-    /// <summary>The count beside the "Needs attention only" toggle while it is on and shows at least one card.</summary>
-    public static string ShowingText(int shown, int total, int healthyWithAdvisories) =>
-        $"showing {shown} of {total}" + AdvisorySplit(healthyWithAdvisories);
-
     /// <summary>The overflow line under the ranked list: the servers past its cap, and how many of those are Healthy with an advisory.</summary>
     public static string MoreText(int additional, int healthyWithAdvisories) =>
         additional > 0 ? $"+{additional} more need attention" + AdvisorySplit(Math.Min(healthyWithAdvisories, additional)) : "";

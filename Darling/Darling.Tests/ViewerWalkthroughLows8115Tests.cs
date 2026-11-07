@@ -116,7 +116,7 @@ public sealed class ViewerWalkthroughLows8115Tests
     [InlineData("jobs")]
     public void ServerColumn_ShowsALongNameWhole(string tab)
     {
-        const string name = "SERVER-GROUP-REGION-PRODUCTION-CLUSTER-NODE-07";
+        const string name = "SERVER-GROUP-REGION-PRODUCTION-CLUSTER-PRIMARY-REPLICA";
         var (columnWidth, natural) = StaTestThread.Run(() => WithTheme(() =>
         {
             FrameworkElement control = tab == "alerts" ? new AlertsHistoryTab() : new JobHistoryTab();
@@ -205,6 +205,8 @@ public sealed class ViewerWalkthroughLows8115Tests
             }
             finally
             {
+                /* Closing an unsaved Settings window re-applies the app's theme from its pack resources, which a test process does not carry; this window changed none. */
+                typeof(SettingsWindow).GetField("_themeSaved", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(window, true);
                 window.Close();
             }
         }));
