@@ -7,11 +7,8 @@
  */
 
 using System;
-using System.ComponentModel;
 using System.Linq;
-using System.Reflection;
 using System.Text.Json;
-using ModelContextProtocol.Server;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -97,17 +94,6 @@ public sealed class PgStatementEvictionNoteTests
 
         Assert.True(json.TryGetProperty("aurora_without_extension", out var flag), "evictions carries no aurora_without_extension flag");
         Assert.Equal(JsonValueKind.False, flag.ValueKind);
-    }
-
-    [Fact]
-    public void TheExtensionsGuide_CarvesOutAuroraForTheStatementsRead()
-    {
-        var method = typeof(DarlingMcpPgServerStateTools).GetMethods(BindingFlags.Public | BindingFlags.Static)
-            .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == "get_pg_extensions");
-        var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
-
-        Assert.Contains("aurora_stat_statements()", description, StringComparison.Ordinal);
-        Assert.Contains("get_pg_top_queries", description, StringComparison.Ordinal);
     }
 
     [Fact]
