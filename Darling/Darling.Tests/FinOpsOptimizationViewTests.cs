@@ -593,4 +593,69 @@ public sealed class FinOpsOptimizationViewLiveTests
 
     private static string StripStart(string json) =>
         System.Text.RegularExpressions.Regex.Replace(json, "\"effective_start\":\"[^\"]+\"", "\"effective_start\":\"-\"");
+
+    /// <summary>
+    /// #8076: a store whose raw query_stats tier is shorter than the 7-day idle window (the Timescale raw retention is 4 days) still
+    /// judges idle databases, from the hourly per-database rollup for every whole hour and raw only past the rollup's materialization
+    /// watermark. Ten days of samples are seeded and materialized into both hourly relations, then the raw rows older than 4 days are
+    /// dropped as retention would drop them. The oldest raw sample is then inside the window, yet the section answers ok with coverage
+    /// true and the one database that ran nothing, because the rollup holds every day the claim needs.
+    /// </summary>
+    [Fact]
+    public async Task IdleDatabases_AreJudgedFromTheHourlyRollup_WhenRawRetentionIsShorterThanTheWindow()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(Cs()!, ct, emptyStore: true);
+        await using var c = new NpgsqlConnection(scratch.ConnectionString);
+        await c.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(c, ct);
+        Assert.SkipWhen(!await TimescaleSupport.TryEnableAsync(c, null, ct), "The rollup route reads a continuous aggregate: TimescaleDB is required.");
+        await TimescaleSupport.ConvertToHypertablesAsync(c, null, ct);
+        await DarlingMcpTestData.RegisterServerAsync(c, ServerId, ServerName, ct);
+        Assert.True(await TimescaleSupport.EnsureContinuousAggregatesAsync(c, null, ct) > 0);
+
+        var now = DarlingMcpTestData.Naive(DateTime.UtcNow);
+        await Size(c, ct, now.AddHours(-3), "IdleBig", 300.5m);
+        await Size(c, ct, now.AddHours(-3), "BusyDb", 900m);
+
+        /* A zero-execution sample at noon on each of the last ten complete UTC days, so every day the claim needs holds one and the oldest
+           is well past 7 days. BusyDb ran two days ago; IdleBig has a row that ran nothing, with a server-local last execution before the window. */
+        for (var day = 1; day <= 10; day++)
+        {
+            await FinOpsIdleCoverageSeed.InsertAsync(c, ct, ServerId, ServerName, now.Date.AddDays(-day).AddHours(12), "day" + day);
+        }
+        await Query(c, ct, now.AddDays(-2), "BusyDb", "0xB0", "SELECT busy", 1_000_000, 5, 100, new DateTime(2026, 10, 1, 9, 0, 0), null);
+        await Query(c, ct, now.AddDays(-2), "IdleBig", "0xB1", "SELECT idle", 0, 0, 0, new DateTime(2026, 9, 20, 3, 4, 5), null);
+
+        /* Every whole hour of the seeded span materialized in both hourly relations, then the raw rows the 4-day raw retention drops. */
+        var refreshEnd = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0);
+        foreach (var view in new[] { TimescaleSupport.QueryStatsDbHourlyView, TimescaleSupport.QueryStatsDbIntervalHourlyView })
+        {
+            await RefreshAsync(c, view, now.Date.AddDays(-11), refreshEnd, ct);
+        }
+        await DarlingMcpTestData.ExecAsync(c, ct, "DELETE FROM query_stats WHERE server_id = $1 AND collection_time < $2", ServerId, now - TimescaleSupport.RawRetentionSpan);
+        await using (var oldest = new NpgsqlCommand("SELECT min(collection_time) FROM query_stats WHERE server_id = $1", c))
+        {
+            oldest.Parameters.AddWithValue(ServerId);
+            var oldestRaw = (DateTime)(await oldest.ExecuteScalarAsync(ct))!;
+            Assert.True(oldestRaw > now.AddDays(-DarlingFinOpsOptimizationReader.IdleCoverageDays), $"the raw tier must be shorter than the window: oldest raw sample {oldestRaw:O}");
+        }
+
+        await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var body = await DarlingMcpFinOpsTools.GetFinOps(ds, "optimization", ServerName, 72, 10, cancellationToken: ct);
+        using var doc = JsonDocument.Parse(body);
+        Assert.True(doc.RootElement.TryGetProperty("idle_databases", out var idle), body);
+        Assert.True(idle.GetProperty("coverage").GetBoolean(), idle.GetRawText());
+        Assert.Equal("ok", idle.GetProperty("status").GetString());
+        Assert.Equal(JsonValueKind.Null, idle.GetProperty("message").ValueKind);
+        Assert.Equal(["IdleBig"], idle.GetProperty("rows").EnumerateArray().Select(r => r.GetProperty("database_name").GetString()).ToArray());
+    }
+
+    private static async Task RefreshAsync(NpgsqlConnection c, string view, DateTime from, DateTime to, CancellationToken ct)
+    {
+        await using var refresh = new NpgsqlCommand($"CALL refresh_continuous_aggregate('collect.{view}'::regclass, $1::timestamp, $2::timestamp)", c);
+        refresh.Parameters.AddWithValue(DateTime.SpecifyKind(from, DateTimeKind.Unspecified));
+        refresh.Parameters.AddWithValue(DateTime.SpecifyKind(to, DateTimeKind.Unspecified));
+        await refresh.ExecuteNonQueryAsync(ct);
+    }
 }
