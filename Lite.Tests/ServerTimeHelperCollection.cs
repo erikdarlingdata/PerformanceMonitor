@@ -19,8 +19,7 @@ namespace Lite.Tests;
 /// is reached by hundreds of classes in other collections, and xunit runs separate collections in parallel. #4776 was
 /// that, a banner four hours off in a class that never named the helper.
 /// <see cref="CollectionDefinitionAttribute.DisableParallelization"/> runs the collection alone, after the parallel
-/// classes, so no other class is mid-assertion while the clock is swapped. <c>CollectionDefinitionCensusTests</c> keeps
-/// it that way.
+/// classes, so no other class is mid-assertion while the clock is swapped.
 /// </summary>
 [CollectionDefinition("server-time-helper", DisableParallelization = true)]
 public sealed class ServerTimeHelperCollection

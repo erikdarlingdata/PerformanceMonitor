@@ -16,7 +16,7 @@ namespace Darling.Tests;
 /// <c>Invalidate</c>, and the member asserts how many probes a sequence of reads and invalidations costs. A class in
 /// another collection that reads a PostgreSQL log through the product code fills and ages the same cache while the
 /// member counts. <see cref="CollectionDefinitionAttribute.DisableParallelization"/> runs the collection alone, after
-/// the parallel classes. <c>CollectionDefinitionCensusTests</c> keeps it that way.
+/// the parallel classes.
 /// </summary>
 [CollectionDefinition("pg-log-format-capability-statics", DisableParallelization = true)]
 public sealed class PgLogFormatCapabilityStaticsCollection

@@ -16,7 +16,7 @@ namespace Darling.Tests;
 /// them in a <c>finally</c>. A viewer class in another collection that copies text through the product code it
 /// exercises would write through the fake while it is installed, and its call would land in the member's record.
 /// <see cref="CollectionDefinitionAttribute.DisableParallelization"/> runs the collection alone, after the parallel
-/// classes. <c>CollectionDefinitionCensusTests</c> keeps it that way.
+/// classes.
 /// </summary>
 [CollectionDefinition("clipboard-text-seams", DisableParallelization = true)]
 public sealed class ClipboardTextSeamsCollection

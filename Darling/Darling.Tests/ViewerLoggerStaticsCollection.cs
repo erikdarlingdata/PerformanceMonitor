@@ -16,7 +16,7 @@ namespace Darling.Tests;
 /// static flush timer. Any viewer class in another collection that logs through the product code it exercises writes
 /// into the same queue while the member is between its flush and its assert, and after the shutdown its lines go
 /// nowhere. <see cref="CollectionDefinitionAttribute.DisableParallelization"/> runs the collection alone, after the
-/// parallel classes. <c>CollectionDefinitionCensusTests</c> keeps it that way.
+/// parallel classes.
 /// </summary>
 [CollectionDefinition("viewer-logger-statics", DisableParallelization = true)]
 public sealed class ViewerLoggerStaticsCollection

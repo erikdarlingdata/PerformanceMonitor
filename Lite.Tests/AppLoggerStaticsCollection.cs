@@ -18,7 +18,6 @@ namespace Lite.Tests;
 /// the product code it exercises while a member is between its drain and its assert. #5863 and #6113 were that, each
 /// with a different victim. <see cref="CollectionDefinitionAttribute.DisableParallelization"/> runs the collection
 /// alone, after the parallel classes, so the queue holds only what the running test logged.
-/// <c>CollectionDefinitionCensusTests</c> keeps it that way.
 /// </summary>
 [CollectionDefinition("app-logger-statics", DisableParallelization = true)]
 public sealed class AppLoggerStaticsCollection

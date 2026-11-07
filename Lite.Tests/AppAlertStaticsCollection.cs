@@ -17,8 +17,7 @@ namespace Lite.Tests;
 /// collection, but the readers of those settings (<c>AppAlertEngineSettings</c>, <c>LiteAlertDeliverer</c>,
 /// <c>CollectionBackgroundService</c>) are exercised by classes in other collections, which xunit runs beside the
 /// members. <see cref="CollectionDefinitionAttribute.DisableParallelization"/> runs the collection alone, after the
-/// parallel classes, so no other class reads a setting mid-swap. <c>CollectionDefinitionCensusTests</c> keeps it that
-/// way.
+/// parallel classes, so no other class reads a setting mid-swap.
 /// </summary>
 [CollectionDefinition("app-alert-statics", DisableParallelization = true)]
 public sealed class AppAlertStaticsCollection
