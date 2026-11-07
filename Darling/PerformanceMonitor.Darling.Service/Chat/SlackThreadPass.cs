@@ -79,7 +79,7 @@ public sealed class SettingsSlackBotPosts(Func<string> token, string? apiBase = 
 /// <summary>
 /// #7656: one pass of the Slack thread posts, after the other request-event sends. It reads the journal rows of the kinds in
 /// <see cref="PostedEvents"/> from the last <see cref="ReadWindow"/> that have no post mark (a mark says what was posted; the window
-/// bounds what each pass reads, so a pass costs the window's rows and not the journal's), in journal
+/// bounds what each pass reads, so a pass costs the window's rows and not the journal's), in time
 /// order, so a request's <c>opened</c> row posts first and opens its thread, and every later row replies in it. A follow-up's request
 /// post replies in its <c>follow_up_of</c> parent's thread and inherits it, one level deep: the parent's stored thread is used when it
 /// exists and sits in the route's current bot channel, else the follow-up opens a thread of its own. A change whose result never came
@@ -93,7 +93,9 @@ public sealed class SettingsSlackBotPosts(Func<string> token, string? apiBase = 
 /// way as its parent), and a follow-up of it starts a thread of its own.</para>
 ///
 /// <para>When a parent post fails, the request has no thread, so its later posts are skipped with one log line and marked, never
-/// posted at the top level. A 429 ends the pass: the post's mark is released, the channel waits for Retry-After in the shared
+/// posted at the top level. A pending note's card (#7658) is the exception: read with no thread, it waits unmarked for up to
+/// <see cref="NoteThreadWait"/>, so the pass that opens the thread, or the next one, posts it there; past the wait it is marked with
+/// <see cref="NoThreadForNote"/>. A 429 ends the pass: the post's mark is released, the channel waits for Retry-After in the shared
 /// <see cref="SlackPostThrottle"/>, and no pass posts to it before then. Every other failure keeps its mark.</para>
 /// </summary>
 public sealed class SlackThreadPass
@@ -115,6 +117,15 @@ public sealed class SlackThreadPass
 
     /// <summary>The reason on the mark of a row that is not posted because its request opened before the route got its bot channel.</summary>
     public const string OpenedBeforeChannel = "opened before the route's bot channel was set";
+
+    /// <summary>How long a pending note's card (#7658) waits, unmarked, for its request's thread. The time order puts the request's
+    /// <c>opened</c> row before the note, so the thread is there by the time the note is read unless the parent post failed for good or the
+    /// request opened before the read window. A note still without a thread this long after it was written is marked with
+    /// <see cref="NoThreadForNote"/> and left to the web page and the Viewer, so it stops taking a batch slot on every pass.</summary>
+    public static readonly TimeSpan NoteThreadWait = TimeSpan.FromHours(1);
+
+    /// <summary>The reason on the mark of a note that is not posted because its request had no thread for <see cref="NoteThreadWait"/>.</summary>
+    public const string NoThreadForNote = "its request had no Slack thread an hour after the note was written";
 
     /// <summary>
     /// The journal kinds that post. The parent from <c>opened</c>; the claim; the report; each change's result (<c>action_done</c>,
@@ -183,11 +194,11 @@ public sealed class SlackThreadPass
         var posted = 0;
         var skippedRequests = new HashSet<Guid>();
         var gatedRequests = new HashSet<Guid>();
+        var waitingRequests = new HashSet<Guid>();
         var blockedChannels = new HashSet<string>(StringComparer.Ordinal);
         foreach (var row in rows)
         {
-            if (!s_posted.Contains(row.Event) && !string.Equals(row.Event, ActionUnknown, StringComparison.Ordinal)
-                && !string.Equals(row.Event, InvestigationRequestStore.NotePending, StringComparison.Ordinal))
+            if (!s_posted.Contains(row.Event) && !string.Equals(row.Event, ActionUnknown, StringComparison.Ordinal) && !IsNote(row))
             {
                 continue;
             }
@@ -258,6 +269,19 @@ public sealed class SlackThreadPass
                        across requests, so its parent and its later rows often land in different passes): the request has no thread and
                        opened before the channel, so the row is marked with the gate as the reason and never posted at the top level. */
                     await MarkGatedAsync(row, gatedRequests, cancellationToken);
+                    break;
+                case SlackThreadPostOutcome.NoThread when IsNote(row) && now - row.EventTimeUtc < NoteThreadWait:
+                    /* A note's card read before its request's thread exists waits, unmarked, so the pass that opens the thread, or the next
+                       one, posts the card in it. One log line per request per pass. */
+                    if (waitingRequests.Add(row.RequestId))
+                    {
+                        _logger.LogInformation("Slack note card {PostKey} for investigation request {RequestId} waits for the request's thread", row.PostKey, row.RequestId);
+                    }
+
+                    break;
+                case SlackThreadPostOutcome.NoThread when IsNote(row):
+                    /* The thread never came within the wait: the note is marked with the reason, so the read stops returning it, and never posted at the top level. */
+                    await _threads.MarkSkippedAsync(row.RequestId, row.RouteId, row.ServerId, row.PostKey, SlackThreadPosts.OnceKey(row.RequestId, row.PostKey), NoThreadForNote, cancellationToken);
                     break;
                 case SlackThreadPostOutcome.NoThread:
                     /* The parent post failed in this pass or an earlier one: the row is marked so it is not read again, and never posted at the top level. */
@@ -374,6 +398,9 @@ public sealed class SlackThreadPass
                 }
         }
     }
+
+    /* A pending note's card (#7658): the one row kind whose id is not a journal id and whose post waits for its thread. */
+    private static bool IsNote(SlackThreadJournalRow row) => string.Equals(row.Event, InvestigationRequestStore.NotePending, StringComparison.Ordinal);
 
     private static string ByWord(string actor) =>
         string.IsNullOrWhiteSpace(actor) || string.Equals(actor, "service", StringComparison.Ordinal) ? "" : " by " + actor;

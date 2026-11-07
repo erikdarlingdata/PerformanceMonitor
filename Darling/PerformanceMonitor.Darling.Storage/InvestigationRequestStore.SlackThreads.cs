@@ -57,8 +57,8 @@ public sealed record SlackThreadJournalRow(
 public interface ISlackThreadRowSource
 {
     /// <summary>Up to <paramref name="limit"/> journal rows of the kinds in <paramref name="events"/> from <paramref name="sinceUtc"/> on
-    /// with no post mark yet, on a live request of an enabled route with a bot channel, in journal order, plus each <c>action_called</c>
-    /// row from that window and before <paramref name="unknownBeforeUtc"/> whose result never came.</summary>
+    /// with no post mark yet, on a live request of an enabled route with a bot channel, in time order (event time, then id), plus each
+    /// <c>action_called</c> row from that window and before <paramref name="unknownBeforeUtc"/> whose result never came.</summary>
     Task<IReadOnlyList<SlackThreadJournalRow>> PendingSlackThreadRowsAsync(IReadOnlyList<string> events, DateTime sinceUtc, DateTime unknownBeforeUtc, int limit, CancellationToken cancellationToken);
 
     /// <summary>The agent changes of one request, oldest first, for the report post.</summary>
@@ -145,7 +145,9 @@ WHERE once_key = $1
        its route is disabled or has no bot channel, and a row once its mark exists. The called row's detail rides along for a change's
        result row, the claim's number for a claim, the report's verdict and root cause for the reported row, and the request's opened
        time for the pass's gate. The called row is joined by its bigint journal id (the result row's called_id, when it is a number),
-       so the join is a primary key lookup per returned row and not a walk of the journal. */
+       so the join is a primary key lookup per returned row and not a walk of the journal. The batch is in time order, then id: a note's
+       id is from its own sequence and small next to the journal's, so an order by id alone would put a note before the opened row that
+       opens its request's thread, and time order keeps each thread's posts in the order they happened. */
     internal const string PendingSlackThreadRowsSql = @"
 WITH posts AS (
     SELECT j.journal_id, j.event, j.event_time, j.actor, j.reason, j.detail, j.request_id,
@@ -198,7 +200,7 @@ WHERE r.practice_of IS NULL
   AND rt.slack_bot_channel <> ''
   AND NOT EXISTS (SELECT 1 FROM config.investigation_journal AS m
                   WHERE m.once_key = 'slack_thread:' || r.request_id::text || ':' || p.post_key)
-ORDER BY p.journal_id
+ORDER BY p.event_time, p.journal_id
 LIMIT $3";
 
     /// <inheritdoc />
