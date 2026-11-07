@@ -14,6 +14,7 @@ using System.Reflection;
 using System.Windows;
 using System.Windows.Controls;
 using Darling.Tests;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Database;
@@ -92,6 +93,29 @@ public sealed class ServerTabChartCardsTests
 
             tab.UpdateBlockingTrendChart(new List<TrendPoint> { Point(t0, 0), Point(t0.AddMinutes(1), 3) }, 24, null, null);
             Expect(found, "non-zero header", Header(tab.BlockingTrendChart), string.Empty);
+            return found;
+        });
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    /// <summary>#8144: a window with no rows at all is not a window of zeros, so the card drops "0 throughout" when the chart goes empty.</summary>
+    [Fact]
+    public void AChartThatGoesFromZerosToNoRows_DropsZeroThroughoutFromItsCardHeader()
+    {
+        var t0 = DateTime.UtcNow.AddHours(-1);
+        var problems = WithTab(tab =>
+        {
+            var found = new List<string>();
+            static string Header(WpfPlot chart) => ServerTab.CardOf(chart)!.HeaderContent is TextBlock t ? t.Text : string.Empty;
+            var update = typeof(ServerTab).GetMethod("UpdateQueryDurationTrendChart", Instance)!;
+            void Draw(List<QueryTrendPoint> data) => update.Invoke(tab, new object?[] { data, 24, null, null, new List<BaselineDiscontinuity>() });
+            static QueryTrendPoint Point(DateTime t) => new() { CollectionTime = t, Value = 0 };
+
+            Draw(new List<QueryTrendPoint> { Point(t0), Point(t0.AddMinutes(1)) });
+            Expect(found, "all-zero header", Header(tab.QueryDurationTrendChart), "0 throughout");
+
+            Draw(new List<QueryTrendPoint>());
+            Expect(found, "empty-window header", Header(tab.QueryDurationTrendChart), string.Empty);
             return found;
         });
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
