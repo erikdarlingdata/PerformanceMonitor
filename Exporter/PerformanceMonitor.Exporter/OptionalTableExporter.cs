@@ -24,6 +24,13 @@ namespace PerformanceMonitor.Exporter;
 public sealed record OptionalExportRequest(string Table, string? TimeColumn, bool IsSnapshot, DateTime FromUtc, DateTime ToUtc)
 {
     /// <summary>
+    /// Snapshot tables only: true when a run has already produced the snapshot for <see cref="FromUtc"/>'s UTC day, so
+    /// a window other than the day's 00:00 window skips it. False (the default) lets a later window of the day produce
+    /// the part the 00:00 window did not.
+    /// </summary>
+    public bool DayAlreadyExported { get; init; }
+
+    /// <summary>
     /// True when the request comes from a <see cref="OptionalTableKind.Dimension"/> registry entry. A dimension has
     /// its own exporter (<c>PgStatementTextExporter</c>) and its own key-set logic; it never runs through <see
     /// cref="OptionalTableExporter.ExportAsync"/>'s generic Window/Snapshot select path. Defaults to false so every
@@ -114,7 +121,9 @@ public static class OptionalTableExporter
                 "(e.g. PgStatementTextExporter), never through the generic OptionalTableExporter Window/Snapshot path.");
         }
 
-        if (request.IsSnapshot && !IsDailySnapshotWindow(request.FromUtc))
+        // The day's snapshot belongs to the 00:00 window. A later window of the same day takes it over only when no
+        // run has produced it yet; then it is stamped with the day's 00:00 all the same.
+        if (request.IsSnapshot && !IsDailySnapshotWindow(request.FromUtc) && request.DayAlreadyExported)
         {
             return new OptionalTableExportResult
             {
@@ -123,7 +132,7 @@ public static class OptionalTableExporter
                 Parts = [],
                 StoreQueryElapsedMs = 0,
                 WriteElapsedMs = 0,
-                SkippedReason = "skipped: not the daily snapshot window",
+                SkippedReason = $"skipped: the daily snapshot for {request.FromUtc.Date:yyyy-MM-dd} is already exported",
             };
         }
 
@@ -154,7 +163,7 @@ public static class OptionalTableExporter
 
             if (request.IsSnapshot)
             {
-                row.AppendValue(DateTime.SpecifyKind(request.FromUtc, DateTimeKind.Unspecified));
+                row.AppendValue(DateTime.SpecifyKind(request.FromUtc.Date, DateTimeKind.Unspecified));
             }
 
             row.EndRow();

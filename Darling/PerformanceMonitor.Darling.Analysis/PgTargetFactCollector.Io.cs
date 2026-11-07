@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -19,7 +20,9 @@ public sealed partial class PgTargetFactCollector
     /// <summary>
     /// The data-file I/O counters of <c>pg_io_stats</c> (<c>pg_stat_io</c>, PG 16+, one-minute cadence) differenced
     /// over the window, per identity, then summed: reads and their time, writes and their time. <c>$1</c>
-    /// server_id, <c>$2</c>/<c>$3</c> window. Only <c>object_type = 'relation'</c> — data files; temp relations and
+    /// server_id, <c>$2</c>/<c>$3</c> window, <c>$4</c> <see cref="CollectorDeltaCalculator.DefaultMaxGapSeconds"/>
+    /// (#8156: a difference whose own interval is longer than the gap policy spans a collector outage and is left
+    /// out, as the coverage witness leaves its seconds out of the observed time). Only <c>object_type = 'relation'</c> — data files; temp relations and
     /// WAL (PG 18) are different storage paths with different latencies and would blur the one number this fact
     /// states. Every <c>context</c> (normal, vacuum, bulkread, bulkwrite) and every <c>backend_type</c> is in: the
     /// operator asks how slow the storage is, not which backend noticed.
@@ -44,7 +47,7 @@ public sealed partial class PgTargetFactCollector
     /// changed without a restart, so a window can straddle the flip — the data says what the window measured.</para>
     /// </summary>
     public const string PgTargetIoLatencySql = @"
-WITH sampled AS (
+WITH differenced AS (
     SELECT
         collection_time,
         backend_type,
@@ -53,6 +56,7 @@ WITH sampled AS (
         read_time_ms  - LAG(read_time_ms)  OVER series AS raw_read_ms,
         writes        - LAG(writes)        OVER series AS raw_writes,
         write_time_ms - LAG(write_time_ms) OVER series AS raw_write_ms,
+        extract(epoch FROM (collection_time - LAG(collection_time) OVER series)) AS interval_sec,
         (ROW_NUMBER() OVER series > 1
          AND stats_reset IS DISTINCT FROM LAG(stats_reset) OVER series) AS reset_here,
         (reads IS NOT NULL)  AS reads_tracked,
@@ -66,6 +70,22 @@ WITH sampled AS (
         PARTITION BY backend_type, object_type, context
         ORDER BY collection_time
     )
+),
+sampled AS (
+    /* #8156: a difference across an interval longer than the gap policy ($4) spans a collector outage and is left
+       out, as the coverage witness leaves its seconds out of the observed time. */
+    SELECT
+        collection_time,
+        backend_type,
+        context,
+        reset_here,
+        reads_tracked,
+        writes_tracked,
+        CASE WHEN interval_sec <= $4 THEN raw_reads    END AS raw_reads,
+        CASE WHEN interval_sec <= $4 THEN raw_read_ms  END AS raw_read_ms,
+        CASE WHEN interval_sec <= $4 THEN raw_writes   END AS raw_writes,
+        CASE WHEN interval_sec <= $4 THEN raw_write_ms END AS raw_write_ms
+    FROM differenced
 )
 SELECT
     CAST(coalesce(SUM(GREATEST(raw_reads, 0)), 0) AS bigint)  AS reads,
@@ -154,6 +174,7 @@ FROM sampled";
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+            cmd.Parameters.AddWithValue(CollectorDeltaCalculator.DefaultMaxGapSeconds);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
