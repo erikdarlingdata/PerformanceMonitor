@@ -240,6 +240,24 @@ public static class SameStatementPileupDetector
     /// </summary>
     public const int StaleSnapshotCutoffMinutes = 10;
 
+    /// <summary>
+    /// Whether <paramref name="rows"/> reach back from their newest instant to the baseline floor <see cref="Evaluate"/>
+    /// draws, <see cref="BaselineLookbackMinutes"/> behind it. A window reader that filled its row cap asks this before it
+    /// hands the rows on (#8157): a capped read that stopped short of the floor would have the finding state a baseline it
+    /// never read, so the sweep skips the evaluation instead. A cap that filled with the floor already reached changes
+    /// nothing. No rows reach nothing.
+    /// </summary>
+    public static bool ReachesBaselineFloor(IReadOnlyList<SnapshotRow> rows)
+    {
+        if (rows is null || rows.Count == 0)
+        {
+            return false;
+        }
+
+        var newest = rows.Max(r => r.CollectionTime);
+        return rows.Min(r => r.CollectionTime) <= newest.AddMinutes(-BaselineLookbackMinutes);
+    }
+
     /// <summary>How much statement text the drill-down's preview carries. Bounds one finding row's
     /// payload only — it filters nothing and takes no part in identity (the readers cap the projected
     /// text well above this, and the identity key is the DMV hash).</summary>
