@@ -17,6 +17,11 @@
         timer refreshes only the active inner tab of the visible server tab.
     -->
     <UserControl.Resources>
+        <ResourceDictionary>
+        <ResourceDictionary.MergedDictionaries>
+            <!-- #8144: the Viewer's EmptyHint and the other shared text styles come from the shared dictionary, not a copy here. -->
+            <ResourceDictionary Source="pack://application:,,,/PerformanceMonitor.Ui;component/Themes/SharedStyles.xaml"/>
+        </ResourceDictionary.MergedDictionaries>
         <BooleanToVisibilityConverter x:Key="BoolToVis"/>
         <ui:OneLineTextConverter x:Key="OneLine"/>
         <local:PgBytesConverter x:Key="PgBytes"/>
@@ -25,17 +30,6 @@
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="Foreground" Value="{DynamicResource ForegroundBrush}"/>
             <Setter Property="Margin" Value="0,0,0,6"/>
-        </Style>
-
-        <Style x:Key="EmptyHint" TargetType="TextBlock">
-            <Setter Property="Foreground" Value="{DynamicResource ForegroundMutedBrush}"/>
-            <Setter Property="HorizontalAlignment" Value="Center"/>
-            <Setter Property="VerticalAlignment" Value="Center"/>
-            <Setter Property="TextWrapping" Value="Wrap"/>
-            <Setter Property="TextAlignment" Value="Center"/>
-            <Setter Property="MaxWidth" Value="480"/>
-            <Setter Property="IsHitTestVisible" Value="False"/>
-            <Setter Property="Visibility" Value="Collapsed"/>
         </Style>
 
         <!-- Dark grid chrome shared by the per-server grids (relocated from MainWindow's
@@ -414,6 +408,7 @@
             <Setter Property="ContextMenu" Value="{StaticResource QueryStorePlanContextMenu}"/>
         </Style>
 
+            </ResourceDictionary>
     </UserControl.Resources>
 
     <Grid>
