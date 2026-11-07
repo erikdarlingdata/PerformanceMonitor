@@ -667,4 +667,61 @@ public sealed partial class PlanForceToolLiveTests
             }
         });
     }
+
+    /// <summary>
+    /// An excluded database is one Darling does not act in. A session whose current database is on the server's exclusion list is refused as
+    /// database_excluded on a dry run and on a write alike, before anything is killed; the refusal is journaled and no action row is. The prepare
+    /// step stops on the same reason, so an approved proposal's press refuses it too.
+    /// </summary>
+    [Fact]
+    public async Task AKillOfASessionInAnExcludedDatabase_IsRefusedAsDatabaseExcluded_OnADryRunAndAWrite_AndTheSessionStays()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var offset = await SeedClockAsync(c);
+            await PgExecAsync(c.Connection, $"UPDATE config.config_monitored_servers SET excluded_databases = ARRAY['{c.Sql.Database}'] WHERE server_id = 7", c.Ct);
+            var victim = await OpenVictimAsync(c);
+            using var _ = victim.Connection;
+
+            foreach (var dryRun in new[] { true, false })
+            {
+                var json = Parse(await KillAsync(c, victim.SessionId, UtcText(victim, offset), dryRun));
+                Assert.Equal("refused", (string?)json["status"]);
+                Assert.Equal("database_excluded", (string?)json["reason"]);
+                Assert.Contains(c.Sql.Database, (string?)json["message"], StringComparison.Ordinal);
+                Assert.True(await SessionAliveAsync(c, victim));
+            }
+
+            Assert.Equal(0, await JournalActionRowsAsync(c));
+            Assert.Equal("1", await PgScalarAsync(c.Connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = 'database_excluded'", c.Ct));
+
+            var store = new InvestigationRequestStore(c.Source, 30, agentActionSource: c.Source);
+            var decision = await ServerActionGate.AuthorizeAsync(store, c.Source, c.Log, DarlingMcpPlanForceTools.KillToolName, ServerActionNames.KillSession, c.Arg,
+                new AgentActionTarget(7, "srv-7", victim.SessionId.ToString(CultureInfo.InvariantCulture), null), c.Ct);
+            var prepared = await DarlingMcpPlanForceTools.PrepareKillSessionAsync(c.Source, c.Source, c.Log, decision.Permit!, 7, "srv-7", azure: false, victim.SessionId,
+                victim.LoginLocal.AddMinutes(-offset), null, c.Ct);
+            Assert.False(prepared.Proceed);
+            Assert.Equal("database_excluded", prepared.RecordReason);
+            Assert.True(await SessionAliveAsync(c, victim));
+        });
+    }
+
+    /// <summary>A session in a database that is not on the list is still killable, and the dry run's session facts name the database the session is in.</summary>
+    [Fact]
+    public async Task AKillOfASessionInADatabaseThatIsNotExcluded_StillPasses_AndTheSessionFactsNameItsDatabase()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var offset = await SeedClockAsync(c);
+            await PgExecAsync(c.Connection, "UPDATE config.config_monitored_servers SET excluded_databases = ARRAY['some_other_db'] WHERE server_id = 7", c.Ct);
+            var victim = await OpenVictimAsync(c);
+            using var _ = victim.Connection;
+
+            var json = Parse(await KillAsync(c, victim.SessionId, UtcText(victim, offset), dryRun: true));
+            Assert.Equal("dry_run", (string?)json["status"]);
+            Assert.Equal(c.Sql.Database, (string?)json["session"]!["database_name"]);
+            Assert.True(await SessionAliveAsync(c, victim));
+            Assert.Equal(0, await JournalActionRowsAsync(c));
+        });
+    }
 }
