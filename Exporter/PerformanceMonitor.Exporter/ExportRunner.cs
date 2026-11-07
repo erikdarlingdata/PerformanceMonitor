@@ -201,12 +201,21 @@ public sealed class ExportRunner
     /// </summary>
     public static (string[] CoreTables, string[] OptionalNames) SplitTables(ExportOptions options)
     {
-        var optionalInTables = options.Tables
-            .Where(t => !ExportOptions.AllTables.Contains(t) && OptionalTables.TryGet(t) is not null)
-            .ToArray();
-        var coreTables = options.Tables.Where(t => !optionalInTables.Contains(t)).ToArray();
-        var optionalNames = options.Also.Concat(optionalInTables).Distinct(StringComparer.Ordinal).ToArray();
+        var optionalNames = OptionalNames(options.Tables, options.Also);
+        var coreTables = options.Tables.Where(t => !optionalNames.Contains(t)).ToArray();
         return (coreTables, optionalNames);
+    }
+
+    /// <summary>
+    /// The optional names of a call: every `--also` name, then every optional-registry name in `--tables`, each once.
+    /// The optional manifest is named by this set (<see cref="OutputPaths.ManifestFilePath(string, string, DateTime,
+    /// DateTime, IReadOnlyCollection{string}, string?)"/>), so the scheduler builds the same set from the call's
+    /// arguments to find that manifest after an exit 3.
+    /// </summary>
+    public static string[] OptionalNames(IEnumerable<string> tables, IEnumerable<string> also)
+    {
+        var optionalInTables = tables.Where(t => !ExportOptions.AllTables.Contains(t) && OptionalTables.TryGet(t) is not null);
+        return also.Concat(optionalInTables).Distinct(StringComparer.Ordinal).ToArray();
     }
 
     /// <summary>
