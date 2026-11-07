@@ -1477,7 +1477,7 @@ LEFT JOIN texts t ON t.sql_handle = j.text_handle;";
             command.Parameters.Add(new DuckDBParameter { Value = db });
         command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
-        var rows = new List<(DateTime BucketStart, double? ElapsedMsPerSecond, double? ExecutionsPerSecond, DateTime FirstCollectionTime, long CollectionCount)>();
+        var rows = new List<(DateTime BucketStart, double? ElapsedMsPerSecond, double? ExecutionsPerSecond, DateTime FirstCollectionTime, long CollectionCount, long? ExecutionCount)>();
         var everyBucketSingleton = true;
 
         using var reader = await command.ExecuteReaderAsync();
@@ -1488,13 +1488,15 @@ LEFT JOIN texts t ON t.sql_handle = j.text_handle;";
                 everyBucketSingleton = false;
 
             /* NULL stays NULL (#3541 A12, at the bucket level): a bucket whose every collection was unrated
-               (a restart, or the window's first pre-v61 collection with no LAG) is kept rather than dropped. */
+               (a restart, or the window's first pre-v61 collection with no LAG) is kept rather than dropped,
+               its count null with its rates (#8073: the executions summed are the rated collections'). */
             rows.Add((
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? null : ToDouble(reader.GetValue(1)),
                 reader.IsDBNull(2) ? null : ToDouble(reader.GetValue(2)),
                 reader.GetDateTime(3),
-                collectionCount));
+                collectionCount,
+                reader.IsDBNull(5) ? null : ToInt64(reader.GetValue(5))));
         }
 
         var items = new List<QueryTrendPoint>(rows.Count);
@@ -1504,7 +1506,7 @@ LEFT JOIN texts t ON t.sql_handle = j.text_handle;";
             {
                 CollectionTime = everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
                 Value = row.ElapsedMsPerSecond,
-                ExecutionCount = row.ExecutionsPerSecond.HasValue ? (long)row.ExecutionsPerSecond.Value : null,
+                ExecutionCount = row.ExecutionCount,
                 ExecutionsPerSecond = row.ExecutionsPerSecond
             });
         }
@@ -1554,7 +1556,8 @@ SELECT
     SUM(rated_elapsed_ms) / SUM(rated_seconds) AS elapsed_ms_per_second,
     CAST(SUM(rated_executions) AS DOUBLE PRECISION) / SUM(rated_seconds) AS executions_per_second,
     MIN(collection_time) AS first_collection_time,
-    COUNT(*) AS collection_count
+    COUNT(*) AS collection_count,
+    SUM(rated_executions) AS execution_count
 FROM rated{(dbClause.Length == 0 ? "" : "\nWHERE EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)")}
 GROUP BY 1
 ORDER BY 1";
@@ -2133,14 +2136,19 @@ public class QueryTrendPoint
 {
     public DateTime CollectionTime { get; set; }
     public double? Value { get; set; }
+    /// <summary>
+    /// The executions summed over the point (#8073): the numerator <see cref="ExecutionsPerSecond"/> was built
+    /// from, so a caller summing it over a window gets the executions that ran. On the plan-cache trends it sums
+    /// the point's rated collections only (an unrated collection's deltas were never measured, so a point with no
+    /// rated collection carries null); a Query Store interval always stores its count, so that trend carries it
+    /// even on an unrated point. Darling's twin is <c>QueryDurationTrendPoint.ExecutionCount</c>.
+    /// </summary>
     public long? ExecutionCount { get; set; }
 
     /// <summary>
-    /// The SAME quantity as <see cref="ExecutionCount"/> - executions per second - without the truncation.
-    /// <para>The long shipped first and the charts have always plotted it; on a server doing three
-    /// executions a second that rounds harmlessly, and on a quiet one doing 0.4 it reports ZERO, which reads
-    /// as an idle server rather than a slow one. Kept alongside rather than replacing it so nothing reading
-    /// the long breaks. Darling's twin is <c>QueryDurationTrendPoint.ExecutionsPerSecond</c>.</para>
+    /// Executions per second, the rate the charts plot: a double, because a server doing 0.4 executions a second
+    /// is quiet rather than idle and only a double can say so. Darling's twin is
+    /// <c>QueryDurationTrendPoint.ExecutionsPerSecond</c>.
     /// </summary>
     public double? ExecutionsPerSecond { get; set; }
 
