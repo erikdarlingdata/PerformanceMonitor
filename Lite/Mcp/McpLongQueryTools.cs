@@ -98,7 +98,7 @@ public sealed class McpLongQueryTools
                         + (include_monitor ? "" : " The monitor's own statements are left out. Pass include_monitor=true to include them."),
                     database, /* #5244 review L2: the echo rides on an empty answer too */
                     emptyNotice.AsHints()), windowEnd.AddHours(-hours_back)),
-                    await dataService.GetLossRunsInWindowAsync(resolved.ServerId, LongQueryCompletionsCollector.Instance.Name, windowEnd.AddHours(-hours_back), windowEnd));
+                    await dataService.GetLossRunsInWindowAsync(resolved.ServerId, LongQueryCompletionsCollector.Instance.Name, windowEnd.AddHours(-hours_back), windowEnd), database != null);
             }
 
             var truncated = rows.Count > limit;
@@ -162,7 +162,7 @@ public sealed class McpLongQueryTools
                 newest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Max(r => r.EventTime)),
                 order = "duration_ms_desc",
                 completions = result
-            }, tagScope.Named), await dataService.GetLossRunsInWindowAsync(resolved.ServerId, LongQueryCompletionsCollector.Instance.Name, requestedStart, windowEnd));
+            }, tagScope.Named), await dataService.GetLossRunsInWindowAsync(resolved.ServerId, LongQueryCompletionsCollector.Instance.Name, requestedStart, windowEnd), database != null);
         }
         catch (Exception ex)
         {

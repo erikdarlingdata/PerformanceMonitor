@@ -135,7 +135,7 @@ public sealed class DarlingMcpLongQueryTools
                     databaseFilter.Describe(), /* #5244 review L2: the echo rides on an empty answer too */
                     /* #8146: the long-query session's ring-buffer loss rides beside the window keys. */
                     RingBufferLossAnswer.WithLoss(emptyNotice.AsHints(),
-                        await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, LongQueryCompletionsCollector.Instance.Name, windowStart, now, cancellationToken))), cancellationToken, windowStart);
+                        await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, LongQueryCompletionsCollector.Instance.Name, windowStart, now, cancellationToken), !databaseFilter.IsAll)), cancellationToken, windowStart);
             }
 
             var truncated = rows.Count > limit;
@@ -215,7 +215,7 @@ public sealed class DarlingMcpLongQueryTools
             /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). #8146: the window's ring-buffer loss is a top-level key when there was any. */
             return RingBufferLossAnswer.Attach(
                 notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json,
-                await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, LongQueryCompletionsCollector.Instance.Name, windowStart, now, cancellationToken));
+                await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, LongQueryCompletionsCollector.Instance.Name, windowStart, now, cancellationToken), !databaseFilter.IsAll);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

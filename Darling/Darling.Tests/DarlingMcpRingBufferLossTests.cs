@@ -289,4 +289,18 @@ VALUES ($1,$2,$3,$4,$2,12000,60,61,'suspended','AppDb')",
 
             Assert.Equal(RingBufferLossAnswer.DatabaseFilterNote, root.GetProperty("ring_buffer_loss").GetProperty("database_filter_note").GetString());
         });
+
+    [Fact]
+    public async Task GetLongQueryCompletions_DatabaseFilterAndLoss_SaysFilterDoesNotNarrowLoss_AgainstDevPostgres() =>
+        await RunAsync("longquery-filter-note", async (c, ds, name, end) =>
+        {
+            await SeedRunAsync(LongQueryCompletionsCollector.Instance.Name, end.AddHours(-3), LossNote, c, name);
+            await SeedRunAsync(LongQueryCompletionsCollector.Instance.Name, end.AddMinutes(-2), null, c, name);
+
+            var filtered = Parse(await DarlingMcpLongQueryTools.GetLongQueryCompletions(ds, name, 24, 15, as_of: AsOf(end), database_name: "AppDb"));
+            var unfiltered = Parse(await DarlingMcpLongQueryTools.GetLongQueryCompletions(ds, name, 24, 15, as_of: AsOf(end)));
+
+            Assert.Equal(RingBufferLossAnswer.DatabaseFilterNote, filtered.GetProperty("hints").GetProperty("ring_buffer_loss").GetProperty("database_filter_note").GetString());
+            Assert.False(unfiltered.GetProperty("hints").GetProperty("ring_buffer_loss").TryGetProperty("database_filter_note", out _));
+        });
 }

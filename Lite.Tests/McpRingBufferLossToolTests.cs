@@ -317,4 +317,18 @@ VALUES ($1, $2, $3, $4, $2, 'rpc_completed', 'testdb', 'EXEC p', 5000000)",
 
         Assert.False(root.GetProperty("hints").GetProperty("ring_buffer_loss").TryGetProperty("database_filter_note", out _));
     }
+
+    [Fact]
+    public async Task GetLongQueryCompletions_DatabaseFilterAndLoss_SaysFilterDoesNotNarrowLoss()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await SeedRunAsync(LongQueryCompletionsCollector.Instance.Name, Anchor.AddHours(-3), LossNote);
+        await SeedRunAsync(LongQueryCompletionsCollector.Instance.Name, Anchor.AddMinutes(-2), null);
+
+        var filtered = Root(await McpLongQueryTools.GetLongQueryCompletions(Service(), _serverManager, ServerName, 24, 15, AsOf, database_name: "AppDb"));
+        var unfiltered = Root(await McpLongQueryTools.GetLongQueryCompletions(Service(), _serverManager, ServerName, 24, 15, AsOf));
+
+        Assert.Equal(RingBufferLossAnswer.DatabaseFilterNote, filtered.GetProperty("hints").GetProperty("ring_buffer_loss").GetProperty("database_filter_note").GetString());
+        Assert.False(unfiltered.GetProperty("hints").GetProperty("ring_buffer_loss").TryGetProperty("database_filter_note", out _));
+    }
 }
