@@ -105,6 +105,29 @@ public sealed class PgWaitTrendEngineCumulativeLiveTests
         });
     }
 
+    /// <summary>A row of the followed event that returns after a skipped cycle carries the gap it spanned as its interval, twice the
+    /// collection's cadence. The point credits every row's delta to the collection and divides by the cadence, the shortest
+    /// interval any of its rows measured, so its rate is the sum of the per-row rates over that cadence, not the total over the
+    /// longest gap.</summary>
+    [Fact]
+    public async Task ACollectionWhereARowReturnsWithALongerInterval_RatesTheTotalOverTheCollectionsCadence()
+    {
+        await RunAsync(MonitoredEngineKind.AuroraPostgres, async (connection, postgres, ct) =>
+        {
+            await SeedCountersAsync(connection, ct);
+            /* A second counter row of the same event name at the second collection, back after a skipped cycle: 1.2 s over 600 s. */
+            await SeedCounterAsync(connection, ct, T0.AddMinutes(10), "IO", 3, "DataFileRead", 301, waits: 400, waitTimeUs: 20_000_000, deltaWaits: 12, deltaWaitTimeUs: 1_200_000, interval: 600);
+
+            var root = Root(await DarlingMcpPgTrendTools.GetPgWaitTrend(postgres, ServerName, "DataFileRead", Hours, AsOfText, cancellationToken: ct));
+            var point = root.GetProperty("points").EnumerateArray().First();
+
+            Assert.Equal(Stamp(T0.AddMinutes(10)), Stamp(point.GetProperty("collection_time")));
+            Assert.Equal(32, point.GetProperty("sample_count").GetInt64());
+            /* 2,000 ms and 1,200 ms, each over the 300 s cadence (6.667 + 4.0), not 3,200 ms over the 600 s gap (5.333). */
+            Assert.Equal(2_000.0 / 300 + 1_200.0 / 300, point.GetProperty("estimated_wait_ms_per_second").GetDouble(), 3);
+        });
+    }
+
     /// <summary>A guard, not a red: a stock target's trend still comes from the sampler rows, whichever arm the store holds for
     /// other servers.</summary>
     [Fact]

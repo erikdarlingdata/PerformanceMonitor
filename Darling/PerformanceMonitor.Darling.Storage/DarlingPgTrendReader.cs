@@ -159,14 +159,18 @@ public static class DarlingPgTrendReader
     /// reset or a gap, where the collector re-baselines and writes 0 for both) is the series' left edge and not a point, which
     /// is the sampler arm's rule for its first snapshot. The counters carry no backend count and no sample period: the rate is
     /// measured wait time per second of the interval, and the count is the number of waits that completed in it.
+    /// <para>The divisor is the collection's CADENCE, the shortest interval any of its rated rows measured, with every rated row's
+    /// delta credited whole: a row that returns after a skipped cycle carries the gap it spanned as its interval, and dividing the
+    /// total by that longer gap under-reports the collection. Over the cadence the point equals the sum of its rows' rates.</para>
     /// <para>$1 server_id, $2 wait_event, $3/$4 window (naive UTC). Bounded by <c>idx_pg_wait_stats_time (server_id,
     /// collection_time)</c>, so a hypertable touches only the window's chunks.</para>
     /// </summary>
     public const string WaitTrendEngineSql = """
         SELECT
             collection_time,
-            CAST(SUM(delta_waits) AS bigint) AS delta_waits,
-            CAST(SUM(delta_wait_time_us) / 1000.0 / NULLIF(MAX(sample_interval_seconds), 0) AS double precision) AS wait_ms_per_second
+            CAST(SUM(delta_waits) FILTER (WHERE sample_interval_seconds > 0) AS bigint) AS delta_waits,
+            CAST(SUM(delta_wait_time_us) FILTER (WHERE sample_interval_seconds > 0) / 1000.0
+                 / NULLIF(MIN(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0), 0) AS double precision) AS wait_ms_per_second
         FROM pg_wait_stats
         WHERE server_id = $1
         AND   wait_event = $2
