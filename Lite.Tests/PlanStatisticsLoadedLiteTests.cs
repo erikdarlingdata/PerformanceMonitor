@@ -15,11 +15,11 @@ using Xunit;
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// #8147 - Lite's analyze_plan_xml lists the statistics a plan used through the shared formatter, so its
-/// statistics_used equals what the formatter returns for the same plan.
+/// #8147 - Lite's analyze_plan_xml lists the statistics the optimizer loaded through the shared formatter, so its
+/// statistics_loaded equals what the formatter returns for the same plan.
 /// </summary>
 [Trait("Stage", "Guard")]
-public sealed class PlanStatisticsUsedLiteTests
+public sealed class PlanStatisticsLoadedLiteTests
 {
     private const string PlanXml =
         "<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\" Version=\"1.539\" Build=\"16.0.1000.6\">" +
@@ -36,7 +36,7 @@ public sealed class PlanStatisticsUsedLiteTests
         "</QueryPlan></StmtSimple></Statements></Batch></BatchSequence></ShowPlanXML>";
 
     [Fact]
-    public void Lite_AnalyzePlanXml_ReturnsTheSameStatisticsUsedAsTheSharedFormatter()
+    public void Lite_AnalyzePlanXml_ReturnsTheSameStatisticsLoadedAsTheSharedFormatter()
     {
         using var lite = JsonDocument.Parse(McpPlanTools.AnalyzePlanXml(PlanXml));
         using var shared = JsonDocument.Parse(McpPlanAnalysisFormatter.BuildAnalysisResult(PlanXml, null, "xml", null));
@@ -44,8 +44,8 @@ public sealed class PlanStatisticsUsedLiteTests
         var liteStmt = lite.RootElement.GetProperty("statements")[0];
         var sharedStmt = shared.RootElement.GetProperty("statements")[0];
 
-        var liteRows = liteStmt.GetProperty("statistics_used").EnumerateArray().ToList();
-        var sharedRows = sharedStmt.GetProperty("statistics_used").EnumerateArray().ToList();
+        var liteRows = liteStmt.GetProperty("statistics_loaded").EnumerateArray().ToList();
+        var sharedRows = sharedStmt.GetProperty("statistics_loaded").EnumerateArray().ToList();
 
         Assert.Equal(2, sharedRows.Count);
         Assert.Equal(sharedRows.Count, liteRows.Count);
@@ -54,6 +54,6 @@ public sealed class PlanStatisticsUsedLiteTests
             Assert.Equal(sharedRows[i].GetRawText(), liteRows[i].GetRawText());
         }
         Assert.Equal(5000, liteRows[0].GetProperty("modification_count").GetInt64());
-        Assert.Equal("recorded", liteStmt.GetProperty("statistics_usage").GetString());
+        Assert.Equal("recorded", liteStmt.GetProperty("statistics_status").GetString());
     }
 }

@@ -17,16 +17,16 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #8147 - the shared plan analysis envelope states which statistics the optimizer used to compile each
-/// statement (<c>statistics_used</c>), how many there were, and whether the plan recorded them at all. The
+/// #8147 - the shared plan analysis envelope states which statistics the optimizer loaded while compiling each
+/// statement (<c>statistics_loaded</c>), how many there were, and whether the plan recorded them at all. The
 /// plans are built per assertion; the expected values are facts of the fixture.
 /// </summary>
 [Trait("Stage", "Guard")]
-public sealed class McpPlanAnalysisStatisticsUsedTests
+public sealed class McpPlanAnalysisStatisticsLoadedTests
 {
     private static readonly string[] RowFields =
     {
-        "database", "schema", "table", "statistic", "modification_count", "table_rows", "modified_percent", "last_update", "sampling_percent"
+        "database", "schema", "table", "statistic", "modification_count", "table_rows", "modified_percent", "stale_at_compile", "last_update", "sampling_percent"
     };
 
     private sealed record Stat(string Table, string Name, long Mods, string Db = "SalesDb", string Schema = "dbo", string? LastUpdate = "2026-10-30T02:14:07.53", string Sampling = "100");
@@ -66,18 +66,18 @@ public sealed class McpPlanAnalysisStatisticsUsedTests
 
     private static JsonElement OnlyStatement(JsonDocument doc) => Assert.Single(doc.RootElement.GetProperty("statements").EnumerateArray());
 
-    private static List<JsonElement> Rows(JsonElement stmt) => stmt.GetProperty("statistics_used").EnumerateArray().ToList();
+    private static List<JsonElement> Rows(JsonElement stmt) => stmt.GetProperty("statistics_loaded").EnumerateArray().ToList();
 
     [Fact]
-    public void StatsUsed_TwelveStatistics_AreOrderedCappedAndTruncationIsObserved()
+    public void StatsLoaded_TwelveStatistics_AreOrderedCappedAndTruncationIsObserved()
     {
         var counts = new long[] { 7, 900, 3, 450, 12, 5000, 1, 88, 640, 20, 2, 130 };
         var stats = counts.Select((c, i) => new Stat("Orders", $"ST_{i:00}", c));
         using var doc = Run(StatsXml(stats));
         var stmt = OnlyStatement(doc);
 
-        Assert.Equal("recorded", stmt.GetProperty("statistics_usage").GetString());
-        Assert.Equal(McpPlanAnalysisFormatter.StatisticsUsedCap, stmt.GetProperty("statistics_cap").GetInt32());
+        Assert.Equal("recorded", stmt.GetProperty("statistics_status").GetString());
+        Assert.Equal(McpPlanAnalysisFormatter.StatisticsLoadedCap, stmt.GetProperty("statistics_cap").GetInt32());
         Assert.Equal(10, stmt.GetProperty("statistics_cap").GetInt32());
         Assert.Equal(10, stmt.GetProperty("statistics_returned").GetInt32());
         Assert.Equal(12, stmt.GetProperty("total_statistics").GetInt32());
@@ -91,7 +91,7 @@ public sealed class McpPlanAnalysisStatisticsUsedTests
     }
 
     [Fact]
-    public void StatsUsed_TenStatistics_IsNotTruncated()
+    public void StatsLoaded_TenStatistics_IsNotTruncated()
     {
         using var doc = Run(StatsXml(Enumerable.Range(0, 10).Select(i => new Stat("Orders", $"ST_{i:00}", i))));
         var stmt = OnlyStatement(doc);
@@ -103,7 +103,7 @@ public sealed class McpPlanAnalysisStatisticsUsedTests
     }
 
     [Fact]
-    public void StatsUsed_EqualCounts_AreOrderedByName()
+    public void StatsLoaded_EqualCounts_AreOrderedByName()
     {
         var stats = new[]
         {
@@ -128,7 +128,7 @@ public sealed class McpPlanAnalysisStatisticsUsedTests
     }
 
     [Fact]
-    public void StatsUsed_RowShare_FromTheScansTableCardinality()
+    public void StatsLoaded_RowShare_FromTheScansTableCardinality()
     {
         using var doc = Run(StatsXml(new[] { new Stat("Orders", "IX_Orders_CustomerId", 250) }), new Scan("Orders", "1000"));
         var row = Assert.Single(Rows(OnlyStatement(doc)));
@@ -140,7 +140,7 @@ public sealed class McpPlanAnalysisStatisticsUsedTests
     }
 
     [Fact]
-    public void StatsUsed_TableNoOperatorReads_HasNullRowsAndPercent()
+    public void StatsLoaded_TableNoOperatorReads_HasNullRowsAndPercent()
     {
         using var doc = Run(StatsXml(new[] { new Stat("Customers", "ST_c", 40) }), new Scan("Orders", "1000"));
         var row = Assert.Single(Rows(OnlyStatement(doc)));
@@ -151,7 +151,7 @@ public sealed class McpPlanAnalysisStatisticsUsedTests
     }
 
     [Fact]
-    public void StatsUsed_ThreeOperatorsOnOneTable_TakesTheLargestCardinality()
+    public void StatsLoaded_ThreeOperatorsOnOneTable_TakesTheLargestCardinality()
     {
         using var doc = Run(StatsXml(new[] { new Stat("Orders", "ST_o", 100) }), new Scan("Orders", "400"), new Scan("Orders", "800"), new Scan("Orders", "600"));
         var row = Assert.Single(Rows(OnlyStatement(doc)));
@@ -161,7 +161,7 @@ public sealed class McpPlanAnalysisStatisticsUsedTests
     }
 
     [Fact]
-    public void StatsUsed_OperatorWithoutTableCardinality_GivesNullRowsAndPercent()
+    public void StatsLoaded_OperatorWithoutTableCardinality_GivesNullRowsAndPercent()
     {
         var update =
             "<StmtSimple StatementText=\"UPDATE dbo.Orders SET Status = 2 WHERE OrderId = 7\" StatementId=\"1\" StatementType=\"UPDATE\" StatementSubTreeCost=\"0.01\" StatementEstRows=\"1\">" +
@@ -181,7 +181,7 @@ public sealed class McpPlanAnalysisStatisticsUsedTests
     private const string TempRaw = "#orders_______________________________________________________________________________________________000000000012";
 
     [Fact]
-    public void StatsUsed_TempTable_ShowsItsShortNameAndGetsItsRowCount()
+    public void StatsLoaded_TempTable_ShowsItsShortNameAndGetsItsRowCount()
     {
         using var doc = Run(StatsXml(new[] { new Stat(TempRaw, "_WA_Sys_00000001_0", 40, Db: "tempdb") }), new Scan(TempRaw, "200", Db: "tempdb"));
         var row = Assert.Single(Rows(OnlyStatement(doc)));
@@ -196,31 +196,31 @@ public sealed class McpPlanAnalysisStatisticsUsedTests
         "<Condition>" + QueryPlan(statsXml, new[] { new Scan("Orders", "1000") }) + "</Condition><Then><Statements/></Then></StmtCond>";
 
     [Fact]
-    public void StatsUsed_IfConditionWithRecordedStats_IsRecorded()
+    public void StatsLoaded_IfConditionWithRecordedStats_IsRecorded()
     {
         using var doc = JsonDocument.Parse(Result(Wrap(IfStmt(StatsXml(new[] { new Stat("Orders", "IX_Orders_CustomerId", 250) })))));
         var stmt = OnlyStatement(doc);
         var row = Assert.Single(Rows(stmt));
 
-        Assert.Equal("recorded", stmt.GetProperty("statistics_usage").GetString());
+        Assert.Equal("recorded", stmt.GetProperty("statistics_status").GetString());
         Assert.Equal("IX_Orders_CustomerId", row.GetProperty("statistic").GetString());
         Assert.Equal(1000, row.GetProperty("table_rows").GetDouble());
         Assert.Equal(25.0, row.GetProperty("modified_percent").GetDouble());
     }
 
     [Fact]
-    public void StatsUsed_IfConditionWithoutStatsUsage_IsNotInPlan()
+    public void StatsLoaded_IfConditionWithoutStatsUsage_IsNotInPlan()
     {
         using var doc = JsonDocument.Parse(Result(Wrap(IfStmt(null))));
         var stmt = OnlyStatement(doc);
 
-        Assert.Equal("not_in_plan", stmt.GetProperty("statistics_usage").GetString());
+        Assert.Equal("not_in_plan", stmt.GetProperty("statistics_status").GetString());
         Assert.Equal(McpPlanAnalysisFormatter.StatisticsNotInPlanNote, stmt.GetProperty("statistics_note").GetString());
         Assert.Empty(Rows(stmt));
     }
 
     [Fact]
-    public void StatsUsed_ZeroTableRows_GivesNullPercent()
+    public void StatsLoaded_ZeroTableRows_GivesNullPercent()
     {
         using var doc = Run(StatsXml(new[] { new Stat("Orders", "ST_o", 100) }), new Scan("Orders", "0"));
         var row = Assert.Single(Rows(OnlyStatement(doc)));
@@ -230,7 +230,7 @@ public sealed class McpPlanAnalysisStatisticsUsedTests
     }
 
     [Fact]
-    public void StatsUsed_MatchesNamesIgnoringCaseAndBrackets()
+    public void StatsLoaded_MatchesNamesIgnoringCaseAndBrackets()
     {
         using var doc = Run(
             StatsXml(new[] { new Stat("[orders]", "[ST_o]", 50, Db: "[salesdb]", Schema: "[DBO]") }),
@@ -244,7 +244,7 @@ public sealed class McpPlanAnalysisStatisticsUsedTests
     }
 
     [Fact]
-    public void StatsUsed_MissingLastUpdate_IsNull()
+    public void StatsLoaded_MissingLastUpdate_IsNull()
     {
         using var doc = Run(StatsXml(new[] { new Stat("Orders", "ST_o", 1, LastUpdate: null) }));
         var row = Assert.Single(Rows(OnlyStatement(doc)));
@@ -253,7 +253,7 @@ public sealed class McpPlanAnalysisStatisticsUsedTests
     }
 
     [Fact]
-    public void StatsUsed_LastUpdate_IsVerbatim()
+    public void StatsLoaded_LastUpdate_IsVerbatim()
     {
         using var doc = Run(StatsXml(new[] { new Stat("Orders", "ST_o", 1, LastUpdate: "2026-10-30T02:14:07.53") }));
         var row = Assert.Single(Rows(OnlyStatement(doc)));
@@ -262,12 +262,12 @@ public sealed class McpPlanAnalysisStatisticsUsedTests
     }
 
     [Fact]
-    public void StatsUsed_PlanWithoutStatsUsage_IsNotInPlanWithTheNote()
+    public void StatsLoaded_PlanWithoutStatsUsage_IsNotInPlanWithTheNote()
     {
         using var doc = Run(null);
         var stmt = OnlyStatement(doc);
 
-        Assert.Equal("not_in_plan", stmt.GetProperty("statistics_usage").GetString());
+        Assert.Equal("not_in_plan", stmt.GetProperty("statistics_status").GetString());
         Assert.Equal(McpPlanAnalysisFormatter.StatisticsNotInPlanNote, stmt.GetProperty("statistics_note").GetString());
         Assert.Empty(Rows(stmt));
         Assert.Equal(0, stmt.GetProperty("statistics_returned").GetInt32());
@@ -277,12 +277,12 @@ public sealed class McpPlanAnalysisStatisticsUsedTests
     }
 
     [Fact]
-    public void StatsUsed_EmptyRecordedList_HasNoNote()
+    public void StatsLoaded_EmptyRecordedList_HasNoNote()
     {
         using var doc = Run("<OptimizerStatsUsage/>");
         var stmt = OnlyStatement(doc);
 
-        Assert.Equal("recorded", stmt.GetProperty("statistics_usage").GetString());
+        Assert.Equal("recorded", stmt.GetProperty("statistics_status").GetString());
         Assert.Equal(JsonValueKind.Null, stmt.GetProperty("statistics_note").ValueKind);
         Assert.Empty(Rows(stmt));
         Assert.Equal(0, stmt.GetProperty("total_statistics").GetInt32());
@@ -290,7 +290,7 @@ public sealed class McpPlanAnalysisStatisticsUsedTests
     }
 
     [Fact]
-    public void StatsUsed_ProcedurePlan_DeclareIsNoQueryPlan_InnerStatementIsRecorded()
+    public void StatsLoaded_ProcedurePlan_DeclareIsNoQueryPlan_InnerStatementIsRecorded()
     {
         var inner = SelectStmt(StatsXml(new[] { new Stat("Orders", "ST_o", 9) }));
         var xml = Wrap(
@@ -300,16 +300,16 @@ public sealed class McpPlanAnalysisStatisticsUsedTests
         using var doc = JsonDocument.Parse(Result(xml));
         var statements = doc.RootElement.GetProperty("statements").EnumerateArray().ToList();
 
-        var recorded = Assert.Single(statements, s => s.GetProperty("statistics_usage").GetString() == "recorded");
+        var recorded = Assert.Single(statements, s => s.GetProperty("statistics_status").GetString() == "recorded");
         Assert.Equal("ST_o", Assert.Single(Rows(recorded)).GetProperty("statistic").GetString());
 
         Assert.Equal(3, statements.Count);
-        var planless = statements.Where(s => s.GetProperty("statistics_usage").GetString() != "recorded").ToList();
+        var planless = statements.Where(s => s.GetProperty("statistics_status").GetString() != "recorded").ToList();
         Assert.Equal(2, planless.Count);
         Assert.Contains(planless, s => s.GetProperty("statement_type").GetString() == "DECLARE");
         Assert.All(planless, s =>
         {
-            Assert.Equal("no_query_plan", s.GetProperty("statistics_usage").GetString());
+            Assert.Equal("no_query_plan", s.GetProperty("statistics_status").GetString());
             Assert.Equal(JsonValueKind.Null, s.GetProperty("statistics_note").ValueKind);
             Assert.Empty(Rows(s));
             Assert.Equal(10, s.GetProperty("statistics_cap").GetInt32());
@@ -320,7 +320,37 @@ public sealed class McpPlanAnalysisStatisticsUsedTests
     }
 
     [Fact]
-    public void StatsUsed_RowsCarryOnlyTheSpecifiedFields()
+    public void StatsLoaded_StaleAtCompile_FollowsTheSqrtThreshold()
+    {
+        using var below = Run(StatsXml(new[] { new Stat("Orders", "ST_o", 3162) }), new Scan("Orders", "10000"));
+        using var above = Run(StatsXml(new[] { new Stat("Orders", "ST_o", 3163) }), new Scan("Orders", "10000"));
+
+        Assert.False(Assert.Single(Rows(OnlyStatement(below))).GetProperty("stale_at_compile").GetBoolean());
+        Assert.True(Assert.Single(Rows(OnlyStatement(above))).GetProperty("stale_at_compile").GetBoolean());
+    }
+
+    [Fact]
+    public void StatsLoaded_StaleAtCompile_IsNullWhenRowsUnknown()
+    {
+        using var doc = Run(StatsXml(new[] { new Stat("Customers", "ST_c", 900000) }), new Scan("Orders", "1000"));
+        var row = Assert.Single(Rows(OnlyStatement(doc)));
+
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("table_rows").ValueKind);
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("stale_at_compile").ValueKind);
+    }
+
+    [Fact]
+    public void StatsLoaded_StaleAtCompile_ZeroRows()
+    {
+        using var none = Run(StatsXml(new[] { new Stat("Orders", "ST_o", 0) }), new Scan("Orders", "0"));
+        using var one = Run(StatsXml(new[] { new Stat("Orders", "ST_o", 1) }), new Scan("Orders", "0"));
+
+        Assert.False(Assert.Single(Rows(OnlyStatement(none))).GetProperty("stale_at_compile").GetBoolean());
+        Assert.True(Assert.Single(Rows(OnlyStatement(one))).GetProperty("stale_at_compile").GetBoolean());
+    }
+
+    [Fact]
+    public void StatsLoaded_RowsCarryOnlyTheSpecifiedFields()
     {
         using var doc = Run(StatsXml(new[] { new Stat("Orders", "ST_o", 9) }));
         var row = Assert.Single(Rows(OnlyStatement(doc)));
@@ -329,7 +359,7 @@ public sealed class McpPlanAnalysisStatisticsUsedTests
     }
 
     [Fact]
-    public void StatsUsed_LeavesWarningsAndCountsUnchanged()
+    public void StatsLoaded_LeavesWarningsAndCountsUnchanged()
     {
         var stats = StatsXml(new[] { new Stat("Orders", "ST_o", 900) });
         using var with = Run(stats);
@@ -348,7 +378,7 @@ public sealed class McpPlanAnalysisStatisticsUsedTests
     }
 
     [Fact]
-    public void StatsUsed_NamesSurviveMetadataOnlyMasking()
+    public void StatsLoaded_NamesSurviveMetadataOnlyMasking()
     {
         var result = Result(Wrap(SelectStmt(StatsXml(new[] { new Stat("Orders", "IX_Orders_CustomerId", 9) }))));
         using var masked = JsonDocument.Parse(McpDataDetailMasker.MaskJson(result, McpDataDetail.MetadataOnly));

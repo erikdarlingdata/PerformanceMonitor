@@ -34,16 +34,16 @@ public static class McpPlanAnalysisFormatter
     public const int TopOperatorCap = 10;
 
     /// <summary>
-    /// How many statistics <c>statistics_used</c> carries per statement (#8147), published beside
+    /// How many statistics <c>statistics_loaded</c> carries per statement (#8147), published beside
     /// <c>statistics_returned</c> / <c>total_statistics</c> / <c>statistics_truncated</c> so the cut is never silent.
     /// </summary>
-    public const int StatisticsUsedCap = 10;
+    public const int StatisticsLoadedCap = 10;
 
     /// <summary>
     /// The <c>statistics_note</c> of a statement whose plan carries a QueryPlan but no OptimizerStatsUsage element
-    /// (<c>statistics_usage</c> = <c>not_in_plan</c>, #8147).
+    /// (<c>statistics_status</c> = <c>not_in_plan</c>, #8147).
     /// </summary>
-    public const string StatisticsNotInPlanNote = "This plan has no record of the statistics it used (SQL Server before 2017 / 2016 SP2, or a plan that loaded none), so their state at compile is unknown.";
+    public const string StatisticsNotInPlanNote = "This plan has no record of the statistics it loaded (SQL Server before 2017 / 2016 SP2, or a plan that loaded none), so their state at compile is unknown.";
 
     /// <summary>
     /// The two <c>top_operators</c> ranking bases, published per statement as <c>operators_ranked_by</c>
@@ -233,14 +233,14 @@ public static class McpPlanAnalysisFormatter
                         };
                     });
 
-                var statsUsage = !s.HasQueryPlan ? "no_query_plan" : s.HasStatsUsage ? "recorded" : "not_in_plan";
+                var statsStatus = !s.HasQueryPlan ? "no_query_plan" : s.HasStatsUsage ? "recorded" : "not_in_plan";
                 var statsRows = s.StatsUsage
                     .OrderByDescending(i => i.ModificationCount)
                     .ThenBy(i => i.DatabaseName, StringComparer.Ordinal)
                     .ThenBy(i => i.SchemaName, StringComparer.Ordinal)
                     .ThenBy(i => i.TableName, StringComparer.Ordinal)
                     .ThenBy(i => i.StatisticsName, StringComparer.Ordinal)
-                    .Take(StatisticsUsedCap)
+                    .Take(StatisticsLoadedCap)
                     .Select(i =>
                     {
                         var tableRows = TableRowsFor(i, allNodes);
@@ -253,6 +253,8 @@ public static class McpPlanAnalysisFormatter
                             modification_count = i.ModificationCount,
                             table_rows = tableRows,
                             modified_percent = tableRows is > 0 ? Math.Round(i.ModificationCount * 100.0 / tableRows.Value, 1) : (double?)null,
+                            /* A lead about the statistic's state at compile (modification count past the 2016+ automatic update threshold sqrt(1000 x rows), rows from the plan's TableCardinality), not a cause of the estimate. */
+                            stale_at_compile = tableRows == null ? (bool?)null : i.ModificationCount > Math.Sqrt(1000.0 * tableRows.Value),
                             last_update = i.LastUpdate,
                             sampling_percent = i.SamplingPercent
                         };
@@ -339,15 +341,15 @@ public static class McpPlanAnalysisFormatter
                     total_operators = allNodes.Count,
                     truncated = allNodes.Count > TopOperatorCap,
                     top_operators = topOps,
-                    /* #8147: what the optimizer's statistics looked like at compile. Ordered by modification
+                    /* #8147: the statistics the optimizer loaded while compiling (the plan does not say which drove the estimates). Ordered by modification
                        count, truncation observed against the whole list. */
-                    statistics_usage = statsUsage,
-                    statistics_note = statsUsage == "not_in_plan" ? StatisticsNotInPlanNote : null,
-                    statistics_cap = StatisticsUsedCap,
-                    statistics_returned = Math.Min(s.StatsUsage.Count, StatisticsUsedCap),
+                    statistics_status = statsStatus,
+                    statistics_note = statsStatus == "not_in_plan" ? StatisticsNotInPlanNote : null,
+                    statistics_cap = StatisticsLoadedCap,
+                    statistics_returned = Math.Min(s.StatsUsage.Count, StatisticsLoadedCap),
                     total_statistics = s.StatsUsage.Count,
-                    statistics_truncated = s.StatsUsage.Count > StatisticsUsedCap,
-                    statistics_used = statsRows
+                    statistics_truncated = s.StatsUsage.Count > StatisticsLoadedCap,
+                    statistics_loaded = statsRows
                 };
             })
             .ToList();
