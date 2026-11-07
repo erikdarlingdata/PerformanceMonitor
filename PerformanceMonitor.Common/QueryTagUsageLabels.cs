@@ -19,6 +19,11 @@ namespace PerformanceMonitor.Common;
 public static class QueryTagUsageLabels
 {
     /// <summary>
+    /// #8083: the answer of <c>get_resource_use_by_tag</c> on a store that defines no query tag, in Darling and Lite. Every row of every
+    /// section would be untagged and every untagged figure would equal its total, so no section is read and no server is gated; a caller
+    /// that wants those totals asks a top-queries read.
+    /// </summary>
+    public const string NoTagsMessage = "No query tags are defined, so there is nothing to roll up by tag: every row in the window would be untagged. create_query_tag adds a tag, and create_query_tag_rule puts work under it.";
     /// #8115: the Query Tag Usage window's whole answer, in Lite and the Darling Viewer, on a store that defines no query tag. Every row of
     /// every section would be untagged and every untagged figure would equal its total, so the window says that once instead of drawing one
     /// "untagged = total" table per server per section.

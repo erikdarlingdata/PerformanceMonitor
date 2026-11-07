@@ -108,6 +108,8 @@ const answerFor = (url) => {
   if (rangeBody && url.includes("get_daily_summary_range")) return json(rangeBody);
   if (url.includes("get_resource_use_by_tag") && tagBody) return json(tagBody);
   if (url.includes("/api/read/list_servers")) return json({ servers: [{ server_name: "alpha", display_name: "alpha" }] });
+  /* #8083: the store defines one tag, so Query Tag Usage goes on to the by-tag read these scenarios watch (with none it draws one line and sends no read). */
+  if (url.includes("/api/read/list_query_tags")) return json({ status: "ok", tags: [{ tag_id: 1, name: "Prod", path: "Prod", colour: null }] });
   if (url.includes("/api/session")) return json({ can_edit: false });
   if (url.includes("/api/catalog")) return json({ reads: [{ name: "get_view_panel_read" }, { name: "get_notebook_cell_read" }], viz: [], compose: {} });
   if (url.includes("/api/views/view1")) return json({ id: "view1", name: "A view", definition: { panels: [{ title: "View panel", read: "get_view_panel_read", viz: "table" }] } });
@@ -121,8 +123,10 @@ globalThis.fetch = (url, opts = {}) => {
   const rec = { at: now, url, signal: opts.signal || null, abortedAtStart: !!(opts.signal && opts.signal.aborted), aborted: false };
   fetchLog.push(rec);
   /* app.js asks /api/session before it starts (#6840: is this a front door?). A store answers it at once, and the page must not wait on the
-     scenario's clock to start, so it is answered now. It stays counted in fetchLog like every other read. */
-  if (url.split("?")[0] === "/api/session") {
+     scenario's clock to start, so it is answered now. It stays counted in fetchLog like every other read. #8083: the same for the tag list
+     Query Tag Usage asks for before its by-tag read, a small config read a store answers at once, so the by-tag read these scenarios time
+     still starts with the page. */
+  if (url.split("?")[0] === "/api/session" || url.split("?")[0] === "/api/read/list_query_tags") {
     const a = answerFor(url);
     return Promise.resolve({ ok: true, status: a.status, json: async () => a.body, text: async () => JSON.stringify(a.body) });
   }

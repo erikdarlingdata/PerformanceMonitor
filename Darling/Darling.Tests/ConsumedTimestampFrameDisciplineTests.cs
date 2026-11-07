@@ -1414,8 +1414,6 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     [
         ("if", "a null test - if (row.EventTime.HasValue) and if (summary.OldestPlanCreateTime is not "
             + "{ } oldest). The matcher reads the identifier before the parenthesis and a keyword is one"),
-        ("DateTime", "new DateTime(d.SampleTime.Year, ..., d.SampleTime.Hour, 0, 0) - an hour-truncating "
-            + "bucket key built FROM a timestamp, not a rendering of one"),
         ("Compare", "Nullable.Compare(a.EventTime, b.EventTime) - a sort comparison"),
         ("ToUtc", "serverClock.ToUtc(r.StartTime) in Lite get_running_jobs (#4793) - the server-clock conversion of a "
             + "stored server-local stamp to naive UTC, which is the de-skew itself rather than a rendering of it"),
