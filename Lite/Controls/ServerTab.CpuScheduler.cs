@@ -92,6 +92,7 @@ public partial class ServerTab : UserControl
         }
 
         CpuSchedRenderer.Render(CpuSchedulerChart, _cpuSchedulerHover, data, ChartXStart(rangeStart, rangeEnd), rangeEnd.ToOADate());
+        SetYUnit(CpuSchedulerChart, "count");
         KeepPlottedInView(CpuSchedulerChart, rangeStart, rangeEnd);
     }
 
