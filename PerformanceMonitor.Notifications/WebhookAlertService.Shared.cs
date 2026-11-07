@@ -14,6 +14,7 @@ using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -287,11 +288,42 @@ public partial class WebhookAlertService
         ILogger? bodyLog = null,
         bool bodyInResult = false)
     {
+        var outcome = await PostOnceAsync(
+            client: null, webhookUrl, jsonPayload, proxyAddress, headers, postTimeout, signing, bodyLog, bodyInResult, cancellationToken);
+        return outcome.Error;
+    }
+
+    /// <summary>
+    /// What one post came back with (#8244): the error text to record (null when delivered), and whether the endpoint
+    /// answered HTTP 429, with the <c>Retry-After</c> it sent when it sent one. A 429 is reported, not logged, so the
+    /// caller can hold the destination and post once more before it counts anything.
+    /// </summary>
+    private readonly record struct WebhookPostOutcome(string? Error, bool RateLimited, RetryConditionHeaderValue? RetryAfter);
+
+    /// <summary>
+    /// One post, with the client stated: <paramref name="client"/> null picks the pooled client for the proxy and the
+    /// redirect rule; a caller that holds its own client (the rate-limit test seam) passes it. Everything else is
+    /// <see cref="PostWebhookAsync(string, string, string?, IReadOnlyDictionary{string, string}?, TimeSpan, WebhookSendSigning?, CancellationToken, ILogger?, bool)"/>'s
+    /// contract, except that an HTTP 429 comes back as <see cref="WebhookPostOutcome.RateLimited"/> with its status text
+    /// as the error and nothing logged.
+    /// </summary>
+    private static async Task<WebhookPostOutcome> PostOnceAsync(
+        HttpClient? client,
+        string webhookUrl,
+        string jsonPayload,
+        string? proxyAddress,
+        IReadOnlyDictionary<string, string>? headers,
+        TimeSpan postTimeout,
+        WebhookSendSigning? signing,
+        ILogger? bodyLog,
+        bool bodyInResult,
+        CancellationToken cancellationToken)
+    {
         var sendsHeaders = headers is { Count: > 0 };
         /* #6003 review: a signed send is held to #5366's rule too. A followed 307/308 would carry the body and a valid
            webhook-signature to whatever host the endpoint names. */
         var noRedirects = sendsHeaders || signing is not null;
-        var client = GetHttpClient(proxyAddress, followRedirects: !noRedirects);
+        client ??= GetHttpClient(proxyAddress, followRedirects: !noRedirects);
 
         /* #5998: a signed send puts these exact bytes on the wire and signs these same bytes, so no re-encoding sits
            between the signature and the body. An unsigned send is the StringContent it always was. */
@@ -337,13 +369,20 @@ public partial class WebhookAlertService
             using var response = await client.SendAsync(request, timeout.Token);
 
             if (response.IsSuccessStatusCode)
-                return null;
+                return new WebhookPostOutcome(null, false, null);
 
             /* #5366: a redirect is not followed on a send with headers or a signature. The message names no URL and no header. */
             if (noRedirects && (int)response.StatusCode is >= 300 and < 400)
             {
-                return string.Create(CultureInfo.InvariantCulture,
-                    $"HTTP {(int)response.StatusCode}: the endpoint answered with a redirect. Set the webhook URL to the final address.");
+                return new WebhookPostOutcome(string.Create(CultureInfo.InvariantCulture,
+                    $"HTTP {(int)response.StatusCode}: the endpoint answered with a redirect. Set the webhook URL to the final address."), false, null);
+            }
+
+            /* #8244: the endpoint is pacing the sender, not refusing the message. The body is not read: nothing from a
+               429 is stored or logged here, and the caller decides whether this attempt is the last. */
+            if (response.StatusCode == HttpStatusCode.TooManyRequests)
+            {
+                return new WebhookPostOutcome(HttpStatusText(response.StatusCode), true, response.Headers.RetryAfter);
             }
 
             /* #6231: the text this returns is what the alert log's send_error and the channel health getter store and
@@ -358,7 +397,7 @@ public partial class WebhookAlertService
 
             var statusText = HttpStatusText(response.StatusCode);
             if (bodyInResult)
-                return $"{statusText}: {body}";
+                return new WebhookPostOutcome($"{statusText}: {body}", false, null);
 
             if (bodyLog is not null)
             {
@@ -366,11 +405,12 @@ public partial class WebhookAlertService
                 bodyLog.LogError($"Webhook post failed with {statusText}; the endpoint's response: {oneLine}");
             }
 
-            return statusText;
+            return new WebhookPostOutcome(statusText, false, null);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            return string.Create(CultureInfo.InvariantCulture, $"timed out after {postTimeout.TotalSeconds:0.###} seconds");
+            return new WebhookPostOutcome(
+                string.Create(CultureInfo.InvariantCulture, $"timed out after {postTimeout.TotalSeconds:0.###} seconds"), false, null);
         }
     }
 

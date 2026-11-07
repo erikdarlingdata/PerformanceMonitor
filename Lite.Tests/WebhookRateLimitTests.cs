@@ -12,7 +12,6 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
-using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Notifications;
@@ -111,12 +110,14 @@ public sealed class WebhookRateLimitTests
         {
             Handler = new ScriptedHandler(() => Now, answers);
             Webhooks = new WebhookAlertService(new SlackSettings(), EmailAlertService.Branding, new AppLoggerAdapter<WebhookAlertService>());
-            Seams.Attach(Webhooks, Handler, () => Now, (wait, _) =>
+            Webhooks.HttpHandlerOverride = Handler;
+            Webhooks.PacingClock = () => Now;
+            Webhooks.Delay = (wait, _) =>
             {
                 Waits.Add(wait);
                 Now += wait;
                 return Task.CompletedTask;
-            });
+            };
         }
 
         public DateTime Start => StartUtc;
@@ -138,31 +139,6 @@ public sealed class WebhookRateLimitTests
     private static int s_serverSequence;
 
     private static readonly DateTime StartUtc = new(2026, 11, 7, 12, 0, 0, DateTimeKind.Utc);
-
-    /// <summary>The service's pacing seams: the handler every post goes through, the clock the per-destination slots are
-    /// read against, and the wait a post performs. Reached by name so this file compiles against a service without
-    /// them; a service without them cannot be driven by a fake handler or clock, and says so.</summary>
-    private static class Seams
-    {
-        public static void Attach(
-            WebhookAlertService webhooks, HttpMessageHandler handler, Func<DateTime> clock, Func<TimeSpan, CancellationToken, Task> delay)
-        {
-            Set(webhooks, "HttpHandlerOverride", handler, "a fake handler cannot answer its posts");
-            Set(webhooks, "PacingClock", clock, "its waits cannot be read off a fake clock");
-            Set(webhooks, "Delay", delay, "its waits run on the wall clock");
-        }
-
-        private static void Set(WebhookAlertService webhooks, string name, object value, string consequence)
-        {
-            var property = typeof(WebhookAlertService).GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            if (property is null || !property.CanWrite)
-            {
-                Assert.Fail($"WebhookAlertService has no settable {name}, so {consequence}: a 429 cannot be tested without waiting on it.");
-            }
-
-            property.SetValue(webhooks, value);
-        }
-    }
 
     [Fact]
     public async Task A429WithRetryAfter_IsPostedAgainAfterTheWait_AndCountsNoFailure()
