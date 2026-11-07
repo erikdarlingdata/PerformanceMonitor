@@ -1078,6 +1078,10 @@ public sealed partial class DarlingWorker
            nothing and leaves every row unmarked for when one is set. The throttle holds a 429's Retry-After across passes. */
         var slackThrottle = new PerformanceMonitor.Darling.Service.Chat.SlackPostThrottle();
         var slackBotPosts = new PerformanceMonitor.Darling.Service.Chat.SettingsSlackBotPosts(() => alertSettings.SlackBotToken);
+        /* #7657: the Socket Mode listener's host reads the opened app-level token through this publication: a token set means listen,
+           blank means off, and a change is seen on the host's next poll. The bot token learns the workspace id at connect, and the
+           routes decide which channels this store owns. */
+        _slackListenerState?.Publish(() => alertSettings.SlackAppToken, () => alertSettings.SlackBotToken, () => alertSettings.NotificationRoutes);
         var slackThreads = new PerformanceMonitor.Darling.Service.Chat.SlackThreadPass(
             investigationStore, investigationStore,
             new PerformanceMonitor.Darling.Service.Chat.SlackThreadPoster(

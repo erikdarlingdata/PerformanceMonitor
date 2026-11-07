@@ -1635,8 +1635,9 @@ LIMIT 1";
        and at each hourly flush); its own reads never go through admission. */
     private readonly ReadAdmission? _readAdmission;
 
-    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState, WebTlsCertificateState webTlsCertState, BaselineCache baselineCache, ReadLatencyAccumulator readLatency, SlowReadLog? slowReads = null, McpTlsCertificateState? mcpTlsCertState = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, PseudonymKeySource? pseudonymKeys = null, DailyHealthReportHub? dailyReportHub = null)
+    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState, WebTlsCertificateState webTlsCertState, BaselineCache baselineCache, ReadLatencyAccumulator readLatency, SlowReadLog? slowReads = null, McpTlsCertificateState? mcpTlsCertState = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, PseudonymKeySource? pseudonymKeys = null, DailyHealthReportHub? dailyReportHub = null, PerformanceMonitor.Darling.Service.Chat.SlackListenerRuntimeState? slackListenerState = null)
     {
+        _slackListenerState = slackListenerState;
         _ownerSource = ownerSource;
         _pseudonymKeys = pseudonymKeys;
         _dailyReportHub = dailyReportHub;
@@ -1665,6 +1666,10 @@ LIMIT 1";
 
     /* #5592: the retention drain's pressure read (see CollectionPressure). */
     private readonly CollectionPressure _collectionPressure;
+
+    /* #7657: where the worker publishes the opened Slack app-level and bot token readers and the live routes for the Socket Mode
+       listener's host; null in a test-constructed worker. */
+    private readonly PerformanceMonitor.Darling.Service.Chat.SlackListenerRuntimeState? _slackListenerState;
 
     /// <summary>Test hook (#5592): the pressure read the retention drain takes.</summary>
     internal CollectionPressure CollectionPressureForTest => _collectionPressure;
