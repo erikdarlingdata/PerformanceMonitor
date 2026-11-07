@@ -131,6 +131,8 @@ new_store fresh
 start_service "${prefix}-fresh-svc" "${image}"
 wait_log "${prefix}-fresh-svc" 'Least-privilege roles ready'
 wait_log "${prefix}-fresh-svc" 'Retention evaluation at startup'
+wait_log "${prefix}-fresh-svc" 'Password key [0-9A-F]{4}-[0-9A-F]{4}'
+wait_log "${prefix}-fresh-svc" "Generated the store's log-hash key"
 uid="$(docker exec "${prefix}-fresh-svc" id -u)" || fail "could not run id -u in the service container"
 [ "${uid}" = 1654 ] || fail "the service runs as uid ${uid}, expected 1654"
 mode="$(docker exec "${prefix}-fresh-svc" stat -c '%u %a' /var/lib/darling/credentials)" || fail "could not stat the credentials directory"
@@ -150,6 +152,7 @@ new_store upgrade
 start_service "${prefix}-upgrade-old" "${previous}"
 wait_log "${prefix}-upgrade-old" 'Retention evaluation at startup'
 wait_log "${prefix}-upgrade-old" 'Password key [0-9A-F]{4}-[0-9A-F]{4}'
+wait_log "${prefix}-upgrade-old" "Generated the store's log-hash key"
 old_fp="$(fingerprint "${prefix}-upgrade-old")"
 [ -n "${old_fp}" ] || fail "the previous image logged no password key fingerprint"
 docker stop "${prefix}-upgrade-old" >/dev/null
