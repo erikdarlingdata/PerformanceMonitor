@@ -66,6 +66,7 @@ public partial class FinOpsTab : UserControl
     private DataGridFilterManager<ExpensiveQueryRow>? _expensiveQueriesFilterMgr;
     private DataGridFilterManager<MemoryGrantEfficiencyRow>? _memoryGrantFilterMgr;
     private DataGridFilterManager<IndexLockingRow>? _indexLockingFilterMgr;
+    private DataGridFilterManager<RecommendationRow>? _recommendationsFilterMgr;
 
     /* #2933: this tab has no load guard, and every grid above is shared across servers — one
        server switch during the fourteen-way fan-out in LoadPerServerDataAsync, or a per-grid Refresh
@@ -384,7 +385,7 @@ public partial class FinOpsTab : UserControl
                 System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
             }
             var (data, skippedNote) = read!.Value;
-            RecommendationsDataGrid.ItemsSource = data;
+            _recommendationsFilterMgr!.UpdateData(data);
             /* #5558: databases this server holds only as an Availability Group secondary copy are left to the primary's findings. */
             RecommendationsSecondaryNoteText.Text = skippedNote ?? "";
             RecommendationsSecondaryNoteText.Visibility = skippedNote is null ? Visibility.Collapsed : Visibility.Visible;
@@ -1171,6 +1172,7 @@ public partial class FinOpsTab : UserControl
         _expensiveQueriesFilterMgr?.UpdateData(new List<ExpensiveQueryRow>());
         _memoryGrantFilterMgr?.UpdateData(new List<MemoryGrantEfficiencyRow>());
         _highImpactFilterMgr?.UpdateData(new List<HighImpactQueryRow>());
+        _recommendationsFilterMgr?.UpdateData(new List<RecommendationRow>());
     }
 
     private async void RefreshRecommendations_Click(object sender, RoutedEventArgs e)
@@ -1437,6 +1439,7 @@ public partial class FinOpsTab : UserControl
         _expensiveQueriesFilterMgr = new DataGridFilterManager<ExpensiveQueryRow>(ExpensiveQueriesDataGrid);
         _memoryGrantFilterMgr = new DataGridFilterManager<MemoryGrantEfficiencyRow>(MemoryGrantEfficiencyDataGrid);
         _indexLockingFilterMgr = new DataGridFilterManager<IndexLockingRow>(IndexLockingDataGrid);
+        _recommendationsFilterMgr = new DataGridFilterManager<RecommendationRow>(RecommendationsDataGrid);
 
         _filterManagers[DatabaseResourcesDataGrid] = _dbResourcesFilterMgr;
         _filterManagers[StorageGrowthDataGrid] = _storageGrowthFilterMgr;
@@ -1453,6 +1456,7 @@ public partial class FinOpsTab : UserControl
         _filterManagers[ExpensiveQueriesDataGrid] = _expensiveQueriesFilterMgr;
         _filterManagers[MemoryGrantEfficiencyDataGrid] = _memoryGrantFilterMgr;
         _filterManagers[IndexLockingDataGrid] = _indexLockingFilterMgr;
+        _filterManagers[RecommendationsDataGrid] = _recommendationsFilterMgr;
     }
 
     /* Host/apply plumbing lives in the shared Ui controller. Lazy (a field initializer can't reference the

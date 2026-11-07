@@ -172,6 +172,39 @@ public sealed class ThemeLeftoversRenderTests
         Assert.True(lines >= 2, $"the Detail text drew on {lines} line(s)");
     }
 
+    /// <summary>
+    /// The server picker's items are named by the server for a screen reader (moved here from a text pin on the XAML, which the theme-following
+    /// item style changed). Checked on the rendered container, in the Light theme after a run-time switch.
+    /// </summary>
+    [Theory]
+    [InlineData("FinOps")]
+    [InlineData("Recommendations")]
+    public void TheServerBoxItems_AreNamedByTheServer_AfterARunTimeThemeSwitch(string host)
+    {
+        var name = Themed(app =>
+        {
+            FrameworkElement tab = host == "FinOps" ? new FinOpsTab() : new RecommendationsTab();
+            var window = new Window { Content = tab, Width = 1280, Height = 800 };
+            window.Show();
+            try
+            {
+                ThemeManager.Apply("Light");
+                var box = (ComboBox)tab.FindName("ServerSelector");
+                box.ItemsSource = new[] { new PerformanceMonitorLite.Models.ServerConnection { ServerName = "sql01", DisplayName = "SQL01", ReadOnlyIntent = true } };
+                box.IsDropDownOpen = true;
+                Settle(window);
+                var item = (ComboBoxItem)box.ItemContainerGenerator.ContainerFromIndex(0);
+                return System.Windows.Automation.AutomationProperties.GetName(item);
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        Assert.Equal("SQL01 (Read-Only)", name);
+    }
+
     // ── Overview fleet card ────────────────────────────────────────────────────────────────────
 
     [Theory]
@@ -194,9 +227,8 @@ public sealed class ThemeLeftoversRenderTests
             {
                 Settle(window);
                 var box = Visuals<OverviewCardBorder>(card).First();
-                var wanted = new[] { "Online", "20%" };
                 var found = Visuals<TextBlock>(card)
-                    .Where(t => t.Text == "Online" || t.Text.StartsWith("20", StringComparison.Ordinal) || t.Text.Length == 8 && t.Text.Contains(':'))
+                    .Where(t => t.Text == "Online" || t.Text == item.CpuDisplay || t.Text == item.LastCollectionDisplay)
                     .Select(t => (t.Text, Fore: ColorOf(t.Foreground)))
                     .ToList();
                 return (ColorOf(box.BorderBrush), ColorOf(item.StatusBrush), ColorOf(box.Background), found);
@@ -274,7 +306,7 @@ public sealed class ThemeLeftoversRenderTests
                 Reveal(content);
                 ThemeManager.Apply(theme);
                 Settle(window);
-                var found = Visuals<Border>(content).Where(b => b.Height == 16 && b.Background is SolidColorBrush)
+                var found = Visuals<Border>(content).Where(b => b.Height == 16 && string.IsNullOrEmpty(b.Name) && b.Background is SolidColorBrush)
                     .Select(b => (Fill: ColorOf(b.Background), Edge: ColorOf(b.BorderBrush), b.BorderThickness.Left)).ToList();
                 return (found, Resource(app, "BackgroundBrush"));
             }
@@ -285,7 +317,7 @@ public sealed class ThemeLeftoversRenderTests
         });
 
         Assert.True(tracks.Count >= 5, $"found {tracks.Count} bar tracks");
-        foreach (var track in tracks.Where(t => t.Edge != Colors.Transparent))
+        foreach (var track in tracks)
         {
             Assert.True(track.Left > 0);
             Assert.True(WcagContrast.Ratio(track.Edge, page) >= 3, $"a track edge is {WcagContrast.Ratio(track.Edge, page):0.00}:1 in {theme}");

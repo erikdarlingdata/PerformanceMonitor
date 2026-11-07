@@ -783,7 +783,10 @@ public class ServerSummaryItem
            contradiction on the card; the row underneath carries the severity in its own colour and its own
            word. */
         CollectionIsNotFresh ? "#FFD54F" :
-        "#2a2d35");
+        /* #8221: a healthy card's border is its band colour (green), not a near-black "neutral" that was invisible on Dark and
+           heavy on Light. A card with no verdict yet (Unknown) keeps the unknown grey. */
+        CardStatus == ServerCardStatus.Online ? "#81C784" :
+        "#888888");
 
     /* ── The card explains itself (#2437 / #2422) ────────────────────────────────────────────────────
        Reported against the Darling viewer and fixed there in #2429; Lite's card had the identical bare
@@ -890,8 +893,29 @@ public class ServerSummaryItem
     /// between the two apps is told the same thing in the same words.</summary>
     private const string CardTooltipAction = "Double-click the card to open this server's tab";
 
+    /* #8221: the band colours are the Dark theme's pale tones, which are 1.4:1 to 2.5:1 on a Light or Cool Breeze card ("Online" and the
+       CPU value read pale green on white). On those themes each band takes the theme's own status colour (4.5:1 or better on the card,
+       #3609), so a card follows the theme it is drawn in. The cards are bound again on a theme change (MainWindow). */
+    private static readonly Dictionary<string, string> LightThemeBandKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["#81C784"] = "SuccessBrush",
+        ["#E57373"] = "ErrorBrush",
+        ["#FFB74D"] = "WarningBrush",
+        ["#FFD54F"] = "WarningBrush",
+        ["#888888"] = "ForegroundMutedBrush",
+    };
+
     private static SolidColorBrush MakeBrush(string hex)
     {
+        if (ThemeManager.HasLightBackground
+            && LightThemeBandKeys.TryGetValue(hex, out var key)
+            && System.Windows.Application.Current?.TryFindResource(key) is SolidColorBrush themed)
+        {
+            var themedBrush = new SolidColorBrush(themed.Color);
+            themedBrush.Freeze();
+            return themedBrush;
+        }
+
         var color = (Color)ColorConverter.ConvertFromString(hex);
         var brush = new SolidColorBrush(color);
         brush.Freeze();

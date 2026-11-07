@@ -253,7 +253,7 @@ public sealed class LiteOverviewCardExplainsItselfTests
     [Fact]
     public void TheCardBorder_RendersTheSameDiscriminantTheWordDoes()
     {
-        var neutral = Healthy().CardBorderBrush.Color;
+        var neutral = new ServerSummaryItem { IsOnline = null }.CardBorderBrush.Color;   // #8221: the unknown grey, since a healthy card now draws its band green
 
         var notChecked = NotYetChecked();
         notChecked.HasCollectorErrors = true;

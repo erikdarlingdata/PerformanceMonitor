@@ -24,7 +24,7 @@
 
     <!-- Background Colors -->
     <Color x:Key="BackgroundDarkColor">#CFDDE9</Color>
-    <Color x:Key="AlternatingRowColor">#C5D5E4</Color>
+    <Color x:Key="AlternatingRowColor">#CAD9E7</Color>
     <Color x:Key="BackgroundColor">#DAE6F0</Color>
     <Color x:Key="BackgroundLightColor">#EEF4FA</Color>
     <Color x:Key="BackgroundLighterColor">#BDD0E1</Color>
@@ -94,6 +94,10 @@
     <SolidColorBrush x:Key="BorderLightBrush" Color="{StaticResource BorderLightColor}"/>
     <!-- #7218: the Availability Groups cards draw their outline from this key. Same definition as the Darling Viewer Cool Breeze theme. -->
     <SolidColorBrush x:Key="CardBorderBrush" Color="{StaticResource BorderLightColor}"/>
+    <!-- #8221: the outline of a button, a text box and a combo box, and the track a bar sits on. 3:1 or better against the page and the card
+         on the two light themes, where the pale BorderBrush (a grid line) left them looking like no control at all. -->
+    <SolidColorBrush x:Key="ControlBorderBrush" Color="#5F7C95"/>
+    <SolidColorBrush x:Key="BarTrackBrush" Color="#B7CADB"/>
 
     <SolidColorBrush x:Key="SuccessBrush" Color="{StaticResource SuccessColor}"/>
     <SolidColorBrush x:Key="WarningBrush" Color="{StaticResource WarningColor}"/>
@@ -161,8 +165,8 @@
     <Style TargetType="Button">
         <Setter Property="Background" Value="{StaticResource BackgroundLightBrush}"/>
         <Setter Property="Foreground" Value="#1A2A3A"/>
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
-        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="BorderBrush" Value="{StaticResource ControlBorderBrush}"/>
+        <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="12,6"/>
         <Setter Property="Cursor" Value="Hand"/>
         <Setter Property="Template">
@@ -398,7 +402,7 @@
     <Style x:Key="FilterTextBoxStyle" TargetType="TextBox">
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
         <Setter Property="Foreground" Value="#1A2A3A"/>
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource ControlBorderBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="4,2"/>
         <Setter Property="CaretBrush" Value="#1A2A3A"/>
@@ -455,7 +459,7 @@
     <Style TargetType="TextBox">
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource ControlBorderBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="6,4"/>
         <Setter Property="CaretBrush" Value="{StaticResource ForegroundBrush}"/>
@@ -490,7 +494,7 @@
     <Style TargetType="PasswordBox">
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource ControlBorderBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="6,4"/>
         <Setter Property="CaretBrush" Value="{StaticResource ForegroundBrush}"/>
@@ -530,7 +534,7 @@
             </Grid.ColumnDefinitions>
             <Border x:Name="Border" Grid.ColumnSpan="2"
                     Background="{StaticResource BackgroundDarkBrush}"
-                    BorderBrush="{StaticResource BorderBrush}"
+                    BorderBrush="{StaticResource ControlBorderBrush}"
                     BorderThickness="1" CornerRadius="2"/>
             <Border Grid.Column="0" Margin="1"
                     Background="{StaticResource BackgroundDarkBrush}"
@@ -548,7 +552,7 @@
     <Style TargetType="ComboBox">
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource ControlBorderBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="6,4"/>
         <Setter Property="Template">
@@ -638,6 +642,12 @@
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
+    </Style>
+
+    <!-- #8221: the server pickers name each item by the server (a screen reader would say the model type). It lives in the theme, not in the tab,
+         because a tab's BasedOn="{StaticResource {x:Type ComboBoxItem}}" is looked up once when the tab loads and keeps the theme it loaded under. -->
+    <Style x:Key="ServerSelectorItemStyle" TargetType="ComboBoxItem" BasedOn="{StaticResource {x:Type ComboBoxItem}}">
+        <Setter Property="AutomationProperties.Name" Value="{Binding DisplayNameWithIntent, Mode=OneTime}"/>
     </Style>
 
     <!-- ============================================ -->
@@ -919,7 +929,7 @@
     </Style>
 
     <Style TargetType="DataGridColumnHeader">
-        <Setter Property="Background" Value="{StaticResource BackgroundLightBrush}"/>
+        <Setter Property="Background" Value="{StaticResource BackgroundBrush}"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
         <Setter Property="BorderThickness" Value="0,0,1,1"/>

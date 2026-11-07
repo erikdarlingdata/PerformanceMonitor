@@ -210,19 +210,4 @@ public class ScreenReaderNamesTests
 
         Assert.True(offenders.Count == 0, string.Join("\n", offenders));
     }
-
-    [Theory]
-    [InlineData("Lite/Controls/RecommendationsTab.xaml")]
-    [InlineData("Lite/Controls/FinOpsTab.xaml")]
-    public void TheServerBox_HasAName_AndItsItemsAreNamedByTheServer(string relative)
-    {
-        var text = File.ReadAllText(Path.Combine(RepoRoot(), relative));
-        var start = text.IndexOf("<ComboBox x:Name=\"ServerSelector\"", StringComparison.Ordinal);
-        Assert.True(start >= 0);
-        var end = text.IndexOf("</ComboBox>", start, StringComparison.Ordinal);
-        var box = text.Substring(start, end - start);
-
-        Assert.Contains("AutomationProperties.Name=\"Server\"", box, StringComparison.Ordinal);
-        Assert.Contains("<Setter Property=\"AutomationProperties.Name\" Value=\"{Binding DisplayNameWithIntent, Mode=OneTime}\"/>", box, StringComparison.Ordinal);
-    }
 }

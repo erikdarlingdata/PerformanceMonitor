@@ -112,7 +112,7 @@ public sealed class LiteOverviewCardRenderTests
     }
 
     [Theory]
-    [InlineData(0, 0, "#2A2D35")]   // healthy: the neutral border
+    [InlineData(0, 0, "#81C784")]   // healthy: the Healthy band colour (#8221)
     [InlineData(3, 0, "#FFB74D")]   // blocking: amber
     [InlineData(0, 2, "#E57373")]   // a deadlock: red
     public void TheCardBorder_IsTwoPixels_InTheServersBandColour(int blocking, int deadlocks, string expected)
