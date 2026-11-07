@@ -19,7 +19,7 @@ using Xunit;
 
 namespace Darling.Tests;
 
-/* Scratch database per test, like PgStatementsDeallocLiveTests: the shared store's search_path would see the other
+/* #1776 own-store: this fact mints its own scratch database through ScratchPostgres and never touches another
    test's rows, so it is deliberately NOT [Collection("live-postgres")]. */
 /// <summary>
 /// #8075 against a real store: an Aurora target reads aurora_stat_statements(), which needs no extension, so when the
