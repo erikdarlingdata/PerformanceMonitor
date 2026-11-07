@@ -3965,7 +3965,10 @@ ORDER BY server_name";
                                 ? $"No blocking or deadlocks recorded for {resolved.DisplayName} in the last {hours_back} hour(s)"
                                 : $"No blocking{DarlingMcpBlockingTools.ForChosenDatabases(databases)} "
                                   + $"(and no deadlocks, which are not limited by database) recorded for {resolved.DisplayName} in the last {hours_back} hour(s)",
-                            coveredClaim: ". The blocking collectors have run successfully for this server, so there was no blocking or deadlock in this window."),
+                            /* #8146: a lossy window keeps the runs but not the all-clear; the lost events were never read. */
+                            coveredClaim: emptyLoss is null
+                                ? ". The blocking collectors have run successfully for this server, so there was no blocking or deadlock in this window."
+                                : ". The blocking collectors have run successfully for this server, but " + RingBufferLossAnswer.LostEventsClaim + "."),
                         RingBufferLossAnswer.WithLoss(emptyNotice.AsHints(), emptyLoss))
                     : McpHelpers.Status(
                         "unavailable",

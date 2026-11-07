@@ -80,10 +80,10 @@ VALUES ($1,$2,$3,$4,$2,'rpc_completed','testdb',5000000,'EXEC p')",
             var loss = root.GetProperty("hints").GetProperty("ring_buffer_loss");
             Assert.Equal(12, loss.GetProperty("evicted_events").GetInt64());
             Assert.Equal(0, loss.GetProperty("dropped_events").GetInt64());
-        var note = loss.GetProperty("note").GetString()!;
-        Assert.Contains("were evicted", note, StringComparison.Ordinal);
-        Assert.DoesNotContain("ring_buffer_evicted=", note, StringComparison.Ordinal);
-        Assert.EndsWith("Z", loss.GetProperty("first_loss_utc").GetString()!, StringComparison.Ordinal);
+            var note = loss.GetProperty("note").GetString()!;
+            Assert.Contains("were evicted", note, StringComparison.Ordinal);
+            Assert.DoesNotContain("ring_buffer_evicted=", note, StringComparison.Ordinal);
+            Assert.EndsWith("Z", loss.GetProperty("first_loss_utc").GetString()!, StringComparison.Ordinal);
         });
 
     /* The loss rides BESIDE the #4966 window keys, not instead of them. */
@@ -190,6 +190,47 @@ VALUES ($1,$2,$3,$4,$2,'rpc_completed','testdb',5000000,'EXEC p')",
 
             Assert.Equal("empty", root.GetProperty("status").GetString());
             Assert.Equal(12, root.GetProperty("hints").GetProperty("ring_buffer_loss").GetProperty("evicted_events").GetInt64());
+        });
+
+    /* Review Focus 5: the runs that executed saw nothing, but the ring buffer lost events before they read it, so the message must not
+       call the window an all-clear. A clean window keeps it (the twin below). */
+    [Fact]
+    public async Task GetDeadlockTrend_EmptyWindowWithLoss_DoesNotClaimAnAllClear_AgainstDevPostgres() =>
+        await RunAsync("trend-empty-claim", async (c, ds, name, end) =>
+        {
+            await SeedRunAsync(DeadlocksCollector.Instance.Name, end.AddHours(-3), LossNote, c, name);
+            await SeedRunAsync(DeadlocksCollector.Instance.Name, end.AddMinutes(-2), null, c, name);
+
+            var message = Parse(await DarlingMcpBlockingTools.GetDeadlockTrend(ds, name, 24, AsOf(end))).GetProperty("message").GetString()!;
+
+            Assert.DoesNotContain("all-clear", message, StringComparison.Ordinal);
+            Assert.Contains("hints.ring_buffer_loss", message, StringComparison.Ordinal);
+        });
+
+    [Fact]
+    public async Task GetDeadlockTrend_EmptyCleanWindow_KeepsTheAllClear_AgainstDevPostgres() =>
+        await RunAsync("trend-empty-clean", async (c, ds, name, end) =>
+        {
+            await SeedRunAsync(DeadlocksCollector.Instance.Name, end.AddHours(-3), null, c, name);
+            await SeedRunAsync(DeadlocksCollector.Instance.Name, end.AddMinutes(-2), null, c, name);
+
+            var message = Parse(await DarlingMcpBlockingTools.GetDeadlockTrend(ds, name, 24, AsOf(end))).GetProperty("message").GetString()!;
+
+            Assert.Contains("genuine all-clear", message, StringComparison.Ordinal);
+        });
+
+    [Fact]
+    public async Task GetBlockingStats_EmptyWindowWithLoss_DoesNotClaimAnAllClear_AgainstDevPostgres() =>
+        await RunAsync("stats-empty-claim", async (c, ds, name, end) =>
+        {
+            await SeedRunAsync(DeadlocksCollector.Instance.Name, end.AddHours(-2), LossNote, c, name);
+            await SeedRunAsync(DeadlocksCollector.Instance.Name, end.AddMinutes(-2), null, c, name);
+
+            var message = Parse(await DarlingMcpDataTools.GetBlockingStats(ds, name, 24, as_of: AsOf(end))).GetProperty("message").GetString()!;
+
+            Assert.DoesNotContain("there was no blocking or deadlock", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("all-clear", message, StringComparison.Ordinal);
+            Assert.Contains("hints.ring_buffer_loss", message, StringComparison.Ordinal);
         });
 
     [Fact]

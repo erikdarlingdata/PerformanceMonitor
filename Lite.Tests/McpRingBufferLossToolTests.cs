@@ -234,6 +234,50 @@ VALUES ($1, $2, $3, $4, $2, 'rpc_completed', 'testdb', 'EXEC p', 5000000)",
         Assert.Equal(12, root.GetProperty("hints").GetProperty("ring_buffer_loss").GetProperty("evicted_events").GetInt64());
     }
 
+    /* Review Focus 5: the runs that executed saw nothing, but the ring buffer lost events before they read it, so the message must not
+       call the window an all-clear. A clean window keeps it (the twin below). */
+    [Fact]
+    public async Task GetDeadlockTrend_EmptyWindowWithLoss_DoesNotClaimAnAllClear()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await SeedRunAsync(DeadlocksCollector.Instance.Name, Anchor.AddHours(-3), LossNote);
+        await SeedRunAsync(DeadlocksCollector.Instance.Name, Anchor.AddMinutes(-2), null);
+
+        var message = Root(await McpBlockingTools.GetDeadlockTrend(Service(), _serverManager, ServerName, 24, AsOf)).GetProperty("message").GetString()!;
+
+        Assert.DoesNotContain("all-clear", message, StringComparison.Ordinal);
+        Assert.Contains("hints.ring_buffer_loss", message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GetDeadlockTrend_EmptyCleanWindow_KeepsTheAllClear()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await SeedRunAsync(DeadlocksCollector.Instance.Name, Anchor.AddHours(-3), null);
+        await SeedRunAsync(DeadlocksCollector.Instance.Name, Anchor.AddMinutes(-2), null);
+
+        var message = Root(await McpBlockingTools.GetDeadlockTrend(Service(), _serverManager, ServerName, 24, AsOf)).GetProperty("message").GetString()!;
+
+        Assert.Contains("genuine all-clear", message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GetBlockingStats_EmptyWindowWithLoss_DoesNotClaimAnAllClear()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        /* Rows from before the window, so the store covers it and the answer takes its covered (all-clear) branch, not the cut one. */
+        await SeedDeadlockAsync(Anchor.AddDays(-3));
+        await SeedBlockedReportAsync(Anchor.AddDays(-3));
+        await SeedRunAsync(DeadlocksCollector.Instance.Name, Anchor.AddHours(-2), LossNote);
+        await SeedRunAsync(DeadlocksCollector.Instance.Name, Anchor.AddMinutes(-2), null);
+
+        var message = Root(await McpHealthTools.GetBlockingStats(Service(), _serverManager, ServerName, 24, AsOf)).GetProperty("message").GetString()!;
+
+        Assert.DoesNotContain("there was no blocking or deadlock", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("all-clear", message, StringComparison.Ordinal);
+        Assert.Contains("hints.ring_buffer_loss", message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task GetBlockingTrend_WithRowsAndLoss_TopLevelKey()
     {

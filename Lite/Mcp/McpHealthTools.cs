@@ -1607,8 +1607,8 @@ public sealed class McpHealthTools
                     : default;
                 /* #8146: this read spans the blocked-process reports and the deadlocks, so the ring-buffer loss of either collector rides the empty answer's hints. */
                 var emptyLoss = everRan ? RingBufferLossAnswer.Combine(
-                await dataService.GetLossRunsInWindowAsync(resolved.ServerId, BlockedProcessReportCollector.Instance.Name, windowEnd.AddHours(-hours), windowEnd),
-                await dataService.GetLossRunsInWindowAsync(resolved.ServerId, DeadlocksCollector.Instance.Name, windowEnd.AddHours(-hours), windowEnd)) : null;
+                    await dataService.GetLossRunsInWindowAsync(resolved.ServerId, BlockedProcessReportCollector.Instance.Name, windowEnd.AddHours(-hours), windowEnd),
+                    await dataService.GetLossRunsInWindowAsync(resolved.ServerId, DeadlocksCollector.Instance.Name, windowEnd.AddHours(-hours), windowEnd)) : null;
                 return RingBufferLossAnswer.AttachToHints(everRan
                     ? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status(
                         "empty",
@@ -1617,7 +1617,10 @@ public sealed class McpHealthTools
                             factual: database == null
                                 ? $"No blocking or deadlocks recorded for {resolved.DisplayName} in the last {hours} hour(s)"
                                 : $"No blocking{McpDatabaseSelection.ForChosen(new[] { database })} (and no deadlocks, which are not limited by database) recorded for {resolved.DisplayName} in the last {hours} hour(s)",
-                            coveredClaim: ". The blocking collectors have run successfully for this server, so there was no blocking or deadlock in this window."),
+                            /* #8146: a lossy window keeps the runs but not the all-clear; the lost events were never read. */
+                            coveredClaim: emptyLoss is null
+                                ? ". The blocking collectors have run successfully for this server, so there was no blocking or deadlock in this window."
+                                : ". The blocking collectors have run successfully for this server, but " + RingBufferLossAnswer.LostEventsClaim + "."),
                         emptyNotice.AsHints()), windowEnd.AddHours(-hours))
                     : McpHelpers.Status(
                         "unavailable",

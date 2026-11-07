@@ -1222,11 +1222,17 @@ public sealed class DarlingMcpBlockingTools
             hints[RingBufferLossAnswer.Key] = lost.ToPayload();
         }
 
+        /* #8146: runs that saw nothing say nothing about the events the ring buffer lost before they read it, so a lossy window
+           keeps the run count but not the all-clear. */
         if (captureCount > 0)
+        {
             return McpHelpers.Status(
                 "empty",
-                $"No {subject} was recorded for {serverName}{ForChosenDatabases(databases)} in the last {hoursBack} hour(s). {captureCount.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)} collector run(s) did execute over this window, so this is a genuine all-clear rather than missing data — see hints.captures for which collectors ran and when.",
+                $"No {subject} was recorded for {serverName}{ForChosenDatabases(databases)} in the last {hoursBack} hour(s). {captureCount.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)} collector run(s) did execute over this window, "
+                    + (loss is null ? "so this is a genuine all-clear rather than missing data" : "but " + RingBufferLossAnswer.LostEventsClaim)
+                    + " — see hints.captures for which collectors ran and when.",
                 hints);
+        }
 
         var everCaptured = await hasEverCapturedAsync();
         return McpHelpers.Status(

@@ -538,13 +538,15 @@ public sealed class McpBlockingTools
                 var captures = await dataService.GetBlockingCaptureCountsAsync(
                     resolved.ServerId, hours_back, asOfUtc: anchorEnd);
                 /* #7005: the window notice (BlockedProcessReports probes the XE collector and the DMV snapshots, the two sources this trend reads). */
-                /* #8146: the blocked-process-report collector's ring-buffer loss over the window rides the empty answer's hints. */
+                /* #8146: the blocked-process-report collector's ring-buffer loss over the window rides the empty answer's hints,
+                   and EmptyTrend drops its all-clear when there was any. */
+                var emptyLoss = await dataService.GetLossRunsInWindowAsync(resolved.ServerId, BlockedProcessReportCollector.Instance.Name, anchorEnd.AddHours(-hours_back), anchorEnd);
                 return RingBufferLossAnswer.AttachToHints(await McpQueryTools.WithEmptyWindowNoticeAsync(WithNullSource(await EmptyTrend(
                     "blocking", resolved.DisplayName, hours_back, captures,
                     () => dataService.HasAnyBlockingCollectorRunAsync(resolved.ServerId),
-                    database)),
+                    database, emptyLoss)),
                     dataService, QueryWindowRelation.BlockedProcessReports, resolved.ServerId, anchorEnd.AddHours(-hours_back), anchorEnd, "blocked_process_report"),
-                    await dataService.GetLossRunsInWindowAsync(resolved.ServerId, BlockedProcessReportCollector.Instance.Name, anchorEnd.AddHours(-hours_back), anchorEnd));
+                    emptyLoss);
             }
 
             var result = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count });
@@ -600,15 +602,18 @@ public sealed class McpBlockingTools
 
                 var captures = await dataService.GetDeadlockCaptureCountsAsync(
                     resolved.ServerId, hours_back, asOfUtc: windowEnd);
-                /* #8146: the deadlock collector's ring-buffer loss over the window rides the empty answer's hints. */
+                /* #8146: the deadlock collector's ring-buffer loss over the window rides the empty answer's hints, and EmptyTrend
+                   drops its all-clear when there was any. */
+                var emptyLoss = await dataService.GetLossRunsInWindowAsync(resolved.ServerId, DeadlocksCollector.Instance.Name, windowEnd.AddHours(-hours_back), windowEnd);
                 return RingBufferLossAnswer.AttachToHints(await McpQueryTools.WithEmptyWindowNoticeAsync(await EmptyTrend(
                     /* SINGULAR: the subject lands in "No {subject} was recorded", and "no deadlocks
                        was recorded" is not a sentence. It also reads correctly in the other two,
                        where it modifies the collector rather than the event. */
                     "deadlock", resolved.DisplayName, hours_back, captures,
-                    () => dataService.HasAnyDeadlockCollectorRunAsync(resolved.ServerId)),
+                    () => dataService.HasAnyDeadlockCollectorRunAsync(resolved.ServerId),
+                    loss: emptyLoss),
                     dataService, QueryWindowRelation.Deadlocks, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "deadlocks"),
-                    await dataService.GetLossRunsInWindowAsync(resolved.ServerId, DeadlocksCollector.Instance.Name, windowEnd.AddHours(-hours_back), windowEnd));
+                    emptyLoss);
             }
 
             var result = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count });
@@ -734,7 +739,8 @@ public sealed class McpBlockingTools
         int hoursBack,
         List<CollectorCaptureCount> captures,
         Func<Task<bool>> hasEverCapturedAsync,
-        string? database = null)
+        string? database = null,
+        RingBufferLossNote.LossWindow? loss = null)
     {
         var captureCount = captures.Sum(c => c.Runs);
         var hints = new
@@ -751,11 +757,17 @@ public sealed class McpBlockingTools
             }),
         };
 
+        /* #8146: runs that saw nothing say nothing about the events the ring buffer lost before they read it, so a lossy window
+           keeps the run count but not the all-clear. The caller attaches hints.ring_buffer_loss. */
         if (captureCount > 0)
+        {
             return McpHelpers.Status(
                 "empty",
-                $"No {subject} was recorded for {serverName}{ForChosenDatabase(database)} in the last {hoursBack} hour(s). {captureCount} collector run(s) DID execute over this window, so this is a genuine all-clear rather than missing data — see hints.captures for which collectors ran and when.",
+                $"No {subject} was recorded for {serverName}{ForChosenDatabase(database)} in the last {hoursBack} hour(s). {captureCount} collector run(s) DID execute over this window, "
+                    + (loss is null ? "so this is a genuine all-clear rather than missing data" : "but " + RingBufferLossAnswer.LostEventsClaim)
+                    + " — see hints.captures for which collectors ran and when.",
                 hints);
+        }
 
         var everCaptured = await hasEverCapturedAsync();
         return McpHelpers.Status(

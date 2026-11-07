@@ -20,6 +20,14 @@ public static class RingBufferLossAnswer
 {
     public const string Key = "ring_buffer_loss";
 
+    /// <summary>
+    /// The clause an empty answer gives instead of its all-clear when the window lost events (REVIEW-TRAPS:39): collector runs that saw
+    /// nothing prove nothing about the events the ring buffer evicted or dropped before those runs read it. It follows "but ", and
+    /// both apps use this one text so their answers match.
+    /// </summary>
+    public const string LostEventsClaim =
+        "the ring buffer lost events before they were collected (see hints.ring_buffer_loss), so the window is incomplete and finding nothing does not mean nothing happened";
+
     /// <summary>The serialized data answer with <c>ring_buffer_loss</c> appended at the top level, or the answer as is when nothing was lost.</summary>
     public static string Attach(string json, RingBufferLossNote.LossWindow? loss)
     {
