@@ -115,6 +115,17 @@ public class CpuSchedulerMetricsTests
             CpuSchedulerMetrics.ClassifyCpuPressure(
                 new StubSnapshot { MaxWorkersCount = 100, TotalCurrentWorkersCount = 95 }).Level);
 
+    /// <summary>The collector raises the exhaustion flag at 90% of max worker threads, so above 90% the flag and the
+    /// utilization arm both hold, and the flag's CRITICAL is what a server at 95% reads.</summary>
+    [Fact]
+    public void ClassifyCpuPressure_ExhaustionFlagAbove90Percent_IsCritical()
+    {
+        var pressure = CpuSchedulerMetrics.ClassifyCpuPressure(
+            new StubSnapshot { MaxWorkersCount = 1000, TotalCurrentWorkersCount = 950, WorkerThreadExhaustionWarning = true });
+
+        Assert.StartsWith("CRITICAL", pressure.Level, System.StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ClassifyCpuPressure_ZeroMaxWorkers_DoesNotDivideByZero_StaysNormal()
         => Assert.Equal("NORMAL",

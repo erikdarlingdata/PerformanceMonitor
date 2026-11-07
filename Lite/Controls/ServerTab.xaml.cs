@@ -548,7 +548,7 @@ public partial class ServerTab : UserControl
            instead of starting a second read. Programmatic selection changes are still skipped below by
            _suppressActiveQueriesAutoRefresh, the only flag that was ever meant to silence this handler. */
         if (e.Source != MainTabControl && e.Source != QueriesSubTabControl
-            && e.Source != MemorySubTabControl && e.Source != BlockingSubTabControl
+            && e.Source != CpuSubTabControl && e.Source != MemorySubTabControl && e.Source != BlockingSubTabControl
             && e.Source != SystemEventsSubTabControl && e.Source != ConfigChangesSubTabControl) return;
 
         UpdateCompareDropdownState();

@@ -44,6 +44,16 @@ public sealed class DarlingConfig
     public PostgresConfig Postgres { get; set; } = new();
 
     /// <summary>
+    /// #8006: where the service loads its password key from, instead of the key file it generates in the credentials
+    /// directory. Only a reference is accepted, <c>file:&lt;path&gt;</c> or <c>env:&lt;NAME&gt;</c>; a literal key is
+    /// refused by <see cref="Validate"/> (<see cref="DarlingPasswordKeySource.LiteralRefusal"/>). Unlike the other
+    /// reference slots it is never resolved at load: the reference stays as written here, so the key text never sits
+    /// in the config object. Null (the setting omitted) keeps the generated key file.
+    /// </summary>
+    [JsonPropertyName("passwordKey")]
+    public string? PasswordKey { get; set; }
+
+    /// <summary>
     /// #4535: the plan analyzer's per-rule disable/severity-override config, read from an optional
     /// <c>analyzer</c> section in darling.json — the same shape as erikdarlingdata/PerformanceStudio's
     /// <c>.planview.json</c> root (<see cref="PerformanceMonitor.PlanAnalysis.AnalyzerConfig"/>). Null
@@ -603,6 +613,15 @@ public sealed class DarlingConfig
         else if (string.IsNullOrWhiteSpace(Postgres.ConnectionString))
         {
             problems.Add("postgres.connectionString is required (or set postgres.managed = true to run the bundled server).");
+        }
+
+        /* #8006: a literal key in darling.json is the plaintext secret the setting exists to avoid, so it is fatal rather
+           than a warning. The sentence is a constant and never repeats the value. The prefix is tested on the value as
+           written, not trimmed: the owned set (DarlingOwnedSecrets.Visit) does the same, so a value with leading
+           whitespace that slipped past here would load a key that no owned-secret check covers. */
+        if (!string.IsNullOrWhiteSpace(PasswordKey) && !DarlingSecretSource.IsReference(PasswordKey))
+        {
+            problems.Add(DarlingPasswordKeySource.LiteralRefusal);
         }
 
         /* Peer-disclosure problems are checked BEFORE the servers early-return so a broken peers block is

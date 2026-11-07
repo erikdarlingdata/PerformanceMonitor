@@ -14,10 +14,12 @@ namespace PerformanceMonitor.Darling.Service;
 /// <summary>The password key the store currently publishes.</summary>
 public sealed record PublishedKey(string KeyId, byte[] Spki);
 
-/// <summary>What the service found about its password key at start: the key file, and the key the store publishes.</summary>
+/// <summary>What the service found about its password key at start: the key file, and the key the store publishes.
+/// <see cref="FromSetting"/> is true when the key came from the <c>passwordKey</c> setting instead of the key file; the
+/// file fields then describe that key, and <see cref="FoundAfterOpenDirectory"/> is ignored.</summary>
 public sealed record PasswordKeyFacts(
     bool FilePresent, bool FileUntrusted, string? FileRefusal, byte[]? FileSpki,
-    bool FoundAfterOpenDirectory, PublishedKey? StoreCurrent, bool FileKeyRetiredInStore);
+    bool FoundAfterOpenDirectory, PublishedKey? StoreCurrent, bool FileKeyRetiredInStore, bool FromSetting = false);
 
 /// <summary>What the service does with its password key at start.</summary>
 public enum PasswordKeyAction
@@ -39,6 +41,10 @@ public enum PasswordKeyAction
 
     /// <summary>The file cannot be used and must not be replaced.</summary>
     Refused,
+
+    /// <summary>The key from the <c>passwordKey</c> setting was reset and nothing is published. Publish nothing and wait
+    /// for a new key in that source.</summary>
+    AwaitNewKey,
 }
 
 /// <summary>The decision for one start. <see cref="RetireAs"/> is <c>retired</c> or <c>discarded</c>; the reason and the
@@ -63,6 +69,10 @@ public static class DarlingPasswordKeyState
     public static PasswordKeyDecision Decide(PasswordKeyFacts f)
     {
         ArgumentNullException.ThrowIfNull(f);
+        if (f.FromSetting)
+        {
+            return DecideFromSetting(f);
+        }
 
         // A file that exists but cannot be trusted is never replaced.
         if (f.FileUntrusted)
@@ -132,6 +142,69 @@ public static class DarlingPasswordKeyState
         var storeId = PasswordSeal.DisplayKeyId(PasswordSeal.KeyIdFor(current.Spki));
         return $"The password key in the credentials directory ({fileId}) is not the key the store publishes ({storeId}). " +
             "Restore the credentials volume that holds the key, or run --reset-password-key and enter the saved passwords again.";
+    }
+
+    /// <summary>The sweep's sentence when the published key was reset and the held key came from <c>passwordKey</c>.</summary>
+    public const string SettingSweepResetReason =
+        "The password key was reset. Put a new key in the passwordKey source (make one with --new-password-key), " +
+        "then restart the service. Saved passwords must be entered again.";
+
+    /// <summary>The sentence for a key from <c>passwordKey</c> that is not the key the store publishes. Both ids are
+    /// worked out from the key bytes, never printed as the store holds them.</summary>
+    public static string SettingMismatchReason(byte[] keySpki, PublishedKey current)
+    {
+        ArgumentNullException.ThrowIfNull(keySpki);
+        ArgumentNullException.ThrowIfNull(current);
+        var keyId = PasswordSeal.DisplayKeyId(PasswordSeal.KeyIdFor(keySpki));
+        var storeId = PasswordSeal.DisplayKeyId(PasswordSeal.KeyIdFor(current.Spki));
+        return $"The password key from passwordKey ({keyId}) is not the key the store publishes ({storeId}). " +
+            "Put the published key back in the passwordKey source, or run --reset-password-key and enter the saved passwords again.";
+    }
+
+    /// <summary>The sentence for a key from <c>passwordKey</c> that the store marks as reset while nothing is published.</summary>
+    public static string SettingResetReason(string keyId) =>
+        $"The password key {PasswordSeal.DisplayKeyId(keyId)} from passwordKey was reset. Put a new key in the passwordKey source " +
+        "(make one with --new-password-key), then restart the service. Saved passwords must be entered again.";
+
+    /// <summary>The sweep's sentence when the store publishes a key other than the one held from <c>passwordKey</c>.</summary>
+    public static string SettingSweepMismatchReason(string currentKeyId, string heldKeyId) =>
+        $"The store now publishes the password key {PasswordSeal.DisplayKeyId(currentKeyId)}, not the key this service holds " +
+        $"from passwordKey ({PasswordSeal.DisplayKeyId(heldKeyId)}). Put the published key back in the passwordKey source and restart the service.";
+
+    // The operator owns a key from the setting, so it is never generated, written or retired here: every row that
+    // would replace the key file instead refuses and says what to put in the source.
+    private static PasswordKeyDecision DecideFromSetting(PasswordKeyFacts f)
+    {
+        if (f.FileUntrusted || f.FileSpki is null)
+        {
+            return new PasswordKeyDecision(
+                PasswordKeyAction.Refused, false, null,
+                string.IsNullOrWhiteSpace(f.FileRefusal) ? "The password key from passwordKey cannot be used." : f.FileRefusal,
+                null);
+        }
+
+        var current = f.StoreCurrent;
+
+        // Same action as the key-file row for an inconsistent published key, in the setting's words.
+        if (current is not null && !string.Equals(current.KeyId, PasswordSeal.KeyIdFor(current.Spki), StringComparison.Ordinal))
+        {
+            return new PasswordKeyDecision(PasswordKeyAction.Mismatch, false, null, SettingMismatchReason(f.FileSpki, current), null);
+        }
+
+        if (current is null)
+        {
+            return f.FileKeyRetiredInStore
+                ? new PasswordKeyDecision(
+                    PasswordKeyAction.AwaitNewKey, false, null, SettingResetReason(PasswordSeal.KeyIdFor(f.FileSpki)), null)
+                : new PasswordKeyDecision(PasswordKeyAction.PublishFile, false, null, null, null);
+        }
+
+        if (SameKey(current.Spki, f.FileSpki))
+        {
+            return new PasswordKeyDecision(PasswordKeyAction.Use, false, null, null, null);
+        }
+
+        return new PasswordKeyDecision(PasswordKeyAction.Mismatch, false, null, SettingMismatchReason(f.FileSpki, current), null);
     }
 
     private static PasswordKeyDecision DecideWithoutFile(PublishedKey? current) =>
