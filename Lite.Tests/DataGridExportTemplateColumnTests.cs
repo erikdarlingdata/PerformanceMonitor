@@ -46,7 +46,7 @@ public sealed class DataGridExportTemplateColumnTests
         TotalExecutions = 12345,
         TotalCpuMs = 678.5,
         RowLockWaitInMs = 910,
-        Nested = new Detail { ServerName = "sql-01" },
+        Nested = new Detail { ServerName = "a8153-server" },
     };
 
     private static T RunSta<T>(Func<T> body) => StaTestThread.Run(() => WithTheme(body));
@@ -94,7 +94,7 @@ public sealed class DataGridExportTemplateColumnTests
 
         var lines = csv.TrimEnd('\n').Split('\n');
         Assert.Equal("Query Text,Executions,Total CPU (ms),Row Lock Wait ms,Server", lines[0]);
-        Assert.Equal("SELECT 1,12345,678.5,910,sql-01", lines[1]);
+        Assert.Equal("SELECT 1,12345,678.5,910,a8153-server", lines[1]);
     }
 
     [Fact]
@@ -104,7 +104,7 @@ public sealed class DataGridExportTemplateColumnTests
 
         var lines = text.TrimEnd('\n').Split('\n');
         Assert.Equal("Query Text\tExecutions\tTotal CPU (ms)\tRow Lock Wait ms\tServer", lines[0]);
-        Assert.Equal("SELECT 1\t12345\t678.5\t910\tsql-01", lines[1]);
+        Assert.Equal("SELECT 1\t12345\t678.5\t910\ta8153-server", lines[1]);
     }
 
     [Fact]
@@ -117,7 +117,7 @@ public sealed class DataGridExportTemplateColumnTests
             return DataGridExport.GetClipboardRowValues(grid, item);
         });
 
-        Assert.Equal(new[] { "SELECT 1", "12345", "678.5", "910", "sql-01" }, values);
+        Assert.Equal(new[] { "SELECT 1", "12345", "678.5", "910", "a8153-server" }, values);
     }
 
     [Fact]
@@ -131,7 +131,7 @@ public sealed class DataGridExportTemplateColumnTests
         });
 
         Assert.Equal("12345", executions);
-        Assert.Equal("sql-01", server);
+        Assert.Equal("a8153-server", server);
     }
 
     [Fact]
