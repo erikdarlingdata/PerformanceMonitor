@@ -70,10 +70,16 @@ WORKDIR /app
 COPY --from=build /app/publish .
 
 # #3914: where the service keeps the passwords of the least-privilege roles it provisions on the compose store.
-# Created owner-only here because Docker seeds a new named volume from the image's directory, mode included, so
-# the compose file's darling-credentials volume starts owner-only too. The service creates each file 0600, and
-# keeps the store's log-hash key there as well (#4004).
-RUN mkdir -p /var/lib/darling/credentials && chmod 700 /var/lib/darling/credentials
+# Created owner-only here and given to $APP_UID, because Docker seeds a new named volume from the image's directory,
+# owner and mode included, so the compose file's darling-credentials volume starts owned by $APP_UID, mode 0700.
+# The service creates each file 0600, and keeps the store's log-hash key there as well (#4004).
+# The file log lives under CommonApplicationData, which is /usr/share on Linux, so that folder is given to $APP_UID too.
+# A volume created by an earlier release is owned by root and is not reseeded: it needs the documented chown to $APP_UID,
+# and until then the service stops collection and says so (#8141).
+RUN mkdir -p /var/lib/darling/credentials /usr/share/PerformanceMonitorDarling/logs \
+    && chown -R $APP_UID:$APP_UID /var/lib/darling /usr/share/PerformanceMonitorDarling \
+    && chmod 700 /var/lib/darling/credentials
+USER $APP_UID
 
 # The config mount point the compose file uses; override DARLING_CONFIG to relocate.
 ENV DARLING_CONFIG=/config/darling.json
