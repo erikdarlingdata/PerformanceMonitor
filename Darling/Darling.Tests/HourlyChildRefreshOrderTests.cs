@@ -10,7 +10,6 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -20,36 +19,27 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// Which hourly aggregates are built from another hourly aggregate on the phase grid, recovered from the shipped
-/// CREATE text (<c>FROM collect.&lt;relation&gt;</c>) rather than from a hand list, so a hierarchical hourly
-/// registered tomorrow is covered the moment it joins <see cref="TimescaleSupport.HourlyRefreshDefinitions"/>.
-/// Shared by the grid pins in this file, TimescaleContinuousAggregateTests and TimescaleSupportTests.
+/// The hourly-from-hourly lineage as the product recovers it from the shipped CREATE text
+/// (<see cref="TimescaleSupport.IsHierarchicalHourlyRefresh"/> and <see cref="TimescaleSupport.RefreshSourceRelationFor"/>),
+/// shaped as the pairs the grid pins in this file, TimescaleContinuousAggregateTests and TimescaleSupportTests judge by their
+/// minutes. One recovery, not a second parse: a lineage the product got wrong fails the pins on the minutes it produced, and the
+/// positive control in <see cref="HourlyChildRefreshOrderTests.EveryHourlyBuiltFromAnHourly_StartsAfterItsSourcesSlotAndWindow"/>
+/// catches a recovery that found nothing.
 /// </summary>
 internal static class HourlyRefreshLineage
 {
-    /// <summary>The relation a CREATE selects <c>FROM</c> inside <c>collect</c>, or null when it names none.</summary>
-    public static string? SourceOf(string createSql)
-    {
-        var match = Regex.Match(createSql, @"FROM\s+collect\.(\w+)", RegexOptions.IgnoreCase);
-        return match.Success ? match.Groups[1].Value : null;
-    }
-
     /// <summary>Every hourly view on the grid paired with its source, where that source is itself an hourly view
     /// on the grid — the pairs whose refresh order inside the hour is load-bearing (#8053).</summary>
     public static IReadOnlyList<(string Child, string Parent)> HierarchicalPairs()
-    {
-        var views = new HashSet<string>(TimescaleSupport.HourlyRefreshDefinitions.Select(d => d.View), StringComparer.Ordinal);
-        return TimescaleSupport.HourlyRefreshDefinitions
-            .Select(d => (Child: d.View, Parent: SourceOf(d.CreateSql)))
-            .Where(p => p.Parent is not null && views.Contains(p.Parent))
-            .Select(p => (p.Child, p.Parent!))
+        => TimescaleSupport.HourlyRefreshDefinitions
+            .Where(d => TimescaleSupport.IsHierarchicalHourlyRefresh(d.View))
+            .Select(d => (Child: d.View, Parent: TimescaleSupport.RefreshSourceRelationFor(d.CreateSql)!))
             .ToArray();
-    }
 
-    /// <summary>The hourly views on the grid that are NOT built from another hourly view — the ones a light-band
-    /// claim is about.</summary>
+    /// <summary>Whether <paramref name="view"/> is an hourly on the grid built from another hourly on the grid — the
+    /// views a light-band claim is NOT about.</summary>
     public static bool IsHierarchical(string view)
-        => HierarchicalPairs().Any(p => string.Equals(p.Child, view, StringComparison.Ordinal));
+        => TimescaleSupport.IsHierarchicalHourlyRefresh(view);
 }
 
 /// <summary>
