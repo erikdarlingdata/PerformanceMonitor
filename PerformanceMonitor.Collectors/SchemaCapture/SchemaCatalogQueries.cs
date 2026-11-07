@@ -71,6 +71,7 @@ public static class SchemaCatalogQueries
 
     private const string Prologue =
         "SET NOCOUNT ON;\r\n"
+        + "IF OBJECT_ID(N'tempdb..#pm_schema_ids') IS NOT NULL DROP TABLE #pm_schema_ids;\r\n"
         + "CREATE TABLE #pm_schema_ids (object_id int NOT NULL PRIMARY KEY);\r\n";
 
     /* STUFF over a FOR XML PATH string: the delimiter is a comma, a name's own backslash and comma are escaped first, and .value('.')
@@ -255,5 +256,7 @@ SELECT
 FROM #pm_schema_ids AS i
 JOIN sys.triggers AS tr ON tr.parent_id = i.object_id AND tr.parent_class = 1
 ORDER BY tr.parent_id, tr.name;
+
+DROP TABLE #pm_schema_ids;
 """;
 }

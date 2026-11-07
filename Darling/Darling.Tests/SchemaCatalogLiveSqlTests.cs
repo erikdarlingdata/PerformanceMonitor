@@ -310,6 +310,33 @@ public sealed class SchemaCatalogLiveSqlTests
     }
 
     [Fact]
+    public async Task CatalogRead_TwoPlainBatchesOnOneOpenConnection_BothSucceed()
+    {
+        await WithScratchDatabaseAsync(null, async (db, ct) =>
+        {
+            await CreateRichSchemaAsync(db, ct);
+
+            await using var connection = new SqlConnection(db);
+            await connection.OpenAsync(ct);
+
+            async Task<SchemaCatalogSnapshot> RunAsync(string batch)
+            {
+                await using var command = new SqlCommand(batch, connection) { CommandTimeout = 60 };
+                await using var reader = await command.ExecuteReaderAsync(ct);
+                return await SchemaCatalogReader.ReadAsync(reader, ct);
+            }
+
+            var full = await RunAsync(SchemaCatalogQueries.BuildFullRead());
+            var orders = full.Objects.Single(o => o.Name == "Orders");
+            var targeted = await RunAsync(SchemaCatalogQueries.BuildTargetedRead([orders.ObjectId]));
+            var again = await RunAsync(SchemaCatalogQueries.BuildFullRead());
+
+            Assert.Equal(["Orders"], targeted.Objects.Select(o => o.Name));
+            Assert.Equal(full.Objects.Count, again.Objects.Count);
+        });
+    }
+
+    [Fact]
     public async Task CatalogRead_OverCap_IsFlagged()
     {
         await WithScratchDatabaseAsync(null, async (db, ct) =>
