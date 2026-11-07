@@ -140,41 +140,39 @@ ORDER BY total_worker_time DESC, query_hash";
     /// The sample text and stored plan for the kept query hashes, each from the hash's busiest row in the window (the
     /// same row choice the aggregate's per-hash lookups made before #6803). $1 server_id, $2 cutoff, $3 the kept
     /// query hashes (text[]). One row per hash; a hash with no text or plan returns NULL in that column. The plan
-    /// comes back as text and as gzip bytes, one lookup per form (#2069: post-V54 plans are gzip bytes with the
-    /// text NULL).
+    /// comes back as text or as gzip bytes, whichever its row's dimension holds (#2069: post-V54 plans are gzip
+    /// bytes with the text NULL).
     /// </summary>
     public const string HighImpactSampleLookupSql = @"
 SELECT
     h.query_hash,
-    LEFT(t.query_text, 200) AS sample_query_text,
-    t.query_text AS full_query_text,
-    x.query_plan_xml,
-    g.query_plan_gz
+    LEFT(COALESCE(t.query_text, td.query_text), 200) AS sample_query_text,
+    COALESCE(t.query_text, td.query_text) AS full_query_text,
+    COALESCE(p.query_plan_xml, pd.query_plan_xml) AS query_plan_xml,
+    pd.query_plan_gz
 FROM unnest($3::text[]) AS h(query_hash)
+-- #8117: each pick runs on the base table, one index range per kept hash on idx_query_stats_server_hash_time, and the
+-- payload dimension (#1767) is read once for the row it picks. The resolving view would join every row of the hash to
+-- the dimension before the pick. A row written before the dimensions existed carries its payload inline, so each form
+-- is the inline column when the row has one, else the dimension row its digest names.
 LEFT JOIN LATERAL (
-    SELECT qs2.query_text FROM v_query_stats qs2
-    WHERE qs2.query_hash = h.query_hash
-    AND qs2.server_id = $1
-    AND qs2.collection_time >= $2
-    AND qs2.query_text IS NOT NULL AND qs2.query_text != ''
-    ORDER BY qs2.delta_execution_count DESC NULLS LAST
+    SELECT qs.query_text, qs.query_text_digest FROM collect.query_stats AS qs
+    WHERE qs.server_id = $1
+    AND   qs.query_hash = h.query_hash
+    AND   qs.collection_time >= $2
+    AND   ((qs.query_text IS NOT NULL AND qs.query_text != '') OR qs.query_text_digest IS NOT NULL)
+    ORDER BY qs.delta_execution_count DESC NULLS LAST
     LIMIT 1) AS t ON true
+LEFT JOIN query_text_dim AS td ON td.digest = t.query_text_digest
 LEFT JOIN LATERAL (
-    SELECT qs2.query_plan_xml FROM v_query_stats qs2
-    WHERE qs2.query_hash = h.query_hash
-    AND qs2.server_id = $1
-    AND qs2.collection_time >= $2
-    AND qs2.query_plan_xml IS NOT NULL AND qs2.query_plan_xml != ''
-    ORDER BY qs2.delta_execution_count DESC NULLS LAST
-    LIMIT 1) AS x ON true
-LEFT JOIN LATERAL (
-    SELECT qs2.query_plan_gz FROM v_query_stats qs2
-    WHERE qs2.query_hash = h.query_hash
-    AND qs2.server_id = $1
-    AND qs2.collection_time >= $2
-    AND qs2.query_plan_gz IS NOT NULL
-    ORDER BY qs2.delta_execution_count DESC NULLS LAST
-    LIMIT 1) AS g ON true";
+    SELECT qs.query_plan_xml, qs.query_plan_digest FROM collect.query_stats AS qs
+    WHERE qs.server_id = $1
+    AND   qs.query_hash = h.query_hash
+    AND   qs.collection_time >= $2
+    AND   ((qs.query_plan_xml IS NOT NULL AND qs.query_plan_xml != '') OR qs.query_plan_digest IS NOT NULL)
+    ORDER BY qs.delta_execution_count DESC NULLS LAST
+    LIMIT 1) AS p ON true
+LEFT JOIN query_plan_dim AS pd ON pd.digest = p.query_plan_digest";
 
     /// <summary>Reads the window's scorable query_hash aggregates for one server and returns the scored high-impact set.</summary>
     public static async Task<List<HighImpactQuery>> ReadAsync(
@@ -202,8 +200,8 @@ LEFT JOIN LATERAL (
             if (!byHash.TryGetValue(found.GetString(0), out var row)) continue;
             row.SampleQueryText = found.IsDBNull(1) ? "" : found.GetString(1);
             row.FullQueryText = found.IsDBNull(2) ? "" : found.GetString(2);
-            /* #2069: the two lookups may land on DIFFERENT sample rows (one pre-V54 text row, one post-V54 gz
-               row); either is "a sample plan for the hash", and text-first keeps the free form when both exist. */
+            /* #2069: the picked row's plan is text (inline, or a pre-V54 dimension row) or gzip bytes (a post-V54
+               dimension row); text-first keeps the free form. */
             row.QueryPlanXml = PayloadDimensions.ResolveContent(
                 found.IsDBNull(3) ? null : found.GetString(3),
                 found.IsDBNull(4) ? null : found.GetFieldValue<byte[]>(4));
