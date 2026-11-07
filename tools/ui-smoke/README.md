@@ -109,10 +109,12 @@ How the page is kept the same on every run:
   browser is moved instead. Every `/api` answer has its timestamps shifted to a fixed date. Every windowed read gets an
   `as_of` of anchor plus one minute. The page clock is pinned to the same fixed date plus one minute.
 - A screenshot is taken again until two in a row are identical. If that does not happen in 8 tries, the page fails.
-- The service marks the three unreachable servers "collection stale" a couple of minutes after the seed anchor, and "offline"
-  after 30. The shots wait until `/api/fleet` shows every card stale. They give up after 4 minutes with one message if the
-  cards never got there, and with another if a card is already Offline. A card is Offline after 30 minutes, or at once if seed.sql
-  gave its server no `collection_log` row (the long-name server has one, #7569).
+- The service marks the three servers seeded with a collection at the anchor "collection stale" a couple of minutes after it, and
+  "offline" after 30. The fourth, `ui-down-sql`, is seeded as unreachable (#7590) and reads Offline from the first poll; `pages.json`
+  names it under `expectedOffline`. The shots wait until `/api/fleet` shows every other card stale and each expected-Offline card
+  Offline (`fleet-stale.mjs`, #8069). They give up after 4 minutes with one message if the cards never got there, and stop at once
+  with another if a card not seeded down is already Offline (30 minutes after the anchor, or from the first poll when seed.sql gave
+  its server no `collection_log` row), or if an expected-Offline card does not read Offline.
 - The database size in the status bar is not the same on every run. Its width changes when it gains a digit (99 MB to 100 MB).
   In one run the item was missing, because the read of the size had not finished. A mask hides the text, not the box. For the
   shots, `shots.mjs` adds a style that hides the item and the separator before it, so the bar is the same either way.
