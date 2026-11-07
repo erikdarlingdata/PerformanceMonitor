@@ -830,11 +830,11 @@ public partial class FinOpsTab : UserControl
     {
         if (trend.Count == 0)
         {
-            PvsTrendChart.Visibility = Visibility.Collapsed;
+            PvsTrendCard.Visibility = Visibility.Collapsed; // #8144: the card goes with its chart
             return;
         }
 
-        PvsTrendChart.Visibility = Visibility.Visible;
+        PvsTrendCard.Visibility = Visibility.Visible;
         _chartHelper.ClearChart(PvsTrendChart); // #8086: a reset also removes the last refresh's legend panel
         ChartStyle.ApplyThemeToChart(PvsTrendChart);
 
@@ -858,9 +858,10 @@ public partial class FinOpsTab : UserControl
 
         PvsTrendChart.Plot.Axes.DateTimeTicksBottomUtc(displayZone);
         PvsTrendChart.Plot.Axes.AutoScale();
-        PvsTrendChart.Plot.YLabel("PVS Off-Row MB");
+        PvsTrendChart.Plot.YLabel("MB");
         _chartHelper.ShowChartLegend(PvsTrendChart); // #8086: beside or under the plot, never over it
         PvsTrendChart.Refresh();
+        ServerTab.MarkAllZero(PvsTrendChart); // #8144: "0 throughout" in the card header
     }
 
     private async System.Threading.Tasks.Task LoadServerInventoryAsync(bool forceRefresh = false)
