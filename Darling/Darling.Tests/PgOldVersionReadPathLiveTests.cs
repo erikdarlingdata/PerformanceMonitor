@@ -235,26 +235,40 @@ public sealed class PgOldVersionReadPathLiveTests
         return JsonSerializer.SerializeToNode(details[key])!.AsObject();
     }
 
-    private static async Task PlantWalAsync(NpgsqlConnection store, int serverId, string serverName, long queryId, DateTime at, long walBytes, CancellationToken ct)
+    /// <summary>
+    /// One stored sample of a series, shaped as the collector stores it: <paramref name="calls"/> is the cumulative
+    /// counter and <paramref name="deltaCalls"/> the interval the collector measured against its previous pass, 0 for
+    /// an interval it could not measure.
+    /// </summary>
+    private static async Task PlantWalAsync(
+        NpgsqlConnection store, int serverId, string serverName, long queryId, DateTime at, long calls, long deltaCalls, long walBytes, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(@"
 INSERT INTO pg_statement_stats
     (collection_id, collection_time, server_id, server_name, queryid, database_id, user_id, toplevel,
      calls, total_exec_time_ms, max_exec_time_ms, rows_returned, shared_blks_hit, shared_blks_read,
      temp_blks_read, temp_blks_written, wal_bytes, delta_calls, delta_total_exec_time_ms, delta_rows)
-VALUES ($1, $2, $3, $4, $5, 1, 10, TRUE, 5, 50, 20, 5, 100, 10, 0, 0, $6, 5, 50, 5)", store);
+VALUES ($1, $2, $3, $4, $5, 1, 10, TRUE, $7, 50, 20, 5, 100, 10, 0, 0, $6, $8, 50, 5)", store);
         command.Parameters.AddWithValue(CollectionIdGenerator.Next());
         command.Parameters.AddWithValue(at);
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(serverName);
         command.Parameters.AddWithValue(queryId);
         command.Parameters.AddWithValue(walBytes);
+        command.Parameters.AddWithValue(calls);
+        command.Parameters.AddWithValue(deltaCalls);
         await command.ExecuteNonQueryAsync(ct);
     }
 
     /// <summary>
     /// The other half of the bad-actor detail's rule: a target that DID report WAL gets its number, and a zero when
     /// the counter did not move. NULL is for "never reported", not for "nothing changed".
+    /// <para>Each series is two in-window samples as the collector stores them (#7909): a first sighting it could not
+    /// date (<c>delta_calls = 0</c>), which contributes nothing on any counter, then a measured interval of five calls
+    /// (<c>calls</c> 10, <c>delta_calls</c> 5), whose WAL increment is its <c>wal_bytes</c> less the first sample's.
+    /// So 201 reads 0 + (5,000 − 1,000) = 4,000 and 202 reads 0 + (1,000 − 1,000) = 0. A sample stored with
+    /// <c>delta_calls = calls</c> would instead be credited with its whole cumulative figure, which is the first
+    /// sighting's shape, not a measured interval's.</para>
     /// </summary>
     [Fact]
     public async Task BadActorDetail_ReportsWalWhenTheTargetReportedIt_IncludingAZeroChange()
@@ -268,10 +282,10 @@ VALUES ($1, $2, $3, $4, $5, 1, 10, TRUE, 5, 50, 20, 5, 100, 10, 0, 0, $6, 5, 50,
         var bodySucceeded = false;
         try
         {
-            await PlantWalAsync(store, serverId, serverName, 201, Anchor, 1_000, ct);
-            await PlantWalAsync(store, serverId, serverName, 201, Anchor.AddMinutes(1), 5_000, ct);
-            await PlantWalAsync(store, serverId, serverName, 202, Anchor, 1_000, ct);
-            await PlantWalAsync(store, serverId, serverName, 202, Anchor.AddMinutes(1), 1_000, ct);
+            await PlantWalAsync(store, serverId, serverName, 201, Anchor, calls: 5, deltaCalls: 0, walBytes: 1_000, ct);
+            await PlantWalAsync(store, serverId, serverName, 201, Anchor.AddMinutes(1), calls: 10, deltaCalls: 5, walBytes: 5_000, ct);
+            await PlantWalAsync(store, serverId, serverName, 202, Anchor, calls: 5, deltaCalls: 0, walBytes: 1_000, ct);
+            await PlantWalAsync(store, serverId, serverName, 202, Anchor.AddMinutes(1), calls: 10, deltaCalls: 5, walBytes: 1_000, ct);
 
             var builder = new NpgsqlConnectionStringBuilder(connectionString!) { SearchPath = PgSchemaGenerator.SearchPath };
             await using var dataSource = NpgsqlDataSource.Create(builder.ConnectionString);
