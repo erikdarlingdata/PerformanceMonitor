@@ -148,6 +148,31 @@ public sealed class ManifestColumn
 {
     public required string Name { get; init; }
     public required string DuckDbType { get; init; }
+
+    /// <summary>
+    /// Reads a written Parquet file's columns back, in file order, for its manifest entry, so the list cannot drift
+    /// from the file. An entry whose file was never written gets an empty list.
+    /// </summary>
+    public static List<ManifestColumn> OfParquetFile(string absolutePath)
+    {
+        var columns = new List<ManifestColumn>();
+        if (!File.Exists(absolutePath))
+        {
+            return columns;
+        }
+
+        using var connection = new DuckDB.NET.Data.DuckDBConnection("Data Source=:memory:");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_parquet('{absolutePath.Replace("'", "''")}'))";
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            columns.Add(new ManifestColumn { Name = reader.GetString(0), DuckDbType = reader.GetString(1) });
+        }
+
+        return columns;
+    }
 }
 
 /// <summary>

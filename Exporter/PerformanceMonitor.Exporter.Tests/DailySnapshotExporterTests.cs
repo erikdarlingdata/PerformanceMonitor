@@ -146,7 +146,7 @@ public class DailySnapshotExporterTests
     }
 
     [Fact]
-    public async Task Skips_a_window_that_is_not_midnight_without_opening_the_reader()
+    public async Task Skips_a_later_window_of_an_exported_day_without_opening_the_reader()
     {
         var table = MakeTable(lookbackHours: 24);
         var from = new DateTime(2026, 9, 21, 10, 0, 0, DateTimeKind.Utc);
@@ -160,12 +160,13 @@ public class DailySnapshotExporterTests
                 opened = true;
                 return Task.FromResult<DbDataReader>(new FakeDbDataReader([], [], []));
             },
-            CancellationToken.None);
+            CancellationToken.None,
+            dayAlreadyExported: true);
 
         Assert.False(opened);
         Assert.Equal(0, result.RowCount);
         Assert.Empty(result.Parts);
-        Assert.Equal("skipped: not the daily snapshot window", result.SkippedReason);
+        Assert.Equal("skipped: the daily snapshot for 2026-09-21 is already exported", result.SkippedReason);
     }
 
     [Fact]

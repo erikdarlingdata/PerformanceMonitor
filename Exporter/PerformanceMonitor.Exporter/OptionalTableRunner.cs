@@ -104,7 +104,7 @@ public static class OptionalTableRunner
             // below, which builds both outputs from one store read.
             if (table.Grain == ExportGrain.Hourly)
             {
-                var hourlyPartPath = await RunHourlyRollupAsync(connectionStringBuilder, options, table, entries, failed, output, ct).ConfigureAwait(false);
+                var hourlyPartPath = await RunHourlyRollupAsync(connectionStringBuilder, options, table, entries, skipped, failed, output, ct).ConfigureAwait(false);
                 if (hourlyPartPath is not null && table.Name == "pg_statement_stats")
                 {
                     pgStatementStatsPartPaths = [hourlyPartPath];
@@ -135,10 +135,18 @@ public static class OptionalTableRunner
                     var policy = ColumnPolicies.For(table.Name);
                     var sql = SqlBuilder.BuildOptionalSelect(table, columns, policy);
 
+                    // The day's snapshot is produced once: by the 00:00 window, or by the first later window of the
+                    // day when no run has recorded it. Under --ignore-state nothing is recorded, so only 00:00 runs it.
+                    using var dailyState = options.IgnoreState ? null : StateStore.Open(options.StateDir);
+                    var day = options.FromUtc.Date;
+                    var dayAlreadyExported = dailyState is null
+                        ? !OptionalTableExporter.IsDailySnapshotWindow(options.FromUtc)
+                        : dailyState.HasDailySnapshot(options.Store, table.Name, day);
+
                     var result = await DailySnapshotExporter.ExportAsync(
                         table, options, options.Store, options.OutDir,
-                        (readFrom, readTo, innerCt) => OpenDailyReaderAsync(connectionStringBuilder, sql, readFrom, readTo, options, table, innerCt),
-                        ct).ConfigureAwait(false);
+                        (readFrom, readTo, innerCt) => OpenRangeReaderAsync(connectionStringBuilder, sql, readFrom, readTo, options, table, innerCt),
+                        ct, dayAlreadyExported).ConfigureAwait(false);
 
                     if (result.SkippedReason is not null)
                     {
@@ -146,6 +154,8 @@ public static class OptionalTableRunner
                         output.WriteLine($"  {result.SkippedReason}");
                         continue;
                     }
+
+                    dailyState?.RecordDailySnapshot(options.Store, table.Name, day);
 
                     foreach (var part in result.Parts)
                     {
@@ -156,7 +166,7 @@ public static class OptionalTableRunner
                             RowCount = part.RowCount,
                             ByteSize = part.ByteSize,
                             Sha256 = part.Sha256,
-                            Columns = [],
+                            Columns = ManifestColumn.OfParquetFile(AbsolutePath(options, part.RelativePath)),
                             StoreQueryElapsedMs = result.StoreQueryElapsedMs,
                             WriteElapsedMs = result.WriteElapsedMs,
                             MissingContentCount = 0,
@@ -185,7 +195,7 @@ public static class OptionalTableRunner
             // through to the generic Event Window/Snapshot read below.
             if (table.Grain == ExportGrain.Change)
             {
-                await RunChangeOnlyAsync(connectionStringBuilder, options, table, entries, failed, output, ct).ConfigureAwait(false);
+                await RunChangeOnlyAsync(connectionStringBuilder, options, table, entries, skipped, failed, output, ct).ConfigureAwait(false);
                 continue;
             }
 
@@ -273,7 +283,17 @@ public static class OptionalTableRunner
                 var policy = ColumnPolicies.For(table.Name);
                 var sql = SqlBuilder.BuildOptionalSelect(table, columns, policy);
 
-                var request = new OptionalExportRequest(table.Name, table.TimeColumn, table.Kind == OptionalTableKind.Snapshot, options.FromUtc, options.ToUtc);
+                // A snapshot table's day is produced once, like a Daily-grain table's: by the 00:00 window, or by the
+                // first later window of the day when no run has recorded it.
+                var isSnapshot = table.Kind == OptionalTableKind.Snapshot;
+                using var snapshotState = isSnapshot && !options.IgnoreState ? StateStore.Open(options.StateDir) : null;
+                var day = options.FromUtc.Date;
+                var request = new OptionalExportRequest(table.Name, table.TimeColumn, isSnapshot, options.FromUtc, options.ToUtc)
+                {
+                    DayAlreadyExported = isSnapshot && (snapshotState is null
+                        ? !OptionalTableExporter.IsDailySnapshotWindow(options.FromUtc)
+                        : snapshotState.HasDailySnapshot(options.Store, table.Name, day)),
+                };
                 var result = await OptionalTableExporter.ExportAsync(
                     request,
                     options.Store,
@@ -287,6 +307,8 @@ public static class OptionalTableRunner
                     output.WriteLine($"  {result.SkippedReason}");
                     continue;
                 }
+
+                snapshotState?.RecordDailySnapshot(options.Store, table.Name, day);
 
                 if (table.Name == "pg_statement_stats")
                 {
@@ -302,7 +324,7 @@ public static class OptionalTableRunner
                         RowCount = part.RowCount,
                         ByteSize = part.ByteSize,
                         Sha256 = part.Sha256,
-                        Columns = [],
+                        Columns = ManifestColumn.OfParquetFile(AbsolutePath(options, part.RelativePath)),
                         StoreQueryElapsedMs = result.StoreQueryElapsedMs,
                         WriteElapsedMs = result.WriteElapsedMs,
                         MissingContentCount = 0,
@@ -338,6 +360,7 @@ public static class OptionalTableRunner
         ExportOptions options,
         OptionalTable table,
         List<ManifestTableEntry> entries,
+        List<SkippedOptionalTable> skipped,
         List<FailedOptionalTable> failed,
         TextWriter output,
         CancellationToken ct)
@@ -348,6 +371,7 @@ public static class OptionalTableRunner
             await using var absentCheckConnection = await StoreConnectionFactory.OpenAsync(connectionStringBuilder, ct).ConfigureAwait(false);
             if (await IsAbsentAsync(absentCheckConnection, table, ct).ConfigureAwait(false))
             {
+                skipped.Add(new SkippedOptionalTable { Table = table.Name, Reason = "absent" });
                 output.WriteLine("  skipped: absent on this store");
                 return;
             }
@@ -385,7 +409,7 @@ public static class OptionalTableRunner
                         RowCount = part.RowCount,
                         ByteSize = part.ByteSize,
                         Sha256 = part.Sha256,
-                        Columns = [],
+                        Columns = ManifestColumn.OfParquetFile(AbsolutePath(options, part.RelativePath)),
                         StoreQueryElapsedMs = result.StoreQueryElapsedMs,
                         WriteElapsedMs = result.WriteElapsedMs,
                         MissingContentCount = 0,
@@ -410,7 +434,7 @@ public static class OptionalTableRunner
                         RowCount = result.RollupPart.RowCount,
                         ByteSize = result.RollupPart.ByteSize,
                         Sha256 = result.RollupPart.Sha256,
-                        Columns = [],
+                        Columns = ManifestColumn.OfParquetFile(AbsolutePath(options, result.RollupPart.RelativePath)),
                         StoreQueryElapsedMs = 0,
                         WriteElapsedMs = result.WriteElapsedMs,
                         MissingContentCount = 0,
@@ -617,7 +641,7 @@ public static class OptionalTableRunner
                 RowCount = textRows.Count,
                 ByteSize = byteSize,
                 Sha256 = sha256,
-                Columns = [],
+                Columns = ManifestColumn.OfParquetFile(absolutePath),
                 StoreQueryElapsedMs = storeStopwatch.Elapsed.TotalMilliseconds,
                 WriteElapsedMs = writeStopwatch.Elapsed.TotalMilliseconds,
                 MissingContentCount = 0,
@@ -643,7 +667,12 @@ public static class OptionalTableRunner
         }
     }
 
-    private static ManifestTableEntry BuildQuerySnapshotsEntry(
+    /// <summary>
+    /// One `query_snapshots` run output's manifest entry. <paramref name="outputPath"/> is the file's on-disk path
+    /// under `&lt;out&gt;/&lt;store&gt;/&lt;outputTable&gt;/`; the entry names it the way every other entry does, as
+    /// `&lt;table&gt;/&lt;file&gt;` relative to the store folder, always with `/`.
+    /// </summary>
+    internal static ManifestTableEntry BuildQuerySnapshotsEntry(
         OptionalTable table, string outputTable, string outputPath, long rowCount, string? part,
         string? timeColumn, string kind, long? unparsedPlanRows)
     {
@@ -652,11 +681,11 @@ public static class OptionalTableRunner
         return new ManifestTableEntry
         {
             Table = outputTable,
-            OutputFile = Path.GetFileName(outputPath),
+            OutputFile = $"{outputTable}/{Path.GetFileName(outputPath)}",
             RowCount = rowCount,
             ByteSize = byteSize,
             Sha256 = sha256,
-            Columns = [],
+            Columns = ManifestColumn.OfParquetFile(outputPath),
             StoreQueryElapsedMs = 0,
             WriteElapsedMs = 0,
             MissingContentCount = 0,
@@ -674,6 +703,10 @@ public static class OptionalTableRunner
         return Convert.ToHexStringLower(hash);
     }
 
+    /// <summary>The on-disk path of a part the manifest names by its store-relative `/` path.</summary>
+    private static string AbsolutePath(ExportOptions options, string relativePath) =>
+        Path.Combine(options.OutDir, options.Store, relativePath.Replace('/', Path.DirectorySeparatorChar));
+
     /// <summary>
     /// Runs one Hourly-grain table: the window's single raw read into <see cref="HourlyRollupExporter"/>, which rolls
     /// it up and writes exactly one part named after <see cref="OptionalTable.RollupName"/>. Returns the absolute path
@@ -685,6 +718,7 @@ public static class OptionalTableRunner
         ExportOptions options,
         OptionalTable table,
         List<ManifestTableEntry> entries,
+        List<SkippedOptionalTable> skipped,
         List<FailedOptionalTable> failed,
         TextWriter output,
         CancellationToken ct)
@@ -695,6 +729,7 @@ public static class OptionalTableRunner
             await using var absentCheckConnection = await StoreConnectionFactory.OpenAsync(connectionStringBuilder, ct).ConfigureAwait(false);
             if (await IsAbsentAsync(absentCheckConnection, table, ct).ConfigureAwait(false))
             {
+                skipped.Add(new SkippedOptionalTable { Table = table.Name, Reason = "absent" });
                 output.WriteLine($"  skipped: absent on this store");
                 return null;
             }
@@ -705,9 +740,12 @@ public static class OptionalTableRunner
             var sql = SqlBuilder.BuildOptionalSelect(table, columns, policy);
             var spec = RollupSql.Specs[table.RollupName!];
 
+            // A spec with counters reads one bridge lookback before the window, so each key's last sample before the
+            // window is in the read: it feeds the counters' bridged delta and is never counted itself.
+            var readFrom = spec.HasCounters ? options.FromUtc - HourlyRollupExporter.CounterBridgeLookback : options.FromUtc;
             var result = await HourlyRollupExporter.ExportAsync(
                 spec, options.Store, options.OutDir, options.FromUtc, options.ToUtc,
-                innerCt => OpenReaderAsync(connectionStringBuilder, sql, options, table, innerCt),
+                innerCt => OpenRangeReaderAsync(connectionStringBuilder, sql, readFrom, options.ToUtc, options, table, innerCt),
                 ct).ConfigureAwait(false);
 
             entries.Add(new ManifestTableEntry
@@ -718,7 +756,7 @@ public static class OptionalTableRunner
                 RowCount = result.Part.RowCount,
                 ByteSize = result.Part.ByteSize,
                 Sha256 = result.Part.Sha256,
-                Columns = [],
+                Columns = ManifestColumn.OfParquetFile(AbsolutePath(options, result.Part.RelativePath)),
                 StoreQueryElapsedMs = result.StoreQueryElapsedMs,
                 WriteElapsedMs = result.WriteElapsedMs,
                 MissingContentCount = 0,
@@ -728,6 +766,8 @@ public static class OptionalTableRunner
                 PolicyVersion = policy?.Version,
                 Grain = "hourly",
                 RollupVersion = spec.Version,
+                ReadFrom = readFrom,
+                ReadTo = options.ToUtc,
             });
 
             output.WriteLine($"  {result.RawRowCount} raw row(s) rolled up into {result.RolledRowCount} row(s)");
@@ -771,10 +811,11 @@ public static class OptionalTableRunner
     }
 
     /// <summary>
-    /// Opens a reader for a Daily-grain table's own lookback range, never the caller's window: the chunk guard and the
-    /// @from/@to parameters are both bound to <paramref name="readFrom"/>/ <paramref name="readTo"/>.
+    /// Opens a reader for a table's own read range rather than the caller's window: a Daily-grain table's lookback
+    /// range, or an Hourly-grain table's window plus its counter bridge lookback. The chunk guard and the @from/@to
+    /// parameters are both bound to <paramref name="readFrom"/>/ <paramref name="readTo"/>.
     /// </summary>
-    private static async Task<System.Data.Common.DbDataReader> OpenDailyReaderAsync(
+    private static async Task<System.Data.Common.DbDataReader> OpenRangeReaderAsync(
         NpgsqlConnectionStringBuilder connectionStringBuilder, string sql, DateTime readFrom, DateTime readTo,
         ExportOptions options, OptionalTable table, CancellationToken ct)
     {
