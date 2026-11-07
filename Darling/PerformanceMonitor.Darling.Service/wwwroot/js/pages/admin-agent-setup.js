@@ -282,7 +282,7 @@ function routeForm(options) {
   };
   const scopeOptions = scopeChoices("All servers", options.servers, options.tags, [entries.scope]);
   const controls = {
-    match: text("match", entries.match, { placeholder: "family, 'Analysis: <category>', exact metric or *" }),
+    match: text("match", entries.match, { placeholder: "family, 'Analysis: *', 'Analysis: <category>', exact metric or *" }),
     scope: select("scope", scopeOptions, entries.scope),
     severities: select("severities", [{ value: "both", label: "Both (Warning and Critical)" }, { value: "critical", label: "Critical only" }, { value: "warning", label: "Warning only" }], entries.severities || "both"),
     reportNotice: select("reportNotice", REPORT_NOTICE_CHOICES, entries.reportNotice || "off"),
