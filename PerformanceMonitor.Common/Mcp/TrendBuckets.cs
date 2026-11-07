@@ -160,8 +160,10 @@ internal static class TrendBuckets
     /// </summary>
     public const string OriginSql = "TIMESTAMP '2000-01-01 00:00:00'";
 
-    /// <summary><see cref="OriginSql"/> as a value, for a read that buckets rows it has already fetched.</summary>
-    public static readonly DateTime Origin = new(2000, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
+    /// <summary><see cref="OriginSql"/> as a value, parsed from that literal so the two cannot drift, for a read that
+    /// buckets rows it has already fetched. Unspecified kind, as the statements' naive timestamps are.</summary>
+    public static readonly DateTime Origin = DateTime.ParseExact(
+        OriginSql, @"'TIMESTAMP '\'yyyy-MM-dd HH:mm:ss\'", CultureInfo.InvariantCulture, DateTimeStyles.None);
 
     /// <summary>
     /// The bucket <paramref name="at"/> falls in, as the SQL statements compute it: <c>time_bucket</c> /
