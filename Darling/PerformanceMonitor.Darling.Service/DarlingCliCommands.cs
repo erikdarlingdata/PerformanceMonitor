@@ -758,10 +758,11 @@ public static partial class DarlingCliCommands
             output.WriteLine("WARNING: " + warning);
         }
 
-        /* #8006: the passwordKey key's fingerprint, or a warning, not a failure: the start refuses such a key without stopping collection.
+        /* #8006: a WARNING line for each check a passwordKey file failed that only warns, then the key's fingerprint, or a warning, not a
+           failure: the start refuses such a key without stopping collection.
            The path is resolved as Load resolved it (DARLING_CONFIG, then beside the binary): configPath is null in the usual run, and
            with no path the credentials-directory check the start makes would be skipped. */
-        if (DarlingPasswordKeySource.DescribeForValidation(config, DarlingConfig.ResolveConfigPath(configPath)) is { } line)
+        foreach (var line in DarlingPasswordKeySource.DescribeForValidation(config, DarlingConfig.ResolveConfigPath(configPath)))
         {
             output.WriteLine(line);
         }

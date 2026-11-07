@@ -680,25 +680,23 @@ public sealed class DarlingPasswordKeySourceTests
             foreach (var setting in new[] { "", ",\"passwordKey\":\"\"", ",\"passwordKey\":\"  \"" })
             {
                 var unset = DarlingConfig.Parse("{\"postgres\":{\"connectionString\":\"Host=h\"}" + setting + "}");
-                Assert.Null(DarlingPasswordKeySource.DescribeForValidation(unset, configPath));
-                Assert.Null(DarlingPasswordKeySource.DescribeForValidation(unset, null));
+                Assert.Empty(DarlingPasswordKeySource.DescribeForValidation(unset, configPath));
+                Assert.Empty(DarlingPasswordKeySource.DescribeForValidation(unset, null));
             }
 
             var expected = "passwordKey: password key " + PasswordSeal.DisplayKeyId(keyId);
-            Assert.Equal(expected, DarlingPasswordKeySource.DescribeForValidation(ConfigWith("file:" + outside), configPath));
-            Assert.Equal(expected, DarlingPasswordKeySource.DescribeForValidation(ConfigWith("file:" + outside), null));
+            Assert.Equal([expected], DarlingPasswordKeySource.DescribeForValidation(ConfigWith("file:" + outside), configPath));
+            Assert.Equal([expected], DarlingPasswordKeySource.DescribeForValidation(ConfigWith("file:" + outside), null));
 
-            var missing = DarlingPasswordKeySource.DescribeForValidation(ConfigWith("file:" + Path.Combine(dir, "missing")), configPath);
-            Assert.NotNull(missing);
+            var missing = Assert.Single(DarlingPasswordKeySource.DescribeForValidation(ConfigWith("file:" + Path.Combine(dir, "missing")), configPath));
             Assert.StartsWith("WARNING: passwordKey", missing, StringComparison.Ordinal);
 
             /* Inside the credentials directory is a warning only when the directory is known. */
-            var insideLine = DarlingPasswordKeySource.DescribeForValidation(ConfigWith("file:" + inside), configPath);
-            Assert.NotNull(insideLine);
+            var insideLine = Assert.Single(DarlingPasswordKeySource.DescribeForValidation(ConfigWith("file:" + inside), configPath));
             Assert.StartsWith("WARNING: passwordKey", insideLine, StringComparison.Ordinal);
             Assert.Contains("credentials directory", insideLine, StringComparison.Ordinal);
             AssertNoKeyText(insideLine, secret);
-            Assert.Equal(expected, DarlingPasswordKeySource.DescribeForValidation(ConfigWith("file:" + inside), null));
+            Assert.Equal([expected], DarlingPasswordKeySource.DescribeForValidation(ConfigWith("file:" + inside), null));
         }
         finally
         {

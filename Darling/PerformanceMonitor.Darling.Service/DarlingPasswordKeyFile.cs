@@ -61,7 +61,7 @@ public static class DarlingPasswordKeyFile
 
     /// <summary>The most a key file's bytes may run to: a 3072-bit PKCS#8 key is about 1.8 KB, which is about 2.4 KB
     /// as base64 and about 3.5 KB as a base64 DPAPI blob of that.</summary>
-    private const int MaxKeyFileBytes = 8192;
+    internal const int MaxKeyFileBytes = 8192;
 
     /* The key cannot be generated again, so it is also held to what a file the service wrote is: owned by the service's
        user with one name (Unix), and in a directory only the service can change (Windows), written through a temporary

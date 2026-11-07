@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -96,34 +97,40 @@ public static class DarlingPasswordKeySource
     }
 
     /// <summary>
-    /// The line <c>--validate-config</c> prints about <c>passwordKey</c>: null when the setting is unset,
-    /// <c>passwordKey: password key {fingerprint}</c> when the key loads, otherwise <c>WARNING: </c> and the refusal. A
-    /// warning, not a failure, because the start refuses such a key without stopping collection. The key is loaded only
-    /// to work out its fingerprint, and is disposed and zeroed before this returns.
+    /// The lines <c>--validate-config</c> prints about <c>passwordKey</c>: none when the setting is unset. Otherwise one
+    /// <c>WARNING: </c> line for each check a <c>file:</c> key failed that does not stop it loading (the same Warnings the
+    /// start logs), then <c>passwordKey: password key {fingerprint}</c> when the key loads, or <c>WARNING: </c> and the
+    /// refusal. A warning, not a failure, because the start refuses such a key without stopping collection. The key is
+    /// loaded only to work out its fingerprint, and is disposed and zeroed before this returns.
     /// </summary>
-    internal static string? DescribeForValidation(DarlingConfig config, string? configPath)
+    internal static IReadOnlyList<string> DescribeForValidation(DarlingConfig config, string? configPath)
     {
         ArgumentNullException.ThrowIfNull(config);
 
         if (string.IsNullOrWhiteSpace(config.PasswordKey))
         {
-            return null;
+            return [];
         }
 
-        var load = LoadFromSetting(
+        var warnings = new List<PasswordKeyFileWarning>();
+        var load = Load(
             config.PasswordKey,
             configPath is null ? null : DarlingLogHashKeyFile.DirectoryFor(config, configPath),
-            NullLogger.Instance);
+            NullLogger.Instance,
+            warnings);
+        var lines = warnings.ConvertAll(warning => "WARNING: " + warning.Sentence);
         var pkcs8 = load.Pkcs8;
         if (pkcs8 is null)
         {
-            return "WARNING: " + load.Refusal;
+            lines.Add("WARNING: " + load.Refusal);
+            return lines;
         }
 
         try
         {
             using var key = PasswordPrivateKey.FromPkcs8(pkcs8);
-            return $"{SettingName}: password key {PasswordSeal.DisplayKeyId(key.PublicKey.KeyId)}";
+            lines.Add($"{SettingName}: password key {PasswordSeal.DisplayKeyId(key.PublicKey.KeyId)}");
+            return lines;
         }
         finally
         {
@@ -140,13 +147,24 @@ public static class DarlingPasswordKeySource
     /// <c>Present</c> true, <c>Untrusted</c> true, <c>Pkcs8</c> null and a <c>Refusal</c> that names
     /// <c>passwordKey</c> and the target, never the text. <c>Path</c> is the reference, except for a literal, where it
     /// is <see cref="SettingName"/>: the literal would be the key.</para>
+    ///
+    /// <para>A <c>file:</c> key is read through <see cref="DarlingPasswordKeyFileReader"/>: one that is not a regular
+    /// file, is larger than the key file's limit or that others could write is refused, and each check that only warns
+    /// (another owner, a second name, read access for others, an open directory) is logged at Warning, naming the path
+    /// and the check.</para>
     /// </summary>
     /// <param name="reference">The setting's value: <c>file:&lt;path&gt;</c> or <c>env:&lt;NAME&gt;</c>.</param>
     /// <param name="credentialsDirectory">The service's credentials directory
     /// (<see cref="DarlingLogHashKeyFile.DirectoryFor"/>), which a <c>file:</c> path must stay out of; null when it is
     /// not known.</param>
     /// <param name="logger">Where a successful read is noted.</param>
-    public static PasswordKeyFileLoad LoadFromSetting(string reference, string? credentialsDirectory, ILogger logger)
+    public static PasswordKeyFileLoad LoadFromSetting(string reference, string? credentialsDirectory, ILogger logger) =>
+        Load(reference, credentialsDirectory, logger, warnings: null);
+
+    /// <summary><see cref="LoadFromSetting"/>, also adding each warning it logs to <paramref name="warnings"/> when one
+    /// is given: <see cref="DescribeForValidation"/> prints them, and the Linux self-check asserts them.</summary>
+    internal static PasswordKeyFileLoad Load(
+        string reference, string? credentialsDirectory, ILogger logger, List<PasswordKeyFileWarning>? warnings)
     {
         var path = reference ?? "";
 
@@ -177,14 +195,41 @@ public static class DarlingPasswordKeySource
             }
 
             string text;
-            try
+            if (isFile)
             {
-                text = DarlingSecretSource.Resolve(path, SettingName);
+                if (named.Length == 0)
+                {
+                    return Refused(path, $"{SettingName}: 'file:' reference names no path.");
+                }
+
+                /* #8006 review: a file: key gets the key file's checks and a bounded read, never File.ReadAllText, so
+                   file:/dev/zero is refused rather than read until memory runs out. What only warns is logged here, once
+                   per load, and handed to --validate-config. */
+                var read = DarlingPasswordKeyFileReader.Read(named);
+                foreach (var warning in read.Warnings)
+                {
+                    logger?.LogWarning(warning.Template, warning.Path);
+                    warnings?.Add(warning);
+                }
+
+                if (read.Text is null)
+                {
+                    return Refused(path, read.Refusal ?? $"{SettingName}: {target} could not be read.");
+                }
+
+                text = read.Text;
             }
-            catch (InvalidOperationException ex)
+            else
             {
-                /* Resolve's sentences already start "passwordKey: " and name the path or the variable, not the contents. */
-                return Refused(path, ex.Message);
+                try
+                {
+                    text = DarlingSecretSource.Resolve(path, SettingName);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    /* Resolve's sentences already start "passwordKey: " and name the variable, not its contents. */
+                    return Refused(path, ex.Message);
+                }
             }
 
             string? problem;

@@ -26,8 +26,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para>Four groups of checks. The key file: generate it, read the mode, owner and link count back, reload it to the
 /// same key id, and see a wider mode and a second name each refused. The external key (#8006): the <c>passwordKey</c>
 /// loader reads one key to the same key id from a base64 file, a PEM file, a Kubernetes-style <c>..data</c> link chain
-/// and an environment variable, and refuses a PKCS#1 PEM, a 2048-bit key, a link into a credentials directory and a
-/// literal. The file identity: a file and its hard link give
+/// and an environment variable, warns for a 0644 file and one another user owns, and refuses a 0664 file,
+/// <c>/dev/zero</c>, a FIFO, a PKCS#1 PEM, a 2048-bit key, a link into a credentials directory and a literal. The file
+/// identity: a file and its hard link give
 /// one identity and two files give two. The vector: a sealed value made on another platform opens here to the expected
 /// text, and stops opening when a bound field changes. A check that cannot be made counts as a failure, never as a
 /// pass.</para>
@@ -284,9 +285,10 @@ internal static class DarlingPasswordKeySelfCheck
     /// <summary>The <c>passwordKey</c> source (#8006) on this Unix system: one generated key loads to the same key id from
     /// a base64 file, a PEM file, a Kubernetes-style secret mount (a link to <c>..data/password-key</c>, where
     /// <c>..data</c> links to a timestamped directory holding the file at mode 440) and an environment variable with
-    /// whitespace around the base64; a PKCS#1 PEM, a 2048-bit key, a symbolic link from outside a credentials directory
-    /// to the key file inside it, and a literal are each refused. Returns null when all of it held, otherwise the first
-    /// thing that did not.</summary>
+    /// whitespace around the base64; the file checks hold (<see cref="CheckFileChecks"/>: a 0644 file warns, a 0664 file,
+    /// <c>/dev/zero</c> and a FIFO are refused, a file another user owns warns); a PKCS#1 PEM, a 2048-bit key, a symbolic
+    /// link from outside a credentials directory to the key file inside it, and a literal are each refused. Returns null
+    /// when all of it held, otherwise the first thing that did not.</summary>
     [UnsupportedOSPlatform("windows")]
     internal static string? CheckExternalKey(string directory)
     {
@@ -342,6 +344,12 @@ internal static class DarlingPasswordKeySelfCheck
                 return failure;
             }
 
+            failure = CheckFileChecks(base64, keyId, directory, logger);
+            if (failure is not null)
+            {
+                return failure;
+            }
+
             try
             {
                 Environment.SetEnvironmentVariable(ExternalKeyVariable, " " + new string(base64) + "\n");
@@ -390,6 +398,117 @@ internal static class DarlingPasswordKeySelfCheck
                 Array.Clear(base64);
             }
         }
+    }
+
+    /// <summary>The <c>file:</c> checks (#8006 review, request 1) through the real Unix calls: a 0644 file loads with the
+    /// warning that others can read it; a 0664 file is refused; <c>/dev/zero</c> and a FIFO are refused as not regular
+    /// files, at once, without being opened; and, when this runs as root (as the workflow does), a file given to another
+    /// user loads with the owner warning. Run as another user, which cannot give a file away, that one case is skipped.
+    /// Returns null when all of it held.</summary>
+    [UnsupportedOSPlatform("windows")]
+    private static string? CheckFileChecks(char[] base64, string keyId, string directory, Microsoft.Extensions.Logging.ILogger logger)
+    {
+        const UnixFileMode ownerReadWrite = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+
+        var open = Path.Combine(directory, "password-key-0644");
+        WriteKeyText(open, base64);
+        File.SetUnixFileMode(open, ownerReadWrite | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+        var failure = ExternalMustLoadWithWarning(open, keyId, logger, "a 0644 file", DarlingPasswordKeyFileReader.OthersReadTemplate);
+        if (failure is not null)
+        {
+            return failure;
+        }
+
+        var groupWritable = Path.Combine(directory, "password-key-0664");
+        WriteKeyText(groupWritable, base64);
+        File.SetUnixFileMode(groupWritable, ownerReadWrite | UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.OtherRead);
+        failure = ExternalMustBeRefusedFor("file:" + groupWritable, logger, "a 0664 file", "(mode 664)");
+        if (failure is not null)
+        {
+            return failure;
+        }
+
+        /* Read with File.ReadAllText, /dev/zero never ends and a FIFO waits for a writer: either held the start. */
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        failure = ExternalMustBeRefusedFor("file:/dev/zero", logger, "/dev/zero", "is not a regular file");
+        if (failure is not null)
+        {
+            return failure;
+        }
+
+        if (clock.Elapsed > TimeSpan.FromSeconds(5))
+        {
+            return $"passwordKey took {clock.Elapsed.TotalSeconds:F1} s to refuse /dev/zero";
+        }
+
+        var fifo = Path.Combine(directory, "password-key-fifo");
+        if (MakeFifo(fifo, Convert.ToUInt32("600", 8)) != 0)
+        {
+            return "a FIFO could not be made, so the FIFO check could not run";
+        }
+
+        failure = ExternalMustBeRefusedFor("file:" + fifo, logger, "a FIFO", "is not a regular file");
+        if (failure is not null)
+        {
+            return failure;
+        }
+
+        if (FileIdentity.EffectiveUserId() != 0)
+        {
+            /* Only root can give a file to another user; the workflow runs the image as root, so there it always runs. */
+            return null;
+        }
+
+        var foreign = Path.Combine(directory, "password-key-foreign");
+        WriteKeyText(foreign, base64);
+        const uint nobody = 65534;
+        if (ChangeOwner(foreign, nobody, nobody) != 0)
+        {
+            return "the key file could not be given to another user, so the owner check could not run";
+        }
+
+        return ExternalMustLoadWithWarning(foreign, keyId, logger, "a file another user owns", DarlingPasswordKeyFileReader.OwnerTemplate);
+    }
+
+    private static string? ExternalMustLoadWithWarning(string path, string keyId, Microsoft.Extensions.Logging.ILogger logger, string from, string template)
+    {
+        var warnings = new List<PasswordKeyFileWarning>();
+        var load = DarlingPasswordKeySource.Load("file:" + path, credentialsDirectory: null, logger, warnings);
+        if (load.Pkcs8 is null)
+        {
+            return $"passwordKey did not read the key from {from}: " + (load.Refusal ?? "no key came back");
+        }
+
+        try
+        {
+            if (load.Untrusted || load.Refusal is not null || KeyIdOf(load.Pkcs8) != keyId)
+            {
+                return $"passwordKey did not load the same key id from {from}";
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(load.Pkcs8);
+        }
+
+        return warnings.Contains(new PasswordKeyFileWarning(template, path))
+            ? null
+            : $"passwordKey loaded {from} without the warning expected for it";
+    }
+
+    private static string? ExternalMustBeRefusedFor(string reference, Microsoft.Extensions.Logging.ILogger logger, string what, string because)
+    {
+        var load = DarlingPasswordKeySource.LoadFromSetting(reference, credentialsDirectory: null, logger);
+        var refusal = load.Refusal;
+        var failure = ExternalMustBeRefused(load, what);
+        if (failure is not null)
+        {
+            return failure;
+        }
+
+        return refusal!.Contains(because, StringComparison.Ordinal)
+            ? null
+            : $"passwordKey refused {what}, but not because it {because}";
     }
 
     [UnsupportedOSPlatform("windows")]
@@ -713,5 +832,11 @@ internal static class DarlingPasswordKeySelfCheck
 #pragma warning disable CA2101 // libc takes UTF-8; LPUTF8Str is correct and CharSet.Unicode would be wrong
     [DllImport("libc", EntryPoint = "link", SetLastError = true)]
     private static extern int Link([MarshalAs(UnmanagedType.LPUTF8Str)] string existing, [MarshalAs(UnmanagedType.LPUTF8Str)] string newName);
+
+    [DllImport("libc", EntryPoint = "mkfifo", SetLastError = true)]
+    private static extern int MakeFifo([MarshalAs(UnmanagedType.LPUTF8Str)] string path, uint mode);
+
+    [DllImport("libc", EntryPoint = "chown", SetLastError = true)]
+    private static extern int ChangeOwner([MarshalAs(UnmanagedType.LPUTF8Str)] string path, uint owner, uint group);
 #pragma warning restore CA2101
 }
