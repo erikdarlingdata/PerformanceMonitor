@@ -182,15 +182,19 @@ public sealed class ViewerFinOpsSqlTests
         Assert.DoesNotContain("qs2", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY query_hash", sql, StringComparison.Ordinal);
 
-        /* The lookup reads v_query_stats, the #1767 resolving view: on the base table the `query_text IS NOT NULL AND
-           query_text != ''` filters match nothing on rows written since the migration, and the panel goes empty with no
-           error anywhere. One lookup per content form (#2069): post-V54 plans are gzip bytes with the text NULL. */
+        /* The lookup picks each kept hash's busiest row on the base table and resolves the #1767 payload dimensions for
+           that one row (#8117): query_text_dim for the text, query_plan_dim for the plan as text or as gzip bytes (#2069:
+           post-V54 plans are gzip bytes with the text NULL). It cannot read the resolving view: that joins every row of
+           the hash to the dimension before the pick. The inline columns still serve rows written before the dimensions
+           existed, so on a store with both shapes neither form goes empty. */
         var lookup = DarlingFinOpsHighImpactReader.HighImpactSampleLookupSql;
-        Assert.Equal(3, lookup.Split("FROM v_query_stats qs2").Length - 1); /* text, plan text, plan gz */
+        Assert.DoesNotContain("v_query_stats", lookup, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.query_stats", lookup, StringComparison.Ordinal);
+        Assert.Contains(PayloadDimensions.QueryTextDimTable, lookup, StringComparison.Ordinal);
+        Assert.Contains(PayloadDimensions.QueryPlanDimTable, lookup, StringComparison.Ordinal);
+        Assert.Contains(PayloadDimensions.CompressedContentColumn, lookup, StringComparison.Ordinal);
         Assert.Contains("unnest($3::text[])", lookup, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY qs2.delta_execution_count DESC NULLS LAST", lookup, StringComparison.Ordinal);
-        Assert.Contains("qs2.query_plan_xml", lookup, StringComparison.Ordinal);
-        Assert.Contains("qs2.query_plan_gz IS NOT NULL", lookup, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY qs.delta_execution_count DESC NULLS LAST", lookup, StringComparison.Ordinal);
 
         var ddl = PgSchemaGenerator.CreateTable(QueryStatsCollector.Instance);
         foreach (var col in new[]
