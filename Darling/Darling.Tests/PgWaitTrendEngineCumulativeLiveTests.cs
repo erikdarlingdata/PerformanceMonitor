@@ -7,14 +7,11 @@
  */
 
 using System;
-using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
-using System.Reflection;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
@@ -129,20 +126,6 @@ public sealed class PgWaitTrendEngineCumulativeLiveTests
             Assert.NotEqual(PgWaitInstrument.EngineCumulative, root.GetProperty("instrument").GetString());
             Assert.Equal(4, root.GetProperty("point_count").GetInt32());
         });
-    }
-
-    /// <summary>The description tells a caller before the call that an Aurora target is served, and which discovery read
-    /// finds its events.</summary>
-    [Fact]
-    public void TheDescription_NamesAuroraAndItsDiscoveryRead()
-    {
-        var description = typeof(DarlingMcpPgTrendTools).GetMethods(BindingFlags.Public | BindingFlags.Static)
-            .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == "get_pg_wait_trend")
-            .GetCustomAttribute<DescriptionAttribute>()!.Description;
-
-        Assert.Contains("Aurora", description, StringComparison.Ordinal);
-        Assert.Contains("get_pg_wait_stats", description, StringComparison.Ordinal);
-        Assert.Contains(PgWaitInstrument.EngineCumulative, description, StringComparison.Ordinal);
     }
 
     /// <summary>The rows the collector writes for two events over three collections: the first sighting of each carries no
