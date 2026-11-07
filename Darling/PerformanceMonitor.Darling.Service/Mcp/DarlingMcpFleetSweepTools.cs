@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Globalization;
+using System.Linq;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -50,7 +51,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpFleetSweepTools
 {
     [McpServerTool(Name = "get_sweep_reports"), Description(
-        "Reads the scheduled Fleet Sweep Report: the timeline for the window, the newest sweep in full, and the " +
+        "Reads the scheduled Fleet Sweep Report: the timeline (headers), the newest sweep in full, and the " +
         "watch worklist (default: open+carried only; pass watch_state for pending/closed); pass sweep_id (a " +
         "STRING) for one sweep. MUTE SEMANTICS: alerts_enabled false means DELIVERY WAS OFF that window; such a " +
         "sweep carries would_have_paged (present-and-empty means nothing would have paged; ABSENT on an " +
@@ -58,11 +59,15 @@ public sealed class DarlingMcpFleetSweepTools
         "sources; read instrument_liveness before trusting a quiet window. Stored read. <<GUIDE>> " +
         "Reads the scheduled Fleet Sweep Reports - the stateful whole-fleet summaries the service persists at " +
         "the configured cadence (get_alert_settings' fleet_sweep group holds the knobs; default hourly). One " +
-        "call returns the sweep timeline for the window (each sweep's full document embedded), the newest " +
-        "sweep in full (per-server verdicts with band transitions pre-computed, plus its would-have-paged " +
-        "ledger when one was taken), and the watch-item worklist with its hysteresis position; pass sweep_id " +
-        "(as a STRING - the ids are too large for a JSON number to round-trip) to fetch one sweep in full " +
-        "instead. Every sweep id the payload carries (sweep_id, previous_sweep_id, the watch items' " +
+        "call returns the sweep timeline for the window (each sweep as its header facts: sweep_id, swept_at, the " +
+        "span, previous_sweep_id, the mute header, server counts, instruments_alive and the instrument_liveness " +
+        "block - the stored document is NOT on the timeline), the newest sweep in full (its document, per-server " +
+        "verdicts with band transitions pre-computed, plus its would-have-paged ledger when one was taken), and " +
+        "the watch-item worklist with its hysteresis position; pass sweep_id (as a STRING - the ids are too large " +
+        "for a JSON number to round-trip) to fetch one sweep in full instead. SIZE: the reply fits the shared " +
+        "32 KB response budget. The timeline is cut newest first when its headers do not all fit - truncated is " +
+        "true, sweeps_returned says how many of count ride, and budget_note says so; narrow hours_back or move " +
+        "as_of to see the older sweeps. latest and the sweep_id read are never cut. Every sweep id the payload carries (sweep_id, previous_sweep_id, the watch items' " +
         "*_sweep_id anchors) is spelled as a JSON string for the same reason - pass one back verbatim. " +
         "Two honesty rules ride every payload, and both carry field-level meaning an agent must read. " +
         "MUTE SEMANTICS: alerts_enabled on a sweep states the alert master switch AS THE SWEEP RAN - false " +
@@ -153,11 +158,35 @@ public sealed class DarlingMcpFleetSweepTools
             var watchItemNames = await DarlingFleetSweepEndpoints.ReadWatchItemNamesAsync(
                 postgres, watchItems, logger, cancellationToken);
 
-            var result = FleetSweepPresentation.BuildTimelineNode(runs, windowStart, windowEnd);
+            /* #8081: the timeline carries each sweep as its header facts. The stored document rides ONCE, on
+               latest (and on the sweep_id read); embedded on every timeline entry as well, the issue's
+               four-sweep hour weighed 60 KB against the 32 KB response budget. The three cut fields are
+               seated here, beside sweeps, and written by the fit below. */
+            var result = FleetSweepPresentation.BuildTimelineNode(runs, windowStart, windowEnd, embedReports: false);
+            var headers = ((JsonArray)result["sweeps"]!).ToList();
+            result["sweeps_returned"] = null;
+            result["truncated"] = null;
+            result["budget_note"] = null;
             result["latest"] = await BuildDetailAsync(postgres, latest, cancellationToken);
             result["watch_state"] = watch_state ?? "open + carried (default)";
             result["watch_items"] = FleetSweepPresentation.BuildWatchItemsNode(watchItems, watchItemNames);
-            return result.ToJsonString();
+
+            /* #8081: the headers are cut to the shared response budget newest first (the store's order), so a
+               long window loses its OLDEST sweeps and says so; count still counts the whole window. latest and
+               the worklist are not cut: one sweep's document is answered whole, the single-item rule every
+               budget read keeps. The header nodes are cloned per fit because a JsonNode has one parent. */
+            return McpResponseBudget.FitPrefix(headers.Count, returned =>
+            {
+                var cut = returned < headers.Count;
+                result["sweeps"] = new JsonArray(headers.Take(returned).Select(h => h?.DeepClone()).ToArray());
+                result["sweeps_returned"] = returned;
+                result["truncated"] = cut;
+                result["budget_note"] = cut
+                    ? string.Create(CultureInfo.InvariantCulture,
+                        $"TRUNCATED: {headers.Count:#,0} sweeps fell in the window; only the newest {returned:#,0} fit the {McpResponseBudget.DefaultBytes:#,0}-byte response budget. Narrow hours_back, or move as_of, to see the older sweeps; latest and the sweep_id read carry a sweep's full document.")
+                    : null;
+                return result.ToJsonString();
+            }).Json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

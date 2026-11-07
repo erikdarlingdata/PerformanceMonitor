@@ -56,19 +56,22 @@ public static class FleetSweepPresentation
 {
     /// <summary>
     /// The timeline payload: the runs inside the caller's span, newest first, each with its full
-    /// document embedded. Both bounds are echoed back so the client renders the window it was
-    /// actually served — the #2506 discipline's read-end: a response that does not say what window it
-    /// covers invites the caller to assume the one it asked for.
+    /// document embedded — or, with <paramref name="embedReports"/> false, each as its header facts alone
+    /// (#8081: <c>get_sweep_reports</c> carries the document once, on its <c>latest</c> node, and cuts the
+    /// headers to the response budget; the web feed and the Viewer keep the embedded form). Both bounds are
+    /// echoed back so the client renders the window it was actually served — the #2506 discipline's
+    /// read-end: a response that does not say what window it covers invites the caller to assume the one
+    /// it asked for.
     /// </summary>
     public static JsonObject BuildTimelineNode(
-        IReadOnlyList<FleetSweepRun> runs, DateTime spanStartUtc, DateTime spanEndUtc)
+        IReadOnlyList<FleetSweepRun> runs, DateTime spanStartUtc, DateTime spanEndUtc, bool embedReports = true)
     {
         ArgumentNullException.ThrowIfNull(runs);
 
         var sweeps = new JsonArray();
         foreach (var run in runs)
         {
-            sweeps.Add(BuildRunNode(run));
+            sweeps.Add(BuildRunNode(run, embedReports));
         }
 
         return new JsonObject
@@ -85,11 +88,32 @@ public static class FleetSweepPresentation
     /// objects. The mute header and the liveness verdict are ALWAYS present — the two facts the spec
     /// requires stated on every sweep, so no client has to know a rule about their absence. The
     /// embedded report's <c>would_have_paged</c> obeys the class contract: absent on an alerts-on
-    /// sweep, stripped here (#3478) because legacy documents carry it fabricated.
+    /// sweep, stripped here (#3478) because legacy documents carry it fabricated. With
+    /// <paramref name="embedReport"/> false the <c>report</c> key is left off (#8081): the header facts
+    /// and the liveness block still ride, so the honesty rules read the same on a header-only entry.
     /// </summary>
-    public static JsonObject BuildRunNode(FleetSweepRun run)
+    public static JsonObject BuildRunNode(FleetSweepRun run, bool embedReport = true)
     {
         ArgumentNullException.ThrowIfNull(run);
+
+        var node = new JsonObject
+        {
+            ["sweep_id"] = SweepIdString(run.SweepId),
+            ["swept_at"] = run.SweptAtUtc.ToString("o"),
+            ["span_start"] = run.SpanStartUtc.ToString("o"),
+            ["span_end"] = run.SpanEndUtc.ToString("o"),
+            ["previous_sweep_id"] = SweepIdString(run.PreviousSweepId),
+            ["alerts_enabled"] = run.AlertsEnabled,
+            ["servers_expected"] = run.ServersExpected,
+            ["servers_reported"] = run.ServersReported,
+            ["instruments_alive"] = run.InstrumentsAlive,
+            ["instrument_liveness"] = EmbedJson(run.InstrumentLivenessJson),
+        };
+
+        if (!embedReport)
+        {
+            return node;
+        }
 
         var report = EmbedJson(run.ReportJson);
 
@@ -119,20 +143,8 @@ public static class FleetSweepPresentation
             RestringTickScaleId(reportObject, "previous_sweep_id");
         }
 
-        return new JsonObject
-        {
-            ["sweep_id"] = SweepIdString(run.SweepId),
-            ["swept_at"] = run.SweptAtUtc.ToString("o"),
-            ["span_start"] = run.SpanStartUtc.ToString("o"),
-            ["span_end"] = run.SpanEndUtc.ToString("o"),
-            ["previous_sweep_id"] = SweepIdString(run.PreviousSweepId),
-            ["alerts_enabled"] = run.AlertsEnabled,
-            ["servers_expected"] = run.ServersExpected,
-            ["servers_reported"] = run.ServersReported,
-            ["instruments_alive"] = run.InstrumentsAlive,
-            ["instrument_liveness"] = EmbedJson(run.InstrumentLivenessJson),
-            ["report"] = report,
-        };
+        node["report"] = report;
+        return node;
     }
 
     /// <summary>
