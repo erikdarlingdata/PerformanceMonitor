@@ -11,11 +11,6 @@
             <Setter Property="VerticalAlignment" Value="Center"/>
             <Setter Property="Margin" Value="0,0,6,0"/>
         </Style>
-        <Style x:Key="FooterButton" TargetType="Button">
-            <Setter Property="Padding" Value="6,4"/>
-            <Setter Property="Margin" Value="2"/>
-            <Setter Property="HorizontalContentAlignment" Value="Left"/>
-        </Style>
     </UserControl.Resources>
     <Grid>
         <Grid.ColumnDefinitions>
@@ -28,21 +23,21 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <Button x:Name="AddServerButton" Grid.Row="0" Grid.Column="0" Style="{StaticResource FooterButton}" Click="AddServer_Click"
+        <Button x:Name="AddServerButton" Grid.Row="0" Grid.Column="0" Padding="6,4" Margin="2" HorizontalContentAlignment="Left" Click="AddServer_Click"
                 AutomationProperties.Name="Add Server">
             <StackPanel Orientation="Horizontal">
                 <TextBlock Text="&#xE710;" Style="{StaticResource FooterIcon}"/>
                 <TextBlock Text="Add Server" VerticalAlignment="Center"/>
             </StackPanel>
         </Button>
-        <Button x:Name="ManageServersButton" Grid.Row="0" Grid.Column="1" Style="{StaticResource FooterButton}" Click="ManageServers_Click"
+        <Button x:Name="ManageServersButton" Grid.Row="0" Grid.Column="1" Padding="6,4" Margin="2" HorizontalContentAlignment="Left" Click="ManageServers_Click"
                 AutomationProperties.Name="Manage Servers">
             <StackPanel Orientation="Horizontal">
                 <TextBlock Text="&#xE770;" Style="{StaticResource FooterIcon}"/>
                 <TextBlock Text="Manage Servers" VerticalAlignment="Center"/>
             </StackPanel>
         </Button>
-        <Button x:Name="InvestigationsButton" Grid.Row="1" Grid.Column="0" Style="{StaticResource FooterButton}" Click="Investigations_Click"
+        <Button x:Name="InvestigationsButton" Grid.Row="1" Grid.Column="0" Padding="6,4" Margin="2" HorizontalContentAlignment="Left" Click="Investigations_Click"
                 AutomationProperties.Name="Investigations"
                 ToolTip="Read-only list of the investigation requests agents were asked to look into, with their reports and journal (#5904)">
             <StackPanel Orientation="Horizontal">
@@ -50,7 +45,7 @@
                 <TextBlock Text="Investigations" VerticalAlignment="Center"/>
             </StackPanel>
         </Button>
-        <Button x:Name="SettingsButton" Grid.Row="1" Grid.Column="1" Style="{StaticResource FooterButton}" Click="Settings_Click"
+        <Button x:Name="SettingsButton" Grid.Row="1" Grid.Column="1" Padding="6,4" Margin="2" HorizontalContentAlignment="Left" Click="Settings_Click"
                 AutomationProperties.Name="Settings">
             <StackPanel Orientation="Horizontal">
                 <TextBlock Text="&#xE713;" Style="{StaticResource FooterIcon}"/>
@@ -58,7 +53,7 @@
             </StackPanel>
         </Button>
 
-        <Button x:Name="MoreButton" Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2" Style="{StaticResource FooterButton}" Click="More_Click"
+        <Button x:Name="MoreButton" Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2" Padding="6,4" Margin="2" HorizontalContentAlignment="Left" Click="More_Click"
                 AutomationProperties.Name="More" ToolTip="Tags, import, logs, plan viewer and about">
             <Button.ContextMenu>
                 <ContextMenu x:Name="MoreMenu" Placement="Top">
