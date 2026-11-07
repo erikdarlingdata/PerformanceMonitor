@@ -261,7 +261,7 @@ public static class McpPlanAnalysisFormatter
 
                 return new
                 {
-                    statement_text =McpHelpers.Truncate(s.StatementText, 2000),
+                    statement_text = McpHelpers.Truncate(s.StatementText, 2000),
                     statement_type = s.StatementType,
                     estimated_cost = Math.Round(s.StatementSubTreeCost, 4),
                     /* #5633 item 21: cache and Query Store plans carry no QueryPlan DegreeOfParallelism, so
@@ -377,7 +377,7 @@ public static class McpPlanAnalysisFormatter
 
     /// <summary>
     /// The row count of the statistic's table as the plan saw it (#8147): the largest <c>TableCardinality</c> among
-    /// the operators that read that table, or null when no operator in the statement does.
+    /// the operators that read that table and recorded one, or null when none does.
     /// </summary>
     private static double? TableRowsFor(OptimizerStatsUsageItem item, IReadOnlyList<PlanNode> nodes)
     {
@@ -385,7 +385,8 @@ public static class McpPlanAnalysisFormatter
         double? rows = null;
         foreach (var n in nodes)
         {
-            if (string.Equals(n.DatabaseName, item.DatabaseName, StringComparison.OrdinalIgnoreCase)
+            if (n.HasTableCardinality
+                && string.Equals(n.DatabaseName, item.DatabaseName, StringComparison.OrdinalIgnoreCase)
                 && string.Equals(n.ObjectName, qualified, StringComparison.OrdinalIgnoreCase))
             {
                 rows = rows is null ? n.TableCardinality : Math.Max(rows.Value, n.TableCardinality);

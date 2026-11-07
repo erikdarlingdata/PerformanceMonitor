@@ -151,13 +151,72 @@ public sealed class McpPlanAnalysisStatisticsUsedTests
     }
 
     [Fact]
-    public void StatsUsed_TwoOperatorsOnOneTable_TakesTheLargerCardinality()
+    public void StatsUsed_ThreeOperatorsOnOneTable_TakesTheLargestCardinality()
     {
-        using var doc = Run(StatsXml(new[] { new Stat("Orders", "ST_o", 100) }), new Scan("Orders", "400"), new Scan("Orders", "800"));
+        using var doc = Run(StatsXml(new[] { new Stat("Orders", "ST_o", 100) }), new Scan("Orders", "400"), new Scan("Orders", "800"), new Scan("Orders", "600"));
         var row = Assert.Single(Rows(OnlyStatement(doc)));
 
         Assert.Equal(800, row.GetProperty("table_rows").GetDouble());
         Assert.Equal(12.5, row.GetProperty("modified_percent").GetDouble());
+    }
+
+    [Fact]
+    public void StatsUsed_OperatorWithoutTableCardinality_GivesNullRowsAndPercent()
+    {
+        var update =
+            "<StmtSimple StatementText=\"UPDATE dbo.Orders SET Status = 2 WHERE OrderId = 7\" StatementId=\"1\" StatementType=\"UPDATE\" StatementSubTreeCost=\"0.01\" StatementEstRows=\"1\">" +
+            "<QueryPlan CachedPlanSize=\"16\" CompileTime=\"1\" CompileCPU=\"1\" CompileMemory=\"64\">" +
+            StatsXml(new[] { new Stat("Orders", "PK_Orders", 300) }) +
+            "<RelOp NodeId=\"0\" PhysicalOp=\"Clustered Index Update\" LogicalOp=\"Clustered Index Update\" EstimateRows=\"1\" EstimateIO=\"0.01\" EstimateCPU=\"0.0001\" AvgRowSize=\"9\" EstimatedTotalSubtreeCost=\"0.01\" Parallel=\"0\" EstimateRebinds=\"0\" EstimateRewinds=\"0\" EstimatedExecutionMode=\"Row\">" +
+            "<OutputList/><Update DMLRequestSort=\"0\" ActionColumn=\"[Action1004]\"><Object Database=\"[SalesDb]\" Schema=\"[dbo]\" Table=\"[Orders]\" Index=\"[PK_Orders]\" IndexKind=\"Clustered\" Storage=\"RowStore\"/></Update></RelOp>" +
+            "</QueryPlan></StmtSimple>";
+        using var doc = JsonDocument.Parse(Result(Wrap(update)));
+        var row = Assert.Single(Rows(OnlyStatement(doc)));
+
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("table_rows").ValueKind);
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("modified_percent").ValueKind);
+        Assert.Equal(300, row.GetProperty("modification_count").GetInt64());
+    }
+
+    private const string TempRaw = "#orders_______________________________________________________________________________________________000000000012";
+
+    [Fact]
+    public void StatsUsed_TempTable_ShowsItsShortNameAndGetsItsRowCount()
+    {
+        using var doc = Run(StatsXml(new[] { new Stat(TempRaw, "_WA_Sys_00000001_0", 40, Db: "tempdb") }), new Scan(TempRaw, "200", Db: "tempdb"));
+        var row = Assert.Single(Rows(OnlyStatement(doc)));
+
+        Assert.Equal("#orders", row.GetProperty("table").GetString());
+        Assert.Equal(200, row.GetProperty("table_rows").GetDouble());
+        Assert.Equal(20.0, row.GetProperty("modified_percent").GetDouble());
+    }
+
+    private static string IfStmt(string? statsXml) =>
+        "<StmtCond StatementText=\"IF EXISTS (SELECT 1 FROM dbo.Orders)\" StatementId=\"1\" StatementType=\"COND WITH QUERY\" StatementSubTreeCost=\"0.0032\">" +
+        "<Condition>" + QueryPlan(statsXml, new[] { new Scan("Orders", "1000") }) + "</Condition><Then><Statements/></Then></StmtCond>";
+
+    [Fact]
+    public void StatsUsed_IfConditionWithRecordedStats_IsRecorded()
+    {
+        using var doc = JsonDocument.Parse(Result(Wrap(IfStmt(StatsXml(new[] { new Stat("Orders", "IX_Orders_CustomerId", 250) })))));
+        var stmt = OnlyStatement(doc);
+        var row = Assert.Single(Rows(stmt));
+
+        Assert.Equal("recorded", stmt.GetProperty("statistics_usage").GetString());
+        Assert.Equal("IX_Orders_CustomerId", row.GetProperty("statistic").GetString());
+        Assert.Equal(1000, row.GetProperty("table_rows").GetDouble());
+        Assert.Equal(25.0, row.GetProperty("modified_percent").GetDouble());
+    }
+
+    [Fact]
+    public void StatsUsed_IfConditionWithoutStatsUsage_IsNotInPlan()
+    {
+        using var doc = JsonDocument.Parse(Result(Wrap(IfStmt(null))));
+        var stmt = OnlyStatement(doc);
+
+        Assert.Equal("not_in_plan", stmt.GetProperty("statistics_usage").GetString());
+        Assert.Equal(McpPlanAnalysisFormatter.StatisticsNotInPlanNote, stmt.GetProperty("statistics_note").GetString());
+        Assert.Empty(Rows(stmt));
     }
 
     [Fact]
@@ -218,14 +277,6 @@ public sealed class McpPlanAnalysisStatisticsUsedTests
     }
 
     [Fact]
-    public void StatsUsed_NotInPlanNote_IsTheSpecifiedText()
-    {
-        Assert.Equal(
-            "This plan has no record of the statistics it used (SQL Server before 2017 / 2016 SP2, or a plan that loaded none), so their state at compile is unknown.",
-            McpPlanAnalysisFormatter.StatisticsNotInPlanNote);
-    }
-
-    [Fact]
     public void StatsUsed_EmptyRecordedList_HasNoNote()
     {
         using var doc = Run("<OptimizerStatsUsage/>");
@@ -261,6 +312,10 @@ public sealed class McpPlanAnalysisStatisticsUsedTests
             Assert.Equal("no_query_plan", s.GetProperty("statistics_usage").GetString());
             Assert.Equal(JsonValueKind.Null, s.GetProperty("statistics_note").ValueKind);
             Assert.Empty(Rows(s));
+            Assert.Equal(10, s.GetProperty("statistics_cap").GetInt32());
+            Assert.Equal(0, s.GetProperty("statistics_returned").GetInt32());
+            Assert.Equal(0, s.GetProperty("total_statistics").GetInt32());
+            Assert.False(s.GetProperty("statistics_truncated").GetBoolean());
         });
     }
 

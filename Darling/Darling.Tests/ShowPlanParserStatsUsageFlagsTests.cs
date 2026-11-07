@@ -112,6 +112,69 @@ public sealed class ShowPlanParserStatsUsageFlagsTests
         Assert.EndsWith(stmt.StatsUsage[0].TableName, nodeTable);
     }
 
+    private const string OneStat = """
+        <OptimizerStatsUsage>
+          <StatisticsInfo Database="[SalesDb]" Schema="[dbo]" Table="[Orders]" Statistics="[IX_Orders_CustomerId]" ModificationCount="5" SamplingPercent="100" LastUpdate="2026-11-01T10:00:00"/>
+        </OptimizerStatsUsage>
+        """;
+
+    private static string QueryPlanXml(string? statsUsage) => $"""
+        <QueryPlan CachedPlanSize="16" CompileTime="1" CompileCPU="1" CompileMemory="100">
+          {statsUsage}
+          <RelOp NodeId="0" PhysicalOp="Table Scan" LogicalOp="Table Scan" EstimateRows="1" EstimateIO="0.003" EstimateCPU="0.0001" AvgRowSize="9" EstimatedTotalSubtreeCost="0.0032" TableCardinality="100" Parallel="0" EstimateRebinds="0" EstimateRewinds="0" EstimatedExecutionMode="Row">
+            <OutputList/>
+            <TableScan Ordered="0" ForcedIndex="0" ForceScan="0" NoExpandHint="0" Storage="RowStore">
+              <DefinedValues/>
+              <Object Database="[SalesDb]" Schema="[dbo]" Table="[Orders]" IndexKind="Heap" Storage="RowStore"/>
+            </TableScan>
+          </RelOp>
+        </QueryPlan>
+        """;
+
+    private static string IfConditionStatement(string? statsUsage) => $"""
+        <StmtCond StatementText="IF EXISTS (SELECT 1 FROM dbo.Orders)" StatementId="1" StatementType="COND WITH QUERY" StatementSubTreeCost="0.0032">
+          <Condition>{QueryPlanXml(statsUsage)}</Condition>
+          <Then><Statements/></Then>
+        </StmtCond>
+        """;
+
+    private static string CursorStatement(string? statsUsage) => $"""
+        <StmtCursor StatementText="declare c cursor for select * from dbo.Orders" StatementId="1" StatementType="DECLARE CURSOR">
+          <CursorPlan CursorName="c" CursorActualType="FastForward" CursorRequestedType="FastForward" CursorConcurrency="Read Only" ForwardOnly="true">
+            <Operation OperationType="FetchQuery">{QueryPlanXml(statsUsage)}</Operation>
+          </CursorPlan>
+        </StmtCursor>
+        """;
+
+    [Fact]
+    public void Parser_IfConditionWithQuery_FlagsItsQueryPlanAndStats()
+    {
+        var stmt = ParseSingle(IfConditionStatement(OneStat));
+
+        Assert.True(stmt.HasQueryPlan);
+        Assert.True(stmt.HasStatsUsage);
+        Assert.Single(stmt.StatsUsage);
+    }
+
+    [Fact]
+    public void Parser_CursorFetchQuery_FlagsItsQueryPlanAndStats()
+    {
+        var stmt = ParseSingle(CursorStatement(OneStat));
+
+        Assert.True(stmt.HasQueryPlan);
+        Assert.True(stmt.HasStatsUsage);
+        Assert.Single(stmt.StatsUsage);
+    }
+
+    [Fact]
+    public void Parser_IfConditionWithoutStatsUsage_HasPlanButNoStats()
+    {
+        var stmt = ParseSingle(IfConditionStatement(null));
+
+        Assert.True(stmt.HasQueryPlan);
+        Assert.False(stmt.HasStatsUsage);
+    }
+
     private static System.Collections.Generic.IEnumerable<PlanNode> Flatten(PlanNode n)
     {
         yield return n;

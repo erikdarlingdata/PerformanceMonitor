@@ -546,6 +546,7 @@ public static class ShowPlanParser
         };
 
         ParseStmtAttributes(stmt, stmtEl);
+        stmt.HasQueryPlan = true;
         ParseQueryPlanElements(stmt, stmtEl, queryPlanEl);
 
         var opNode = ParseRelOp(relOpEl, 0, cancellationToken);
@@ -1151,6 +1152,7 @@ public static class ShowPlanParser
             // the plan does not carry it; EstimateRowsWithoutRowGoal is a different quantity (the output
             // estimate before the row goal), and the viewer shows each only when the plan has it.
             node.TableCardinality = ParseDouble(relOpEl.Attribute("TableCardinality")?.Value);
+            node.HasTableCardinality = relOpEl.Attribute("TableCardinality") != null;
             node.EstimatedRowsRead = ParseDouble(relOpEl.Attribute("EstimatedRowsRead")?.Value);
             node.EstimateRowsWithoutRowGoal = ParseDouble(relOpEl.Attribute("EstimateRowsWithoutRowGoal")?.Value);
 

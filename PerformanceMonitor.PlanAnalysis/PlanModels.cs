@@ -275,6 +275,7 @@ public class PlanNode
     public string? PartitionColumns { get; set; }
     public string? DefinedValues { get; set; }
     public double TableCardinality { get; set; }
+    public bool HasTableCardinality { get; set; }
     public double EstimatedRowsRead { get; set; }
     public string? TopExpression { get; set; }
     public bool IsPercent { get; set; }

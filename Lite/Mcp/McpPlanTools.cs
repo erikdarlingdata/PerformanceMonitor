@@ -184,7 +184,7 @@ public sealed class McpPlanTools
     [McpServerTool(Name = "analyze_query_store_plan"), Description(
         "Analyzes an execution plan from Query Store by database name and plan ID. " +
         "Fetches the plan on-demand from the monitored SQL Server instance. " +
-        "Use after get_query_store_top to understand why a query is expensive. Each statement also lists statistics_used: the statistics its plan loaded (OptimizerStatsUsage), most-modified first, capped at statistics_cap, with modification_count, table_rows, modified_percent, last_update (server local time) and sampling_percent as of compile; statistics_usage says recorded, not_in_plan or no_query_plan.")]
+        "Use after get_query_store_top to understand why a query is expensive. Each statement lists statistics_used: the statistics its plan loaded (OptimizerStatsUsage), most-modified first, capped at statistics_cap, with modification_count, table_rows, modified_percent, last_update (server local time) and sampling_percent as of compile; statistics_usage says recorded, not_in_plan or no_query_plan.")]
     public static async Task<string> AnalyzeQueryStorePlan(
         /* Injected for the engine-capability miss alone (#2532): unlike its three siblings this tool
            fetches the plan LIVE from the monitored instance rather than from the store, so the store
