@@ -1198,9 +1198,21 @@ internal static class DarlingDataReader
                    COUNT(DISTINCT) skips NULLs, so 0 means only pre-dimension legacy rows, which age
                    out with raw retention. */
                 COUNT(DISTINCT query_text_digest) AS distinct_texts,
+                /* #8136: the group's newest text-bearing row, picked in this pass over the winners' rows so latest_text
+                   below is a lookup on the capped rows and not a third read of the window. The pick is a MAX over a byte
+                   key that sorts the way the lookup used to: collection_time first (timestamp_send is its microseconds,
+                   big-endian, positive for any collection date), then collection_id (the row collected last wins a tie;
+                   int8send of a positive id), then the row's text as a flag byte and payload: 0x00 and the inline text
+                   when the row carries one (pre-dimension rows only; v_query_stats' COALESCE prefers it), else 0x01 and
+                   the 32-byte digest. Only rows that carry a text or a digest take part, which is the row the view gives
+                   a text for. A MAX keeps one value per group and has a combine step, so the aggregate stays partial and
+                   parallel where the planner wants it; an ordered array aggregate loses both. */
+                MAX(timestamp_send(q.collection_time) || int8send(q.collection_id)
+                    || CASE WHEN q.query_text IS NOT NULL THEN '\x00'::bytea || convert_to(q.query_text, 'UTF8') ELSE '\x01'::bytea || q.query_text_digest END)
+                    FILTER (WHERE q.query_text IS NOT NULL OR q.query_text_digest IS NOT NULL) AS latest_text_key,
                 MAX(w.rank_metric) AS rank_metric,
                 MAX(w.rank_cpu) AS rank_cpu
-            FROM query_stats
+            FROM query_stats AS q
             JOIN winners AS w
                 ON  COALESCE(query_hash, '') = COALESCE(w.win_query_hash, '')
                 AND database_name IS NOT DISTINCT FROM w.win_database_name
@@ -1214,45 +1226,25 @@ internal static class DarlingDataReader
             GROUP BY database_name, query_hash, host_object_name
         ),
         latest_text AS MATERIALIZED (
-            /* #5309: the representative text of EVERY ranked group in ONE lookup. This used to be a lateral
-               lookup of the newest row, one per ranked row, which on a store without TimescaleDB scanned
-               the raw table once per row (25 scans, 28 of 38 seconds at seven days). Here one pass reads the
-               window's rows for the winners' keys and keeps the newest row per key. The newest row is chosen on
-               narrow columns (the inline text exists only on pre-dimension rows) and the text is resolved from
-               query_text_dim for that one row afterwards, so the sort never carries a wide text. A row counts
-               as having text when its inline text or its dimension row exists, the rule v_query_stats' COALESCE
-               gives. The key match is NULL-safe, with the COALESCE equality as the hashable pre-filter (see
-               pass 2). The group's own host object keeps one caller's text from labelling another's (#2012).
-               MATERIALIZED, because the join to it below is NULL-safe (IS NOT DISTINCT FROM), which PostgreSQL
-               cannot hash: left plain, it inlines this CTE into a nested loop and re-runs it per ranked row
-               (a 120-candidate round scanned the 20,000-row query_text_dim 10,000 times, 9,975 ms; materialized,
-               805 ms, same rows). The CTE is read once and the join probes its result. */
+            /* #5309, #8136: the representative text of EVERY ranked group, resolved for the capped rows only. Pass 2
+               carries each group's newest text-bearing row out of its read of the winners' rows (latest_text_key: 8
+               bytes of time, 8 of collection id, a flag byte at offset 16, then the payload from byte 18), so this reads
+               at most $7 rows and the dimension: the inline text when that row has one (flag 0x00, pre-dimension rows
+               only), else its digest (flag 0x01) resolved from query_text_dim, the rule v_query_stats' COALESCE gives.
+               Retention keeps a text's dimension row for the facts' full retention (DarlingRetention scopes the
+               dimension cutoff that way), so a digest inside raw retention resolves here. The group's own host object
+               keeps one caller's text from labelling another's (#2012). MATERIALIZED, because the join to it below is
+               NULL-safe (IS NOT DISTINCT FROM), which PostgreSQL cannot hash: left plain, it inlines this CTE into a
+               nested loop and re-runs it per ranked row (a 120-candidate round scanned the 20,000-row query_text_dim
+               10,000 times, 9,975 ms; materialized, 805 ms, same rows). The CTE is read once and the join probes its
+               result. */
             SELECT
-                l.database_name,
-                l.query_hash,
-                l.host_object_name,
-                COALESCE(l.query_text, d.query_text) AS query_text
-            FROM
-            (
-                SELECT DISTINCT ON (q.database_name, q.query_hash, q.host_object_name)
-                    q.database_name,
-                    q.query_hash,
-                    q.host_object_name,
-                    q.query_text,
-                    q.query_text_digest
-                FROM query_stats AS q
-                JOIN winners AS w
-                    ON  COALESCE(q.query_hash, '') = COALESCE(w.win_query_hash, '')
-                    AND q.database_name IS NOT DISTINCT FROM w.win_database_name
-                    AND q.query_hash IS NOT DISTINCT FROM w.win_query_hash
-                    AND q.host_object_name IS NOT DISTINCT FROM w.win_host_object_name
-                WHERE q.server_id = $1
-                AND   q.collection_time >= $2
-                AND   q.collection_time <= $3
-                AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
-                ORDER BY q.database_name, q.query_hash, q.host_object_name, q.collection_time DESC, q.collection_id DESC
-            ) AS l
-            LEFT JOIN query_text_dim AS d ON d.digest = l.query_text_digest
+                k.database_name,
+                k.query_hash,
+                k.host_object_name,
+                COALESCE(CASE WHEN get_byte(k.latest_text_key, 16) = 0 THEN convert_from(substring(k.latest_text_key FROM 18), 'UTF8') END, d.query_text) AS query_text
+            FROM ranked AS k
+            LEFT JOIN query_text_dim AS d ON d.digest = CASE WHEN get_byte(k.latest_text_key, 16) = 1 THEN substring(k.latest_text_key FROM 18) END
         ),
         page AS (
         SELECT
