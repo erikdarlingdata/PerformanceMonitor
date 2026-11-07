@@ -80,6 +80,26 @@ VALUES ($1,$2,$3,$4,$2,'rpc_completed','testdb',5000000,'EXEC p')",
             var loss = root.GetProperty("hints").GetProperty("ring_buffer_loss");
             Assert.Equal(12, loss.GetProperty("evicted_events").GetInt64());
             Assert.Equal(0, loss.GetProperty("dropped_events").GetInt64());
+        var note = loss.GetProperty("note").GetString()!;
+        Assert.Contains("were evicted", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("ring_buffer_evicted=", note, StringComparison.Ordinal);
+        Assert.EndsWith("Z", loss.GetProperty("first_loss_utc").GetString()!, StringComparison.Ordinal);
+        });
+
+    /* The loss rides BESIDE the #4966 window keys, not instead of them. */
+    [Fact]
+    public async Task EmptyAnswer_KeepsItsWindowKeysBesideRingBufferLoss_AgainstDevPostgres() =>
+        await RunAsync("empty-window-keys", async (c, ds, name, end) =>
+        {
+            await SeedRunAsync(DeadlocksCollector.Instance.Name, end.AddHours(-3), LossNote, c, name);
+            await SeedRunAsync(DeadlocksCollector.Instance.Name, end.AddMinutes(-2), null, c, name);
+
+            var hints = Parse(await DarlingMcpBlockingTools.GetDeadlocks(ds, name, 24, 15, as_of: AsOf(end))).GetProperty("hints");
+
+            Assert.True(hints.TryGetProperty("effective_start", out _));
+            Assert.True(hints.TryGetProperty("window_truncated", out _));
+            Assert.True(hints.TryGetProperty("truncation_note", out _));
+            Assert.Equal(12, hints.GetProperty("ring_buffer_loss").GetProperty("evicted_events").GetInt64());
         });
 
     [Fact]

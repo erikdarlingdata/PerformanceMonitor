@@ -138,6 +138,28 @@ public sealed class RingBufferLossNoteTests
         }
 
         Assert.Equal(10L, payload["evicted_events"]);
-        Assert.Equal("n", payload["note"]);
+    }
+
+    [Fact]
+    public void ToPayload_NoteIsSentenceWithAdviceNotLabels()
+    {
+        var t = new DateTime(2026, 11, 7, 10, 0, 0, DateTimeKind.Utc);
+        var window = new RingBufferLossNote.LossWindow(
+            12, 4, 1, t, t.AddMinutes(1),
+            "ring_buffer_evicted=12 ring_buffer_loss_window_s=60 ring_buffer_events_limit=1000");
+
+        var payload = window.ToPayload();
+        var note = (string)payload["note"]!;
+
+        Assert.Contains("12 event(s) were evicted from the ring buffer before collection", note, StringComparison.Ordinal);
+        Assert.Contains("4 event(s) were dropped by the session before they reached its targets", note, StringComparison.Ordinal);
+        Assert.Contains("1 span(s) after a session restart could not be counted", note, StringComparison.Ordinal);
+        Assert.Contains("between 2026-11-07 10:00 and 2026-11-07 10:01 UTC", note, StringComparison.Ordinal);
+        Assert.Contains(". Latest: ", note, StringComparison.Ordinal);
+        Assert.Contains(RingBufferLossNote.SettingHint, note, StringComparison.Ordinal);
+        Assert.DoesNotContain("ring_buffer_evicted=", note, StringComparison.Ordinal);
+        Assert.EndsWith("Z", (string)payload["first_loss_utc"]!, StringComparison.Ordinal);
+        Assert.EndsWith("Z", (string)payload["last_loss_utc"]!, StringComparison.Ordinal);
+        Assert.Equal(t, DateTime.Parse((string)payload["first_loss_utc"]!, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind));
     }
 }

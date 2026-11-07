@@ -122,6 +122,26 @@ VALUES ($1, $2, $3, $4, $2, 'rpc_completed', 'testdb', 'EXEC p', 5000000)",
         var loss = root.GetProperty("hints").GetProperty("ring_buffer_loss");
         Assert.Equal(12, loss.GetProperty("evicted_events").GetInt64());
         Assert.Equal(0, loss.GetProperty("dropped_events").GetInt64());
+        var note = loss.GetProperty("note").GetString()!;
+        Assert.Contains("were evicted", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("ring_buffer_evicted=", note, StringComparison.Ordinal);
+        Assert.EndsWith("Z", loss.GetProperty("first_loss_utc").GetString()!, StringComparison.Ordinal);
+    }
+
+    /* The loss rides BESIDE the #4966 window keys, not instead of them. */
+    [Fact]
+    public async Task EmptyAnswer_KeepsItsWindowKeysBesideRingBufferLoss()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await SeedRunAsync(DeadlocksCollector.Instance.Name, Anchor.AddHours(-3), LossNote);
+        await SeedRunAsync(DeadlocksCollector.Instance.Name, Anchor.AddMinutes(-2), null);
+
+        var hints = Root(await DeadlocksAsync()).GetProperty("hints");
+
+        Assert.True(hints.TryGetProperty("effective_start", out _));
+        Assert.True(hints.TryGetProperty("window_truncated", out _));
+        Assert.True(hints.TryGetProperty("truncation_note", out _));
+        Assert.Equal(12, hints.GetProperty("ring_buffer_loss").GetProperty("evicted_events").GetInt64());
     }
 
     [Fact]

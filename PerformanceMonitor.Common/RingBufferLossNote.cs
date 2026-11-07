@@ -209,9 +209,41 @@ public static class RingBufferLossNote
             ["evicted_events"] = Evicted,
             ["dropped_events"] = Dropped,
             ["unknown_spans"] = UnknownRuns,
-            ["first_loss_utc"] = FirstLossUtc,
-            ["last_loss_utc"] = LastLossUtc,
-            ["note"] = NewestNote,
+            ["first_loss_utc"] = Iso(FirstLossUtc),
+            ["last_loss_utc"] = Iso(LastLossUtc),
+            ["note"] = Sentence(),
         };
+
+        /* The same "o" round-trip text the neighbouring timestamp keys use, with the Z of an instant the store holds in UTC. */
+        private static string Iso(DateTime utc) => DateTime.SpecifyKind(utc, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture);
+
+        /// <summary>
+        /// The <c>note</c> of the payload: the window's totals, then the newest lossy run's own sentence (<see cref="Describe"/>), which is
+        /// where the advice and the setting to raise come from. The raw labels stay out of it. The totals come from the summed fields, so a
+        /// window combined from two collectors reads the same way as one.
+        /// </summary>
+        private string Sentence()
+        {
+            var inv = CultureInfo.InvariantCulture;
+            var parts = new List<string>();
+            if (Evicted > 0)
+            {
+                parts.Add(string.Format(inv, "{0:N0} event(s) were evicted from the ring buffer before collection", Evicted));
+            }
+
+            if (Dropped > 0)
+            {
+                parts.Add(string.Format(inv, "{0:N0} event(s) were dropped by the session before they reached its targets", Dropped));
+            }
+
+            if (UnknownRuns > 0)
+            {
+                parts.Add(string.Format(inv, "{0:N0} span(s) after a session restart could not be counted", UnknownRuns));
+            }
+
+            var text = string.Join("; ", parts)
+                + string.Format(inv, " between {0:yyyy-MM-dd HH:mm} and {1:yyyy-MM-dd HH:mm} UTC", FirstLossUtc, LastLossUtc);
+            return Describe(NewestNote) is { } latest ? text + ". Latest: " + latest : text;
+        }
     }
 }
