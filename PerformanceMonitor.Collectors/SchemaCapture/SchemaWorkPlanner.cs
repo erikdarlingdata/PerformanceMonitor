@@ -224,12 +224,15 @@ public static class SchemaWorkPlanner
         _ => null,
     };
 
-    /* The create time the server reports for one running session is not stable to the millisecond: two reads of the same session were
-       seen a few milliseconds apart. A real restart is a stop and a start, seconds apart at the least, so a second is the tolerance. */
+    /* The create time the server reports for one running session is not stable. Two reads were seen a few milliseconds apart, and on a
+       server whose tick clock runs faster than the wall clock (seen on a SQL Server 2019 container: about 0.6 s earlier per second) it moves
+       earlier with every read, as the DMV derives it from the tick count. A restart stops one session and starts another, so the new
+       create time is later than the stored one by seconds at the least; a create time that is earlier, or later by under a second, is
+       the same session. A tick clock that runs slow would still read as a restart: that costs a reconcile, never a missed change. */
     public static bool IsSameSession(SchemaCaptureStateRow? serverState, SchemaSessionState session) =>
         serverState?.SessionCreateTime is { } stored
         && session.CreateTimeUtc is { } now
-        && (stored - now).Duration() < TimeSpan.FromSeconds(1);
+        && now - stored < TimeSpan.FromSeconds(1);
 
     /* The events the stored cursor has not seen. With the same session, those after the stored sequence: the read starts a second
        before the stored event's time so a tie at one timestamp is not missed, and the sequence tells the read ones apart. */

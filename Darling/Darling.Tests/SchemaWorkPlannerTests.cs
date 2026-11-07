@@ -151,6 +151,19 @@ public class SchemaWorkPlannerTests
     }
 
     [Fact]
+    public void Planner_SessionCreateTimeReportedMinutesEarlier_IsNotARestart()
+    {
+        /* A server whose tick clock outruns the wall clock reports a create time that moves earlier with every read of one session. A
+           restart starts a session later than the one it replaces, so an earlier create time is never one. */
+        var session = new SchemaSessionState(true, Session1.AddMinutes(-3), null, false);
+
+        var plan = For(Plan([Probe("SalesDb")], States(Db("SalesDb")), Batch(10), session: session), "SalesDb");
+
+        Assert.Equal(SchemaDatabaseWork.Skip, plan.Work);
+        Assert.Null(plan.Reason);
+    }
+
+    [Fact]
     public void Planner_SessionCreateTimeJitterOfAFewMilliseconds_IsNotARestart()
     {
         var session = new SchemaSessionState(true, Session1.AddMilliseconds(3), null, false);
