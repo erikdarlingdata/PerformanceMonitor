@@ -24,7 +24,7 @@
 
     <!-- Background Colors -->
     <Color x:Key="BackgroundDarkColor">#CFDDE9</Color>
-    <Color x:Key="AlternatingRowColor">#C5D5E4</Color>
+    <Color x:Key="AlternatingRowColor">#CAD9E7</Color>
     <Color x:Key="BackgroundColor">#DAE6F0</Color>
     <Color x:Key="BackgroundLightColor">#EEF4FA</Color>
     <Color x:Key="BackgroundLighterColor">#BDD0E1</Color>
