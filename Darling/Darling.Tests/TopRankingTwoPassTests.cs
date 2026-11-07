@@ -158,11 +158,20 @@ public sealed class TopRankingTwoPassTests
         })
         {
             var text = filter.Replace("{TimescaleSupport.IntervalHonestSourceFilter}", "sample_interval_seconds IS DISTINCT FROM 0", StringComparison.Ordinal);
-            /* once per pass. The host-object read's one latest-text lookup (#5309) scopes by server and reads the window
-               too; TopQueriesSql's lookup reads the ranked rows and the text dimension only (#8136: pass 2 carries each
-               group's newest text-bearing row), so its window predicates appear exactly once per pass. */
-            var lookup = name == "TopQueriesByHostObjectSql" && (filter == "server_id = $1" || filter.StartsWith("collection_time", StringComparison.Ordinal));
-            Assert.Equal(lookup ? 3 : 2, Regex.Matches(sql, Regex.Escape(text)).Count);
+            /* once per pass: pass 1 and pass 2 each carry the filter, so the count is taken over the two passes, which end
+               where the text lookup begins. What the lookup and the orphan fallback read (#8136, #8139) is pinned by
+               TopQueriesTextOneScanLiveTests through the plan. TopQueriesSql's pass 2 applies the interval filter to each
+               measure rather than to the pass (#8139), so for it that filter is a presence in the passes, not a count. */
+            var lookupAt = sql.IndexOf("latest_text AS MATERIALIZED (", StringComparison.Ordinal);
+            var passes = lookupAt < 0 ? sql : sql[..lookupAt];
+            if (name == "TopQueriesSql" && filter.StartsWith("{TimescaleSupport", StringComparison.Ordinal))
+            {
+                Assert.Contains(text, passes, StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.Equal(2, Regex.Matches(passes, Regex.Escape(text)).Count);
+            }
         }
 
         var p2 = sql[sql.IndexOf("JOIN winners AS w", StringComparison.Ordinal)..];

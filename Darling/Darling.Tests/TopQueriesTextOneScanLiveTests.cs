@@ -119,6 +119,40 @@ public sealed class TopQueriesTextOneScanLiveTests
             }
         });
 
+    [Fact]
+    public Task TheOrphanDigestAndTheZeroIntervalRow_ReadTheTextsTheLookupGave_ThroughBothReaders() =>
+        WithSeedAsync(async (_, connectionString, serverId, now, ct) =>
+        {
+            /* #8139: two rows the collector writes that the carried pick alone would read differently from the lookup it
+               replaced. E8's newest digest has no dimension row (#7419), so the text is the newest row's that resolves. E9's
+               newest text-bearing row is a first-sighting row (interval 0, #4394); the MCP keeps it out of every measure and
+               the text is still its, as the Viewer's and as before. */
+            var start = now.AddHours(-24);
+            var end = now.AddMinutes(5);
+            var expected = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["D3/0xE8/(null)"] = "a8136 e8 resolvable older",
+                ["D3/0xE9/(null)"] = "a8136 e9 newest zero interval",
+            };
+
+            await using var viewer = new ViewerDataService(connectionString);
+            var viewerRows = await viewer.GetTopQueriesByCpuAsync(serverId, start, end, Top, cancellationToken: ct);
+            var viewerTexts = viewerRows.ToDictionary(r => Key(r.DatabaseName, r.QueryHash, r.HostObjectName), r => r.QueryText, StringComparer.Ordinal);
+            await using var postgres = NpgsqlDataSource.Create(connectionString);
+            var mcpRows = await DarlingDataReader.GetTopQueriesByCpuAsync(postgres, serverId, start, end, Top, DatabaseFilter.All, cancellationToken: ct);
+            var mcpTexts = mcpRows.ToDictionary(r => Key(r.DatabaseName, r.QueryHash, r.HostObjectName), r => r.QueryText, StringComparer.Ordinal);
+            foreach (var (key, text) in expected)
+            {
+                Assert.True(viewerTexts.TryGetValue(key, out var viewerGot), $"the Viewer page has no row for {key}; it has [{string.Join(", ", viewerTexts.Keys)}]");
+                Assert.Equal(text, viewerGot);
+                Assert.True(mcpTexts.TryGetValue(key, out var mcpGot), $"the MCP page has no row for {key}; it has [{string.Join(", ", mcpTexts.Keys)}]");
+                Assert.Equal(text, mcpGot);
+            }
+
+            /* The measures of E9 are the honest row's alone: one execution, not two rows' worth of anything. */
+            Assert.Equal(10, mcpRows.Single(r => r.QueryHash == "0xE9").TotalExecutions);
+        }, collectorEdges: true);
+
     private static string Key(string? database, string? hash, string? host) => $"{database ?? "(null)"}/{hash ?? "(null)"}/{host ?? "(null)"}";
 
     // ------------------------------------------------------------------ plan reading
@@ -138,6 +172,12 @@ public sealed class TopQueriesTextOneScanLiveTests
         Assert.True(lookupReads.Count == 0,
             $"{name}: the text lookup read {string.Join(", ", lookupReads.Select(n => $"{n.NodeType} on {n.Relation} (loops={n.Loops}, rows={n.Rows})"))}; " +
             "it must read only the text dimension for the ranked rows, not the window again");
+
+        /* The orphan fallback (#7419) is in the plan for the key whose digest has no dimension row; with every digest
+           resolving, as here, its window read never runs. */
+        var fallback = all.Where(n => n.Cte == "fallback_text" && n.Relation is not null && IsRawRead(n.Relation)).ToList();
+        Assert.True(fallback.All(n => n.Loops == 0),
+            $"{name}: the orphan fallback read the window [{string.Join("; ", fallback.Select(n => $"{n.NodeType} on {n.Relation} loops={n.Loops} rows={n.Rows}"))}] although every pick resolved; it must not run then");
 
         var raw = all.Where(n => n.Relation is not null && IsRawRead(n.Relation)).ToList();
         Assert.NotEmpty(raw);
@@ -209,7 +249,7 @@ public sealed class TopQueriesTextOneScanLiveTests
     /// E2's two rows share a collection time, the one collected last carrying text B; E3 has only an inline text; E4's newest
     /// row has an inline text and an older one a digest.
     /// </summary>
-    private static async Task WithSeedAsync(Func<NpgsqlConnection, string, int, DateTime, CancellationToken, Task> body)
+    private static async Task WithSeedAsync(Func<NpgsqlConnection, string, int, DateTime, CancellationToken, Task> body, bool collectorEdges = false)
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live one-scan tests (each mints its own scratch database).");
@@ -237,7 +277,7 @@ public sealed class TopQueriesTextOneScanLiveTests
                         UNION ALL SELECT unnest($2::text[])) AS t
                   ON CONFLICT (digest) DO NOTHING",
                 BulkGroups,
-                new[] { "a8136 e1 older text", "a8136 e2 text A (collected first)", "a8136 e2 text B (collected last)", "a8136 e4 older digest", "a8136 e6 other host text", "a8136 e5 null database text" });
+                new[] { "a8136 e1 older text", "a8136 e2 text A (collected first)", "a8136 e2 text B (collected last)", "a8136 e4 older digest", "a8136 e6 other host text", "a8136 e5 null database text", "a8136 e8 resolvable older", "a8136 e9 older honest", "a8136 e9 newest zero interval" });
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 "INSERT INTO query_stats " + StatsColumns + @"
                   SELECT $1 + g * 100 + r, $2 - (r * interval '1 hour'), $3, $4, 'D' || (g % 3), '0xB' || g,
@@ -248,12 +288,12 @@ public sealed class TopQueriesTextOneScanLiveTests
                   FROM generate_series(1, $5) AS g CROSS JOIN generate_series(0, $6 - 1) AS r",
                 CollectionIdGenerator.Next(), now.AddMinutes(-30), serverId, ServerName, BulkGroups, RowsPerGroup);
 
-            async Task Plant(string? database, string hash, string? host, DateTime at, string? inlineText, string? dimText, long weight, long? collectionId = null) =>
+            async Task Plant(string? database, string hash, string? host, DateTime at, string? inlineText, string? dimText, long weight, long? collectionId = null, long executions = 10, int interval = 3600) =>
                 await DarlingMcpTestData.ExecAsync(connection, ct,
                     "INSERT INTO query_stats " + StatsColumns + @"
                       VALUES ($1, $2, $3, $4, $5, $6, $7, '0xP', '0xS', '0xL', $8, CASE WHEN $9::text IS NULL THEN NULL ELSE sha256(convert_to($9::text, 'UTF8')) END,
-                              10, $10, $10, 100, 0, 0, 1, 100, 1, 100, 1, 1, 3600)",
-                    collectionId ?? CollectionIdGenerator.Next(), at, serverId, ServerName, database, hash, host, inlineText, dimText, weight);
+                              $11, $10, $10, 100, 0, 0, 1, 100, 1, 100, 1, 1, $12)",
+                    collectionId ?? CollectionIdGenerator.Next(), at, serverId, ServerName, database, hash, host, inlineText, dimText, weight, executions, interval);
 
             /* E1: the newest row has no text; the text is the older row's. */
             await Plant("D1", "0xE1", null, now.AddHours(-3), null, "a8136 e1 older text", 9_000_000);
@@ -272,6 +312,17 @@ public sealed class TopQueriesTextOneScanLiveTests
             await Plant("D2", "0xE4", "dbo.OtherHost", now.AddHours(-1), null, "a8136 e6 other host text", 5_000_000);
             /* E5: a NULL database; the key is still found and the text still resolves. */
             await Plant(null, "0xE5", null, now.AddHours(-2), null, "a8136 e5 null database text", 4_000_000);
+            if (collectorEdges)
+            {
+                /* E8 (#7419): the newest row's digest has no dimension row (the collector commits a fact row before its
+                   dimension row, and a failed dimension write is not retried); the text is the newest row's that resolves. */
+                await Plant("D3", "0xE8", null, now.AddHours(-3), null, "a8136 e8 resolvable older", 3_500_000);
+                await Plant("D3", "0xE8", null, now.AddHours(-1), null, "a8136 e8 orphan (no dimension row)", 3_500_000);
+                /* E9 (#4394): the newest text-bearing row is a first-sighting row, interval 0 and zero deltas; the ranking
+                   leaves it out of every measure, and the text is still its. */
+                await Plant("D3", "0xE9", null, now.AddHours(-3), null, "a8136 e9 older honest", 3_000_000);
+                await Plant("D3", "0xE9", null, now.AddHours(-1), null, "a8136 e9 newest zero interval", 0, executions: 0, interval: 0);
+            }
 
             await body(connection, connectionString, serverId, now, ct);
             succeeded = true;
