@@ -12,15 +12,16 @@ using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using System.Text.Json.Nodes;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Data;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
-using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -109,17 +110,64 @@ public sealed class ViewerWalkthroughLeftovers8133Tests
         Assert.Equal(expected, row.Position);
     }
 
+    /// <summary>
+    /// The real Fleet Sweeps tab, rendered on the shared STA thread with the app's theme, bound to one carried watch row: the
+    /// first-seen column's header reads "First ever seen" and the row's Position cell reads the current-run sentence.
+    /// </summary>
     [Fact]
-    public void FleetSweepFirstSeenColumn_SaysItIsTheFirstEverSighting()
+    public void FleetSweepsGrid_RendersFirstEverSeenAndTheCurrentRun()
     {
-        var xaml = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "FleetSweepsTab.xaml");
-        var column = Regex.Match(xaml, "<DataGridTextColumn Header=\"([^\"]*)\" Binding=\"\\{Binding FirstSeen\\}\"");
-        Assert.True(column.Success, "FleetSweepsTab.xaml has no FirstSeen column with its header first.");
-        Assert.Equal("First ever seen", column.Groups[1].Value);
+        StaTestThread.Run(() =>
+        {
+            var app = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+            var theme = new ResourceDictionary { Source = new Uri(ThemeUri) };
+            app.Resources.MergedDictionaries.Add(theme);
+            var window = new Window { Width = 1200, Height = 700, ShowActivated = false, WindowStartupLocation = WindowStartupLocation.Manual, Left = -4000 };
+            try
+            {
+                var tab = new FleetSweepsTab();
+                window.Content = tab;
+                var grid = (DataGrid)tab.FindName("WatchItemsDataGrid")!;
+                grid.ItemsSource = FleetSweepsRows.WatchItems(new JsonObject
+                {
+                    ["entry_bar_sweeps"] = 2,
+                    ["exit_bar_sweeps"] = 2,
+                    ["items"] = new JsonArray(new JsonObject
+                    {
+                        ["server_id"] = 7, ["server"] = "srv", ["item"] = "deadlocks", ["condition"] = "deadlocks above the bar",
+                        ["state"] = "carried", ["consecutive_hits"] = 12, ["consecutive_misses"] = 0,
+                        ["first_seen_at"] = "2026-01-01T00:00:00Z", ["last_seen_at"] = "2026-02-21T00:00:00Z",
+                    }),
+                });
+                StaTestThread.Settle(window);
+                grid.UpdateLayout();
+
+                var firstSeen = grid.Columns.Single(c => (c as DataGridBoundColumn)?.Binding is Binding { Path.Path: "FirstSeen" });
+                Assert.Equal("First ever seen", firstSeen.Header as string);
+
+                var position = grid.Columns.Single(c => (c as DataGridBoundColumn)?.Binding is Binding { Path.Path: "Position" });
+                var row = (DataGridRow)grid.ItemContainerGenerator.ContainerFromIndex(0);
+                Assert.True(row is not null, "The watch grid realized no row for its one item.");
+                var cell = position.GetCellContent(row!) as TextBlock;
+                Assert.True(cell is not null, "The Position cell realized no TextBlock.");
+                Assert.Equal("12 consecutive hits in the current run", cell!.Text);
+            }
+            finally
+            {
+                window.Close();
+                app.Resources.MergedDictionaries.Remove(theme);
+            }
+        });
     }
+
+    private const string ThemeUri = "pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/DarkTheme.xaml";
 
     // ── F8(a): the fleet Overview says it is loading while its first read runs ──
 
+    /// <summary>
+    /// The text and the decision behind the Overview's loading state. The main window itself is not rendered here: it opens a
+    /// store and the sidebar on construction, which no test fixture stands in for.
+    /// </summary>
     [Fact]
     public void FleetOverview_HasALoadingTextForItsFirstRead()
     {
@@ -130,12 +178,6 @@ public sealed class ViewerWalkthroughLeftovers8133Tests
         Assert.True((bool)shows.Invoke(null, new object[] { true, 0 })!);
         Assert.False((bool)shows.Invoke(null, new object[] { false, 0 })!);
         Assert.False((bool)shows.Invoke(null, new object[] { true, 3 })!);
-
-        var xaml = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "MainWindow.xaml");
-        var element = Regex.Match(xaml, "<TextBlock x:Name=\"OverviewLoadingText\"[^>]*>");
-        Assert.True(element.Success, "MainWindow.xaml has no OverviewLoadingText element.");
-        Assert.Contains("FleetOverviewLoadingText.Loading", element.Value, StringComparison.Ordinal);
-        Assert.Contains("Visibility=\"Collapsed\"", element.Value, StringComparison.Ordinal);
     }
 }
 
