@@ -407,12 +407,22 @@ internal static class DarlingPasswordKeyFileReader
             return refusal;
         }
 
-        var where = path.StartsWith(ComposeSecretsMount, StringComparison.Ordinal)
-            ? " on the host, on the file the secret is made from (keep its mode 0400 or 0600)"
-            : "";
-        return $"{refusal.TrimEnd('.')}. It is owned by user {found.UserId.ToString(CultureInfo.InvariantCulture)}, not by "
-            + $"user {euid.ToString(CultureInfo.InvariantCulture)}, which the service runs as; to give it to that user, run"
-            + $"{where}: {DarlingManagedRoles.CredentialOwnershipFix(euid, path)}";
+        var users = $"{refusal.TrimEnd('.')}. It is owned by user {found.UserId.ToString(CultureInfo.InvariantCulture)}, "
+            + $"not by user {euid.ToString(CultureInfo.InvariantCulture)}, which the service runs as; to give it to that user, ";
+        return path.StartsWith(ComposeSecretsMount, StringComparison.Ordinal)
+            ? users + ComposeSecretOwnershipFix(euid, path[ComposeSecretsMount.Length..])
+            : users + $"run: {DarlingManagedRoles.CredentialOwnershipFix(euid, path)}";
+    }
+
+    /// <summary>
+    /// The host-side fix for a compose secret the service cannot read (#8141). The path under /run/secrets/ exists only
+    /// inside the container, so the command names the host file the way secrets/README.md does, after the secret's name.
+    /// </summary>
+    private static string ComposeSecretOwnershipFix(uint userId, string secret)
+    {
+        var u = userId.ToString(CultureInfo.InvariantCulture);
+        return $"run on the host, in the compose folder: sudo chown {u}:{u} secrets/{secret} (the file the {secret} secret "
+            + "names in docker-compose.yml; keep its mode 0400 or 0600; see Darling/compose/secrets/README.md)";
     }
 
     /// <summary>Where compose mounts a service's secrets.</summary>

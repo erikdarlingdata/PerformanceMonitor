@@ -14,7 +14,8 @@ name: Darling Linux store
 #      name the way out (#6791: it could not measure the store's volume from another host), `--free-space 41G` must dry-run,
 #      run and then find nothing left to do (#6071: the verb refused to run on Linux at all);
 #   4. the password key on Linux, in the image with `--self-check-password-key` (#5366, #8006): the Unix owner, link-count
-#      and file-identity calls, the Linux crypto path and the passwordKey source, none of which the Windows tests reach.
+#      and file-identity calls, the Linux crypto path and the passwordKey source, none of which the Windows tests reach. It
+#      runs twice: as root, for the passwordKey owner cases only root can set up, and as UID 1654, the image's user (#8141).
 #
 # Triggers: the nightly (nightly.yml calls this as a reusable workflow), a manual dispatch, and a pull request that touches
 # the files this checks most directly. The pull request workflow (pr.yml) is the one per-PR CI system (#6656); this narrow

@@ -201,8 +201,12 @@ public sealed class CredentialOwnershipMessageTests
 
             Assert.StartsWith("passwordKey: secret file '/run/secrets/password_key' could not be read: denied", refusal);
             Assert.Contains("owned by user 1000, not by user 1654", refusal);
-            Assert.Contains("chown -R 1654:1654 '/run/secrets/password_key'", refusal);
-            Assert.Contains("on the host", refusal);
+            var command = refusal[refusal.IndexOf("run on the host", StringComparison.Ordinal)..];
+            Assert.Contains("sudo chown 1654:1654 secrets/password_key", command);
+            Assert.Contains("the password_key secret", command);
+            Assert.Contains("Darling/compose/secrets/README.md", command);
+            Assert.DoesNotContain("/run/secrets/", command);
+            Assert.DoesNotContain("-R", command);
             Assert.DoesNotContain("docker compose run", refusal);
             Assert.DoesNotContain("missing", refusal);
         }
