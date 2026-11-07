@@ -226,7 +226,7 @@ public sealed class ActionProposalPress
     {
         var queryId = target["query_id"]!.GetValue<long>();
         var planId = target["plan_id"]!.GetValue<long>();
-        var prepared = await DarlingMcpPlanForceTools.PrepareForcePlanAsync(_owner, _logger, permit, proposal.ServerId, permit.ServerName, force,
+        var prepared = await DarlingMcpPlanForceTools.PrepareForcePlanAsync(_owner, _owner, _logger, permit, proposal.ServerId, permit.ServerName, force,
             Text(target, "database"), queryId, planId, dryRun: true, NoRefusalRow, ct);
         if (prepared.Facts is not { } facts)
             return PlanStop(prepared.Answer, permit.ServerName);

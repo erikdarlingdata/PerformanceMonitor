@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -93,12 +94,58 @@ public sealed partial class DarlingMcpPlanForceTools
 
     // ---- force and unforce ----
 
-    internal static async Task<PlanPrepared<ForcePlanFacts>> PrepareForcePlanAsync(NpgsqlDataSource owner, ILogger logger, ServerActionPermit permit, int serverId,
+    /// <summary>A force or unforce names a database, query_id and plan_id that no Query Store row Darling collected for that server holds together. Nothing is run.</summary>
+    internal const string PlanNotCollected = "plan_not_collected";
+
+    /// <summary>
+    /// The databases of one server whose collected Query Store rows hold the (query_id, plan_id) pair: the raw <c>query_store_stats</c> rows and the
+    /// <c>query_store_interval_wide</c> table, which keeps <see cref="QueryStoreIntervalPartitions.WideHorizonDays"/> days. A pair whose rows have aged out of both is not collected.
+    /// </summary>
+    internal const string CollectedPlanDatabasesSql = @"
+SELECT database_name FROM collect.query_store_stats WHERE server_id = $1 AND query_id = $2 AND plan_id = $3
+UNION
+SELECT database_name FROM collect.query_store_interval_wide WHERE server_id = $1 AND query_id = $2 AND plan_id = $3
+ORDER BY database_name";
+
+    internal static async Task<IReadOnlyList<string>> ReadCollectedPlanDatabasesAsync(NpgsqlDataSource postgres, int serverId, long queryId, long planId, CancellationToken ct)
+    {
+        await using var connection = await postgres.OpenConnectionAsync(ct);
+        await using var command = new NpgsqlCommand(CollectedPlanDatabasesSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer });
+        command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = queryId, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint });
+        command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = planId, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint });
+        var names = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            names.Add(reader.GetString(0));
+        return names;
+    }
+
+    /// <summary>The refusal's message: the databases the store does hold the pair for, when it holds it for any, else that the rows may have aged out.</summary>
+    internal static string PlanNotCollectedMessage(string serverDisplayName, string database, long queryId, long planId, IReadOnlyList<string> collected) =>
+        collected.Count > 0
+            ? $"Darling has collected plan {planId} for query {queryId} on {serverDisplayName} in {string.Join(", ", collected)}, not in {database}. Query Store ids are per-database sequences, so the same pair names an unrelated plan of an unrelated query in another database. Pass the database_name of the get_query_store_top row the ids came from. Nothing was run."
+            : $"Darling has not collected plan {planId} for query {queryId} in {database} on {serverDisplayName}: no Query Store row Darling collected for that server holds that database, query_id and plan_id together. The store keeps those rows for about {QueryStoreIntervalPartitions.WideHorizonDays} days after the plan was last collected, so a plan last seen before that has aged out and cannot be checked here. Pass the three values from one get_query_store_top row. Nothing was run.";
+
+    /// <summary>
+    /// <paramref name="postgres"/> is the store's read data source: its collected Query Store rows decide whether <paramref name="database"/>, <paramref name="queryId"/> and
+    /// <paramref name="planId"/> name one plan Darling collected on this server, before the server is read.
+    /// </summary>
+    internal static async Task<PlanPrepared<ForcePlanFacts>> PrepareForcePlanAsync(NpgsqlDataSource postgres, NpgsqlDataSource owner, ILogger logger, ServerActionPermit permit, int serverId,
         string serverDisplayName, bool force, string database, long queryId, long planId, bool dryRun, PlanRefusalSink onRefusal, CancellationToken ct)
     {
         var (executor, ended) = await OpenExecutorAsync(owner, logger, serverId, serverDisplayName, database, onRefusal, ct);
         if (ended is not null)
             return PlanPrepared<ForcePlanFacts>.End(ended);
+
+        /* The store's own rows decide whether the three values name one collected plan. Query Store ids are per-database sequences from 1, so the pair alone exists in
+           nearly every database on the server, and the server's check (the pair exists in the named database) cannot tell a wrong database from the right one. */
+        var collected = await ReadCollectedPlanDatabasesAsync(postgres, serverId, queryId, planId, ct);
+        if (!collected.Any(name => string.Equals(name, database, StringComparison.OrdinalIgnoreCase)))
+        {
+            await onRefusal(PlanNotCollected, ct);
+            return PlanPrepared<ForcePlanFacts>.End(Answer("refused", PlanNotCollected, PlanNotCollectedMessage(serverDisplayName, database, queryId, planId, collected), new { dry_run = dryRun }));
+        }
 
         /* The before state, read on the server. */
         var before = await executor!.ReadPlanStateAsync(permit, queryId, planId, ct);
