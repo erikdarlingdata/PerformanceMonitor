@@ -204,7 +204,7 @@ public partial class ViewerServerTab
         FileIoReadChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         FileIoReadChart.Plot.Axes.SetLimitsX(ChartXStart(FileIoReadChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(FileIoReadChart);
-        FileIoReadChart.Plot.YLabel("Read Latency (ms)");
+        FileIoReadChart.Plot.YLabel("ms");
         SetChartYLimitsWithLegendPadding(FileIoReadChart, 0, readMax > 0 ? readMax : 10);
         ShowChartLegend(FileIoReadChart);
         FileIoReadChart.Refresh();
@@ -212,7 +212,7 @@ public partial class ViewerServerTab
         FileIoWriteChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         FileIoWriteChart.Plot.Axes.SetLimitsX(ChartXStart(FileIoWriteChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(FileIoWriteChart);
-        FileIoWriteChart.Plot.YLabel("Write Latency (ms)");
+        FileIoWriteChart.Plot.YLabel("ms");
         SetChartYLimitsWithLegendPadding(FileIoWriteChart, 0, writeMax > 0 ? writeMax : 10);
         ShowChartLegend(FileIoWriteChart);
         FileIoWriteChart.Refresh();
@@ -285,7 +285,7 @@ public partial class ViewerServerTab
         FileIoReadThroughputChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         FileIoReadThroughputChart.Plot.Axes.SetLimitsX(ChartXStart(FileIoReadThroughputChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(FileIoReadThroughputChart);
-        FileIoReadThroughputChart.Plot.YLabel("Read Throughput (MB/s)");
+        FileIoReadThroughputChart.Plot.YLabel("MB/s");
         SetChartYLimitsWithLegendPadding(FileIoReadThroughputChart, 0, readMax > 0 ? readMax : 1);
         ShowChartLegend(FileIoReadThroughputChart);
         FileIoReadThroughputChart.Refresh();
@@ -293,7 +293,7 @@ public partial class ViewerServerTab
         FileIoWriteThroughputChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         FileIoWriteThroughputChart.Plot.Axes.SetLimitsX(ChartXStart(FileIoWriteThroughputChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(FileIoWriteThroughputChart);
-        FileIoWriteThroughputChart.Plot.YLabel("Write Throughput (MB/s)");
+        FileIoWriteThroughputChart.Plot.YLabel("MB/s");
         SetChartYLimitsWithLegendPadding(FileIoWriteThroughputChart, 0, writeMax > 0 ? writeMax : 1);
         ShowChartLegend(FileIoWriteThroughputChart);
         FileIoWriteThroughputChart.Refresh();
