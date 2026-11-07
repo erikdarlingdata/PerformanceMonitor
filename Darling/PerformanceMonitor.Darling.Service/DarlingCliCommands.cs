@@ -65,6 +65,31 @@ public enum StartupAction
 /// </summary>
 public static partial class DarlingCliCommands
 {
+    /// <summary>
+    /// Which account <c>--validate-config</c> judges a <c>file:</c> <c>passwordKey</c> as, on Windows: the account the service is
+    /// registered under, the one that reads the key at start, and only when the service is not registered the account running this
+    /// process (a console run, or a check before install). The owner and folder checks trust that account along with SYSTEM and
+    /// Administrators, so judging as the caller let an administrator's own folder pass a check the service then refused. Reuses the
+    /// process-wide setting <c>--harden-files</c> uses (#2371), set only when the service is registered; the verb is a one-shot process.
+    /// Returns the line that names the account, or null when no <c>file:</c> key is configured.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static string? ApplyValidateConfigAccount(DarlingConfig config, Func<string, SecurityIdentifier?> registeredServiceAccount)
+    {
+        if (config.PasswordKey is null || !config.PasswordKey.StartsWith("file:", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var registered = registeredServiceAccount(ServiceName);
+        if (registered is null)
+        {
+            return $"The password key file is judged as the account you are running as ({DarlingFileSecurity.ServiceAccountDisplayName}), because the '{ServiceName}' service is not registered on this machine.";
+        }
+
+        DarlingFileSecurity.HardenForAccount(registered);
+        return $"The password key file is judged as the service account {DarlingFileSecurity.ServiceAccountDisplayName}.";
+    }
     /// <summary>The verb that encrypts a SQL-auth password for darling.json (reads stdin).</summary>
     public static bool IsEncryptPasswordVerb(string arg) =>
         string.Equals(arg, "--encrypt-password", StringComparison.OrdinalIgnoreCase);
@@ -727,7 +752,8 @@ public static partial class DarlingCliCommands
     /// is the one case where the file genuinely is the best available answer.</para>
     /// </summary>
     public static async Task<int> ValidateConfigAsync(
-        string? configPath, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+        string? configPath, TextWriter output, TextWriter error, CancellationToken cancellationToken,
+        Func<string, SecurityIdentifier?>? registeredServiceAccount = null)
     {
         DarlingConfig config;
         try
@@ -762,6 +788,12 @@ public static partial class DarlingCliCommands
            failure: the start refuses such a key without stopping collection.
            The path is resolved as Load resolved it (DARLING_CONFIG, then beside the binary): configPath is null in the usual run, and
            with no path the credentials-directory check the start makes would be skipped. */
+        /* The service, not this process, reads the key at start, so on Windows the key file is judged as the account the service is registered under. */
+        if (OperatingSystem.IsWindows() && ApplyValidateConfigAccount(config, registeredServiceAccount ?? DarlingFileSecurity.RegisteredServiceAccount) is { } judgedAs)
+        {
+            output.WriteLine(judgedAs);
+        }
+
         foreach (var line in DarlingPasswordKeySource.DescribeForValidation(config, DarlingConfig.ResolveConfigPath(configPath)))
         {
             output.WriteLine(line);
