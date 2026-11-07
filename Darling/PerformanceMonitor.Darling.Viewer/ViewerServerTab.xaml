@@ -2229,11 +2229,16 @@
         <TabItem Header="CPU">
             <TabControl x:Name="CpuSubTabControl" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                 <TabItem Header="CPU Utilization">
-                    <Grid Margin="8">
-                        <ui:ChartPanel Title="CPU utilization">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8"><!-- #8220: scrolls when the chart cannot keep its minimum height with its legend -->
+                    <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="300">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                        </Grid.RowDefinitions>
+                        <ui:ChartPanel Title="CPU utilization" Grid.Row="0">
                             <scottplot:WpfPlot x:Name="CpuChart"/>
                         </ui:ChartPanel>
                     </Grid>
+                    </ScrollViewer>
                 </TabItem>
                 <TabItem Header="CPU Scheduler">
                     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8"><!-- #7478: scrolls when the chart cannot keep its minimum height -->
