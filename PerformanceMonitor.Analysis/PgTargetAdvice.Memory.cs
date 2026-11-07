@@ -33,7 +33,7 @@ public static partial class PgTargetAdvice
         Headline: "The configured memory worst case exceeds this host's memory",
         Investigation:
             "PostgreSQL's per-backend allocation model, summed from the latest pg_server_config snapshot: shared_buffers " +
-            "once, plus max_connections × work_mem × (1 + max_parallel_workers_per_gather), every backend may run one sort " +
+            "once, plus max_connections × work_mem × (1 + max_parallel_workers_per_gather), where every backend may run one sort " +
             "or hash at work_mem and each parallel worker another, plus autovacuum_max_workers × maintenance_work_mem " +
             "(autovacuum_work_mem when set), plus wal_buffers; measured against the host's memory_total_bytes from " +
             "pg_cpu_utilization (AWS Performance Insights, Aurora only, a stock target has no host-memory source and " +

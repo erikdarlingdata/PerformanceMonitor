@@ -3086,8 +3086,8 @@ ORDER BY server_name";
         {
             return ("unavailable",
                 "No fleet-maintenance run-records have EVER been recorded. Both passes write one on their "
-                + "FIRST pass after the service starts: data_retention for the daily purge, "
-                + "oversized_plan_sweep for the fifteen-minute oversized-plan backlog drain, so this is a service "
+                + "FIRST pass after the service starts (data_retention for the daily purge, "
+                + "oversized_plan_sweep for the fifteen-minute oversized-plan backlog drain), so this is a service "
                 + "that has not completed a maintenance pass, not an empty window. Check that the service is "
                 + "running, and check its log: these writes are failure-isolated and report at Debug.");
         }

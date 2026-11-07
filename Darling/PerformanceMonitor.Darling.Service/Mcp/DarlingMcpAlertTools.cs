@@ -1388,8 +1388,8 @@ public sealed partial class DarlingMcpAlertTools
         "hour, and the servers that bound holds back are named on the post that does go out. A first " +
         "notice is never held back by either bound, and delivery.mode PerEvent opts out of the per-metric " +
         "one. Its stored name, email_cooldown_minutes, is also accepted as a top-level alias, but send " +
-        "only one of the two spellings. An alert whose Server reads 'Monitor Store', or the store's own " +
-        "peers.storeName label, when that file-only field is set: " +
+        "only one of the two spellings. An alert whose Server reads 'Monitor Store' (or the store's own " +
+        "peers.storeName label, when that file-only field is set) " +
         "is about the monitor's own store and is tuned under self_alerts, including Retention Held, whose " +
         "self_alerts.retention_hold_warn_ratio and self_alerts.retention_hold_critical_ratio are how many times " +
         "its configured horizon a held retention tier must be holding to warn and to go critical. Both accept " +
@@ -2354,8 +2354,8 @@ public sealed partial class DarlingMcpAlertTools
         "id and a new creation date, and the Stale Mute Rules self-alert ages a rule from its creation date, so " +
         "a rule re-created on every edit never becomes stale and is never reported, while an edited one is " +
         "reported on the age it actually has. Editing NEVER moves created_at_utc, whatever fields change; that " +
-        "preservation is the reason this verb exists. Two cautions: clearing scope fields WIDENS the rule, one " +
-        "with no constraining fields left mutes EVERY alert (a whole-fleet silence), and an edited server_name " +
+        "preservation is the reason this verb exists. Two cautions: clearing scope fields WIDENS the rule (one " +
+        "with no constraining fields left mutes EVERY alert, a whole-fleet silence), and an edited server_name " +
         "must match the alert rows' spelling EXACTLY as get_alert_history reports it (the monitor's own " +
         "self-alert family and the engine alerts can spell the same server differently, display-short vs " +
         "registry name, so copy the spelling off the alert rows being muted rather than retyping it), or the " +

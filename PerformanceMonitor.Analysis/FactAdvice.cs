@@ -2509,7 +2509,7 @@ public static class FactAdvice
                         : "";
             inv =
                 $"The all-types wait rate peaked at about {current:0.#} ms/sec this window, roughly {RatioText(ratio)}× the " +
-                $"{mean:0.#} ms/sec normal for this hour-of-week: led by {topList}{meanClause}. This is a shift in the overall wait " +
+                $"{mean:0.#} ms/sec normal for this hour-of-week, led by {topList}{meanClause}. This is a shift in the overall wait " +
                 "profile, not necessarily a sustained problem: check whether it coincides with a workload change, a deploy, " +
                 "or a one-off event before treating it as chronic.";
         }
@@ -2696,8 +2696,8 @@ public static class FactAdvice
 
         var rem =
             "Treat these as candidates, not commands: the optimizer suggests a wide covering index per query and " +
-            "ignores write cost and overlap with existing indexes. Review them together: several suggestions often " +
-            "collapse into one sensible index, and weigh the estimated improvement against the added write and " +
+            "ignores write cost and overlap with existing indexes. Review them together (several suggestions often " +
+            "collapse into one sensible index), and weigh the estimated improvement against the added write and " +
             "maintenance cost before creating any. The attached detail has the suggested key and included columns.";
 
         return fallback with
@@ -3011,8 +3011,8 @@ public static class FactAdvice
         inv.Append(". This is measured from the two most recent daily object-size snapshots, so it is a genuine day-over-day jump rather than a one-off reading.");
 
         var rem =
-            "Decide whether this is expected load or a problem. Expected growth: an archive import, a backfill, " +
-            "an index rebuild that temporarily doubles space, needs only capacity awareness; confirm the volume " +
+            "Decide whether this is expected load or a problem. Expected growth (an archive import, a backfill, " +
+            "an index rebuild that temporarily doubles space) needs only capacity awareness; confirm the volume " +
             "has headroom. Unexpected growth points at a runaway insert without cleanup, a disabled or broken purge " +
             "job, or a heap that needs a clustered index; for genuinely large, fast-growing tables, evaluate PAGE " +
             "compression and partitioning. Steep sustained growth against limited volume free space is the early " +

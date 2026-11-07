@@ -95,8 +95,8 @@ public static partial class PgTargetAdvice
             "parked connections and the fix is transaction scoping in the application (and idle_in_transaction_" +
             "session_timeout as a backstop); a bigger pool only defers the refusal. If active sessions hold them, " +
             "the two levers are a connection pooler between the applications and the server (pgbouncer in " +
-            "transaction mode, or RDS Proxy on AWS), which trades session-level state: prepared statements, SET, " +
-            "advisory locks, LISTEN, and adds a hop; or raising max_connections, which costs work_mem × connections " +
+            "transaction mode, or RDS Proxy on AWS), which trades session-level state (prepared statements, SET, " +
+            "advisory locks, LISTEN) and adds a hop; or raising max_connections, which costs work_mem × connections " +
             "of memory headroom on the same host and takes a restart. get_pg_session_states shows the sessions " +
             "behind the peak; get_pg_server_config shows the ceiling and whether a change is already pending restart.");
 

@@ -84,8 +84,8 @@ public static partial class PgTargetAdvice
                 Investigation:
                     "`work_mem` is evidence-gated (D5): there is no right value without the workload, and raising it on a " +
                     "convention is the classic overcommit path, because it is allocated per sort or hash node per backend. " +
-                    "This card exists only as the leaf of a PG_TEMP_SPILL story: temp files written at or above the floor " +
-                    "over the observed window, and roots nothing on its own. " + (knob is null
+                    "This card exists only as the leaf of a PG_TEMP_SPILL story (temp files written at or above the floor " +
+                    "over the observed window), and roots nothing on its own. " + (knob is null
                         ? "The setting was not read this pass."
                         : $"On this host it is {stated}" + (knob.Value <= PgTargetScorer.WorkMemBootValMb ? ", the shipped default." : ".")),
                 Remediation:

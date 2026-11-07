@@ -43,8 +43,8 @@ public static partial class PgTargetAdvice
         Headline: "Buffer-cache hit ratio: read from PG_BUFFER_CACHE_PRESSURE, not from a fact of its own",
         Investigation:
             "The hit ratio (blks_hit against blks_hit + blks_read from pg_stat_database) is one arm of the buffer-cache " +
-            "composite, PG_BUFFER_CACHE_PRESSURE, so that the one condition it measures: a working set larger than " +
-            "shared_buffers, is counted once. No PG_HIT_RATIO fact is emitted; this key is declared and inert.",
+            "composite, PG_BUFFER_CACHE_PRESSURE, so that the one condition it measures (a working set larger than " +
+            "shared_buffers) is counted once. No PG_HIT_RATIO fact is emitted; this key is declared and inert.",
         Remediation: "See PG_BUFFER_CACHE_PRESSURE and CONFIG_PG_SHARED_BUFFERS.");
 
     private static AdviceBlock ComposeDeadlockRate(IReadOnlyDictionary<string, Fact> facts)

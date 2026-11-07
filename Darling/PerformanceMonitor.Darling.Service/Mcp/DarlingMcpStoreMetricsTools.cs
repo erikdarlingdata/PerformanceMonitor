@@ -923,9 +923,9 @@ public sealed class DarlingMcpStoreMetricsTools
         var measured = $" Over the {minutes} minutes ending {Stamp(reading.ObservedAt)} the checkpointer ran "
             + (checkpointCount is long count ? $"{count} {(count == 1 ? "checkpoint" : "checkpoints")}, spending " : "an unmeasured number of checkpoints (a row before V140 has no timed count), spending ")
             + $"{(syncMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)}s total in its sync (fsync) phase and "
-            + $"{((reading.WriteMs ?? 0) / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)}s in its write phase: "
-            + (averageSyncMs is double average ? $"an average of {(average / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)}s of sync per checkpoint: " : string.Empty)
-            + $"and {requested} {(requested == 1 ? "checkpoint was" : "checkpoints were")} REQUESTED rather than timed (started by WAL volume reaching max_wal_size, "
+            + $"{((reading.WriteMs ?? 0) / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)}s in its write phase"
+            + (averageSyncMs is double average ? $" (an average of {(average / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)}s of sync per checkpoint)" : string.Empty)
+            + $", and {requested} {(requested == 1 ? "checkpoint was" : "checkpoints were")} REQUESTED rather than timed (started by WAL volume reaching max_wal_size, "
             + "a base backup, or a CHECKPOINT statement, not by checkpoint_timeout).";
 
         if (!reading.IsPressure)
@@ -1300,8 +1300,8 @@ public sealed class DarlingMcpStoreMetricsTools
                 return rule
                     + $" This block read as '{role}', which is a member of NEITHER, so the view shows this connection "
                     + $"NOTHING by construction: rows_observed = {rows} here is the filter, not the table, and says "
-                    + "nothing about whether recording works. The service's owner role: the role that created the "
-                    + "jobs, sees the rows; read job_history as that role before concluding anything from an empty "
+                    + "nothing about whether recording works. The service's owner role (the role that created the "
+                    + "jobs) sees the rows; read job_history as that role before concluding anything from an empty "
                     + $"result. Meanwhile job_stats, which is not filtered, says {ran} job(s) started a run in the "
                     + $"last {window} hours"
                     + (newestRun is null ? "." : $" (newest start {newestRun}).");

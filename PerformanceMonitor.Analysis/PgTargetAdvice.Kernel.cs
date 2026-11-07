@@ -99,8 +99,8 @@ public static partial class PgTargetAdvice
         var resets = KnobMeta(burn, "reset_count") ?? 0;
         var sb = new StringBuilder(640);
         sb.Append("Over the observed window this server's statements burned ").Append(Cores(cores))
-          .Append(" busy on average: peaking at ").Append(Cores(peak)).Append(" in one collection interval, a per-collection mean of ")
-          .Append(Cores(mean)).Append(": ").Append(KnobPct(userShare)).Append(" of the execution CPU in user time and the rest in the kernel");
+          .Append(" busy on average (peaking at ").Append(Cores(peak)).Append(" in one collection interval, a per-collection mean of ")
+          .Append(Cores(mean)).Append("), with ").Append(KnobPct(userShare)).Append(" of the execution CPU in user time and the rest in the kernel");
         if (planShare > 0)
             sb.Append("; planning was ").Append(KnobPct(planShare)).Append(" of all CPU counted");
         sb.Append(". ");

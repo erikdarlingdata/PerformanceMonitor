@@ -368,8 +368,8 @@ public static partial class PgTargetAdvice
         Headline: "The xmin horizon stayed pinned across a majority of the window's consecutive captures",
         Investigation:
             "VACUUM can remove only tuples older than the cluster's oldest active snapshot (the xmin horizon). " +
-            "Four unrelated causes hold it back and look identical by symptom, dead tuples accumulate, autovacuum " +
-            "reports success, nothing shrinks, so the collector attributes each capture to its source: a session " +
+            "Four unrelated causes hold it back and look identical by symptom (dead tuples accumulate, autovacuum " +
+            "reports success, nothing shrinks), so the collector attributes each capture to its source: a session " +
             "(idle in transaction or a long query), a replication slot's xmin or catalog_xmin, a standby's " +
             "hot_standby_feedback, or a prepared transaction. Persistence is measured on the HORIZON: the winning " +
             "age, whoever won, staying at or above the same bar the xmin alert pages on for a run of consecutive " +

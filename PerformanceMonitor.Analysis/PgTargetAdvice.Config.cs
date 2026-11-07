@@ -132,8 +132,8 @@ public static partial class PgTargetAdvice
             Headline: $"track_io_timing is {stated}: block read and write times are not being measured",
             Investigation:
                 "With `track_io_timing` off, `blk_read_time` and `blk_write_time` in pg_stat_statements and pg_stat_database " +
-                "read as zero, and every I/O question this product can otherwise answer per statement, which queries wait " +
-                "on storage, how much of a statement's time is disk: has no data behind it. This is a monitoring-coverage " +
+                "read as zero, and every I/O question this product can otherwise answer per statement (which queries wait " +
+                "on storage, how much of a statement's time is disk) has no data behind it. This is a monitoring-coverage " +
                 "advisory (the PostgreSQL analogue of a Query Store that is not capturing): nothing is wrong with the server, " +
                 "something is missing from what can be seen of it.",
             Remediation:
