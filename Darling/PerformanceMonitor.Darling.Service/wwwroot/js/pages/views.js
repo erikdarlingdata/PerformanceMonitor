@@ -687,9 +687,10 @@ export async function renderView(main, id, opts) {
   const view = res.data || {};
   const def = view.definition || {};
 
-  /* A notebook is the same stored row with a kind:"notebook" definition — render it as a document, not a grid. */
+  /* A notebook is the same stored row with a kind:"notebook" definition — render it as a document, not a grid. On a poll it is
+     refreshed in place like the grid below (#7924), so it is told whether the page is held and under which key. */
   if (isNotebookDefinition(def)) {
-    renderNotebookDoc(main, { mode: "saved", view, session, catalog, fleetRes });
+    renderNotebookDoc(main, { mode: "saved", view, session, catalog, fleetRes, hold, pageKey });
     return;
   }
 
@@ -802,7 +803,10 @@ export async function renderView(main, id, opts) {
  */
 /**
  * `opts`:
- *   { mode: "saved", view, session, catalog, fleetRes }                          — an ordinary saved notebook.
+ *   { mode: "saved", view, session, catalog, fleetRes, hold, pageKey }           — an ordinary saved notebook. `hold` is
+ *     renderView's holdsPage answer: on a poll over the notebook already on screen (#7924) the document stays where it is and
+ *     each cell is refreshed in place once its own new read returns, the way a dashboard's grid is; `pageKey` is the page key
+ *     showPage/showAround remember it under.
  *   { mode: "alert", definition, alert, status, notes, canEdit, catalog, server, provenance, isLive, onOpenLive }
  *     — #4222's read-only alert-notebook render: an IN-MEMORY definition bound to one firing (no saved `view`
  *     row, no /api/fleet read — the server is fixed — and no scope bar, since there is nothing to re-scope).
@@ -905,31 +909,58 @@ export async function renderNotebookDoc(main, opts) {
       variables: variables.map((v) => ({ name: v.name, dimension: v.dimension, default: v.default || undefined })),
       values: { ...state.values },
     });
-    const onChange = () => { rememberScope(opts.view.id, state); renderDoc(); };
+    /* A scope change draws new-scope cells, so an in-place refresh still outstanding is for the old scope and must not land over them. */
+    const onChange = () => {
+      if (cancelViewRefresh) {
+        cancelViewRefresh();
+        cancelViewRefresh = null;
+      }
+      rememberScope(opts.view.id, state);
+      renderDoc();
+    };
     controls = hasPanels ? buildViewControls(fleet, variables, state, defaultHours, onChange) : null;
   }
 
-  const docBox = el("div", { class: "notebook-doc" });
+  /* #7924: on a poll the document already on screen stays and is refreshed in place (refreshGridInPlace pairs its cells by index), so
+     the scope controls built above keep drawing into it. */
+  const liveDoc = !isAlert && opts.hold ? Array.from(main.children).find((n) => n.className === "notebook-doc") : null;
+  const docBox = liveDoc || el("div", { class: "notebook-doc" });
   const limiter = isAlert ? new InFlightLimiter(3) : null;
   const ourHash = location.hash;
   let panelRender = null;
-  function renderDoc() {
+  function buildDoc() {
     if (isAlert) {
       /* Alert-mode cells load top to bottom, at most 3 in flight (#4222's cost rule) — renderCell/renderPanel
          return synchronously with the fetch outstanding, so the limiter gates ACQUIRING a slot before the cell
          node is even built, then releases it off renderPanel's onSettled callback. */
       const scope = currentScope();
-      mount(docBox, cells.map((cell, i) => renderAlertCell(cell, i, readSet, sourceSet, scope, opts, limiter)));
-    } else {
-      refreshScopeNote();
-      /* #7257: a saved notebook starts its panel reads two at a time, and a new render (a scope change) ends the one before it. */
-      if (panelRender) panelRender.end();
-      const render = (panelRender = newPanelRender(ourHash));
-      mount(docBox, cells.map((cell) => renderCell(cellUnderScope(cell), readSet, sourceSet, currentScope(), undefined, render.gate)));
+      return cells.map((cell, i) => renderAlertCell(cell, i, readSet, sourceSet, scope, opts, limiter));
     }
+    refreshScopeNote();
+    /* #7257: a saved notebook starts its panel reads two at a time, and a new render (a scope change) ends the one before it. */
+    if (panelRender) panelRender.end();
+    const render = (panelRender = newPanelRender(ourHash));
+    /* The cell's index is its slot: the identity under which a composed panel cell holds its zoom and drill (#7923), so the
+       poll's rebuild of the cell draws them again. */
+    return cells.map((cell, i) => renderCell(cellUnderScope(cell), readSet, sourceSet, currentScope(), undefined, render.gate, i));
+  }
+  function renderDoc() {
+    mount(docBox, buildDoc());
   }
 
-  mount(main, [head, status, controls, scopeNote, docBox]);
+  if (liveDoc) {
+    showAround(main, opts.pageKey, liveDoc, [head, status, controls, scopeNote].filter(Boolean));
+    const staged = buildDoc();
+    const stagedRender = panelRender;
+    const cancelSwap = refreshGridInPlace(liveDoc, staged);
+    cancelViewRefresh = () => {
+      cancelSwap();
+      stagedRender.end();
+    };
+    return;
+  }
+  if (isAlert) mount(main, [head, status, controls, scopeNote, docBox]);
+  else showPage(main, opts.pageKey, [head, status, controls, scopeNote, docBox]);
   renderDoc();
 }
 
@@ -1115,19 +1146,21 @@ function openLiveButton(onOpenLive) {
 /* One notebook cell -> a document block: a markdown cell renders through renderMarkdown (XSS-safe); a panel cell
    through the shared panelOrError (unknown source/viz -> a clean strip, exactly as in the dashboard grid).
    `onSettled` is optional and only the alert notebook passes it (its in-flight limiter's release): see panelOrError. */
-function renderCell(cell, readSet, sourceSet, scope, onSettled, gate = null) {
+/* `slot` is the cell's index in a saved notebook: the stable identity a composed panel cell holds its zoom and drill under across
+   the poll's rebuild (#7924). The alert notebook passes none, so its cells hold nothing, like the editor preview. */
+function renderCell(cell, readSet, sourceSet, scope, onSettled, gate = null, slot = null) {
   if (!cell || typeof cell !== "object") return null;
   if (cell.type === "markdown") {
     return el("div", { class: "notebook-md markdown-body" }, [renderMarkdown(cell.text)]);
   }
   if (cell.type === "panel") {
-    return el("div", { class: "notebook-panel" }, [panelOrError(cell, readSet, sourceSet, scope, onSettled, null, gate)]);
+    return el("div", { class: "notebook-panel" }, [panelOrError(cell, readSet, sourceSet, scope, onSettled, slot, gate)]);
   }
   /* A `read` cell (design D7, #4222) is a v1 read panel, FLAT like a panel cell: routed through the exact same
      panelOrError -> renderPanel path a dashboard read panel uses (its own fixed params, scope-independent).
      Minimal routing only; renderNotebookDoc's broader refactor is a later slice's job. */
   if (cell.type === "read") {
-    return el("div", { class: "notebook-panel" }, [panelOrError(cell, readSet, sourceSet, scope, onSettled, null, gate)]);
+    return el("div", { class: "notebook-panel" }, [panelOrError(cell, readSet, sourceSet, scope, onSettled, slot, gate)]);
   }
   return null;
 }
