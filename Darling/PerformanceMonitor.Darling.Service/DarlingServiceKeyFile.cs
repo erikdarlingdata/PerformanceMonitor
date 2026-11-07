@@ -245,7 +245,9 @@ internal static class DarlingServiceKeyFile
 
         if (owner.UserId != modes.EffectiveUserId)
         {
-            return "it is owned by another user than the one the service runs as";
+            var euid = modes.EffectiveUserId;
+            return $"it is owned by user {owner.UserId.ToString(CultureInfo.InvariantCulture)}, not by user {euid.ToString(CultureInfo.InvariantCulture)}, "
+                + $"which the service runs as; to give it to that user, run: {DarlingManagedRoles.CredentialOwnershipFix(euid, path)}";
         }
 
         return owner.Links == 1

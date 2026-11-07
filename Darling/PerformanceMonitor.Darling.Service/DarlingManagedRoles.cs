@@ -4893,6 +4893,23 @@ WHERE t.tgrelid = 'config.investigation_journal'::regclass
             "PerformanceMonitorDarling", "compose-credentials")
         : "/var/lib/darling/credentials";
 
+    /// <summary>The mount point of the compose distribution's credential volume (#8141).</summary>
+    internal const string ComposeCredentialVolumeRoot = "/var/lib/darling";
+
+    /// <summary>
+    /// The command that gives the credential file or directory at <paramref name="path"/> to <paramref name="userId"/>
+    /// (#8141). Inside the compose volume the files are reachable only through the container, so the fix is the
+    /// one-off root container that chowns the volume; elsewhere it is a plain chown of the path.
+    /// </summary>
+    internal static string CredentialOwnershipFix(uint userId, string path)
+    {
+        var u = userId.ToString(CultureInfo.InvariantCulture);
+        return path == ComposeCredentialVolumeRoot || path.StartsWith(ComposeCredentialVolumeRoot + "/", StringComparison.Ordinal)
+            ? $"docker compose run --rm --no-deps --user 0 --entrypoint chown darling -R {u}:{u} {ComposeCredentialVolumeRoot} "
+                + $"(on Kubernetes, chown the volume mounted at {ComposeCredentialVolumeRoot} to {u}:{u})"
+            : $"chown {u}:{u} '{path}'";
+    }
+
     /// <summary>The compose store's credential file for <paramref name="role"/>: the managed file's name without
     /// the <c>.dpapi</c> extension, because it holds the password itself (#3914).</summary>
     public static string ComposeStoreCredentialFileName(string role) => $"pg-{role}-credential";
