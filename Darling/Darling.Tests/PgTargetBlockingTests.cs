@@ -863,7 +863,7 @@ public sealed class PgTargetBlockingTests
                 var anomalyCard = Assert.Single(findings, f => RootKey(f) == PgTargetFactKeys.AnomalyBlocking);
                 Assert.Equal(card.GetProperty("incident_id").GetString(), anomalyCard.GetProperty("incident_id").GetString());
                 var anomalyHeadline = anomalyCard.GetProperty("advice").GetProperty("headline").GetString()!;
-                Assert.StartsWith("Blocked sessions per capture spiked to 3 sessions — ", anomalyHeadline, StringComparison.Ordinal);
+                Assert.StartsWith("Blocked sessions per capture spiked to 3 sessions: ", anomalyHeadline, StringComparison.Ordinal);
                 Assert.DoesNotContain("Anomalous spike", anomalyHeadline, StringComparison.Ordinal);
 
                 Assert.All(findings.SelectMany(f => f.GetProperty("next_tools").EnumerateArray()).Select(t => t.GetProperty("tool").GetString()!), t => Assert.StartsWith("get_pg_", t, StringComparison.Ordinal));
