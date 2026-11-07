@@ -95,18 +95,18 @@ public sealed class DarlingMcpQueryTagRollupTools
                 tagFilter = found;
             }
 
-            /* #8083: with no tag defined, every row of every section would be untagged and every untagged figure would equal its total, so the
-               per-server gates, the routing and the six aggregations are not run: the answer is this one status. A named tag is refused above
-               first, as on a store with tags, and the engine question is not asked (a fleet of PostgreSQL targets answers not_collected once a
-               tag exists). */
-            if (tags.Count == 0)
-            {
-                return McpHelpers.Status("empty", QueryTagUsageLabels.NoTagsMessage);
-            }
-
             var windowStart = windowEnd.AddHours(-hours_back);
             /* #6860: answers name a server by its display name (#6179), not the connection key. */
             var names = scope.ToDictionary(s => s.ServerId, s => DarlingServerResolver.AnswerNameOf(servers, s));
+
+            /* #8083: with no tag defined, every row of every section would be untagged and every untagged figure would equal its total, so the
+               per-server gates, the routing and the six aggregations are not run: the answer is one empty status over the resolved window, with
+               the window notice every empty answer of this tool carries (#6984). A named tag is refused above first, as on a store with tags, and
+               the engine question is not asked (a fleet of PostgreSQL targets answers not_collected once a tag exists). */
+            if (tags.Count == 0)
+            {
+                return await NoTagsAnswerAsync(postgres, fleet, scope, names, hours_back, windowStart, windowEnd, logger, cancellationToken);
+            }
 
             var serverIds = scope.Select(s => s.ServerId).ToArray();
 
@@ -334,25 +334,7 @@ public sealed class DarlingMcpQueryTagRollupTools
             /* Data, or an empty answer: no served section held figures (nothing collected, or nothing carrying the requested tag), so the status
                is "empty", and the sections ride along (Lite does the same) so each section's own status and any unserved section's reason are
                there to read. */
-            /* #7010: one window-floor notice for the whole answer, the LATEST of the six section floors (a roll-up is only as complete as its
-               least-covered section, and a section's floor is where its own relation's coverage starts). One fleet-form probe per section relation
-               (six a call, run one after the other), scoped to the server when one is named, never one per relation per server. A relation the
-               window holds nothing in answers null and gives way to the others. */
-            var noticeNames = fleet ? null : new[] { scope[0].ServerName };
-            var noticeSources = new[] { "query_stats", "query_store_stats", "procedure_stats", "blocked_process_reports", "dmv_blocking_snapshots", "deadlocks" }
-                .Select(DataWindowFloor.Source.ForCollectorTable).ToArray();
-            var notice = await DarlingMcpWindowNotice.ReadAsync(
-                async () =>
-                {
-                    DateTime? latest = null;
-                    foreach (var source in noticeSources)
-                    {
-                        latest = DarlingMcpWindowNotice.Later(latest, await DarlingMcpWindowNotice.ProbeScoped(postgres, [source], noticeNames, windowStart, windowEnd, cancellationToken));
-                    }
-
-                    return latest;
-                },
-                windowStart, windowEnd, "query tag source tables", emptyAnswer: !anyData, logger: logger, cancellationToken: cancellationToken);
+            var notice = await ReadWindowNoticeAsync(postgres, fleet ? null : scope[0].ServerName, windowStart, windowEnd, emptyAnswer: !anyData, logger, cancellationToken);
 
             var payload = new Dictionary<string, object?>();
             if (!anyData)
@@ -395,6 +377,64 @@ public sealed class DarlingMcpQueryTagRollupTools
         {
             return McpHelpers.FormatError("get_resource_use_by_tag", ex);
         }
+    }
+
+    /// <summary>
+    /// #7010: one window-floor notice for the whole answer, the LATEST of the six section floors (a roll-up is only as complete as its
+    /// least-covered section, and a section's floor is where its own relation's coverage starts). One fleet-form probe per section relation
+    /// (six a call, run one after the other), scoped to the server when one is named, never one per relation per server. A relation the
+    /// window holds nothing in answers null and gives way to the others.
+    /// </summary>
+    private static Task<McpWindowNotice> ReadWindowNoticeAsync(
+        NpgsqlDataSource postgres, string? serverName, DateTime windowStart, DateTime windowEnd, bool emptyAnswer, ILogger? logger, CancellationToken cancellationToken)
+    {
+        var noticeNames = serverName is null ? null : new[] { serverName };
+        var noticeSources = new[] { "query_stats", "query_store_stats", "procedure_stats", "blocked_process_reports", "dmv_blocking_snapshots", "deadlocks" }
+            .Select(DataWindowFloor.Source.ForCollectorTable).ToArray();
+        return DarlingMcpWindowNotice.ReadAsync(
+            async () =>
+            {
+                DateTime? latest = null;
+                foreach (var source in noticeSources)
+                {
+                    latest = DarlingMcpWindowNotice.Later(latest, await DarlingMcpWindowNotice.ProbeScoped(postgres, [source], noticeNames, windowStart, windowEnd, cancellationToken));
+                }
+
+                return latest;
+            },
+            windowStart, windowEnd, "query tag source tables", emptyAnswer: emptyAnswer, logger: logger, cancellationToken: cancellationToken);
+    }
+
+    /// <summary>
+    /// #8083: the answer on a store that defines no query tag: <c>empty</c> with <see cref="QueryTagUsageLabels.NoTagsMessage"/>, the scope and
+    /// the resolved window, and the window notice (<c>effective_start</c>, <c>window_truncated</c>, <c>truncation_note</c>) as the tool's other
+    /// empty answers carry it, so the #6984 window contract holds. No section is read, so there is no <c>sections</c> list.
+    /// </summary>
+    private static async Task<string> NoTagsAnswerAsync(
+        NpgsqlDataSource postgres, bool fleet, List<RegisteredServer> scope, Dictionary<int, string> names, int hoursBack,
+        DateTime windowStart, DateTime windowEnd, ILogger? logger, CancellationToken cancellationToken)
+    {
+        var notice = await ReadWindowNoticeAsync(postgres, fleet ? null : scope[0].ServerName, windowStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
+        var payload = new Dictionary<string, object?>
+        {
+            ["status"] = "empty",
+            ["message"] = QueryTagUsageLabels.NoTagsMessage,
+            ["scope"] = fleet ? "fleet" : "server",
+            ["server"] = fleet ? null : names[scope[0].ServerId],
+            ["hours_back"] = hoursBack,
+            ["window_start"] = windowStart.ToString("o", CultureInfo.InvariantCulture),
+            ["window_end"] = windowEnd.ToString("o", CultureInfo.InvariantCulture),
+        };
+        if (!notice.IsUnavailable)
+        {
+            payload["effective_start"] = notice.EffectiveStart;
+            payload["window_truncated"] = notice.WindowTruncated;
+            payload["truncation_note"] = notice.TruncationNote;
+        }
+
+        payload["tag"] = null;
+        payload["sections_additive"] = false;
+        return JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
     }
 
     /// <summary>Whether the facts hold figures for the request: any fact at all without a tag filter, else a fact on the tag or a tag under it.</summary>
