@@ -12,7 +12,9 @@ name: Darling Linux store
 #      with no servers: it must migrate and run its startup retention pass;
 #   3. the store verbs from a second container of the same image: `--backfill-rollups` with no `--free-space` must refuse and
 #      name the way out (#6791: it could not measure the store's volume from another host), `--free-space 41G` must dry-run,
-#      run and then find nothing left to do (#6071: the verb refused to run on Linux at all).
+#      run and then find nothing left to do (#6071: the verb refused to run on Linux at all);
+#   4. the password key on Linux, in the image with `--self-check-password-key` (#5366, #8006): the Unix owner, link-count
+#      and file-identity calls, the Linux crypto path and the passwordKey source, none of which the Windows tests reach.
 #
 # Triggers: the nightly (nightly.yml calls this as a reusable workflow), a manual dispatch, and a pull request that touches
 # the files this checks most directly. The pull request workflow (pr.yml) is the one per-PR CI system (#6656); this narrow
@@ -31,6 +33,16 @@ on:
       - 'Darling/PerformanceMonitor.Darling.Service/DarlingLaunchMemorySelfCheck.cs'
       - 'Darling/PerformanceMonitor.Darling.Service/DarlingCliCommands.cs'
       - 'Darling/PerformanceMonitor.Darling.Service/DarlingStoreHostProfile.cs'
+      - 'Darling/PerformanceMonitor.Darling.Service/DarlingPasswordKey*.cs'
+      - 'Darling/PerformanceMonitor.Darling.Service/DarlingSecretSource.cs'
+      - 'Darling/PerformanceMonitor.Darling.Service/DarlingServiceKeyFile.cs'
+      - 'Darling/PerformanceMonitor.Darling.Service/DarlingFileSecurity.cs'
+      - 'Darling/PerformanceMonitor.Darling.Service/DarlingOwnedSecrets.cs'
+      - 'Darling/PerformanceMonitor.Darling.Service/DarlingManagedRoles.cs'
+      - 'Darling/PerformanceMonitor.Darling.Storage/PasswordSeal.cs'
+      - 'Darling/PerformanceMonitor.Darling.Storage/PasswordBinding.cs'
+      - 'Darling/PerformanceMonitor.Darling.Storage/ServerConnectionIdentity.cs'
+      - 'Darling/Darling.Tests/Fixtures/PasswordSeal/**'
       - 'Darling/PerformanceMonitor.Darling.Storage/PgSchemaGenerator.cs'
       - 'Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs'
       - 'Darling/PerformanceMonitor.Darling.Storage/RollupBackfill.cs'
@@ -93,6 +105,20 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm --memory 512m "${DARLING_IMAGE}" --self-check-launch-memory 512
+
+      # #5366, #8006: the test project runs on Windows, so the Unix file checks behind the password key (owner, link count, file
+      # identity), the Linux crypto path and the passwordKey source (base64, PEM, a Kubernetes-style ..data link, env:) run
+      # here, inside the image the service ships in. It ran in build.yml until that became release-only (#6656), and was then
+      # skipped on every run. The vector is mounted read-only; any failure exits non-zero and fails the job.
+      - name: Check the password key on Linux (self-check verb in the built image)
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          vector="${GITHUB_WORKSPACE}/Darling/Darling.Tests/Fixtures/PasswordSeal/linux-self-check-vector.json"
+          test -f "${vector}"
+          docker run --rm -v "${vector}:/vector/linux-self-check-vector.json:ro" "${DARLING_IMAGE}" \
+            --self-check-password-key /vector/linux-self-check-vector.json
 
       - name: Start the store (a TimescaleDB container with a non-superuser owner)
         timeout-minutes: 5

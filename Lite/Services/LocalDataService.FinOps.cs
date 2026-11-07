@@ -71,6 +71,10 @@ public class DatabaseSizeSummaryRow
     public decimal FreeMb => UsedMb.HasValue ? TotalMb - UsedMb.Value : TotalMb;
     public decimal UsedPct => TotalMb > 0 && UsedMb.HasValue ? Math.Round(UsedMb.Value * 100m / TotalMb, 1) : 0;
 
+    /// <summary>#8115: the bar's "used / allocated MB" label. A database whose used size was not collected says so instead of
+    /// leaving the slash standing in front of the allocation.</summary>
+    public string SizeLabel => UsedMb.HasValue ? $"{UsedMb.Value:N0} / {TotalMb:N0} MB" : $"used size not collected / {TotalMb:N0} MB";
+
     /* Star-width GridLength for XAML binding — drives the stacked bar proportions */
     public System.Windows.GridLength UsedStarWidth =>
         new(Math.Max((double)(UsedMb ?? 0m), 0.1), System.Windows.GridUnitType.Star);

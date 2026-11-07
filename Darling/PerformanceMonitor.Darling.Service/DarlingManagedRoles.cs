@@ -6046,6 +6046,11 @@ internal interface IUnixDirectoryModes
     /// absent (<see cref="FileInfo.Exists"/> is false), which is not the same as missing. True where a stand-in does not
     /// model it.</summary>
     bool CanList(string directory) => true;
+
+    /// <summary>Whether the file at <paramref name="path"/>, every link followed, is a regular file (#8006): not a
+    /// directory, a device, a FIFO or a socket. Null when that cannot be told here (Windows, a stand-in that does not
+    /// model it).</summary>
+    bool? IsRegularFile(string path) => null;
 }
 
 /// <summary>Who owns a file and how many names it has (#5366).</summary>
@@ -6077,4 +6082,6 @@ internal sealed class PlatformUnixDirectoryModes : IUnixDirectoryModes
             return false;
         }
     }
+
+    public bool? IsRegularFile(string path) => FileIdentity.UnixIsRegularFile(path);
 }

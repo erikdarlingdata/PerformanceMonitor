@@ -145,10 +145,9 @@
                     <TextBlock x:Name="RecommendationsSecondaryNoteText" Visibility="Collapsed" TextWrapping="Wrap"
                                Margin="10,0,10,4" FontSize="11" FontStyle="Italic"
                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
-                    <TextBlock x:Name="RecommendationsNoDataMessage"
+                    <TextBlock Style="{DynamicResource EmptyHint}" x:Name="RecommendationsNoDataMessage"
                                Text="No recommendations — all checks passed or insufficient data for analysis."
-                               Margin="10,0" Visibility="Collapsed"
-                               Foreground="{DynamicResource ForegroundMutedBrush}" FontStyle="Italic"/>
+                               Margin="10,0" Visibility="Collapsed"/>
                 </StackPanel>
 
                 <!-- Recommendations DataGrid -->
@@ -625,14 +624,8 @@
                                                 <!-- Size label -->
                                                 <TextBlock Grid.Column="2" Margin="0,0,4,0" VerticalAlignment="Center"
                                                            HorizontalAlignment="Right" FontSize="11.5"
-                                                           Foreground="{DynamicResource ForegroundBrush}">
-                                                    <TextBlock.Text>
-                                                        <MultiBinding StringFormat="{}{0:N0} / {1:N0} MB">
-                                                            <Binding Path="UsedMb"/>
-                                                            <Binding Path="TotalMb"/>
-                                                        </MultiBinding>
-                                                    </TextBlock.Text>
-                                                </TextBlock>
+                                                           Foreground="{DynamicResource ForegroundBrush}"
+                                                           Text="{Binding SizeLabel}"/>
                                             </Grid>
                                         </DataTemplate>
                                     </ItemsControl.ItemTemplate>
@@ -2493,10 +2486,9 @@
                 </StackPanel>
 
                 <!-- No Data Message -->
-                <TextBlock x:Name="HighImpactNoDataMessage" Grid.Row="1"
+                <TextBlock Style="{DynamicResource EmptyHint}" x:Name="HighImpactNoDataMessage" Grid.Row="1"
                            Text="No high-impact queries found for this time range."
-                           Margin="10,0" Visibility="Collapsed"
-                           Foreground="{DynamicResource ForegroundMutedBrush}" FontStyle="Italic"/>
+                           Margin="10,0" Visibility="Collapsed"/>
 
                 <!-- High Impact DataGrid -->
                 <DataGrid x:Name="HighImpactDataGrid"

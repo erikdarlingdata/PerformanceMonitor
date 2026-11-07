@@ -234,6 +234,9 @@ public sealed class DarlingMcpHostService : BackgroundService
                 try
                 {
                     config = DarlingConfig.Load();
+                    /* #8006 review: this host runs beside the worker and may start its PowerShell firewall probe first, so
+                       it takes a passwordKey env: variable out of the environment too. Does nothing without the setting. */
+                    DarlingPasswordKeySource.CaptureForService(config);
 
                     /* #5506 part 3: reads.maxHeavyReads is file-only and read when the host starts. */
                     _readAdmission?.Configure(config.Reads.MaxHeavyReads);
