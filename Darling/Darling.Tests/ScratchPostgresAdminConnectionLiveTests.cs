@@ -25,13 +25,11 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class ScratchPostgresAdminConnectionLiveTests
 {
-    private const string AdminApplicationName = "darling-tests-scratch-admin";
-
     private static async Task<HashSet<int>> AdminBackendsAsync(NpgsqlConnection observer, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(
             "SELECT pid FROM pg_catalog.pg_stat_activity WHERE application_name = $1 AND backend_type = 'client backend'", observer);
-        command.Parameters.AddWithValue(AdminApplicationName);
+        command.Parameters.AddWithValue(ScratchPostgres.AdminApplicationName);
         var pids = new HashSet<int>();
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
