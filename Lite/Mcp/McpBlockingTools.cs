@@ -39,7 +39,8 @@ public sealed class McpBlockingTools
             var rows = await dataService.GetRecentDeadlocksAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1);
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "deadlocks")
+                /* #8146: the deadlock collector's ring-buffer loss over the window rides the empty answer's hints (not_collected and the precondition stay bare). */
+                return RingBufferLossAnswer.AttachToHints(await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "deadlocks")
                     /* #2546: capability first (permanent), then the runtime precondition (fixable), then the
                        read's own miss. A deadlock capture the collector cannot read returns zero rows
                        forever, which is byte-identical to a server that simply did not deadlock — the one
@@ -50,7 +51,8 @@ public sealed class McpBlockingTools
                     ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty", "No deadlocks found in this window.",
                         (await McpQueryTools.EventWindowNoticeAsync(
                             () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.Deadlocks, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
-                            null, windowEnd.AddHours(-hours_back), windowEnd, "deadlocks", emptyAnswer: true)).AsHints()), windowEnd.AddHours(-hours_back));
+                            null, windowEnd.AddHours(-hours_back), windowEnd, "deadlocks", emptyAnswer: true)).AsHints()), windowEnd.AddHours(-hours_back)),
+                    await dataService.GetLossRunsInWindowAsync(resolved.ServerId, DeadlocksCollector.Instance.Name, windowEnd.AddHours(-hours_back), windowEnd));
             }
 
             var truncated = rows.Count > limit;
@@ -74,7 +76,8 @@ public sealed class McpBlockingTools
                 has_deadlock_xml = r.HasDeadlockXml
             });
 
-            return JsonSerializer.Serialize(new
+            /* #8146: the window's ring-buffer loss is a top-level key when there was any. */
+            return RingBufferLossAnswer.Attach(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
@@ -94,7 +97,7 @@ public sealed class McpBlockingTools
                 order = "deadlock_time_desc",
                 separately_monitored_note = SeparatelyMonitoredScope.ListNote(resolved.ServerId),
                 deadlocks = result
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), await dataService.GetLossRunsInWindowAsync(resolved.ServerId, DeadlocksCollector.Instance.Name, requestedStart, windowEnd));
         }
         catch (Exception ex)
         {
@@ -249,11 +252,13 @@ public sealed class McpBlockingTools
             var rows = await dataService.GetRecentBlockedProcessReportsAsync(resolved.ServerId, hours_back, databaseNames: database == null ? null : new[] { database }, asOfUtc: windowEnd, limit: limit + 1);
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "blocked_process_report")
+                /* #8146: the blocked-process-report collector's ring-buffer loss over the window rides the empty answer's hints. */
+                return RingBufferLossAnswer.AttachToHints(await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "blocked_process_report")
                     ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty", $"No blocked process reports found in this window{ForChosenDatabase(database)}.",
                         (await McpQueryTools.EventWindowNoticeAsync(
                             () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
-                            null, windowEnd.AddHours(-hours_back), windowEnd, "blocked_process_report", emptyAnswer: true)).AsHints()), windowEnd.AddHours(-hours_back));
+                            null, windowEnd.AddHours(-hours_back), windowEnd, "blocked_process_report", emptyAnswer: true)).AsHints()), windowEnd.AddHours(-hours_back)),
+                    await dataService.GetLossRunsInWindowAsync(resolved.ServerId, BlockedProcessReportCollector.Instance.Name, windowEnd.AddHours(-hours_back), windowEnd));
             }
 
             var truncated = rows.Count > limit;
@@ -314,7 +319,8 @@ public sealed class McpBlockingTools
                 blocking_priority = r.BlockingPriority
             });
 
-            return JsonSerializer.Serialize(new
+            /* #8146: the window's ring-buffer loss is a top-level key when there was any. */
+            return RingBufferLossAnswer.Attach(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 /* The span REQUESTED. Kept under its shipped name, and no longer the only span on the page. */
@@ -339,7 +345,7 @@ public sealed class McpBlockingTools
                 order = "event_time_desc",
                 separately_monitored_note = SeparatelyMonitoredScope.ListNote(resolved.ServerId),
                 reports = result
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), await dataService.GetLossRunsInWindowAsync(resolved.ServerId, BlockedProcessReportCollector.Instance.Name, requestedStart, windowEnd));
         }
         catch (Exception ex)
         {
@@ -532,16 +538,19 @@ public sealed class McpBlockingTools
                 var captures = await dataService.GetBlockingCaptureCountsAsync(
                     resolved.ServerId, hours_back, asOfUtc: anchorEnd);
                 /* #7005: the window notice (BlockedProcessReports probes the XE collector and the DMV snapshots, the two sources this trend reads). */
-                return await McpQueryTools.WithEmptyWindowNoticeAsync(WithNullSource(await EmptyTrend(
+                /* #8146: the blocked-process-report collector's ring-buffer loss over the window rides the empty answer's hints. */
+                return RingBufferLossAnswer.AttachToHints(await McpQueryTools.WithEmptyWindowNoticeAsync(WithNullSource(await EmptyTrend(
                     "blocking", resolved.DisplayName, hours_back, captures,
                     () => dataService.HasAnyBlockingCollectorRunAsync(resolved.ServerId),
                     database)),
-                    dataService, QueryWindowRelation.BlockedProcessReports, resolved.ServerId, anchorEnd.AddHours(-hours_back), anchorEnd, "blocked_process_report");
+                    dataService, QueryWindowRelation.BlockedProcessReports, resolved.ServerId, anchorEnd.AddHours(-hours_back), anchorEnd, "blocked_process_report"),
+                    await dataService.GetLossRunsInWindowAsync(resolved.ServerId, BlockedProcessReportCollector.Instance.Name, anchorEnd.AddHours(-hours_back), anchorEnd));
             }
 
             var result = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count });
 
-            return await McpQueryTools.WithDataWindowNoticeAsync(JsonSerializer.Serialize(new
+            /* #8146: the blocked-process-report collector's ring-buffer loss over the window, a top-level key when there was any. */
+            return RingBufferLossAnswer.Attach(await McpQueryTools.WithDataWindowNoticeAsync(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
@@ -551,7 +560,8 @@ public sealed class McpBlockingTools
                 source = points[0].Source,
                 trend = result
             }, McpHelpers.JsonOptions),
-                dataService, QueryWindowRelation.BlockedProcessReports, resolved.ServerId, anchorEnd.AddHours(-hours_back), anchorEnd, "blocked_process_report");
+                dataService, QueryWindowRelation.BlockedProcessReports, resolved.ServerId, anchorEnd.AddHours(-hours_back), anchorEnd, "blocked_process_report"),
+                await dataService.GetLossRunsInWindowAsync(resolved.ServerId, BlockedProcessReportCollector.Instance.Name, anchorEnd.AddHours(-hours_back), anchorEnd));
         }
         catch (Exception ex)
         {
@@ -590,24 +600,28 @@ public sealed class McpBlockingTools
 
                 var captures = await dataService.GetDeadlockCaptureCountsAsync(
                     resolved.ServerId, hours_back, asOfUtc: windowEnd);
-                return await McpQueryTools.WithEmptyWindowNoticeAsync(await EmptyTrend(
+                /* #8146: the deadlock collector's ring-buffer loss over the window rides the empty answer's hints. */
+                return RingBufferLossAnswer.AttachToHints(await McpQueryTools.WithEmptyWindowNoticeAsync(await EmptyTrend(
                     /* SINGULAR: the subject lands in "No {subject} was recorded", and "no deadlocks
                        was recorded" is not a sentence. It also reads correctly in the other two,
                        where it modifies the collector rather than the event. */
                     "deadlock", resolved.DisplayName, hours_back, captures,
                     () => dataService.HasAnyDeadlockCollectorRunAsync(resolved.ServerId)),
-                    dataService, QueryWindowRelation.Deadlocks, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "deadlocks");
+                    dataService, QueryWindowRelation.Deadlocks, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "deadlocks"),
+                    await dataService.GetLossRunsInWindowAsync(resolved.ServerId, DeadlocksCollector.Instance.Name, windowEnd.AddHours(-hours_back), windowEnd));
             }
 
             var result = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count });
 
-            return await McpQueryTools.WithDataWindowNoticeAsync(JsonSerializer.Serialize(new
+            /* #8146: the deadlock collector's ring-buffer loss over the window, a top-level key when there was any. */
+            return RingBufferLossAnswer.Attach(await McpQueryTools.WithDataWindowNoticeAsync(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
                 trend = result
             }, McpHelpers.JsonOptions),
-                dataService, QueryWindowRelation.Deadlocks, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "deadlocks");
+                dataService, QueryWindowRelation.Deadlocks, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "deadlocks"),
+                await dataService.GetLossRunsInWindowAsync(resolved.ServerId, DeadlocksCollector.Instance.Name, windowEnd.AddHours(-hours_back), windowEnd));
         }
         catch (Exception ex)
         {

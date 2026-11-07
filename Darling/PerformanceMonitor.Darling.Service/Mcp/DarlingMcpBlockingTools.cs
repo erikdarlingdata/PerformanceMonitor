@@ -18,6 +18,7 @@ using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
@@ -175,9 +176,11 @@ public sealed class DarlingMcpBlockingTools
                     /* #4966: an empty answer over a window the store may not reach back to is not a true negative, so the window keys
                        ride on it under hints. The page is fed by two collectors, so the probe is both (the earlier of the two). */
                     ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", $"No blocking events found in this window{ForChosenDatabases(databases)}.",
-                        (await DarlingMcpWindowNotice.ReadEventAsync(
+                        /* #8146: the loss of the blocked-process-report collector's runs rides beside the window keys (the DMV collector has no ring buffer). */
+                        RingBufferLossAnswer.WithLoss((await DarlingMcpWindowNotice.ReadEventAsync(
                             () => DarlingMcpWindowNotice.Probe(postgres, BlockingPageSources, resolved.ServerName, windowStart, now, cancellationToken),
-                            null, windowStart, now, BlockingPageTables, emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken, windowStart);
+                            null, windowStart, now, BlockingPageTables, emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints(),
+                            await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, BlockedProcessReportCollector.Instance.Name, windowStart, now, cancellationToken))), cancellationToken, windowStart);
 
             var scanTruncated = filtering && rows.Count > DarlingBlockingReader.FingerprintScanCeiling;
             if (scanTruncated) rows = rows.Take(DarlingBlockingReader.FingerprintScanCeiling).ToList();
@@ -330,8 +333,10 @@ public sealed class DarlingMcpBlockingTools
                 separately_monitored_databases = separate
             }, "events", "has_blocked_plan", "has_blocking_plan");
 
-            /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
-            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
+            /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). #8146: the window's ring-buffer loss is a top-level key when there was any. */
+            return RingBufferLossAnswer.Attach(
+                notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json,
+                await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, BlockedProcessReportCollector.Instance.Name, windowStart, now, cancellationToken));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -427,9 +432,11 @@ public sealed class DarlingMcpBlockingTools
                     ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "deadlocks", cancellationToken)
                     /* #4966: the window keys ride on an empty answer under hints; not_collected and the precondition stay bare. */
                     ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", "No deadlocks found in this window.",
-                        (await DarlingMcpWindowNotice.ReadEventAsync(
+                        /* #8146: the deadlock collector's ring-buffer loss rides beside the window keys. */
+                        RingBufferLossAnswer.WithLoss((await DarlingMcpWindowNotice.ReadEventAsync(
                             () => DarlingMcpWindowNotice.Probe(postgres, "deadlocks", resolved.ServerName, windowStart, now, cancellationToken),
-                            null, windowStart, now, "deadlocks", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken, windowStart);
+                            null, windowStart, now, "deadlocks", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints(),
+                            await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, DeadlocksCollector.Instance.Name, windowStart, now, cancellationToken))), cancellationToken, windowStart);
 
             var scanTruncated = filtering && rows.Count > DarlingBlockingReader.FingerprintScanCeiling;
             if (scanTruncated) rows = rows.Take(DarlingBlockingReader.FingerprintScanCeiling).ToList();
@@ -511,8 +518,10 @@ public sealed class DarlingMcpBlockingTools
                 separately_monitored_databases = separate
             }, "deadlocks", "has_victim_plan");
 
-            /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
-            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
+            /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). #8146: the window's ring-buffer loss is a top-level key when there was any. */
+            return RingBufferLossAnswer.Attach(
+                notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json,
+                await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, DeadlocksCollector.Instance.Name, windowStart, now, cancellationToken));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -899,7 +908,8 @@ public sealed class DarlingMcpBlockingTools
                     await EmptyTrend(
                         "blocking", resolved.DisplayName, hours_back, captures,
                         () => DarlingBlockingTrendReader.HasAnyBlockingCollectorRunAsync(postgres, resolved.ServerId, cancellationToken),
-                        databases, emptyNotice), cancellationToken, start));
+                        databases, emptyNotice,
+                        await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, BlockedProcessReportCollector.Instance.Name, start, now, cancellationToken)), cancellationToken, start));
             }
 
             /* #7010: where the store's data starts for the window, as get_blocking writes it. The probe is skipped for a window of 90
@@ -932,7 +942,10 @@ public sealed class DarlingMcpBlockingTools
                 reply["covered"] = CoveredJson(covered);
             }
 
-            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(reply, McpHelpers.JsonOptions), notice);
+            /* #8146: the blocked-process-report collector's ring-buffer loss over the window, a top-level key when there was any. */
+            return RingBufferLossAnswer.Attach(
+                DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(reply, McpHelpers.JsonOptions), notice),
+                await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, BlockedProcessReportCollector.Instance.Name, start, now, cancellationToken));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -994,7 +1007,8 @@ public sealed class DarlingMcpBlockingTools
                            where it modifies the collector rather than the event. */
                         "deadlock", resolved.DisplayName, hours_back, captures,
                         () => DarlingBlockingTrendReader.HasAnyDeadlockCollectorRunAsync(postgres, resolved.ServerId, cancellationToken),
-                        window: emptyNotice), cancellationToken, start);
+                        window: emptyNotice,
+                        loss: await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, DeadlocksCollector.Instance.Name, start, now, cancellationToken)), cancellationToken, start);
             }
 
             /* #7010: where the store's data starts for the window; a failed probe costs the three keys, never the trend. */
@@ -1021,7 +1035,10 @@ public sealed class DarlingMcpBlockingTools
                 reply["covered"] = CoveredJson(covered);
             }
 
-            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(reply, McpHelpers.JsonOptions), notice);
+            /* #8146: the deadlock collector's ring-buffer loss over the window, a top-level key when there was any. */
+            return RingBufferLossAnswer.Attach(
+                DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(reply, McpHelpers.JsonOptions), notice),
+                await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, DeadlocksCollector.Instance.Name, start, now, cancellationToken));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1173,7 +1190,8 @@ public sealed class DarlingMcpBlockingTools
         List<DarlingBlockingTrendReader.CaptureCount> captures,
         Func<Task<bool>> hasEverCapturedAsync,
         DatabaseFilter databases = default,
-        McpWindowNotice? window = null)
+        McpWindowNotice? window = null,
+        RingBufferLossNote.LossWindow? loss = null)
     {
         var captureCount = captures.Sum(c => c.Runs);
         var hints = new Dictionary<string, object?>
@@ -1196,6 +1214,12 @@ public sealed class DarlingMcpBlockingTools
             hints["effective_start"] = notice.EffectiveStart;
             hints["window_truncated"] = notice.WindowTruncated;
             hints["truncation_note"] = notice.TruncationNote;
+        }
+
+        /* #8146: events the ring buffer lost over the window, so an empty trend is not read as an all-clear. */
+        if (loss is { } lost)
+        {
+            hints[RingBufferLossAnswer.Key] = lost.ToPayload();
         }
 
         if (captureCount > 0)

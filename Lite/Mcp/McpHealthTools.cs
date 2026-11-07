@@ -1605,7 +1605,11 @@ public sealed class McpHealthTools
                 var emptyNotice = everRan
                     ? await BlockingStatsWindowNoticeAsync(dataService, resolved.ServerId, hours, windowEnd, emptyAnswer: true)
                     : default;
-                return everRan
+                /* #8146: this read spans the blocked-process reports and the deadlocks, so the ring-buffer loss of either collector rides the empty answer's hints. */
+                var emptyLoss = everRan ? RingBufferLossAnswer.Combine(
+                await dataService.GetLossRunsInWindowAsync(resolved.ServerId, BlockedProcessReportCollector.Instance.Name, windowEnd.AddHours(-hours), windowEnd),
+                await dataService.GetLossRunsInWindowAsync(resolved.ServerId, DeadlocksCollector.Instance.Name, windowEnd.AddHours(-hours), windowEnd)) : null;
+                return RingBufferLossAnswer.AttachToHints(everRan
                     ? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status(
                         "empty",
                         McpHelpers.QuietUnlessCut(
@@ -1617,12 +1621,14 @@ public sealed class McpHealthTools
                         emptyNotice.AsHints()), windowEnd.AddHours(-hours))
                     : McpHelpers.Status(
                         "unavailable",
-                        $"The blocking collectors have NEVER run successfully for {resolved.DisplayName}, so this is NOT a clean bill of health — nothing looked. Blocked-process reports need the XE session running, or the DMV blocking snapshot collector enabled; check those before concluding this server does not block.");
+                        $"The blocking collectors have NEVER run successfully for {resolved.DisplayName}, so this is NOT a clean bill of health — nothing looked. Blocked-process reports need the XE session running, or the DMV blocking snapshot collector enabled; check those before concluding this server does not block."),
+                    emptyLoss);
             }
 
             var notice = await BlockingStatsWindowNoticeAsync(dataService, resolved.ServerId, hours, windowEnd);
 
-            return JsonSerializer.Serialize(new
+            /* #8146: the ring-buffer loss of the two collectors this read spans is a top-level key when there was any. */
+            return RingBufferLossAnswer.Attach(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back = hours,
@@ -1655,7 +1661,9 @@ public sealed class McpHealthTools
                     max_wait_ms = d.MaxWaitMs,
                     avg_wait_ms = Math.Round(d.AvgWaitMs, 0),
                 }),
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), RingBufferLossAnswer.Combine(
+                await dataService.GetLossRunsInWindowAsync(resolved.ServerId, BlockedProcessReportCollector.Instance.Name, windowEnd.AddHours(-hours), windowEnd),
+                await dataService.GetLossRunsInWindowAsync(resolved.ServerId, DeadlocksCollector.Instance.Name, windowEnd.AddHours(-hours), windowEnd)));
         }
         catch (Exception ex)
         {
