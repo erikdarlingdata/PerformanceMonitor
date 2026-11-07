@@ -74,11 +74,13 @@ public static class CpuSchedulerMetrics
     }
 
     /// <summary>
-    /// The rolled-up CPU-scheduler pressure classification, a pure client-side derivation mirroring
-    /// install/47's <c>report.cpu_scheduler_pressure</c> (pressure_level + recommendation). The banding is the
-    /// proc's own CASE, in the same order: runnable task queue &gt; 50 CRITICAL / &gt; 20 HIGH / &gt; 10 MEDIUM,
-    /// then worker-utilization &gt; 90% HIGH, then the collector's worker-exhaustion / runnable-tasks /
-    /// queued-requests warning flags.
+    /// The rolled-up CPU-scheduler pressure classification, a pure client-side derivation of install/47's
+    /// <c>report.cpu_scheduler_pressure</c> (pressure_level + recommendation). The banding is the proc's CASE with one
+    /// deliberate difference in order: runnable task queue &gt; 50 CRITICAL / &gt; 20 HIGH / &gt; 10 MEDIUM, then the
+    /// collector's worker-exhaustion flag CRITICAL, then worker-utilization &gt; 90% HIGH, then the runnable-tasks and
+    /// queued-requests warning flags. The proc tests the 90% arm before the flag; because the collector raises the flag
+    /// at 90% of max worker threads, that order makes the proc's CRITICAL reachable only at exactly 90%, and a server
+    /// at 95% reads HIGH there. Here the flag comes first, so above 90% the level is CRITICAL.
     /// </summary>
     public static CpuPressure ClassifyCpuPressure(ICpuSchedulerSnapshot s)
     {
@@ -90,8 +92,8 @@ public static class CpuSchedulerMetrics
             s.TotalRunnableTasksCount > 50 ? "CRITICAL - High runnable task queue" :
             s.TotalRunnableTasksCount > 20 ? "HIGH - Moderate runnable task queue" :
             s.TotalRunnableTasksCount > 10 ? "MEDIUM - Some runnable tasks queued" :
-            workerUtil > 90 ? "HIGH - Worker thread exhaustion" :
             s.WorkerThreadExhaustionWarning ? "CRITICAL - Worker thread exhaustion warning" :
+            workerUtil > 90 ? "HIGH - Worker thread exhaustion" :
             s.RunnableTasksWarning ? "HIGH - Runnable tasks warning" :
             s.QueuedRequestsWarning ? "MEDIUM - Queued requests warning" :
             "NORMAL";
@@ -131,6 +133,6 @@ public static class CpuSchedulerMetrics
 public sealed record CpuSchedulerMetricRow(string Metric, string Value, bool IsWarning, string? Hint = null);
 
 /// <summary>The rolled-up CPU-scheduler pressure classification for the metric grid's headline rows: the
-/// banded pressure level plus its paired recommendation, mirroring install/47's
+/// banded pressure level plus its paired recommendation, derived from install/47's
 /// report.cpu_scheduler_pressure.</summary>
 public sealed record CpuPressure(string Level, string Recommendation);

@@ -225,7 +225,8 @@ LIMIT $3";
 
         var servers = firing.Select(r => r.ServerId).Distinct().ToList();
         var metrics = firing.Select(r => r.MetricName).Distinct(StringComparer.Ordinal).ToList();
-        var since = firing.Min(r => r.AlertTime).AddDays(-InvestigationAlertRecurrence.Days);
+        /* One day more than the look-back, so a fire a DST change moved an hour past it is read; DaysAgo applies the exact bound. */
+        var since = firing.Min(r => r.AlertTime).AddDays(-(InvestigationAlertRecurrence.Days + 1));
         var until = firing.Max(r => r.AlertTime);
 
         using var connection = await OpenConnectionAsync();
@@ -253,11 +254,17 @@ AND   metric_name IN ({string.Join(", ", metrics.Select((_, i) => "$" + (i + 3 +
             }
         }
 
+        /* Each server's own clock, so a schedule kept in its local time keeps its streak across a DST change; a server with no
+           stored clock is read in UTC. */
+        var zones = new Dictionary<int, TimeZoneInfo?>();
+        foreach (var server in servers)
+            zones[server] = (await GetServerClockAsync(server))?.AsTimeZone();
+
         for (var i = 0; i < page.Count; i++)
         {
             if (AlertMetricClassifier.IsResolution(page[i].MetricName)) continue;
             streaks[i] = fires.TryGetValue((page[i].ServerId, page[i].MetricName), out var list)
-                ? InvestigationAlertStreak.ForAlert(page[i].AlertTime, list)
+                ? InvestigationAlertStreak.ForAlert(page[i].AlertTime, list, zones[page[i].ServerId])
                 : 0;
         }
 
