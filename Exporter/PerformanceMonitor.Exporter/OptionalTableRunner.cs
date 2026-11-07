@@ -137,7 +137,7 @@ public static class OptionalTableRunner
 
                     var result = await DailySnapshotExporter.ExportAsync(
                         table, options, options.Store, options.OutDir,
-                        (readFrom, readTo, innerCt) => OpenDailyReaderAsync(connectionStringBuilder, sql, readFrom, readTo, options, table, innerCt),
+                        (readFrom, readTo, innerCt) => OpenRangeReaderAsync(connectionStringBuilder, sql, readFrom, readTo, options, table, innerCt),
                         ct).ConfigureAwait(false);
 
                     if (result.SkippedReason is not null)
@@ -705,9 +705,12 @@ public static class OptionalTableRunner
             var sql = SqlBuilder.BuildOptionalSelect(table, columns, policy);
             var spec = RollupSql.Specs[table.RollupName!];
 
+            // A spec with counters reads one bridge lookback before the window, so each key's last sample before the
+            // window is in the read: it feeds the counters' bridged delta and is never counted itself.
+            var readFrom = spec.HasCounters ? options.FromUtc - HourlyRollupExporter.CounterBridgeLookback : options.FromUtc;
             var result = await HourlyRollupExporter.ExportAsync(
                 spec, options.Store, options.OutDir, options.FromUtc, options.ToUtc,
-                innerCt => OpenReaderAsync(connectionStringBuilder, sql, options, table, innerCt),
+                innerCt => OpenRangeReaderAsync(connectionStringBuilder, sql, readFrom, options.ToUtc, options, table, innerCt),
                 ct).ConfigureAwait(false);
 
             entries.Add(new ManifestTableEntry
@@ -728,6 +731,8 @@ public static class OptionalTableRunner
                 PolicyVersion = policy?.Version,
                 Grain = "hourly",
                 RollupVersion = spec.Version,
+                ReadFrom = readFrom,
+                ReadTo = options.ToUtc,
             });
 
             output.WriteLine($"  {result.RawRowCount} raw row(s) rolled up into {result.RolledRowCount} row(s)");
@@ -771,10 +776,11 @@ public static class OptionalTableRunner
     }
 
     /// <summary>
-    /// Opens a reader for a Daily-grain table's own lookback range, never the caller's window: the chunk guard and the
-    /// @from/@to parameters are both bound to <paramref name="readFrom"/>/ <paramref name="readTo"/>.
+    /// Opens a reader for a table's own read range rather than the caller's window: a Daily-grain table's lookback
+    /// range, or an Hourly-grain table's window plus its counter bridge lookback. The chunk guard and the @from/@to
+    /// parameters are both bound to <paramref name="readFrom"/>/ <paramref name="readTo"/>.
     /// </summary>
-    private static async Task<System.Data.Common.DbDataReader> OpenDailyReaderAsync(
+    private static async Task<System.Data.Common.DbDataReader> OpenRangeReaderAsync(
         NpgsqlConnectionStringBuilder connectionStringBuilder, string sql, DateTime readFrom, DateTime readTo,
         ExportOptions options, OptionalTable table, CancellationToken ct)
     {

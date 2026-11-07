@@ -64,7 +64,12 @@ public sealed record RollupSpec(
     IReadOnlyList<string> Key,
     IReadOnlyList<RollupRule> Rules,
     bool HasSampleInterval = false,
-    int Version = 1);
+    int Version = 1)
+{
+    /// <summary>True when a rule is a <see cref="RollupRuleKind.Counter"/>: the rollup then needs each key's last
+    /// sample before the window to bridge the counter into the window's first hour.</summary>
+    public bool HasCounters => Rules.Any(r => r.Kind == RollupRuleKind.Counter);
+}
 
 /// <summary>
 /// Pure SQL generation for the H (hourly rollup) grain. <see cref="Build"/> turns a <see cref="RollupSpec"/> into a
@@ -99,8 +104,14 @@ public static class RollupSql
         return Build(spec);
     }
 
-    /// <summary>Builds the DuckDB SQL for a spec directly, over a table called `raw`.</summary>
-    public static string Build(RollupSpec spec)
+    /// <summary>
+    /// Builds the DuckDB SQL for a spec directly, over a table called `raw`. With <paramref name="windowFrom"/> set and
+    /// a spec that has Counter rules, rows of `raw` before it are bridge samples: each key's last sample before the
+    /// window. They feed only the counters' `_delta_hour_bridged` (the step from that sample into the window's first
+    /// hour); every other aggregate, `_delta_in_hour` included, sees the window's own rows alone, and a bridge sample is
+    /// never counted. Without <paramref name="windowFrom"/> every row of `raw` is a window row.
+    /// </summary>
+    public static string Build(RollupSpec spec, DateTime? windowFrom = null)
     {
         var counterColumns = spec.Rules
             .Where(r => r.Kind == RollupRuleKind.Counter)
@@ -112,15 +123,34 @@ public static class RollupSql
         var partitionBy = string.Join(", ", partitionCols.Select(Q));
 
         string source;
+        var where = string.Empty;
         if (counterColumns.Count == 0)
         {
             source = "raw";
         }
         else
         {
-            var lagExprs = counterColumns.Select(c =>
-                $"{Q(c)} - lag({Q(c)}) OVER (PARTITION BY {partitionBy} ORDER BY {Q(spec.TimeColumn)}) AS {Q("_d_" + c)}");
-            source = $"(SELECT *, {string.Join(", ", lagExprs)} FROM raw)";
+            var over = $"OVER (PARTITION BY {partitionBy} ORDER BY {Q(spec.TimeColumn)})";
+            var extras = new List<string>();
+            string? inWindow = null;
+            if (windowFrom is { } from)
+            {
+                inWindow = $"{Q(spec.TimeColumn)} >= TIMESTAMP '{from.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)}'";
+                extras.Add($"{inWindow} AS {Q("_in_window")}");
+                where = $"WHERE {Q("_in_window")}\n";
+            }
+
+            foreach (var c in counterColumns)
+            {
+                // _db_: the step from the key's previous sample, on whichever side of the window start it lies.
+                extras.Add($"{Q(c)} - lag({Q(c)}) {over} AS {Q("_db_" + c)}");
+                // _d_: the step counted inside the hour, only when the previous sample is a window row too.
+                extras.Add(inWindow is null
+                    ? $"{Q(c)} - lag({Q(c)}) {over} AS {Q("_d_" + c)}"
+                    : $"CASE WHEN lag({inWindow}) {over} THEN {Q(c)} - lag({Q(c)}) {over} END AS {Q("_d_" + c)}");
+            }
+
+            source = $"(SELECT *, {string.Join(", ", extras)} FROM raw)";
         }
 
         var select = new List<string>
@@ -145,7 +175,7 @@ public static class RollupSql
         return $"""
             SELECT {string.Join(",\n               ", select)}
             FROM {source} AS raw
-            GROUP BY ALL
+            {where}GROUP BY ALL
             """;
     }
 
@@ -174,6 +204,8 @@ public static class RollupSql
             $"arg_max({Q(c)}, {Q(timeColumn)}) AS {Q(c + "_last")}",
             // a drop (_d_c < 0) is a reset: count the post-reset value (c) instead of the negative step.
             $"sum(CASE WHEN {Q("_d_" + c)} >= 0 THEN {Q("_d_" + c)} WHEN {Q("_d_" + c)} < 0 THEN {Q(c)} END) AS {Q(c + "_delta_in_hour")}",
+            // the same sum with the step from the previous hour's last sample into this hour counted too.
+            $"sum(CASE WHEN {Q("_db_" + c)} >= 0 THEN {Q("_db_" + c)} WHEN {Q("_db_" + c)} < 0 THEN {Q(c)} END) AS {Q(c + "_delta_hour_bridged")}",
         }),
 
         RollupRuleKind.Last => rule.Columns.Select(c =>

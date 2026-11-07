@@ -73,7 +73,7 @@ Each entry in `tables` has these fields.
 | `query_store_source_mode`, `query_store_source` and related fields | `query_store_stats` | Present when the read used the wide or compare source. |
 | `policy_version` | optional tables with a column policy | The version of the column policy that was applied. |
 | `grain`, `source_table`, `rollup_version` | hourly and daily optional tables | The grain, the source table and the rollup version. |
-| `read_from`, `read_to` | tables with their own read window | The range actually read. |
+| `read_from`, `read_to` | tables with their own read window | The range actually read. A daily table's lookback range, or an hourly rollup's window plus the counter bridge lookback before it. |
 | `daily_missing_servers` | daily grain | Servers missing from the expected set. |
 | `change_key_columns`, `change_baseline`, `change_rows_suppressed` | change grain | The change key, whether this is a full baseline and the rows suppressed as unchanged. |
 | `schema_fingerprint` | when computed | A fingerprint of the source schema, to detect drift. |
@@ -266,7 +266,12 @@ These are the units the store uses. The files keep them.
 | `pg_session_states` | `state_duration_ms`, `xact_duration_ms`, `query_duration_ms` | milliseconds |
 | `pg_cpu_utilization` | `cpu_percent`, `acu_utilization_percent` | percent |
 
-Counter columns in cumulative tables grow until the source restarts. Rows in a `*_hourly` rollup have `_first`, `_last` and `_delta_in_hour` columns for a counter. A drop in a counter counts as a reset, and the delta then uses the value after the reset.
+Counter columns in cumulative tables grow until the source restarts. Rows in a `*_hourly` rollup have `_first`, `_last`, `_delta_in_hour` and `_delta_hour_bridged` columns for a counter. A drop in a counter counts as a reset, and the delta then uses the value after the reset.
+
+- `_delta_in_hour` sums the steps between the hour's own samples. The step from the previous hour's last sample into this hour belongs to no hour, so a day's sum of `_delta_in_hour` is a lower bound on the counter's growth.
+- `_delta_hour_bridged` adds that step. The exporter reads each key's last sample before the window (`read_from` on the entry is the window start minus that lookback) and counts the step from it to the hour's first sample. A day's sum of `_delta_hour_bridged` is the counter's growth over the day. When no sample exists in the lookback, the two columns are equal.
+
+The tables with counter columns are `pg_statement_stats_hourly`, `pg_database_stats_hourly`, `pg_io_stats_hourly` and `pg_write_stats_hourly`.
 
 The Parquet types follow the store types. Exact numerics with a precision and scale stay `DECIMAL(p,s)`. Unconstrained numerics become `DOUBLE`. The manifest lists the DuckDB type of every column.
 
