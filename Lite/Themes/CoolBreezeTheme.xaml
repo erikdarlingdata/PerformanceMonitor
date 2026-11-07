@@ -980,6 +980,12 @@
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
+        <!-- #8223: the blank header cell the grid draws after its last column (its filler header, no content) takes the header background without the cell border, so it reads as the rest of the header bar. -->
+        <Style.Triggers>
+            <Trigger Property="Content" Value="{x:Null}">
+                <Setter Property="BorderThickness" Value="0,0,0,1"/>
+            </Trigger>
+        </Style.Triggers>
     </Style>
 
     <!-- Column header style when filter is active - subtle blue highlight -->

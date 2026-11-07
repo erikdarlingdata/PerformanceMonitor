@@ -428,7 +428,7 @@
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Header="{x:Static local:ViewerLabels.AvgSqlServerCpuPercent}" Binding="{Binding AvgCpuPct, StringFormat=N1}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="{x:Static local:ViewerLabels.P95SqlServerCpuPercent}" Binding="{Binding P95CpuPct, StringFormat=N1}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="{x:Static local:ViewerLabels.MaxSqlServerCpuPercent}" Binding="{Binding MaxCpuPct}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="{x:Static local:ViewerLabels.MaxSqlServerCpuPercent}" Binding="{Binding MaxCpuPct, StringFormat=N1}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Mem Ratio" Binding="{Binding MemoryRatio, StringFormat=N2}" Width="Auto" MinWidth="90" ElementStyle="{StaticResource NumericCell}"/>
                                 </DataGrid.Columns>
                             </DataGrid>

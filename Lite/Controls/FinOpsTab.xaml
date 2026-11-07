@@ -498,7 +498,7 @@
                             <DataGridTextColumn Header="P95 SQL Server CPU %" Binding="{Binding P95CpuPct, StringFormat='{}{0:N1}'}" Width="95">
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="Max SQL Server CPU %" Binding="{Binding MaxCpuPct}" Width="100">
+                            <DataGridTextColumn Header="Max SQL Server CPU %" Binding="{Binding MaxCpuPct, StringFormat='{}{0:N1}'}" Width="100">
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
                             <DataGridTextColumn Header="Mem Ratio" Binding="{Binding MemoryRatio, StringFormat='{}{0:N2}'}" Width="Auto" MinWidth="95">
@@ -683,7 +683,7 @@
                               RowStyle="{StaticResource DefaultRowStyle}"
                               LoadingRow="MarkedGrid_LoadingRow">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Binding="{Binding DatabaseDisplay}" SortMemberPath="DatabaseName" Width="180">
+                            <DataGridTextColumn Binding="{Binding DatabaseDisplay}" SortMemberPath="DatabaseName" Width="180" ElementStyle="{StaticResource TrimmedCell}">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -2547,6 +2547,7 @@
                             </DataGridTextColumn.Header>
                             <DataGridTextColumn.ElementStyle>
                                 <Style TargetType="TextBlock">
+                                    <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
                                     <Setter Property="ToolTip" Value="{Binding DatabaseTooltip}"/>
                                 </Style>
                             </DataGridTextColumn.ElementStyle>

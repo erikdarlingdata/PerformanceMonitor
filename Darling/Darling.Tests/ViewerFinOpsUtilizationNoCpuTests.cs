@@ -49,7 +49,7 @@ public sealed class ViewerFinOpsUtilizationNoCpuTests
         row.MaxCpuPct = 77;
 
         Assert.Equal($"{12.5m:N1}%", row.AvgCpuText);
-        Assert.Equal($"{40m:N2}%", row.P95CpuText);
+        Assert.Equal($"{40m:N1}%", row.P95CpuText);
         Assert.Equal("77.0%", row.MaxCpuText);
 
         // A measured idle server is a real 0, not a dash.
