@@ -109,6 +109,30 @@ public sealed class WebPgGridTextTests
         Assert.DoesNotContain("postmaster", shown[3], StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #8075: on an Aurora target whose collector database has no pg_stat_statements row, the sentence over the grid names the
+    /// missing extension, not the old major or old extension version that the stock sentence names.
+    /// </summary>
+    [Fact]
+    public void TheEvictionSentence_OnAuroraWithoutTheExtension_NamesTheMissingExtension()
+    {
+        var aurora = PgStatementEvictionNoteTests.AuroraWithoutExtension();
+        var elsewhere = new DarlingPgStatementReader.PgEvictionInfo(false, null, null);
+        var evictions = new[] { aurora, elsewhere }
+            .Select(i => JsonSerializer.SerializeToElement(DarlingMcpPgStatementTools.BuildEvictions(i))).ToArray();
+
+        var shown = Strings(RunHarness(new { evictions }), "evictionShort");
+
+        Assert.StartsWith("This server does not report how often pg_stat_statements dropped entries.", shown[0], StringComparison.Ordinal);
+        Assert.Contains("CREATE EXTENSION pg_stat_statements", shown[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("PostgreSQL 14", shown[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("1.9", shown[0], StringComparison.Ordinal);
+
+        Assert.StartsWith("This server does not report how often pg_stat_statements dropped entries.", shown[1], StringComparison.Ordinal);
+        Assert.Contains("PostgreSQL 14", shown[1], StringComparison.Ordinal);
+        Assert.DoesNotContain("CREATE EXTENSION", shown[1], StringComparison.Ordinal);
+    }
+
     private static JsonElement RunHarness(object input)
     {
         var js = PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js");
