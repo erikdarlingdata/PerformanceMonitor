@@ -20,13 +20,14 @@ public sealed partial class PgTargetFactCollector
     /// <summary>
     /// The per-database counters of the window, differenced per <c>database_name</c> series and summed —
     /// one row per database, spilled bytes first. <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC),
-    /// <c>$4</c> the window's midpoint (naive UTC) — the transactions and observed seconds of the SECOND half ride
-    /// as two extra columns so <c>PG_TPS</c> can carry a trend (second-half rate minus first-half rate) as a reader's
-    /// figure in its metadata, without a second scan — and <c>$5</c>
-    /// <see cref="CollectorDeltaCalculator.DefaultMaxGapSeconds"/>, the gap policy (#8156): a difference whose own
-    /// interval is longer than it spans a collector outage, and is left out of every sum the way the coverage
-    /// witness leaves its seconds out of the observed time, so a rate over observed seconds counts only what was
-    /// observed. Nothing in the engine reads the trend since #3747 retired the
+    /// <c>$4</c> the window's midpoint (naive UTC) — the transactions and intervals of the SECOND half ride as two
+    /// extra columns so <c>PG_TPS</c> can carry a trend (second-half rate minus first-half rate) as a reader's
+    /// figure in its metadata, without a second scan, and the observed seconds of the differences taken, in the
+    /// second half and in all, ride as the two last columns (#8156) so each half's rate is over its own seconds —
+    /// and <c>$5</c> <see cref="CollectorDeltaCalculator.DefaultMaxGapSeconds"/>, the gap policy (#8156): a
+    /// difference whose own interval is longer than it spans a collector outage, and is left out of every sum the
+    /// way the coverage witness leaves its seconds out of the observed time, so a rate over observed seconds counts
+    /// only what was observed. Nothing in the engine reads the trend since #3747 retired the
     /// raw-trend co-fire hook it was first stamped for; the columns stay because the figure is cheap here and
     /// useful on the fact.
     ///
@@ -100,11 +101,12 @@ SELECT
     CAST(coalesce(SUM(GREATEST(raw_temp_bytes, 0)), 0) AS bigint)    AS temp_bytes,
     CAST(coalesce(SUM(GREATEST(raw_deadlocks, 0)), 0) AS bigint)     AS deadlocks,
     CAST(coalesce(SUM(GREATEST(raw_xact_commit, 0) + GREATEST(raw_xact_rollback, 0)) FILTER (WHERE collection_time > $4), 0) AS bigint) AS xact_second_half,
-    coalesce(SUM(interval_sec) FILTER (WHERE raw_deadlocks IS NOT NULL AND collection_time > $4), 0) AS observed_seconds_second_half,
+    CAST(count(raw_deadlocks) FILTER (WHERE collection_time > $4) AS integer) AS intervals_second_half,
     CAST(count(*) FILTER (WHERE reset_here) AS integer)              AS stats_reset_count,
     CAST(count(*) FILTER (WHERE LEAST(raw_xact_commit, raw_xact_rollback, raw_temp_files, raw_temp_bytes, raw_deadlocks) < 0) AS integer) AS counter_rewind_count,
     CAST(count(*) AS integer)                                        AS sample_count,
     CAST(count(raw_deadlocks) AS integer)                            AS intervals,
+    coalesce(SUM(interval_sec) FILTER (WHERE raw_deadlocks IS NOT NULL AND collection_time > $4), 0) AS observed_seconds_second_half,
     coalesce(SUM(interval_sec) FILTER (WHERE raw_deadlocks IS NOT NULL), 0) AS observed_seconds
 FROM sampled
 GROUP BY database_name
@@ -194,7 +196,7 @@ AND   collection_time >= $4";
         if (context.ObservedDurationMs <= 0) return;
 
         long xactCommit = 0, xactRollback = 0, tempFiles = 0, tempBytes = 0, deadlocks = 0, xactSecondHalf = 0;
-        int statsResetCount = 0, counterRewindCount = 0, sampleCount = 0, intervals = 0, databases = 0;
+        int statsResetCount = 0, counterRewindCount = 0, sampleCount = 0, intervals = 0, intervalsSecondHalf = 0, databases = 0;
         double observedSecondsBySeries = 0, observedSecondsSecondHalf = 0;
         string? topSpillDatabase = null;
         long topSpillBytes = 0;
@@ -230,12 +232,13 @@ AND   collection_time >= $4";
                 tempBytes += rowTempBytes;
                 deadlocks += rowDeadlocks;
                 xactSecondHalf += ToInt64(reader.GetValue(6));
-                observedSecondsSecondHalf = Math.Max(observedSecondsSecondHalf, Convert.ToDouble(reader.GetValue(7)));
+                intervalsSecondHalf += Convert.ToInt32(reader.GetValue(7));
                 statsResetCount += Convert.ToInt32(reader.GetValue(8));
                 counterRewindCount += Convert.ToInt32(reader.GetValue(9));
                 sampleCount += Convert.ToInt32(reader.GetValue(10));
                 intervals += Convert.ToInt32(reader.GetValue(11));
-                observedSecondsBySeries = Math.Max(observedSecondsBySeries, Convert.ToDouble(reader.GetValue(12)));
+                observedSecondsSecondHalf = Math.Max(observedSecondsSecondHalf, Convert.ToDouble(reader.GetValue(12)));
+                observedSecondsBySeries = Math.Max(observedSecondsBySeries, Convert.ToDouble(reader.GetValue(13)));
                 databases++;
 
                 if (databaseName is not null && rowTempBytes > topSpillBytes)
@@ -294,16 +297,20 @@ AND   collection_time >= $4";
                seconds of the differences that fell in it, summed per series by the read and taken from the fullest
                series (every database shares the collection's instants, so the sums agree unless a database was
                created or dropped mid-window), so a half the collector missed is not read as a quiet half and a gap
-               interval is in neither half (#8156). Stamped only when both halves were observed — a trend over one
-               half is not a trend. */
-            var observedSecondsFirstHalf = observedSecondsBySeries - observedSecondsSecondHalf;
-            if (observedSecondsFirstHalf > 0 && observedSecondsSecondHalf > 0)
+               interval is in neither half (#8156). Stamped only when both halves were observed — at least one rated
+               interval each, with seconds behind it — because a trend over one half is not a trend. */
+            var intervalsFirstHalf = intervals - intervalsSecondHalf;
+            if (intervalsFirstHalf > 0 && intervalsSecondHalf > 0)
             {
-                var tpsFirstHalf = (transactions - xactSecondHalf) / observedSecondsFirstHalf;
-                var tpsSecondHalf = xactSecondHalf / observedSecondsSecondHalf;
-                tps.Metadata[PgTargetScorer.TpsFirstHalfKey] = tpsFirstHalf;
-                tps.Metadata[PgTargetScorer.TpsSecondHalfKey] = tpsSecondHalf;
-                tps.Metadata[PgTargetScorer.TpsTrendKey] = tpsSecondHalf - tpsFirstHalf;
+                var observedSecondsFirstHalf = observedSecondsBySeries - observedSecondsSecondHalf;
+                if (observedSecondsFirstHalf > 0 && observedSecondsSecondHalf > 0)
+                {
+                    var tpsFirstHalf = (transactions - xactSecondHalf) / observedSecondsFirstHalf;
+                    var tpsSecondHalf = xactSecondHalf / observedSecondsSecondHalf;
+                    tps.Metadata[PgTargetScorer.TpsFirstHalfKey] = tpsFirstHalf;
+                    tps.Metadata[PgTargetScorer.TpsSecondHalfKey] = tpsSecondHalf;
+                    tps.Metadata[PgTargetScorer.TpsTrendKey] = tpsSecondHalf - tpsFirstHalf;
+                }
             }
 
             facts.Add(tps);
