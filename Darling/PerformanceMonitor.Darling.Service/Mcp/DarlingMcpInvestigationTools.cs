@@ -383,9 +383,10 @@ public sealed partial class DarlingMcpInvestigationTools
         [Description("Your claim_id, to renew. Omit to claim.")] string? claim_id = null,
         [Description("Omit, or 1.")] int? brief_format = null,
         DarlingMcpServedPolicy? served = null,
+        StoreOwnerSource? ownerSource = null,
         CancellationToken cancellationToken = default) =>
         ClaimAsync(Store(postgres), composer, request_id, agent_id, claim_id, brief_format, cancellationToken, served?.Policy.AgentTokenName,
-            served?.NamedAgentNames);
+            served?.NamedAgentNames, ownerSource?.Read() is { } owner ? Store(owner) : null);
 
     /// <summary>The claim over a given store and composer, so a test can drive a composer that fails. <paramref name="tokenName"/> is
     /// the name of the named agent token the call came with (#6542), or null for the legacy token: with a name, the agent is that
@@ -394,7 +395,7 @@ public sealed partial class DarlingMcpInvestigationTools
     /// (<paramref name="tokenName"/> null) may not claim under one of them.</summary>
     internal static async Task<string> ClaimAsync(InvestigationRequestStore store, InvestigationBriefComposer composer,
         string request_id, string agent_id, string? claim_id, int? brief_format, CancellationToken cancellationToken, string? tokenName = null,
-        IReadOnlySet<string>? namedAgentNames = null)
+        IReadOnlySet<string>? namedAgentNames = null, InvestigationRequestStore? ownerStore = null)
     {
         if (!Guid.TryParse(request_id, out var requestId))
             return InvestigationToolCore.Status("not_found", $"request_id '{request_id}' is not a request id.");
@@ -496,7 +497,7 @@ public sealed partial class DarlingMcpInvestigationTools
                     new InvalidOperationException("the brief could not be stored under this claim, so the claim was released."));
             }
 
-            return JsonSerializer.Serialize(new
+            var answer = JsonSerializer.SerializeToNode(new
             {
                 status = "claimed",
                 request_id = requestId,
@@ -506,7 +507,17 @@ public sealed partial class DarlingMcpInvestigationTools
                 brief_format = InvestigationFormats.BriefFormat,
                 report_formats = InvestigationFormats.AcceptedReportFormats,
                 brief = JsonNode.Parse(brief),
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions)!.AsObject();
+
+            /* #7659: what granted people asked in the thread rides beside the brief, never inside it, read on the owner connection (the mcp login
+               holds no SELECT on the message table). A request nobody asked in carries no key, so an alert claim answers as before. */
+            if (ownerStore is not null && await PersonRequestsAsync(ownerStore, requestId, cancellationToken) is { } personRequests)
+            {
+                answer["person_requests"] = personRequests;
+                answer["person_requests_rule"] = PersonRequestsRule;
+            }
+
+            return answer.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -132,6 +132,7 @@ public sealed class SlackThreadPass
         "proposal_refused", "proposal_expired", "proposal_superseded",
         "proposal_voided", "proposal_unknown",
         InvestigationEvents.Resolved, "closed", InvestigationEvents.Expired, InvestigationEvents.ClaimsExhausted,
+        InvestigationRequestStore.AgentMessage,
     ];
 
     private static readonly HashSet<string> s_posted = new(PostedEvents, StringComparer.Ordinal);
@@ -212,7 +213,8 @@ public sealed class SlackThreadPass
 
             var isParent = string.Equals(row.PostKey, SlackThreadPosts.RequestKey, StringComparison.Ordinal);
             var threadRequest = row.RequestId;
-            if (isParent && row.FollowUpOf is Guid parent)
+            /* A follow-up inherits its parent's thread; a chat request (#7659) the thread of the request it is linked to, the same way. */
+            if (isParent && (row.FollowUpOf ?? row.ChatThreadOf) is Guid parent)
             {
                 var parentThread = await _threads.FindAsync(parent, cancellationToken);
                 if (parentThread is not null && string.Equals(parentThread.ChannelId, channel, StringComparison.Ordinal))
@@ -313,6 +315,10 @@ public sealed class SlackThreadPass
                         changes.Select(c => new ReportNoticeChange(c.Tool, InvestigationEventDelivery.ChangeObject(c.TargetId, c.Database, mode), ResultWord(c.Result))).ToList(),
                         baseUrl),
                     mode, verdictButtons: buttons).WebInstead(buttons, "Mark the verdict on the web page, on the request.");
+            case InvestigationRequestStore.AgentMessage:
+                /* The agent's message (#7659): the actor is agent:<id>; the text is in the detail and follows the mode like every free text. */
+                return SlackThreadPosts.AgentMessagePost(
+                    row.Actor.StartsWith("agent:", StringComparison.Ordinal) ? row.Actor["agent:".Length..] : row.Actor, Text(detail?["text"]), mode);
             case InvestigationRequestStore.NotePending:
                 return SlackThreadPosts.NotePost(row.JournalId, row.Actor, row.Reason ?? "", row.ServerName, Text(detail?["metric"]), mode, buttons)
                     .WebInstead(buttons, "Decide this note on the web page or in the Viewer.");

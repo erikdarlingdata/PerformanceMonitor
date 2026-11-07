@@ -8,10 +8,13 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using NpgsqlTypes;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 
@@ -31,6 +34,24 @@ public static class SlackChatRules
 
     /// <summary>The most characters of a person's message kept, and of an agent's message posted.</summary>
     public const int TextLimit = 4000;
+
+    /// <summary>PURE: <paramref name="text"/> held to <paramref name="limit"/> UTF-16 units, never cut between the two halves of a surrogate pair.</summary>
+    public static string Bound(string? text, int limit = TextLimit)
+    {
+        var value = text ?? "";
+        if (value.Length <= limit)
+        {
+            return value;
+        }
+
+        var cut = limit;
+        if (cut > 0 && char.IsHighSurrogate(value[cut - 1]))
+        {
+            cut--;
+        }
+
+        return value[..cut];
+    }
 }
 
 /// <summary>#7659: the request thread a mention landed in, as this store knows it: the thread's first request (the one whose parent post opened
@@ -166,63 +187,543 @@ public sealed partial class InvestigationRequestStore
     /// <summary>The once key of a person's message journal row: one per channel and ts, so the same mention arriving twice journals once.</summary>
     public static string PersonMessageOnceKey(string channelId, string ts) => "person_message:" + channelId + ":" + ts;
 
+    /* The thread's first request: of the requests that share the channel and parent ts (a follow-up and a chat request save the thread as their own
+       once their request post replied in it), the one that opened first. The reverse index on (channel_id, thread_ts) serves the lookup. */
+    internal const string FindChatThreadSql = @"
+SELECT t.request_id, r.route_id, r.server_id, r.opened_at
+FROM config.investigation_request_threads AS t
+JOIN config.investigation_requests AS r ON r.request_id = t.request_id
+WHERE t.channel_id = $1 AND t.thread_ts = $2
+ORDER BY r.opened_at, t.posted_at, t.request_id
+LIMIT 1";
+
+    /* The newest request of the thread: the first request itself, any request whose thread row is the same channel and ts (a follow-up chain
+       that replied in it), and any chat request linked to the first request, which has no thread row until its own request post delivers. */
+    internal const string NewestThreadRequestSql = @"
+SELECT r.request_id, r.state, r.trigger_kind, r.opened_at
+FROM config.investigation_requests AS r
+WHERE r.practice_of IS NULL
+  AND (r.request_id = $1
+       OR r.chat_thread_of = $1
+       OR r.request_id IN (SELECT t.request_id FROM config.investigation_request_threads AS t WHERE t.channel_id = $2 AND t.thread_ts = $3))
+ORDER BY r.opened_at DESC, r.request_id DESC
+LIMIT 1";
+
+    /* The highest request level among an enabled person's grants that reach the server: the fleet, the server, or one of its tags (the scope rule
+       of PersonGrantSql). A Level 3 grant includes Level 2, as a Level 3 route does. */
+    internal const string RequestLevelSql = @"
+SELECT COALESCE(max(CASE g.capability WHEN 'request_level_3' THEN 3 WHEN 'request_level_2' THEN 2 WHEN 'ask' THEN 1 ELSE 0 END), 0)
+FROM config.person_grant AS g
+JOIN config.person AS p ON p.person_id = g.person_id
+WHERE g.person_id = $1
+  AND p.enabled
+  AND (   (g.scope_server_id IS NULL AND g.scope_tag_id IS NULL)
+       OR g.scope_server_id = $2
+       OR g.scope_tag_id IN (SELECT m.tag_id FROM config.server_tag_map AS m WHERE m.server_id = $2))";
+
+    /* The message's natural key is the channel and ts: the same mention arriving as app_mention and as message, or on both connections, inserts once. */
+    internal const string SavePersonMessageSql = @"
+INSERT INTO config.investigation_person_messages (channel_id, ts, thread_ts, thread_request_id, person_id, identity, message_text, state, received_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, 'waiting', $8)
+ON CONFLICT (channel_id, ts) DO NOTHING";
+
+    /* A join lowers an unclaimed chat request to the joining asker's level, as JoinSql lowers an alert request's level. No row: it moved on. */
+    internal const string JoinChatRequestSql = @"
+UPDATE config.investigation_requests
+SET autonomy_level = least(autonomy_level, $2::smallint)
+WHERE request_id = $1 AND state = 'open' AND trigger_kind = 'chat'
+RETURNING route_id, server_id";
+
+    internal const string AddAskerSql = @"
+INSERT INTO config.investigation_request_askers (request_id, person_id, identity, request_level, joined_at)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (request_id, person_id) DO UPDATE SET request_level = least(config.investigation_request_askers.request_level, EXCLUDED.request_level)";
+
+    internal const string AttachPersonMessageSql = @"
+UPDATE config.investigation_person_messages
+SET request_id = $3, state = $4
+WHERE channel_id = $1 AND ts = $2";
+
+    /* The chat requests of the last hour, by thread (the link column) and by route, apart from alerts (CountRouteSql leaves them out). */
+    internal const string ChatCountsSql = @"
+SELECT count(*) FILTER (WHERE chat_thread_of = $1), count(*) FILTER (WHERE route_id = $2)
+FROM config.investigation_requests
+WHERE trigger_kind = 'chat'
+  AND practice_of IS NULL
+  AND opened_at > $3 - interval '1 hour'";
+
+    /* The chat request copies its parent as OpenFollowUpSql copies a follow-up, with trigger_kind chat and the thread's first request in
+       chat_thread_of, stamped at the lowest of the parent's stamp ($4 the level the live routes give the parent's metrics, $5 the lowest asker
+       level), never below 1 (the column's floor; Level 1 is reads alone). $1 new id, $2 parent, $3 now, $6 the thread's first request. */
+    internal const string OpenChatRequestSql = @"
+INSERT INTO config.investigation_requests
+    (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
+     window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, max_severity, trigger_kind, chat_thread_of)
+SELECT $1, r.route_id, r.server_id, r.server_name, r.family, r.first_metric, r.story_path_hash, r.first_alert_at, r.last_alert_at,
+       r.window_until, $3, $3 + (r.expires_at - r.opened_at), r.lease_minutes, greatest(1, least(r.autonomy_level, $4::smallint, $5::smallint)), r.alert_count,
+       r.max_severity, 'chat', $6
+FROM config.investigation_requests AS r
+WHERE r.request_id = $2
+RETURNING route_id, server_id, first_metric";
+
+    /* A follow-up and a force check of a chat request copy its askers (an alert request has none, so the copy is empty). $1 new, $2 source. */
+    internal const string CopyAskersSql = @"
+INSERT INTO config.investigation_request_askers (request_id, person_id, identity, request_level, joined_at)
+SELECT $1, person_id, identity, request_level, joined_at
+FROM config.investigation_request_askers
+WHERE request_id = $2
+ON CONFLICT (request_id, person_id) DO NOTHING";
+
+    internal const string WaitingThreadsSql = @"
+SELECT m.thread_request_id, r.route_id, r.server_id, m.channel_id, m.thread_ts, count(*)
+FROM config.investigation_person_messages AS m
+JOIN config.investigation_requests AS r ON r.request_id = m.thread_request_id
+WHERE m.state = 'waiting'
+GROUP BY m.thread_request_id, r.route_id, r.server_id, m.channel_id, m.thread_ts
+ORDER BY min(m.received_at)
+LIMIT $1";
+
+    internal const string WaitingMessagesSql = @"
+SELECT channel_id, ts, thread_ts, thread_request_id, person_id, identity, message_text, state, request_id, received_at
+FROM config.investigation_person_messages
+WHERE thread_request_id = $1 AND state = 'waiting'
+ORDER BY received_at, ts";
+
+    /* The open chat requests older than $1 with no offline answer yet, with the thread they belong to. A day bounds the read. */
+    internal const string UnclaimedChatRequestsSql = @"
+SELECT r.request_id, r.chat_thread_of, r.route_id, r.server_id, t.channel_id, t.thread_ts, r.opened_at
+FROM config.investigation_requests AS r
+JOIN config.investigation_request_threads AS t ON t.request_id = r.chat_thread_of
+WHERE r.trigger_kind = 'chat'
+  AND r.state = 'open'
+  AND r.practice_of IS NULL
+  AND r.opened_at <= $1
+  AND r.opened_at > $1 - interval '1 day'
+  AND NOT EXISTS (SELECT 1 FROM config.investigation_journal AS j WHERE j.once_key = 'slack_thread:' || r.request_id::text || ':chat_answer:offline')
+ORDER BY r.opened_at";
+
+    internal const string PersonRequestsSql = @"
+SELECT COALESCE(p.display_name, m.identity), m.person_id, m.message_text, r.server_id
+FROM config.investigation_person_messages AS m
+JOIN config.investigation_requests AS r ON r.request_id = m.request_id
+LEFT JOIN config.person AS p ON p.person_id = m.person_id
+WHERE m.request_id = $1
+ORDER BY m.received_at, m.ts";
+
+    internal const string PersonRequestGrantsSql = @"
+SELECT g.capability, g.kinds
+FROM config.person_grant AS g
+WHERE g.person_id = $1
+  AND g.capability IN ('ask', 'request_level_2', 'request_level_3')
+  AND (   (g.scope_server_id IS NULL AND g.scope_tag_id IS NULL)
+       OR g.scope_server_id = $2
+       OR g.scope_tag_id IN (SELECT m.tag_id FROM config.server_tag_map AS m WHERE m.server_id = $2))
+ORDER BY g.capability";
+
+    internal const string AgentMessageLockSql = @"
+SELECT state, claim_id, lease_until, server_id
+FROM config.investigation_requests
+WHERE request_id = $1
+FOR UPDATE";
+
     /// <inheritdoc cref="ISlackChatStore.FindThreadAsync" />
-    public Task<SlackChatThread?> FindChatThreadAsync(string channelId, string threadTs, CancellationToken cancellationToken) =>
-        Task.FromResult<SlackChatThread?>(null);
+    public async Task<SlackChatThread?> FindChatThreadAsync(string channelId, string threadTs, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(channelId) || string.IsNullOrWhiteSpace(threadTs))
+        {
+            return null;
+        }
+
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null, FindChatThreadSql, P(channelId.Trim()), P(threadTs.Trim()));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken)
+            ? new SlackChatThread(reader.GetGuid(0), reader.GetInt32(1), reader.GetInt32(2), channelId.Trim(), threadTs.Trim(), Utc(reader.GetDateTime(3)))
+            : null;
+    }
 
     /// <inheritdoc cref="ISlackChatStore.NewestRequestAsync" />
-    public Task<SlackChatNewest?> NewestThreadRequestAsync(SlackChatThread thread, CancellationToken cancellationToken) =>
-        Task.FromResult<SlackChatNewest?>(null);
+    public async Task<SlackChatNewest?> NewestThreadRequestAsync(SlackChatThread thread, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(thread);
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null, NewestThreadRequestSql, P(thread.ThreadRequestId), P(thread.ChannelId), P(thread.ThreadTs));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken)
+            ? new SlackChatNewest(reader.GetGuid(0), reader.GetString(1), reader.GetString(2), Utc(reader.GetDateTime(3)))
+            : null;
+    }
 
     /// <inheritdoc cref="ISlackChatStore.RequestLevelAsync" />
-    public Task<int> RequestLevelAsync(long personId, int serverId, CancellationToken cancellationToken) => Task.FromResult(0);
+    public async Task<int> RequestLevelAsync(long personId, int serverId, CancellationToken cancellationToken)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null, RequestLevelSql, P(personId), P(serverId));
+        return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+    }
 
     /// <inheritdoc cref="ISlackChatStore.SaveMessageAsync" />
-    public Task<bool> SavePersonMessageAsync(SlackPersonMessage message, CancellationToken cancellationToken) => Task.FromResult(false);
+    public async Task<bool> SavePersonMessageAsync(SlackPersonMessage message, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null, SavePersonMessageSql,
+            P(message.ChannelId), P(message.Ts), P(message.ThreadTs), P(message.ThreadRequestId),
+            new NpgsqlParameter<long?> { TypedValue = message.PersonId, NpgsqlDbType = NpgsqlDbType.Bigint },
+            P(message.Identity), P(SlackChatRules.Bound(message.Text)), P(message.ReceivedAtUtc ?? Now()));
+        return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
+    }
 
     /// <inheritdoc cref="ISlackChatStore.JoinChatRequestAsync" />
-    public Task<bool> JoinChatRequestAsync(Guid requestId, SlackAsker asker, SlackPersonMessage message, CancellationToken cancellationToken) =>
-        Task.FromResult(false);
+    public async Task<bool> JoinChatRequestAsync(Guid requestId, SlackAsker asker, SlackPersonMessage message, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(asker);
+        ArgumentNullException.ThrowIfNull(message);
+        var now = Now();
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        int routeId = 0, serverId = 0;
+        var joined = false;
+        await using (var join = Command(connection, transaction, JoinChatRequestSql, P(requestId), P((short)asker.RequestLevel)))
+        await using (var returned = await join.ExecuteReaderAsync(cancellationToken))
+        {
+            if (await returned.ReadAsync(cancellationToken))
+            {
+                joined = true;
+                routeId = returned.GetInt32(0);
+                serverId = returned.GetInt32(1);
+            }
+        }
+
+        if (!joined)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return false;
+        }
+
+        await ExecAsync(connection, transaction, AddAskerSql, cancellationToken, P(requestId), P(asker.PersonId), P(asker.Identity), P((short)asker.RequestLevel), P(now));
+        await ExecAsync(connection, transaction, AttachPersonMessageSql, cancellationToken, P(message.ChannelId), P(message.Ts), P(requestId), P(SlackPersonMessageStates.Joined));
+        await JournalAskerAsync(connection, transaction, now, requestId, routeId, serverId, asker, message, SlackPersonMessageStates.Joined, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return true;
+    }
 
     /// <inheritdoc cref="ISlackChatStore.ChatCountsAsync" />
-    public Task<SlackChatCounts> ChatCountsAsync(Guid threadRequestId, int routeId, DateTime nowUtc, CancellationToken cancellationToken) =>
-        Task.FromResult(new SlackChatCounts(0, 0));
+    public async Task<SlackChatCounts> ChatCountsAsync(Guid threadRequestId, int routeId, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        return await ChatCountsAsync(connection, null, threadRequestId, routeId, nowUtc, cancellationToken);
+    }
 
-    /// <summary>Opens a chat request (<see cref="ISlackChatStore.OpenChatRequestAsync"/>). <paramref name="loadRoutes"/> gives the live routes, so the
-    /// stamp is the lowest of the parent's stamp, the level the routes give the parent's metrics, and the lowest asker level.</summary>
-    public Task<SlackChatOpenResult> OpenChatRequestAsync(SlackChatThread thread, Guid parentRequestId, IReadOnlyList<SlackAsker> askers,
+    private async Task<SlackChatCounts> ChatCountsAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction, Guid threadRequestId, int routeId, DateTime nowUtc,
+        CancellationToken cancellationToken)
+    {
+        await using var command = Command(connection, transaction, ChatCountsSql, P(threadRequestId), P(routeId), P(nowUtc));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await reader.ReadAsync(cancellationToken);
+        return new SlackChatCounts(reader.GetInt64(0), reader.GetInt64(1));
+    }
+
+    /// <summary>
+    /// Opens a chat request (<see cref="ISlackChatStore.OpenChatRequestAsync"/>), under the route's advisory lock so two opens on one route count
+    /// in turn: the thread cap and <paramref name="routeMaxPerHour"/> first, then the copy of the parent with <c>trigger_kind</c> chat and the thread
+    /// link, the parent's alert rows, the askers, the messages moved to opened, one <c>opened</c> row and one <c>person_message</c> row per message.
+    /// <paramref name="loadRoutes"/> gives the live routes, so the stamp is the lowest of the parent's stamp, the level the routes give the parent's
+    /// metrics (a metric whose route is gone reads 0, fail closed, as the gate reads it), and the lowest asker level.
+    /// </summary>
+    public async Task<SlackChatOpenResult> OpenChatRequestAsync(SlackChatThread thread, Guid parentRequestId, IReadOnlyList<SlackAsker> askers,
         IReadOnlyList<SlackPersonMessage> messages, int routeMaxPerHour, DateTime nowUtc,
         Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, AlertSeverityLevel?, NotificationRoute?>>> loadRoutes,
-        CancellationToken cancellationToken) =>
-        Task.FromResult(new SlackChatOpenResult(SlackChatOpenOutcome.ParentGone, null));
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(thread);
+        ArgumentNullException.ThrowIfNull(askers);
+        ArgumentNullException.ThrowIfNull(messages);
+        ArgumentNullException.ThrowIfNull(loadRoutes);
+        var now = DateTime.SpecifyKind(nowUtc, DateTimeKind.Utc);
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await ExecAsync(connection, transaction, RouteLockSql, cancellationToken, P(RouteLockKey), P(thread.RouteId));
+        var counts = await ChatCountsAsync(connection, transaction, thread.ThreadRequestId, thread.RouteId, now, cancellationToken);
+        if (counts.ThreadLastHour >= SlackChatRules.PerThreadPerHour)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return new SlackChatOpenResult(SlackChatOpenOutcome.ThreadCap, null);
+        }
+
+        if (counts.RouteLastHour >= routeMaxPerHour)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return new SlackChatOpenResult(SlackChatOpenOutcome.RouteCap, null);
+        }
+
+        /* The level the live routes give the parent's metrics: the lowest wins, a metric with no route reads 0. A parent with no alert rows lowers nothing. */
+        var routeLevel = 3;
+        var resolve = await loadRoutes(connection, transaction, cancellationToken);
+        var metrics = new List<(string Metric, AlertSeverityLevel? Severity)>();
+        await using (var read = Command(connection, transaction, AgentActionMetricsSql, P(parentRequestId)))
+        await using (var reader = await read.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var severity = reader.IsDBNull(1) ? null
+                    : string.Equals(reader.GetString(1), InvestigationEvents.Critical, StringComparison.Ordinal) ? AlertSeverityLevel.Critical
+                    : (AlertSeverityLevel?)AlertSeverityLevel.Warning;
+                metrics.Add((reader.GetString(0), severity));
+            }
+        }
+
+        foreach (var (metric, severity) in metrics)
+        {
+            routeLevel = Math.Min(routeLevel, resolve(metric, thread.ServerId, severity)?.AgentLevel ?? 0);
+        }
+
+        var askerLevel = askers.Count == 0 ? 3 : askers.Min(a => a.RequestLevel);
+        var requestId = Guid.NewGuid();
+        int routeId = 0, serverId = 0;
+        string? firstMetric = null;
+        await using (var insert = Command(connection, transaction, OpenChatRequestSql, P(requestId), P(parentRequestId), P(now),
+            P((short)routeLevel), P((short)askerLevel), P(thread.ThreadRequestId)))
+        await using (var returned = await insert.ExecuteReaderAsync(cancellationToken))
+        {
+            if (await returned.ReadAsync(cancellationToken))
+            {
+                routeId = returned.GetInt32(0);
+                serverId = returned.GetInt32(1);
+                firstMetric = returned.GetString(2);
+            }
+        }
+
+        if (firstMetric is null)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return new SlackChatOpenResult(SlackChatOpenOutcome.ParentGone, null);
+        }
+
+        await ExecAsync(connection, transaction, CopyFollowUpAlertsSql, cancellationToken, P(requestId), P(parentRequestId));
+        foreach (var asker in askers)
+        {
+            await ExecAsync(connection, transaction, AddAskerSql, cancellationToken, P(requestId), P(asker.PersonId), P(asker.Identity), P((short)asker.RequestLevel), P(now));
+        }
+
+        var detail = new JsonObject
+        {
+            ["chat_thread_of"] = thread.ThreadRequestId.ToString("D"),
+            ["parent"] = parentRequestId.ToString("D"),
+            ["askers"] = askers.Count,
+            ["messages"] = messages.Count,
+        };
+        await JournalAsync(connection, transaction, now, requestId, routeId, serverId, InvestigationEvents.Opened, "service", firstMetric, detail.ToJsonString(), null, cancellationToken);
+        foreach (var message in messages)
+        {
+            await ExecAsync(connection, transaction, AttachPersonMessageSql, cancellationToken, P(message.ChannelId), P(message.Ts), P(requestId), P(SlackPersonMessageStates.Opened));
+            var asker = askers.FirstOrDefault(a => a.PersonId == message.PersonId) ?? new SlackAsker(message.PersonId ?? 0, message.Identity, askerLevel);
+            await JournalAskerAsync(connection, transaction, now, requestId, routeId, serverId, asker, message, SlackPersonMessageStates.Opened, cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return new SlackChatOpenResult(SlackChatOpenOutcome.Opened, requestId);
+    }
+
+    /* The asker's journal row (AskerJournalEvent): the person as the actor and in detail.person_id, which the approver check reads, the identity used,
+       the message's channel and ts, and no text. One per channel and ts. */
+    private Task<int> JournalAskerAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime now, Guid requestId, int routeId, int serverId,
+        SlackAsker asker, SlackPersonMessage message, string outcome, CancellationToken cancellationToken)
+    {
+        var detail = new JsonObject
+        {
+            ["person_id"] = asker.PersonId,
+            ["identity"] = asker.Identity,
+            ["request_level"] = asker.RequestLevel,
+            ["channel"] = message.ChannelId,
+            ["ts"] = message.Ts,
+            ["outcome"] = outcome,
+        };
+        return JournalAsync(connection, transaction, now, requestId, routeId, serverId, AskerJournalEvent, "person:" + asker.PersonId.ToString(CultureInfo.InvariantCulture),
+            outcome, detail.ToJsonString(), PersonMessageOnceKey(message.ChannelId, message.Ts), cancellationToken);
+    }
 
     /// <inheritdoc cref="ISlackChatStore.JournalPersonMessageAsync" />
-    public Task JournalPersonMessageAsync(Guid? requestId, int? routeId, int? serverId, string actor, string outcome, JsonObject detail, string onceKey,
-        CancellationToken cancellationToken) => Task.CompletedTask;
+    public async Task JournalPersonMessageAsync(Guid? requestId, int? routeId, int? serverId, string actor, string outcome, JsonObject detail, string onceKey,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(actor);
+        ArgumentException.ThrowIfNullOrWhiteSpace(outcome);
+        ArgumentNullException.ThrowIfNull(detail);
+        ArgumentException.ThrowIfNullOrWhiteSpace(onceKey);
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await JournalAsync(connection, transaction, Now(), requestId, routeId, serverId, AskerJournalEvent, actor, outcome, detail.ToJsonString(), onceKey, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
 
     /// <inheritdoc cref="ISlackChatStore.MarkChatAnswerOnceAsync" />
-    public Task<bool> MarkChatAnswerOnceAsync(Guid? requestId, int? routeId, int? serverId, string answerKey, string onceKey, CancellationToken cancellationToken) =>
-        Task.FromResult(false);
+    public async Task<bool> MarkChatAnswerOnceAsync(Guid? requestId, int? routeId, int? serverId, string answerKey, string onceKey, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(answerKey);
+        ArgumentException.ThrowIfNullOrWhiteSpace(onceKey);
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var written = await JournalAsync(connection, transaction, Now(), requestId, routeId, serverId, SlackThreadPosted, "service", answerKey, null, onceKey, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return written == 1;
+    }
 
     /// <inheritdoc cref="ISlackChatStore.WaitingThreadsAsync" />
-    public Task<IReadOnlyList<SlackWaitingThread>> WaitingThreadsAsync(int limit, CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<SlackWaitingThread>>([]);
+    public async Task<IReadOnlyList<SlackWaitingThread>> WaitingThreadsAsync(int limit, CancellationToken cancellationToken)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null, WaitingThreadsSql, P(Math.Clamp(limit, 1, 1000)));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var rows = new List<SlackWaitingThread>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new SlackWaitingThread(reader.GetGuid(0), reader.GetInt32(1), reader.GetInt32(2), reader.GetString(3), reader.GetString(4), (int)reader.GetInt64(5)));
+        }
+
+        return rows;
+    }
 
     /// <inheritdoc cref="ISlackChatStore.WaitingMessagesAsync" />
-    public Task<IReadOnlyList<SlackPersonMessage>> WaitingMessagesAsync(Guid threadRequestId, CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<SlackPersonMessage>>([]);
+    public async Task<IReadOnlyList<SlackPersonMessage>> WaitingMessagesAsync(Guid threadRequestId, CancellationToken cancellationToken)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null, WaitingMessagesSql, P(threadRequestId));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var rows = new List<SlackPersonMessage>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new SlackPersonMessage(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetGuid(3),
+                reader.IsDBNull(4) ? null : reader.GetInt64(4), reader.GetString(5), reader.GetString(6), reader.GetString(7),
+                reader.IsDBNull(8) ? null : reader.GetGuid(8), Utc(reader.GetDateTime(9))));
+        }
+
+        return rows;
+    }
 
     /// <inheritdoc cref="ISlackChatStore.UnclaimedChatRequestsAsync" />
-    public Task<IReadOnlyList<SlackUnclaimedChat>> UnclaimedChatRequestsAsync(DateTime openedBeforeUtc, CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<SlackUnclaimedChat>>([]);
+    public async Task<IReadOnlyList<SlackUnclaimedChat>> UnclaimedChatRequestsAsync(DateTime openedBeforeUtc, CancellationToken cancellationToken)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null, UnclaimedChatRequestsSql, P(openedBeforeUtc));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var rows = new List<SlackUnclaimedChat>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new SlackUnclaimedChat(reader.GetGuid(0), reader.GetGuid(1), reader.GetInt32(2), reader.GetInt32(3), reader.GetString(4), reader.GetString(5), Utc(reader.GetDateTime(6))));
+        }
 
-    /// <summary>The messages of a chat request for the claim answer's <c>person_requests</c>: each person's name, grants for the request's server and text.</summary>
-    public Task<IReadOnlyList<PersonRequest>> ListPersonRequestsAsync(Guid requestId, CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<PersonRequest>>([]);
+        return rows;
+    }
 
-    /// <summary>An agent's message to the thread (<c>post_investigation_message</c>): while <paramref name="claimId"/> is the live claim of
-    /// <paramref name="requestId"/>, journals <see cref="AgentMessage"/> as <c>agent:&lt;agentId&gt;</c> with the text, bounded, under the request's
-    /// agent journal cap.</summary>
-    public Task<AgentMessageResult> PostAgentMessageAsync(Guid requestId, Guid claimId, string agentId, string text, CancellationToken cancellationToken) =>
-        Task.FromResult(new AgentMessageResult(AgentMessageOutcome.NotFound, null));
+    /// <summary>The messages of a chat request for the claim answer's <c>person_requests</c>: each person's name, grants for the request's server
+    /// (<c>ask</c>, <c>request_level_2</c>, <c>request_level_3:&lt;kinds&gt;</c>) and text, oldest first. Empty for an alert request.</summary>
+    public async Task<IReadOnlyList<PersonRequest>> ListPersonRequestsAsync(Guid requestId, CancellationToken cancellationToken)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        var rows = new List<(string Name, long? PersonId, string Text, int ServerId)>();
+        await using (var command = Command(connection, null, PersonRequestsSql, P(requestId)))
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                rows.Add((reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetInt64(1), reader.GetString(2), reader.GetInt32(3)));
+            }
+        }
+
+        var grants = new Dictionary<long, IReadOnlyList<string>>();
+        var result = new List<PersonRequest>(rows.Count);
+        foreach (var (name, personId, text, serverId) in rows)
+        {
+            IReadOnlyList<string> held = [];
+            if (personId is long person)
+            {
+                if (!grants.TryGetValue(person, out held!))
+                {
+                    var list = new List<string>();
+                    await using var command = Command(connection, null, PersonRequestGrantsSql, P(person), P(serverId));
+                    await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                    while (await reader.ReadAsync(cancellationToken))
+                    {
+                        var capability = reader.GetString(0);
+                        var kinds = reader.IsDBNull(1) ? [] : reader.GetFieldValue<string[]>(1);
+                        list.Add(kinds.Length == 0 ? capability : capability + ":" + string.Join(",", kinds));
+                    }
+
+                    held = list;
+                    grants[person] = held;
+                }
+            }
+
+            result.Add(new PersonRequest(name, held, text));
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// An agent's message to the thread (<c>post_investigation_message</c>): while <paramref name="claimId"/> is the live claim of
+    /// <paramref name="requestId"/> (the row held <c>FOR UPDATE</c>), journals <see cref="AgentMessage"/> as <c>agent:&lt;agentId&gt;</c> with the
+    /// text bounded to <see cref="SlackChatRules.TextLimit"/>, under the request's agent journal cap (<see cref="InvestigationRules.MaxAgentJournalRows"/>).
+    /// </summary>
+    public async Task<AgentMessageResult> PostAgentMessageAsync(Guid requestId, Guid claimId, string agentId, string text, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(agentId);
+        var now = Now();
+        var actor = "agent:" + agentId;
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        string? state = null;
+        Guid? currentClaim = null;
+        DateTime? leaseUntil = null;
+        var serverId = 0;
+        await using (var command = Command(connection, transaction, AgentMessageLockSql, P(requestId)))
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                state = reader.GetString(0);
+                currentClaim = reader.IsDBNull(1) ? null : reader.GetGuid(1);
+                leaseUntil = reader.IsDBNull(2) ? null : Utc(reader.GetDateTime(2));
+                serverId = reader.GetInt32(3);
+            }
+        }
+
+        if (state is null)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return new AgentMessageResult(AgentMessageOutcome.NotFound, null);
+        }
+
+        if (state is "reported" or "closed")
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return new AgentMessageResult(AgentMessageOutcome.NotOpen, null);
+        }
+
+        if (state != "claimed" || currentClaim != claimId || leaseUntil is not DateTime lease || lease <= now)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return new AgentMessageResult(AgentMessageOutcome.LeaseLost, null);
+        }
+
+        if (await JournalCappedAsync(connection, transaction, now, requestId, actor, "message", cancellationToken))
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return new AgentMessageResult(AgentMessageOutcome.JournalCapped, null);
+        }
+
+        var detail = new JsonObject { ["text"] = SlackChatRules.Bound(text) };
+        long journalId;
+        await using (var insert = Command(connection, transaction, AgentActionJournalSql, P(now), P(requestId), P(serverId), P(AgentMessage), P(actor),
+            PNullable(null), P(detail.ToJsonString())))
+        {
+            journalId = (long)(await insert.ExecuteScalarAsync(cancellationToken))!;
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return new AgentMessageResult(AgentMessageOutcome.Posted, journalId);
+    }
+
+    private static DateTime Utc(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Utc);
 }

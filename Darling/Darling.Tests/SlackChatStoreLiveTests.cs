@@ -59,7 +59,7 @@ public sealed class SlackChatStoreLiveTests
         var link = chatThreadOf is null ? "NULL" : $"'{chatThreadOf}'";
         await ExecAsync(connection,
             "INSERT INTO config.investigation_requests (request_id, route_id, server_id, server_name, family, first_metric, first_alert_at, last_alert_at, window_until, opened_at, expires_at, state, autonomy_level, trigger_kind, chat_thread_of) "
-            + $"VALUES ('{id}', {routeId}, {ServerId}, 'srv-7', 'performance', 'CPU', now() AT TIME ZONE 'UTC' - interval '2 hours', now() AT TIME ZONE 'UTC' - interval '2 hours', now() AT TIME ZONE 'UTC' - interval '1 hour', "
+            + $"VALUES ('{id}', {routeId}, {ServerId}, 'srv-7', 'blocking', 'CPU', now() AT TIME ZONE 'UTC' - interval '2 hours', now() AT TIME ZONE 'UTC' - interval '2 hours', now() AT TIME ZONE 'UTC' - interval '1 hour', "
             + $"now() AT TIME ZONE 'UTC' - interval '{(int)openedAgo.TotalSeconds} seconds', now() AT TIME ZONE 'UTC' - interval '{(int)openedAgo.TotalSeconds} seconds' + interval '4 hours', '{state}', {level}, '{kind}', {link})", ct);
         await ExecAsync(connection,
             $"INSERT INTO config.investigation_request_alerts (request_id, alert_time, server_id, metric_name, severity) VALUES ('{id}', now() AT TIME ZONE 'UTC' - interval '2 hours', {ServerId}, 'CPU', 'critical'), ('{id}', now() AT TIME ZONE 'UTC' - interval '90 minutes', {ServerId}, 'Blocking', 'warning')", ct);
@@ -244,11 +244,11 @@ public sealed class SlackChatStoreLiveTests
             Assert.Equal(new[] { "ask" }, requests[1].Grants);
             Assert.Empty(await store.ListPersonRequestsAsync(s_parent, ct));
 
-            /* A parent whose routes are gone stamps 0 (fail closed), and an asker below the routes lowers it. */
+            /* A parent whose routes are gone stamps 1, the column's floor (reads alone), and an asker below the routes lowers it. */
             var low = await store.OpenChatRequestAsync(Thread(seed.RouteId), s_parent, [new SlackAsker(seed.Erik, "slack:T:U", 1)], [], 10, DateTime.UtcNow, RoutesAt(3), ct);
             Assert.Equal("1", await ScalarAsync(connection, $"SELECT autonomy_level::text FROM config.investigation_requests WHERE request_id = '{low.RequestId}'", ct));
             var gone = await store.OpenChatRequestAsync(Thread(seed.RouteId), s_parent, [new SlackAsker(seed.Dana, "slack:T:U", 3)], [], 10, DateTime.UtcNow, RoutesAt(null), ct);
-            Assert.Equal("0", await ScalarAsync(connection, $"SELECT autonomy_level::text FROM config.investigation_requests WHERE request_id = '{gone.RequestId}'", ct));
+            Assert.Equal("1", await ScalarAsync(connection, $"SELECT autonomy_level::text FROM config.investigation_requests WHERE request_id = '{gone.RequestId}'", ct));
             Assert.Equal(SlackChatOpenOutcome.ParentGone, (await store.OpenChatRequestAsync(Thread(seed.RouteId), Guid.NewGuid(), [], [], 10, DateTime.UtcNow, RoutesAt(2), ct)).Outcome);
         });
     }
@@ -280,7 +280,8 @@ public sealed class SlackChatStoreLiveTests
                 count.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.UtcNow, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz });
                 await using var reader = await count.ExecuteReaderAsync(ct);
                 Assert.True(await reader.ReadAsync(ct));
-                Assert.Equal((2L, 2L), (reader.GetInt64(0), reader.GetInt64(1)));
+                /* The parent opened an hour ago, at the hourly window's edge; the other thread's request half an hour ago. Neither chat request counts. */
+                Assert.Equal((1L, 2L), (reader.GetInt64(0), reader.GetInt64(1)));
             }
 
             Assert.Equal(new SlackChatCounts(1, 7), await store.ChatCountsAsync(other, seed.RouteId, DateTime.UtcNow, ct));

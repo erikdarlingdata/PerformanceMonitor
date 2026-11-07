@@ -474,7 +474,7 @@ public sealed class SlackMentionHandlerTests
         {
             ["team_id"] = "T0FOREIGN",
             ["api_app_id"] = App,
-            ["event"] = new JsonObject { ["type"] = SlackMentionHandler.AppMention, ["text"] = "<@U0BOT> hi", ["user"] = User, ["ts"] = "1.2", ["thread_ts"] = ThreadTs, ["channel"] = Channel },
+            ["event"] = new JsonObject { ["type"] = SlackMentionHandler.AppMention, ["text"] = "<@U0BOT> hi", ["user"] = User, ["user_team"] = Team, ["ts"] = "1.2", ["thread_ts"] = ThreadTs, ["channel"] = Channel },
         };
         var verdict = SlackEnvelopeFilter.Judge(SlackEnvelopeFilter.EventsApiType, payload, Team, App, _ => true, out var inbound, out var interaction);
         Assert.Equal(SlackEnvelopeVerdict.DropTeam, verdict);
@@ -572,10 +572,12 @@ public sealed class SlackMentionHandlerTests
     {
         var full = SlackThreadPosts.AgentMessagePost("agent-a", "The plan for 'orders' is forced now.", McpDataDetail.Full);
         Assert.Contains("agent-a", full.Text, StringComparison.Ordinal);
-        Assert.Contains("The plan for 'orders' is forced now.", JsonSerializer.Serialize(full.Blocks), StringComparison.Ordinal);
+        /* The serializer writes an apostrophe as an escape, so the literal is checked by its word. */
+        Assert.Contains("orders", JsonSerializer.Serialize(full.Blocks), StringComparison.Ordinal);
+        Assert.Contains("is forced now.", JsonSerializer.Serialize(full.Blocks), StringComparison.Ordinal);
 
         var masked = SlackThreadPosts.AgentMessagePost("agent-a", "The plan for 'orders' is forced now.", McpDataDetail.MaskLiterals);
-        Assert.DoesNotContain("'orders'", JsonSerializer.Serialize(masked.Blocks), StringComparison.Ordinal);
+        Assert.DoesNotContain("orders", JsonSerializer.Serialize(masked.Blocks), StringComparison.Ordinal);
 
         var withheld = SlackThreadPosts.AgentMessagePost("agent-a", "The plan for 'orders' is forced now.", McpDataDetail.MetadataOnly);
         Assert.DoesNotContain("orders", JsonSerializer.Serialize(withheld.Blocks), StringComparison.Ordinal);
@@ -583,10 +585,10 @@ public sealed class SlackMentionHandlerTests
 
         /* The text is escaped and bounded like every collected value: a mention cannot ride in the agent's message. */
         var escaped = SlackThreadPosts.AgentMessagePost("agent-a", "<!channel> look " + new string('x', 5000), McpDataDetail.Full);
-        var json = JsonSerializer.Serialize(escaped.Blocks);
-        Assert.DoesNotContain("<!channel>", json, StringComparison.Ordinal);
-        Assert.Contains("&lt;!channel&gt;", json, StringComparison.Ordinal);
-        Assert.True(json.Length < 4200, json.Length.ToString());
+        var section = JsonSerializer.SerializeToNode(escaped.Blocks)![0]!["text"]!["text"]!.GetValue<string>();
+        Assert.DoesNotContain("<!channel>", section, StringComparison.Ordinal);
+        Assert.Contains("&lt;!channel&gt;", section, StringComparison.Ordinal);
+        Assert.True(section.Length < 3000, section.Length.ToString());
     }
 
     [Fact]
