@@ -585,6 +585,57 @@ internal static class ChartLayoutProbe
         encoder.Save(stream);
     }
 
+    /// <summary>#8220: the Query Heatmap's labels on a settled chart that plots <paramref name="columns"/> time buckets and <paramref name="rows"/> value
+    /// buckets. An X label stays on one line and keeps 10 px clear of the next; a Y label keeps 4 px clear of the next. One line per defect.</summary>
+    public static List<string> MeasureHeatmapLabels(WpfPlot chart, int columns, int rows, out string reading)
+    {
+        var problems = new List<string>();
+        var plot = chart.Plot;
+        var rect = plot.RenderManager.LastRender.DataRect;
+        using var paint = Paint.NewDisposablePaint();
+
+        var xTicks = plot.Axes.Bottom.TickGenerator.Ticks.Where(t => t.IsMajor).OrderBy(t => t.Position).ToList();
+        var xStyle = plot.Axes.Bottom.TickLabelStyle;
+        var xPixels = rect.Width / columns;
+        var minGap = double.MaxValue;
+        for (var i = 0; i < xTicks.Count; i++)
+        {
+            if (xTicks[i].Label.Contains('\n', StringComparison.Ordinal))
+            {
+                problems.Add($"the X label '{xTicks[i].Label.Replace("\n", "\\n", StringComparison.Ordinal)}' is on more than one line");
+            }
+
+            if (i > 0)
+            {
+                var gap = ((xTicks[i].Position - xTicks[i - 1].Position) * xPixels)
+                    - ((xStyle.Measure(xTicks[i].Label, paint).Width + xStyle.Measure(xTicks[i - 1].Label, paint).Width) / 2);
+                minGap = Math.Min(minGap, gap);
+                if (gap < 10)
+                {
+                    problems.Add($"X labels '{xTicks[i - 1].Label}' and '{xTicks[i].Label}' are {gap:0.#} px apart, under 10");
+                }
+            }
+        }
+
+        var yTicks = plot.Axes.Left.TickGenerator.Ticks.Where(t => t.IsMajor).OrderBy(t => t.Position).ToList();
+        var yStyle = plot.Axes.Left.TickLabelStyle;
+        var yPixels = rect.Height / rows;
+        var minYGap = double.MaxValue;
+        for (var i = 1; i < yTicks.Count; i++)
+        {
+            var gap = ((yTicks[i].Position - yTicks[i - 1].Position) * yPixels)
+                - ((yStyle.Measure(yTicks[i].Label, paint).Height + yStyle.Measure(yTicks[i - 1].Label, paint).Height) / 2);
+            minYGap = Math.Min(minYGap, gap);
+            if (gap < 4)
+            {
+                problems.Add($"Y labels '{yTicks[i - 1].Label}' and '{yTicks[i].Label}' are {gap:0.#} px apart, under 4");
+            }
+        }
+
+        reading = $"plot {rect.Width:0}x{rect.Height:0}, {xTicks.Count} X labels (tightest gap {(minGap == double.MaxValue ? 0 : minGap):0} px), {yTicks.Count} Y labels (tightest gap {(minYGap == double.MaxValue ? 0 : minYGap):0} px)";
+        return problems;
+    }
+
     // ---- Feeding a chart through its own render method with a made-up reply ----
 
     /// <summary>Builds a list of made-up rows of <paramref name="rowType"/>: times ramp from <paramref name="from"/> to
