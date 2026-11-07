@@ -28,6 +28,43 @@ internal static class PgLogLiveWait
     /// <c>json</c>) holds every one of <paramref name="markers"/>, up to 30 seconds, then fails the test naming
     /// the markers. Each marker is plain text with no quote or newline, so the format's own escaping leaves it intact.
     /// </summary>
+    /// <summary>
+    /// The newest log file ending in <paramref name="extension"/>, by the rule the wait and the collectors' tail share
+    /// (<c>modification DESC, name DESC</c>), or null when the log directory holds none.
+    /// </summary>
+    public static async Task<string?> NewestFileAsync(NpgsqlConnection connection, string extension, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            "SELECT name FROM pg_catalog.pg_ls_logdir() WHERE name ~* @ext ORDER BY modification DESC, name DESC LIMIT 1", connection);
+        command.Parameters.AddWithValue("ext", "\\." + extension + "$");
+        return await command.ExecuteScalarAsync(ct) as string;
+    }
+
+    /// <summary>
+    /// Rotates the server log through <c>pg_rotate_logfile()</c> and returns once the newest file ending in
+    /// <paramref name="extension"/> is a new one (#8205). The syslogger rotates on its next pass, not inside the call, so a
+    /// read right after the call could still see the outgoing file. Fails after 10 seconds when no new file appears.
+    /// </summary>
+    public static async Task RotateAsync(NpgsqlConnection connection, string extension, CancellationToken ct)
+    {
+        var before = await NewestFileAsync(connection, extension, ct);
+        await using (var rotate = new NpgsqlCommand("SELECT pg_catalog.pg_rotate_logfile()", connection))
+        {
+            await rotate.ExecuteNonQueryAsync(ct);
+        }
+
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (await NewestFileAsync(connection, extension, ct) == before)
+        {
+            if (DateTime.UtcNow >= deadline)
+            {
+                Assert.Fail("pg_rotate_logfile() did not produce a new ." + extension + " log file within 10 seconds (newest is still " + before + ").");
+            }
+
+            await Task.Delay(100, ct);
+        }
+    }
+
     public static async Task WaitForTextAsync(NpgsqlConnection connection, string extension, CancellationToken ct, params string[] markers)
     {
         var deadline = DateTime.UtcNow + Budget;

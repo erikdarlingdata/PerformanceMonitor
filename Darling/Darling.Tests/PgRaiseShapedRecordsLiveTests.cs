@@ -221,7 +221,16 @@ public sealed class PgRaiseShapedRecordsLiveTests
     }
 
     [Fact]
-    public async Task AFakePlanCaptureRaisedByPlpgsql_IsSkippedNotStored()
+    public Task AFakePlanCaptureRaisedByPlpgsql_IsSkippedNotStored() => RunFakePlanCaptureAsync(theLogRotatesBeforeTheRead: false);
+
+    /* #8205: the collector tails the newest log file, and the server rotates its log at midnight and at log_rotation_size,
+       so a record written a moment before a rotation is in the file before the one the read tails. The proof must still
+       hold when a rotation lands between the test's write and the collector's read. */
+    [Fact]
+    public Task AFakePlanCaptureRaisedByPlpgsql_IsSkippedNotStored_WhenTheLogRotatesBetweenTheWriteAndTheRead() =>
+        RunFakePlanCaptureAsync(theLogRotatesBeforeTheRead: true);
+
+    private static async Task RunFakePlanCaptureAsync(bool theLogRotatesBeforeTheRead)
     {
         var store = StoreConnectionString;
         var target = TargetConnectionString;
@@ -258,6 +267,10 @@ public sealed class PgRaiseShapedRecordsLiveTests
         }
 
         await PgLogLiveWait.WaitForTextAsync(targetConnection, "csv", ct, "forged_4058l");
+        if (theLogRotatesBeforeTheRead)
+        {
+            await PgLogLiveWait.RotateAsync(targetConnection, "csv", ct);
+        }
 
         var context = new CollectorContext
         {
