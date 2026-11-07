@@ -387,7 +387,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         {
             _crosshairManager?.SetLaneBaselineSteps(BlockingChart, baseline, isEventBased: true);
 
-            PerformanceMonitor.Ui.BaselineBand.AddSteps(BlockingChart.Plot, baseline, ChartPalette.AccentColor("BaselineBlocking"));
+            PerformanceMonitor.Ui.BaselineBand.AddBand(BlockingChart.Plot, baseline, ChartPalette.AccentColor("BaselineBlocking"));
         }
 
         // Blocking bars — red
@@ -467,7 +467,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         {
             _crosshairManager?.SetLaneBaselineSteps(CpuChart, baseline, 10);
 
-            PerformanceMonitor.Ui.BaselineBand.AddSteps(CpuChart.Plot, baseline, ChartPalette.AccentColor("BaselineCpu"));
+            PerformanceMonitor.Ui.BaselineBand.AddBand(CpuChart.Plot, baseline, ChartPalette.AccentColor("BaselineCpu"));
 
             // Anomaly markers on SQL series only. #7644: each point is judged against its own hour's step, and a point in an hour with no step is not marked.
             var anomalyIndices = new List<int>();
@@ -543,7 +543,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         {
             _crosshairManager?.SetLaneBaselineSteps(chart, baseline, minAnomalyValue);
 
-            PerformanceMonitor.Ui.BaselineBand.AddSteps(chart.Plot, baseline, colorHex);
+            PerformanceMonitor.Ui.BaselineBand.AddBand(chart.Plot, baseline, colorHex);
 
             // Highlight anomalous points (outside ± 2σ band AND above absolute minimum). #7644: each point is judged against its own
             // hour's step, and a point in an hour with no step is not marked.
@@ -644,7 +644,8 @@ public partial class CorrelatedTimelineLanesControl : UserControl
            see all five gutters at once and hand them the widest. It has to run on EVERY refresh, not
            once at Initialize: ClearChart() calls WpfPlot.Reset(), which swaps in a fresh Plot and takes
            any axis floor with it. */
-        LaneAxisAligner.AlignLeftGutters(charts);
+        var gutter = LaneAxisAligner.AlignLeftGutters(charts);
+        PlaceCaptions(gutter / CpuChart.DisplayScale);
 
         foreach (var chart in charts)
             chart.Refresh();
@@ -714,6 +715,21 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         }
     }
 
+    /// <summary>
+    /// #8162: each lane's label is a caption at the top left of its lane, over the plot and clear of the Y tick labels, so the
+    /// lanes need no gutter of their own. The tick labels' width is the lanes' shared left gutter (<paramref name="gutter"/>, in
+    /// device-independent pixels), and the caption starts just past it.
+    /// </summary>
+    private void PlaceCaptions(double gutter)
+    {
+        var margin = new Thickness(gutter + 6, 3, 0, 0);
+        foreach (var caption in new[] { CpuCaption, WaitStatsCaption, BlockingCaption, MemoryCaption, FileIoCaption })
+            caption.Margin = margin;
+    }
+
+    /// <summary>#8162: the height a lane that shows no X labels keeps under its plot: its tick marks.</summary>
+    private const float LaneTickRoom = 6f;
+
     private static void ApplyTheme(ScottPlot.WPF.WpfPlot chart)
     {
         // Lanes are a deliberately stripped chrome variant (legend hidden, no font-size / first-render
@@ -734,8 +750,14 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             System.Windows.Media.Color.FromRgb(c.FigureBackground.R, c.FigureBackground.G, c.FigureBackground.B));
     }
 
-    private static void ReapplyAxisColors(ScottPlot.WPF.WpfPlot chart)
+    /* #8162: a lane's plot fills its lane. This runs after DateTimeTicksBottomUtc, which swaps in a new bottom axis and takes any
+       size limit with it. The lane label is a caption over the lane, so no top axis sits above the plot, and a lane that shows no
+       X labels keeps no room for them (ScottPlot reserves the label height even when the labels are hidden, which left a band
+       under every lane). The last lane keeps the room its labels need. */
+    private void ReapplyAxisColors(ScottPlot.WPF.WpfPlot chart)
     {
+        chart.Plot.Axes.Top.IsVisible = false;
+        chart.Plot.Axes.Bottom.MaximumSize = chart == FileIoChart ? float.PositiveInfinity : LaneTickRoom;
         var text = ChartStyle.GetThemeColors().Text;
         chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = text;
         chart.Plot.Axes.Left.TickLabelStyle.ForeColor = text;

@@ -81,8 +81,8 @@ public sealed class OverviewBaselineBandTests
             var baseline = Bucket(mean, sd);
             var plot = Draw(control, lane, baseline).Plot;
 
-            // #7644: the band is one rectangle per hour (a VerticalSpan would run the whole X axis, the old flat band).
-            var rectangle = Assert.Single(plot.GetPlottables<Rectangle>());
+            // #7644: #8162: the band is one filled shape per run of hours, not a rectangle per hour.
+            var rectangle = Assert.Single(plot.GetPlottables<Polygon>());
             Assert.Empty(plot.GetPlottables<HorizontalSpan>());
 
             // The rectangle's Y edges are the band's own edges, and its X edges are the step's hour.
@@ -130,7 +130,7 @@ public sealed class OverviewBaselineBandTests
             control.UpdateLane(control.WaitStatsChart, "Wait", data, "#FFB74D", baseline: steps, minAnomalyValue: 100);
 
             var plot = control.WaitStatsChart.Plot;
-            Assert.Equal(2, plot.GetPlottables<Rectangle>().Count());
+            Assert.Single(plot.GetPlottables<Polygon>());
             // The two marked points are neighbours in the series, so they are drawn as one segment: read the marks by colour, not by shape.
             Assert.Equal([Hour(10), Hour(70)], OverviewLaneMarks.MarkedX(plot));
         });
@@ -218,7 +218,7 @@ public sealed class OverviewBaselineBandTests
                 baseline: Array.Empty<BaselineBand.HourStep>(), minAnomalyValue: 100);
 
             var plot = control.WaitStatsChart.Plot;
-            Assert.Empty(plot.GetPlottables<Rectangle>());
+            Assert.Empty(plot.GetPlottables<Polygon>());
             Assert.Equal(0, OverviewLaneMarks.MarkedCount(plot));
         });
     }

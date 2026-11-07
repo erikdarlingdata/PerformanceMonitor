@@ -82,7 +82,7 @@ public sealed class OverviewBaselineBandTests
             var baseline = Bucket(mean, sd);
             var plot = Draw(control, lane, baseline).Plot;
 
-            var span = Assert.Single(plot.GetPlottables<Rectangle>());
+            var span = Assert.Single(plot.GetPlottables<Polygon>());
             Assert.Empty(plot.GetPlottables<HorizontalSpan>());
 
             // The band's Y limits are its own edges (#7433: the range is on Y, never on X), and its X limits the hour it covers.
