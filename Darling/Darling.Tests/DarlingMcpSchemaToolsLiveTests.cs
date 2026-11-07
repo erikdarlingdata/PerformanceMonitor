@@ -135,6 +135,10 @@ public sealed class DarlingMcpSchemaToolsLiveTests
         DarlingMcpSchemaTools.FindSchemaObjects(
             s.Source, ServerName, database, prefix, contains, column, references, text, limit, detail, DarlingMcpSchemaTools.BudgetMilliseconds, DateTime.UtcNow, ct);
 
+    private static Task<string> FindWithBudget(Store s, CancellationToken ct, int budgetMilliseconds, string text) =>
+        DarlingMcpSchemaTools.FindSchemaObjects(
+            s.Source, ServerName, Db, null, null, null, null, text, 50, McpDataDetail.Full, budgetMilliseconds, DateTime.UtcNow, ct);
+
     private static string[] Names(JsonElement array, string property) =>
         array.EnumerateArray().Select(e => e.GetProperty(property).GetString()!).ToArray();
 
@@ -535,6 +539,52 @@ public sealed class DarlingMcpSchemaToolsLiveTests
 
             var byName = await Parse(Find(s, ct, prefix: "Order", detail: McpDataDetail.MaskLiterals));
             Assert.Equal(new[] { "OrderView" }, Names(byName.GetProperty("objects"), "name"));
+        });
+    }
+
+    [Fact]
+    public async Task FindSchemaObjects_DefinitionContains_StatementTimeout_ReturnsStopped()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            /* Eight 2 MB view bodies that never hold the needle: the ILIKE has to read all 16 MB, which no 1 ms statement_timeout survives. */
+            var body = new string('x', 2_000_000);
+            await Baseline(s, ct, Enumerable.Range(1, 8).Select(i => View(100 + i, "BigView" + i, body)).ToArray());
+
+            using var stopped = JsonDocument.Parse(await FindWithBudget(s, ct, budgetMilliseconds: 1, text: "needle"));
+            Assert.Equal("stopped", stopped.RootElement.GetProperty("status").GetString());
+            Assert.Contains("budget", stopped.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+
+            using var answered = JsonDocument.Parse(await Find(s, ct, text: "needle"));
+            Assert.Equal("empty", answered.RootElement.GetProperty("status").GetString());
+        });
+    }
+
+    [Fact]
+    public async Task FindSchemaObjects_NamePatterns_AreLiteral_NotLikeWildcards()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            await Baseline(
+                s, ct,
+                Table(10, "Orders", new[] { "Id" }), Table(11, "Ord_Archive", new[] { "Id" }), Table(12, "Ord%Rate", new[] { "Id" }),
+                Table(13, "Plain", new[] { "Id" }),
+                View(20, "Discount50", "select 1 as Id -- 50 percent"), View(21, "Discount", "select 1 as Id -- 50% off"));
+
+            var prefix = await Parse(Find(s, ct, prefix: "Ord_"));
+            Assert.Equal(new[] { "Ord_Archive" }, Names(prefix.GetProperty("objects"), "name"));
+
+            var percentPrefix = await Parse(Find(s, ct, prefix: "Ord%"));
+            Assert.Equal(new[] { "Ord%Rate" }, Names(percentPrefix.GetProperty("objects"), "name"));
+
+            var contains = await Parse(Find(s, ct, contains: "%"));
+            Assert.Equal(new[] { "Ord%Rate" }, Names(contains.GetProperty("objects"), "name"));
+
+            var underscore = await Parse(Find(s, ct, contains: "d_A"));
+            Assert.Equal(new[] { "Ord_Archive" }, Names(underscore.GetProperty("objects"), "name"));
+
+            var text = await Parse(Find(s, ct, text: "50%"));
+            Assert.Equal(new[] { "Discount" }, Names(text.GetProperty("objects"), "name"));
         });
     }
 
