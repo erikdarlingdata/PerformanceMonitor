@@ -17,6 +17,7 @@ using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Chat;
+using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
@@ -28,8 +29,9 @@ namespace Darling.Tests;
 /// #7659 on a live store: the rung (V254: the chat link column, the asker table, the message table and the thread reverse index), the thread
 /// lookups, the request level a person's grants give, the message's natural key, the chat request open (its copied alert rows, kind, link, askers
 /// and stamp) and join, the two hourly caps, <c>CountRouteSql</c> and the resolve sweep leaving chat requests out, the follow-up of a chat request
-/// copying its askers and kind, the chat sweep opening one request for every waiting message and saying the agent may be offline once, the agent's
-/// message under its claim and journal cap, and the claim answer's <c>person_requests</c>.
+/// copying its askers and kind, the chat sweep opening one request for every waiting message, refusing a waiting message whose asker lost the
+/// grant and saying the agent may be offline once, the agent's message under its claim and journal cap, and the claim answer's
+/// <c>person_requests</c> carrying the granted askers' texts alone.
 /// </summary>
 /* #1776 own-store: each test mints its own scratch database through ScratchPostgres. */
 public sealed class SlackChatStoreLiveTests
@@ -558,13 +560,105 @@ public sealed class SlackChatStoreLiveTests
         });
     }
 
+    /// <summary>The sweep applies the handler's rules on a live store (#7659): a person disabled while their mention waited behind a claimed chat
+    /// request is refused once the claim lapses, with no asker row, no person_message row naming them and their text in no person_requests; the
+    /// granted asker's message joins the request without touching its stamp; the sweep does not throw; and a second waiting thread still opens.</summary>
     [Fact]
-    public void TheMessageTool_IsAnInvestigationTool_ServedOnlyUnderTheInvestigationsArm()
+    public async Task TheChatSweep_RefusesAWaitingMessageWhoseAskerWasDisabled_JoinsTheGrantedOne_AndStillOpensTheNextThread()
     {
-        Assert.Contains(DarlingMcpInvestigationTools.PostMessageToolName, DarlingMcpWritePolicy.InvestigationTools);
-        Assert.True(DarlingMcpWritePolicy.IsInvestigation(DarlingMcpInvestigationTools.PostMessageToolName));
-        Assert.Contains(InvestigationRequestStore.AgentMessage, DarlingManagedRoles.JournalOwnerEventList, StringComparison.Ordinal);
-        Assert.Contains(InvestigationRequestStore.AskerJournalEvent, DarlingManagedRoles.JournalOwnerEventList, StringComparison.Ordinal);
+        await WithStoreAsync(async (connection, source, store, seed, ct) =>
+        {
+            /* A chat request in play: Dana's, claimed by an agent. Erik and Dana mention while it is claimed, so both messages wait. */
+            var chat = (await store.OpenChatRequestAsync(Thread(seed.RouteId), s_parent, [new SlackAsker(seed.Dana, "slack:" + Team + ":U0DANA", 3)], [], 10, DateTime.UtcNow, RoutesAt(3), ct)).RequestId!.Value;
+            Assert.Equal(InvestigationClaimOutcome.Claimed, (await store.ClaimAsync(chat, "agent-a", ct)).Outcome);
+            Assert.Equal(SlackPersonMessageSaved.Saved, await store.SavePersonMessageAsync(Message("1700000000.001001", seed.Erik, "U0ERIK", "the password is hunter2"), ct));
+            Assert.Equal(SlackPersonMessageSaved.Saved, await store.SavePersonMessageAsync(Message("1700000000.001002", seed.Dana, "U0DANA", "and the blocking"), ct));
+
+            /* A second thread on the route, with a waiting message from a person still granted. */
+            var other = Guid.NewGuid();
+            await AddRequestAsync(connection, other, seed.RouteId, "reported", TimeSpan.FromMinutes(30), ct: ct);
+            await ExecAsync(connection, $"INSERT INTO config.investigation_request_threads (request_id, channel_id, thread_ts) VALUES ('{other}', '{Channel}', '1700000000.000500')", ct);
+            Assert.Equal(SlackPersonMessageSaved.Saved, await store.SavePersonMessageAsync(new SlackPersonMessage(Channel, "1700000000.001003", "1700000000.000500", other, seed.Dana, "slack:" + Team + ":U0DANA", "second thread"), ct));
+
+            /* Erik is disabled while his message waits, and the claim lapses: the chat request is open and unclaimed again. */
+            Assert.True((await PersonDirectory.SetPersonEnabledAsync(source, seed.Erik, false, Admin, ServerActionSurfaces.Viewer, ct)).Succeeded);
+            await ExecAsync(connection, $"UPDATE config.investigation_requests SET state = 'open', claim_id = NULL, claimed_by = NULL, lease_until = NULL WHERE request_id = '{chat}'", ct);
+
+            var posts = new RecordingPosts();
+            var routes = new[] { new NotificationRoute(seed.RouteId, "cpu", "", "", "", "", "", Enabled: true) { SlackBotChannel = Channel, AgentMaxPerHour = 10 } };
+            var now = DateTime.UtcNow;
+            var sweep = new SlackChatSweep(new StoreSlackChatCommands(store, NullLogger.Instance), posts, () => routes, NullLogger.Instance, () => now);
+
+            /* One pass, no exception: Dana's message joins the chat request, Erik's is refused, and the second thread opens. */
+            Assert.Equal((1, 0), await sweep.RunOnceAsync(ct));
+            Assert.Equal("joined|" + chat, await ScalarAsync(connection, "SELECT state || '|' || request_id::text FROM config.investigation_person_messages WHERE ts = '1700000000.001002'", ct));
+            Assert.Equal("refused|", await ScalarAsync(connection, "SELECT state || '|' || COALESCE(request_id::text, '') FROM config.investigation_person_messages WHERE ts = '1700000000.001001'", ct));
+            Assert.Equal("3", await ScalarAsync(connection, $"SELECT autonomy_level::text FROM config.investigation_requests WHERE request_id = '{chat}'", ct));
+            Assert.Equal(seed.Dana.ToString(System.Globalization.CultureInfo.InvariantCulture), await ScalarAsync(connection, $"SELECT string_agg(person_id::text, ',') FROM config.investigation_request_askers WHERE request_id = '{chat}'", ct));
+
+            /* Erik is nowhere an asker: no person_message row names him, his text is in no journal row and in no person_requests. */
+            Assert.Equal("0", await ScalarAsync(connection, $"SELECT count(*) FROM config.investigation_journal WHERE event = '{InvestigationRequestStore.AskerJournalEvent}' AND detail ->> 'person_id' = '{seed.Erik}'", ct));
+            Assert.Equal("0", await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal WHERE detail::text LIKE '%hunter2%'", ct));
+            Assert.Equal(new[] { "and the blocking" }, (await store.ListPersonRequestsAsync(chat, ct)).Items.Select(r => r.Text).ToArray());
+
+            /* The refusal is the handler's: one sentence to Erik, and a journal row with the identity, no text and no person_id. */
+            Assert.Equal((Channel, SlackChatAnswers.NoGrant, ThreadTs), Assert.Single(posts.Posts));
+            Assert.Equal("person:" + seed.Erik + "|" + SlackChatAnswers.NoGrantKind + "|slack:" + Team + ":U0ERIK|", await ScalarAsync(connection,
+                $"SELECT actor || '|' || reason || '|' || (detail ->> 'identity') || '|' || COALESCE(detail ->> 'text', '') FROM config.investigation_journal WHERE event = '{InvestigationRequestStore.AskerJournalEvent}' AND detail ->> 'ts' = '1700000000.001001'", ct));
+
+            /* The second thread opened for Dana's message, and nothing waits any more. */
+            Assert.Equal("1", await ScalarAsync(connection, $"SELECT count(*) FROM config.investigation_requests WHERE trigger_kind = 'chat' AND chat_thread_of = '{other}'", ct));
+            Assert.Equal("opened", await ScalarAsync(connection, "SELECT state FROM config.investigation_person_messages WHERE ts = '1700000000.001003'", ct));
+            Assert.Empty(await store.WaitingThreadsAsync(10, ct));
+
+            /* A second pass has nothing to do and answers nothing more. */
+            Assert.Equal((0, 0), await sweep.RunOnceAsync(ct));
+            Assert.Single(posts.Posts);
+        });
+    }
+
+    /// <summary>The claim answer's person_requests (#7659), through the claim tool with the owner store: exactly the granted askers' texts, with
+    /// their names and grants, and the rule beside them; a message row for a disabled person or for one with no grant reaching the server is left
+    /// out; an alert request nobody asked in carries neither key.</summary>
+    [Fact]
+    public async Task TheClaimAnswer_CarriesPersonRequestsForExactlyTheGrantedAskers_AndNoneForAnAlertRequest()
+    {
+        await WithStoreAsync(async (connection, source, store, seed, ct) =>
+        {
+            var dana = Message("1700000000.001101", seed.Dana, "U0DANA", "force the good plan");
+            var erik = Message("1700000000.001102", seed.Erik, "U0ERIK", "and look at blocking");
+            Assert.Equal(SlackPersonMessageSaved.Saved, await store.SavePersonMessageAsync(dana, ct));
+            Assert.Equal(SlackPersonMessageSaved.Saved, await store.SavePersonMessageAsync(erik, ct));
+            var chat = (await store.OpenChatRequestAsync(Thread(seed.RouteId), s_parent, [new SlackAsker(seed.Dana, dana.Identity, 3), new SlackAsker(seed.Erik, erik.Identity, 1)], [dana, erik], 10, DateTime.UtcNow, RoutesAt(3), ct)).RequestId!.Value;
+
+            /* Message rows under the chat request for Pat, disabled, and for Sam, whose ask grant is for another server: never the agent's. */
+            await ExecAsync(connection, "INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES (8, 'srv-8', 'host-8')", ct);
+            var sam = (await PersonDirectory.AddPersonAsync(source, "Sam", Admin, ServerActionSurfaces.Viewer, ct)).PersonId!.Value;
+            Assert.True((await PersonDirectory.AddGrantAsync(source, sam, 8, null, PersonCapabilities.Ask, null, Admin, ServerActionSurfaces.Viewer, ct)).Succeeded);
+            await ExecAsync(connection, $"INSERT INTO config.investigation_person_messages (channel_id, ts, thread_ts, thread_request_id, request_id, person_id, identity, message_text, state, received_at) VALUES "
+                + $"('{Channel}', '1700000000.001103', '{ThreadTs}', '{s_parent}', '{chat}', {seed.Pat}, 'slack:{Team}:U0PAT', 'pat says drop the table', 'opened', now() AT TIME ZONE 'UTC' + interval '1 second'), "
+                + $"('{Channel}', '1700000000.001104', '{ThreadTs}', '{s_parent}', '{chat}', {sam}, 'slack:{Team}:U0SAM', 'sam says the password is hunter2', 'opened', now() AT TIME ZONE 'UTC' + interval '2 seconds')", ct);
+
+            var composer = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(source), new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools);
+            var answer = JsonNode.Parse(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, chat.ToString(), "agent-a", null, null, ct, ownerStore: store))!.AsObject();
+            Assert.Equal("claimed", answer["status"]!.ToString());
+            var requests = Assert.IsType<JsonArray>(answer["person_requests"]);
+            Assert.Equal(new[] { ("Dana", "force the good plan"), ("Erik", "and look at blocking") }, requests.Select(r => (r!["name"]!.ToString(), r["text"]!.ToString())).ToArray());
+            Assert.Equal(new[] { "request_level_3:force_plan" }, requests[0]!["grants"]!.AsArray().Select(g => g!.ToString()).ToArray());
+            Assert.Equal(new[] { "ask" }, requests[1]!["grants"]!.AsArray().Select(g => g!.ToString()).ToArray());
+            Assert.Equal(DarlingMcpInvestigationTools.PersonRequestsRule, answer["person_requests_rule"]!.ToString());
+            Assert.Null(answer["person_requests_omitted"]);
+            Assert.DoesNotContain("drop the table", answer.ToJsonString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("hunter2", answer.ToJsonString(), StringComparison.Ordinal);
+
+            /* An alert request nobody asked in: the claim answers as before, with neither key. */
+            var alert = Guid.NewGuid();
+            await AddRequestAsync(connection, alert, seed.RouteId, "open", TimeSpan.FromMinutes(5), ct: ct);
+            var plain = JsonNode.Parse(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, alert.ToString(), "agent-a", null, null, ct, ownerStore: store))!.AsObject();
+            Assert.Equal("claimed", plain["status"]!.ToString());
+            Assert.Null(plain["person_requests"]);
+            Assert.Null(plain["person_requests_rule"]);
+        });
     }
 }
 

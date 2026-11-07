@@ -75,12 +75,14 @@ public sealed record SlackChatThread(Guid ThreadRequestId, int RouteId, int Serv
 public sealed record SlackChatNewest(Guid RequestId, string State, string TriggerKind, DateTime OpenedAtUtc);
 
 /// <summary>#7659: the states of a person's message: <see cref="Waiting"/> for a request to end, <see cref="Joined"/> into an unclaimed chat
-/// request, <see cref="Opened"/> as part of a chat request's open.</summary>
+/// request, <see cref="Opened"/> as part of a chat request's open, <see cref="Refused"/> by the sweep (the thread past its age limit, or the
+/// asker's live level 0 by the time the request ended) and never handed to a chat request.</summary>
 public static class SlackPersonMessageStates
 {
     public const string Waiting = "waiting";
     public const string Joined = "joined";
     public const string Opened = "opened";
+    public const string Refused = "refused";
 }
 
 /// <summary>
@@ -134,8 +136,8 @@ public sealed record SlackChatOpenResult(SlackChatOpenOutcome Outcome, Guid? Req
 /// <summary>#7659: the chat requests opened in the last hour: by this thread, and by this route.</summary>
 public sealed record SlackChatCounts(long ThreadLastHour, long RouteLastHour);
 
-/// <summary>#7659: a thread with waiting messages, for the sweep.</summary>
-public sealed record SlackWaitingThread(Guid ThreadRequestId, int RouteId, int ServerId, string ChannelId, string ThreadTs, int Messages);
+/// <summary>#7659: a thread with waiting messages, for the sweep; <see cref="OpenedAtUtc"/> is when its first request opened, for the age limit.</summary>
+public sealed record SlackWaitingThread(Guid ThreadRequestId, int RouteId, int ServerId, string ChannelId, string ThreadTs, int Messages, DateTime OpenedAtUtc);
 
 /// <summary>#7659: a chat request no agent has claimed, with its thread, for the offline post.</summary>
 public sealed record SlackUnclaimedChat(Guid RequestId, Guid ThreadRequestId, int RouteId, int ServerId, string ChannelId, string ThreadTs, DateTime OpenedAtUtc);
@@ -203,6 +205,9 @@ public interface ISlackChatStore
 
     /// <summary>The waiting messages of one thread, oldest first.</summary>
     Task<IReadOnlyList<SlackPersonMessage>> WaitingMessagesAsync(Guid threadRequestId, CancellationToken cancellationToken);
+
+    /// <summary>Marks a waiting message <see cref="SlackPersonMessageStates.Refused"/>: it is handed to no chat request. A message no longer waiting is left as it is.</summary>
+    Task RefuseMessageAsync(SlackPersonMessage message, CancellationToken cancellationToken);
 
     /// <summary>The open chat requests no agent has claimed that opened at or before <paramref name="openedBeforeUtc"/> and have no offline post yet.</summary>
     Task<IReadOnlyList<SlackUnclaimedChat>> UnclaimedChatRequestsAsync(DateTime openedBeforeUtc, CancellationToken cancellationToken);
@@ -313,14 +318,21 @@ FROM config.investigation_request_askers
 WHERE request_id = $2
 ON CONFLICT (request_id, person_id) DO NOTHING";
 
+    /* The threads with waiting messages, with when each thread's first request opened, so the sweep applies the age limit as the handler does. */
     internal const string WaitingThreadsSql = @"
-SELECT m.thread_request_id, r.route_id, r.server_id, m.channel_id, m.thread_ts, count(*)
+SELECT m.thread_request_id, r.route_id, r.server_id, m.channel_id, m.thread_ts, count(*), r.opened_at
 FROM config.investigation_person_messages AS m
 JOIN config.investigation_requests AS r ON r.request_id = m.thread_request_id
 WHERE m.state = 'waiting'
-GROUP BY m.thread_request_id, r.route_id, r.server_id, m.channel_id, m.thread_ts
+GROUP BY m.thread_request_id, r.route_id, r.server_id, m.channel_id, m.thread_ts, r.opened_at
 ORDER BY min(m.received_at)
 LIMIT $1";
+
+    /* A waiting message the sweep refuses: it keeps its text as the audit row it is, and no chat request ever reads it. */
+    internal const string RefusePersonMessageSql = @"
+UPDATE config.investigation_person_messages
+SET state = 'refused'
+WHERE channel_id = $1 AND ts = $2 AND state = 'waiting'";
 
     /* The oldest waiting messages of a thread, at most the thread cap: rows past it wait for the next open. */
     internal const string WaitingMessagesSql = @"
@@ -643,10 +655,19 @@ FOR UPDATE";
         var rows = new List<SlackWaitingThread>();
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new SlackWaitingThread(reader.GetGuid(0), reader.GetInt32(1), reader.GetInt32(2), reader.GetString(3), reader.GetString(4), (int)reader.GetInt64(5)));
+            rows.Add(new SlackWaitingThread(reader.GetGuid(0), reader.GetInt32(1), reader.GetInt32(2), reader.GetString(3), reader.GetString(4), (int)reader.GetInt64(5), Utc(reader.GetDateTime(6))));
         }
 
         return rows;
+    }
+
+    /// <inheritdoc cref="ISlackChatStore.RefuseMessageAsync" />
+    public async Task RefusePersonMessageAsync(SlackPersonMessage message, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = Command(connection, null, RefusePersonMessageSql, P(message.ChannelId), P(message.Ts));
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     /// <inheritdoc cref="ISlackChatStore.WaitingMessagesAsync" />

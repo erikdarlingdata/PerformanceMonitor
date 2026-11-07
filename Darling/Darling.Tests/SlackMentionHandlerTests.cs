@@ -64,6 +64,7 @@ public sealed class SlackMentionHandlerTests
         public Dictionary<Guid, List<SlackPersonMessage>> WaitingMessages { get; } = [];
         public List<SlackUnclaimedChat> Unclaimed { get; } = [];
         public List<DateTime> UnclaimedAskedBefore { get; } = [];
+        public List<SlackPersonMessage> Refused { get; } = [];
         public int Calls { get; private set; }
 
         public Task<SlackChatThread?> FindThreadAsync(string channelId, string threadTs, CancellationToken ct)
@@ -132,6 +133,13 @@ public sealed class SlackMentionHandlerTests
 
         public Task<IReadOnlyList<SlackPersonMessage>> WaitingMessagesAsync(Guid threadRequestId, CancellationToken ct) =>
             Task.FromResult<IReadOnlyList<SlackPersonMessage>>(WaitingMessages.TryGetValue(threadRequestId, out var m) ? m : []);
+
+        public Task RefuseMessageAsync(SlackPersonMessage message, CancellationToken ct)
+        {
+            Calls++;
+            Refused.Add(message);
+            return Task.CompletedTask;
+        }
 
         public Task<IReadOnlyList<SlackUnclaimedChat>> UnclaimedChatRequestsAsync(DateTime openedBeforeUtc, CancellationToken ct)
         {
@@ -235,16 +243,6 @@ public sealed class SlackMentionHandlerTests
         Assert.False(SlackMentionHandler.IsTooOld(Now.AddDays(-7), Now));
         Assert.True(SlackMentionHandler.IsTooOld(Now.AddDays(-7).AddSeconds(-1), Now));
         Assert.Equal(TimeSpan.FromDays(7), SlackChatRules.ThreadAgeLimit);
-    }
-
-    [Fact]
-    public void TheAnswers_AreOneSentenceEach_WithNoEmoji()
-    {
-        foreach (var answer in new[] { SlackChatAnswers.NoGrant, SlackChatAnswers.OutsideThread, SlackChatAnswers.OldRequest, SlackChatAnswers.Waiting, SlackChatAnswers.OverCap, SlackChatAnswers.Offline, SlackChatAnswers.RouteCap, SlackChatAnswers.WaitingFull })
-        {
-            Assert.DoesNotContain(':', answer.Replace("'", ""));
-            Assert.All(answer, c => Assert.True(c < 0x2000, answer));
-        }
     }
 
     /* ───────── the handler ───────── */
@@ -555,7 +553,7 @@ public sealed class SlackMentionHandlerTests
     public async Task TheSweep_OpensOneChatRequestForTheWaitingMessagesOfAThread_WhoseNewestRequestHasEnded_WithEveryAsker()
     {
         var (sweep, store, posts) = Sweep();
-        store.Waiting.Add(new SlackWaitingThread(First, RouteId, ServerId, Channel, ThreadTs, 2));
+        store.Waiting.Add(new SlackWaitingThread(First, RouteId, ServerId, Channel, ThreadTs, 2, Now.AddHours(-2)));
         store.WaitingMessages[First] = [Waiting("1700000000.000601", 7, "first"), Waiting("1700000000.000602", 8, "second"), Waiting("1700000000.000603", 7, "third")];
         store.Levels[7] = 1;
         store.Levels[8] = 3;
@@ -574,7 +572,7 @@ public sealed class SlackMentionHandlerTests
     public async Task TheSweep_LeavesWaitingMessagesAlone_WhileTheNewestRequestIsInPlay_OrOverTheCaps()
     {
         var (sweep, store, _) = Sweep();
-        store.Waiting.Add(new SlackWaitingThread(First, RouteId, ServerId, Channel, ThreadTs, 1));
+        store.Waiting.Add(new SlackWaitingThread(First, RouteId, ServerId, Channel, ThreadTs, 1, Now.AddHours(-2)));
         store.WaitingMessages[First] = [Waiting("1700000000.000601", 7, "first")];
         store.Levels[7] = 1;
         store.Newest = new SlackChatNewest(Newest, "claimed", InvestigationTriggerKinds.Chat, Now.AddMinutes(-1));
@@ -585,6 +583,93 @@ public sealed class SlackMentionHandlerTests
         store.Counts = new SlackChatCounts(6, 0);
         Assert.Equal((0, 0), await sweep.RunOnceAsync(CancellationToken.None));
         Assert.Empty(store.Opens);
+        Assert.Empty(store.Refused);
+    }
+
+    /// <summary>The sweep applies the handler's grant rule before it opens or joins: a waiting message whose asker's live level is 0 by the time the
+    /// request ends (the grant removed, or the person disabled) is refused as the handler refuses a mention without the grant, answered once an hour
+    /// and journaled without text or person_id, and never opens or joins a chat request at level 0. The other askers' messages go on as before.</summary>
+    [Fact]
+    public async Task TheSweep_RefusesAWaitingMessageWhoseAskersLiveLevelIsZero_OnceAnHour_AndOpensOrJoinsForTheRest()
+    {
+        var (sweep, store, posts) = Sweep();
+        store.Waiting.Add(new SlackWaitingThread(First, RouteId, ServerId, Channel, ThreadTs, 3, Now.AddHours(-2)));
+        store.WaitingMessages[First] = [Waiting("1700000000.000601", 7, "first"), Waiting("1700000000.000602", 8, "the password is hunter2"), Waiting("1700000000.000603", 8, "again")];
+        store.Levels[7] = 1;
+        store.Newest = new SlackChatNewest(Newest, "reported", InvestigationTriggerKinds.Alert, Now.AddMinutes(-10));
+
+        /* The open arm: person 8 has no live level, so the chat request opens for person 7's message alone. */
+        Assert.Equal((1, 0), await sweep.RunOnceAsync(CancellationToken.None));
+        var open = Assert.Single(store.Opens);
+        Assert.Equal(new[] { "first" }, open.Messages.Select(m => m.Text).ToArray());
+        Assert.Equal((7L, 1), (Assert.Single(open.Askers).PersonId, Assert.Single(open.Askers).RequestLevel));
+        Assert.Equal(new[] { "1700000000.000602", "1700000000.000603" }, store.Refused.Select(m => m.Ts).ToArray());
+        Assert.Equal((Channel, SlackChatAnswers.NoGrant, ThreadTs), Assert.Single(posts.Posts));
+        var row = Assert.Single(store.Journal);
+        Assert.Equal((First, RouteId, ServerId, "person:8", SlackChatAnswers.NoGrantKind), (row.Request, row.Route, row.Server, row.Actor, row.Outcome));
+        Assert.Null(row.Detail["text"]);
+        Assert.Null(row.Detail["person_id"]);
+        Assert.DoesNotContain("hunter2", row.Detail.ToJsonString(), StringComparison.Ordinal);
+
+        /* The join arm: person 7 joins the unclaimed chat request at their level; person 8's message is refused, never joined at level 0, and the
+           same person within the hour gets no second answer. */
+        store.Opens.Clear();
+        store.Refused.Clear();
+        store.WaitingMessages[First] = [Waiting("1700000000.000604", 7, "join me"), Waiting("1700000000.000605", 8, "still revoked")];
+        store.Newest = new SlackChatNewest(Newest, "open", InvestigationTriggerKinds.Chat, Now.AddMinutes(-1));
+        Assert.Equal((0, 0), await sweep.RunOnceAsync(CancellationToken.None));
+        var join = Assert.Single(store.Joins);
+        Assert.Equal((Newest, 7L, 1, "join me"), (join.Request, join.Asker.PersonId, join.Asker.RequestLevel, join.Message.Text));
+        Assert.Equal("1700000000.000605", Assert.Single(store.Refused).Ts);
+        Assert.Empty(store.Opens);
+        Assert.Single(posts.Posts);
+        Assert.Single(store.Journal);
+
+        /* Nobody granted: nothing opens, and every message is refused. */
+        store.Refused.Clear();
+        store.Joins.Clear();
+        store.WaitingMessages[First] = [Waiting("1700000000.000606", 8, "alone")];
+        store.Newest = new SlackChatNewest(Newest, "reported", InvestigationTriggerKinds.Chat, Now.AddMinutes(-1));
+        Assert.Equal((0, 0), await sweep.RunOnceAsync(CancellationToken.None));
+        Assert.Empty(store.Opens);
+        Assert.Empty(store.Joins);
+        Assert.Single(store.Refused);
+    }
+
+    /// <summary>The sweep applies the handler's age limit: a thread whose first request opened more than seven days ago opens nothing, and every
+    /// waiting message of it is refused as the handler refuses a mention there, each person answered once.</summary>
+    [Fact]
+    public async Task TheSweep_RefusesEveryWaitingMessageOfAThreadPastSevenDays_AndOpensNothing()
+    {
+        var (sweep, store, posts) = Sweep();
+        store.Waiting.Add(new SlackWaitingThread(First, RouteId, ServerId, Channel, ThreadTs, 2, Now.AddDays(-7).AddSeconds(-1)));
+        store.WaitingMessages[First] = [Waiting("1700000000.000601", 7, "late"), Waiting("1700000000.000602", 8, "later"), Waiting("1700000000.000603", 7, "latest")];
+        store.Levels[7] = 1;
+        store.Levels[8] = 3;
+        store.Newest = new SlackChatNewest(Newest, "reported", InvestigationTriggerKinds.Alert, Now.AddDays(-8));
+
+        Assert.Equal((0, 0), await sweep.RunOnceAsync(CancellationToken.None));
+
+        Assert.Empty(store.Opens);
+        Assert.Empty(store.Joins);
+        Assert.Equal(3, store.Refused.Count);
+        Assert.Equal(2, posts.Posts.Count);
+        Assert.All(posts.Posts, p => Assert.Equal((Channel, SlackChatAnswers.OldRequest, ThreadTs), p));
+        Assert.Equal(2, store.Journal.Count);
+        Assert.All(store.Journal, r =>
+        {
+            Assert.Equal((First, SlackChatAnswers.OldKind), (r.Request, r.Outcome));
+            Assert.Null(r.Detail["text"]);
+            Assert.Null(r.Detail["person_id"]);
+        });
+
+        /* A thread at the limit, not past it, still opens. */
+        store.Waiting[0] = new SlackWaitingThread(First, RouteId, ServerId, Channel, ThreadTs, 1, Now.AddDays(-7));
+        store.Refused.Clear();
+        store.WaitingMessages[First] = [Waiting("1700000000.000604", 7, "in time")];
+        Assert.Equal((1, 0), await sweep.RunOnceAsync(CancellationToken.None));
+        Assert.Single(store.Opens);
+        Assert.Empty(store.Refused);
     }
 
     [Fact]

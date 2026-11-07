@@ -79,6 +79,10 @@ public sealed class StoreSlackChatCommands(InvestigationRequestStore store, ILog
         _store.WaitingMessagesAsync(threadRequestId, cancellationToken);
 
     /// <inheritdoc />
+    public Task RefuseMessageAsync(SlackPersonMessage message, CancellationToken cancellationToken) =>
+        _store.RefusePersonMessageAsync(message, cancellationToken);
+
+    /// <inheritdoc />
     public Task<IReadOnlyList<SlackUnclaimedChat>> UnclaimedChatRequestsAsync(DateTime openedBeforeUtc, CancellationToken cancellationToken) =>
         _store.UnclaimedChatRequestsAsync(openedBeforeUtc, cancellationToken);
 }
