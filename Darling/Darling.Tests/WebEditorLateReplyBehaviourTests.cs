@@ -20,7 +20,8 @@ namespace Darling.Tests;
 /// #7937: a reply that lands after the author has moved on is dropped. In the dashboard composer's read-panel editor a sample
 /// that returns after the author picked a chart type keeps the pick, and the older of two samples does not fill the fields.
 /// In the alert-rule editor the validate and test replies of an earlier check do not land over the "Checking…" strip of a later
-/// one. Run as the shipped <c>editor.js</c> and <c>alert-editor.js</c> under Node against a scripted service whose replies are
+/// one, nor over the hint an incomplete rule shows. A chart picked while a newly chosen read's sample is in flight takes its fields
+/// from that sample. Run as the shipped <c>editor.js</c> and <c>alert-editor.js</c> under Node against a scripted service whose replies are
 /// held until released (<c>web-editor-late-reply-harness.mjs</c>). Node is skipped when it is not installed.
 /// </summary>
 public sealed class WebEditorLateReplyBehaviourTests
@@ -96,5 +97,26 @@ public sealed class WebEditorLateReplyBehaviourTests
         // The newer check's own replies draw its result.
         Assert.StartsWith("Tested with warning 20", run.GetProperty("alertPreviewAtEnd").GetString());
         Assert.Equal(new[] { "validate:10", "validate:20", "test:20" }, Strings(run.GetProperty("alertAllChecks")));
+    }
+
+    [Fact]
+    public void ClearingTheThreshold_WhileValidateWaits_SendsNoTestAndKeepsTheHint()
+    {
+        var run = Result.Value;
+        Assert.Equal(new[] { "validate:10" }, Strings(run.GetProperty("clearChecksBefore")));
+        Assert.StartsWith("Choose a metric and a warning threshold", run.GetProperty("clearPreviewAfterClear").GetString());
+        // The earlier check's validate answer starts no test of the definition the author has left, and the hint stays.
+        Assert.Empty(Ints(run.GetProperty("clearTestsAfterOlderValidate")));
+        Assert.StartsWith("Choose a metric and a warning threshold", run.GetProperty("clearPreviewAtEnd").GetString());
+    }
+
+    [Fact]
+    public void AChartPickedWhileTheNewReadsSampleIsInFlight_TakesItsFieldsFromTheNewSample()
+    {
+        var run = Result.Value;
+        Assert.Equal("line", run.GetProperty("switchVizAtEnd").GetString());
+        var fields = run.GetProperty("switchFieldsAtEnd");
+        Assert.Equal("b2_rows", fields.GetProperty("rowsKey").GetString());
+        Assert.Equal("y", fields.GetProperty("xKey").GetString());
     }
 }

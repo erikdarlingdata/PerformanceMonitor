@@ -158,6 +158,8 @@ const pick = async (root, label, value) => { const sel = byLabel(root, label); s
 const open = () => reads.filter((r) => !r.answered);
 const openChecks = () => checks.filter((c) => !c.answered);
 const rowsKeyOptions = (root) => { const box = all(root).find((n) => cls(n) === "vizcfg-box"); return box ? all(box).filter((n) => n.tag === "option").map((n) => n.attrs.value).filter((v) => v && /_rows$/.test(v)) : []; };
+/* The rows key and x-axis key the Fields editor has FILLED IN (its inputs' values), as against the keys it offers. */
+const fieldsPicked = (root) => { const v = (label) => { const i = byLabel(root, label); return i ? i.value : null; }; return { rowsKey: v("rows key"), xKey: v("x-axis key") }; };
 
 /* Settles the composer before this one. Its preview timer (editor.js, PREVIEW_DEBOUNCE_MS after the last change) sends a read of
    its panel's read at the same path a sample uses, and a sample the next composer sends for that path JOINS the open request
@@ -254,6 +256,52 @@ const out = {};
   await flush();
   out.alertPreviewAtEnd = preview();
   out.alertAllChecks = checks.map((c) => c.kind + ":" + c.warn);
+}
+
+/* 4. The alert-rule editor: the author clears the threshold while the first check waits on validate. The earlier check's validate
+      answer must start no test and must not draw over the hint the incomplete rule shows. */
+{
+  checks.length = 0;
+  const main = new FakeNode("main");
+  await alertEditor.renderAlertEditor(main, "new");
+  await flush();
+  const preview = () => all(main).find((n) => cls(n) === "alert-preview").textContent;
+  await pick(main, "Metric", "wait_ms");
+  await pick(main, "Aggregate", "sum");
+  const warn = byLabel(main, "Warning threshold");
+  warn.value = "10";
+  warn.fire("input");
+  await firePendingTimers();
+  out.clearChecksBefore = openChecks().map((c) => c.kind + ":" + c.warn);
+  warn.value = "";
+  warn.fire("input");
+  await firePendingTimers();
+  out.clearPreviewAfterClear = preview();
+  answer(checks.find((c) => c.kind === "validate" && c.warn === 10), { valid: true });
+  await flush();
+  out.clearTestsAfterOlderValidate = checks.filter((c) => c.kind === "test").map((c) => c.warn);
+  const olderTest = checks.find((c) => c.kind === "test" && c.warn === 10);
+  if (olderTest) {
+    answer(olderTest, { status: "ok", note: "Tested with warning 10", results: [{ server_name: "srv-a", current_value: 15 }] });
+    await flush();
+  }
+  out.clearPreviewAtEnd = preview();
+}
+
+/* 5. A read has its sample; the author switches to another read and picks a chart before its sample lands. The fields must come from
+      the new read's sample, not the old read's. */
+{
+  const main = await readPanelEditor();
+  await pick(main, "Read", "r1");
+  answer(reads.find((r) => r.tool === "r1"), { a1_rows: [{ x: 1 }] });
+  await flush();
+  await pick(main, "Read", "r2");
+  await pick(main, "Visualization", "line");
+  out.switchFieldsWhileInFlight = fieldsPicked(main);
+  answer(reads.find((r) => r.tool === "r2"), { b2_rows: [{ y: 1 }] });
+  await flush();
+  out.switchVizAtEnd = byLabel(main, "Visualization").value;
+  out.switchFieldsAtEnd = fieldsPicked(main);
 }
 
 console.log(JSON.stringify(out));
