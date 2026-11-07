@@ -470,10 +470,25 @@ jobs:
           name: ci-test-results-${{ matrix.leg }}
           path: |
             TestResults/
+            !TestResults/crash-dumps/**
             ${{ runner.temp }}/darling-pg*.log
           retention-days: 7
           overwrite: true
           if-no-files-found: ignore
+
+      # #8190: a test host that died with a native fault (exit -1073741819 is an access violation) wrote a minidump under
+      # TestResults/crash-dumps, and the shard scripts recorded its exit code there (.github/scripts/crash-dumps.ps1). The folder
+      # is its own artifact: only a crashed leg has one, and a dump is tens of MB, so it is kept out of the results above.
+      - name: Upload the leg's crash dumps
+        if: always() && hashFiles('TestResults/crash-dumps/**') != ''
+        continue-on-error: true
+        timeout-minutes: 10
+        uses: actions/upload-artifact@v6
+        with:
+          name: ci-crash-dumps-${{ matrix.leg }}
+          path: TestResults/crash-dumps/
+          retention-days: 7
+          overwrite: true
 
   # The Darling export tool (Exporter/): restore in locked mode, build, and run its tests. It is a plain net10.0 console app,
   # so it runs on Linux, where Docker is available for the tests that start a real PostgreSQL (they skip themselves without

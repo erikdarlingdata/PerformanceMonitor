@@ -245,6 +245,11 @@ $shard = $Leg - 1
 New-Item -ItemType Directory -Force -Path TestResults | Out-Null
 Write-Host "leg $Leg of ${LegCount}: areas $Areas, shard $shard"
 
+# #8190: every test host this leg starts inherits the crash-dump variables, so one that dies with a native fault leaves a
+# minidump under TestResults/crash-dumps for the workflow to upload. The shard script marks its own chunks; the Lite loop below marks its.
+. (Join-Path $scripts 'crash-dumps.ps1')
+Enable-CrashDumps
+
 # The slices first, so a log that dies early still names what the leg was to run. The Darling list is handed to the shard
 # script below, which would otherwise list the classes again (one test host start each, 10 s a listing, #7098); both cut it
 # with the same deterministic packer. The Lite list is recomputed by the Lite chunk loop below from the same slice.
@@ -338,6 +343,7 @@ if ($runLite) {
             Write-Host "lite shard $shard chunk $n of $($chunks.Count): $($chunk.Count) classes"
             & $liteExe @chunkArgs -xml "TestResults/lite-timing-$shard-$n-a$RunAttempt.xml" -longRunning 300 | Tee-Object -FilePath "TestResults/lite-runner-$shard.log" -Append
             if ($LASTEXITCODE -ne 0) { $failedChunks++; Write-Host "lite shard $shard chunk $n failed with exit code $LASTEXITCODE" }
+            Write-CrashMarker "lite shard $shard chunk $n" $LASTEXITCODE
         }
         # Piece-level exit status: the Invoke-Piece check reads $LASTEXITCODE.
         $global:LASTEXITCODE = if ($failedChunks -gt 0) { 1 } else { 0 }
