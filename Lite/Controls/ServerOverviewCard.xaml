@@ -43,7 +43,7 @@
                                  VerticalAlignment="Center"/>
                     </StackPanel>
                     <TextBlock Text="{Binding DisplayName}" AutomationProperties.AutomationId="OverviewServerCardName"
-                               Style="{StaticResource PanelTitleText}" TextTrimming="CharacterEllipsis"/>
+                               Style="{DynamicResource PanelTitleText}" TextTrimming="CharacterEllipsis"/>
                 </DockPanel>
                 <!-- #2437 (the Lite half of #2422): the status line carries the
                      reason it is that colour. It was a bare word — a reader saw
