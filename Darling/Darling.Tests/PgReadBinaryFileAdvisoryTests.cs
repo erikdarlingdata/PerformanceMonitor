@@ -26,6 +26,7 @@ public sealed class PgReadBinaryFileAdvisoryTests : IDisposable
     {
         PgReadBinaryFileAdvisory.Reset();
         PgReadBinaryFileAdvisory.NoteInterval = TimeSpan.FromHours(24);
+        PgReadBinaryFileAdvisory.ClockForTests = null;
         PgReadBinaryFileCapability.Reset();
     }
 
@@ -33,6 +34,7 @@ public sealed class PgReadBinaryFileAdvisoryTests : IDisposable
     {
         PgReadBinaryFileAdvisory.Reset();
         PgReadBinaryFileAdvisory.NoteInterval = TimeSpan.FromHours(24);
+        PgReadBinaryFileAdvisory.ClockForTests = null;
         PgReadBinaryFileCapability.Reset();
     }
 
@@ -49,16 +51,22 @@ public sealed class PgReadBinaryFileAdvisoryTests : IDisposable
         Assert.False(PgReadBinaryFileAdvisory.ShouldNote("target-a"));
     }
 
+    /// <summary>The gate is judged on the advisory's own clock: a fake clock steps 19 ms (inside a 20 ms interval, no
+    /// note) and then 2 ms more (past it, notes again), so no wall-clock pause between two calls can cross the
+    /// interval on its own.</summary>
     [Fact]
-    public async Task AfterTheIntervalItNotesAgain()
+    public void AfterTheIntervalItNotesAgain()
     {
+        var now = new DateTime(2026, 10, 14, 12, 0, 0, DateTimeKind.Utc);
+        PgReadBinaryFileAdvisory.ClockForTests = () => now;
         PgReadBinaryFileAdvisory.NoteInterval = TimeSpan.FromMilliseconds(20);
 
         Assert.True(PgReadBinaryFileAdvisory.ShouldNote("target-a"));
+
+        now = now.AddMilliseconds(19);
         Assert.False(PgReadBinaryFileAdvisory.ShouldNote("target-a"));
 
-        await Task.Delay(60);
-
+        now = now.AddMilliseconds(2);
         Assert.True(PgReadBinaryFileAdvisory.ShouldNote("target-a"));
     }
 
