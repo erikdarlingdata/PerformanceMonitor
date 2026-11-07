@@ -211,6 +211,8 @@ public sealed class QueryTagUsageViewLiveTests
     {
         await WithViewAsync(async (store, viewer, ct) =>
         {
+            /* #8083: the tool reads no section on a store that defines no tag, so one is defined; it maps nothing. */
+            await TagAsync(store, ct, "A");
             foreach (var table in new[]
             {
                 "query_stats", "query_store_interval_wide", "procedure_stats", "blocked_process_reports", "dmv_blocking_snapshots", "deadlocks",

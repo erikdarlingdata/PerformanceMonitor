@@ -240,9 +240,31 @@ public sealed class LiteQueryTagMcpToolTests : IDisposable
         Assert.DoesNotContain("carry query tag", message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #8083: a store that defines no query tag answers empty with the reason and no sections, although the window holds work: every row would
+    /// be untagged and every untagged figure would equal its total, so no section is read. An unknown tag name is still a refusal.
+    /// </summary>
+    [Fact]
+    public async Task ResourceUse_WithNoQueryTagDefined_IsEmptyWithTheReason_AndCarriesNoSections()
+    {
+        await PlanAsync(_idA, "0x00000000000000AA", 5_000_000);
+
+        foreach (var server in new[] { ServerA, null })
+        {
+            var root = Parse(await McpQueryTagUsageTools.GetResourceUseByTag(_service, _serverManager, server, 24));
+
+            Assert.True(root.TryGetProperty("status", out var status), "the read carries no status: " + root.GetRawText());
+            Assert.Equal("empty", status.GetString());
+            Assert.Contains("No query tags are defined", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.False(root.TryGetProperty("sections", out _), "no section is read on a store with no tag");
+        }
+    }
+
     [Fact]
     public async Task ResourceUse_OnAnAzureSqlDatabaseServerWithNoRows_IsEmptyWithItsSections_BecauseNoSourceCollectorSkipsThatEdition()
     {
+        /* #8083: the tool reads no section on a store that defines no tag, so one is defined; it maps nothing. */
+        await _service.CreateQueryTagAsync("fixture", null);
         await ExecAsync(
             "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition) VALUES ($1, $2, $3, 'x', 'Edition', '12.0.2000.8', 'RTM', 5)",
             _nextId++, Ago(5), _idA);
