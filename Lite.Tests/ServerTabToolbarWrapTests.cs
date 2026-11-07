@@ -35,6 +35,9 @@ public sealed class ServerTabToolbarWrapTests
     /* The sidebar's width in MainWindow.xaml; a tab is narrower than the window by that much. */
     private const int SidebarWidth = 280;
 
+    /* #8219: below about 1100 DIPs the sidebar shows its 40 px rail, so a tab beside it is wider than it was. */
+    private static int SidebarFor(int windowWidth) => windowWidth < 1100 ? 40 : SidebarWidth;
+
     [Theory]
     [InlineData(1280, 800)]
     [InlineData(900, 600)]
@@ -70,8 +73,8 @@ public sealed class ServerTabToolbarWrapTests
         var outside = StaTestThread.Run(() => WithTheme(() =>
         {
             var found = new List<string>();
-            found.AddRange(Outside(new JobHistoryTab(), width - SidebarWidth, height, "Refresh").Select(o => "[Job History] " + o));
-            found.AddRange(Outside(new AlertsHistoryTab(), width - SidebarWidth, height, "Refresh", "DismissAllButton").Select(o => "[Alert History] " + o));
+            found.AddRange(Outside(new JobHistoryTab(), width - SidebarFor(width), height, "Refresh").Select(o => "[Job History] " + o));
+            found.AddRange(Outside(new AlertsHistoryTab(), width - SidebarFor(width), height, "Refresh", "DismissAllButton").Select(o => "[Alert History] " + o));
             return found;
         }));
 
@@ -95,6 +98,12 @@ public sealed class ServerTabToolbarWrapTests
                 var element = tab.FindName(name) as FrameworkElement
                     ?? ClippedTextProbe.Descendants(tab).OfType<Button>().FirstOrDefault(b => Equals(b.Content, name))
                     ?? throw new Xunit.Sdk.XunitException($"{name} is not on the tab");
+                /* #8219: a toolbar control that did not fit is in the toolbar's overflow menu, which the "..." button opens. That is reachable. */
+                if (ToolBar.GetIsOverflowItem(element))
+                {
+                    continue;
+                }
+
                 var bounds = element.TransformToAncestor(tab).TransformBounds(new Rect(element.RenderSize));
                 var natural = element.DesiredSize.Width - element.Margin.Left - element.Margin.Right;
                 if (bounds.Left < -0.5 || bounds.Right > tab.ActualWidth + 0.5 || element.RenderSize.Width + 0.5 < natural)
