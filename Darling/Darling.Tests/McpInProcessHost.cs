@@ -76,12 +76,15 @@ internal sealed class McpInProcessHost : IAsyncDisposable
     /// <param name="installGuard">False to leave <see cref="McpUnknownArgumentGuard"/> out, so a call meets the SDK's
     /// binder with nothing in front of it.</param>
     /// <param name="cancellationToken">Cancels the client's start.</param>
+    /// <param name="configureServer">Further server configuration, applied after the guard and before the tools are
+    /// registered: a test's own message filter, for one.</param>
     public static async Task<McpInProcessHost> StartAsync(
         IReadOnlyCollection<Type> toolTypes,
         Func<Type, bool> isServiceParameter,
         Func<Type, object?> inertInstanceFor,
         bool installGuard,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<IMcpServerBuilder>? configureServer = null)
     {
         var clientToServer = new Pipe();
         var serverToClient = new Pipe();
@@ -117,6 +120,8 @@ internal sealed class McpInProcessHost : IAsyncDisposable
         {
             builder = builder.WithRequestFilters(filters => filters.AddCallToolFilter(McpUnknownArgumentGuard.Instance));
         }
+
+        configureServer?.Invoke(builder);
 
         var register = typeof(McpSchemaCompat).GetMethod(
             nameof(McpSchemaCompat.WithGeminiCompatibleTools),
