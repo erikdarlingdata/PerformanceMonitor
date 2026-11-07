@@ -76,9 +76,11 @@ public static class CpuSchedulerMetrics
     /// <summary>
     /// The rolled-up CPU-scheduler pressure classification, a pure client-side derivation mirroring
     /// install/47's <c>report.cpu_scheduler_pressure</c> (pressure_level + recommendation). The banding is the
-    /// proc's own CASE, in the same order: runnable task queue &gt; 50 CRITICAL / &gt; 20 HIGH / &gt; 10 MEDIUM,
-    /// then worker-utilization &gt; 90% HIGH, then the collector's worker-exhaustion / runnable-tasks /
-    /// queued-requests warning flags.
+    /// proc's own CASE: runnable task queue &gt; 50 CRITICAL / &gt; 20 HIGH / &gt; 10 MEDIUM, then the collector's
+    /// worker-exhaustion flag CRITICAL, then worker-utilization &gt; 90% HIGH, then the runnable-tasks and
+    /// queued-requests warning flags. The exhaustion flag is tested before the utilization arm because the collector
+    /// raises it at 90% of max worker threads, so above 90% both hold and the flag's CRITICAL is the level a server
+    /// at 95% reads; tested after it, CRITICAL would be reachable only at exactly 90%.
     /// </summary>
     public static CpuPressure ClassifyCpuPressure(ICpuSchedulerSnapshot s)
     {
@@ -90,8 +92,8 @@ public static class CpuSchedulerMetrics
             s.TotalRunnableTasksCount > 50 ? "CRITICAL - High runnable task queue" :
             s.TotalRunnableTasksCount > 20 ? "HIGH - Moderate runnable task queue" :
             s.TotalRunnableTasksCount > 10 ? "MEDIUM - Some runnable tasks queued" :
-            workerUtil > 90 ? "HIGH - Worker thread exhaustion" :
             s.WorkerThreadExhaustionWarning ? "CRITICAL - Worker thread exhaustion warning" :
+            workerUtil > 90 ? "HIGH - Worker thread exhaustion" :
             s.RunnableTasksWarning ? "HIGH - Runnable tasks warning" :
             s.QueuedRequestsWarning ? "MEDIUM - Queued requests warning" :
             "NORMAL";
