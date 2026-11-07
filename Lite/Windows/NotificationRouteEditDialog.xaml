@@ -5,7 +5,7 @@
         SizeToContent="Height" Width="620"
         WindowStartupLocation="CenterOwner"
         ResizeMode="NoResize"
-        Icon="/EDD.ico"
+        Icon="pack://application:,,,/PerformanceMonitorLite;component/EDD.ico"
         Background="{DynamicResource BackgroundBrush}">
     <!-- #5750: one route. What it matches, which server or tag it covers, and a destination per channel.
          Shape of MuteRuleDialog; the save happens in the dialog so the store's own validation message shows inline. -->
@@ -46,7 +46,7 @@
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
             <ComboBox Grid.Column="0" x:Name="MatchCombo" SelectionChanged="MatchCombo_SelectionChanged"
-                      ToolTip="A family covers every alert in it. Choose 'Exact metric name' to route one alert by its metric name, as shown in Alert History. Exact names win over families, and a family wins over 'Every metric'."/>
+                      ToolTip="A family covers every alert in it. Choose 'Exact metric name' to route one alert by its metric name, as shown in Alert History. 'Every analysis finding (Analysis: *)' catches every analysis finding, after a route for its category and before a family. Exact names win over families, and a family wins over 'Every metric'."/>
             <TextBox Grid.Column="2" x:Name="ExactMetricBox" IsEnabled="False"
                      ToolTip="The exact metric name, e.g. Deadlocks or Server Unreachable. Not case-sensitive."/>
         </Grid>

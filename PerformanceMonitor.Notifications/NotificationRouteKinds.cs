@@ -40,7 +40,7 @@ public static class NotificationRouteKinds
 
     /// <summary>The line the edit dialogs show under the Matches list for <see cref="AnalysisAllChoiceLabel"/> (#7999).</summary>
     public const string AnalysisAllChoiceDescription =
-        "Every analysis finding of any category, at any scope. A route for one category (Analysis: <category>) or for the finding's own name wins over it; a family route and * lose to it.";
+        "Every analysis finding of any category, at any scope. Within the same scope, a route for one category (Analysis: <category>) or for the finding's own name wins over it, and a family route or * loses to it.";
 
     /// <summary>The <c>metric_match</c> text an edit dialog stores (#7999): the chosen combo tag, or the typed exact name when the
     /// tag is null. An exact name that is really a family spelled by hand becomes the family, and any spelling of the

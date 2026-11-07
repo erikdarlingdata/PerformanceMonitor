@@ -328,7 +328,7 @@ public sealed record NotificationRoute(
     }
 
     /// <summary>The text a writer should store for <paramref name="metricMatch"/> (#7999): <see cref="AnalysisAllMatch"/> for any
-    /// accepted spelling of the every-finding match, otherwise the input unchanged. One helper for the MCP writers and both
+    /// accepted spelling of the every-finding match, otherwise the input unchanged. One helper for the MCP writers, the web agent-setup form and both
     /// edit dialogs, so no product canonicalises it differently.</summary>
     public static string CanonicalMatch(string metricMatch) =>
         IsAnalysisAllMatch(metricMatch) ? AnalysisAllMatch : metricMatch;

@@ -18,7 +18,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>
 /// Add/Edit one notification route (#3598). The match combo is filled from <see cref="AlertFamily.All"/> plus
-/// one "Exact metric name…" entry, so the family list on screen IS the closed taxonomy the resolver matches
+/// one "Every analysis finding (Analysis: *)" entry (#7999) and one "Exact metric name…" entry, so the family list on screen IS the closed taxonomy the resolver matches
 /// against and cannot drift from it. Validation is the store's own
 /// (<see cref="ViewerDataService.ValidateNotificationRoute"/>), so a route this dialog accepts is one the
 /// store accepts. Since #5750 the dialog also picks the route's scope (all servers, one server, or a tag) and offers the
@@ -249,7 +249,7 @@ public partial class NotificationRouteEditDialog : Window
         return 0;
     }
 
-    /// <summary>The chosen family, the wildcard <c>*</c>, or null for "Exact metric name…".</summary>
+    /// <summary>The chosen family, the wildcard <c>*</c>, <c>Analysis: *</c> (every analysis finding), or null for "Exact metric name…".</summary>
     private string? SelectedMatch() => (FamilyCombo.SelectedItem as ComboBoxItem)?.Tag as string;
 
     private RouteScopeOption? SelectedScope() => ScopeCombo.SelectedItem as RouteScopeOption;

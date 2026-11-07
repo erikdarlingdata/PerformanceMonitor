@@ -40,7 +40,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// </summary>
 public sealed partial class DarlingMcpAlertTools
 {
-    private const string MatchHelp = "a family (performance, self-monitor, reports, agent-jobs, external), 'Analysis: <category>', 'Analysis: *' (every analysis finding, at any scope), an exact metric name, or * (scoped routes only)";
+    private const string MatchHelp = "a family (performance, self-monitor, reports, agent-jobs, external), 'Analysis: <category>', 'Analysis: *' (every finding), an exact metric name, or * (scoped routes only)";
 
     [McpServerTool(Name = "create_notification_route"), Description(
         "Creates a notification route, optionally with its own destinations (Slack, Teams, generic webhook, PagerDuty, email). With none, each channel goes where it went before (the next matching route, else Settings). Changes shared alert configuration; the service delivers on it at its next sweep. Returns created (the route with its recipient list in full, and for each destination set whether it is saved: the host for Teams and Slack, never a URL or key) with the undo call, or invalid. Only an operator token sets the agent fields (levels 0 to 3)." +

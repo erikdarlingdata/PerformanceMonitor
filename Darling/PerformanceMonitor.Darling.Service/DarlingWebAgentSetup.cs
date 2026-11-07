@@ -297,7 +297,7 @@ SELECT has_table_privilege(current_user, 'config_notification_routes', 'INSERT')
                 return "metric_match must be text.";
             }
 
-            draft.MetricMatch = match.GetValue<string>();
+            draft.MetricMatch = NotificationRoute.CanonicalMatch(match.GetValue<string>()); /* #7999: any spelling of Analysis: * is stored canonically */
         }
 
         if (body.ContainsKey("enabled"))
