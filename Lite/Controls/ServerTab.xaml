@@ -1507,10 +1507,11 @@
                 <TabControl x:Name="MemorySubTabControl" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                     <!-- Memory Overview Sub-Tab -->
                     <TabItem Header="Overview">
-                        <Grid Margin="8">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8"><!-- #8098: scrolls when the chart cannot keep its minimum height under the summary panel -->
+                        <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="420">
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
-                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                             </Grid.RowDefinitions>
 
                             <!-- Memory Summary Panel -->
@@ -1565,7 +1566,7 @@
 
                             <!-- Memory Trend Chart -->
                             <ScottPlot:WpfPlot Grid.Row="1" x:Name="MemoryChart"/>
-                        </Grid>
+                        </Grid></ScrollViewer>
                     </TabItem>
 
                     <!-- Memory Clerks Sub-Tab -->
@@ -2610,9 +2611,10 @@
                  latest-snapshot metric/value grid below whose warning rows highlight (the collector's own
                  CASE-computed pressure flags). Loads on tab activation via RefreshVisibleTabAsync (index 14). -->
             <TabItem Header="CPU Scheduler">
-                <Grid Margin="8">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8"><!-- #8098: scrolls when the chart cannot keep its minimum height above the snapshot grid -->
+                <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="420">
                     <Grid.RowDefinitions>
-                        <RowDefinition Height="2*"/>
+                        <RowDefinition Height="2*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
                     <ScottPlot:WpfPlot Grid.Row="0" x:Name="CpuSchedulerChart"/>
@@ -2640,7 +2642,7 @@
                     </DataGrid>
                     <!-- Shown only where the cpu_scheduler_stats collector does not run (Azure SQL Database). -->
                     <TextBlock Grid.Row="1" x:Name="CpuSchedulerNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
-                </Grid>
+                </Grid></ScrollViewer>
             </TabItem>
 
             <!-- Plan Cache Tab — the Lite port of Darling's Plan Cache surface (plan_cache_stats). The
