@@ -143,7 +143,7 @@ public sealed class DarlingMcpPgTrendTools
                 counter_reset_count = resets,
                 note = engineCounters
                     ? "estimated_wait_ms_per_second keeps the sampled arm's key but is MEASURED here: the wait time the engine's "
-                      + "cumulative wait counters (aurora_stat_system_waits(), the pg_wait_stats collector) accrued for the event "
+                      + "cumulative wait counters (the pg_wait_stats collector) accrued for the event "
                       + "between two collections, over the seconds between them, so the value is a duration rather than an estimate "
                       + "from samples. sample_count is the number of waits that completed in the interval, not profiler samples. "
                       + "backend_count is null on every point, because the native counters do not carry it. counter_reset is false "
