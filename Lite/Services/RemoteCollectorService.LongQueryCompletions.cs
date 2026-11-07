@@ -792,10 +792,14 @@ WHERE des.name = @session_name;", connection))
 
         try
         {
-            using var createCmd = new SqlCommand(
-                LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds, App.XeRingBufferMaxEvents), connection);
-            createCmd.CommandTimeout = CommandTimeoutSeconds;
-            await ExecuteLongQueryAzureDdlAsync(createCmd, cancellationToken);
+            /* #8146: max_events_limit is unverified on Azure SQL Database, so a refused create is retried once without it. */
+            await RingBufferTarget.CreateWithoutLimitOnRefusalAsync(App.XeRingBufferMaxEvents, async limit =>
+            {
+                using var createCmd = new SqlCommand(
+                    LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds, limit), connection);
+                createCmd.CommandTimeout = CommandTimeoutSeconds;
+                await ExecuteLongQueryAzureDdlAsync(createCmd, cancellationToken);
+            }, IsBenignXeSessionAlreadyPresentException);
         }
         catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))
         {
@@ -940,11 +944,15 @@ END;", connection);
             }
         }
 
-        using var createCmd = new SqlCommand(
-            LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds, App.XeRingBufferMaxEvents)
-            + "\n\n" + LongQueryCompletionsCollector.BuildStartSessionSql(sessionName, databaseScoped: true), connection);
-        createCmd.CommandTimeout = CommandTimeoutSeconds;
-        await ExecuteLongQueryAzureDdlAsync(createCmd, cancellationToken);
+        /* #8146: max_events_limit is unverified on Azure SQL Database, so a refused create is retried once without it. */
+        await RingBufferTarget.CreateWithoutLimitOnRefusalAsync(App.XeRingBufferMaxEvents, async limit =>
+        {
+            using var createCmd = new SqlCommand(
+                LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds, limit)
+                + "\n\n" + LongQueryCompletionsCollector.BuildStartSessionSql(sessionName, databaseScoped: true), connection);
+            createCmd.CommandTimeout = CommandTimeoutSeconds;
+            await ExecuteLongQueryAzureDdlAsync(createCmd, cancellationToken);
+        }, IsBenignXeSessionAlreadyPresentException);
         AppLogger.Info("XeSession", $"[Azure SQL DB:{connection.Database}] Created and started long-query completion XE session (database-scoped)");
     }
 

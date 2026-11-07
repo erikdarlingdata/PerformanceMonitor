@@ -608,7 +608,7 @@ SELECT
     /// customizable TEXT columns (statement / batch_text) are turned on via SET so they are actually
     /// collected; object_name needs no SET — it is one of rpc_completed's default data fields (#2129).
     /// </summary>
-    public static string BuildCreateSessionSql(string sessionName, bool databaseScoped, long thresholdMicroseconds, int ringBufferMaxEvents = RingBufferTarget.DefaultMaxEvents)
+    public static string BuildCreateSessionSql(string sessionName, bool databaseScoped, long thresholdMicroseconds, int? ringBufferMaxEvents = RingBufferTarget.DefaultMaxEvents)
     {
         /* Nothing creates the legacy name any more (#4961): a name that is not per-install is refused here. */
         RequireInstallSessionName(sessionName);

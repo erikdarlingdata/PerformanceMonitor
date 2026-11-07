@@ -8,6 +8,7 @@
 
 using System;
 using System.Globalization;
+using System.Threading.Tasks;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -31,4 +32,26 @@ public static class RingBufferTarget
     /// <summary>The setting's value bounded to [<see cref="MinMaxEvents"/>, <see cref="MaxMaxEvents"/>]; unset is the default.</summary>
     public static int Clamp(int? configured) =>
         configured is { } value ? Math.Clamp(value, MinMaxEvents, MaxMaxEvents) : DefaultMaxEvents;
+
+    /// <summary>
+    /// #8146: an Azure SQL Database create of a session whose DDL carries <c>max_events_limit</c>, which is unverified there. A
+    /// session at the engine's default limit is better than none, and the loss note shows the limit the session got, so a refused
+    /// create is sent once more with the option left out (<paramref name="create"/> gets null). A cancellation and the engine's
+    /// "already there" (<paramref name="isAlreadyPresent"/>) are not retried; they reach the caller as before. If the retry fails
+    /// too, its exception surfaces. The twin of the deadlock and blocked-process retry in <c>AlwaysOnXeSessions.CreateAsync</c>.
+    /// </summary>
+    public static async Task CreateWithoutLimitOnRefusalAsync(int maxEvents, Func<int?, Task> create, Func<Exception, bool> isAlreadyPresent)
+    {
+        ArgumentNullException.ThrowIfNull(create);
+        ArgumentNullException.ThrowIfNull(isAlreadyPresent);
+
+        try
+        {
+            await create(maxEvents);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException && !isAlreadyPresent(ex))
+        {
+            await create(null);
+        }
+    }
 }

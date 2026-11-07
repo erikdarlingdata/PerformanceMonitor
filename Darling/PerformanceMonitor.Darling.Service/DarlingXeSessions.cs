@@ -1174,10 +1174,14 @@ WHERE des.name = @session_name;", connection))
             }
         }
 
-        using var createCmd = new SqlCommand(
-            LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds, ringBufferMaxEvents), connection);
-        createCmd.CommandTimeout = 60;
-        await ExecuteLongQueryAzureDdlAsync(createCmd, cancellationToken);
+        /* #8146: max_events_limit is unverified on Azure SQL Database, so a refused create is retried once without it. */
+        await RingBufferTarget.CreateWithoutLimitOnRefusalAsync(ringBufferMaxEvents, async limit =>
+        {
+            using var createCmd = new SqlCommand(
+                LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds, limit), connection);
+            createCmd.CommandTimeout = 60;
+            await ExecuteLongQueryAzureDdlAsync(createCmd, cancellationToken);
+        }, IsBenignXeSessionAlreadyPresentException);
         logger?.LogInformation("[{Server}] [{Database}] Created the long-query completion XE session's definition over a connection without read-only intent (database-scoped)", server.Config.DisplayName, databaseName);
         return true;
     }
@@ -1772,11 +1776,15 @@ END;", connection);
             return;
         }
 
-        using var createCmd = new SqlCommand(
-            LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds, ringBufferMaxEvents)
-            + "\n\n" + LongQueryCompletionsCollector.BuildStartSessionSql(sessionName, databaseScoped: true), connection);
-        createCmd.CommandTimeout = 60;
-        await ExecuteLongQueryAzureDdlAsync(createCmd, cancellationToken);
+        /* #8146: max_events_limit is unverified on Azure SQL Database, so a refused create is retried once without it. */
+        await RingBufferTarget.CreateWithoutLimitOnRefusalAsync(ringBufferMaxEvents, async limit =>
+        {
+            using var createCmd = new SqlCommand(
+                LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds, limit)
+                + "\n\n" + LongQueryCompletionsCollector.BuildStartSessionSql(sessionName, databaseScoped: true), connection);
+            createCmd.CommandTimeout = 60;
+            await ExecuteLongQueryAzureDdlAsync(createCmd, cancellationToken);
+        }, IsBenignXeSessionAlreadyPresentException);
         logger?.LogInformation("[{Server}] [{Database}] Created and started long-query completion XE session (database-scoped)", server.Config.DisplayName, databaseName);
     }
 
@@ -1793,6 +1801,10 @@ END;", connection);
     /// catalogs are visibility-scoped per principal, so CREATE/START can report these even when
     /// the pre-check came back empty; they confirm the session is up (#1251, verbatim from Lite).
     /// </summary>
+    /// <summary><see cref="IsBenignXeSessionAlreadyPresent(SqlException)"/> for any exception; false when it is not a <see cref="SqlException"/>.</summary>
+    private static bool IsBenignXeSessionAlreadyPresentException(Exception ex) =>
+        ex is SqlException sql && IsBenignXeSessionAlreadyPresent(sql);
+
     internal static bool IsBenignXeSessionAlreadyPresent(SqlException ex)
     {
         if (ex.Errors.Count == 0)

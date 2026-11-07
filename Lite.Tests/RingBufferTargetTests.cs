@@ -7,8 +7,13 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Data.SqlClient;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitorLite.Tests;
 using Xunit;
 
 namespace Lite.Tests;
@@ -24,7 +29,78 @@ public sealed class RingBufferTargetTests
     {
         var sql = RingBufferTarget.Sql(5000);
 
-        Assert.Contains("SET max_memory = 4096, max_events_limit = 5000", sql, StringComparison.Ordinal);
+        Assert.Contains("max_memory = 4096", sql, StringComparison.Ordinal);
+        Assert.Contains("max_events_limit = 5000", sql, StringComparison.Ordinal);
+    }
+
+    private static bool AlreadyPresent(Exception ex) => ex is SqlException sql && sql.Number == 25631;
+
+    /* The Azure SQL Database long-query creates (both apps) go through CreateWithoutLimitOnRefusalAsync, because
+       max_events_limit is unverified there: a refusal gets one retry without the option, so the session still exists. */
+    [Fact]
+    public async Task AzureCreate_Refused_IsRetriedOnceWithoutTheLimit()
+    {
+        var sent = new List<int?>();
+
+        await RingBufferTarget.CreateWithoutLimitOnRefusalAsync(5000, limit =>
+        {
+            sent.Add(limit);
+            return limit is null ? Task.CompletedTask : Task.FromException(SqlExceptionFactory.Create(25706, errorClass: 16, message: "refused"));
+        }, AlreadyPresent);
+
+        Assert.Equal(new int?[] { 5000, null }, sent);
+    }
+
+    [Fact]
+    public async Task AzureCreate_Accepted_IsSentOnceWithTheLimit()
+    {
+        var sent = new List<int?>();
+
+        await RingBufferTarget.CreateWithoutLimitOnRefusalAsync(5000, limit =>
+        {
+            sent.Add(limit);
+            return Task.CompletedTask;
+        }, AlreadyPresent);
+
+        Assert.Equal(new int?[] { 5000 }, sent);
+    }
+
+    [Fact]
+    public async Task AzureCreate_AlreadyPresent_IsNotRetried_AndReachesTheCaller()
+    {
+        var sent = new List<int?>();
+
+        var ex = await Assert.ThrowsAsync<SqlException>(() => RingBufferTarget.CreateWithoutLimitOnRefusalAsync(5000, limit =>
+        {
+            sent.Add(limit);
+            return Task.FromException(SqlExceptionFactory.Create(25631, errorClass: 16, message: "already exists"));
+        }, AlreadyPresent));
+
+        Assert.Equal(25631, ex.Number);
+        Assert.Equal(new int?[] { 5000 }, sent);
+    }
+
+    [Fact]
+    public async Task AzureCreate_Cancelled_IsNotRetried()
+    {
+        var sent = new List<int?>();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => RingBufferTarget.CreateWithoutLimitOnRefusalAsync(5000, limit =>
+        {
+            sent.Add(limit);
+            return Task.FromCanceled(new CancellationToken(canceled: true));
+        }, AlreadyPresent));
+
+        Assert.Equal(new int?[] { 5000 }, sent);
+    }
+
+    [Fact]
+    public async Task AzureCreate_RetryAlsoRefused_SurfacesTheRetrysException()
+    {
+        var ex = await Assert.ThrowsAsync<SqlException>(() => RingBufferTarget.CreateWithoutLimitOnRefusalAsync(5000, limit =>
+            Task.FromException(SqlExceptionFactory.Create(limit is null ? 1088 : 25706, errorClass: 16, message: "refused")), AlreadyPresent));
+
+        Assert.Equal(1088, ex.Number);
     }
 
     [Fact]
