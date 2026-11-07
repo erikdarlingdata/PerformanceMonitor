@@ -413,6 +413,8 @@ public sealed class QueryTagRollupRoutingLiveTests
 
         await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+        /* #8083: the roll-up reads no section on a store that defines no tag, so the store defines one. It maps nothing, so no test's rows change. */
+        await ExecAsync(connection, ct, "INSERT INTO config.query_tags (name) VALUES ('fixture')");
 
         var bodySucceeded = false;
         try

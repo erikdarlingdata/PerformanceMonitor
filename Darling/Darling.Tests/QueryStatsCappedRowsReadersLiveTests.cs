@@ -61,6 +61,8 @@ public sealed class QueryStatsCappedRowsReadersLiveTests
             await DarlingMcpTestData.ExecAsync(seed, ct,
                 "INSERT INTO servers (server_id, server_name, display_name, is_enabled, created_date, modified_date) VALUES ($1, $2, $2, TRUE, $3, $3)",
                 ServerId, ServerName, DarlingMcpTestData.Naive(DateTime.UtcNow));
+            /* #8083: the by-tag read reads no section on a store that defines no tag, so the store defines one. It maps nothing, so every row stays untagged. */
+            await DarlingMcpTestData.ExecAsync(seed, ct, "INSERT INTO config.query_tags (name) VALUES ('fixture')");
         }
 
         await body(postgres, ct);
