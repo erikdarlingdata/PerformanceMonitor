@@ -31,15 +31,19 @@ public static class NotificationRouteKinds
     /// every finding of that category, whatever its hash.</summary>
     public const string AnalysisCategoryKind = "analysis_category";
 
+    /// <summary><c>match_kind</c> for the every-analysis-finding route, <c>Analysis: *</c> (#7999): every finding of every category.</summary>
+    public const string AnalysisAllKind = "analysis_all";
+
     /// <summary>Whether <paramref name="metricMatch"/> is the <c>*</c> match (the same rule as <see cref="NotificationRoute.IsWildcard"/>).</summary>
     public static bool IsWildcard(string? metricMatch) =>
         string.Equals(metricMatch?.Trim(), NotificationRoute.WildcardMatch, StringComparison.Ordinal);
 
-    /// <summary>The route's <c>match_kind</c>: <see cref="Wildcard"/>, <see cref="FamilyKind"/>, <see cref="AnalysisCategoryKind"/>
-    /// or <see cref="ExactMetric"/>.</summary>
+    /// <summary>The route's <c>match_kind</c>: <see cref="Wildcard"/>, <see cref="FamilyKind"/>, <see cref="AnalysisAllKind"/>,
+    /// <see cref="AnalysisCategoryKind"/> or <see cref="ExactMetric"/>.</summary>
     public static string MatchKind(string? metricMatch) =>
         IsWildcard(metricMatch) ? Wildcard
         : AlertFamily.NormalizeFamily(metricMatch) is not null ? FamilyKind
+        : NotificationRoute.IsAnalysisAllMatch(metricMatch) ? AnalysisAllKind
         : NotificationRoute.AnalysisCategoryOf(metricMatch) is not null ? AnalysisCategoryKind
         : ExactMetric;
 
