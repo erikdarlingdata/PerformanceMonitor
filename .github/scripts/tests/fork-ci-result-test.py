@@ -340,6 +340,50 @@ check("approval recorded with an upper-case sha: success", d.state, "success")
 d, stub = decide(reviews=[review("maint")], perms={"maint": perm("none", "none")})
 check("a former collaborator: pending", d.state, "pending")
 
+# --- a reviewer the permission read cannot see (a bot, 404; a login the token may not ask about, 403) is no maintainer ----------------
+def http_error(status, text):
+    try:
+        return fr.FetchError(text, status=status)
+    except TypeError:
+        return fr.FetchError(text)
+
+
+def try_decide(**kw):
+    stub = Stub(answers(**kw))
+    try:
+        return fr.decide(event(), stub), None, stub
+    except fr.FetchError as exc:
+        return None, exc, stub
+
+
+def state_or_error(d, err):
+    return d.state if d is not None else f"FetchError: {err}"
+
+
+BOT_PERMS = dict(PERMS, **{"helper[bot]": http_error(404, "gh: Not Found (HTTP 404)"),
+                           "outsider": http_error(403, "gh: Resource not accessible by integration (HTTP 403)"),
+                           "unlucky": http_error(500, "gh: Server Error (HTTP 500)")})
+d, err, _ = try_decide(reviews=[review("helper[bot]"), review("maint")], perms=BOT_PERMS)
+check("a bot's approval beside a maintainer's: success", state_or_error(d, err), "success")
+d, err, _ = try_decide(reviews=[review("helper[bot]")], perms=BOT_PERMS)
+check("a bot's approval alone: pending", state_or_error(d, err), "pending")
+check("a bot's approval alone: the description still says approval is needed", d is not None and "approv" in d.description.lower(), True)
+d, err, _ = try_decide(reviews=[review("outsider"), review("maint")], perms=BOT_PERMS)
+check("a 403 for one reviewer does not block another maintainer's approval: success", state_or_error(d, err), "success")
+d, err, _ = try_decide(reviews=[review("outsider")], perms=BOT_PERMS)
+check("a 403 alone: pending", state_or_error(d, err), "pending")
+d, err, _ = try_decide(reviews=[review("unlucky"), review("maint")], perms=BOT_PERMS)
+check("any other error on the permission read still fails closed", d is None and err is not None, True)
+try:
+    fr.decide(event(), Stub(dict(answers(), **{JOBS: http_error(404, "gh: Not Found (HTTP 404)")})))
+    failures.append("a 404 on the jobs read: decide returned instead of raising FetchError")
+except fr.FetchError:
+    pass
+parse = getattr(fr, "http_status_of", None)
+check("the HTTP status is read from gh's message",
+      (parse("gh: Not Found (HTTP 404)") if parse else None, parse("gh: Resource not accessible by integration (HTTP 403)") if parse else None,
+       parse("dial tcp: connection refused") if parse else "missing"), (404, 403, None))
+
 # --- a read that fails writes nothing and is reported, never guessed --------------------------------------------------------------------
 for path in (JOBS, PULLS, FILES, RUNS, REVIEWS, PERM("maint")):
     a = answers()
