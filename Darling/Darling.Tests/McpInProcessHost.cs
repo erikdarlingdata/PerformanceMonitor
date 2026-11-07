@@ -41,6 +41,15 @@ namespace Darling.Tests;
 /// </summary>
 internal sealed class McpInProcessHost : IAsyncDisposable
 {
+    /// <summary>
+    /// The protocol revision both sides of the host negotiate: the newest one that still uses the <c>initialize</c>
+    /// handshake, so the handshake is one <c>initialize</c> round trip. An SDK client left on its defaults opens with
+    /// a <c>server/discover</c> probe on the newest revision instead, under a five-second probe timeout, and the server
+    /// pins its session to that revision as it reads the probe; a probe the client gives up on sends it on to
+    /// <c>initialize</c>, which the pinned session refuses (#8134).
+    /// </summary>
+    private const string HandshakeProtocolVersion = "2025-11-25";
+
     private readonly ServiceProvider _provider;
     private readonly CancellationTokenSource _stop;
     private readonly Task _serverRun;
@@ -76,12 +85,15 @@ internal sealed class McpInProcessHost : IAsyncDisposable
     /// <param name="installGuard">False to leave <see cref="McpUnknownArgumentGuard"/> out, so a call meets the SDK's
     /// binder with nothing in front of it.</param>
     /// <param name="cancellationToken">Cancels the client's start.</param>
+    /// <param name="configureServer">Further server configuration, applied after the guard and before the tools are
+    /// registered: a test's own message filter, for one.</param>
     public static async Task<McpInProcessHost> StartAsync(
         IReadOnlyCollection<Type> toolTypes,
         Func<Type, bool> isServiceParameter,
         Func<Type, object?> inertInstanceFor,
         bool installGuard,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<IMcpServerBuilder>? configureServer = null)
     {
         var clientToServer = new Pipe();
         var serverToClient = new Pipe();
@@ -110,13 +122,15 @@ internal sealed class McpInProcessHost : IAsyncDisposable
             services.AddSingleton(serviceType, instance);
         }
 
-        var builder = services.AddMcpServer()
+        var builder = services.AddMcpServer(options => options.ProtocolVersion = HandshakeProtocolVersion)
             .WithStreamServerTransport(clientToServer.Reader.AsStream(), serverToClient.Writer.AsStream());
 
         if (installGuard)
         {
             builder = builder.WithRequestFilters(filters => filters.AddCallToolFilter(McpUnknownArgumentGuard.Instance));
         }
+
+        configureServer?.Invoke(builder);
 
         var register = typeof(McpSchemaCompat).GetMethod(
             nameof(McpSchemaCompat.WithGeminiCompatibleTools),
@@ -133,6 +147,7 @@ internal sealed class McpInProcessHost : IAsyncDisposable
 
         var client = await McpClient.CreateAsync(
             new StreamClientTransport(clientToServer.Writer.AsStream(), serverToClient.Reader.AsStream()),
+            new McpClientOptions { ProtocolVersion = HandshakeProtocolVersion },
             cancellationToken: cancellationToken);
 
         return new McpInProcessHost(provider, stop, serverRun, client, log, inertInstances);

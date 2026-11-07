@@ -44,18 +44,41 @@ public static class DarlingPgSessionStatesReader
     public const int MinSustainedHolderSamples = 2;
 
     /// <summary>
+    /// The smallest peak horizon age that makes a sustained holder (#8092): ten thousand transactions assigned
+    /// behind the session's snapshot or xid at the moment of a sample.
+    /// <para>The age, not the duration, is what supports the causal claim, and the count rule alone cannot
+    /// carry it: a maintenance login that runs a 30 ms write every few minutes is the oldest holder in every
+    /// sample that sees it, at an age of 1 or 2, the handful of transactions in flight at that instant. Nothing
+    /// waited behind it for longer than its own statement. A transaction VACUUM is actually stuck behind has
+    /// been open while the instance kept assigning xids, and its age climbs with them; by ten thousand it is
+    /// holding back that many transactions' row versions, which is where a red is worth painting. Hundreds of
+    /// thousands would be wraparound territory, judged against autovacuum_freeze_max_age elsewhere; this band
+    /// is about dead rows, and sits well under the ages the tests call real.</para>
+    /// </summary>
+    public const long MinSustainedHolderHorizonAge = 10_000;
+
+    /// <summary>
+    /// The sample half of the sustained-holder rule (#7381): at least <see cref="MinSustainedHolderSamples"/>
+    /// holder samples and at least <see cref="SustainedHolderSampleShare"/> of the samples that saw the session.
+    /// True for a short writer seen at every sample as well as for a real hold; <see cref="IsSustainedHolder"/>
+    /// adds the age that tells them apart, and the finding text names which of the two a row is.
+    /// </summary>
+    public static bool HoldsAcrossSamples(PgSessionStateRow r) =>
+        r.SampleCount > 0
+        && r.HorizonHolderSamples >= Math.Max(
+            MinSustainedHolderSamples, (int)Math.Ceiling(r.SampleCount * SustainedHolderSampleShare));
+
+    /// <summary>
     /// The one rule behind the MCP Critical band, the "PINS THE XMIN HORIZON" text and the viewer's red row
-    /// (#7381): at least <see cref="MinSustainedHolderSamples"/> holder samples, at least
-    /// <see cref="SustainedHolderSampleShare"/> of the samples that saw the session, and a peak horizon age
-    /// above 0. Age 0 means the session held the newest xid or snapshot, so nothing waited behind it: being
-    /// the oldest on a quiet instance is not the same as holding anything. This also covers rows stored
+    /// (#7381, #8092): <see cref="HoldsAcrossSamples"/>, and a peak horizon age of at least
+    /// <see cref="MinSustainedHolderHorizonAge"/>. Age 0 means the session held the newest xid or snapshot, so
+    /// nothing waited behind it: being the oldest on a quiet instance is not the same as holding anything. A
+    /// small positive age is a short writer caught at each sample, not a hold. This also covers rows stored
     /// before the collector stopped reporting the service's own connections.
     /// </summary>
     public static bool IsSustainedHolder(PgSessionStateRow r) =>
-        r.SampleCount > 0
-        && r.PeakHorizonAge > 0
-        && r.HorizonHolderSamples >= Math.Max(
-            MinSustainedHolderSamples, (int)Math.Ceiling(r.SampleCount * SustainedHolderSampleShare));
+        HoldsAcrossSamples(r)
+        && r.PeakHorizonAge >= MinSustainedHolderHorizonAge;
 
     /// <param name="LastQueryText">#7428: the normalised statement text captured for <see cref="LastQueryId"/> in
     /// <c>collect.pg_statement_text</c>, or null until the hourly capture reaches that id. Also null for id 0 and for a

@@ -367,7 +367,7 @@ LIMIT $3";
         var cutoff = Cutoff;
 
         /* The ranking statement carries no correlated subquery at all. Before the fix it evaluated four per hash: 60 hashes, 240 evaluations. */
-        Assert.Equal(0, SubPlanEvaluations(await ExplainAsync(dataSource, DarlingFinOpsHighImpactReader.HighImpactQueriesSql, cutoff)));
+        Assert.Equal(0, SubPlanEvaluations(await ExplainAsync(dataSource, DarlingFinOpsHighImpactReader.HighImpactQueriesSql, cutoff, topN: 2)));
 
         /* The kept rows: the lookup then runs once per kept hash, never once per hash in the window. */
         var kept = (await DarlingFinOpsHighImpactReader.ReadAsync(dataSource, ServerId, HoursBack, 60, ct, topN: 2)).Select(q => q.QueryHash).ToArray();

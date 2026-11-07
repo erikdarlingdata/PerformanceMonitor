@@ -21,6 +21,8 @@ namespace Lite.Tests;
 /// statements' shape: both tables read from an hour before the window, and none of the removed span term.
 /// #7161 changed the query grain's rating on purpose (a gap to the previous collection replaces MAX of the stored intervals) and
 /// updated these four hashes with that reason.
+/// #8073 is another: both query-grain statements gain a trailing <c>execution_count</c> column (the bucket's summed rated
+/// executions), so the four hashes moved again on purpose.
 /// </summary>
 [Trait("Stage", "Guard")]
 public sealed class ProcedureTrendQueryPinTests
@@ -34,15 +36,15 @@ public sealed class ProcedureTrendQueryPinTests
     [Fact]
     public void QueryStatsChartSql_IsByteIdenticalToItsTextBeforeTheProcedureChange()
     {
-        Assert.Equal("23C4F74C5F3AD584284208E4C30F6EB6C27CBFCF1C3089452CE027C7A146820A", Sha(LocalDataService.DurationTrendChartSql("v_query_stats", "", 4)));
-        Assert.Equal("8DE9CEBFC140992610ED6F3B21FCBF490E33BFF6B7F720606B81EC32F5CE4B2D", Sha(LocalDataService.DurationTrendChartSql("v_query_stats", Clause(4), 6)));
+        Assert.Equal("15D7072335BC0123D2A5D646F346ED8D28367604CC4D866029613EF4CB8BE2A9", Sha(LocalDataService.DurationTrendChartSql("v_query_stats", "", 4)));
+        Assert.Equal("0B43A65EC59C2DE3003465E13934D337C03B9DBCB3758391C0D8E5C86495F610", Sha(LocalDataService.DurationTrendChartSql("v_query_stats", Clause(4), 6)));
     }
 
     [Fact]
     public void QueryStatsBucketedSql_IsByteIdenticalToItsTextBeforeTheProcedureChange()
     {
-        Assert.Equal("A0D6527AAD23AF109160775690EC526B73CAC8869B9C5439B6CB61C5ABF43A25", Sha(LocalDataService.BucketedDurationTrendSql("v_query_stats", "")));
-        Assert.Equal("3D38B78AD063E73640C1AF78A098B681C8BE25A1E7B6F48D30FF47A7FFA2979A", Sha(LocalDataService.BucketedDurationTrendSql("v_query_stats", Clause(5))));
+        Assert.Equal("8020B8CE5EE7813BDFF96EC980D1112BBBE820E57CCA074AACA37C87C3808705", Sha(LocalDataService.BucketedDurationTrendSql("v_query_stats", "")));
+        Assert.Equal("CA5B63CCD7B613BA0BB95EFD4CD5495670747691E3194987799EADB0AAB075DC", Sha(LocalDataService.BucketedDurationTrendSql("v_query_stats", Clause(5))));
     }
 
     [Theory]

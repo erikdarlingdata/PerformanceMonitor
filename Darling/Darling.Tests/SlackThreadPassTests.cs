@@ -212,6 +212,63 @@ public sealed class SlackThreadPassTests
         Assert.Equal(2, posts.Posts.Count);
     }
 
+    /// <summary>A pending note written from a request (#7658), as the pass's read returns it: the note's own id in the journal id column,
+    /// its text as the reason, written at <paramref name="createdAt"/>. Its request opened at Now less 30 minutes.</summary>
+    private static SlackThreadJournalRow NoteRow(long noteId, Guid requestId, DateTime createdAt) =>
+        new(noteId, InvestigationRequestStore.NotePending, createdAt, "agent:a", "Index ix_a is unused", "{\"note_id\":" + noteId + ",\"metric\":\"CPU\"}",
+            "note:" + noteId, requestId, RouteId, ServerId: 3, "prod-sql-01", "CPU", "critical", "alert", null, null, 0, null, null, Now.AddMinutes(-30));
+
+    [Fact]
+    public async Task ANoteReadBeforeItsParent_IsLeftUnmarked_AndPostsInTheThreadOnceTheParentHas()
+    {
+        var store = new MemoryStore();
+        var posts = new QueuePosts();
+        /* The note's id comes from its own sequence and is small next to the journal's, so a read that sorts by id puts it before its request's opened row. */
+        store.Rows.Add(NoteRow(5, R1, Now.AddMinutes(-10)));
+        store.Rows.Add(Row(900, "opened", R1, actor: "service", reason: "CPU"));
+        var (pass, _) = Pass(store, posts, () => Now);
+
+        await pass.RunOnceAsync(CancellationToken.None);
+        await pass.RunOnceAsync(CancellationToken.None);
+
+        /* The parent opened the thread, and the card followed in it: in the pass that opened it or the next. */
+        Assert.Equal(2, posts.Posts.Count);
+        Assert.Null(posts.Posts[0].ThreadTs);
+        Assert.Contains("Investigation request", posts.Posts[0].Text);
+        Assert.Equal(store.Threads[R1].ThreadTs, posts.Posts[1].ThreadTs);
+        Assert.StartsWith("Note proposed by agent:a", posts.Posts[1].Text, StringComparison.Ordinal);
+        Assert.Contains(SlackThreadPosts.OnceKey(R1, "note:5"), store.Marks);
+        Assert.Empty(store.SkipReasons);
+        Assert.Equal(0, await pass.RunOnceAsync(CancellationToken.None));
+        Assert.Equal(2, posts.Posts.Count);
+    }
+
+    [Fact]
+    public async Task ANote_WhoseRequestHasHadNoThreadForAnHour_IsMarkedWithTheReason_AndNeverPostedAtTheTopLevel()
+    {
+        var store = new MemoryStore();
+        var posts = new QueuePosts();
+        store.Rows.Add(NoteRow(5, R1, Now.AddMinutes(-59)));
+        var logger = new ListLogger();
+        var (pass, _) = Pass(store, posts, () => Now, logger: logger);
+
+        /* Under an hour old with no thread: the note waits, unmarked, and the pass warns nothing. */
+        Assert.Equal(0, await pass.RunOnceAsync(CancellationToken.None));
+        Assert.Empty(posts.Posts);
+        Assert.Empty(store.Marks);
+        Assert.DoesNotContain(logger.Lines, l => l.Level >= LogLevel.Warning);
+
+        /* An hour on and still no thread: the note is marked with the reason, so the read stops returning it, and nothing is posted. */
+        var (latePass, _) = Pass(store, posts, () => Now.AddMinutes(2), logger: logger);
+        Assert.Equal(0, await latePass.RunOnceAsync(CancellationToken.None));
+        Assert.Empty(posts.Posts);
+        var key = SlackThreadPosts.OnceKey(R1, "note:5");
+        Assert.Contains(key, store.Marks);
+        Assert.Contains("thread", store.SkipReasons[key], StringComparison.Ordinal);
+        Assert.Equal(0, await latePass.RunOnceAsync(CancellationToken.None));
+        Assert.Empty(posts.Posts);
+    }
+
     [Fact]
     public async Task TheDoNotPostList_PostsNothing_AndWritesNoMark()
     {

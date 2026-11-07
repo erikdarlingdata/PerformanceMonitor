@@ -92,6 +92,7 @@
             </Style>
 
             <ui:HeatIntensityToBrushConverter x:Key="HeatBrush"/>
+            <ui:OneLineTextConverter x:Key="OneLine"/>
         </ResourceDictionary>
     </UserControl.Resources>
 
@@ -2358,7 +2359,7 @@
                                     <DataGridTemplateColumn Header="Query Preview" Width="350">
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
-                                                <TextBlock Text="{Binding QueryPreview}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2" ToolTip="{Binding FullQueryText}"/>
+                                                <TextBlock Text="{Binding QueryPreview, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" Margin="5,2" ToolTip="{Binding FullQueryText}"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>
@@ -2550,7 +2551,7 @@
                             </DataGridTemplateColumn.Header>
                             <DataGridTemplateColumn.CellTemplate>
                                 <DataTemplate>
-                                    <TextBlock Text="{Binding SampleQueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2" ToolTip="{Binding FullQueryText}"/>
+                                    <TextBlock Text="{Binding SampleQueryText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" Margin="5,2" ToolTip="{Binding FullQueryText}"/>
                                 </DataTemplate>
                             </DataGridTemplateColumn.CellTemplate>
                         </DataGridTemplateColumn>

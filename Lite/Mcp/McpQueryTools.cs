@@ -2076,13 +2076,14 @@ public sealed class McpQueryTools
     /// <summary>
     /// The one payload shape the three Performance-Trends siblings share, so a caller can chart them on one
     /// axis without learning three field names. Darling serializes the same fields.
-    /// <para><c>execution_count</c> and <c>executions_per_second</c> are the SAME quantity. The first
-    /// shipped truncated to an integer, which on a quiet server turns 0.4 executions a second into a
-    /// reported ZERO - an idle server, when the truth was a slow one. It is kept so a consumer reading it
-    /// does not break; read <c>executions_per_second</c>.</para>
-    /// <para><c>value</c> and <c>elapsed_ms_per_second</c> are the same quantity too (#3541): a bare
+    /// <para><c>execution_count</c> is the point's summed executions (#8073), the numerator
+    /// <c>executions_per_second</c> was built from, so the two agree and a caller summing the count over a
+    /// window gets the executions that ran, as <c>aggregate_note</c> says. The rate is the one to chart, and
+    /// it is a double: a server running under one execution a second is quiet, not idle, and only the double
+    /// can say so.</para>
+    /// <para><c>value</c> and <c>elapsed_ms_per_second</c> are the same quantity (#3541): a bare
     /// <c>value</c> named no unit, and a reasoning agent charted it as whatever it guessed. The named field is
-    /// the one to read; <c>value</c> stays for the consumer already reading it, on the precedent above.</para>
+    /// the one to read; <c>value</c> stays for the consumer already reading it.</para>
     /// </summary>
     private static string SerializeTrend(
         string serverName, int hours_back, DateTime startUtc, DateTime windowEndUtc, List<QueryTrendPoint> points, TrendGrain grain,
