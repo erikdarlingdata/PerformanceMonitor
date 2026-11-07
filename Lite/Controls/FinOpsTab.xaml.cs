@@ -80,6 +80,7 @@ public partial class FinOpsTab : UserControl
     public FinOpsTab()
     {
         InitializeComponent();
+        DataGridNumberHeaders.Apply(this); // #8223: a number column's header on the same edge as its values
         /* #5562: every list opened on the last 24 hours (1d); the heatmap on 30 days (1mo). */
         /* R5: the lists and the heatmap read "hours back from now", so each picker is rolling only (the heatmap in whole days). */
         LiteTimeRange.ConfigureFinOpsPicker(ResourceUsageTimeRangePicker, RollingUnitRule.Hour);
@@ -548,7 +549,7 @@ public partial class FinOpsTab : UserControl
            database's own (its memory limit, from committed_target_kb), not the host's RAM. So both are shown on every
            edition, and only the caption and the verdict's wording change there. */
         var azureSqlDb = ServerHardwareScope.HardwareIsTheHosts(data.EngineEdition);
-        MemoryRatioText.Text = $"{bpPct:N0}%";
+        MemoryRatioText.Text = $"{bpPct:N1}%";
         SetBar(MemoryRatioBar, MemRatioFilled, MemRatioEmpty, bpPct);
 
         PhysicalMemoryCaption.Text = ServerHardwareScope.PhysicalMemoryCaption(data.EngineEdition);

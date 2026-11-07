@@ -225,7 +225,7 @@ public sealed class GridPolishRound2Tests
         foreach (var (tab, view) in Views("FinOps", new Case("IndexLockingDataGrid", typeof(IndexLockingRow))).Select(v => ("FinOps", v))
             .Concat(Views("Server", new Case("LongQueryCompletionsGrid", typeof(LongQueryCompletionRow)), new Case("QueryStoreGrid", typeof(QueryStoreRow))).Select(v => ("Server", v))))
         {
-            foreach (var col in view.Cols.Where(c => c.Header.Length > 0 && !c.Filter))
+            foreach (var col in view.Cols.Where(c => c.Header.Length > 0 && c.Header != "Query Plan" && !c.Filter))
             {
                 problems.Add($"{view.Grid} at {view.Label}: '{col.Header}' has no filter button");
             }

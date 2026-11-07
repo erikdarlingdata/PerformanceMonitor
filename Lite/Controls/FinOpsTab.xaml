@@ -91,6 +91,12 @@
                 <Setter Property="ContextMenu" Value="{StaticResource StorageGrowthContextMenu}"/>
             </Style>
 
+            <!-- #8223: a text cell narrower than its text ends in an ellipsis and shows the whole text in a tooltip. -->
+            <Style x:Key="TrimmedCell" TargetType="TextBlock" BasedOn="{StaticResource DataGridCellText}">
+                <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                <Setter Property="ToolTip" Value="{Binding Text, RelativeSource={RelativeSource Self}}"/>
+            </Style>
+
             <ui:HeatIntensityToBrushConverter x:Key="HeatBrush"/>
             <ui:OneLineTextConverter x:Key="OneLine"/>
         </ResourceDictionary>
@@ -333,12 +339,9 @@
                             </Grid>
                             <!-- CPU Details -->
                             <TextBlock Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11.5" Margin="0,2,0,0">
-                                <Run x:Name="CpuCountText" Text="-"/>
-                                <Run x:Name="CpuCountUnitText" Text=" CPUs,"/>
-                                <Run x:Name="WorkerThreadsText" Text="-"/>
-                                <Run Text=" workers,"/>
-                                <Run x:Name="CpuSamplesText" Text="-"/>
-                                <Run Text=" samples (24h)"/>
+                                <Run x:Name="CpuCountText" Text="-"/><Run x:Name="CpuCountUnitText" Text=" CPUs,"/>
+                                <Run x:Name="WorkerThreadsText" Text="-"/><Run Text=" workers,"/>
+                                <Run x:Name="CpuSamplesText" Text="-"/><Run Text=" samples (24h)"/>
                             </TextBlock>
                         </StackPanel>
                     </GroupBox>
@@ -1144,37 +1147,47 @@
                                     <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="IndexName" Click="FilterButton_Click" Margin="0,0,4,0"/>
                                     <TextBlock Text="Index" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="Row Lock Waits" Binding="{Binding RowLockWaitCount, StringFormat='{}{0:N0}'}" Width="125" ElementStyle="{StaticResource RightAlign}"/>
-                            <DataGridTemplateColumn Header="Row Lock Wait ms" Width="140" SortMemberPath="RowLockWaitInMs">
+                            <DataGridTextColumn Binding="{Binding RowLockWaitCount, StringFormat='{}{0:N0}'}" Width="125" ElementStyle="{StaticResource RightAlign}">
+                                <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RowLockWaitCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Row Lock Waits" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                            </DataGridTextColumn>
+                            <DataGridTemplateColumn Width="140" SortMemberPath="RowLockWaitInMs" ui:DataGridNumberHeaders.IsNumberColumn="True">
+                                <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RowLockWaitInMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Row Lock Wait ms" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
                                 <DataGridTemplateColumn.CellTemplate><DataTemplate>
                                     <Border Background="{Binding RowLockHeat, Converter={StaticResource HeatBrush}, ConverterParameter=Lock}">
                                         <TextBlock Text="{Binding RowLockWaitInMs, StringFormat='{}{0:N0}'}" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="6,2"/>
                                     </Border>
                                 </DataTemplate></DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
-                            <DataGridTemplateColumn Header="Page Lock Wait ms" Width="140" SortMemberPath="PageLockWaitInMs">
+                            <DataGridTemplateColumn Width="140" SortMemberPath="PageLockWaitInMs" ui:DataGridNumberHeaders.IsNumberColumn="True">
+                                <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PageLockWaitInMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Page Lock Wait ms" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
                                 <DataGridTemplateColumn.CellTemplate><DataTemplate>
                                     <Border Background="{Binding PageLockHeat, Converter={StaticResource HeatBrush}, ConverterParameter=Lock}">
                                         <TextBlock Text="{Binding PageLockWaitInMs, StringFormat='{}{0:N0}'}" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="6,2"/>
                                     </Border>
                                 </DataTemplate></DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
-                            <DataGridTextColumn Header="Lock Escalations" Binding="{Binding IndexLockPromotionCount, StringFormat='{}{0:N0}'}" Width="125" ElementStyle="{StaticResource RightAlign}"/>
-                            <DataGridTemplateColumn Header="Page Latch Wait ms" Width="145" SortMemberPath="PageLatchWaitInMs">
+                            <DataGridTextColumn Binding="{Binding IndexLockPromotionCount, StringFormat='{}{0:N0}'}" Width="125" ElementStyle="{StaticResource RightAlign}">
+                                <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="IndexLockPromotionCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Lock Escalations" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                            </DataGridTextColumn>
+                            <DataGridTemplateColumn Width="145" SortMemberPath="PageLatchWaitInMs" ui:DataGridNumberHeaders.IsNumberColumn="True">
+                                <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PageLatchWaitInMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Page Latch Wait ms" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
                                 <DataGridTemplateColumn.CellTemplate><DataTemplate>
                                     <Border Background="{Binding PageLatchHeat, Converter={StaticResource HeatBrush}, ConverterParameter='Buffer Latch'}">
                                         <TextBlock Text="{Binding PageLatchWaitInMs, StringFormat='{}{0:N0}'}" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="6,2"/>
                                     </Border>
                                 </DataTemplate></DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
-                            <DataGridTemplateColumn Header="Page IO Latch Wait ms" Width="160" SortMemberPath="PageIoLatchWaitInMs">
+                            <DataGridTemplateColumn Width="160" SortMemberPath="PageIoLatchWaitInMs" ui:DataGridNumberHeaders.IsNumberColumn="True">
+                                <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PageIoLatchWaitInMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Page IO Latch Wait ms" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
                                 <DataGridTemplateColumn.CellTemplate><DataTemplate>
                                     <Border Background="{Binding PageIoLatchHeat, Converter={StaticResource HeatBrush}, ConverterParameter='Buffer IO'}">
                                         <TextBlock Text="{Binding PageIoLatchWaitInMs, StringFormat='{}{0:N0}'}" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="6,2"/>
                                     </Border>
                                 </DataTemplate></DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
-                            <DataGridTextColumn Header="Reserved MB" Binding="{Binding ReservedMb, StringFormat='{}{0:N1}'}" Width="110" ElementStyle="{StaticResource RightAlign}"/>
+                            <DataGridTextColumn Binding="{Binding ReservedMb, StringFormat='{}{0:N1}'}" Width="110" ElementStyle="{StaticResource RightAlign}">
+                                <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ReservedMb" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Reserved MB" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                            </DataGridTextColumn>
                         </DataGrid.Columns>
                     </DataGrid>
                     <TextBlock x:Name="NoIndexLockingMessage" Text="No locking/contention data recorded yet"
@@ -2525,7 +2538,7 @@
                                 </Style>
                             </DataGridTextColumn.ElementStyle>
                         </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding DatabaseDisplay}" SortMemberPath="DatabaseName" Width="170">
+                        <DataGridTextColumn Binding="{Binding DatabaseDisplay}" SortMemberPath="DatabaseName" Width="140">
                             <DataGridTextColumn.Header>
                                 <StackPanel Orientation="Horizontal">
                                     <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -2538,7 +2551,7 @@
                                 </Style>
                             </DataGridTextColumn.ElementStyle>
                         </DataGridTextColumn>
-                        <DataGridTemplateColumn Width="400">
+                        <DataGridTemplateColumn Width="240">
                             <DataGridTemplateColumn.Header>
                                 <StackPanel Orientation="Horizontal">
                                     <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SampleQueryText" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -2689,7 +2702,7 @@
                               RowStyle="{StaticResource DefaultRowStyle}"
                               LoadingRow="MarkedGrid_LoadingRow">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Binding="{Binding ApplicationName}" Width="300">
+                            <DataGridTextColumn Binding="{Binding ApplicationName}" Width="220" ElementStyle="{StaticResource TrimmedCell}">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ApplicationName" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -2980,7 +2993,7 @@
                               RowStyle="{StaticResource DefaultRowStyle}"
                               LoadingRow="MarkedGrid_LoadingRow">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Binding="{Binding ServerName}" Width="160">
+                            <DataGridTextColumn Binding="{Binding ServerName}" Width="120" ElementStyle="{StaticResource TrimmedCell}">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ServerName" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -2988,7 +3001,7 @@
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding Edition}" Width="200">
+                            <DataGridTextColumn Binding="{Binding Edition}" Width="140" ElementStyle="{StaticResource TrimmedCell}">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Edition" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -2996,7 +3009,7 @@
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding ProductVersion}" Width="180">
+                            <DataGridTextColumn Binding="{Binding ProductVersion}" Width="100" ElementStyle="{StaticResource TrimmedCell}">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ProductVersion" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -3004,7 +3017,7 @@
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding HostOsVersion}" Width="200">
+                            <DataGridTextColumn Binding="{Binding HostOsVersion}" Width="140" ElementStyle="{StaticResource TrimmedCell}">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="HostOsVersion" Click="FilterButton_Click" Margin="0,0,4,0"/>
