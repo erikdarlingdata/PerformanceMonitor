@@ -194,6 +194,34 @@ public sealed class InvestigationsPageTests
         Assert.Equal("", closed.GetProperty("pane").GetString());
     }
 
+    /// <summary>#8007: request A's detail read is still out when A is dropped, by a State pick and by a list re-read that no longer holds
+    /// it. The read then answers: the pane stays empty, no Close form is drawn for A, and the read was aborted when A was dropped.</summary>
+    [Theory]
+    [InlineData("droppedByFilter")]
+    [InlineData("droppedByReRead")]
+    public void ADetailReadStillOutWhenItsRequestIsDropped_IsAborted_AndDoesNotRedrawThePane(string phase)
+    {
+        var dropped = Run().GetProperty(phase);
+        Assert.Contains("Loading this request", dropped.GetProperty("paneWhileOut").GetString(), StringComparison.Ordinal);
+        Assert.Equal(1, dropped.GetProperty("detailReads").GetInt32());
+        Assert.True(Assert.Single(dropped.GetProperty("abortedBeforeAnswer").EnumerateArray()).GetBoolean(), "the detail read still out was not aborted when its request was dropped");
+        Assert.Equal("", dropped.GetProperty("pane").GetString());
+        Assert.Equal(0, dropped.GetProperty("closeButtons").GetInt32());
+    }
+
+    /// <summary>#8007: request A's detail read has answered, but the session read the pane waits on with it is still out, when a State pick
+    /// drops A. The fetch is past aborting, so only the detail ticket stops the answer: once the session read answers, the pane is still empty.</summary>
+    [Fact]
+    public void ADetailReadThatAnsweredBeforeItsRequestWasDropped_WhileTheSessionReadIsStillOut_DoesNotRedrawThePane()
+    {
+        var dropped = Run().GetProperty("droppedWhileSessionOut");
+        Assert.Equal(1, dropped.GetProperty("detailReads").GetInt32());
+        Assert.Equal(1, dropped.GetProperty("answeredBeforeDrop").GetInt32());
+        Assert.Contains("Loading this request", dropped.GetProperty("paneWhileSessionOut").GetString(), StringComparison.Ordinal);
+        Assert.Equal("", dropped.GetProperty("paneAfterDrop").GetString());
+        Assert.Equal("", dropped.GetProperty("pane").GetString());
+    }
+
     /// <summary>#7987: request A's close is out when request B is picked and its reason typed. A's answer re-reads the list, and B's form
     /// comes back with the reason as typed: only the closed request's own draft is dropped.</summary>
     [Fact]

@@ -372,10 +372,13 @@ export function renderInvestigations(main, requestId) {
 
   /* #7957: the open request is dropped and its pane emptied when a filter changes and when a re-read's list no longer holds it, as after a
      Close under a State filter: the closed request no longer matches, so a pane still offering its Close form would be for a request
-     that is already closed. */
+     that is already closed. #8007: a detail read still out for the dropped request is discarded with it, or its answer would draw the pane,
+     Close form included, for a request the page no longer has picked. */
   const dropRequest = () => {
     choices.requestId = null;
     closeDraft = null;
+    ++detailSeq;
+    if (detailAbort) detailAbort.abort();
     mount(slot, []);
   };
   const reload = () => {
