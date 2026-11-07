@@ -25,21 +25,26 @@ public sealed record SlackThreadPostContent(string Text, IReadOnlyList<object> B
 
 /// <summary>
 /// #7656: the posts of a request's thread, built from service data. Every collected value (a server name, a metric, an agent's text,
-/// an object name) goes through <see cref="Escape"/>, the one helper, before it is placed in mrkdwn, so <c>&lt;!channel&gt;</c> and
-/// masked links in collected text show as characters. Free text follows <c>mcp.dataDetail</c>: <c>full</c> as stored,
-/// <c>maskLiterals</c> through the prose masker, <c>metadataOnly</c> left out, so the thread then carries verdicts, states and links.
+/// an object name) goes through <see cref="Bounded"/>: escaped by <see cref="Escape"/>, the one helper, before it is placed in mrkdwn,
+/// so <c>&lt;!channel&gt;</c> and masked links in collected text show as characters, and held to its bound AFTER escaping, cut on a
+/// whole text element (the #3625 rule), so a bound holds against Slack's 3,000-character section text whatever the value holds, and
+/// no emoji is cut in half. Free text follows <c>mcp.dataDetail</c>: <c>full</c> as stored, <c>maskLiterals</c> through the prose
+/// masker, <c>metadataOnly</c> left out, so the thread then carries verdicts, states and links.
 /// </summary>
 public static class SlackThreadPosts
 {
     /// <summary>The web route of one request; the id rides in the hash query, as the report notice links it.</summary>
     private const string RequestRoute = "/#/investigations?request=";
 
-    private const int RootCauseLimit = 1500;
     private const int StatementLimit = 1500;
     private const int TextLimit = 300;
 
     /// <summary>The one escape helper: <c>&amp;</c>, <c>&lt;</c> and <c>&gt;</c> become entities. Null and empty read as empty.</summary>
     public static string Escape(string? text) => WebhookAlertService.SlackEscape(text);
+
+    /// <summary><paramref name="text"/> escaped and inside <paramref name="limit"/> characters of escaped text, cut on a whole text
+    /// element and ending in <c>...</c> when it had to be cut. The webhook builders' own bound (<c>WebhookAlertService.SlackEscapedBounded</c>).</summary>
+    internal static string Bounded(string? text, int limit) => WebhookAlertService.SlackEscapedBounded(text, limit);
 
     /// <summary>The post key of the thread parent. One per request.</summary>
     public const string RequestKey = "request";
@@ -58,10 +63,10 @@ public static class SlackThreadPosts
     public static SlackThreadPostContent RequestPost(SlackRequestFacts facts, McpDataDetail mode)
     {
         ArgumentNullException.ThrowIfNull(facts);
-        var server = Escape(Clip(facts.ServerName, TextLimit));
-        var metric = Escape(Clip(facts.Metric, TextLimit));
-        var severity = Escape(Clip(facts.Severity, 50));
-        var trigger = Escape(Clip(facts.Trigger, 50));
+        var server = Bounded(facts.ServerName, TextLimit);
+        var metric = Bounded(facts.Metric, TextLimit);
+        var severity = Bounded(facts.Severity, 50);
+        var trigger = Bounded(facts.Trigger, 50);
         var text = $"Investigation request: {metric} on {server} ({severity})";
         var blocks = new List<object>
         {
@@ -74,39 +79,25 @@ public static class SlackThreadPosts
     /// <summary>An agent's claim: who, and which claim.</summary>
     public static SlackThreadPostContent ClaimPost(string agentName, int claimNo)
     {
-        var agent = Escape(Clip(agentName, TextLimit));
+        var agent = Bounded(agentName, TextLimit);
         var text = $"Claimed by {agent} (claim {claimNo.ToString(CultureInfo.InvariantCulture)})";
         return new SlackThreadPostContent(text, [Section(text)]);
     }
 
-    /// <summary>The report, with the #6979 notice's content: the verdict, the root cause's first line at the mode, the changes and the links.</summary>
+    /// <summary>The report, with the #6979 notice's content and its Slack bounds: the lead (verdict, server, metric) in one section, then
+    /// the notice's own body blocks (the root cause's first line at the mode in a section of its own, the changes in another, each
+    /// bounded after escaping), then the links. No section passes Slack's 3,000-character text limit.</summary>
     public static SlackThreadPostContent ReportPost(ReportNoticeContent content, McpDataDetail mode)
     {
         ArgumentNullException.ThrowIfNull(content);
-        var verdict = Escape(Clip(content.Verdict, 100));
-        var server = Escape(Clip(content.ServerName, TextLimit));
-        var lines = new List<string> { $"*Agent report: {verdict}*", $"*Server:* {server}", $"*Metric:* {Escape(Clip(content.Metric, TextLimit))}" };
+        var verdict = Bounded(content.Verdict, 100);
+        var server = Bounded(content.ServerName, TextLimit);
+        var blocks = new List<object>
+        {
+            Section($"*Agent report: {verdict}*\n*Server:* {server}\n*Metric:* {Bounded(content.Metric, TextLimit)}"),
+        };
         var rootCause = InvestigationEventDelivery.RootCauseFirstLine(content.RootCauseFirstLine, mode);
-        if (!string.IsNullOrWhiteSpace(rootCause))
-        {
-            lines.Add("*Root cause:* " + Escape(Clip(rootCause, RootCauseLimit)));
-        }
-
-        if (content.Changes.Count > 0)
-        {
-            lines.Add($"*Changes ({content.Changes.Count.ToString(CultureInfo.InvariantCulture)}):*");
-            foreach (var change in content.Changes.Take(WebhookAlertService.ReportNoticeChangeLimit))
-            {
-                lines.Add(ChangeLine(change.Tool, change.Object, change.Result, mode));
-            }
-
-            if (content.Changes.Count > WebhookAlertService.ReportNoticeChangeLimit)
-            {
-                lines.Add($"_and {(content.Changes.Count - WebhookAlertService.ReportNoticeChangeLimit).ToString(CultureInfo.InvariantCulture)} more_");
-            }
-        }
-
-        var blocks = new List<object> { Section(string.Join("\n", lines)) };
+        blocks.AddRange(WebhookAlertService.ReportNoticeSlackBodyBlocks(content with { RootCauseFirstLine = rootCause }));
         var (requestUrl, changesUrl) = WebhookAlertService.ReportNoticeLinks(content);
         AddLinks(blocks, (requestUrl, "Open the request"), (changesUrl, "Open the agent changes"));
         return new SlackThreadPostContent($"Agent report: {verdict} on {server}", blocks);
@@ -116,16 +107,16 @@ public static class SlackThreadPosts
     public static SlackThreadPostContent ChangePost(string tool, string objectText, string result, McpDataDetail mode)
     {
         var line = ChangeLine(tool, objectText, result, mode);
-        return new SlackThreadPostContent("Agent change: " + Escape(Clip(tool, 50)) + " " + Escape(Clip(result, 50)), [Section("*Agent change*\n" + line)]);
+        return new SlackThreadPostContent("Agent change: " + Bounded(tool, 50) + " " + Bounded(result, 50), [Section("*Agent change*\n" + line)]);
     }
 
     /// <summary>A proposal, when it is made and at each decision: the kind, the server, the state, when it expires (the card, when it is
     /// made), the statement at the mode (<c>metadataOnly</c> withholds it and the link stands in), and the link to the proposal page.</summary>
     public static SlackThreadPostContent ProposalPost(string tool, string serverName, string state, string? statement, string? proposalUrl, McpDataDetail mode, DateTime? expiresUtc = null)
     {
-        var kind = Escape(Clip(tool, 50));
-        var server = Escape(Clip(serverName, TextLimit));
-        var stateText = Escape(Clip(state, 50));
+        var kind = Bounded(tool, 50);
+        var server = Bounded(serverName, TextLimit);
+        var stateText = Bounded(state, 50);
         var lines = new List<string> { $"*Proposed action: {kind}*", $"*Server:* {server}", $"*State:* {stateText}" };
         if (expiresUtc is DateTime expires)
         {
@@ -135,7 +126,7 @@ public static class SlackThreadPosts
         if (!string.IsNullOrWhiteSpace(statement) && mode != McpDataDetail.MetadataOnly)
         {
             var shown = mode == McpDataDetail.MaskLiterals ? McpDataDetailMasker.MaskLiterals(statement) : statement;
-            lines.Add("```" + Escape(Clip(shown, StatementLimit)) + "```");
+            lines.Add("```" + Bounded(shown, StatementLimit) + "```");
         }
 
         var blocks = new List<object> { Section(string.Join("\n", lines)) };
@@ -147,16 +138,16 @@ public static class SlackThreadPosts
     /// person when one acted, and <paramref name="reason"/> what they or the service said.</summary>
     public static SlackThreadPostContent EndPost(string state, string? actor, string? reason)
     {
-        var stateText = Escape(Clip(state, 50));
+        var stateText = Bounded(state, 50);
         var text = stateText;
         if (!string.IsNullOrWhiteSpace(actor) && !string.Equals(actor, "service", StringComparison.Ordinal))
         {
-            text += " by " + Escape(Clip(actor, TextLimit));
+            text += " by " + Bounded(actor, TextLimit);
         }
 
         if (!string.IsNullOrWhiteSpace(reason))
         {
-            text += ": " + Escape(Clip(reason, TextLimit));
+            text += ": " + Bounded(reason, TextLimit);
         }
 
         return new SlackThreadPostContent(text, [Section("*" + stateText + "*" + text[stateText.Length..])]);
@@ -165,8 +156,8 @@ public static class SlackThreadPosts
     /// <summary>The resolution: every metric of the request cleared.</summary>
     public static SlackThreadPostContent ResolutionPost(string metrics)
     {
-        var text = "Resolved: " + Escape(Clip(metrics, TextLimit));
-        return new SlackThreadPostContent(text, [Section("*Resolved*\n" + Escape(Clip(metrics, TextLimit)))]);
+        var text = "Resolved: " + Bounded(metrics, TextLimit);
+        return new SlackThreadPostContent(text, [Section("*Resolved*\n" + Bounded(metrics, TextLimit))]);
     }
 
     /// <summary>The request's web link, or null without a usable base URL (the same rule as the report notice's links).</summary>
@@ -187,9 +178,9 @@ public static class SlackThreadPosts
     /* The object goes through the #6979 rule: kept at full, masked as prose otherwise, an all-digit id kept. */
     private static string ChangeLine(string tool, string objectText, string result, McpDataDetail mode)
     {
-        var toolText = Escape(Clip(tool?.Replace('`', '\''), 50));
-        var target = Escape(Clip(InvestigationEventDelivery.ChangeObject(objectText ?? "", null, mode), 100));
-        var resultText = Escape(Clip(result, 100));
+        var toolText = Bounded(tool?.Replace('`', '\''), 50);
+        var target = Bounded(InvestigationEventDelivery.ChangeObject(objectText ?? "", null, mode), 100);
+        var resultText = Bounded(result, 100);
         return $"• `{toolText}`" + (target.Length > 0 ? $" {target}" : "") + (resultText.Length > 0 ? $": {resultText}" : "");
     }
 
@@ -208,15 +199,5 @@ public static class SlackThreadPosts
         {
             blocks.Add(new { type = "context", elements });
         }
-    }
-
-    private static string Clip(string? text, int limit)
-    {
-        if (string.IsNullOrEmpty(text))
-        {
-            return "";
-        }
-
-        return text.Length <= limit ? text : text[..limit] + "...";
     }
 }

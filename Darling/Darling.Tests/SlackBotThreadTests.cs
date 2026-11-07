@@ -344,6 +344,80 @@ public sealed class SlackThreadPostsTests
         }
     }
 
+    /// <summary>The text of every section block of a post, in order.</summary>
+    private static List<string> SectionTexts(SlackThreadPostContent content)
+    {
+        var texts = new List<string>();
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(content.Blocks));
+        foreach (var block in doc.RootElement.EnumerateArray())
+        {
+            if (block.TryGetProperty("type", out var type) && type.GetString() == "section" && block.TryGetProperty("text", out var text))
+            {
+                texts.Add(text.GetProperty("text").GetString()!);
+            }
+        }
+
+        return texts;
+    }
+
+    /// <summary>Slack refuses a section whose text passes 3,000 characters with <c>invalid_blocks</c>, and a refused report keeps its
+    /// mark and never posts. A long root cause full of <c>&lt;</c> and <c>&amp;</c> (each grows to an entity when escaped) and ten changes
+    /// with long objects: the report keeps the #6979 notice's shape, the root cause and the changes in sections of their own, each bounded
+    /// after escaping, so every section stays inside the limit and every collected character still shows as an entity.</summary>
+    [Fact]
+    public void Report_post_keeps_every_section_inside_slacks_text_limit_with_a_long_root_cause_and_many_changes()
+    {
+        var rootCause = string.Concat(Enumerable.Repeat("<plan & cost> ", 150));
+        var changes = Enumerable.Range(1, 10)
+            .Select(i => new ReportNoticeChange("set_alert_threshold", $"cpu <{new string('x', 200)}> & {i} in tenant_a", new string('r', 150) + " & done"))
+            .ToList();
+        var content = new ReportNoticeContent(RequestId, "needs_person", new string('s', 400) + " & <co>", new string('m', 400), rootCause, changes, Base);
+
+        var post = SlackThreadPosts.ReportPost(content, McpDataDetail.Full);
+
+        var sections = SectionTexts(post);
+        Assert.True(sections.Count >= 3, "the lead, the root cause and the changes are sections of their own");
+        Assert.All(sections, s => Assert.True(s.Length <= WebhookAlertService.SlackTextObjectLimit, $"a section of {s.Length} characters passes Slack's limit of {WebhookAlertService.SlackTextObjectLimit}"));
+        Assert.Contains(sections, s => s.StartsWith("*Root cause:*", StringComparison.Ordinal) && s.Contains("&lt;plan &amp; cost&gt;", StringComparison.Ordinal) && s.EndsWith("...", StringComparison.Ordinal));
+        Assert.Contains(sections, s => s.Contains("*Changes (10):*", StringComparison.Ordinal) && s.Contains("set_alert_threshold", StringComparison.Ordinal));
+        var strings = Strings(post);
+        Assert.DoesNotContain(strings, s => s.Contains("<plan", StringComparison.Ordinal) || s.Contains("<co>", StringComparison.Ordinal) || s.Contains("& ", StringComparison.Ordinal));
+        Assert.Contains(strings, s => s.Contains("needs_person", StringComparison.Ordinal));
+        Assert.Contains(strings, s => s.Contains("investigations?request=", StringComparison.Ordinal));
+        Assert.Contains(strings, s => s.Contains("admin/agent-changes", StringComparison.Ordinal));
+    }
+
+    /// <summary>A bound is held on whole text elements (#3625): an emoji whose surrogate pair straddles the cut, or a letter whose
+    /// combining accent falls past it, is kept whole or dropped whole, never split into a replacement glyph or a bare letter.</summary>
+    [Fact]
+    public void Posts_cut_on_whole_text_elements_so_an_emoji_or_accent_at_the_cut_is_never_split()
+    {
+        /* The server and metric bound is 300 characters: unit 300 is the first half of the emoji's pair, units 300 and 301 the letter and its accent. */
+        var emojiAtTheCut = new string('a', 299) + "\U0001F600" + "tail";
+        var accentAtTheCut = new string('b', 299) + "é" + "tail";
+
+        var request = SlackThreadPosts.RequestPost(new SlackRequestFacts(RequestId, emojiAtTheCut, accentAtTheCut, "critical", "alert", Base), McpDataDetail.Full);
+        var claim = SlackThreadPosts.ClaimPost(accentAtTheCut, 1);
+
+        foreach (var s in Strings(request).Concat(Strings(claim)))
+        {
+            Assert.DoesNotContain('�', s);
+            for (var i = 0; i < s.Length; i++)
+            {
+                if (char.IsHighSurrogate(s[i]))
+                    Assert.True(i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]), "a high surrogate at the cut has lost its pair");
+                else if (char.IsLowSurrogate(s[i]))
+                    Assert.True(i > 0 && char.IsHighSurrogate(s[i - 1]), "a low surrogate at the cut has lost its pair");
+            }
+        }
+
+        /* The kept stretch is a prefix of the value: the emoji and the accented letter are dropped whole, and the cut is stated. */
+        Assert.Contains(Strings(request), s => s.Contains(new string('a', 299) + "...", StringComparison.Ordinal));
+        Assert.DoesNotContain(Strings(request), s => s.Contains("\U0001F600", StringComparison.Ordinal));
+        Assert.Contains(Strings(request), s => s.Contains(new string('b', 299) + "...", StringComparison.Ordinal));
+        Assert.DoesNotContain(Strings(request).Concat(Strings(claim)), s => s.Contains(new string('b', 299) + "e...", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void Change_post_masks_the_object_and_keeps_tool_and_result_at_metadata_only()
     {
