@@ -684,6 +684,21 @@
     </Style>
 
 
+    <!-- #8222: the keyboard focus cue. A 1 px accent outline instead of the stock dotted box. WPF draws a FocusVisualStyle only
+         when focus arrived by keyboard (Tab, arrows), so a mouse click leaves nothing. The tab styles below name it, and
+         App.InstallKeyboardFocusCue makes it the default for every other control. The brush is a DynamicResource so one style
+         instance follows a theme switch. -->
+    <Style x:Key="KeyboardFocusVisualStyle">
+        <Setter Property="Control.Template">
+            <Setter.Value>
+                <ControlTemplate>
+                    <Rectangle Stroke="{DynamicResource AccentBrush}" StrokeThickness="1" RadiusX="2" RadiusY="2"
+                               SnapsToDevicePixels="True" IsHitTestVisible="False"/>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <!-- ============================================ -->
     <!-- TabControl Style                             -->
     <!-- ============================================ -->
@@ -706,7 +721,7 @@
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
-                        <Grid Grid.Row="0" Panel.ZIndex="1">
+                        <Grid Grid.Row="0" Panel.ZIndex="1" Margin="{Binding Path=(helpers:TabStripOverflow.HeaderMargin), RelativeSource={RelativeSource TemplatedParent}}">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="Auto"/>
@@ -771,11 +786,13 @@
         <Setter Property="BorderThickness" Value="0"/>
         <Setter Property="Padding" Value="14,6"/>
         <Setter Property="Margin" Value="0,0,2,0"/>
+        <Setter Property="FocusVisualStyle" Value="{StaticResource KeyboardFocusVisualStyle}"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="TabItem">
                     <Border x:Name="border"
                             Background="{TemplateBinding Background}"
+                            BorderBrush="{StaticResource AccentBrush}"
                             BorderThickness="0"
                             CornerRadius="3,3,0,0"
                             Padding="{TemplateBinding Padding}"
@@ -795,7 +812,8 @@
                             <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
                         </Trigger>
                         <Trigger Property="IsSelected" Value="True">
-                            <Setter TargetName="border" Property="Background" Value="{StaticResource BackgroundLighterBrush}"/>
+                            <Setter TargetName="border" Property="Background" Value="Transparent"/>
+                            <Setter TargetName="border" Property="BorderThickness" Value="0,0,0,2"/>
                             <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
                         </Trigger>
                     </ControlTemplate.Triggers>
@@ -812,6 +830,7 @@
         <Setter Property="BorderThickness" Value="0"/>
         <Setter Property="Padding" Value="10,6"/>
         <Setter Property="Margin" Value="0,0,4,0"/>
+        <Setter Property="FocusVisualStyle" Value="{StaticResource KeyboardFocusVisualStyle}"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="TabItem">
@@ -847,6 +866,7 @@
         <Setter Property="FontSize" Value="11"/>
         <Setter Property="Padding" Value="8,4"/>
         <Setter Property="Margin" Value="0,0,2,0"/>
+        <Setter Property="FocusVisualStyle" Value="{StaticResource KeyboardFocusVisualStyle}"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="TabItem">
@@ -1567,13 +1587,16 @@
                             BorderThickness="{TemplateBinding BorderThickness}"
                             Padding="{TemplateBinding Padding}"
                             CornerRadius="4">
-                        <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Cycle"/>
+                        <StackPanel IsItemsHost="True" Grid.IsSharedSizeScope="True" KeyboardNavigation.DirectionalNavigation="Cycle"/>
                     </Border>
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
     </Style>
 
+    <!-- #8222: no fixed icon column. The icon cell is as wide as the widest icon in the menu (Grid.IsSharedSizeScope on the
+         ContextMenu), so a menu with no icons has none, and the current item of a menu (IsChecked) gets an accent bar and the
+         accent colour instead of an empty reserved column. -->
     <Style TargetType="MenuItem">
         <Setter Property="Background" Value="Transparent"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
@@ -1583,17 +1606,23 @@
                     <Border x:Name="Border" Background="{TemplateBinding Background}" BorderThickness="0">
                         <Grid>
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="26" SharedSizeGroup="MenuItemIconColumnGroup"/>
+                                <ColumnDefinition Width="Auto" SharedSizeGroup="MenuItemIconColumnGroup"/>
                                 <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="17"/>
                             </Grid.ColumnDefinitions>
-                            <!-- Icon column -->
-                            <Border x:Name="IconColumn" Grid.Column="0" Background="Transparent"/>
-                            <ContentPresenter x:Name="Icon" Grid.Column="0" Margin="4,0,6,0" VerticalAlignment="Center" ContentSource="Icon"/>
-                            <ContentPresenter Grid.Column="1" Margin="8,4" VerticalAlignment="Center" ContentSource="Header" RecognizesAccessKey="True"/>
+                            <ContentPresenter x:Name="Icon" Grid.Column="0" Margin="10,0,0,0" VerticalAlignment="Center" ContentSource="Icon"/>
+                            <ContentPresenter Grid.Column="1" Margin="10,4" VerticalAlignment="Center" ContentSource="Header" RecognizesAccessKey="True"/>
+                            <Border x:Name="CheckMark" Grid.ColumnSpan="2" Width="3" HorizontalAlignment="Left"
+                                    Background="{StaticResource AccentBrush}" Visibility="Collapsed"/>
                         </Grid>
                     </Border>
                     <ControlTemplate.Triggers>
+                        <Trigger Property="Icon" Value="{x:Null}">
+                            <Setter TargetName="Icon" Property="Margin" Value="0"/>
+                        </Trigger>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="CheckMark" Property="Visibility" Value="Visible"/>
+                            <Setter Property="Foreground" Value="{StaticResource AccentBrush}"/>
+                        </Trigger>
                         <Trigger Property="IsHighlighted" Value="True">
                             <Setter TargetName="Border" Property="Background" Value="{StaticResource BackgroundLighterBrush}"/>
                         </Trigger>

@@ -2803,32 +2803,34 @@
                         </Grid></ScrollViewer>
                     </TabItem>
                     <TabItem Header="Current Waits">
-                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #7385: scrolls when the charts cannot all keep their minimum height -->
-                        <Grid ui:ChartGroup.IsAligned="True" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="460">
+                        <ScrollViewer x:Name="CurrentWaitsScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #7385: scrolls when the charts cannot all keep their minimum height -->
+                        <!-- #8219: two columns so the charts sit side by side (ChartPairLayout) when the tab cannot give both a stacked row. MinHeight is one chart row with the banner and note; the stacked layout adds the second row's MinHeight to it. -->
+                            <Grid x:Name="CurrentWaitsGrid" ui:ChartGroup.IsAligned="True" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="260">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
-                                <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                                <RowDefinition x:Name="CurrentWaitsSecondRow" Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                                 <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
                             <!-- "Showing since <start>" when this server's waiting_tasks rows start after the range
                                  does (DataWindowFloor via LoadBlockingAsync). Both charts read waiting_tasks. -->
-                            <TextBlock Grid.Row="0" x:Name="CurrentWaitsTruncationBanner" Visibility="Collapsed"
+                            <TextBlock Grid.Row="0" Grid.ColumnSpan="2" x:Name="CurrentWaitsTruncationBanner" Visibility="Collapsed"
                                        Padding="8,4" FontWeight="Bold"
                                        Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
                                        Background="#22FFAA00"/>
-                            <Border Grid.Row="1" Margin="0,0,0,4">
+                            <Border x:Name="CurrentWaitsFirstCard" Grid.Row="1" Grid.ColumnSpan="2" Margin="0,0,0,4">
                                 <ui:ChartPanel Title="Total wait duration">
                                     <scottplot:WpfPlot x:Name="CurrentWaitsDurationChart"/>
                                 </ui:ChartPanel>
                             </Border>
-                            <Border Grid.Row="2" Margin="0,4,0,0">
+                            <Border x:Name="CurrentWaitsSecondCard" Grid.Row="2" Grid.ColumnSpan="2" Margin="0,4,0,0">
                                 <ui:ChartPanel Title="Blocked sessions">
                                     <scottplot:WpfPlot x:Name="CurrentWaitsBlockedChart"/>
                                 </ui:ChartPanel>
                             </Border>
                             <!-- Both charts read waiting_tasks, which stores a row only when a collection found a task waiting or blocked, so a quiet server draws few points and a gap means nothing was waiting. -->
-                            <TextBlock Grid.Row="3" x:Name="CurrentWaitsSparseNote" Padding="8,4" FontStyle="Italic" TextWrapping="Wrap"
+                            <TextBlock Grid.Row="3" Grid.ColumnSpan="2" x:Name="CurrentWaitsSparseNote" Padding="8,4" FontStyle="Italic" TextWrapping="Wrap"
                                        Foreground="{DynamicResource ForegroundDimBrush}"
                                        Text="Points appear only when a collection found waiting or blocked tasks. A gap means nothing was waiting at that time."/>
                         </Grid></ScrollViewer>
