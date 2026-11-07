@@ -617,14 +617,18 @@ public sealed class FinOpsOptimizationViewLiveTests
         var now = DarlingMcpTestData.Naive(DateTime.UtcNow);
         await Size(c, ct, now.AddHours(-3), "IdleBig", 300.5m);
         await Size(c, ct, now.AddHours(-3), "BusyDb", 900m);
+        await Size(c, ct, now.AddHours(-3), "RollupOnlyDb", 450m);
 
         /* A zero-execution sample at noon on each of the last ten complete UTC days, so every day the claim needs holds one and the oldest
-           is well past 7 days. BusyDb ran two days ago; IdleBig has a row that ran nothing, with a server-local last execution before the window. */
+           is well past 7 days. BusyDb ran two days ago, inside raw. RollupOnlyDb's only execution is five and a half days back: after the raw
+           drop below it survives in the hourly rollup alone, and its server-local last execution is before the window, so only the rollup's
+           execution sum keeps it off the idle list. IdleBig has a row that ran nothing, with a server-local last execution before the window. */
         for (var day = 1; day <= 10; day++)
         {
             await FinOpsIdleCoverageSeed.InsertAsync(c, ct, ServerId, ServerName, now.Date.AddDays(-day).AddHours(12), "day" + day);
         }
         await Query(c, ct, now.AddDays(-2), "BusyDb", "0xB0", "SELECT busy", 1_000_000, 5, 100, new DateTime(2026, 10, 1, 9, 0, 0), null);
+        await Query(c, ct, now.AddDays(-5).AddHours(-12), "RollupOnlyDb", "0xB2", "SELECT rollup", 500_000, 3, 40, new DateTime(2026, 9, 25, 8, 0, 0), null);
         await Query(c, ct, now.AddDays(-2), "IdleBig", "0xB1", "SELECT idle", 0, 0, 0, new DateTime(2026, 9, 20, 3, 4, 5), null);
 
         /* Every whole hour of the seeded span materialized in both hourly relations, then the raw rows the 4-day raw retention drops. */
@@ -648,7 +652,10 @@ public sealed class FinOpsOptimizationViewLiveTests
         Assert.True(idle.GetProperty("coverage").GetBoolean(), idle.GetRawText());
         Assert.Equal("ok", idle.GetProperty("status").GetString());
         Assert.Equal(JsonValueKind.Null, idle.GetProperty("message").ValueKind);
-        Assert.Equal(["IdleBig"], idle.GetProperty("rows").EnumerateArray().Select(r => r.GetProperty("database_name").GetString()).ToArray());
+        var names = idle.GetProperty("rows").EnumerateArray().Select(r => r.GetProperty("database_name").GetString()).ToArray();
+        /* The database whose only execution the rollup holds is active, not idle: the activity sum read the rollup arm, not raw alone. */
+        Assert.DoesNotContain("RollupOnlyDb", names);
+        Assert.Equal(["IdleBig"], names);
     }
 
     private static async Task RefreshAsync(NpgsqlConnection c, string view, DateTime from, DateTime to, CancellationToken ct)
