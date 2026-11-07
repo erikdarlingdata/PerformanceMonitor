@@ -277,10 +277,12 @@ FROM range($4) t(i)",
         Assert.Equal(Stamp(@base), Parse(await McpMemoryTools.GetMemoryClerks(_dataService, _serverManager, ServerName)).GetProperty("captured_at").GetString());
         Assert.Equal(Stamp(@base), Parse(await McpIoTools.GetFileIoStats(_dataService, _serverManager, ServerName)).GetProperty("captured_at").GetString());
 
-        /* Perfmon: the stamp comes from the unfiltered snapshot, so a filter that matches nothing still says when. */
-        var perfmon = Parse(await McpPerfmonTools.GetPerfmonStats(_dataService, _serverManager, ServerName, "no such counter"));
-        Assert.Equal(Stamp(@base), perfmon.GetProperty("captured_at").GetString());
-        Assert.Empty(perfmon.GetProperty("counters").EnumerateArray());
+        /* Perfmon: the stamp comes from the unfiltered snapshot, so a filter that matches nothing still says when. #8090: such a
+           filter answers a status word (not_collected, with the collected counters), and the stamp rides in its hints. */
+        var perfmon = JsonDocument.Parse(await McpPerfmonTools.GetPerfmonStats(_dataService, _serverManager, ServerName, "no such counter")).RootElement.Clone();
+        Assert.Equal("not_collected", perfmon.GetProperty("status").GetString());
+        Assert.Equal(Stamp(@base), perfmon.GetProperty("hints").GetProperty("captured_at").GetString());
+        Assert.Equal(Stamp(@base), Parse(await McpPerfmonTools.GetPerfmonStats(_dataService, _serverManager, ServerName)).GetProperty("captured_at").GetString());
     }
 
     [Fact]

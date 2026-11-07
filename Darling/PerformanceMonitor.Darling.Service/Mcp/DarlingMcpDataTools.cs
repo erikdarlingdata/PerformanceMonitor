@@ -717,8 +717,19 @@ public sealed class DarlingMcpDataTools
 
             /* #7903: the whole name first, ignoring case; a substring match only when no name equals the filter, so one
                counter's name does not take its longer neighbours. The shared helper is Lite's twin's too. */
-            var filtered = McpHelpers.FilterByNameExactThenContains(snapshot.Rows, r => r.CounterName, counter_name);
-            filtered = McpHelpers.FilterByNameExactThenContains(filtered, r => r.InstanceName, instance_name);
+            var byCounter = McpHelpers.FilterByNameExactThenContains(snapshot.Rows, r => r.CounterName, counter_name);
+            var filtered = McpHelpers.FilterByNameExactThenContains(byCounter, r => r.InstanceName, instance_name);
+            var capturedAt = snapshot.CapturedAt!.Value.ToString("o");
+
+            /* #8090: a filter that matches nothing answers a status word with the names the snapshot does hold, as the trend
+               does for an unknown counter, instead of counters: [] with no word beside it. */
+            if (filtered.Count == 0)
+            {
+                return TrendPayloads.PerfmonLatestMiss(
+                    counter_name, instance_name, capturedAt,
+                    snapshot.Rows.Select(r => r.CounterName).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToList(),
+                    byCounter.Select(r => r.InstanceName).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToList());
+            }
 
             /* One row per counter, built by the shared TrendPayloads.PerfmonLatestRow that Lite's McpPerfmonTools
                calls too: counter_kind is the stored type's three-way reading (V132, #3653 A7), delta_value is null
@@ -727,7 +738,7 @@ public sealed class DarlingMcpDataTools
             var result = filtered.Select(PerfmonRowPayload).ToList();
 
             /* #6180: the page is cut to the shared response target (see TrendPayloads.PerfmonLatestReply). */
-            return TrendPayloads.PerfmonLatestReply(resolved.DisplayName, snapshot.CapturedAt!.Value.ToString("o"), result);
+            return TrendPayloads.PerfmonLatestReply(resolved.DisplayName, capturedAt, result);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

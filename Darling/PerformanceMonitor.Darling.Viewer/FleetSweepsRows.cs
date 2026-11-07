@@ -254,7 +254,9 @@ internal static class FleetSweepsRows
                 var position = state == "pending" ? $"{hits} of {entryBar} hits to open"
                     : state == "closed" ? "closed"
                     : misses > 0 ? $"{misses} of {exitBar} quiet to close"
-                    : $"{hits} consecutive hit{(hits == 1 ? "" : "s")}";
+                    /* #8133: the hits count the current unbroken run, which starts over after a quiet sweep; the first-seen
+                       column is the item's first ever sighting, so the two can stand apart without contradiction. */
+                    : $"{hits} consecutive hit{(hits == 1 ? "" : "s")} in the current run";
                 /* The fleet-scope sentinel has no server name; "server 0" would be a fabrication. */
                 var server = Bool(w, "fleet_scope", false) ? "Fleet"
                     : Str(w, "server") is { Length: > 0 } n ? n : "server " + Int(w, "server_id");
