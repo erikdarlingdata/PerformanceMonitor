@@ -173,6 +173,43 @@ public sealed class ViewerChartCardsTests
         });
 
     [Fact]
+    public void ACardShowingZeroThroughout_LosesTheMark_WhenTheNextRefreshClearsAndFindsNoRows() =>
+        StaTestThread.Run(() =>
+        {
+            WithTheme(() =>
+            {
+                // The tabs reload a chart the way ChartRenderHelper does: ClearChart (which resets the plot), draw, then RefreshEmptyChart when there are no rows.
+                var helper = new ChartRenderHelper();
+                var chart = new WpfPlot();
+                var card = new ChartPanel { Title = "Zeros", Content = chart };
+                var host = new System.Windows.Controls.Grid();
+                host.Children.Add(card);
+                ViewerChartCards.Attach(host);
+                var window = new Window { Content = host, Width = 600, Height = 400, Left = 0, Top = 0 };
+                window.Show();
+                try
+                {
+                    ChartLayoutProbe.Layout(window);
+
+                    helper.ClearChart(chart);
+                    chart.Plot.Add.Scatter(new[] { 1.0, 2.0, 3.0 }, new[] { 0.0, 0.0, 0.0 }).LegendText = "none";
+                    ChartLayoutProbe.Render(chart);
+                    var mark = Assert.IsType<System.Windows.Controls.TextBlock>(card.HeaderContent);
+                    Assert.Equal("0 throughout", mark.Text);
+
+                    helper.ClearChart(chart);
+                    helper.RefreshEmptyChart(chart, "Zeros", "ms");
+                    ChartLayoutProbe.Render(chart);
+                    Assert.Null(card.HeaderContent);
+                }
+                finally
+                {
+                    window.Close();
+                }
+            });
+        });
+
+    [Fact]
     public void TheBlockingSeverityCards_NameTheAnsweringCollectorInTheSubtitle_OnlyWhenTheyDrawRows() =>
         StaTestThread.Run(() =>
         {
@@ -192,8 +229,8 @@ public sealed class ViewerChartCardsTests
 
                     tab.RenderBlockingDurationChart(rows);
                     total.Invoke(tab, new object[] { rows });
-                    Assert.Equal("DMV snapshot", ViewerChartCards.CardOf(tab.BlockingDurationChart)!.Subtitle);
-                    Assert.Equal("DMV snapshot", ViewerChartCards.CardOf(tab.BlockingTotalDurationChart)!.Subtitle);
+                    Assert.Equal("Source: DMV snapshot", ViewerChartCards.CardOf(tab.BlockingDurationChart)!.Subtitle);
+                    Assert.Equal("Source: DMV snapshot", ViewerChartCards.CardOf(tab.BlockingTotalDurationChart)!.Subtitle);
                     Assert.Equal("ms", tab.BlockingDurationChart.Plot.Axes.Left.Label.Text);
 
                     tab.RenderBlockingDurationChart(new List<BlockingDurationStatsPoint>());
@@ -209,8 +246,8 @@ public sealed class ViewerChartCardsTests
         });
 
     /// <summary>
-    /// A unit is short (twelve characters at most, the length ChartAxisTitle treats as a unit) and has no spaces ("ms", "MB", "GB", "%", "count", "ms/s", "reports/min"); a name or a name with its unit
-    /// ("Lock wait ms/s", "Memory (GB)") has spaces or is long. The label is read from the plot's left axis after the render methods ran.
+    /// A unit is short (twelve characters at most, the length ChartAxisTitle treats as a unit) and has no spaces ("ms", "MB", "GB", "%", "count", "ms/sec", "reports/min"); a name or a name with its unit
+    /// ("Lock wait ms/sec", "Memory (GB)") has spaces or is long. The label is read from the plot's left axis after the render methods ran.
     /// </summary>
     private static List<string> Check(WpfPlot chart)
     {
