@@ -347,11 +347,13 @@ SET search_path = decoy, pg_catalog;", ct);
            or the one that just ended, with an hour to spare for a store clock ahead of the monitored server's, never late
            (the old one-hour bound sat exactly on the just-ended interval's start). One second before it is late, and marks its day and the next: the open days
            are built as partial days up to a watermark under this bound, so a write below it can change a built day. */
-        /* The store's hour has turned since the reading above: the trigger's edge is an hour past the one this reading implies. */
-        var edgeNow = now.AddHours(-1);
+        /* The trigger's edge is the store's now(), which PostgreSQL fixes for the life of a transaction: the instant is read
+           inside the transaction that seeds the edge rows, so no hour turn can fall between the reading and the trigger. */
+        await using var edgeTx = await connection.BeginTransactionAsync(ct);
+        var edgeNow = await ReadDatabaseUtcNowAsync(connection, ct);
         var bound = new DateTime(edgeNow.Year, edgeNow.Month, edgeNow.Day, edgeNow.Hour, 0, 0, DateTimeKind.Utc).AddHours(-2);
         await ExecAsync(connection, "TRUNCATE collect.plan_regression_daily_built", ct);
-        await UpsertAsync(connection, ServerA, new[] { bound, bound.AddMinutes(30), now }, 1, 1, ct);
+        await UpsertAsync(connection, ServerA, new[] { bound, bound.AddMinutes(30), edgeNow }, 1, 1, ct);
         Assert.Equal(0, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.plan_regression_daily_built", ct));
 
         var lateFirst = bound.AddSeconds(-1);
@@ -360,6 +362,7 @@ SET search_path = decoy, pg_catalog;", ct);
         Assert.Equal(2, built.Count);
         Assert.Equal(1L, built[lateFirst.Date]);
         Assert.Equal(1L, built[lateFirst.Date.AddDays(1)]);
+        await edgeTx.CommitAsync(ct);
     }
 
     [Fact]
