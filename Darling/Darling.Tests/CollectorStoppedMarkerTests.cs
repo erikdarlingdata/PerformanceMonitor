@@ -87,6 +87,7 @@ public sealed class CollectorStoppedMarkerTests : IDisposable
                 Servers = [new MonitoredServer { Host = "test-host" }],
             })),
             ("managed store on a non-Windows host", s => s.PublishManagedStoreNeedsWindows()),
+            ("credentials directory owned by another user", s => s.PublishCredentialDirectoryRefused("x")),
         };
 
         for (var i = 0; i < routes.Length; i++)

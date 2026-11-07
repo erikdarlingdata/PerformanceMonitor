@@ -5213,6 +5213,51 @@ WHERE u.rolname = current_user";
     }
 
     /// <summary>
+    /// Why the service must not start collecting with the credentials directory at <paramref name="directory"/> (#8141):
+    /// another user owns it, or the service's user cannot list it. One sentence with the path, both users and the command
+    /// that fixes it; no exception text, because it reaches the ping body. Null when there is nothing to refuse: this
+    /// platform has no Unix modes, the service is root, nothing is at the path, or the service owns it and can list it.
+    /// </summary>
+    internal static string? ComposeCredentialDirectoryOwnershipRefusal(string directory)
+    {
+        if (ComposeCredentialDirectoryGuard.Current.UnixModes is not { } modes || modes.EffectiveUserId == 0)
+        {
+            return null;
+        }
+
+        var euid = modes.EffectiveUserId;
+        var euidText = euid.ToString(CultureInfo.InvariantCulture);
+        UnixFileOwner? owner;
+        try
+        {
+            owner = modes.OwnerOf(directory);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return CannotBeReadSentence(directory, euid, euidText);
+        }
+
+        if (owner is not { } found)
+        {
+            return null;
+        }
+
+        if (found.UserId != euid)
+        {
+            return $"The credentials directory {directory} belongs to user {found.UserId.ToString(CultureInfo.InvariantCulture)}, "
+                + $"but the service runs as user {euidText}, so collection is stopped and nothing in it was read or changed; "
+                + $"to give it to the service's user, run: {CredentialOwnershipFix(euid, directory)}, then start the service again.";
+        }
+
+        return modes.CanList(directory) ? null : CannotBeReadSentence(directory, euid, euidText);
+    }
+
+    private static string CannotBeReadSentence(string directory, uint euid, string euidText)
+        => $"The credentials directory {directory} cannot be read by user {euidText}, which the service runs as, "
+            + "so collection is stopped and nothing in it was read or changed; "
+            + $"to give it to that user, run: {CredentialOwnershipFix(euid, directory)}, then start the service again.";
+
+    /// <summary>
     /// Sets the compose store's credentials directory owner-only again before any file in it is read, and says what
     /// the service may do with it this start (#3914). A symbolic link is never followed: nothing in it is read or
     /// written. Unix: 0700 is re-applied on every call and the result read back

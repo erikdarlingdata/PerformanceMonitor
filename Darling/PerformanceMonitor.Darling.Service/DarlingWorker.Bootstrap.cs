@@ -280,6 +280,19 @@ public sealed partial class DarlingWorker
             _logger.LogWarning("{Warning}", triageLinkWarning);
         }
 
+        /* #8141: a credentials directory another user owns, or one the service's user cannot list, stops the start
+           here, before the store is opened: nothing is provisioned and no key loads. A narrow exception to "a key
+           problem never stops the start", because every later step would read the directory as empty and replace
+           what is in it. */
+        if (!config.Postgres.Managed
+            && Hosting.DarlingHostBinding.IsRunningInContainer
+            && DarlingManagedRoles.ComposeCredentialDirectoryOwnershipRefusal(DarlingManagedRoles.ComposeStoreCredentialDirectory) is { } refusal)
+        {
+            _logger.LogCritical("{Refusal}", refusal);
+            _collectorState.PublishCredentialDirectoryRefused(refusal);
+            return;
+        }
+
         /* Bundled-Postgres bootstrap (the shipped zero-admin default): in managed mode the
            service unpacks/initializes/starts its own Postgres BEFORE the store connection
            below, and the connection string is DERIVED (localhost + port + the generated

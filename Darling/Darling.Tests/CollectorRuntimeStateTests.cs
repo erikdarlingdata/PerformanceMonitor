@@ -462,14 +462,15 @@ public sealed class CollectorRuntimeStateTests
         /* And a terminal verdict on each of those three (PublishStopped, exception paths) plus the two config
            gates that never reach a retry or an exception at all: an all-fatal Validate
            (PublishConfigurationProblems) and postgres.managed on a non-Windows host
-           (PublishManagedStoreNeedsWindows). */
+           (PublishManagedStoreNeedsWindows), and the credentials-directory ownership gate
+           (PublishCredentialDirectoryRefused, #8141). */
         var terminal = Regex.Matches(
             code,
-            @"_collectorState\.(?:PublishStopped|PublishConfigurationProblems|PublishManagedStoreNeedsWindows)\(").Count;
+            @"_collectorState\.(?:PublishStopped|PublishConfigurationProblems|PublishManagedStoreNeedsWindows|PublishCredentialDirectoryRefused)\(").Count;
         Assert.True(
-            terminal == 5,
+            terminal == 6,
             $"expected a terminal verdict at the config-load, config-validate, managed-mode-platform, "
-            + $"managed-bootstrap and store-connect stand-downs; found {terminal}.");
+            + $"credentials-directory ownership, managed-bootstrap and store-connect stand-downs; found {terminal}.");
 
         /* Exactly one publish clears the failure phases, and it is the one that says collection started. */
         Assert.Single(Regex.Matches(code, @"_collectorState\.PublishCollecting\("));
@@ -511,6 +512,15 @@ public sealed class CollectorRuntimeStateTests
 
         foreach (var method in publishMethods)
         {
+            /* #8141: the one sanctioned string seat. Its only caller passes
+               DarlingManagedRoles.ComposeCredentialDirectoryOwnershipRefusal's sentence (a path, two user ids and a
+               chown command); the maintainer approved that stop and its text. */
+            if (method.Name == nameof(CollectorRuntimeState.PublishCredentialDirectoryRefused))
+            {
+                Assert.Equal([typeof(string)], method.GetParameters().Select(p => p.ParameterType).ToArray());
+                continue;
+            }
+
             Assert.True(
                 method.GetParameters().All(p => approvedParameterTypes.Contains(p.ParameterType)),
                 $"{method.Name} takes a parameter of type "
