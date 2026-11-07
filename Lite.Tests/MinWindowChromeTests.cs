@@ -147,16 +147,95 @@ public sealed class MinWindowChromeTests
                 return (visibleRows, shown, summaryText);
             }));
 
-            /* Before this change the grid showed 2 rows (113 high). 4 is what the chrome now leaves: each row is 38 high, set by the
-               themes' DataGridRow style, which this change does not touch. The issue's target is 8 rows and both Current Waits charts;
-               that needs a shorter row in the themes (see the pull request). */
-            Assert.True(rows >= 4, $"{theme}: Top Queries shows {rows} rows ({summary})");
+            /* Before #8219 the grid showed 2 rows (113 high). Each row is 38 high, set by the themes' DataGridRow style (the same look
+               as the Viewer), so the rows come from the space: the slicer is compact in a short window (70 instead of 130). */
+            Assert.True(rows >= 6, $"{theme}: Top Queries shows {rows} rows ({summary})");
             _ = charts;
         }
         finally
         {
             try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup */ }
         }
+    }
+
+    [Fact]
+    public void CurrentWaits_ShowsBothPlotsAtTheMinimum_AndKeepsTheFullFloorAtFullSize()
+    {
+        var found = RunTab("Dark", (w, tab) =>
+        {
+            var main = (TabControl)tab.FindName("MainTabControl");
+            SelectTab(main, "Blocking");
+            var blocking = (TabControl)tab.FindName("BlockingSubTabControl");
+            SelectTab(blocking, "Current Waits");
+            var measured = new List<(int Width, string Name, double Height, bool Inside, double Viewport)>();
+            foreach (var (width, height) in new[] { (900, 600), (1280, 800) })
+            {
+                Lay(w, width, height);
+                var viewport = ClippedTextProbe.Descendants(blocking).OfType<ScrollViewer>().First(s => s.IsVisible && s.ViewportHeight > 0);
+                foreach (var name in new[] { "CurrentWaitsDurationChart", "CurrentWaitsBlockedChart" })
+                {
+                    var plot = (FrameworkElement)tab.FindName(name);
+                    var bounds = plot.TransformToAncestor(viewport).TransformBounds(new Rect(plot.RenderSize));
+                    measured.Add((width, name, plot.ActualHeight, plot.IsVisible && bounds.Top >= -0.5 && bounds.Bottom <= viewport.ViewportHeight + 0.5, viewport.ViewportHeight));
+                }
+            }
+
+            return measured;
+        });
+
+        foreach (var (width, name, height, inside, viewport) in found)
+        {
+            var floor = width == 900 ? 120 : 200;
+            Assert.True(height >= floor, $"{name} is {height:F0} high at {width} wide, the floor is {floor} (viewport {viewport:F0})");
+            Assert.True(inside, $"{name} ({height:F0} high) is not fully inside the {viewport:F0} high viewport at {width} wide");
+        }
+    }
+
+    [Fact]
+    public void TheTimeSlicer_IsCompactInAShortWindow_AndFullHeightWhenTheWindowGrows()
+    {
+        var (heights, problems) = RunTab("Dark", (w, tab) =>
+        {
+            var main = (TabControl)tab.FindName("MainTabControl");
+            SelectTab(main, "Queries");
+            var queries = (TabControl)tab.FindName("QueriesSubTabControl");
+            SelectTab(queries, "Top Queries by Duration");
+            var slicer = (TimeRangeSlicerControl)tab.FindName("QueryStatsSlicer");
+            var start = new DateTime(2026, 10, 1, 0, 0, 0, DateTimeKind.Utc);
+            slicer.LoadData(Enumerable.Range(0, 24).Select(i => new PerformanceMonitor.Common.TimeSliceBucket { BucketTime = start.AddHours(i), Value = i + 1 }).ToList(),
+                "Total CPU (ms)", start, start.AddHours(24));
+            var border = (FrameworkElement)slicer.FindName("SlicerBorder");
+            var canvas = (Canvas)slicer.FindName("SlicerCanvas");
+            var heights = new List<double>();
+            var problems = new List<string>();
+            foreach (var (width, height) in new[] { (900, 600), (1280, 800), (900, 600) })
+            {
+                Lay(w, width, height);
+                slicer.Redraw();
+                canvas.UpdateLayout();
+                heights.Add(border.ActualHeight);
+                var texts = canvas.Children.OfType<TextBlock>().ToList();
+                if (!texts.Any(t => t.Text.Contains('/')))
+                {
+                    problems.Add($"{width}x{height}: no time axis label drawn");
+                }
+
+                foreach (var t in texts.Where(t => Canvas.GetTop(t) + t.ActualHeight > border.ActualHeight + 0.5))
+                {
+                    problems.Add($"{width}x{height}: '{t.Text}' ends at {Canvas.GetTop(t) + t.ActualHeight:F0}, past the {border.ActualHeight:F0} high slicer");
+                }
+
+                if (canvas.Children.OfType<System.Windows.Shapes.Rectangle>().Count(r => Math.Abs(r.Height - border.ActualHeight) < 0.5 && r.Width <= 12) < 2)
+                {
+                    problems.Add($"{width}x{height}: the two selection handles are not drawn full height");
+                }
+            }
+
+            return (heights, problems);
+        });
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+        Assert.Equal(new[] { 70.0, 130.0, 70.0 }, heights);
     }
 
     [Theory]
@@ -396,6 +475,32 @@ public sealed class MinWindowChromeTests
                 try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup */ }
             }
         }));
+
+    private static T RunTab<T>(string theme, Func<MainWindow, ServerTab, T> body)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "MinWindowChrome_" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(dir);
+        try
+        {
+            using var duckDb = new DuckDbInitializer(Path.Combine(dir, "test.duckdb"));
+            return StaTestThread.Run(() => WithTheme(theme, () =>
+            {
+                var w = NewWindow(dir);
+                try
+                {
+                    return body(w, HostTab(w, duckDb));
+                }
+                finally
+                {
+                    HostOf(w).Close();
+                }
+            }));
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup */ }
+        }
+    }
 
     private static MainWindow NewWindow(string dir)
     {
