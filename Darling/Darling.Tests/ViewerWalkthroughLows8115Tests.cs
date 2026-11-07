@@ -222,7 +222,7 @@ public sealed class ViewerWalkthroughLows8115Tests
     [Fact]
     public void ReadOnlyGate_MakesTextReadOnlyAndDisablesChoices_LeavingButtonsAlone()
     {
-        var gate = Method(ViewerType("ReadOnlySettingsGate"), "Apply", typeof(DependencyObject), typeof(string));
+        var gate = Method(ViewerType("ReadOnlySettingsGate"), "Apply", typeof(DependencyObject), typeof(string), typeof(string[]));
 
         /* WPF controls are built on the suite's one shared STA thread (#5602). */
         StaTestThread.Run(() =>
@@ -239,7 +239,7 @@ public sealed class ViewerWalkthroughLows8115Tests
             root.Children.Add(check);
             root.Children.Add(inner);
 
-            var gated = (int)gate.Invoke(null, new object[] { root, "shown for reference" })!;
+            var gated = (int)gate.Invoke(null, new object[] { root, "shown for reference", Array.Empty<string>() })!;
 
             Assert.Equal(3, gated);
             Assert.True(text.IsReadOnly);
@@ -254,15 +254,20 @@ public sealed class ViewerWalkthroughLows8115Tests
     public void ReadOnlyGate_OnTheRealMutingTab_LeavesTheViewerOnlyTriageDefaultsEditable()
     {
         var gate = Method(ViewerType("ReadOnlySettingsGate"), "Apply", typeof(DependencyObject), typeof(string), typeof(string[]));
-        var (gated, comboEnabled, checkEnabled) = StaTestThread.Run(() => WithTheme(() =>
+        var (skipped, walked) = StaTestThread.Run(() => WithTheme(() =>
         {
             var store = new ViewerAppSettingsStore(Path.Combine(Path.GetTempPath(), "settings-gate-8115-" + Guid.NewGuid().ToString("N") + ".json"));
             var window = new SettingsWindow(new ViewerPreferences(), store, null);
             try
             {
                 var content = (DependencyObject)window.MutingTriageTab.Content;
-                var count = (int)gate.Invoke(null, new object[] { content, "shown for reference", new[] { "ViewerOnlyTriageDefaults" } })!;
-                return (count, window.MuteRuleDefaultExpirationCombo.IsEnabled, window.LogAlertDismissalsCheckBox.IsEnabled);
+                /* With the viewer-only section skipped, as ApplyReadOnlyGating skips it, both controls stay enabled; the same walk with
+                   nothing skipped reaches and disables them, which is what shows the skip, not the walk's reach, kept them. */
+                gate.Invoke(null, new object[] { content, "shown for reference", new[] { "ViewerOnlyTriageDefaults" } });
+                var skipped = (window.MuteRuleDefaultExpirationCombo.IsEnabled, window.LogAlertDismissalsCheckBox.IsEnabled);
+                gate.Invoke(null, new object[] { content, "shown for reference", Array.Empty<string>() });
+                var walked = (window.MuteRuleDefaultExpirationCombo.IsEnabled, window.LogAlertDismissalsCheckBox.IsEnabled);
+                return (skipped, walked);
             }
             finally
             {
@@ -271,9 +276,9 @@ public sealed class ViewerWalkthroughLows8115Tests
             }
         }));
 
-        Assert.True(gated > 0, "nothing on the Muting & triage tab was gated");
-        Assert.True(comboEnabled, "the viewer-local mute-rule expiration default was disabled on a read-only seat");
-        Assert.True(checkEnabled, "the viewer-local dismissal-logging option was disabled on a read-only seat");
+        Assert.True(skipped.Item1, "the viewer-local mute-rule expiration default was disabled on a read-only seat");
+        Assert.True(skipped.Item2, "the viewer-local dismissal-logging option was disabled on a read-only seat");
+        Assert.False(walked.Item1 || walked.Item2, "the gate's walk does not reach the viewer-only controls, so the skip proves nothing");
     }
 
     // ── F15: the People window's empty state on a read-only seat gives no step the seat cannot take ──
