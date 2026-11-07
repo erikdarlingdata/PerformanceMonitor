@@ -249,7 +249,8 @@ public sealed class QueryTagUsageBehaviourTests
     {
         var busy = Run().GetProperty("busyOnce");
         Assert.Equal(1, busy.GetProperty("readsBefore").GetInt32());
-        Assert.Contains("strip notice", StripClasses(busy.GetProperty("stripsBefore")));
+        /* #7934: the strip waiting to send the read again carries busy-retry, which marks a panel that has not drawn yet. */
+        Assert.Contains("strip notice busy-retry", StripClasses(busy.GetProperty("stripsBefore")));
         Assert.DoesNotContain("strip error", StripClasses(busy.GetProperty("stripsBefore")));
         Assert.Equal(2, busy.GetProperty("readsAfter").GetInt32());
         Assert.True(busy.GetProperty("planCardAfter").GetBoolean());
@@ -264,5 +265,15 @@ public sealed class QueryTagUsageBehaviourTests
         Assert.Equal(2, busy.GetProperty("readsAfter").GetInt32());
         Assert.Contains("strip error", StripClasses(busy.GetProperty("stripsAfter")));
         Assert.False(busy.GetProperty("planCardAfter").GetBoolean());
+    }
+
+    /// <summary>#7945: a small figure such as 0.04 executions keeps two significant digits instead of reading 0.0; a figure from 0.1 up keeps one
+    /// decimal, and a whole number prints whole.</summary>
+    [Fact]
+    public void ASmallFigure_KeepsTwoSignificantDigits_InsteadOfReadingZero()
+    {
+        var rows = Rows(Run().GetProperty("smallFigureRows"));
+        var tag = Assert.Single(rows, r => r[0] == "T");
+        Assert.Equal(new[] { "T", "0.04", "1,234.6", "7" }, tag);
     }
 }

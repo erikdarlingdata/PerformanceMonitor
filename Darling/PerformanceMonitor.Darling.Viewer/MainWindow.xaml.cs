@@ -1629,8 +1629,9 @@ public partial class MainWindow : Window
     }
 
     /// <summary>Attaches each server's tags as coloured pills to its Overview summary, joining the loaded tag
-    /// list (<c>_tags</c> / <c>_serverTagIds</c>) — the summary carries no tag query of its own. Pills are
-    /// ordered by tag name so a card is stable. No tags anywhere → every card keeps its empty default.</summary>
+    /// list (<c>_tags</c> / <c>_serverTagIds</c>) — the summary carries no tag query of its own. The pills come
+    /// from <see cref="OverviewCardView.TagPills"/>: ordered by tag name so a card is stable, each carrying the
+    /// names of the tags above it for the search (#7984). No tags anywhere → every card keeps its empty default.</summary>
     private void StampTagPills(IReadOnlyList<ServerSummaryItem> summaries)
     {
         if (_tags.Count == 0 || _serverTagIds.Count == 0)
@@ -1638,21 +1639,11 @@ public partial class MainWindow : Window
             return;
         }
 
-        var tagById = _tags.ToDictionary(t => t.Id);
         foreach (var summary in summaries)
         {
-            if (!_serverTagIds.TryGetValue(summary.ServerId, out var tagIds) || tagIds.Count == 0)
-            {
-                summary.TagPills = System.Array.Empty<ServerTagPill>();
-                continue;
-            }
-
-            summary.TagPills = tagIds
-                .Select(id => tagById.TryGetValue(id, out var tag) ? tag : null)
-                .Where(t => t is not null)
-                .OrderBy(t => t!.Name, StringComparer.OrdinalIgnoreCase)
-                .Select(t => new ServerTagPill(t!.Name, t!.Colour))
-                .ToList();
+            summary.TagPills = _serverTagIds.TryGetValue(summary.ServerId, out var tagIds) && tagIds.Count > 0
+                ? OverviewCardView.TagPills(_tags, tagIds)
+                : System.Array.Empty<ServerTagPill>();
         }
     }
 

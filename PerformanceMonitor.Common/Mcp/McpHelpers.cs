@@ -738,6 +738,26 @@ internal static class McpHelpers
     }
 
     /// <summary>
+    /// #7903: the name filter <c>get_perfmon_stats</c> applies to <c>counter_name</c> and <c>instance_name</c> on both
+    /// products. The rows whose name equals <paramref name="wanted"/>, ignoring case; when no row's name does, the rows
+    /// whose name contains it, ignoring case. So 'Transactions/sec' returns that one counter and not Write
+    /// Transactions/sec beside it, while a partial name still finds its counters. A null or empty
+    /// <paramref name="wanted"/> keeps every row; a row with a null name never matches a filter.
+    /// </summary>
+    public static IReadOnlyList<T> FilterByNameExactThenContains<T>(IEnumerable<T> rows, Func<T, string?> name, string? wanted)
+    {
+        var list = rows as IReadOnlyList<T> ?? rows.ToList();
+        if (string.IsNullOrEmpty(wanted))
+            return list;
+
+        var exact = list.Where(r => string.Equals(name(r), wanted, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (exact.Count > 0)
+            return exact;
+
+        return list.Where(r => name(r) is { } n && n.Contains(wanted, StringComparison.OrdinalIgnoreCase)).ToList();
+    }
+
+    /// <summary>
     /// Validates top/limit parameter. Returns null if valid, the <see cref="Refusal"/> envelope if invalid
     /// (<c>hints.parameter</c> is <paramref name="paramName"/>, so a tool that calls this for <c>top</c> refuses
     /// <c>top</c> by name).

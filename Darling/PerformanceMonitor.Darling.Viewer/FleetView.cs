@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using PerformanceMonitor.Common.Tags;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -193,11 +194,15 @@ internal sealed class FleetView
         }
 
         /* Search predicate for the tagged projection: a server matches on its name OR on any tag name
-           assigned to it. Built once (tag id → name), then applied wherever servers enter the tree — the
-           favourites group, each tag's server list, and the untagged group — so a filtered server vanishes
-           from every place it would otherwise appear. A null search matches everything, keeping the
+           assigned to it OR the name of any tag above one of its tags (#7984), the same fields as the Overview
+           search. Built once (tag id → the names that tag answers to), then applied wherever servers enter the
+           tree — the favourites group, each tag's server list, and the untagged group — so a filtered server
+           vanishes from every place it would otherwise appear. A null search matches everything, keeping the
            no-search projection byte-identical to before. */
-        var tagNameById = _tags.ToDictionary(t => t.Id, t => t.Name);
+        var nodes = _tags.Select(t => new TagTreeNode(t.Id, t.Name, t.ParentId)).ToList();
+        var searchNamesByTag = _tags.ToDictionary(
+            t => t.Id,
+            t => TagTreeRules.Ancestors(nodes, t.Id).Select(a => a.Name).Prepend(t.Name).ToList());
 
         bool ServerMatches(DarlingServer s)
         {
@@ -215,7 +220,7 @@ internal sealed class FleetView
             {
                 foreach (var tid in tagIds)
                 {
-                    if (tagNameById.TryGetValue(tid, out var name) && ServerOverviewFilter.Matches(_search, name))
+                    if (searchNamesByTag.TryGetValue(tid, out var names) && ServerOverviewFilter.Matches(_search, names.ToArray()))
                     {
                         return true;
                     }

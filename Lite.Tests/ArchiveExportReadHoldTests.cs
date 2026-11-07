@@ -27,7 +27,10 @@ namespace PerformanceMonitorLite.Tests;
 ///
 /// <para>The holds are recorded through <see cref="ArchiveService.ExportReadHoldForTests"/>, which fires right after
 /// each read hold is taken and right before it is released. The writer is a real <c>AcquireWriteLock</c> on its own
-/// thread, queued from inside a hold, with the background budget.</para>
+/// thread, queued from inside a hold, with the background budget. Its park tail is its whole budget, so it parks on the
+/// lock at once rather than polling first (#7256): what these tests prove is that every hold is released before the next
+/// is taken, and a parked writer, which the lock admits ahead of every new reader the moment a hold ends, shows that
+/// deterministically. The poll itself is covered in <c>BudgetedWriterPollTests</c>.</para>
 /// </summary>
 [Collection("CollectionResetGate")]
 public sealed class ArchiveExportReadHoldTests : IDisposable
@@ -92,7 +95,11 @@ public sealed class ArchiveExportReadHoldTests : IDisposable
 
     private async Task<DuckDbInitializer> InitializeAsync()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
+        var initializer = new DuckDbInitializer(_dbPath)
+        {
+            /* The queued writer parks at once (see the class summary): a tail no shorter than its budget skips the poll. */
+            WriteLockParkTail = WriterBudget,
+        };
         _initializers.Add(initializer);
         await initializer.InitializeFromTemplateAsync();
         return initializer;
