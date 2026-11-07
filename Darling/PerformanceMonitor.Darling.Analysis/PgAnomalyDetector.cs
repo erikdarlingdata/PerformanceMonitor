@@ -213,7 +213,7 @@ ORDER BY local_hour";
 
     /* Wait-profile current window: all-types wait ms/sec per collection (the collection's STORED interval
        since V127, the LAG for pre-V127 collections — never an assumed cadence; mirrors the WaitMsPerSec
-       baseline), then PEAK and MEAN across collections. A restart collection (every row's stored interval
+       baseline; since #8106 each ROW is rated over its own interval and the rates summed), then PEAK and MEAN across collections. A restart collection (every row's stored interval
        0) has a NULL interval, so it is neither a peak candidate, nor a term of the mean, nor counted as a
        sample — before #3540 it was a sample worth 0.00 ms/sec. Window bound aligned to the baseline
        (>= $2 AND < $3).
@@ -234,20 +234,27 @@ ORDER BY local_hour";
 WITH per_collection AS (
     SELECT collection_time,
            SUM(delta_wait_time_ms)::DOUBLE PRECISION AS total_wait_ms,
+           /* #8106: sample_interval_seconds is a per-row figure, the seconds since that wait type's own previous
+              sighting, so a type that returns after missing some passes stores several cadences beside its
+              siblings' one. Each row is rated over its OWN interval and the rates are summed; a row whose
+              interval is 0 (a first sighting or a counter reset: no delta knowable) adds nothing, and a
+              collection whose EVERY row is 0 (a restart) has no rate and is not a sample. A pre-V127 collection
+              stored no interval on any row: its summed delta is rated over the LAG this read always used. */
            CASE WHEN MAX(sample_interval_seconds) IS NULL
-                THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-                ELSE NULLIF(MAX(sample_interval_seconds), 0)
-           END AS interval_sec
+                THEN SUM(delta_wait_time_ms)::DOUBLE PRECISION / NULLIF(extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))), 0)
+                WHEN MAX(sample_interval_seconds) > 0
+                THEN SUM(delta_wait_time_ms::DOUBLE PRECISION / NULLIF(sample_interval_seconds, 0))
+           END AS ms_per_sec
     FROM v_wait_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   delta_wait_time_ms >= 0
     GROUP BY collection_time
 )
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
-       MAX(CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END) AS peak_ms_per_sec,
-       AVG(CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END) AS avg_ms_per_sec,
+       MAX(ms_per_sec) AS peak_ms_per_sec,
+       AVG(ms_per_sec) AS avg_ms_per_sec,
        SUM(total_wait_ms) AS total_wait_ms,
-       COUNT(*) FILTER (WHERE interval_sec IS NOT NULL) AS sample_count
+       COUNT(*) FILTER (WHERE ms_per_sec IS NOT NULL) AS sample_count
 FROM per_collection
 GROUP BY local_hour
 ORDER BY local_hour";
@@ -258,17 +265,18 @@ ORDER BY local_hour";
     public static readonly string YoungBaselineBarPeakSql = @"
 WITH per_collection AS (
     SELECT collection_time,
-           COALESCE(SUM(delta_wait_time_ms) FILTER (WHERE wait_type NOT IN (" + AnomalyThresholds.YoungBaselineBarExcludedWaitsSqlList + @")), 0)::DOUBLE PRECISION AS bar_wait_ms,
+           /* #8106: each row rated over its OWN interval, as WaitRateTileWindowSql rates the window. */
            CASE WHEN MAX(sample_interval_seconds) IS NULL
-                THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-                ELSE NULLIF(MAX(sample_interval_seconds), 0)
-           END AS interval_sec
+                THEN COALESCE(SUM(delta_wait_time_ms) FILTER (WHERE wait_type NOT IN (" + AnomalyThresholds.YoungBaselineBarExcludedWaitsSqlList + @")), 0)::DOUBLE PRECISION / NULLIF(extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))), 0)
+                WHEN MAX(sample_interval_seconds) > 0
+                THEN COALESCE(SUM(delta_wait_time_ms::DOUBLE PRECISION / NULLIF(sample_interval_seconds, 0)) FILTER (WHERE wait_type NOT IN (" + AnomalyThresholds.YoungBaselineBarExcludedWaitsSqlList + @")), 0)
+           END AS bar_ms_per_sec
     FROM v_wait_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   delta_wait_time_ms >= 0
     GROUP BY collection_time
 )
-SELECT MAX(CASE WHEN interval_sec > 0 THEN bar_wait_ms / interval_sec END) AS bar_peak_ms_per_sec
+SELECT MAX(bar_ms_per_sec) AS bar_peak_ms_per_sec
 FROM per_collection";
 
     /* The newest server-properties row's engine edition, read only by the young-baseline arm. */

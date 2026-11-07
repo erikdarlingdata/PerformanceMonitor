@@ -579,6 +579,15 @@ public static partial class TimescaleSupport
     public const string PerfmonIntervalBaselineView = "perfmon_interval_baseline";
     public const string WaitStatsIntervalBaselineView = "wait_stats_interval_baseline";
 
+    /// <summary>The PER-ROW RATE wait-stats baseline supply (#8106): <see cref="WaitStatsIntervalBaselineView"/>'s successor. It
+    /// carries the sum of each row's delta over that row's own <c>sample_interval_seconds</c> beside the summed delta, so the
+    /// WaitMsPerSec arm reads a collection's rate as the summed row rates rather than the summed delta over one interval, and a
+    /// wait type that returns after missing some passes (its own interval several cadences long) no longer divides its siblings'
+    /// deltas. A continuous aggregate's query cannot change in place, so this is a new relation under a new name, registered in the
+    /// interval supply's position, backfilled from raw, with the interval supply retiring through
+    /// <see cref="SupersededBaselineRelations"/> once this one covers the tier.</summary>
+    public const string WaitStatsRateBaselineView = "wait_stats_rate_baseline";
+
     /// <summary>
     /// The SUPERSEDED perfmon and wait-stats baseline supplies (#1757 shape, replaced by #3653's interval-honest
     /// pair). Not registered: they are no longer in <see cref="BaselineAggregates"/>, so the ensure sweep never
@@ -675,6 +684,10 @@ public static partial class TimescaleSupport
     {
         (LegacyPerfmonBaselineView,   PerfmonIntervalBaselineView),
         (LegacyWaitStatsBaselineView, WaitStatsIntervalBaselineView),
+        /* #8106: the interval-honest wait supply is itself superseded by the per-row rate supply. The chain is walked in this
+           order on every start, so a store that still carries wait_stats_baseline judges it against wait_stats_interval_baseline
+           before that relation is judged against wait_stats_rate_baseline; a legacy whose successor is gone can never drop. */
+        (WaitStatsIntervalBaselineView, WaitStatsRateBaselineView),
     };
 
     /// <summary>BatchRequests baseline supply (#3653, A6/A10) -- the counter_name and non-negative filters bake in,
@@ -707,7 +720,10 @@ AND   sample_interval_seconds IS DISTINCT FROM 0
 GROUP BY server_id, bucket, collection_time
 WITH NO DATA";
 
-    /// <summary>WaitStats AND WaitMsPerSec baseline supply (#3653, A6/A10). Both families share this source and
+    /// <summary>The SUPERSEDED (#8106) WaitStats AND WaitMsPerSec baseline supply (#3653, A6/A10), as every store that ran a build
+    /// between #3698 and #8106 carries it. Retained, not registered, the way <see cref="LegacyCreateWaitStatsBaselineSql"/> is: the
+    /// record of what <see cref="WaitStatsIntervalBaselineView"/> computes, the text the live retirement test builds its fixture from,
+    /// and what <c>PgBaselineProvider</c>'s legacy wait arms are written against. Both families share this source and
     /// share the identical row-level filter (delta_wait_time_ms >= 0 AND sample_interval_seconds IS DISTINCT
     /// FROM 0), which is what lets one aggregate serve both; Darling.Tests pins that sharing so a future
     /// family-specific filter cannot silently poison its sibling's supply.
@@ -727,6 +743,31 @@ SELECT
     collection_time,
     sum(delta_wait_time_ms) AS total_wait_ms,
     max(sample_interval_seconds) AS sample_interval_seconds
+FROM collect.wait_stats
+WHERE delta_wait_time_ms >= 0
+AND   sample_interval_seconds IS DISTINCT FROM 0
+GROUP BY server_id, bucket, collection_time
+WITH NO DATA";
+
+    /// <summary>WaitStats AND WaitMsPerSec baseline supply (#8106): <see cref="CreateWaitStatsIntervalBaselineSql"/>'s shape, the same
+    /// row-level filter (<c>delta_wait_time_ms >= 0 AND sample_interval_seconds IS DISTINCT FROM 0</c>, which Darling.Tests pins the two
+    /// families to share) and the same (server_id, bucket, collection_time) grain, plus <c>summed_row_rates</c>: each row's delta over
+    /// its OWN stored interval, summed over the collection. <c>sample_interval_seconds</c> stays a per-collection figure with the
+    /// three-state meaning the provider's interval-NULL gate keys on (NULL only when no row of the collection recorded one), but is the
+    /// collection's CADENCE, the shortest interval any of its rows measured, rather than the longest: a wait type that returns after
+    /// missing some passes stores the seconds since its own previous sighting, several cadences, and taking that as the collection's
+    /// interval divided every sibling's delta by it, which is the deflation #8106 records. The WaitStats arm reads the summed
+    /// delta as before; the WaitMsPerSec arm reads the summed row rates where the interval is stored and rates the summed delta over
+    /// <c>LAG(collection_time)</c> only for a pre-column collection.</summary>
+    public const string CreateWaitStatsRateBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.wait_stats_rate_baseline
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+SELECT
+    server_id,
+    time_bucket('1 hour', collection_time) AS bucket,
+    collection_time,
+    sum(delta_wait_time_ms) AS total_wait_ms,
+    sum(delta_wait_time_ms::double precision / NULLIF(sample_interval_seconds, 0)) AS summed_row_rates,
+    min(sample_interval_seconds) AS sample_interval_seconds
 FROM collect.wait_stats
 WHERE delta_wait_time_ms >= 0
 AND   sample_interval_seconds IS DISTINCT FROM 0
@@ -2184,6 +2225,7 @@ AND   EXISTS (SELECT 1 FROM unnest($1::integer[]) AS id WHERE a.backend_type LIK
     public static string SourceTableFor(string view) => view switch
     {
         PerfmonIntervalBaselineView => "perfmon_stats",
+        WaitStatsRateBaselineView => "wait_stats",
         WaitStatsIntervalBaselineView => "wait_stats",
         /* The superseded pair reads the same raw tables; named so the retirement fixture and any coverage probe
            over a legacy relation resolve without a second map. */
@@ -2527,7 +2569,7 @@ AND   EXISTS (SELECT 1 FROM unnest($1::integer[]) AS id WHERE a.backend_type LIK
     public static readonly (string CreateSql, string View)[] BaselineAggregates =
     {
         (CreatePerfmonIntervalBaselineSql,   PerfmonIntervalBaselineView),
-        (CreateWaitStatsIntervalBaselineSql, WaitStatsIntervalBaselineView),
+        (CreateWaitStatsRateBaselineSql,     WaitStatsRateBaselineView),
         (CreateSessionStatsBaselineSql,   SessionStatsBaselineView),
         (CreateQueryStatsBaselineSql,     QueryStatsBaselineView),
         (CreateBlockedProcessBaselineSql, BlockedProcessBaselineView),

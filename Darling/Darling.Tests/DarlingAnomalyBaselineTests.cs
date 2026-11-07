@@ -349,9 +349,19 @@ public sealed class DarlingAnomalyBaselineTests
             var legacy = PgBaselineProvider.GetLegacyBaselineQuery(gated[i].Metric)!;
 
             Assert.Contains(gated[i].Predicate, successor, StringComparison.Ordinal);
-            Assert.DoesNotContain(gated[i].Predicate, legacy, StringComparison.Ordinal);
-            Assert.Contains(ungated[i].Predicate, legacy, StringComparison.Ordinal);
             Assert.DoesNotContain(ungated[i].Predicate, successor, StringComparison.Ordinal);
+            if (gated[i].Metric == MetricNames.BatchRequests)
+            {
+                /* The pre-#3653 legacy text has no interval to gate on. */
+                Assert.DoesNotContain(gated[i].Predicate, legacy, StringComparison.Ordinal);
+                Assert.Contains(ungated[i].Predicate, legacy, StringComparison.Ordinal);
+            }
+            else
+            {
+                /* #8106: the wait pair's legacy supply is #3653's interval-honest aggregate, so its legacy text carries the gate too. */
+                Assert.Contains(gated[i].Predicate, legacy, StringComparison.Ordinal);
+                Assert.DoesNotContain(ungated[i].Predicate, legacy, StringComparison.Ordinal);
+            }
 
             /* The successor reads the successor relation and never the legacy one; the legacy text the reverse.
                The legacy name is a PREFIX of the successor's source line only in the other direction
@@ -375,9 +385,12 @@ public sealed class DarlingAnomalyBaselineTests
             }
         }
 
-        /* The rate arms read the STORED interval first and derive one from LAG only where it is NULL. */
+        /* The rate arms read the STORED interval first and derive one from LAG only where it is NULL; the successor (#8106) reads the
+           collection's rate as its summed row rates where the interval is stored. */
         Assert.Contains("CASE WHEN sample_interval_seconds IS NULL", PgBaselineProvider.GetBaselineQuery(MetricNames.WaitMsPerSec)!, StringComparison.Ordinal);
-        Assert.DoesNotContain("sample_interval_seconds", PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitMsPerSec)!, StringComparison.Ordinal);
+        Assert.Contains("ELSE summed_row_rates", PgBaselineProvider.GetBaselineQuery(MetricNames.WaitMsPerSec)!, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN sample_interval_seconds IS NULL", PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitMsPerSec)!, StringComparison.Ordinal);
+        Assert.DoesNotContain("summed_row_rates", PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitMsPerSec)!, StringComparison.Ordinal);
         Assert.DoesNotContain("sample_interval_seconds", PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.BatchRequests)!, StringComparison.Ordinal);
     }
 
@@ -570,10 +583,12 @@ public sealed class DarlingAnomalyBaselineTests
         var sql = PgAnomalyDetector.WaitRateTileWindowSql;
         var expectedColumns = new[]
         {
-            "MAX(CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END) AS peak_ms_per_sec",
-            "AVG(CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END) AS avg_ms_per_sec",
+            /* #8106: the per-collection rate is computed in the CTE (each row over its own interval, summed), so the
+               outer aggregates read ms_per_sec; a collection with no rate is NULL to all three and is not a sample. */
+            "MAX(ms_per_sec) AS peak_ms_per_sec",
+            "AVG(ms_per_sec) AS avg_ms_per_sec",
             "SUM(total_wait_ms) AS total_wait_ms",
-            "COUNT(*) FILTER (WHERE interval_sec IS NOT NULL) AS sample_count",
+            "COUNT(*) FILTER (WHERE ms_per_sec IS NOT NULL) AS sample_count",
         };
         foreach (var column in expectedColumns)
             Assert.Contains(column, sql, StringComparison.Ordinal);
@@ -860,8 +875,8 @@ public sealed class DarlingAnomalyBaselineTests
            itself); the shape pinned here holds for both the successor and the legacy text. */
         foreach (var (sql, supply) in new[]
         {
-            (PgBaselineProvider.GetBaselineQuery(MetricNames.WaitStats)!, "FROM wait_stats_interval_baseline"),
-            (PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitStats)!, "FROM wait_stats_baseline"),
+            (PgBaselineProvider.GetBaselineQuery(MetricNames.WaitStats)!, "FROM wait_stats_rate_baseline"),
+            (PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitStats)!, "FROM wait_stats_interval_baseline"),
         })
         {
             Assert.DoesNotContain("QUALIFY", sql, StringComparison.OrdinalIgnoreCase);
@@ -951,8 +966,17 @@ public sealed class DarlingAnomalyBaselineTests
             Assert.True(exclusionAt > fromCteAt, "the exclusion must filter OUTSIDE the windowed CTE");
 
             /* The rate arm yields NULL, never 0, for a non-positive interval; the ELSE that rated it 0 is gone
-               from both texts. */
-            Assert.Contains("CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END AS ms_per_sec", sql, StringComparison.Ordinal);
+               from both texts. #8106: the successor rates a stored-interval collection as its summed row rates and
+               keeps the LAG-rated form for a pre-column collection; the legacy text (#3653's) keeps the guarded arm. */
+            if (sql == PgBaselineProvider.GetBaselineQuery(MetricNames.WaitMsPerSec))
+            {
+                Assert.Contains("CASE WHEN sample_interval_seconds IS NULL THEN total_wait_ms / interval_sec", sql, StringComparison.Ordinal);
+                Assert.Contains("ELSE summed_row_rates", sql, StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.Contains("CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END AS ms_per_sec", sql, StringComparison.Ordinal);
+            }
             Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
             Assert.True(rateFilterAt > sql.IndexOf("END AS ms_per_sec", StringComparison.Ordinal), "the > 0 filter is with_rate's own WHERE, under the arm it guards");
         }

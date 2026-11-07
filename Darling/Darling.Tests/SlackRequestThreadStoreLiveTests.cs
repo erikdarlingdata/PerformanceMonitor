@@ -35,13 +35,19 @@ public sealed class SlackRequestThreadProbeTests
         var parameters = map.GetParameters();
         var threads = Array.FindIndex(parameters, p => p.Name == "hasSlackBotThreads");
         Assert.True(threads >= 0, "the probe has a hasSlackBotThreads sentinel");
-        Assert.Equal(parameters.Length - 1, threads);
 
+        /* The sentinels above V252 off, so the thread table is the newest one present. */
         var allTrue = Enumerable.Repeat((object)true, parameters.Length).ToArray();
-        Assert.Equal(252, (int)map.Invoke(null, allTrue)!);
+        var upToThreads = (object[])allTrue.Clone();
+        for (var i = threads + 1; i < upToThreads.Length; i++)
+        {
+            upToThreads[i] = false;
+        }
+
+        Assert.Equal(252, (int)map.Invoke(null, upToThreads)!);
         Assert.Equal(StorageVersion.SchemaVersion, (int)map.Invoke(null, allTrue)!);
 
-        var withoutThreads = (object[])allTrue.Clone();
+        var withoutThreads = (object[])upToThreads.Clone();
         withoutThreads[threads] = false;
         Assert.Equal(251, (int)map.Invoke(null, withoutThreads)!);
     }

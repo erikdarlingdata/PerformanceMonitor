@@ -16,6 +16,7 @@ using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
 namespace Darling.Tests;
@@ -102,6 +103,81 @@ public sealed class WaitRateRowIntervalLiveTests
         var bucket = await provider.GetBaselineAsync(ServerId, MetricNames.WaitMsPerSec, DateTime.UtcNow, ct);
         Assert.Equal(60, bucket.SampleCount);
         Assert.Equal(602.0, bucket.Mean, 2);
+    }
+
+    /// <summary>The upgrade: a store that carries <c>wait_stats_interval_baseline</c> as its registered wait supply, stamped below V255,
+    /// runs the ladder. V255 creates the successor aggregate; the ensure sweep gives it its policies and the backfill materializes the
+    /// seeded hour; the provider's supply choice takes the successor, which reads the corrected baseline; and the interval supply
+    /// stays until the successor covers the 35-day tier.</summary>
+    [Fact]
+    public async Task AStoreWithTheIntervalSupply_UpgradesToTheRateSupply_AndReadsTheCorrectedBaseline()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #8106 upgrade test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await BuildStoreAsync(scratch, ct);
+        var hour = SeededHour;
+        await SeedTheIssuesHourAsync(connection, hour, ct);
+
+        /* Back to the store shape before this rung: the interval supply registered (so it exists), the successor absent, V255 unstamped. */
+        await ExecuteAsync(connection, TimescaleSupport.CreateWaitStatsIntervalBaselineSql, ct);
+        await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 252, ct);
+        await ExecuteAsync(connection, "DELETE FROM darling_schema_version WHERE version >= 255", ct);
+        Assert.False(await RelationExistsAsync(connection, TimescaleSupport.WaitStatsRateBaselineView, ct));
+        Assert.Equal(252, await ScalarAsync<int>(connection, "SELECT max(version) FROM darling_schema_version", ct));
+
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await RelationExistsAsync(connection, TimescaleSupport.WaitStatsRateBaselineView, ct), "V255 creates the successor on a store whose wait_stats is a hypertable");
+        Assert.True(await ScalarAsync<bool>(connection, TimescaleSupport.BaselineRelationIsContinuousAggregateSql(TimescaleSupport.WaitStatsRateBaselineView), ct));
+        Assert.Equal(StorageVersion.SchemaVersion, await ScalarAsync<int>(connection, "SELECT max(version) FROM darling_schema_version", ct));
+
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+        await TimescaleSupport.BackfillBaselineAggregatesAsync(connection, null, ct);
+        Assert.Equal(hour, await ScalarAsync<DateTime>(connection, $"SELECT min(bucket) FROM collect.{TimescaleSupport.WaitStatsRateBaselineView} WHERE server_id = {ServerId}", ct));
+        /* timescaledb_information.jobs reports a continuous aggregate's jobs under the user view's own identity. */
+        Assert.True(await ScalarAsync<long>(connection,
+            $"SELECT count(*) FROM timescaledb_information.jobs WHERE hypertable_schema = 'collect' AND hypertable_name = '{TimescaleSupport.WaitStatsRateBaselineView}' AND proc_name = 'policy_refresh_continuous_aggregate'", ct) == 1,
+            "the ensure sweep gives the successor its refresh policy");
+
+        /* The interval supply still holds the hour and the successor reaches it, so the provider reads the successor and the corrected figure. */
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var bucket = await new PgBaselineProvider(postgres).GetBaselineAsync(ServerId, MetricNames.WaitMsPerSec, DateTime.UtcNow, ct);
+        Assert.Equal(600.4, bucket.Mean, 2);
+
+        /* The interval supply is not dropped yet: the successor's oldest bucket is two days old, the tier is 35. */
+        var verdict = await TimescaleSupport.JudgeSupersededBaselineRelationAsync(
+            connection, TimescaleSupport.WaitStatsIntervalBaselineView, TimescaleSupport.WaitStatsRateBaselineView, DateTime.UtcNow, ct);
+        Assert.Equal(TimescaleSupport.SupersededBaselineDecision.SuccessorShort, verdict.Decision);
+        Assert.Equal(0, await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, null, DateTime.UtcNow, ct));
+        Assert.True(await RelationExistsAsync(connection, TimescaleSupport.WaitStatsIntervalBaselineView, ct));
+
+        /* Forty days on, the successor covers the tier and the interval supply retires. */
+        Assert.Equal(1, await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, null, DateTime.UtcNow.AddDays(40), ct));
+        Assert.False(await RelationExistsAsync(connection, TimescaleSupport.WaitStatsIntervalBaselineView, ct));
+    }
+
+    /// <summary>The viewer's probe: the successor relation is the V255 sentinel and the top arm.</summary>
+    [Fact]
+    public void TheProbe_MapsTheRateBaselineToTheSchemaVersion_AndItsAbsenceTo252()
+    {
+        var map = typeof(ViewerDataService).GetMethod(
+            nameof(ViewerDataService.MapProbedSchemaVersion),
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+        var parameters = map.GetParameters();
+        var rate = Array.FindIndex(parameters, p => p.Name == "hasWaitStatsRateBaseline");
+        Assert.True(rate >= 0, "the probe has a hasWaitStatsRateBaseline sentinel");
+        Assert.Equal(parameters.Length - 1, rate);
+
+        var allTrue = Enumerable.Repeat((object)true, parameters.Length).ToArray();
+        Assert.Equal(StorageVersion.SchemaVersion, (int)map.Invoke(null, allTrue)!);
+        Assert.Equal(PgMigrations.Scripts[^1].Version, (int)map.Invoke(null, allTrue)!);
+
+        var withoutRate = (object[])allTrue.Clone();
+        withoutRate[rate] = false;
+        Assert.Equal(252, (int)map.Invoke(null, withoutRate)!);
     }
 
     private static async Task<NpgsqlConnection> BuildStoreAsync(ScratchPostgres scratch, CancellationToken ct)

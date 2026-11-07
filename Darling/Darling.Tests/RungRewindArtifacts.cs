@@ -732,6 +732,10 @@ ALTER TABLE IF EXISTS config.config_notification_routes DROP COLUMN IF EXISTS sl
 ALTER TABLE IF EXISTS config.config_notification_routes DROP COLUMN IF EXISTS slack_bot_channel_set_at;
 ALTER TABLE IF EXISTS config.config_notification DROP COLUMN IF EXISTS slack_bot_token;
 ALTER TABLE IF EXISTS config.config_notification DROP COLUMN IF EXISTS slack_app_token;"),
+        // V255 (#8106): the per-row wait rate baseline supply. The probe's sentinel is the relation itself, a continuous aggregate or the plain
+        // fallback view, so the rewind drops whichever shape stands (the product's own discriminating drop), and a re-run of V255 or the
+        // ensure sweep creates it again. Safe on a store that never had it.
+        new(255, "hasWaitStatsRateBaseline", PerformanceMonitor.Darling.Storage.TimescaleSupport.DropRetiredBaselineRelationSql(PerformanceMonitor.Darling.Storage.TimescaleSupport.WaitStatsRateBaselineView)),
     ];
 
     /// <summary>

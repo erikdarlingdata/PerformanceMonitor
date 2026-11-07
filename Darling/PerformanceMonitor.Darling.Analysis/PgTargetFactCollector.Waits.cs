@@ -76,9 +76,13 @@ WITH per_collection AS (
     SELECT
         collection_time,
         MAX(sample_interval_seconds) AS stored_interval,
+        /* #8106: the collection's cadence is the SHORTEST positive interval any of its rows measured. Each row's
+           interval is the seconds since that event's own previous sighting, so an event that returns after missing
+           some passes carries several cadences beside its siblings' one, and MAX would count those seconds as
+           observed time the siblings never covered. NULL when every row is 0 (a restart: not a sample). */
         CASE WHEN MAX(sample_interval_seconds) IS NULL
              THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-             ELSE NULLIF(MAX(sample_interval_seconds), 0)
+             ELSE MIN(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0)
         END AS interval_sec
     FROM pg_wait_stats
     WHERE server_id = $1

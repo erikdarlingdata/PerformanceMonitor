@@ -2724,6 +2724,38 @@ END
 $do$;";
 
     /// <summary>
+    /// V255 (#8106): the per-row wait rate baseline supply, <c>collect.wait_stats_rate_baseline</c>, created where the store can hold it
+    /// at migration time so the upgraded store carries its successor from this rung on. On a store without TimescaleDB it is the plain
+    /// fallback view over <c>collect.wait_stats</c>, the same view the ensure sweep derives. On a TimescaleDB store whose
+    /// <c>wait_stats</c> is already a hypertable (every upgrading store) it is the continuous aggregate, <c>WITH NO DATA</c>, which is
+    /// catalog-only and transaction-safe; the ensure sweep that follows on the same start finds it, gives it the refresh, retention and
+    /// compression policies of the position it took over from <c>wait_stats_interval_baseline</c>, and backfills it from raw. On a
+    /// fresh TimescaleDB store the table is not yet a hypertable here (the conversion runs after the ladder), so this rung creates
+    /// nothing and the sweep creates the aggregate as it creates every other. <c>wait_stats_interval_baseline</c> is not touched: it
+    /// keeps serving the baseline tier until the successor covers it, then retires through
+    /// <c>TimescaleSupport.SupersededBaselineRelations</c>. Idempotent. <b>No Lite twin:</b> Lite has no rollup tier.
+    /// </summary>
+    private static readonly string V255Sql = @"
+DO $$
+DECLARE
+    v_hypertable boolean := false;
+BEGIN
+    /* timescaledb_information only exists once the extension has been created; to_regclass probes it without raising, and
+       the hypertable read goes through EXECUTE so the reference is parsed only when it runs. */
+    IF to_regclass('timescaledb_information.continuous_aggregates') IS NULL THEN
+        EXECUTE '" + TimescaleSupport.CreateBaselineFallbackViewSql(TimescaleSupport.WaitStatsRateBaselineView, TimescaleSupport.CreateWaitStatsRateBaselineSql).Replace("'", "''") + @"';
+        RETURN;
+    END IF;
+
+    EXECUTE 'SELECT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_schema = ''collect'' AND hypertable_name = ''wait_stats'')'
+    INTO v_hypertable;
+
+    IF v_hypertable THEN
+        EXECUTE '" + TimescaleSupport.CreateWaitStatsRateBaselineSql.Replace("'", "''") + @"';
+    END IF;
+END $$;";
+
+    /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
     /// <c>DatabaseProtectionCollector</c> every 60 minutes (Darling only). One row per database per pass: the raw times (UTC), the
     /// recovery model, the database state and replica role, a per-row platform label (native, platform_managed, native_only) and a state
@@ -3233,6 +3265,7 @@ $rung$;";
         new Migration(250, "memory-pressure-node", V250Sql),
         new Migration(251, "compose-stamp-late-mark-offset-zero", V251Sql),
         new Migration(252, "slack-bot-threads", V252Sql),
+        new Migration(255, "wait-stats-rate-baseline", V255Sql),
     };
 
     /// <summary>
