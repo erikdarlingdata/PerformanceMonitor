@@ -41,6 +41,11 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     public CorrelatedTimelineLanesControl()
     {
         InitializeComponent();
+        /* #8104: the lanes grid's Height follows the scroll viewer's viewport, and WPF clamps an explicit Height only by the
+           element's own MinHeight, whatever its rows ask for. The floor is therefore the rows' total, the rule the shared
+           ChartLayout guard applies to the chart tabs' grids, so the scroll viewer's extent holds every lane and scrolls when
+           the viewport is shorter, instead of clipping the last lane under the window with no scrollbar. */
+        LanesGrid.MinHeight = LanesGrid.RowDefinitions.Sum(r => r.MinHeight);
         /* No Unloaded → Dispose() handler: WPF fires Unloaded for transient
            reasons (tab virtualization, layout rebuilds) and Dispose() clears
            the crosshair manager's lane list, permanently breaking the crosshair
@@ -61,9 +66,15 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         _displayZone = displayZone;
 
         var charts = new[] { CpuChart, WaitStatsChart, BlockingChart, MemoryChart, FileIoChart };
-        foreach (var chart in charts)
+        var laneNames = new[] { "SQL CPU", "Wait Stats", "Blocking", "Buffer Pool", "I/O Latency" };
+        var emptyLook = new ChartRenderHelper();
+        for (var lane = 0; lane < charts.Length; lane++)
         {
+            var chart = charts[lane];
             ApplyTheme(chart);
+            /* #8086: until the first read comes back a lane shows the empty chart's sentence, not ScottPlot's default -10 to 10
+               axes. The first update resets the chart, which drops this. */
+            emptyLook.RefreshEmptyChart(chart, laneNames[lane], "");
             // Disable zoom/pan/drag but keep mouse events for crosshair
             chart.UserInputProcessor.UserActionResponses.Clear();
             SetupLaneDrillDown(chart);

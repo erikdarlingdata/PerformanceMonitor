@@ -248,8 +248,9 @@ public sealed partial class ViewerDataService
                time, 8 of collection id, a flag byte at offset 16, then the payload from byte 18), so this reads at most
                $6 rows and the dimension: the inline text when that row has one (flag 0x00, pre-dimension rows only),
                else its digest (flag 0x01) resolved from query_text_dim, the rule v_query_stats' COALESCE gives.
-               Retention keeps a text's dimension row for the facts' full retention (DarlingRetention scopes the
-               dimension cutoff that way), so a digest inside raw retention resolves here. The group's own host object
+               A digest resolves here unless its dimension row is missing, which the collector allows (#7419: a
+               fact row is committed before its dimension row, and a failed dimension write is not retried);
+               orphans and fallback_text below cover that key the way the lookup did. The group's own host object
                keeps one caller's text from labelling another's (#2012). MATERIALIZED, because the join to it below is
                NULL-safe (IS NOT DISTINCT FROM), which PostgreSQL cannot hash: left plain it is inlined into a nested
                loop and re-run per ranked row. */
@@ -260,6 +261,53 @@ public sealed partial class ViewerDataService
                 COALESCE(CASE WHEN get_byte(k.latest_text_key, 16) = 0 THEN convert_from(substring(k.latest_text_key FROM 18), 'UTF8') END, d.query_text) AS query_text
             FROM ranked AS k
             LEFT JOIN query_text_dim AS d ON d.digest = CASE WHEN get_byte(k.latest_text_key, 16) = 1 THEN substring(k.latest_text_key FROM 18) END
+        ),
+        orphans AS MATERIALIZED (
+            /* #7419: the collector commits a fact row whose text digest has no dimension row (the dimension write follows
+               the facts, and a failed one is not retried), so a pick can carry a digest the dimension cannot resolve.
+               These are the capped rows whose pick did not resolve: a key that has a pick but no text. */
+            SELECT k.database_name, k.query_hash, k.host_object_name
+            FROM ranked AS k
+            JOIN latest_text AS t
+                ON  t.database_name IS NOT DISTINCT FROM k.database_name
+                AND t.query_hash IS NOT DISTINCT FROM k.query_hash
+                AND t.host_object_name IS NOT DISTINCT FROM k.host_object_name
+            WHERE k.latest_text_key IS NOT NULL
+            AND   t.query_text IS NULL
+        ),
+        fallback_text AS MATERIALIZED (
+            /* The lookup latest_text replaced, run for the orphan keys only: the newest row of each whose inline text or
+               dimension row exists, the rule v_query_stats' COALESCE gives. The EXISTS over orphans is an init plan that
+               gates the window scan (a one-time filter in the plan), so with no orphans the window is not read at all;
+               with one, this reads the window for that key's rows, as every read did before #8136. MATERIALIZED for
+               the same reason latest_text is. */
+            SELECT
+                l.database_name,
+                l.query_hash,
+                l.host_object_name,
+                COALESCE(l.query_text, d.query_text) AS query_text
+            FROM
+            (
+                SELECT DISTINCT ON (q.database_name, q.query_hash, q.host_object_name)
+                    q.database_name,
+                    q.query_hash,
+                    q.host_object_name,
+                    q.query_text,
+                    q.query_text_digest
+                FROM query_stats AS q
+                JOIN orphans AS o
+                    ON  COALESCE(q.query_hash, '') = COALESCE(o.query_hash, '')
+                    AND q.database_name IS NOT DISTINCT FROM o.database_name
+                    AND q.query_hash IS NOT DISTINCT FROM o.query_hash
+                    AND q.host_object_name IS NOT DISTINCT FROM o.host_object_name
+                WHERE q.server_id = $1
+                AND   q.collection_time >= $2
+                AND   q.collection_time <= $3
+                AND   EXISTS (SELECT 1 FROM orphans)
+                AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
+                ORDER BY q.database_name, q.query_hash, q.host_object_name, q.collection_time DESC, q.collection_id DESC
+            ) AS l
+            LEFT JOIN query_text_dim AS d ON d.digest = l.query_text_digest
         ),
         module AS (
             /* #1568 module attribution: one procedure_stats identity per sql_handle (latest
@@ -339,7 +387,7 @@ public sealed partial class ViewerDataService
             r.total_clr_time,
             r.plan_generation_num,
             r.worker_time_per_second,
-            t.query_text,
+            COALESCE(t.query_text, f.query_text) AS query_text,
             r.has_query_plan,
             m.object_name AS module_object_name,
             m.schema_name AS module_schema_name,
@@ -353,8 +401,12 @@ public sealed partial class ViewerDataService
             ON  t.database_name IS NOT DISTINCT FROM r.database_name
             AND t.query_hash IS NOT DISTINCT FROM r.query_hash
             AND t.host_object_name IS NOT DISTINCT FROM r.host_object_name
+        LEFT JOIN fallback_text AS f
+            ON  f.database_name IS NOT DISTINCT FROM r.database_name
+            AND f.query_hash IS NOT DISTINCT FROM r.query_hash
+            AND f.host_object_name IS NOT DISTINCT FROM r.host_object_name
         LEFT JOIN module AS m ON m.sql_handle = r.sql_handle
-        WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
+        WHERE COALESCE(t.query_text, f.query_text) IS NULL OR COALESCE(t.query_text, f.query_text) NOT LIKE 'WAITFOR%'
         ORDER BY r.total_elapsed_us DESC, r.database_name, r.query_hash, r.host_object_name
         LIMIT $4
         )

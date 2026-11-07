@@ -729,7 +729,8 @@ stored AS
                 MAX(elapsed_ms_per_second) AS peak_elapsed_ms_per_second,
                 MIN(collection_time) AS first_collection_time,
                 COUNT(*) - COUNT(rated_seconds) AS unrated_collections,
-                COUNT(*) AS collection_count
+                COUNT(*) AS collection_count,
+                SUM(rated_executions) AS execution_count
             FROM rated{windowHasRows}
             GROUP BY 1
             ORDER BY 1
@@ -820,7 +821,8 @@ stored AS
                 CAST(SUM(executions) AS DOUBLE PRECISION) / (COUNT(*) * {HourlyBucketSecondsSql}) AS executions_per_second,
                 MAX(elapsed_ms / {HourlyBucketSecondsSql}) AS peak_elapsed_ms_per_second,
                 MIN(bucket) AS first_collection_time,
-                0 AS unrated_collections
+                0 AS unrated_collections,
+                SUM(executions) AS execution_count
             FROM {source}{windowHasRows}
             GROUP BY 1
             ORDER BY 1

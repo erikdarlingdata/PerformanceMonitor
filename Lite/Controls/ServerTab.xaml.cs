@@ -193,7 +193,8 @@ public partial class ServerTab : UserControl
             BlockingDurationChart, BlockingTotalDurationChart, DeadlockWaitChart, DeadlockTotalWaitChart,
             CurrentWaitsDurationChart, CurrentWaitsBlockedChart, LatchStatsChart, SpinlockStatsChart,
             BadPagesChart, DumpRequestsChart, AccessViolationsChart, WriteAccessViolationsChart,
-            NonYieldingTasksChart, LatchWarningsChart, SickSpinlocksChart, CpuComparisonChart);
+            NonYieldingTasksChart, LatchWarningsChart, SickSpinlocksChart, CpuComparisonChart,
+            MemoryChart, CpuSchedulerChart);
         QueryTagFilterCombo.ItemsSource = new[] { PerformanceMonitorLite.Helpers.QueryTagGrid.AllChoice };
         QueryTagFilterCombo.SelectedIndex = 0;
         SetupBarCellMaxes();
@@ -295,6 +296,7 @@ public partial class ServerTab : UserControl
 
         /* Apply theme immediately so charts don't flash white before data loads */
         ApplyTheme(WaitStatsChart);
+        _chartHelper.RefreshEmptyChart(WaitStatsChart, "Wait Stats", ""); // #8086: not the default -10 to 10 axes before the first read
         ApplyTheme(QueryDurationTrendChart);
         ApplyTheme(ProcDurationTrendChart);
         ApplyTheme(QueryStoreDurationTrendChart);

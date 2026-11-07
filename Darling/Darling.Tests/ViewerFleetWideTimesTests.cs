@@ -62,6 +62,20 @@ public sealed class ViewerFleetWideTimesTests : IDisposable
         Assert.Equal("", FleetSweepsRows.Local("not a time"));
     }
 
+    /// <summary>The status bar's refresh stamp is a fleet-wide time with its zone, the text the tabs' "Last refreshed" strips show, so the
+    /// bottom of the window and the top of a tab read one clock and both name it.</summary>
+    [Fact]
+    public void RefreshedStamp_IsAFleetWideTime_WithItsZone()
+    {
+        var at = new DateTime(2026, 7, 1, 14, 30, 0, DateTimeKind.Unspecified);
+
+        Assert.Equal("14:30:00 UTC", ViewerTimeHelper.RefreshedStamp(at, TimeDisplayMode.UTC));
+        Assert.Equal("14:30:00 UTC", ViewerTimeHelper.RefreshedStamp(at, TimeDisplayMode.ServerTime));
+        var local = TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(at, DateTimeKind.Utc), TimeZoneInfo.Local).ToString("HH:mm:ss", CultureInfo.InvariantCulture);
+        Assert.StartsWith(local + " ", ViewerTimeHelper.RefreshedStamp(at, TimeDisplayMode.LocalTime), StringComparison.Ordinal);
+        Assert.NotEqual(local + " ", ViewerTimeHelper.RefreshedStamp(at, TimeDisplayMode.LocalTime));
+    }
+
     private static CustomViewRow Row(string? by) => new(new CustomViewSummary(
         1, "v", null, 1, new DateTime(2026, 7, 1, 14, 30, 0, DateTimeKind.Unspecified), by, "dashboard", null, false, null, false));
 

@@ -1233,8 +1233,9 @@ internal static class PgDisplay
         public string Caveats { get; init; } = "";
 
         /// <summary>Sustained holder: the red. Only ever true for a session seen holding the oldest xmin
-        /// across at least <see cref="DarlingPgSessionStatesReader.SustainedHolderSampleShare"/> of the samples that saw it, so a passing
-        /// sighting — which every write transaction produces — is not painted as a cause.</summary>
+        /// across at least <see cref="DarlingPgSessionStatesReader.SustainedHolderSampleShare"/> of the samples that saw it, at a peak
+        /// horizon age of at least <see cref="DarlingPgSessionStatesReader.MinSustainedHolderHorizonAge"/>, so a passing
+        /// sighting — which every write transaction produces — and a short writer caught at each sample are not painted as a cause.</summary>
         public bool IsSustainedHorizonHolder { get; init; }
 
         /// <summary>Idle in transaction past the attention threshold: the amber. A different finding from

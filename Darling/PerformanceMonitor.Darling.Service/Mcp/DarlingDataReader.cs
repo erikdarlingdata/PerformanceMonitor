@@ -1148,47 +1148,53 @@ internal static class DarlingDataReader
                COALESCE equality is only a hashable pre-filter (PostgreSQL cannot hash or merge an IS NOT
                DISTINCT FROM, so alone it would nested-loop every window row against every winner); the IS NOT
                DISTINCT FROM terms make the match exact. A winner is unique per key, so no row repeats. */
+            /* #4394 and #8139: the interval filter sits on each measure, not on the pass, so the text pick below sees
+               every row of the group as the lookup it replaced did, a first-sighting, reset or gap row (interval 0)
+               included, while no measure takes such a row into a sum, an extreme, a handle or a count;
+               last_execution_time is an observation and stays over every row. */
             SELECT
                 database_name,
                 query_hash,
                 host_object_name,
-                CAST(SUM(delta_execution_count) AS bigint) AS total_executions,
-                CAST(SUM(delta_worker_time) AS bigint) AS total_cpu_us,
-                CAST(SUM(delta_elapsed_time) AS bigint) AS total_elapsed_us,
-                CAST(SUM(delta_logical_reads) AS bigint) AS total_reads,
-                CAST(SUM(delta_logical_writes) AS bigint) AS total_writes,
-                CAST(SUM(delta_physical_reads) AS bigint) AS total_physical_reads,
-                CAST(SUM(delta_rows) AS bigint) AS total_rows,
-                CAST(SUM(delta_spills) AS bigint) AS total_spills,
-                MIN(min_dop) AS min_dop,
-                MAX(max_dop) AS max_dop,
-                MIN(min_worker_time) AS min_worker_time,
-                MAX(max_worker_time) AS max_worker_time,
-                MIN(min_elapsed_time) AS min_elapsed_time,
-                MAX(max_elapsed_time) AS max_elapsed_time,
-                MAX(query_plan_hash) AS query_plan_hash,
-                MAX(sql_handle) AS sql_handle,
-                MAX(plan_handle) AS plan_handle,
+                CAST(SUM(delta_execution_count) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS bigint) AS total_executions,
+                CAST(SUM(delta_worker_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS bigint) AS total_cpu_us,
+                CAST(SUM(delta_elapsed_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS bigint) AS total_elapsed_us,
+                CAST(SUM(delta_logical_reads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS bigint) AS total_reads,
+                CAST(SUM(delta_logical_writes) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS bigint) AS total_writes,
+                CAST(SUM(delta_physical_reads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS bigint) AS total_physical_reads,
+                CAST(SUM(delta_rows) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS bigint) AS total_rows,
+                CAST(SUM(delta_spills) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS bigint) AS total_spills,
+                MIN(min_dop) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_dop,
+                MAX(max_dop) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_dop,
+                MIN(min_worker_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_worker_time,
+                MAX(max_worker_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_worker_time,
+                MIN(min_elapsed_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_elapsed_time,
+                MAX(max_elapsed_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_elapsed_time,
+                MAX(query_plan_hash) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS query_plan_hash,
+                MAX(sql_handle) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS sql_handle,
+                MAX(plan_handle) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS plan_handle,
+                /* An observation, not a measure: the newest time the plan ran, read over every row of the group, a
+                   zero-interval row included, as the Viewer reads it. */
                 MAX(last_execution_time) AS last_execution_time,
-                MAX(creation_time) AS creation_time,
-                MIN(min_physical_reads) AS min_physical_reads,
-                MAX(max_physical_reads) AS max_physical_reads,
-                MIN(min_rows) AS min_rows,
-                MAX(max_rows) AS max_rows,
-                MIN(min_grant_kb) AS min_grant_kb,
-                MAX(max_grant_kb) AS max_grant_kb,
-                MIN(min_used_grant_kb) AS min_used_grant_kb,
-                MAX(max_used_grant_kb) AS max_used_grant_kb,
-                MIN(min_ideal_grant_kb) AS min_ideal_grant_kb,
-                MAX(max_ideal_grant_kb) AS max_ideal_grant_kb,
-                MIN(min_spills) AS min_spills,
-                MAX(max_spills) AS max_spills,
-                MIN(min_reserved_threads) AS min_reserved_threads,
-                MAX(max_reserved_threads) AS max_reserved_threads,
-                MIN(min_used_threads) AS min_used_threads,
-                MAX(max_used_threads) AS max_used_threads,
-                MAX(total_clr_time) AS total_clr_time,
-                MAX(plan_generation_num) AS plan_generation_num,
+                MAX(creation_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS creation_time,
+                MIN(min_physical_reads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_physical_reads,
+                MAX(max_physical_reads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_physical_reads,
+                MIN(min_rows) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_rows,
+                MAX(max_rows) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_rows,
+                MIN(min_grant_kb) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_grant_kb,
+                MAX(max_grant_kb) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_grant_kb,
+                MIN(min_used_grant_kb) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_used_grant_kb,
+                MAX(max_used_grant_kb) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_used_grant_kb,
+                MIN(min_ideal_grant_kb) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_ideal_grant_kb,
+                MAX(max_ideal_grant_kb) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_ideal_grant_kb,
+                MIN(min_spills) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_spills,
+                MAX(max_spills) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_spills,
+                MIN(min_reserved_threads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_reserved_threads,
+                MAX(max_reserved_threads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_reserved_threads,
+                MIN(min_used_threads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS min_used_threads,
+                MAX(max_used_threads) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS max_used_threads,
+                MAX(total_clr_time) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS total_clr_time,
+                MAX(plan_generation_num) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS plan_generation_num,
                 MAX(CAST(delta_worker_time AS double precision) / NULLIF(sample_interval_seconds, 0) / 1000.0) AS worker_time_per_second,
                 /* #2012: how many DISTINCT statement texts this hash group merged. query_hash is a
                    SHAPE hash — INSERT...EXEC statements naming DIFFERENT callee procs share one
@@ -1197,7 +1203,7 @@ internal static class DarlingDataReader
                    the statement. Counted over the #1767 content digest already on every row (~free);
                    COUNT(DISTINCT) skips NULLs, so 0 means only pre-dimension legacy rows, which age
                    out with raw retention. */
-                COUNT(DISTINCT query_text_digest) AS distinct_texts,
+                COUNT(DISTINCT query_text_digest) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS distinct_texts,
                 /* #8136: the group's newest text-bearing row, picked in this pass over the winners' rows so latest_text
                    below is a lookup on the capped rows and not a third read of the window. The pick is a MAX over a byte
                    key that sorts the way the lookup used to: collection_time first (timestamp_send is its microseconds,
@@ -1222,7 +1228,6 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
-            AND   {TimescaleSupport.IntervalHonestSourceFilter}
             GROUP BY database_name, query_hash, host_object_name
         ),
         latest_text AS MATERIALIZED (
@@ -1231,8 +1236,9 @@ internal static class DarlingDataReader
                bytes of time, 8 of collection id, a flag byte at offset 16, then the payload from byte 18), so this reads
                at most $7 rows and the dimension: the inline text when that row has one (flag 0x00, pre-dimension rows
                only), else its digest (flag 0x01) resolved from query_text_dim, the rule v_query_stats' COALESCE gives.
-               Retention keeps a text's dimension row for the facts' full retention (DarlingRetention scopes the
-               dimension cutoff that way), so a digest inside raw retention resolves here. The group's own host object
+               A digest resolves here unless its dimension row is missing, which the collector allows (#7419: a
+               fact row is committed before its dimension row, and a failed dimension write is not retried);
+               orphans and fallback_text below cover that key the way the lookup did. The group's own host object
                keeps one caller's text from labelling another's (#2012). MATERIALIZED, because the join to it below is
                NULL-safe (IS NOT DISTINCT FROM), which PostgreSQL cannot hash: left plain, it inlines this CTE into a
                nested loop and re-runs it per ranked row (a 120-candidate round scanned the 20,000-row query_text_dim
@@ -1245,6 +1251,53 @@ internal static class DarlingDataReader
                 COALESCE(CASE WHEN get_byte(k.latest_text_key, 16) = 0 THEN convert_from(substring(k.latest_text_key FROM 18), 'UTF8') END, d.query_text) AS query_text
             FROM ranked AS k
             LEFT JOIN query_text_dim AS d ON d.digest = CASE WHEN get_byte(k.latest_text_key, 16) = 1 THEN substring(k.latest_text_key FROM 18) END
+        ),
+        orphans AS MATERIALIZED (
+            /* #7419: the collector commits a fact row whose text digest has no dimension row (the dimension write follows
+               the facts, and a failed one is not retried), so a pick can carry a digest the dimension cannot resolve.
+               These are the capped rows whose pick did not resolve: a key that has a pick but no text. */
+            SELECT k.database_name, k.query_hash, k.host_object_name
+            FROM ranked AS k
+            JOIN latest_text AS t
+                ON  t.database_name IS NOT DISTINCT FROM k.database_name
+                AND t.query_hash IS NOT DISTINCT FROM k.query_hash
+                AND t.host_object_name IS NOT DISTINCT FROM k.host_object_name
+            WHERE k.latest_text_key IS NOT NULL
+            AND   t.query_text IS NULL
+        ),
+        fallback_text AS MATERIALIZED (
+            /* The lookup latest_text replaced, run for the orphan keys only: the newest row of each whose inline text or
+               dimension row exists, the rule v_query_stats' COALESCE gives. The EXISTS over orphans is an init plan that
+               gates the window scan (a one-time filter in the plan), so with no orphans the window is not read at all;
+               with one, this reads the window for that key's rows, as every read did before #8136. MATERIALIZED for
+               the same reason latest_text is. */
+            SELECT
+                l.database_name,
+                l.query_hash,
+                l.host_object_name,
+                COALESCE(l.query_text, d.query_text) AS query_text
+            FROM
+            (
+                SELECT DISTINCT ON (q.database_name, q.query_hash, q.host_object_name)
+                    q.database_name,
+                    q.query_hash,
+                    q.host_object_name,
+                    q.query_text,
+                    q.query_text_digest
+                FROM query_stats AS q
+                JOIN orphans AS o
+                    ON  COALESCE(q.query_hash, '') = COALESCE(o.query_hash, '')
+                    AND q.database_name IS NOT DISTINCT FROM o.database_name
+                    AND q.query_hash IS NOT DISTINCT FROM o.query_hash
+                    AND q.host_object_name IS NOT DISTINCT FROM o.host_object_name
+                WHERE q.server_id = $1
+                AND   q.collection_time >= $2
+                AND   q.collection_time <= $3
+                AND   EXISTS (SELECT 1 FROM orphans)
+                AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
+                ORDER BY q.database_name, q.query_hash, q.host_object_name, q.collection_time DESC, q.collection_id DESC
+            ) AS l
+            LEFT JOIN query_text_dim AS d ON d.digest = l.query_text_digest
         ),
         page AS (
         SELECT
@@ -1268,7 +1321,7 @@ internal static class DarlingDataReader
             r.max_worker_time,
             r.min_elapsed_time,
             r.max_elapsed_time,
-            t.query_text,
+            COALESCE(t.query_text, f.query_text) AS query_text,
             r.distinct_texts,
             CAST(1 AS bigint) AS distinct_query_hashes,
             r.last_execution_time,
@@ -1300,7 +1353,11 @@ internal static class DarlingDataReader
             ON  t.database_name IS NOT DISTINCT FROM r.database_name
             AND t.query_hash IS NOT DISTINCT FROM r.query_hash
             AND t.host_object_name IS NOT DISTINCT FROM r.host_object_name
-        WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
+        LEFT JOIN fallback_text AS f
+            ON  f.database_name IS NOT DISTINCT FROM r.database_name
+            AND f.query_hash IS NOT DISTINCT FROM r.query_hash
+            AND f.host_object_name IS NOT DISTINCT FROM r.host_object_name
+        WHERE COALESCE(t.query_text, f.query_text) IS NULL OR COALESCE(t.query_text, f.query_text) NOT LIKE 'WAITFOR%'
         ORDER BY r.rank_metric DESC NULLS LAST, r.rank_cpu DESC NULLS LAST, r.database_name, r.query_hash, r.host_object_name
         LIMIT $4
         )
