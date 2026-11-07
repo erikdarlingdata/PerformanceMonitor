@@ -40,14 +40,28 @@ public sealed class ViewerCollectionHealthSeatGateTests
     {
         return StaTestThread.Run(() =>
         {
-            var dataService = new ViewerDataService("Host=127.0.0.1;Port=1;Database=darling;Username=darling");
-            typeof(ViewerDataService).GetProperty(nameof(ViewerDataService.IsReadOnly))!.SetValue(dataService, readOnly);
-            var tab = new ViewerServerTab(dataService, new DarlingServer(1, "seat-gate-test", "seat-gate-test", true, null));
-            typeof(ViewerServerTab).GetField("_suppressDrillDownAutoRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(tab, true);
-            var window = new Window { Content = tab, Width = 1800, Height = 1000 };
-            window.Show();
+            /* The tab's XAML takes the grid styles (NumericCell, DarkGrid) from the application's merged theme, which the app merges at
+               startup and a test process does not: merge the Viewer's own theme the way the sweep-pressure tests do, and take it out after. */
+            var app = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+            ResourceDictionary? added = null;
+            if (!app.Resources.Contains("NumericCell"))
+            {
+                added = new ResourceDictionary
+                {
+                    Source = new Uri("pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/DarkTheme.xaml"),
+                };
+                app.Resources.MergedDictionaries.Add(added);
+            }
+
+            Window? window = null;
             try
             {
+                var dataService = new ViewerDataService("Host=127.0.0.1;Port=1;Database=darling;Username=darling");
+                typeof(ViewerDataService).GetProperty(nameof(ViewerDataService.IsReadOnly))!.SetValue(dataService, readOnly);
+                var tab = new ViewerServerTab(dataService, new DarlingServer(1, "seat-gate-test", "seat-gate-test", true, null));
+                typeof(ViewerServerTab).GetField("_suppressDrillDownAutoRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(tab, true);
+                window = new Window { Content = tab, Width = 1800, Height = 1000 };
+                window.Show();
                 ((TabItem)tab.FindName("CollectionHealthTab")).IsSelected = true;
                 window.UpdateLayout();
 
@@ -71,7 +85,11 @@ public sealed class ViewerCollectionHealthSeatGateTests
             }
             finally
             {
-                window.Close();
+                window?.Close();
+                if (added is not null)
+                {
+                    app.Resources.MergedDictionaries.Remove(added);
+                }
             }
         });
     }
