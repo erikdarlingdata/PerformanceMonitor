@@ -30,6 +30,11 @@ public sealed class RunScheduler(
             return ExitRefused;
         }
 
+        foreach (var warning in settings.Warnings())
+        {
+            output.WriteLine($"warning: {warning}");
+        }
+
         var nowUtc = (options.NowUtc ?? clock()).ToUniversalTime();
         var (loaded, stateError) = ScheduleState.Load(settings.StatePath);
         if (options.PlanOnly) return PlanOnly(nowUtc, loaded, stateError);
@@ -288,11 +293,13 @@ public sealed class RunScheduler(
     internal IReadOnlyList<(string Table, string Error)> ReadFailedOptional(PlannedCall call, FamilyPlan plan)
     {
         var unknown = new[] { ("unknown", "exit 3; optional manifest not readable") };
-        if (string.IsNullOrEmpty(call.Also)) return unknown;
+        // The child names its optional manifest by the call's optional names: the --also names plus the optional-registry
+        // names in --tables. The same helper builds the same set here, so the two cannot drift.
+        var optionalNames = ExportRunner.OptionalNames(SplitCsv(call.Tables), SplitCsv(call.Also));
+        if (optionalNames.Length == 0) return unknown;
         try
         {
-            var also = call.Also.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
-            var path = OutputPaths.ManifestFilePath(settings.OutDir, settings.Store, call.From, call.To, also, dimensionOrigin: null);
+            var path = OutputPaths.ManifestFilePath(settings.OutDir, settings.Store, call.From, call.To, optionalNames, dimensionOrigin: null);
             if (!File.Exists(path)) return unknown;
             var node = JsonNode.Parse(File.ReadAllText(path));
             var failures = new List<(string Table, string Error)>();
@@ -315,6 +322,9 @@ public sealed class RunScheduler(
             return unknown;
         }
     }
+
+    private static string[] SplitCsv(string? csv) =>
+        string.IsNullOrEmpty(csv) ? [] : csv.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
 
     private List<string> ReadOptionalTables()
     {

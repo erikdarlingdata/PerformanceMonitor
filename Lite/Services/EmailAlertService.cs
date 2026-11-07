@@ -187,7 +187,7 @@ public class EmailAlertService : IFindingAlertSender
 
             /* #3598 / #4750: the row records where the posts went and what each channel's send did, exactly as
                the headless service's DarlingAlertDeliverer does. The record lists the channels the firing resolved
-               to, each with the route that supplied it (route_id; source "Exact", "Family" or "Wildcard", or "Default"
+               to, each with the route that supplied it (route_id; source "Exact", "Category", "AnalysisAll", "Family" or "Wildcard", or "Default"
                for the parent settings since #5750) and "delivered", "failed" or "not attempted" — an alert that reached one webhook and failed on another used to read as one
                delivery. Only the outcome word is stored: a webhook error can carry its endpoint's URL, so the
                reason stays in send_error. Null when no channel reached resolution (throttled, folded, muted,

@@ -87,6 +87,7 @@
             <Setter Property="ui:DataGridClipboardBehavior.FixHeaderCopy" Value="True"/>
             <Setter Property="ui:DataGridSortBehavior.SortDescendingFirst" Value="True"/>
             <Setter Property="ui:DataGridFillColumn.Enabled" Value="True"/>
+            <Setter Property="ui:DataGridHeaderFit.Enabled" Value="True"/>
             <Setter Property="ui:ScrollPanBehavior.EnableMiddleClickPanning" Value="True"/>
             <Setter Property="AutoGenerateColumns" Value="False"/>
             <Setter Property="IsReadOnly" Value="True"/>
@@ -862,7 +863,7 @@
                                     <Border Background="{DynamicResource BackgroundBrush}" BorderBrush="{DynamicResource CardBorderBrush}"
                                             BorderThickness="1" CornerRadius="5" MinWidth="86" Margin="0,0,8,0" Padding="12,6">
                                         <StackPanel>
-                                            <TextBlock Text="{Binding TotalServers}" FontSize="22" FontWeight="Bold"
+                                            <TextBlock Text="{Binding TotalServers}" Style="{StaticResource KpiValueText}"
                                                        Foreground="{DynamicResource ForegroundBrush}" HorizontalAlignment="Center"/>
                                             <TextBlock Text="Enabled servers" FontSize="10" Foreground="{DynamicResource ForegroundMutedBrush}"
                                                        HorizontalAlignment="Center"/>
@@ -871,7 +872,7 @@
                                     <Border Background="{DynamicResource BackgroundBrush}" BorderBrush="{DynamicResource SuccessBrush}"
                                             BorderThickness="1" CornerRadius="5" MinWidth="86" Margin="0,0,8,0" Padding="12,6">
                                         <StackPanel>
-                                            <TextBlock Text="{Binding HealthyCount}" FontSize="22" FontWeight="Bold"
+                                            <TextBlock Text="{Binding HealthyCount}" Style="{StaticResource KpiValueText}"
                                                        Foreground="{DynamicResource SuccessBrush}" HorizontalAlignment="Center"/>
                                             <TextBlock Text="Healthy" FontSize="10" Foreground="{DynamicResource ForegroundMutedBrush}"
                                                        HorizontalAlignment="Center"/>
@@ -880,7 +881,7 @@
                                     <Border Background="{DynamicResource BackgroundBrush}" BorderBrush="{DynamicResource WarningBrush}"
                                             BorderThickness="1" CornerRadius="5" MinWidth="86" Margin="0,0,8,0" Padding="12,6">
                                         <StackPanel>
-                                            <TextBlock Text="{Binding WarningCount}" FontSize="22" FontWeight="Bold"
+                                            <TextBlock Text="{Binding WarningCount}" Style="{StaticResource KpiValueText}"
                                                        Foreground="{DynamicResource WarningBrush}" HorizontalAlignment="Center"/>
                                             <TextBlock Text="Warning" FontSize="10" Foreground="{DynamicResource ForegroundMutedBrush}"
                                                        HorizontalAlignment="Center"/>
@@ -889,7 +890,7 @@
                                     <Border Background="{DynamicResource BackgroundBrush}" BorderBrush="{DynamicResource ErrorBrush}"
                                             BorderThickness="1" CornerRadius="5" MinWidth="86" Margin="0,0,8,0" Padding="12,6">
                                         <StackPanel>
-                                            <TextBlock Text="{Binding CriticalCount}" FontSize="22" FontWeight="Bold"
+                                            <TextBlock Text="{Binding CriticalCount}" Style="{StaticResource KpiValueText}"
                                                        Foreground="{DynamicResource ErrorBrush}" HorizontalAlignment="Center"/>
                                             <TextBlock Text="Critical" FontSize="10" Foreground="{DynamicResource ForegroundMutedBrush}"
                                                        HorizontalAlignment="Center"/>
@@ -898,7 +899,7 @@
                                     <Border Background="{DynamicResource BackgroundBrush}" BorderBrush="#888888"
                                             BorderThickness="1" CornerRadius="5" MinWidth="86" Margin="0,0,8,0" Padding="12,6">
                                         <StackPanel>
-                                            <TextBlock Text="{Binding OfflineCount}" FontSize="22" FontWeight="Bold"
+                                            <TextBlock Text="{Binding OfflineCount}" Style="{StaticResource KpiValueText}"
                                                        Foreground="{DynamicResource ForegroundMutedBrush}" HorizontalAlignment="Center"/>
                                             <TextBlock Text="Offline" FontSize="10" Foreground="{DynamicResource ForegroundMutedBrush}"
                                                        HorizontalAlignment="Center"/>
@@ -1062,8 +1063,8 @@
                                         <Grid>
                                             <StackPanel Margin="16">
                                                 <DockPanel Margin="0,0,0,4">
-                                                    <TextBlock Text="{Binding DisplayName}" AutomationProperties.AutomationId="OverviewServerCardName" FontSize="16" FontWeight="SemiBold"
-                                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                                    <TextBlock Text="{Binding DisplayName}" AutomationProperties.AutomationId="OverviewServerCardName"
+                                                               Style="{StaticResource PanelTitleText}"/>
                                                     <Ellipse Width="10" Height="10" Fill="{Binding StatusBrush}"
                                                              ToolTip="{Binding StatusTooltip}"
                                                              HorizontalAlignment="Right" VerticalAlignment="Center"/>

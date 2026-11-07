@@ -145,7 +145,8 @@ internal static class GridColumnLayoutProbe
         {
             found.Add($"{blankColumn} has no realized header");
         }
-        else if (blank.ActualWidth > header.DesiredSize.Width + 0.5)
+        /* #8197: the header floor (DataGridHeaderFit) also keeps room for the sort glyph, which an unsorted header has not drawn yet (8 px + its 6 px margin). */
+        else if (blank.ActualWidth > header.DesiredSize.Width + 14.5)
         {
             found.Add($"{blankColumn} is {blank.ActualWidth:F0} px wide for blank cells under a {header.DesiredSize.Width:F0} px header");
         }

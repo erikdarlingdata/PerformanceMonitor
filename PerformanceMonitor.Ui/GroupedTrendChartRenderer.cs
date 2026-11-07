@@ -100,6 +100,8 @@ internal sealed class GroupedTrendChartRenderer
             .OrderByDescending(g => g.Sum(value))
             .ToList();
 
+        var legendNames = LegendNames(byGroup.Select(g => g.Key));
+
         double globalMax = 0;
         int colorIdx = 0;
         foreach (var group in byGroup)
@@ -109,7 +111,7 @@ internal sealed class GroupedTrendChartRenderer
             var values = points.Select(value).ToArray();
 
             var plot = chart.Plot.Add.TimeSeries(times, values);
-            plot.LegendText = TruncateName(group.Key);
+            plot.LegendText = legendNames[group.Key];
             plot.Color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
             ChartStyle.StyleScatter(plot);
             hover?.Add(plot, group.Key);
@@ -127,8 +129,35 @@ internal sealed class GroupedTrendChartRenderer
         chart.Refresh();
     }
 
-    /// <summary>Legend names for latch classes / spinlock names get long; clip to 20 chars + ellipsis
-    /// exactly like the Dashboard's Latch/Spinlock chart legends.</summary>
-    private static string TruncateName(string name)
-        => name.Length > 20 ? name.Substring(0, 20) + "..." : name;
+    /// <summary>A legend name up to this long is kept whole; a longer one is clipped in the middle (#8186).</summary>
+    internal const int LegendNameLength = 32;
+
+    /// <summary>How much of a clipped name's tail is kept: latch class and spinlock names end in the part that tells them apart.</summary>
+    private const int LegendTailLength = 16;
+
+    /// <summary>
+    /// #8186: the legend text for each series name. Latch class and spinlock names share long prefixes (ACCESS_METHODS_HOBT_COUNT,
+    /// ACCESS_METHODS_HOBT_VIRTUAL_ROOT and ACCESS_METHODS_HOBT_FACTORY), so a name over <see cref="LegendNameLength"/> is cut in the
+    /// middle and keeps its head and its tail, and two names that still clip to the same text are both kept whole. No two series in one
+    /// legend read the same; the hover shows the full name.
+    /// </summary>
+    internal static IReadOnlyDictionary<string, string> LegendNames(IEnumerable<string> names)
+    {
+        var labels = names.Distinct(StringComparer.Ordinal).ToDictionary(name => name, ClipName, StringComparer.Ordinal);
+        var clashing = labels.GroupBy(pair => pair.Value, StringComparer.Ordinal)
+            .Where(group => group.Count() > 1)
+            .SelectMany(group => group.Select(pair => pair.Key))
+            .ToList();
+        foreach (var name in clashing)
+        {
+            labels[name] = name;
+        }
+
+        return labels;
+    }
+
+    private static string ClipName(string name)
+        => name.Length <= LegendNameLength
+            ? name
+            : string.Concat(name.AsSpan(0, LegendNameLength - LegendTailLength - 3), "...", name.AsSpan(name.Length - LegendTailLength));
 }

@@ -41,6 +41,13 @@ public partial class PlanViewerControl
         public PropertySection Model { get; init; } = null!;
     }
 
+    /// <summary>
+    /// #8185: how often the optimizer expects <paramref name="node"/> to run: once, plus once per rebind and once per rewind. The
+    /// Properties panel's Est. Executions and Est. Rows All Execs and the arrow tooltip's Estimated Number of Rows for All Executions
+    /// all count it here, so an inner-side spool with 10 rebinds and 990 rewinds reads 1,001 runs on every surface.
+    /// </summary>
+    internal static double EstimatedExecutions(PlanNode node) => 1 + node.EstimateRebinds + node.EstimateRewinds;
+
     private void ShowPropertiesPanel(PlanNode node)
     {
         PropertiesContent.Children.Clear();
@@ -336,10 +343,10 @@ public partial class PlanViewerControl
 
         // === Estimated Rows Section ===
         AddPropertySection("Estimated Rows");
-        var estExecs = 1 + node.EstimateRebinds;
+        var estExecs = EstimatedExecutions(node);
         AddPropertyRow("Est. Executions", $"{estExecs:N0}");
         AddPropertyRow("Est. Rows Per Exec", $"{node.EstimateRows:N1}");
-        AddPropertyRow("Est. Rows All Execs", $"{node.EstimateRows * Math.Max(1, estExecs):N1}");
+        AddPropertyRow("Est. Rows All Execs", $"{node.EstimateRows * estExecs:N1}");
         if (node.EstimatedRowsRead > 0)
             AddPropertyRow("Est. Rows to Read", $"{node.EstimatedRowsRead:N1}");
         if (node.EstimateRowsWithoutRowGoal > 0)
