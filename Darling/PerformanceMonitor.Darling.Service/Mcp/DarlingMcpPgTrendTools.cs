@@ -55,7 +55,11 @@ public sealed class DarlingMcpPgTrendTools
                pointing at a window read. */
             var arm = await DarlingPgTrendReader.GetWaitTrendArmAsync(postgres, resolved.ServerId, cancellationToken);
             var engineCounters = arm == DarlingPgTrendReader.PgWaitTrendArm.EngineCumulative;
-            var collector = engineCounters ? "pg_wait_stats" : "pg_wait_sampling";
+
+            /* The capability question goes to the arm's own collector, each named as a literal so the wiring census can read it. */
+            async Task<string?> NotCollectedAsync() => engineCounters
+                ? await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "pg_wait_stats", cancellationToken)
+                : await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "pg_wait_sampling", cancellationToken);
 
             /* With no event named, follow the one that actually dominates this server rather than a name
                somebody guessed. Which one was chosen is reported, so the answer is never about a different
@@ -66,8 +70,7 @@ public sealed class DarlingMcpPgTrendTools
 
             if (string.IsNullOrWhiteSpace(chosen))
             {
-                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.DisplayName, collector, cancellationToken)
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await NotCollectedAsync()
                     ?? EmptyStatus(await EmptyHintsAsync(postgres, "get_pg_wait_trend", resolved.ServerName, start, windowEnd, logger, cancellationToken),
                         "empty",
                         engineCounters
@@ -88,8 +91,7 @@ public sealed class DarlingMcpPgTrendTools
 
             if (points.Count == 0)
             {
-                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.DisplayName, collector, cancellationToken)
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await NotCollectedAsync()
                     ?? EmptyStatus(await EmptyHintsAsync(postgres, "get_pg_wait_trend", resolved.ServerName, start, windowEnd, logger, cancellationToken),
                         "empty",
                         engineCounters

@@ -166,7 +166,7 @@ public static class DarlingPgTrendReader
         SELECT
             collection_time,
             CAST(SUM(delta_waits) AS bigint) AS delta_waits,
-            CAST(SUM(delta_wait_time_us) / 1000.0 / MAX(sample_interval_seconds) AS double precision) AS wait_ms_per_second
+            CAST(SUM(delta_wait_time_us) / 1000.0 / NULLIF(MAX(sample_interval_seconds), 0) AS double precision) AS wait_ms_per_second
         FROM pg_wait_stats
         WHERE server_id = $1
         AND   wait_event = $2
