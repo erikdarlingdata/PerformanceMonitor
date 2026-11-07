@@ -1541,8 +1541,11 @@ public sealed class DarlingStoreUpgradeTests
     /// same way under the same already-cancelled token — and then threw the fixed "would not start even with
     /// an empty postgresql.auto.conf" message, wrong for a service stop unrelated to the carried settings. The
     /// probe is faked (always exits 0) so the trial is reached without a real "postgres -C" call; the trial's
-    /// own start is real and live, so cancellation lands while <c>pg_ctl -w</c> is actually waiting, the same
-    /// as a real service stop would (#4280 round-2 part 2, item 0b).
+    /// own start is real and live. The trial is held on <see cref="DarlingStoreUpgrade.BeforeTrialStartForTests"/>
+    /// between its marker write and its start, the cancel is raised while it is held, and only then is it
+    /// let go, so the cancellation always meets the start (#8193): polling for the marker instead left a
+    /// window in which a fast start, and the rest of the carry, finished before the cancel, and the task
+    /// then completed normally (#4280 round-2 part 2, item 0b).
     /// </summary>
     [Fact]
     public async Task CarryAutoConfAsync_CancelledDuringTheTrialStart_PropagatesCancellation_NotTheFixedMessage()
@@ -1576,20 +1579,26 @@ public sealed class DarlingStoreUpgradeTests
             Task<(int ExitCode, string Output)> Probe(string exePath, string arguments, TimeSpan probeTimeout, CancellationToken token)
                 => Task.FromResult((0, string.Empty));
 
-            var upgrade = new DarlingStoreUpgrade(new CapturingLogger());
+            /* The trial signals here after it writes its marker and before it starts the cluster, then waits
+               on the gate. Cancelling while it waits puts the cancellation on the start itself, so the test
+               never races a start that has already finished (#8193). The carry task is awaited alongside the
+               signal so a carry that ends without reaching its trial fails at the assert below rather than
+               waiting out the timeout. */
+            var trialStartEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var trialStartGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var upgrade = new DarlingStoreUpgrade(new CapturingLogger())
+            {
+                BeforeTrialStartForTests = _ =>
+                {
+                    trialStartEntered.TrySetResult();
+                    return trialStartGate.Task;
+                },
+            };
             var carryTask = upgrade.CarryAutoConfAsync(oldDataDirectory, newDataDirectory, bin, Probe, cts.Token);
 
-            /* The trial writes its marker synchronously, before it starts the real cluster (#3908) — as soon
-               as it appears, the awaited StartClusterAsync call is in flight, so cancelling now lands there. */
-            var marker = Path.Combine(newDataDirectory, DarlingStoreUpgrade.QuiescedUpdateMarkerFileName);
-            var deadline = DateTime.UtcNow.AddSeconds(30);
-            while (!File.Exists(marker) && DateTime.UtcNow < deadline)
-            {
-                await Task.Delay(10, timeout.Token);
-            }
-
-            Assert.True(File.Exists(marker), "The trial never wrote its marker within 30s.");
+            await Task.WhenAny(trialStartEntered.Task, carryTask);
             cts.Cancel();
+            trialStartGate.SetResult();
 
             await Assert.ThrowsAsync<OperationCanceledException>(() => carryTask);
             Assert.Equal(
