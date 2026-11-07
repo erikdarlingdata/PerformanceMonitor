@@ -834,7 +834,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        var body = $"{row.ServerName}: {ToastBody(row)}";
+        /* #8115: a resolution's stored message already opens with the server (the engine writes it that way for the delivery channels). */
+        var body = ViewerToastText.WithServer(row.ServerName, row.StoredServerName, ToastBody(row));
 
         if (row.IsResolved)
         {

@@ -624,14 +624,8 @@
                                                 <!-- Size label -->
                                                 <TextBlock Grid.Column="2" Margin="0,0,4,0" VerticalAlignment="Center"
                                                            HorizontalAlignment="Right" FontSize="11.5"
-                                                           Foreground="{DynamicResource ForegroundBrush}">
-                                                    <TextBlock.Text>
-                                                        <MultiBinding StringFormat="{}{0:N0} / {1:N0} MB">
-                                                            <Binding Path="UsedMb"/>
-                                                            <Binding Path="TotalMb"/>
-                                                        </MultiBinding>
-                                                    </TextBlock.Text>
-                                                </TextBlock>
+                                                           Foreground="{DynamicResource ForegroundBrush}"
+                                                           Text="{Binding SizeLabel}"/>
                                             </Grid>
                                         </DataTemplate>
                                     </ItemsControl.ItemTemplate>

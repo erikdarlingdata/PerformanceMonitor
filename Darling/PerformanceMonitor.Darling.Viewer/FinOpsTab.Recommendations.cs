@@ -25,6 +25,9 @@ public partial class FinOpsTab
     /// <summary>Reads the collected recommendations for this server and repaints the grid + count indicator.</summary>
     private async Task LoadFinOpsRecommendationsAsync()
     {
+        /* #8115: while the read runs the sub-tab says so; empty headers under the caption are otherwise the same picture as no findings. */
+        FinOpsRecommendationsCountIndicator.Text = FinOpsRecommendationsCountText.Loading;
+        FinOpsRecommendationsNoDataMessage.Visibility = Visibility.Collapsed;
         var (data, skippedNote) = await _dataService.GetRecommendationsWithNoteAsync(_server.ServerId, _server.MonthlyCostUsd);
 
         /* #5558: databases this server holds only as an Availability Group secondary copy are left to the primary's findings. */
@@ -32,9 +35,7 @@ public partial class FinOpsTab
         FinOpsRecommendationsSecondaryNote.Visibility = skippedNote is null ? Visibility.Collapsed : Visibility.Visible;
         _finopsRecommendationsFilterMgr!.UpdateData(data);
         FinOpsRecommendationsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        FinOpsRecommendationsCountIndicator.Text = data.Count > 0
-            ? $"{data.Count} recommendation(s)"
-            : "no recommendations";
+        FinOpsRecommendationsCountIndicator.Text = FinOpsRecommendationsCountText.For(data.Count);
     }
 
     /// <summary>Refresh button — re-runs the checks over the latest collected data with the shell's status-bar error surfacing.</summary>

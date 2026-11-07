@@ -99,6 +99,14 @@ public sealed class QueryTagUsageWindow : Window
                 _tag.SelectedItem = QueryTagUsageView.AllChoice;
             }
 
+            /* #8115: with no tag defined every table would be one untagged row equal to its total, so the answer is one sentence. */
+            if (QueryTagUsageText.NoTagsAnswer(data.Tags.Count) is { } noTags)
+            {
+                _message.Text = noTags;
+                _tables.Children.Clear();
+                return;
+            }
+
             /* #7374: every server is read first, in both scopes (a server whose registry row says PostgreSQL but that holds SQL Server rows keeps
                them). Only a server the read found no rows for is asked the engine question: a PostgreSQL server has none of these sources, so it
                reads not_collected with the engine reason. If every server in scope is such a server, the reason is the whole answer. */

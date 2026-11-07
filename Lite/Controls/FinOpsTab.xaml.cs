@@ -361,6 +361,10 @@ public partial class FinOpsTab : UserControl
                grid on the first server's answer. Caught in review on this change. */
             var gen = _loads.Claim(nameof(LoadRecommendationsAsync));
 
+            /* #8115: while the read runs the sub-tab says so; empty headers under the caption are otherwise the same picture as no findings. */
+            RecommendationsCountIndicator.Text = "Loading recommendations…";
+            RecommendationsNoDataMessage.Visibility = Visibility.Collapsed;
+
             var utilityConnectionString = _credentialResolver.GetUtilityConnectionString(selectedServer!);
             var (data, skippedNote) = await Task.Run(() => _dataService.GetRecommendationsWithNoteAsync(serverId, connectionString, utilityConnectionString, _currentServerMonthlyCost));
             if (_loads.Superseded(nameof(LoadRecommendationsAsync), gen)) return;
