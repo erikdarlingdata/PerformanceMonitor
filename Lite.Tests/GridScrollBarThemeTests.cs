@@ -46,10 +46,11 @@ public class GridScrollBarThemeTests
         Color ThumbCenter,
         Color ThemeBorder,
         int ArrowButtons,
-        double LastColumnRight,
+        double ColumnsTotal,
         int MeasuresAfterSettle,
         int MeasuresAfterMore,
-        double[] FillWidths);
+        double[] FillWidths,
+        bool ContentScrolls);
 
     private static Uri ThemeUri(string name) => new($"pack://application:,,,/PerformanceMonitorLite;component/Themes/{name}.xaml");
 
@@ -62,13 +63,14 @@ public class GridScrollBarThemeTests
     /// A grid of <paramref name="fixedColumns"/> fixed columns (130 px) and, when <paramref name="fillColumn"/>, a fill column, with <paramref name="rows"/> rows,
     /// in a canvas <paramref name="width"/> by <paramref name="height"/>, in a window themed with <paramref name="theme"/>.
     /// </summary>
-    private static Laid Lay(string theme, int rows, int fixedColumns, bool fillColumn, double width, double height) =>
+    private static Laid Lay(string theme, int rows, int fixedColumns, bool fillColumn, double width, double height,
+        double columnWidth = 130, string header = "Column ", int? rowsAfter = null) =>
         StaTestThread.Run(() =>
         {
             var grid = new CountingGrid { AutoGenerateColumns = false, IsReadOnly = true };
             for (var i = 0; i < fixedColumns; i++)
             {
-                grid.Columns.Add(new DataGridTextColumn { Header = "Column " + i, Binding = new System.Windows.Data.Binding("."), Width = 130 });
+                grid.Columns.Add(new DataGridTextColumn { Header = header + i, Binding = new System.Windows.Data.Binding("."), Width = columnWidth });
             }
 
             if (fillColumn)
@@ -86,9 +88,16 @@ public class GridScrollBarThemeTests
             try
             {
                 ClippedTextProbe.Settle(window);
+                if (rowsAfter is { } more)
+                {
+                    /* The rows arrive after the grid was shown, as a refresh does. */
+                    grid.ItemsSource = Enumerable.Range(0, more).Select(i => "row " + i).ToList();
+                    ClippedTextProbe.Settle(window);
+                }
+
                 var afterSettle = grid.Measures;
                 var fillBefore = grid.Columns.Select(c => c.ActualWidth).ToArray();
-                for (var i = 0; i < 5; i++)
+                for (var i = 0; i < 2; i++)
                 {
                     StaTestThread.WaitForIdle(window.Dispatcher, TimeSpan.FromSeconds(5));
                     window.UpdateLayout();
@@ -119,7 +128,7 @@ public class GridScrollBarThemeTests
                 var lastRight = grid.Columns.Sum(c => c.ActualWidth);
                 var border = (SolidColorBrush)grid.FindResource("BorderBrush");
                 return new Laid(grid, vertical, horizontal, scroll, thumbColor, border.Color, arrows, lastRight, afterSettle, grid.Measures,
-                    fillBefore.Zip(grid.Columns.Select(c => c.ActualWidth), (a, b) => b - a).ToArray());
+                    fillBefore.Zip(grid.Columns.Select(c => c.ActualWidth), (a, b) => b - a).ToArray(), scroll.CanContentScroll);
             }
             finally
             {
@@ -182,12 +191,11 @@ public class GridScrollBarThemeTests
         /* The health grids (Memory Conditions, Node OOM, Significant Waits, CPU Tasks) are all fixed columns, empty most of the time. */
         var laid = Lay(theme, 0, 12, false, 700, 300);
 
-        var last = laid.Grid.Columns[^1];
-        var lastRightInContent = laid.Grid.Columns.Sum(c => c.ActualWidth);
+        var lastRightInContent = laid.ColumnsTotal;
         var fits = lastRightInContent <= laid.Scroll.ViewportWidth + 0.5;
         var scrolls = Shows(laid.Horizontal) && laid.Scroll.ScrollableWidth >= lastRightInContent - laid.Scroll.ViewportWidth - 0.5;
         Assert.True(fits || scrolls,
-            $"last column '{last.Header}' ends at {lastRightInContent} in a viewport of {laid.Scroll.ViewportWidth}, scrollable {laid.Scroll.ScrollableWidth}, bar shown {Shows(laid.Horizontal)}");
+            $"the last column ends at {lastRightInContent} in a viewport of {laid.Scroll.ViewportWidth}, scrollable {laid.Scroll.ScrollableWidth}, bar shown {Shows(laid.Horizontal)}");
     }
 
     [Theory]
@@ -212,6 +220,55 @@ public class GridScrollBarThemeTests
 
         Assert.True(laid.MeasuresAfterSettle < 60, $"the grid was measured {laid.MeasuresAfterSettle} times to settle");
         Assert.Equal(laid.MeasuresAfterSettle, laid.MeasuresAfterMore);
-        Assert.Equal(laid.Grid.Columns.Sum(c => c.ActualWidth) > laid.Scroll.ViewportWidth + 0.5, Shows(laid.Horizontal));
+        Assert.Equal(laid.ColumnsTotal > laid.Scroll.ViewportWidth + 0.5, Shows(laid.Horizontal));
+    }
+
+    /// <summary>Everything to the right of the viewport is reached by scrolling: the columns fit, or the scroll bar shows and goes far enough.</summary>
+    private static void AssertLastColumnReachable(Laid laid)
+    {
+        var overflow = laid.ColumnsTotal - laid.Scroll.ViewportWidth;
+        Assert.True(overflow <= 0.5 || (Shows(laid.Horizontal) && laid.Scroll.ScrollableWidth >= overflow - 1),
+            $"columns are {laid.ColumnsTotal} wide in a viewport of {laid.Scroll.ViewportWidth}; scrollable {laid.Scroll.ScrollableWidth}, bar shown {Shows(laid.Horizontal)}");
+    }
+
+    [Theory]
+    [MemberData(nameof(Themes))]
+    public void AGridWhoseHeadersWidenItsColumns_CanScrollToItsLastColumn(string theme)
+    {
+        /* A 40 px column with a long header grows to the header's width once the grid loads; the scroll extent has to follow. */
+        var laid = Lay(theme, 5, 10, false, 700, 300, columnWidth: 40, header: "Memory Used Total MB ");
+
+        Assert.True(laid.ColumnsTotal > 1000, $"the headers should have widened the columns, got {laid.ColumnsTotal}");
+        AssertLastColumnReachable(laid);
+    }
+
+    [Theory]
+    [MemberData(nameof(Themes))]
+    public void AnEmptyGridWhoseHeadersWidenItsColumns_CanScrollToItsLastColumn(string theme)
+    {
+        var laid = Lay(theme, 0, 10, false, 700, 300, columnWidth: 40, header: "Memory Used Total MB ");
+
+        Assert.True(laid.ColumnsTotal > 1000, $"the headers should have widened the columns, got {laid.ColumnsTotal}");
+        AssertLastColumnReachable(laid);
+    }
+
+    [Theory]
+    [MemberData(nameof(Themes))]
+    public void AnEmptyGridThatIsRefreshedWithRows_ScrollsByRowsAgain_AndStillReachesItsLastColumn(string theme)
+    {
+        var laid = Lay(theme, 0, 12, false, 700, 300, rowsAfter: 200);
+
+        AssertLastColumnReachable(laid);
+        Assert.True(Shows(laid.Vertical), "200 rows do not fit in 300 px");
+        Assert.True(laid.ContentScrolls, "rows scroll by row again once the grid has some");
+        Assert.True(laid.Scroll.ScrollableHeight < 200 * 5, $"scrolling by row, the grid scrolls about 200 rows, not 200 rows of pixels: {laid.Scroll.ScrollableHeight}");
+    }
+
+    [Theory]
+    [MemberData(nameof(Themes))]
+    public void AGridWithRows_ReachesItsLastColumn_At900x600AndAt1280x800(string theme)
+    {
+        AssertLastColumnReachable(Lay(theme, 60, 14, true, 900 - 20, 600 - 150));
+        AssertLastColumnReachable(Lay(theme, 60, 14, true, 1280 - 20, 800 - 150));
     }
 }
