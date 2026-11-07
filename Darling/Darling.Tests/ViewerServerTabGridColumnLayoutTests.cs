@@ -40,7 +40,7 @@ public sealed class ViewerServerTabGridColumnLayoutTests
 
         var found = WithServerTab(tab => GridColumnLayoutProbe.Shown(
             GridColumnLayoutProbe.Detach(tab, "QueryStatsGrid"), rows,
-            grid => GridColumnLayoutProbe.MeasureQueryText(grid, rows, GridColumnLayoutProbe.LongQueryText, "Executions", "Total CPU (ms)")));
+            grid => GridColumnLayoutProbe.MeasureQueryText(grid, rows, GridColumnLayoutProbe.LongQueryText, "Executions", "Total CPU (ms)", "Total Duration (ms)")));
 
         Assert.True(found.Count == 0, $"Top Queries at {GridColumnLayoutProbe.Viewport} px:{Environment.NewLine}" + string.Join(Environment.NewLine, found));
     }
