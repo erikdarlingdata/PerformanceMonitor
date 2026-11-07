@@ -609,7 +609,8 @@ public sealed class FinOpsOptimizationViewLiveTests
         await using var c = new NpgsqlConnection(scratch.ConnectionString);
         await c.OpenAsync(ct);
         await PgMigrations.MigrateAsync(c, ct);
-        Assert.SkipWhen(!await TimescaleSupport.TryEnableAsync(c, null, ct), "The rollup route reads a continuous aggregate: TimescaleDB is required.");
+        var timescale = await TimescaleSupport.TryEnableAsync(c, null, ct);
+        Assert.SkipWhen(!timescale, "The rollup route reads a continuous aggregate: TimescaleDB is required.");
         await TimescaleSupport.ConvertToHypertablesAsync(c, null, ct);
         await DarlingMcpTestData.RegisterServerAsync(c, ServerId, ServerName, ct);
         Assert.True(await TimescaleSupport.EnsureContinuousAggregatesAsync(c, null, ct) > 0);
