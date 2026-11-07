@@ -1135,9 +1135,10 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
     /// <summary>#8106: <c>sample_interval_seconds</c> is a per-row figure, the seconds since that wait type's own previous sighting. A
     /// type that returns after missing some passes stores several cadences while its siblings in the same collection store one, and a
     /// baseline that divided the collection's summed wait by its longest row interval read every such collection at a fraction. The
-    /// WaitMsPerSec baseline rates each row over its own interval and sums the rates: two steady types at 500 and 100 ms/s and a third
-    /// seen every fifth minute (600 ms over its own 300 s) read 600 or 602 on every collection, so the hour's mean is 600.4 rather than
-    /// the 504.4 of twelve collections read at 122.</summary>
+    /// WaitMsPerSec baseline credits a collection's rows measured over a positive interval whole and rates the sum over the collection's
+    /// cadence: two steady types at 500 and 100 ms/s and a third seen every fifth minute (600 ms over its own 300 s) read 600 on 48
+    /// collections and 610 on 12, so the hour's mean is 602, the sum of the per-type rates, rather than the 504.4 of twelve
+    /// collections read at 122.</summary>
     [Fact]
     public async Task WaitMsPerSecBaseline_RatesEachRowOverItsOwnInterval_SoAReturningWaitTypeDoesNotDeflateTheCollection()
     {
@@ -1156,7 +1157,7 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         var baseline = await _baselineProvider.GetBaselineAsync(ServerId, MetricNames.WaitMsPerSec, _analysisStart);
 
         Assert.Equal(60, baseline.SampleCount);
-        Assert.Equal(600.4, baseline.Mean, precision: 2);
+        Assert.Equal(602.0, baseline.Mean, precision: 2);
     }
 
     private async Task SeedWaitStatAsync(DateTime time, string waitType, long deltaWaitMs, int? sampleIntervalSeconds = null)

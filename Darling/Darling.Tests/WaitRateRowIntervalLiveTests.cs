@@ -26,8 +26,10 @@ namespace Darling.Tests;
 /// divides the collection's summed wait by its longest row interval deflates every collection that holds a returning row. The
 /// wait-rate anomaly's window, the young-baseline bar and the stored WaitMsPerSec baseline all rate each row over its own interval
 /// instead, so the window and the baseline it is scored against agree. The rows are the issue's: two steady types at 500 and
-/// 100 ms/s every minute, and a third seen every fifth minute (600 ms over its own 300 s, 2 ms/s), so every collection reads 600
-/// or 602 and the hour averages 600.4.
+/// 100 ms/s every minute, and a third seen every fifth minute (600 ms over its own 300 s, 2 ms/s). A collection credits every row
+/// measured over a positive interval whole and rates the sum over its cadence, the shortest interval any of its rows measured, so the
+/// returning row's 600 ms lands on the collection that observed it: 48 collections read 600, 12 read 610, and the hour averages 602,
+/// the sum of the per-type rates (500 + 100 + 2) and the hour's 2,167,200 ms over its 3,600 s.
 ///
 /// <para><b>Own store</b> (<c>#1776 own-store</c>): each test mints its own scratch database through <see cref="ScratchPostgres"/>,
 /// builds it the way the service does (ladder, TimescaleDB, hypertables, ensure sweep), and drops it whole.</para>
@@ -61,8 +63,8 @@ public sealed class WaitRateRowIntervalLiveTests
             BindWindow(window, hour);
             await using var reader = await window.ExecuteReaderAsync(ct);
             Assert.True(await reader.ReadAsync(ct), "the hour tiles to one local-hour row");
-            Assert.Equal(602.0, reader.GetDouble(1), 2);
-            Assert.Equal(600.4, reader.GetDouble(2), 2);
+            Assert.Equal(610.0, reader.GetDouble(1), 2);
+            Assert.Equal(602.0, reader.GetDouble(2), 2);
             Assert.Equal(60, Convert.ToInt32(reader.GetValue(4)));
             Assert.False(await reader.ReadAsync(ct));
         }
@@ -72,12 +74,13 @@ public sealed class WaitRateRowIntervalLiveTests
             bar.Parameters.AddWithValue(ServerId);
             bar.Parameters.AddWithValue(hour);
             bar.Parameters.AddWithValue(hour.AddHours(1));
-            Assert.Equal(602.0, Convert.ToDouble(await bar.ExecuteScalarAsync(ct)), 2);
+            Assert.Equal(610.0, Convert.ToDouble(await bar.ExecuteScalarAsync(ct)), 2);
         }
     }
 
     /// <summary>The stored baseline over the successor supply, read through the provider's own WaitMsPerSec arm: every collection's
-    /// rate is its summed row rates, so the hour's mean is 600.4 rather than the 504.4 of twelve deflated collections.</summary>
+    /// wait is rated over its cadence, so the hour's mean is 602, the sum of the per-type rates, rather than the 504.4 of twelve
+    /// deflated collections.</summary>
     [Fact]
     public async Task TheWaitMsPerSecBaseline_ReadsEachCollectionAsItsSummedRowRates()
     {
@@ -91,14 +94,14 @@ public sealed class WaitRateRowIntervalLiveTests
         var hour = SeededHour;
         await SeedTheIssuesHourAsync(connection, hour, ct);
 
-        Assert.Equal(600.4, await WholeTierMeanAsync(connection, PgBaselineProvider.GetBaselineQuery(MetricNames.WaitMsPerSec)!, hour, ct), 2);
+        Assert.Equal(602.0, await WholeTierMeanAsync(connection, PgBaselineProvider.GetBaselineQuery(MetricNames.WaitMsPerSec)!, hour, ct), 2);
 
         /* And through the provider itself: the analysis time's window reaches the seeded hour, and every tier holds the same 60 samples. */
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var provider = new PgBaselineProvider(postgres);
         var bucket = await provider.GetBaselineAsync(ServerId, MetricNames.WaitMsPerSec, DateTime.UtcNow, ct);
         Assert.Equal(60, bucket.SampleCount);
-        Assert.Equal(600.4, bucket.Mean, 2);
+        Assert.Equal(602.0, bucket.Mean, 2);
     }
 
     private static async Task<NpgsqlConnection> BuildStoreAsync(ScratchPostgres scratch, CancellationToken ct)
