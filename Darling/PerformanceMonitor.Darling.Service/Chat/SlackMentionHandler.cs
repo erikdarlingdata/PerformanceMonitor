@@ -45,10 +45,11 @@ public static class SlackChatAnswers
     public const string OverCap = "This thread has reached 6 agent requests this hour. I'll open yours when the hour ends.";
     public const string Offline = "No agent has picked this up in 5 minutes. It may be offline.";
     public const string RouteCap = "This route has reached its agent requests for this hour. I'll open yours when the hour ends.";
+    public const string WaitingFull = "This thread already has as many messages waiting for the agent as it can hold, so I can't take this one until it has read them.";
 
     /// <summary>The answer kinds, as the once marks name them.</summary>
     public const string NoGrantKind = "no_grant", OutsideKind = "outside", OldKind = "old", WaitingKind = "waiting", OverCapKind = "over_cap",
-        OfflineKind = "offline", RouteCapKind = "route_cap";
+        OfflineKind = "offline", RouteCapKind = "route_cap", WaitingFullKind = "waiting_full";
 }
 
 /// <summary>
@@ -183,7 +184,7 @@ public sealed class SlackMentionHandler : ISlackEventHandlers
         var newest = await _store.NewestRequestAsync(thread, cancellationToken);
         var message = new SlackPersonMessage(inbound.Channel, inbound.Ts, inbound.ThreadTs!, thread.ThreadRequestId, person.PersonId, identity,
             Bound(StripBotMentions(text, inbound.BotUserId)));
-        if (!await _store.SaveMessageAsync(message, cancellationToken))
+        if (await _store.SaveMessageAsync(message, cancellationToken) != SlackPersonMessageSaved.Saved)
         {
             /* The same mention again (app_mention and message, or Slack's retry on the other connection): the first one acted. */
             return;

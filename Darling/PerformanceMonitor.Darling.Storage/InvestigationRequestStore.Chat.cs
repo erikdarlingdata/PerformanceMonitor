@@ -35,6 +35,19 @@ public static class SlackChatRules
     /// <summary>The most characters of a person's message kept, and of an agent's message posted.</summary>
     public const int TextLimit = 4000;
 
+    /// <summary>The most messages one thread holds waiting for the agent. Past it a mention is refused with one sentence.</summary>
+    public const int WaitingPerThread = 20;
+
+    /// <summary>The most messages one person holds waiting in one thread. Past it their mention is refused with one sentence.</summary>
+    public const int WaitingPerPerson = 5;
+
+    /// <summary>The most characters of people's text one claim answer carries in <c>person_requests</c>: the newest messages are kept and the
+    /// answer says how many were left out.</summary>
+    public const int PersonRequestsCharLimit = 16000;
+
+    /// <summary>The most message rows one claim answer reads before the character ceiling.</summary>
+    public const int PersonRequestsRowLimit = 50;
+
     /// <summary>PURE: <paramref name="text"/> held to <paramref name="limit"/> UTF-16 units, never cut between the two halves of a surrogate pair.</summary>
     public static string Bound(string? text, int limit = TextLimit)
     {
@@ -79,6 +92,22 @@ public static class SlackPersonMessageStates
 public sealed record SlackPersonMessage(string ChannelId, string Ts, string ThreadTs, Guid ThreadRequestId, long? PersonId, string Identity, string Text,
     string State = SlackPersonMessageStates.Waiting, Guid? RequestId = null, DateTime? ReceivedAtUtc = null);
 
+/// <summary>#7659: how saving a person's message ended.</summary>
+public enum SlackPersonMessageSaved
+{
+    /// <summary>Saved as waiting.</summary>
+    Saved,
+
+    /// <summary>A message with that channel and ts is already saved: the same mention arrived again.</summary>
+    Duplicate,
+
+    /// <summary>The thread already holds <see cref="SlackChatRules.WaitingPerThread"/> waiting messages.</summary>
+    ThreadFull,
+
+    /// <summary>The person already holds <see cref="SlackChatRules.WaitingPerPerson"/> waiting messages in the thread.</summary>
+    PersonFull,
+}
+
 /// <summary>#7659: a person who asked in a chat request: the person, the Slack identity used, and the request level their grants give for the
 /// request's server (1 <c>ask</c>, 2 <c>request_level_2</c>, 3 <c>request_level_3</c>).</summary>
 public sealed record SlackAsker(long PersonId, string Identity, int RequestLevel);
@@ -114,6 +143,10 @@ public sealed record SlackUnclaimedChat(Guid RequestId, Guid ThreadRequestId, in
 /// <summary>#7659: one entry of the claim answer's <c>person_requests</c>: the person's name, their grants for the request's server, and their text.</summary>
 public sealed record PersonRequest(string Name, IReadOnlyList<string> Grants, string Text);
 
+/// <summary>#7659: the <c>person_requests</c> of one claim answer: the newest messages inside the character ceiling, oldest first, and how many older
+/// ones were left out.</summary>
+public sealed record PersonRequestsPage(IReadOnlyList<PersonRequest> Items, int Omitted);
+
 /// <summary>#7659: how <see cref="InvestigationRequestStore.PostAgentMessageAsync"/> ended.</summary>
 public enum AgentMessageOutcome
 {
@@ -144,8 +177,8 @@ public interface ISlackChatStore
     /// <summary>The request level an enabled person's grants give for <paramref name="serverId"/>: 3, 2, 1, or 0 with no <c>ask</c>.</summary>
     Task<int> RequestLevelAsync(long personId, int serverId, CancellationToken cancellationToken);
 
-    /// <summary>Saves a message as waiting. False when a message with that channel and ts is already saved: the same mention arrived again.</summary>
-    Task<bool> SaveMessageAsync(SlackPersonMessage message, CancellationToken cancellationToken);
+    /// <summary>Saves a message as waiting, under the thread's and the person's waiting caps; a message with that channel and ts already saved is a duplicate.</summary>
+    Task<SlackPersonMessageSaved> SaveMessageAsync(SlackPersonMessage message, CancellationToken cancellationToken);
 
     /// <summary>Joins a saved message and its asker into the unclaimed chat request <paramref name="requestId"/>, lowering its stamp to the asker's
     /// level. False when that request is no longer an open chat request: the message stays waiting.</summary>
@@ -363,7 +396,7 @@ FOR UPDATE";
     }
 
     /// <inheritdoc cref="ISlackChatStore.SaveMessageAsync" />
-    public async Task<bool> SavePersonMessageAsync(SlackPersonMessage message, CancellationToken cancellationToken)
+    public async Task<SlackPersonMessageSaved> SavePersonMessageAsync(SlackPersonMessage message, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(message);
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
@@ -371,7 +404,7 @@ FOR UPDATE";
             P(message.ChannelId), P(message.Ts), P(message.ThreadTs), P(message.ThreadRequestId),
             new NpgsqlParameter<long?> { TypedValue = message.PersonId, NpgsqlDbType = NpgsqlDbType.Bigint },
             P(message.Identity), P(SlackChatRules.Bound(message.Text)), P(message.ReceivedAtUtc ?? Now()));
-        return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
+        return await command.ExecuteNonQueryAsync(cancellationToken) == 1 ? SlackPersonMessageSaved.Saved : SlackPersonMessageSaved.Duplicate;
     }
 
     /// <inheritdoc cref="ISlackChatStore.JoinChatRequestAsync" />
@@ -618,7 +651,7 @@ FOR UPDATE";
 
     /// <summary>The messages of a chat request for the claim answer's <c>person_requests</c>: each person's name, grants for the request's server
     /// (<c>ask</c>, <c>request_level_2</c>, <c>request_level_3:&lt;kinds&gt;</c>) and text, oldest first. Empty for an alert request.</summary>
-    public async Task<IReadOnlyList<PersonRequest>> ListPersonRequestsAsync(Guid requestId, CancellationToken cancellationToken)
+    public async Task<PersonRequestsPage> ListPersonRequestsAsync(Guid requestId, CancellationToken cancellationToken)
     {
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         var rows = new List<(string Name, long? PersonId, string Text, int ServerId)>();
@@ -658,7 +691,7 @@ FOR UPDATE";
             result.Add(new PersonRequest(name, held, text));
         }
 
-        return result;
+        return new PersonRequestsPage(result, 0);
     }
 
     /// <summary>

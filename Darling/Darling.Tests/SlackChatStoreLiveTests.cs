@@ -199,8 +199,8 @@ public sealed class SlackChatStoreLiveTests
         await WithStoreAsync(async (connection, _, store, seed, ct) =>
         {
             var message = Message("1700000000.000201", seed.Dana, "U0DANA", "please force the good plan");
-            Assert.True(await store.SavePersonMessageAsync(message, ct));
-            Assert.False(await store.SavePersonMessageAsync(message with { Text = "again" }, ct));
+            Assert.Equal(SlackPersonMessageSaved.Saved, await store.SavePersonMessageAsync(message, ct));
+            Assert.Equal(SlackPersonMessageSaved.Duplicate, await store.SavePersonMessageAsync(message with { Text = "again" }, ct));
             Assert.Equal("waiting", await ScalarAsync(connection, "SELECT state FROM config.investigation_person_messages", ct));
 
             /* The parent is stamped 3, the routes give its metrics 2, Dana holds 3: the chat request is stamped 2. */
@@ -221,7 +221,7 @@ public sealed class SlackChatStoreLiveTests
 
             /* Erik, with ask alone, joins the unclaimed chat request: a second asker row, and the stamp drops to 1. */
             var second = Message("1700000000.000202", seed.Erik, "U0ERIK", "and check blocking");
-            Assert.True(await store.SavePersonMessageAsync(second, ct));
+            Assert.Equal(SlackPersonMessageSaved.Saved, await store.SavePersonMessageAsync(second, ct));
             Assert.True(await store.JoinChatRequestAsync(chat, new SlackAsker(seed.Erik, second.Identity, 1), second, ct));
             Assert.Equal("1", await ScalarAsync(connection, $"SELECT autonomy_level::text FROM config.investigation_requests WHERE request_id = '{chat}'", ct));
             Assert.Equal("2", await ScalarAsync(connection, $"SELECT count(*) FROM config.investigation_request_askers WHERE request_id = '{chat}'", ct));
@@ -231,18 +231,20 @@ public sealed class SlackChatStoreLiveTests
             /* Once claimed the chat request takes no join: the message stays waiting. */
             Assert.Equal(InvestigationClaimOutcome.Claimed, (await store.ClaimAsync(chat, "agent-a", ct)).Outcome);
             var third = Message("1700000000.000203", seed.Erik, "U0ERIK", "one more");
-            Assert.True(await store.SavePersonMessageAsync(third, ct));
+            Assert.Equal(SlackPersonMessageSaved.Saved, await store.SavePersonMessageAsync(third, ct));
             Assert.False(await store.JoinChatRequestAsync(chat, new SlackAsker(seed.Erik, third.Identity, 1), third, ct));
             Assert.Equal("waiting", await ScalarAsync(connection, "SELECT state FROM config.investigation_person_messages WHERE ts = '1700000000.000203'", ct));
 
             /* The person requests the claim answer carries: each asker's name, grants for the server and text, in order. */
-            var requests = await store.ListPersonRequestsAsync(chat, ct);
+            var page = await store.ListPersonRequestsAsync(chat, ct);
+            var requests = page.Items;
+            Assert.Equal(0, page.Omitted);
             Assert.Equal(2, requests.Count);
             Assert.Equal(("Dana", "please force the good plan"), (requests[0].Name, requests[0].Text));
             Assert.Equal(new[] { "request_level_3:force_plan" }, requests[0].Grants);
             Assert.Equal(("Erik", "and check blocking"), (requests[1].Name, requests[1].Text));
             Assert.Equal(new[] { "ask" }, requests[1].Grants);
-            Assert.Empty(await store.ListPersonRequestsAsync(s_parent, ct));
+            Assert.Empty((await store.ListPersonRequestsAsync(s_parent, ct)).Items);
 
             /* A parent whose routes are gone stamps 1, the column's floor (reads alone), and an asker below the routes lowers it. */
             var low = await store.OpenChatRequestAsync(Thread(seed.RouteId), s_parent, [new SlackAsker(seed.Erik, "slack:T:U", 1)], [], 10, DateTime.UtcNow, RoutesAt(3), ct);
@@ -317,7 +319,7 @@ public sealed class SlackChatStoreLiveTests
         await WithStoreAsync(async (connection, _, store, seed, ct) =>
         {
             var message = Message("1700000000.000301", seed.Dana, "U0DANA", "force it");
-            Assert.True(await store.SavePersonMessageAsync(message, ct));
+            Assert.Equal(SlackPersonMessageSaved.Saved, await store.SavePersonMessageAsync(message, ct));
             var chat = (await store.OpenChatRequestAsync(Thread(seed.RouteId), s_parent, [new SlackAsker(seed.Dana, message.Identity, 3)], [message], 10, DateTime.UtcNow, RoutesAt(3), ct)).RequestId!.Value;
             await ExecAsync(connection, $"UPDATE config.investigation_requests SET state = 'reported', reported_at = now(), follow_up_at = now() - interval '1 minute' WHERE request_id IN ('{chat}', '{s_parent}')", ct);
 
@@ -350,8 +352,8 @@ public sealed class SlackChatStoreLiveTests
     {
         await WithStoreAsync(async (connection, _, store, seed, ct) =>
         {
-            Assert.True(await store.SavePersonMessageAsync(Message("1700000000.000401", seed.Erik, "U0ERIK", "first"), ct));
-            Assert.True(await store.SavePersonMessageAsync(Message("1700000000.000402", seed.Dana, "U0DANA", "second"), ct));
+            Assert.Equal(SlackPersonMessageSaved.Saved, await store.SavePersonMessageAsync(Message("1700000000.000401", seed.Erik, "U0ERIK", "first"), ct));
+            Assert.Equal(SlackPersonMessageSaved.Saved, await store.SavePersonMessageAsync(Message("1700000000.000402", seed.Dana, "U0DANA", "second"), ct));
             var waiting = Assert.Single(await store.WaitingThreadsAsync(10, ct));
             Assert.Equal((s_parent, seed.RouteId, ServerId, Channel, ThreadTs, 2), (waiting.ThreadRequestId, waiting.RouteId, waiting.ServerId, waiting.ChannelId, waiting.ThreadTs, waiting.Messages));
             Assert.Equal(new[] { "first", "second" }, (await store.WaitingMessagesAsync(s_parent, ct)).Select(m => m.Text).ToArray());
@@ -449,7 +451,7 @@ public sealed class SlackChatStoreLiveTests
             await ExecAsync(connection, "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
             /* Dana asks; she holds request_level_3 with force_plan alone, so the chat request is stamped 3 and her request may propose a plan force. */
             var message = Message("1700000000.000701", seed.Dana, "U0DANA", "kill the blocking session");
-            Assert.True(await store.SavePersonMessageAsync(message, ct));
+            Assert.Equal(SlackPersonMessageSaved.Saved, await store.SavePersonMessageAsync(message, ct));
             var chat = (await store.OpenChatRequestAsync(Thread(seed.RouteId), s_parent, [new SlackAsker(seed.Dana, message.Identity, 3)], [message], 10, DateTime.UtcNow, RoutesAt(3), ct)).RequestId!.Value;
             var claim = (await store.ClaimAsync(chat, "agent-a", ct)).ClaimId!.Value;
             var requestsBefore = await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_requests", ct);
@@ -473,7 +475,7 @@ public sealed class SlackChatStoreLiveTests
             Assert.True((await PersonDirectory.AddGrantAsync(source, seed.Erik, ServerId, null, PersonCapabilities.RequestLevel3, [ServerActionNames.EvictPlan], Admin, ServerActionSurfaces.Viewer, ct)).Succeeded);
             await ExecAsync(connection, $"UPDATE config.investigation_requests SET state = 'open', claim_id = NULL, claimed_by = NULL, lease_until = NULL WHERE request_id = '{chat}'", ct);
             var second = Message("1700000000.000702", seed.Erik, "U0ERIK", "and evict the plan");
-            Assert.True(await store.SavePersonMessageAsync(second, ct));
+            Assert.Equal(SlackPersonMessageSaved.Saved, await store.SavePersonMessageAsync(second, ct));
             Assert.True(await store.JoinChatRequestAsync(chat, new SlackAsker(seed.Erik, second.Identity, 3), second, ct));
             claim = (await store.ClaimAsync(chat, "agent-a", ct)).ClaimId!.Value;
             var forceAfter = await store.CheckServerActionAsync(Call(chat, claim, ServerActionNames.ForcePlan), hooks, ct);
@@ -494,6 +496,64 @@ public sealed class SlackChatStoreLiveTests
             Assert.Equal(false, await holds.ExecuteScalarAsync(ct));
             holds.Parameters[0].Value = s_parent;
             Assert.Equal(true, await holds.ExecuteScalarAsync(ct));
+        });
+    }
+
+    /// <summary>The waiting caps (#7659): a person holds at most five waiting messages in a thread and a thread at most twenty, the waiting read is
+    /// bounded, and past either cap the save answers the cap instead of writing.</summary>
+    [Fact]
+    public async Task TheWaitingCaps_HoldAPersonToFiveAndAThreadToTwenty_AndTheWaitingReadIsBounded()
+    {
+        await WithStoreAsync(async (connection, source, store, seed, ct) =>
+        {
+            for (var i = 0; i < SlackChatRules.WaitingPerPerson; i++)
+                Assert.Equal(SlackPersonMessageSaved.Saved, await store.SavePersonMessageAsync(Message($"1700000000.00090{i}", seed.Erik, "U0ERIK", "erik " + i), ct));
+            Assert.Equal(SlackPersonMessageSaved.PersonFull, await store.SavePersonMessageAsync(Message("1700000000.000910", seed.Erik, "U0ERIK", "one too many"), ct));
+            Assert.Equal("0", await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_person_messages WHERE ts = '1700000000.000910'", ct));
+            /* The same ts again is still the duplicate, not the cap. */
+            Assert.Equal(SlackPersonMessageSaved.Duplicate, await store.SavePersonMessageAsync(Message("1700000000.000900", seed.Erik, "U0ERIK", "again"), ct));
+
+            /* Three more people fill the thread to twenty; a fifth person is refused by the thread cap with none of their own waiting. */
+            var people = new List<long> { seed.Dana, seed.Pat };
+            for (var p = 0; p < 2; p++)
+                people.Add((await PersonDirectory.AddPersonAsync(source, "Extra" + p, Admin, ServerActionSurfaces.Viewer, ct)).PersonId!.Value);
+            var ts = 920;
+            foreach (var person in people)
+                for (var i = 0; i < SlackChatRules.WaitingPerPerson; i++)
+                    Assert.Equal(SlackPersonMessageSaved.Saved, await store.SavePersonMessageAsync(Message($"1700000000.000{ts++}", person, "U" + person, "text"), ct));
+            Assert.Equal(SlackChatRules.WaitingPerThread.ToString(System.Globalization.CultureInfo.InvariantCulture), await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_person_messages WHERE state = 'waiting'", ct));
+            var fifth = (await PersonDirectory.AddPersonAsync(source, "Fifth", Admin, ServerActionSurfaces.Viewer, ct)).PersonId!.Value;
+            Assert.Equal(SlackPersonMessageSaved.ThreadFull, await store.SavePersonMessageAsync(Message("1700000000.000999", fifth, "U0FIFTH", "full"), ct));
+
+            /* Rows written past the cap by another path still come back bounded. */
+            await ExecAsync(connection, $"INSERT INTO config.investigation_person_messages (channel_id, ts, thread_ts, thread_request_id, person_id, identity, message_text, state) SELECT '{Channel}', '1700000001.' || lpad(g::text, 6, '0'), '{ThreadTs}', '{s_parent}', {fifth}, 'slack:T:U', 'extra', 'waiting' FROM generate_series(1, 10) AS g", ct);
+            Assert.Equal(SlackChatRules.WaitingPerThread, (await store.WaitingMessagesAsync(s_parent, ct)).Count);
+            Assert.Equal(SlackChatRules.WaitingPerThread, Assert.Single(await store.WaitingThreadsAsync(10, ct)).Messages);
+        });
+    }
+
+    /// <summary>The claim answer's person_requests (#7659) is bounded by characters: the newest messages inside the ceiling, oldest first, and a count of
+    /// what was left out, so one asker cannot grow the answer without bound.</summary>
+    [Fact]
+    public async Task PersonRequests_KeepTheNewestInsideTheCharacterCeiling_AndSayHowManyWereLeftOut()
+    {
+        await WithStoreAsync(async (connection, _, store, seed, ct) =>
+        {
+            var chat = (await store.OpenChatRequestAsync(Thread(seed.RouteId), s_parent, [new SlackAsker(seed.Erik, "slack:T0TEAM:U0ERIK", 1)], [], 10, DateTime.UtcNow, RoutesAt(2), ct)).RequestId!.Value;
+            /* Six messages of 3,500 characters each, oldest first: four fit under the 16,000-character ceiling. */
+            for (var i = 0; i < 6; i++)
+                await ExecAsync(connection, $"INSERT INTO config.investigation_person_messages (channel_id, ts, thread_ts, thread_request_id, request_id, person_id, identity, message_text, state, received_at) VALUES ('{Channel}', '1700000002.00000{i}', '{ThreadTs}', '{s_parent}', '{chat}', {seed.Erik}, 'slack:T0TEAM:U0ERIK', 'm{i} ' || repeat('x', 3497), 'opened', now() AT TIME ZONE 'UTC' + interval '{i} seconds')", ct);
+
+            var page = await store.ListPersonRequestsAsync(chat, ct);
+            Assert.Equal(2, page.Omitted);
+            Assert.Equal(new[] { "m2", "m3", "m4", "m5" }, page.Items.Select(r => r.Text[..2]).ToArray());
+            Assert.All(page.Items, r => Assert.Equal("Erik", r.Name));
+            Assert.True(page.Items.Sum(r => r.Text.Length) <= SlackChatRules.PersonRequestsCharLimit);
+
+            var (requests, omitted) = await DarlingMcpInvestigationTools.PersonRequestsAsync(store, chat, ct);
+            Assert.Equal(4, requests!.Count);
+            Assert.Equal(2, omitted);
+            Assert.Equal(16000, SlackChatRules.PersonRequestsCharLimit);
         });
     }
 

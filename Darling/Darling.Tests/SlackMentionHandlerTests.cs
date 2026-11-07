@@ -82,13 +82,17 @@ public sealed class SlackMentionHandlerTests
 
         public Task<int> RequestLevelAsync(long personId, int serverId, CancellationToken ct) { Calls++; return Task.FromResult(Levels.TryGetValue(personId, out var l) ? l : 0); }
 
-        public Task<bool> SaveMessageAsync(SlackPersonMessage message, CancellationToken ct)
+        public SlackPersonMessageSaved? SaveAnswer { get; set; }
+
+        public Task<SlackPersonMessageSaved> SaveMessageAsync(SlackPersonMessage message, CancellationToken ct)
         {
             Calls++;
+            if (SaveAnswer is { } forced)
+                return Task.FromResult(forced);
             if (!Saved.Add(message.ChannelId + "|" + message.Ts))
-                return Task.FromResult(false);
+                return Task.FromResult(SlackPersonMessageSaved.Duplicate);
             Messages.Add(message);
-            return Task.FromResult(true);
+            return Task.FromResult(SlackPersonMessageSaved.Saved);
         }
 
         public Task<bool> JoinChatRequestAsync(Guid requestId, SlackAsker asker, SlackPersonMessage message, CancellationToken ct)
@@ -236,7 +240,7 @@ public sealed class SlackMentionHandlerTests
     [Fact]
     public void TheAnswers_AreOneSentenceEach_WithNoEmoji()
     {
-        foreach (var answer in new[] { SlackChatAnswers.NoGrant, SlackChatAnswers.OutsideThread, SlackChatAnswers.OldRequest, SlackChatAnswers.Waiting, SlackChatAnswers.OverCap, SlackChatAnswers.Offline, SlackChatAnswers.RouteCap })
+        foreach (var answer in new[] { SlackChatAnswers.NoGrant, SlackChatAnswers.OutsideThread, SlackChatAnswers.OldRequest, SlackChatAnswers.Waiting, SlackChatAnswers.OverCap, SlackChatAnswers.Offline, SlackChatAnswers.RouteCap, SlackChatAnswers.WaitingFull })
         {
             Assert.DoesNotContain(':', answer.Replace("'", ""));
             Assert.All(answer, c => Assert.True(c < 0x2000, answer));
@@ -295,7 +299,8 @@ public sealed class SlackMentionHandlerTests
 
         var post = Assert.Single(posts.Posts);
         Assert.Equal((Channel, SlackChatAnswers.NoGrant, ThreadTs), post);
-        Assert.Equal(2, store.Journal.Count);
+        /* The second mention within the hour from the same person is a repeat: no second answer and no second journal row. */
+        Assert.Single(store.Journal);
         foreach (var row in store.Journal)
         {
             Assert.Equal((First, RouteId, ServerId, "person:7", SlackChatAnswers.NoGrantKind), (row.Request, row.Route, row.Server, row.Actor, row.Outcome));
@@ -325,7 +330,7 @@ public sealed class SlackMentionHandlerTests
         store.Levels[Erik.PersonId] = 3;
         await handler.HandleEventAsync(Event(SlackMentionHandler.AppMention, "<@U0BOT> hi", ts: "1700000000.000203", channel: Channel), CancellationToken.None);
         Assert.Single(posts.Posts);
-        Assert.Equal(2, store.Journal.Count);
+        Assert.Single(store.Journal);
         Assert.Empty(store.Opens);
     }
 
@@ -341,14 +346,25 @@ public sealed class SlackMentionHandlerTests
         Assert.Equal((null, SlackChatAnswers.OutsideKind), (row.Request, row.Outcome));
         Assert.Null(row.Detail["text"]);
 
-        /* A reply in a thread this store did not open: answered once in that thread, the second time not. */
+        /* More mentions outside request threads from the same person within the hour, top-level or in a thread this store did not open: no second
+           answer and no second journal row, so a channel member cannot drive posts or journal growth by repeating. */
         await handler.HandleEventAsync(Event(SlackMentionHandler.AppMention, "<@U0BOT> hi", ts: "1700000000.000401", threadTs: "1700000000.000400"), CancellationToken.None);
         await handler.HandleEventAsync(Event(SlackMentionHandler.AppMention, "<@U0BOT> hi again", ts: "1700000000.000402", threadTs: "1700000000.000400"), CancellationToken.None);
-        Assert.Equal(2, posts.Posts.Count);
-        Assert.Equal((Channel, SlackChatAnswers.OutsideThread, "1700000000.000400"), posts.Posts[1]);
-        Assert.Equal(3, store.Journal.Count);
+        for (var i = 0; i < 5; i++)
+            await handler.HandleEventAsync(Event(SlackMentionHandler.AppMention, "<@U0BOT> spam", ts: "1700000000.00050" + i, threadTs: null), CancellationToken.None);
+        Assert.Single(posts.Posts);
+        Assert.Single(store.Journal);
         Assert.Empty(store.Messages);
         Assert.Empty(store.Opens);
+
+        /* Another person is answered on their own account, and the next hour starts the first person's count again. */
+        await handler.HandleEventAsync(Event(SlackMentionHandler.AppMention, "<@U0BOT> hi", ts: "1700000000.000600", threadTs: null, user: "U0OTHER"), CancellationToken.None);
+        Assert.Equal(2, posts.Posts.Count);
+        Assert.Equal(2, store.Journal.Count);
+        var later = new SlackMentionHandler(store, posts, () => Routes(), NullLogger.Instance, () => Now.AddHours(1));
+        await later.HandleEventAsync(Event(SlackMentionHandler.AppMention, "<@U0BOT> hi", ts: "1700000000.000700", threadTs: null), CancellationToken.None);
+        Assert.Equal(3, posts.Posts.Count);
+        Assert.Equal(3, store.Journal.Count);
     }
 
     [Fact]
@@ -362,8 +378,8 @@ public sealed class SlackMentionHandlerTests
         await handler.HandleEventAsync(Event(SlackMentionHandler.AppMention, "<@U0BOT> hi", ts: "1700000000.000502"), CancellationToken.None);
 
         Assert.Equal((Channel, SlackChatAnswers.OldRequest, ThreadTs), Assert.Single(posts.Posts));
-        Assert.Equal(2, store.Journal.Count);
-        Assert.All(store.Journal, r => Assert.Equal((First, SlackChatAnswers.OldKind), (r.Request, r.Outcome)));
+        var old = Assert.Single(store.Journal);
+        Assert.Equal((First, SlackChatAnswers.OldKind), (old.Request, old.Outcome));
         Assert.Empty(store.Messages);
         Assert.Empty(store.Opens);
         Assert.Empty(store.Joins);
@@ -420,6 +436,29 @@ public sealed class SlackMentionHandlerTests
         Assert.Equal((Channel, SlackChatAnswers.RouteCap, ThreadTs), Assert.Single(posts.Posts));
         Assert.Equal(SlackPersonMessageStates.Waiting, Assert.Single(store.Messages).State);
         Assert.Empty(store.Opens);
+    }
+
+    [Fact]
+    public async Task OverTheWaitingCaps_TheMentionIsRefusedWithOneSentenceOnceAnHour_AndNothingIsOpenedOrJoined()
+    {
+        var (handler, store, posts) = Handler();
+        store.Threads[Channel + "|" + ThreadTs] = Thread();
+        store.Newest = new SlackChatNewest(Newest, "claimed", InvestigationTriggerKinds.Alert, Now.AddMinutes(-3));
+        store.SaveAnswer = SlackPersonMessageSaved.PersonFull;
+
+        await handler.HandleEventAsync(Event(SlackMentionHandler.AppMention, "<@U0BOT> sixth", ts: "1700000000.000801"), CancellationToken.None);
+        await handler.HandleEventAsync(Event(SlackMentionHandler.AppMention, "<@U0BOT> seventh", ts: "1700000000.000802"), CancellationToken.None);
+        store.SaveAnswer = SlackPersonMessageSaved.ThreadFull;
+        await handler.HandleEventAsync(Event(SlackMentionHandler.AppMention, "<@U0BOT> eighth", ts: "1700000000.000803"), CancellationToken.None);
+
+        Assert.Equal((Channel, SlackChatAnswers.WaitingFull, ThreadTs), Assert.Single(posts.Posts));
+        var row = Assert.Single(store.Journal);
+        Assert.Equal((First, SlackChatAnswers.WaitingFullKind), (row.Request, row.Outcome));
+        Assert.Null(row.Detail["text"]);
+        Assert.Empty(store.Messages);
+        Assert.Empty(store.Opens);
+        Assert.Empty(store.Joins);
+        Assert.Equal((20, 5), (SlackChatRules.WaitingPerThread, SlackChatRules.WaitingPerPerson));
     }
 
     [Fact]

@@ -96,14 +96,14 @@ public sealed partial class DarlingMcpInvestigationTools
 
     /// <summary>The claim answer's <c>person_requests</c> (#7659): what each granted person asked in the thread, read on the owner connection, as a
     /// JSON array, or null for a request nobody asked in. Service-owned, beside the brief and never inside it.</summary>
-    internal static async Task<JsonArray?> PersonRequestsAsync(InvestigationRequestStore owner, Guid requestId, CancellationToken cancellationToken)
+    internal static async Task<(JsonArray? Requests, int Omitted)> PersonRequestsAsync(InvestigationRequestStore owner, Guid requestId, CancellationToken cancellationToken)
     {
-        var requests = await owner.ListPersonRequestsAsync(requestId, cancellationToken);
-        if (requests.Count == 0)
-            return null;
+        var page = await owner.ListPersonRequestsAsync(requestId, cancellationToken);
+        if (page.Items.Count == 0)
+            return (null, 0);
 
         var array = new JsonArray();
-        foreach (var request in requests)
+        foreach (var request in page.Items)
         {
             var grants = new JsonArray();
             foreach (var grant in request.Grants)
@@ -111,6 +111,6 @@ public sealed partial class DarlingMcpInvestigationTools
             array.Add(new JsonObject { ["name"] = request.Name, ["grants"] = grants, ["text"] = request.Text });
         }
 
-        return array;
+        return (array, page.Omitted);
     }
 }

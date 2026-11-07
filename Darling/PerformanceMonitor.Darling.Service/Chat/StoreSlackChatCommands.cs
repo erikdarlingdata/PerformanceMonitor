@@ -44,7 +44,7 @@ public sealed class StoreSlackChatCommands(InvestigationRequestStore store, ILog
         _store.RequestLevelAsync(personId, serverId, cancellationToken);
 
     /// <inheritdoc />
-    public Task<bool> SaveMessageAsync(SlackPersonMessage message, CancellationToken cancellationToken) =>
+    public Task<SlackPersonMessageSaved> SaveMessageAsync(SlackPersonMessage message, CancellationToken cancellationToken) =>
         _store.SavePersonMessageAsync(message, cancellationToken);
 
     /// <inheritdoc />
