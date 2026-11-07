@@ -196,7 +196,10 @@ jobs:
           set -euo pipefail
           vector="${GITHUB_WORKSPACE}/Darling/Darling.Tests/Fixtures/PasswordSeal/linux-self-check-vector.json"
           test -f "${vector}"
-          docker run --rm --user 1654:1654             -v "${vector}:/vector/linux-self-check-vector.json:ro"             "${DARLING_IMAGE}"             --self-check-password-key /vector/linux-self-check-vector.json
+          docker run --rm --user 1654:1654 \
+            -v "${vector}:/vector/linux-self-check-vector.json:ro" \
+            "${DARLING_IMAGE}" \
+            --self-check-password-key /vector/linux-self-check-vector.json
 
       # A rollup short of its source: raw query_stats rows 9 to 12 days old, written straight into the raw table, so no
       # refresh covers them (the INSERT of RollupBackfillLiveTests.SeedHourlyQueryStatsAsync, over a fixed window). The

@@ -115,7 +115,7 @@ wait_log() {
 
 # fingerprint <container>: the password key fingerprint of the container's log.
 fingerprint() {
-  docker logs "$1" 2>&1 | grep 'Password key' | grep -Eo "${fp_re}" | head -n 1
+  docker logs "$1" 2>&1 | grep 'Password key' | grep -Eo "${fp_re}" | head -n 1 || true
 }
 
 log_of() { docker logs "$1" 2>&1; }
@@ -144,6 +144,7 @@ leg="upgrade"
 new_store upgrade
 start_service "${prefix}-upgrade-old" "${previous}"
 wait_log "${prefix}-upgrade-old" 'Retention evaluation at startup'
+wait_log "${prefix}-upgrade-old" 'Password key [0-9A-F]{4}-[0-9A-F]{4}'
 old_fp="$(fingerprint "${prefix}-upgrade-old")"
 [ -n "${old_fp}" ] || fail "the previous image logged no password key fingerprint"
 docker stop "${prefix}-upgrade-old" >/dev/null
@@ -153,6 +154,7 @@ docker run --rm --user 0 --entrypoint chown -v "${vol}:/var/lib/darling" "${imag
 start_service "${prefix}-upgrade-new" "${image}"
 wait_log "${prefix}-upgrade-new" 'Least-privilege roles ready'
 wait_log "${prefix}-upgrade-new" 'Retention evaluation at startup'
+wait_log "${prefix}-upgrade-new" 'Password key [0-9A-F]{4}-[0-9A-F]{4}'
 new_fp="$(fingerprint "${prefix}-upgrade-new")"
 [ "${new_fp}" = "${old_fp}" ] || fail "password key fingerprint changed: '${old_fp}' -> '${new_fp}'"
 for f in ${held}; do
