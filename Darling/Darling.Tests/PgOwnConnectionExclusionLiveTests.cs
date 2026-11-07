@@ -80,15 +80,32 @@ public sealed class PgOwnConnectionExclusionLiveTests
     };
 
     [Fact]
-    public async Task SessionStates_AndXminHorizon_LeaveOutTheServicesOwnConnections()
+    public Task SessionStates_AndXminHorizon_LeaveOutTheServicesOwnConnections() => RunAsync(anotherSessionHoldsAnOlderTransaction: false);
+
+    /* #8203: pg_stat_activity is cluster-wide, so a transaction another session holds anywhere on the server (a test in its
+       own database, an autovacuum worker) can be older than this test's application connection for the whole read. The
+       collector then rightly names that holder, and the service's own connections, older still, must stay out of it. */
+    [Fact]
+    public Task SessionStates_AndXminHorizon_LeaveOutTheServicesOwnConnections_WhenAnotherSessionHoldsAnOlderTransaction() =>
+        RunAsync(anotherSessionHoldsAnOlderTransaction: true);
+
+    private static async Task RunAsync(bool anotherSessionHoldsAnOlderTransaction)
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString), SkipReason);
 
         var ct = TestContext.Current.CancellationToken;
 
-        /* The service connections open first, so each holds the oldest transaction id: without the
-           exclusion the xmin horizon read names one of them, which is the defect. */
+        /* The older transaction another session on the cluster can hold: opened before the service connections, so it is
+           the oldest holder of all, and the collector names it over the application connection. */
+        await using var elsewhere = anotherSessionHoldsAnOlderTransaction ? await OpenAsync(connectionString!, "pm7381-elsewhere", ct) : null;
+        if (elsewhere is not null)
+        {
+            await HoldTransactionAsync(elsewhere, ct);
+        }
+
+        /* The service connections open before the application one, so each holds an older transaction id than it: without
+           the exclusion the xmin horizon read names one of them, which is the defect. */
         await using var monitoring = await OpenAsync(connectionString!, PgWaitSamplingCollector.ServiceApplicationName, ct);
         await using var remediation = await OpenAsync(connectionString!, PgWaitSamplingCollector.ServiceRemediationApplicationName, ct);
         await using var application = await OpenAsync(connectionString!, "pm7381-app", ct);
