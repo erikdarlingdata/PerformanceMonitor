@@ -241,7 +241,7 @@ public sealed class PurgeNowBackgroundTests
     {
         var worker = MakeWorker();
         var gate = new TaskCompletionSource();
-        Assert.True(Reply(worker.TryStartPurgeNow(_ => gate.Task, null, CancellationToken.None)).GetProperty("started").GetBoolean());
+        Assert.True(Reply(worker.TryStartPurgeNow(async _ => { await gate.Task; await Task.Delay(60); }, null, CancellationToken.None)).GetProperty("started").GetBoolean());
 
         gate.SetResult();
         await Task.Delay(TimeSpan.FromMilliseconds(50), TestContext.Current.CancellationToken);

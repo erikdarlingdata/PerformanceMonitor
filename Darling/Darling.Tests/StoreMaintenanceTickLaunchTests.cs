@@ -135,7 +135,7 @@ public sealed class StoreMaintenanceTickLaunchTests
     {
         var (worker, _) = MakeWorker();
         var gate = new TaskCompletionSource();
-        Assert.True(worker.TryStartStoreMetricsTick(Now, () => null, (_, _) => gate.Task, CancellationToken.None));
+        Assert.True(worker.TryStartStoreMetricsTick(Now, () => null, async (_, _) => { await gate.Task; await Task.Delay(60); }, CancellationToken.None)); /* The body settles 60 ms after its gate: the stall a loaded runner puts between the gate and the tracked task's completion. */
         gate.SetResult();
         await Task.Delay(TimeSpan.FromMilliseconds(50));
 
@@ -251,7 +251,7 @@ public sealed class StoreMaintenanceTickLaunchTests
     {
         var (worker, _) = MakeWorker();
         var gate = new TaskCompletionSource();
-        Assert.True(worker.TryStartStoreMaintenanceTick(_ => gate.Task, CancellationToken.None));
+        Assert.True(worker.TryStartStoreMaintenanceTick(async _ => { await gate.Task; await Task.Delay(60); }, CancellationToken.None)); /* The body settles 60 ms after its gate: the stall a loaded runner puts between the gate and the tracked task's completion. */
         gate.SetResult();
         await Task.Delay(TimeSpan.FromMilliseconds(50));
 
