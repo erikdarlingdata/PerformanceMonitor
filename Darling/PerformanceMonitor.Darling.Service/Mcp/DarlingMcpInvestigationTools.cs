@@ -70,7 +70,7 @@ public sealed partial class DarlingMcpInvestigationTools
     [McpServerTool(Name = "list_investigation_requests"), Description(
         "Lists the investigation requests alerts opened for your agent, newest first, with state, lease and expiry. Writes " +
         "nothing. status ok or empty. Claim one with claim_investigation_request. <<GUIDE>> " +
-        "Each row: id, server, family, first metric, alert count, state, lease and expiry; a Change Watch request also carries detail_text, " +
+        "Each row: id, server (server_name is the label the opening alert carried, kept for the request's life, so two requests for one server can carry two labels; instance_name is the registry's current name for server_id and display_name its display name, read when served, so group requests by server_id or instance_name), family, first metric, alert count, state, lease and expiry; a Change Watch request also carries detail_text, " +
         "its changes and the measures that moved, each query measure with its database. The state is computed from the " +
         "lease and expiry at read time (a lapsed lease reads open), and the read writes nothing. " +
         "A request is opened when an alert matches a notification route whose agent_level is 1 (get_notification_routes), " +
@@ -515,8 +515,8 @@ public sealed partial class DarlingMcpInvestigationTools
     }
 
     [McpServerTool(Name = "get_investigation_evidence"), Description(
-        "Reads the frozen evidence sections of one investigation request, reported ones too. Writes nothing. status ok, empty, not_found or " +
-        "already_claimed. <<GUIDE>> " +
+        "Reads the frozen evidence sections of one investigation request, reported ones too. Writes nothing. status ok, empty, invalid (a " +
+        "sections name no section carries, the known names listed), not_found or already_claimed. <<GUIDE>> " +
         "Where the host serves named agent tokens, claim_not_token (a named token passed another token's claim_id) and " +
         "agent_id_is_named_token (the legacy token passed a claim_id a named token holds) can also answer. " +
         "The brief is composed once, at claim time; evidence that freezes later reaches you only as an evidence_ready event " +
@@ -562,6 +562,17 @@ public sealed partial class DarlingMcpInvestigationTools
 
                 if (holder is null)
                     return InvestigationToolCore.Status("already_claimed", "Another claim holds a live lease on this request.");
+            }
+
+            /* #8090: a name no evidence section carries is refused by name, with the sections listed, before the stored rows are
+               filtered; empty would read as "the request has no evidence". A known section the request has no row for stays empty. */
+            if (sections is { Length: > 0 })
+            {
+                var known = InvestigationEvidenceCapture.SectionCollectors.Keys;
+                var unknown = sections.Where(s => !known.Contains(s)).Distinct(StringComparer.Ordinal).ToArray();
+                if (unknown.Length > 0)
+                    return InvestigationToolCore.Status("invalid",
+                        $"sections names no evidence section: {string.Join(", ", unknown.Select(u => $"'{u}'"))}. The sections are {string.Join(", ", known)}.");
             }
 
             var wanted = sections is { Length: > 0 } ? new HashSet<string>(sections, StringComparer.Ordinal) : null;

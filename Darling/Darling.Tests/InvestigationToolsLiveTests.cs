@@ -628,6 +628,34 @@ FROM generate_series(1, " + (InvestigationToolCore.MaxLimit + 1) + ") AS i", ct)
         return Convert.ToString(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
     }
 
+    /// <summary>
+    /// #8090 item 4: two requests for one <c>server_id</c> opened under two labels (one alert path labels a server with its registry
+    /// name, another with its host name) carry the registry's one current name as <c>instance_name</c> and <c>display_name</c> on both
+    /// rows, read when served, while <c>server_name</c> keeps the label each was opened with (#5999, the webhook token's contract).
+    /// </summary>
+    [Fact]
+    public async Task List_CarriesTheRegistrysOneName_BesideEachRequestsOpenedWithLabel()
+    {
+        await RunAsync(async (store, dataSource, connection, ct) =>
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, 7, "alpha", ct);
+            var byRegistryName = (await store.OpenOrJoinAsync(Alert("blocking") with { ServerName = "alpha" }, ct)).RequestId!.Value;
+            var byHostName = (await store.OpenOrJoinAsync(Alert("resources") with { ServerName = "alpha.example.internal" }, ct)).RequestId!.Value;
+
+            var rows = Root(await DarlingMcpInvestigationTools.ListInvestigationRequests(dataSource, cancellationToken: ct))
+                .GetProperty("requests").EnumerateArray().ToDictionary(r => Guid.Parse(r.GetProperty("request_id").GetString()!));
+
+            Assert.Equal("alpha", rows[byRegistryName].GetProperty("server_name").GetString());
+            Assert.Equal("alpha.example.internal", rows[byHostName].GetProperty("server_name").GetString());
+            foreach (var row in new[] { rows[byRegistryName], rows[byHostName] })
+            {
+                Assert.Equal(7, row.GetProperty("server_id").GetInt32());
+                Assert.Equal("alpha", row.GetProperty("instance_name").GetString());
+                Assert.Equal("alpha", row.GetProperty("display_name").GetString());
+            }
+        });
+    }
+
     private async Task RunAsync(Func<InvestigationRequestStore, NpgsqlDataSource, NpgsqlConnection, CancellationToken, Task> body)
     {
         var baseConnectionString = ConnectionString;
