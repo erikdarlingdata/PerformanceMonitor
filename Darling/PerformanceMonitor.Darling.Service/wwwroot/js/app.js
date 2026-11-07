@@ -765,21 +765,24 @@ function refreshShell() {
    discard an in-progress edit, or waste a read against a page opened to read once), and neither is a page whose
    own last render's reads are still outstanding (#4191): a poll landing mid-load would fire every one of its
    panel reads a second time on top of the first, which is exactly what doubled audit_config on the Config tab.
-   The check runs before refreshShell() starts any of THIS tick's reads (refresh() and schedulerTick() call the
-   shell first, but its reads are the sidebar/view-list/AG-nav probes, not the page's), so it reflects only what
-   the PREVIOUS render left running. The sidebar/view-list/AG-nav probe keep refreshing regardless — only the
-   heavier per-page render waits for the last one to settle. */
+   #7935: the shell's reads (the sidebar's fleet read, the view list, the AG probe) count in the same read count, so
+   each caller asks hasInFlightReads() BEFORE refreshShell() starts this tick's reads, and the answer reflects only
+   what the PREVIOUS render left running. The page then renders in the same pass as the shell, and its /api/fleet
+   joins the sidebar's request (#3895) instead of following it a tick later as a second roll-up. The
+   sidebar/view-list/AG-nav probes keep refreshing regardless — only the heavier per-page render waits for the last
+   one to settle. */
 function refreshPage() {
-  if (isNoPollRoute(currentRoute().name) || hasInFlightReads()) return;
+  if (isNoPollRoute(currentRoute().name)) return;
   route({ poll: true });
 }
 
 /* The refresh entry the master pause and the tab-visible handler use: always the shell, and the page when
-   `force` is set or it is due. */
+   `force` is set or it is due, and none of its own reads are still running. */
 function refresh(force) {
   if (isSessionExpired()) return;
+  const pageGo = (force || pageIsDue(Date.now())) && !hasInFlightReads();
   refreshShell();
-  if (force || pageIsDue(Date.now())) refreshPage();
+  if (pageGo) refreshPage();
 }
 
 function schedulerTick() {
@@ -797,8 +800,9 @@ function schedulerTick() {
     return;
   }
   /* Off pauses only the page's own render; the shell roll-up (sidebar, status bar, session check) keeps running. */
+  const pageGo = pageIsDue(now) && !hasInFlightReads();
   if (now - shellLastRefreshAt >= POLL_MS) refreshShell();
-  if (pageIsDue(now)) refreshPage();
+  if (pageGo) refreshPage();
   updateRefreshHint();
 }
 
