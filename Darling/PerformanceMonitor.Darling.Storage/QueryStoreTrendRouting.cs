@@ -412,7 +412,10 @@ SELECT
        an unrated point as null with the reason, the viewer's chart reader skips it (a chart has nowhere to
        draw "unknown"). */
     CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds END AS duration_ms_per_second,
-    CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
+    CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second,
+    /* #8073: the point's stored executions (an hour's sum on the rollup arm, the interval's on the raw arms), a count
+       the store holds whether or not the point's length is knowable. */
+    CAST(total_executions AS bigint) AS execution_count
 FROM rated
 ORDER BY point_time
 """;

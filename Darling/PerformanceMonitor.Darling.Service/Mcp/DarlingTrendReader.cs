@@ -62,12 +62,14 @@ internal static class DarlingTrendReader
 
     /// <summary>
     /// One query-duration / execution-count trend point, shared by the three Performance-Trends siblings:
-    /// the per-second rate (elapsed ms/sec) plus executions/sec (Lite's <c>QueryTrendPoint</c> shape).
-    /// <para><c>ExecutionCount</c> and <c>ExecutionsPerSecond</c> are the SAME quantity - executions per
-    /// second - and both are here because the first one shipped truncated to a long. On a server doing
-    /// three executions a second that rounds harmlessly; on a quiet one doing 0.4 it reports ZERO, which
-    /// reads as an idle server rather than a slow one. The long is kept so a consumer reading it does not
-    /// break; new readers should take <c>ExecutionsPerSecond</c>.</para>
+    /// the per-second rate (elapsed ms/sec), executions/sec, and the executions themselves (Lite's
+    /// <c>QueryTrendPoint</c> shape).
+    /// <para><c>ExecutionCount</c> is a COUNT (#8073): the executions summed over the point, the numerator
+    /// <c>ExecutionsPerSecond</c> was built from, so a caller summing it over a window gets the executions that
+    /// ran, as the shared <c>aggregate_note</c> promises. On the plan-cache trends it sums the point's RATED
+    /// collections only (an unrated collection's deltas were never measured, so a point with no rated collection
+    /// carries null); a Query Store interval always stores its count, so that trend carries it even on an
+    /// unrated point. <c>ExecutionsPerSecond</c> is the rate, and the one to chart.</para>
     /// </summary>
     public sealed record QueryDurationTrendPoint(
         DateTime CollectionTime, double? Value, long? ExecutionCount, double? ExecutionsPerSecond)
@@ -1269,7 +1271,9 @@ internal static class DarlingTrendReader
         SELECT
             point_time AS collection_time,
             CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds END AS duration_ms_per_second,
-            CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
+            CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second,
+            /* #8073: the interval's stored executions, a count the store holds whether or not the interval's length is knowable. */
+            CAST(total_executions AS bigint) AS execution_count
         FROM raw
         ORDER BY point_time
         """;
@@ -1403,21 +1407,23 @@ internal static class DarlingTrendReader
     /// <summary>
     /// Reads the bucketed duration shape both routed tiers project (#3897): the bucket's start, its two
     /// time-weighted rates (NULL when nothing in the bucket was rated — kept as an unrated point, #3541 A12),
-    /// the worst single collection's rate (the busiest hour on the hourly tier), the bucket's first collection, and how many
-    /// of its collections were left out of the rates.
+    /// the worst single collection's rate (the busiest hour on the hourly tier), the bucket's first collection, how many
+    /// of its collections were left out of the rates, and (#8073) the executions its rate was built from, read by name
+    /// because the raw tier projects a <c>collection_count</c> the hourly tier does not.
     /// </summary>
     private static async Task<List<QueryDurationTrendPoint>> ReadBucketedDurationPointsAsync(
         NpgsqlCommand command, CancellationToken cancellationToken)
     {
         var items = new List<QueryDurationTrendPoint>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var executionCount = reader.GetOrdinal("execution_count");
         while (await reader.ReadAsync(cancellationToken))
         {
             var executionsPerSecond = reader.IsDBNull(2) ? (double?)null : Convert.ToDouble(reader.GetValue(2));
             items.Add(new QueryDurationTrendPoint(
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? null : Convert.ToDouble(reader.GetValue(1)),
-                executionsPerSecond is { } eps ? (long)eps : null,
+                reader.IsDBNull(executionCount) ? null : Convert.ToInt64(reader.GetValue(executionCount)),
                 executionsPerSecond)
             {
                 PeakElapsedMsPerSecond = reader.IsDBNull(3) ? null : Convert.ToDouble(reader.GetValue(3)),
@@ -1477,11 +1483,11 @@ internal static class DarlingTrendReader
     }
 
     /// <summary>
-    /// Executes a bound duration-trend command and reads the shared three-column point shape. All three duration
-    /// trends project the same three columns - point time, a per-second value, a per-second execution rate - which is
-    /// the viewer's own arrangement, kept so the three series cannot drift apart in how they are read. Summed bigint
-    /// deltas come back as Postgres numeric, so the values Convert tolerantly. (The unbound-command wrapper that stood
-    /// above this had no callers once every trend ran the filtered statements, #5244 review L1.)
+    /// Executes a bound Query Store duration-trend command and reads the per-interval point shape: point time, a
+    /// per-second value, a per-second execution rate (the viewer's own arrangement, kept so the two surfaces cannot
+    /// drift apart in how they are read), and (#8073) the interval's stored executions. Summed bigint deltas come back
+    /// as Postgres numeric, so the values Convert tolerantly. (The unbound-command wrapper that stood above this had no
+    /// callers once every trend ran the filtered statements, #5244 review L1.)
     /// </summary>
     private static async Task<List<QueryDurationTrendPoint>> ReadDurationPointsAsync(
         NpgsqlCommand command, CancellationToken cancellationToken)
@@ -1492,12 +1498,13 @@ internal static class DarlingTrendReader
         {
             /* NULL stays NULL (#3541 A12): no rate for the window's first collection, or for a collection whose
                stored interval was unknowable (a restart pass, #3540 V128) — either way the point is kept as
-               UNRATED rather than dropped or coerced to the fabricated quiet the SQL stopped producing. */
+               UNRATED rather than dropped or coerced to the fabricated quiet the SQL stopped producing. The
+               count is the interval's own and is there either way. */
             var executionsPerSecond = reader.IsDBNull(2) ? (double?)null : Convert.ToDouble(reader.GetValue(2));
             items.Add(new QueryDurationTrendPoint(
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? null : Convert.ToDouble(reader.GetValue(1)),
-                executionsPerSecond is { } eps ? (long)eps : null,
+                reader.IsDBNull(3) ? null : Convert.ToInt64(reader.GetValue(3)),
                 executionsPerSecond)
             {
                 /* An unbucketed point is its own single interval: no peak finer than itself to report, and at

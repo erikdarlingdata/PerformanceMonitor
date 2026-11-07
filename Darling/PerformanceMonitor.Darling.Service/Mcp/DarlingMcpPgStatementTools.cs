@@ -285,7 +285,9 @@ public sealed class DarlingMcpPgStatementTools
     /// #4677: pg_stat_statements evicts its least-used entries (about 5% of pg_stat_statements.max per pass) when the
     /// table is full, so a rarely-run statement can be missing and a re-admitted one counts only from then. The count
     /// is eviction PASSES, not entries. Unknown (no run in the window observed the counter) is <c>known = false</c>
-    /// with a null count, never 0: 0 means the counter was read and no pass happened.
+    /// with a null count, never 0: 0 means the counter was read and no pass happened. <c>aurora_without_extension</c>
+    /// (#8075) is true when the unknown is explained by the Aurora native path: the target is Aurora and the extension
+    /// inventory shows pg_stat_statements created in no database, so the web's short sentence can name that cause.
     /// </summary>
     internal static object BuildEvictions(DarlingPgStatementReader.PgEvictionInfo? info)
     {
@@ -297,6 +299,7 @@ public sealed class DarlingMcpPgStatementTools
                 known = false,
                 eviction_passes_in_window = (long?)null,
                 max_entries = info?.MaxEntries,
+                aurora_without_extension = info is { AuroraWithoutExtension: true },
                 note,
             };
         }
@@ -308,6 +311,7 @@ public sealed class DarlingMcpPgStatementTools
             known = true,
             eviction_passes_in_window = (long?)passes,
             max_entries = info.MaxEntries,
+            aurora_without_extension = false,
             note,
         };
     }

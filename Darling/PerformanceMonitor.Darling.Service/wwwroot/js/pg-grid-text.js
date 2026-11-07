@@ -109,14 +109,19 @@ export function detailColumn(key, label, word, hint, extra) {
 }
 
 /**
- * #7410: the one sentence over Top Query Shapes in place of the eviction note. It is built from the read's own fields (`evictions.known`
- * and `evictions.eviction_passes_in_window`), never from the note's text. Null when the counter was read and no pass happened, so the
- * strip then falls back to the note as given, which is also null.
+ * #7410: the one sentence over Top Query Shapes in place of the eviction note. It is built from the read's own fields (`evictions.known`,
+ * `evictions.eviction_passes_in_window` and `evictions.aurora_without_extension`), never from the note's text. Null when the counter was
+ * read and no pass happened, so the strip then falls back to the note as given, which is also null.
+ * #8075: on an Aurora target whose extension inventory shows pg_stat_statements created in no database, the unknown is the missing
+ * extension (Aurora serves the statements without it), not an old major or an old extension version.
  */
 export function evictionNoteShort(data) {
   const e = data && typeof data === "object" ? data.evictions : null;
   if (!e || typeof e !== "object") return null;
   if (e.known === false) {
+    if (e.aurora_without_extension === true) {
+      return "This server does not report how often pg_stat_statements dropped entries. pg_stat_statements is not created in the database the collector connects to: Aurora serves the statements without it, and the eviction counter needs CREATE EXTENSION pg_stat_statements there.";
+    }
     return "This server does not report how often pg_stat_statements dropped entries. That needs PostgreSQL 14 or later with the extension at version 1.9 or newer.";
   }
   const n = e.eviction_passes_in_window;
