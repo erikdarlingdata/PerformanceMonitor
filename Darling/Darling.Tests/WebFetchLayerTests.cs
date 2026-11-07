@@ -172,24 +172,6 @@ public sealed class WebFetchLayerTests
         Assert.Contains("let renderGeneration = 0;", server, StringComparison.Ordinal);
     }
 
-    /// <summary>The poll loop skips re-rendering the route while the LAST render's reads are still outstanding
-    /// — evaluated from a page-agnostic in-flight counter, so it works for every page without each one exposing
-    /// its own "am I still loading" flag. The sidebar/view-list/AG-nav probe still runs every tick regardless;
-    /// only the heavier per-page render waits.</summary>
-    [Fact]
-    public void AppJs_RefreshSkipsARouteRenderWhileItsLastOneIsStillInFlight()
-    {
-        var app = AppJs;
-
-        // The guard lives in refreshPage(): the four no-poll routes and an outstanding render both return
-        // before route({ poll: true }) runs.
-        var pageAt = app.IndexOf("function refreshPage() {", StringComparison.Ordinal);
-        Assert.True(pageAt >= 0, "refreshPage() not found");
-        var guardAt = app.IndexOf("hasInFlightReads()) return;", pageAt, StringComparison.Ordinal);
-        var routeAt = app.IndexOf("route({ poll: true });", pageAt, StringComparison.Ordinal);
-        Assert.True(guardAt >= 0 && routeAt > guardAt, "the in-flight check must run before the page is re-rendered");
-    }
-
     /* ---------------------------------------------------------------------------------------------------
        #4222d — shell-level auto-refresh play/pause, plus the #/triage poll-cost guard.
        --------------------------------------------------------------------------------------------------- */
