@@ -170,6 +170,26 @@ Three independent mechanisms:
 
 Darling deliberately does not archive before deleting; compression is the archive.
 
+### Schema tracking
+
+Darling can keep a versioned history of the tables and views of the databases it monitors (#7643). It is the `schema_objects` collector, Darling only (Lite has no twin) and **off by default**. Enabling it creates this install's own `PerformanceMonitor_Darling_<id>_SchemaChanges` Extended Events session on the server; disabling it drops the session. The history lives in the store's `schema_*` tables and is read through `get_object_definition`, `get_schema_changes` and `find_schema_objects`.
+
+How a pass works, in the order it happens:
+
+1. **Baseline.** The first pass over a database reads every user table and view (columns, indexes, constraints, triggers) and stores each as version 1, `change_kind = baseline`. A system database, a tool database in the identity-capacity skip list and a database outside the collector's database scope are not read.
+2. **Events.** The session records committed DDL (`object_created`, `object_altered`, `object_deleted` and `sp_rename`). Each later pass reads the new events and re-reads only the objects they name. A re-read that finds no difference in the canonical definition writes nothing, so a no-op `ALTER` leaves no version. Each version carries the login, application and host that the event named; the session records no statement text.
+3. **Gaps.** A server restart, a full ring buffer, a session that was stopped, an event sequence with a hole, a database that returns to scope, and a restore (the database's `recovery_fork_guid` moved) are all gaps. The pass closes a gap by reading the whole database and writing only the differences, labelled `reconcile`. There is no periodic full re-read: with no gap and no event, a pass reads nothing and the pass log says so.
+4. **Drops.** An object is recorded as `dropped` only after a complete read. A read that hit the cap of 10,000 objects per database, that was denied `VIEW ANY DEFINITION`, or that was interrupted is marked incomplete and drops nothing.
+
+Each pass writes one row per database to `collect.schema_capture_passes` (what was read and written, whether it was complete, and a note), so "nothing changed" and "nothing was read" are different stored answers.
+
+Limits worth knowing:
+
+- Only writable databases are tracked: a standalone database, an Availability Group primary or an Azure SQL Database. Secondaries, standby, restoring, read-only and snapshot databases are skipped. An Availability Group database keeps one history under the group, not one per replica.
+- Trigger DDL reconciles its database, because the event names the trigger and not the table it belongs to. A rename reconciles its database too, so the old name is closed and the new one opened in one pass.
+- The Azure SQL Database path (one session and one history per database) is covered by fakes only and has not been run against a real Azure instance.
+- Closed versions are kept 30 days, a current version never expires. See [Retention](#retention).
+
 ---
 
 ## Lite: the desktop edition
