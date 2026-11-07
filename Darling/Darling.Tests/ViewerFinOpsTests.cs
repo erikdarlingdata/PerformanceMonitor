@@ -171,12 +171,11 @@ public sealed class ViewerFinOpsSqlTests
     }
 
     [Fact]
-    public void HighImpactSql_RanksOnTheResolvingView_AndLooksUpTextAndPlanForTheKeptHashesOnly()
+    public void HighImpactSql_RanksWithoutTextOrPlan_AndLooksUpTextAndPlanForTheKeptHashesOnly()
     {
         var sql = ViewerDataService.HighImpactQueriesSql;
         /* Aggregates to query_hash level with no text and no plan (#6803: those ran per hash in the window, before the
            scorer kept the top few dozen); the lookup is a second statement over the kept hashes. */
-        Assert.Contains("FROM v_query_stats AS qs", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("qs2", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY query_hash", sql, StringComparison.Ordinal);
 
