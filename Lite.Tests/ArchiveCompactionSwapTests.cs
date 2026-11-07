@@ -26,7 +26,13 @@ namespace PerformanceMonitorLite.Tests;
 /// parts and counted the new rows twice. These tests drive <see cref="ArchiveService.CompactParquetFiles"/>
 /// over real parquet files with a handle held on a temp at promotion time, and count rows through the same
 /// globs the archive views use.
+/// <para>The swap-journal replay and each group's swap wait <see cref="ArchiveService.WriteLockBudget"/> for the write lock
+/// and skip their unit when it is not free in time (#5731). That lock is one static lock shared by every
+/// <c>DuckDbInitializer</c> in the process, and a budgeted writer polls for it with no queue position, so the classes
+/// running alongside, which park on it while they build their own databases, can keep it out past any budget. The class
+/// runs alone, after the parallel classes, like the other classes that need the lock quiet (#8142).</para>
 /// </summary>
+[Collection("CollectionResetGate")]
 public sealed class ArchiveCompactionSwapTests : IDisposable
 {
     private readonly string _tempDir;
@@ -61,12 +67,17 @@ public sealed class ArchiveCompactionSwapTests : IDisposable
 
     private string P(string fileName) => Path.Combine(_archiveDir, fileName).Replace("\\", "/");
 
+    /* The class runs alone, so nothing else holds the lock; the test budget covers a writer a finished class left behind. */
     private ArchiveService NewService()
     {
         var initializer = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
         _initializers.Add(initializer);
-        return new(initializer, _archiveDir);
+        return new(initializer, _archiveDir) { WriteLockBudget = DuckDbInvestigationStoreTests.TestLockBudget };
     }
+
+    /* A run that still skipped a unit says so here, rather than at a row count the half-merged files happen to add up to. */
+    private static void Compact(ArchiveService service) =>
+        Assert.True(service.CompactParquetFiles(), "a compaction unit was skipped because the write lock was not free within the test budget");
 
     private static void Exec(string sql)
     {
@@ -123,7 +134,7 @@ public sealed class ArchiveCompactionSwapTests : IDisposable
 
         try
         {
-            service.CompactParquetFiles();
+            Compact(service);
         }
         finally
         {
@@ -140,7 +151,7 @@ public sealed class ArchiveCompactionSwapTests : IDisposable
         /* The next cycle, with nothing holding the temp, merges the month cleanly. */
         MakeParquet("20260928_1500_t.parquet", 100_100, 100_200);
         service.OnCompactionTempsReadyForTests = null;
-        service.CompactParquetFiles();
+        Compact(service);
 
         (rows, distinct) = Visible("t");
         Assert.Equal(100_200, rows);
@@ -176,7 +187,7 @@ public sealed class ArchiveCompactionSwapTests : IDisposable
 
         try
         {
-            service.CompactParquetFiles();
+            Compact(service);
         }
         finally
         {
@@ -198,7 +209,7 @@ public sealed class ArchiveCompactionSwapTests : IDisposable
         /* Next cycle: the same inputs merge into pt001 and a fresh pt003, every row exactly once, and pt002,
            which stayed throughout, is untouched. */
         service.OnCompactionTempsReadyForTests = null;
-        service.CompactParquetFiles();
+        Compact(service);
 
         (rows, distinct) = Visible("t");
         Assert.Equal(300_000, rows);
@@ -238,7 +249,7 @@ public sealed class ArchiveCompactionSwapTests : IDisposable
 
         try
         {
-            service.CompactParquetFiles();
+            Compact(service);
         }
         finally
         {
@@ -259,7 +270,7 @@ public sealed class ArchiveCompactionSwapTests : IDisposable
 
         /* Next cycle, nothing held: the same inputs merge into pt001 and pt002, every row exactly once. */
         service.OnCompactionTempsReadyForTests = null;
-        service.CompactParquetFiles();
+        Compact(service);
 
         (rows, distinct) = Visible("t");
         Assert.Equal(250_000, rows);
@@ -286,7 +297,7 @@ public sealed class ArchiveCompactionSwapTests : IDisposable
             "input|20260928_1400_t.parquet"
         ]);
 
-        NewService().CompactParquetFiles();
+        Compact(NewService());
 
         var (rows, distinct) = Visible("t");
         Assert.Equal(1_100, rows);
@@ -315,7 +326,7 @@ public sealed class ArchiveCompactionSwapTests : IDisposable
             "input|20260928_1400_t.parquet"
         ]);
 
-        NewService().CompactParquetFiles();
+        Compact(NewService());
 
         var (rows, distinct) = Visible("t");
         Assert.Equal(100, rows);
@@ -345,7 +356,7 @@ public sealed class ArchiveCompactionSwapTests : IDisposable
         var service = NewService();
         using (new FileStream(P("20260928_1400_t.parquet").Replace("/", "\\"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
         {
-            service.CompactParquetFiles();
+            Compact(service);
         }
 
         Assert.True(File.Exists(P("202609_t.swap")), "the journal was dropped while its input still existed");
@@ -353,7 +364,7 @@ public sealed class ArchiveCompactionSwapTests : IDisposable
         Assert.Equal(1_000, Scalar($"SELECT count(*) FROM read_parquet('{P("202609_t.parquet")}')"));
 
         /* Released: the next run deletes the input, drops the journal, and merges the month once. */
-        service.CompactParquetFiles();
+        Compact(service);
 
         var (rows, distinct) = Visible("t");
         Assert.Equal(1_100, rows);
@@ -373,7 +384,7 @@ public sealed class ArchiveCompactionSwapTests : IDisposable
         MakeParquet("imported_202609_t_pt001.parquet", 1_000, 2_000);
 
         var service = NewService();
-        service.CompactParquetFiles();
+        Compact(service);
 
         /* Both are final monthly shapes, so the group has nothing new to fold and both stay as they are. */
         var (rows, distinct) = Visible("t");
@@ -384,7 +395,7 @@ public sealed class ArchiveCompactionSwapTests : IDisposable
 
         /* With a per-cycle file to fold in, both part files are inputs of one merge and every row survives. */
         MakeParquet("20260928_1400_t.parquet", 2_000, 2_100);
-        service.CompactParquetFiles();
+        Compact(service);
 
         (rows, distinct) = Visible("t");
         Assert.Equal(2_100, rows);
@@ -399,7 +410,7 @@ public sealed class ArchiveCompactionSwapTests : IDisposable
         MakeParquet("imported_202609_query_snapshots_pt001.parquet", 100, 200);
         MakeParquet("20260928_1400_query_snapshots.parquet", 200, 300);
 
-        NewService().CompactParquetFiles();
+        Compact(NewService());
 
         Assert.Equal(
             ["20260928_1400_query_snapshots.parquet", "202609_query_snapshots_pt001.parquet", "imported_202609_query_snapshots_pt001.parquet"],
@@ -421,7 +432,7 @@ public sealed class ArchiveCompactionSwapTests : IDisposable
         MakeParquet("all_t.parquet", 1_000, 1_500);
         MakeParquet($"{month}01_1400_t.parquet", 1_500, 1_600);
 
-        NewService().CompactParquetFiles();
+        Compact(NewService());
 
         var (rows, distinct) = Visible("t");
         Assert.Equal(1_600, rows);

@@ -65,7 +65,8 @@ public sealed class ViewerQueriesSqlTests
            another caller's rows (NOT DISTINCT FROM so ad-hoc NULL hosts still match ad-hoc rows). */
         Assert.Contains("GROUP BY database_name, query_hash, host_object_name", sql, StringComparison.Ordinal);
         Assert.Contains("host_object_name IS NOT DISTINCT FROM r.host_object_name", sql, StringComparison.Ordinal);
-        Assert.Contains("q.host_object_name IS NOT DISTINCT FROM rk.host_object_name", sql, StringComparison.Ordinal);
+        /* #8136: the lookup's own host-object match to the window is gone (the text is picked inside the group's aggregate);
+           TopQueriesTextOneScanLiveTests pins that two same-hash groups under different host objects keep their own texts. */
         Assert.Contains("HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0", sql, StringComparison.Ordinal);
     }
 
@@ -88,14 +89,12 @@ public sealed class ViewerQueriesSqlTests
         var sql = ViewerDataService.TopQueriesSql;
         Assert.DoesNotContain("LEFT JOIN LATERAL", sql, StringComparison.Ordinal);   /* #5309: one lookup, not one per row */
         Assert.Contains("q.query_text IS NOT NULL", sql, StringComparison.Ordinal);
-        Assert.Contains("q.collection_time DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("DISTINCT ON (q.database_name, q.query_hash, q.host_object_name)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("LIMIT 1", sql, StringComparison.Ordinal);
-        /* The LATERAL still fetches only query_text (never the multi-KB plan), and it reads v_query_stats so
-           the #1767 payload dimension is resolved — the base table's inline query_text is NULL on every row
-           written since. The plan is surfaced by a cheap group-level presence flag that gates the grid's
-           Query Plan column; the plan XML itself is read on demand (GetQueryStatsPlanXmlAsync). */
-        Assert.Contains("JOIN query_text_dim AS d ON d.digest = l.query_text_digest", sql, StringComparison.Ordinal);
+        /* #8136: which row's text is picked (the newest that carries one, the row collected last on a tie, inline before
+           digest) and that it resolves through the #1767 dimension are pinned by TopQueriesTextOneScanLiveTests through the
+           rows both readers return. The lookup still fetches only query_text (never the multi-KB plan); the plan is surfaced
+           by a cheap group-level presence flag that gates the grid's Query Plan column, and the plan XML itself is read on
+           demand (GetQueryStatsPlanXmlAsync). */
 
         /* The flag now has a digest arm: since #1767 the plan lives in query_plan_dim and the fact row
            carries only the key, so a bare `query_plan_xml IS NOT NULL` would report "no plan captured" for

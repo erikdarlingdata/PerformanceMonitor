@@ -357,7 +357,11 @@ function lowerEmphasisWords(text) {
  */
 export function plainText(text) {
   if (typeof text !== "string" || text === "") return text;
-  if (text.includes(ENGINE_GATE_MARK)) return AZURE_SQL_DATABASE_MARK.test(text) ? AZURE_SQL_DATABASE_NOT_COLLECTED_LINE : NOT_COLLECTED_LINE;
+  if (text.includes(ENGINE_GATE_MARK)) {
+    if (AZURE_SQL_DATABASE_MARK.test(text)) return AZURE_SQL_DATABASE_NOT_COLLECTED_LINE;
+    if (AWS_RDS_MARK.test(text)) return awsRdsNotCollectedLine(text);
+    return NOT_COLLECTED_LINE;
+  }
   let t = text;
   if (text.includes(RUNTIME_PRECONDITION_MARK)) t = runtimePreconditionText(text);
   t = namedTokenText(t);
@@ -530,6 +534,19 @@ export const AZURE_SQL_DATABASE_NOT_COLLECTED_LINE = "Azure SQL Database does no
 
 /** How the server's engine-gate sentence names an Azure SQL Database ("<server> runs on Azure SQL Database (EngineEdition 5)."). */
 const AZURE_SQL_DATABASE_MARK = /runs on Azure SQL Database \(EngineEdition 5\)/;
+
+/** #8095: how the engine-gate sentence names an Amazon RDS for SQL Server instance whose gap is the platform's (CollectorEngineCapability.AwsRdsDescription),
+    and the clause of that sentence that names what is not collected ("so this server does not collect the SQL Agent running-job snapshot, and never will"). */
+const AWS_RDS_MARK = /runs on Amazon RDS for SQL Server \(an AWS RDS instance\)/;
+const NOT_COLLECTED_CLAUSE = /does not collect (.+?), and never will/;
+
+/** #8095: the line for an Amazon RDS for SQL Server engine gate. It names the engine and the data it does not expose, the way the Azure line
+    names its engine, because the generic line sits above panels RDS does fill: "does not apply to this kind of server" over a Job History grid
+    full of Agent runs reads as a contradiction, while "does not expose the SQL Agent running-job snapshot" does not. */
+export function awsRdsNotCollectedLine(text) {
+  const clause = NOT_COLLECTED_CLAUSE.exec(text);
+  return "Amazon RDS for SQL Server does not expose " + (clause ? clause[1] : "this data") + ".";
+}
 
 /** The words every engine-gate sentence ends on (CollectorEngineCapability's permanent-gap epilogue). A "not collected"
     answer that is something else, such as a plan that was never stored, does not carry them and keeps its own sentence.

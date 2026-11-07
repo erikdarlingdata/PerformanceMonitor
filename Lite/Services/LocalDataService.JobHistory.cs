@@ -59,7 +59,12 @@ public partial class LocalDataService
     public async Task<List<JobHistoryRow>> GetJobHistoryAsync(
         DateTime windowStartUtc, int limit, int? serverId, IReadOnlyDictionary<int, ServerClock>? openTabClocks = null,
         DateTime? windowEndUtc = null, int? runStatus = null, string? category = null) =>
-        (await GetJobHistoryWithClocksAsync(windowStartUtc, limit, serverId, openTabClocks, windowEndUtc, runStatus, category)).Rows;
+        (await GetJobHistoryWithClocksCoreAsync(windowStartUtc, limit, serverId, openTabClocks, windowEndUtc, runStatus, category, shareCapPerServer: false)).Rows;
+
+    /// <summary>#8133: when set, the tab's All Servers read (<see cref="GetJobHistoryWithClocksAsync"/>) guarantees each server with rows in
+    /// the window its share of the row cap (<see cref="JobHistoryCap.PerServerShare"/>) before the newest runs of the rest, so one busy server
+    /// cannot fill the page alone. The other read overloads, the MCP tool's among them, never share: they read the newest runs of the whole fleet.</summary>
+    internal bool ShareJobHistoryCapPerServer { get; set; }
 
     /// <summary>
     /// <see cref="GetJobHistoryAsync(DateTime, int, int?, IReadOnlyDictionary{int, ServerClock}?, DateTime?)"/> that also returns the clock it
@@ -74,9 +79,16 @@ public partial class LocalDataService
     /// filtered to.
     /// </para>
     /// </summary>
-    internal async Task<(List<JobHistoryRow> Rows, IReadOnlyDictionary<int, ServerClock> Clocks)> GetJobHistoryWithClocksAsync(
+    internal Task<(List<JobHistoryRow> Rows, IReadOnlyDictionary<int, ServerClock> Clocks)> GetJobHistoryWithClocksAsync(
         DateTime windowStartUtc, int limit, int? serverId, IReadOnlyDictionary<int, ServerClock>? openTabClocks = null,
-        DateTime? windowEndUtc = null, int? runStatus = null, string? category = null)
+        DateTime? windowEndUtc = null, int? runStatus = null, string? category = null) =>
+        GetJobHistoryWithClocksCoreAsync(windowStartUtc, limit, serverId, openTabClocks, windowEndUtc, runStatus, category, ShareJobHistoryCapPerServer);
+
+    /// <summary>The read behind <see cref="GetJobHistoryWithClocksAsync"/>; <paramref name="shareCapPerServer"/> is the per-call form of
+    /// <see cref="ShareJobHistoryCapPerServer"/>, so a caller that must never share passes false whatever the tab set.</summary>
+    private async Task<(List<JobHistoryRow> Rows, IReadOnlyDictionary<int, ServerClock> Clocks)> GetJobHistoryWithClocksCoreAsync(
+        DateTime windowStartUtc, int limit, int? serverId, IReadOnlyDictionary<int, ServerClock>? openTabClocks,
+        DateTime? windowEndUtc, int? runStatus, string? category, bool shareCapPerServer)
     {
         var serverIds = serverId.HasValue
             ? new List<int> { serverId.Value }
@@ -91,7 +103,35 @@ public partial class LocalDataService
             rows.AddRange(await ReadJobHistoryForServerAsync(id, clock, windowStartUtc, limit, windowEndUtc, runStatus, category));
         }
 
-        return (ApplyJobHistoryWindow(rows, windowStartUtc, limit, windowEndUtc), clocks);
+        /* #8133: with the share, every server with rows in the window is guaranteed its share of the cap before the newest runs of the
+           rest, so one busy server cannot fill the page alone and a fleet under the cap comes back whole. Each server is still read to
+           the cap; without the share the page is the newest runs of the whole fleet. */
+        return (shareCapPerServer && !serverId.HasValue
+            ? ApplyJobHistoryShare(ApplyJobHistoryWindow(rows, windowStartUtc, int.MaxValue, windowEndUtc), limit)
+            : ApplyJobHistoryWindow(rows, windowStartUtc, limit, windowEndUtc), clocks);
+    }
+
+    /// <summary>
+    /// #8133: the fleet cut with a guaranteed minimum per server. <paramref name="windowed"/> is the window's rows in page order; each
+    /// server's first <see cref="JobHistoryCap.PerServerShare"/> of them (the cap over the servers present) come first, then the rest in
+    /// page order, and the page is the first <paramref name="limit"/> of that, so a fleet under the cap is returned whole.
+    /// </summary>
+    internal static List<JobHistoryRow> ApplyJobHistoryShare(List<JobHistoryRow> windowed, int limit)
+    {
+        var share = JobHistoryCap.PerServerShare(limit, windowed.Select(r => r.ServerId).Distinct().Count());
+        var seen = new Dictionary<int, int>();
+        var guaranteed = new List<JobHistoryRow>();
+        var rest = new List<JobHistoryRow>();
+        foreach (var row in windowed)
+        {
+            var rank = seen.GetValueOrDefault(row.ServerId) + 1;
+            seen[row.ServerId] = rank;
+            (rank <= share ? guaranteed : rest).Add(row);
+        }
+
+        /* The choice is share-first; the page itself stays in the window's newest-first order, the way the Darling read re-sorts its cut. */
+        var chosen = new HashSet<JobHistoryRow>(guaranteed.Concat(rest).Take(Math.Max(limit, 0)), ReferenceEqualityComparer.Instance);
+        return windowed.Where(chosen.Contains).ToList();
     }
 
     /// <summary>This machine's zone, the last clock in the Job History chain. A seam for the tests, which name a fixed zone so a

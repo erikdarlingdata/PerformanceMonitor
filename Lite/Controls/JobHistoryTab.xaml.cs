@@ -223,6 +223,8 @@ public partial class JobHistoryTab : UserControl
             var categoriesTask = _choicesFreshness.NeedsRead(choicesKey, DateTime.UtcNow)
                 ? ReadKnownCategoriesAsync(startUtc, rangeEndUtc, serverId, choicesKey)
                 : null;
+            /* #8133: at All Servers the cap is shared out per server, so one busy server cannot fill the page alone. */
+            _dataService.ShareJobHistoryCapPerServer = true;
             var readTask = System.Threading.Tasks.Task.Run(() => _dataService.GetJobHistoryWithClocksAsync(startUtc, RowCap, serverId, openTabClocks, rangeEndUtc, statusFilter, categoryFilter));
 
             var (all, readClocks) = await readTask;
