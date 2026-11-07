@@ -26,10 +26,6 @@ using Xunit;
 
 namespace PerformanceMonitor.Darling.Tests;
 
-/* #1776 own-store: every fact mints its own scratch database through ScratchPostgres (the plan test reads EXPLAIN, and a
-   shared store carries other classes' leftovers) and touches nothing on the shared one, so it is not serialized against
-   the live-postgres collection. */
-
 /// <summary>
 /// #8136: the raw Top Queries statements (the Viewer's duration grid and the MCP's <c>get_top_queries_by_cpu</c>) read the
 /// window's <c>query_stats</c> rows to rank the groups, and read them AGAIN to find each ranked group's newest text, a
@@ -54,6 +50,9 @@ namespace PerformanceMonitor.Darling.Tests;
 /// <para>The seed is anchored through <see cref="LiveClock"/>: the plan test reads EXPLAIN, and a window seeded from the
 /// wall clock moves across chunk boundaries with the hour (#5608).</para>
 /// </summary>
+/* #1776 own-store: every fact mints its own scratch database through ScratchPostgres (the plan test reads EXPLAIN, and a
+   shared store carries other classes' leftovers) and touches nothing on the shared one, so it is not serialized against
+   the live-postgres collection. */
 public sealed class TopQueriesTextOneScanLiveTests
 {
     private const string ServerName = "a8136-one-scan";
