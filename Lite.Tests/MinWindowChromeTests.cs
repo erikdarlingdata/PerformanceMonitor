@@ -16,6 +16,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using Darling.Tests;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Models;
@@ -188,6 +189,54 @@ public sealed class MinWindowChromeTests
             var floor = width == 900 ? 120 : 200;
             Assert.True(height >= floor, $"{name} is {height:F0} high at {width} wide, the floor is {floor}");
         }
+    }
+
+    [Theory]
+    [InlineData("Dark", 900, 600)]
+    [InlineData("Light", 900, 600)]
+    [InlineData("CoolBreeze", 900, 600)]
+    [InlineData("Dark", 1280, 800)]
+    [InlineData("Light", 1280, 800)]
+    [InlineData("CoolBreeze", 1280, 800)]
+    public void CurrentWaits_ShowsBothChartsWithAPlotOf120OrMore_InEveryTheme(string theme, int width, int height)
+    {
+        /* #8219: at 900x600 the tab has about 377 high. Stacked, two plots of 120 need about 470, so the charts go side by side there
+           and both are inside the visible area, with no scrolling. Each plot (the data rectangle, not the whole chart) is 120 or more. */
+        var found = RunTab(theme, (w, tab) =>
+        {
+            var main = (TabControl)tab.FindName("MainTabControl");
+            SelectTab(main, "Blocking");
+            var blocking = (TabControl)tab.FindName("BlockingSubTabControl");
+            SelectTab(blocking, "Current Waits");
+            Lay(w, width, height);
+            var start = DateTime.UtcNow.AddHours(-6);
+            foreach (var method in new[] { "UpdateCurrentWaitsDurationChart", "UpdateCurrentWaitsBlockedChart" })
+            {
+                var m = typeof(ServerTab).GetMethod(method, BindingFlags.Instance | BindingFlags.NonPublic)!;
+                var rows = ChartLayoutProbe.MakeRows(m.GetParameters()[0].ParameterType.GetGenericArguments()[0], start, DateTime.UtcNow);
+                m.Invoke(tab, new[] { rows, 6, null, null });
+            }
+
+            Lay(w, width, height);
+            Snap(w, theme, $"current-waits-{width}x{height}");
+            var viewport = ClippedTextProbe.Descendants(blocking).OfType<ScrollViewer>().First(s => s.IsVisible && s.ViewportHeight > 0);
+            var results = new List<string>();
+            foreach (var name in new[] { "CurrentWaitsDurationChart", "CurrentWaitsBlockedChart" })
+            {
+                var chart = (ScottPlot.WPF.WpfPlot)tab.FindName(name);
+                var plotHeight = chart.Plot.RenderManager.LastRender.DataRect.Height;
+                var box = chart.TransformToAncestor(viewport).TransformBounds(new Rect(chart.RenderSize));
+                var inside = chart.IsVisible && box.Top >= -0.5 && box.Bottom <= viewport.ViewportHeight + 0.5 && box.Left >= -0.5 && box.Right <= viewport.ViewportWidth + 0.5;
+                if (plotHeight < 120 || !inside)
+                {
+                    results.Add($"{name}: plot {plotHeight:F0} high, chart {box.Width:F0}x{box.Height:F0} at ({box.Left:F0},{box.Top:F0}), visible area {viewport.ViewportWidth:F0}x{viewport.ViewportHeight:F0}");
+                }
+            }
+
+            return results;
+        });
+
+        Assert.True(found.Count == 0, $"{theme} {width}x{height}: " + string.Join("; ", found));
     }
 
     [Fact]
