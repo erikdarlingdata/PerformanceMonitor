@@ -706,6 +706,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # Only the scripts folder, for ci-verdict-issues.py (#8202): the two issue steps below call it. No credentials stay
+      # in the checkout; the steps use GH_TOKEN.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+
       - name: Set CI result
         id: verdict
         shell: bash
@@ -786,8 +794,29 @@ jobs:
           gh api "repos/${GITHUB_REPOSITORY}/statuses/${CI_RESULT_SHA}" -f state="${state}" -f context='CI result' \
             -f description="${desc:0:140}" -f target_url="${TARGET_URL}" > /dev/null
 
+      # #8202: a pull request whose green came from a rerun passed by luck once. The script reads every earlier attempt's
+      # failed test legs for their [FAIL] lines and files one issue per test (or comments on the open one), before the merge
+      # button is pressed. It reports only: the script exits 0 on its own failures and the step never fails the run.
+      - name: File the tests an earlier attempt failed, when the run passed only on a rerun
+        if: ${{ always() && github.event_name == 'pull_request' && steps.verdict.outputs.state == 'success' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATE: ${{ steps.verdict.outputs.state }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -uo pipefail
+
+          python -I .github/scripts/ci-verdict-issues.py rerun-flakes --repo "${GITHUB_REPOSITORY}" --server-url "${GITHUB_SERVER_URL}" \
+            --event "${GITHUB_EVENT_NAME}" --state "${STATE}" --run-id "${GITHUB_RUN_ID}" --run-attempt "${RUN_ATTEMPT}" \
+            --pr-number "${PR_NUMBER}" --head-sha "${HEAD_SHA}"
+
       # A dev push that turns red opens one "dev is red" issue, or comments on the open one; a green dev push closes it.
-      # Only a failure opens it: a cancelled or skipped-by-cancel run says nothing about the code.
+      # Only a failure opens it: a cancelled or skipped-by-cancel run says nothing about the code. The body lists every dev
+      # commit the red run swept in since the last green dev run, with its pull request number (#8202).
       - name: Open, update or close the "dev is red" issue
         if: ${{ always() && github.event_name == 'push' && steps.verdict.outputs.state != '' }}
         shell: bash
@@ -814,36 +843,11 @@ jobs:
             exit 0
           fi
 
-          # The commits since the last dev commit whose CI result is success (newest first, at most 30 looked at).
-          since=""
-          nl=$'\n'
-          tab=$'\t'
-          seen_self=false
-          while IFS="${tab}" read -r sha subject; do
-            if [ "${seen_self}" = "false" ]; then
-              [ "${sha}" = "${GITHUB_SHA}" ] && seen_self=true
-              [ "${seen_self}" = "true" ] || continue
-            else
-              green=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${sha}/statuses" \
-                --jq '[.[] | select(.context == "CI result" and .state == "success")] | length' 2>/dev/null || echo 0)
-              if [ "${green}" != "0" ]; then
-                since="${since}(stopped at ${sha:0:9}, the last dev commit with a green CI result)${nl}"
-                break
-              fi
-            fi
-            since="${since}- ${sha:0:9} ${subject//@/(at)}${nl}"
-          done < <(gh api "repos/${GITHUB_REPOSITORY}/commits?sha=dev&per_page=30" --jq '.[] | [.sha, (.commit.message | split("\n")[0])] | @tsv')
-          [ -n "${since}" ] || since="(none found in the last 30 commits)"$'\n'
-
-          {
-            echo "The dev push CI failed at ${GITHUB_SHA}."
-            echo
-            echo "Run: ${RUN_URL}"
-            echo "Failed:${FAILED:- see the run}"
-            echo
-            echo "Commits since the last green dev run (newest first):"
-            printf '%s' "${since}"
-          } > body.txt
+          # The body: the failure, the run, and every dev commit from this sha back to the last one whose CI result is
+          # success, each with its short sha, pull request number and title. The script writes the head of the body even
+          # when the commit list cannot be read, so the issue is filed either way.
+          python -I .github/scripts/ci-verdict-issues.py dev-red-body --repo "${GITHUB_REPOSITORY}" --red-sha "${GITHUB_SHA}" \
+            --run-url "${RUN_URL}" --failed "${FAILED}" --out body.txt
 
           if [ -n "${issue}" ]; then
             gh issue comment "${issue}" --repo "${GITHUB_REPOSITORY}" --body-file body.txt
