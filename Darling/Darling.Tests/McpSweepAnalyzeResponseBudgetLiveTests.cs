@@ -30,10 +30,10 @@ namespace Darling.Tests;
 /// and say when they cut. Each case seeds its own scratch store (<see cref="ScratchPostgres"/>) and reads it through
 /// the tool itself, so the bytes measured are the bytes a client receives.
 ///
-/// <para><c>get_sweep_reports</c>: the timeline carries each sweep as its header facts and leaves the stored document
-/// to <c>latest</c> and to the <c>sweep_id</c> read, so the newest document rides once; a window holding more headers
-/// than the budget fits is cut newest first and flagged (<c>truncated</c>, <c>sweeps_returned</c> beside the window's
-/// <c>count</c>, <c>budget_note</c>). <c>analyze_server</c>: the findings are already severity-first, so a cut keeps
+/// <para><c>get_sweep_reports</c>: the timeline entries are the web feed's and the Viewer's own, each with its document
+/// embedded (the zero-drift rule <c>ViewerFleetSweepsReadTests</c> pins), so a window holding more of them than the
+/// budget fits is cut newest first and flagged (<c>truncated</c>, <c>sweeps_returned</c> beside the window's
+/// <c>count</c>, <c>budget_note</c>); <c>latest</c> is never cut. <c>analyze_server</c>: the findings are already severity-first, so a cut keeps
 /// the most severe and the reply says so (<c>truncated</c>, <c>findings_returned</c> beside <c>finding_count</c>,
 /// <c>truncation_note</c> naming <c>get_analysis_findings</c>).</para>
 /// </summary>
@@ -46,9 +46,9 @@ public sealed class McpSweepAnalyzeResponseBudgetLiveTests
 
     /* ---------------- get_sweep_reports ---------------- */
 
-    /// <summary>192 sweeps at a 15-minute cadence over a 48-hour window: far more headers than fit. The reply
-    /// stays under the budget, keeps the newest sweeps, says how many of the window's count it carries, and
-    /// still embeds the newest document once, on <c>latest</c>.</summary>
+    /// <summary>192 sweeps at a 15-minute cadence over a 48-hour window: far more entries than fit. The reply
+    /// stays under the budget, keeps the newest sweeps with their documents, says how many of the window's
+    /// count it carries, and embeds the newest document on <c>latest</c>.</summary>
     [Fact]
     public async Task GetSweepReports_AWindowOfManySweeps_FitsTheBudget_NewestFirst_AndSaysItWasCut()
     {
@@ -81,18 +81,18 @@ public sealed class McpSweepAnalyzeResponseBudgetLiveTests
         Assert.Equal(ids[returned.GetInt32() - 1].ToString(CultureInfo.InvariantCulture),
             sweeps[sweeps.GetArrayLength() - 1].GetProperty("sweep_id").GetString());
 
-        /* Headers only on the timeline; the document rides once, on latest. */
-        Assert.False(sweeps[0].TryGetProperty("report", out _), "a timeline entry carries header facts, not the stored document");
+        /* Each entry is the web feed's own, document embedded; latest carries the newest in full. */
+        Assert.Equal(JsonValueKind.Object, sweeps[0].GetProperty("report").ValueKind);
         var latest = root.GetProperty("latest");
         Assert.Equal(ids[0].ToString(CultureInfo.InvariantCulture), latest.GetProperty("sweep_id").GetString());
         Assert.Equal(JsonValueKind.Object, latest.GetProperty("report").ValueKind);
     }
 
     /// <summary>Four sweeps in the default one-hour window, each with a document of about 12 KB: the case the
-    /// issue measured at 60 KB when every document rode twice. The reply fits, nothing is cut, and the header
-    /// facts the honesty rules need (mute header, liveness verdict and block) are still on every timeline entry.</summary>
+    /// issue measured at 60 KB. The reply is cut to the budget newest first and says so; the newest sweep still
+    /// rides in full on <c>latest</c>, and every entry kept is the web feed's own.</summary>
     [Fact]
-    public async Task GetSweepReports_AFewSweepsWithLargeDocuments_AnswersWhole_WithHeadersOnTheTimeline_AndTheDocumentOnLatest()
+    public async Task GetSweepReports_AFewSweepsWithLargeDocuments_IsCutToTheBudget_NewestFirst_AndLatestCarriesTheDocument()
     {
         var cs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live sweep-report budget test.");
@@ -110,6 +110,43 @@ public sealed class McpSweepAnalyzeResponseBudgetLiveTests
         Assert.True(Encoding.UTF8.GetByteCount(json) <= McpResponseBudget.DefaultBytes,
             $"the default-shaped reply is {Encoding.UTF8.GetByteCount(json):#,0} bytes, over the {McpResponseBudget.DefaultBytes:#,0}-byte budget");
         Assert.Equal(4, root.GetProperty("count").GetInt32());
+        Assert.True(root.TryGetProperty("truncated", out var truncated) && truncated.GetBoolean(), "a cut timeline says truncated: true");
+        var returned = root.GetProperty("sweeps_returned").GetInt32();
+        Assert.InRange(returned, 1, 3);
+        var sweeps = root.GetProperty("sweeps");
+        Assert.Equal(returned, sweeps.GetArrayLength());
+        Assert.Contains("response budget", root.GetProperty("budget_note").GetString()!, StringComparison.Ordinal);
+        Assert.Equal(ids[0].ToString(CultureInfo.InvariantCulture), sweeps[0].GetProperty("sweep_id").GetString());
+        Assert.Equal(40, sweeps[0].GetProperty("report").GetProperty("servers").GetArrayLength());
+
+        var latest = root.GetProperty("latest");
+        Assert.Equal(ids[0].ToString(CultureInfo.InvariantCulture), latest.GetProperty("sweep_id").GetString());
+        Assert.Equal(40, latest.GetProperty("report").GetProperty("servers").GetArrayLength());
+        Assert.Equal(2, latest.GetProperty("verdicts").GetArrayLength());
+    }
+
+    /// <summary>Four sweeps with small documents in the default hour: well under the budget. Nothing is cut, the
+    /// reply says so, and every entry carries its document and the header facts the honesty rules need (mute
+    /// header, liveness verdict and block).</summary>
+    [Fact]
+    public async Task GetSweepReports_AFewSweepsWithSmallDocuments_AnswersWhole_AndSaysSo()
+    {
+        var cs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live sweep-report budget test.");
+        var ct = Ct;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        await using var postgres = NpgsqlDataSource.Create(WithSearchPath(scratch));
+
+        var ids = await SeedSweepsAsync(postgres, sweepCount: 4, TimeSpan.FromMinutes(12), serversPerReport: 6, ct);
+
+        var json = await DarlingMcpFleetSweepTools.GetSweepReports(postgres, NullLogger.Instance, cancellationToken: ct);
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        Assert.True(Encoding.UTF8.GetByteCount(json) <= McpResponseBudget.DefaultBytes,
+            $"the default-shaped reply is {Encoding.UTF8.GetByteCount(json):#,0} bytes, over the {McpResponseBudget.DefaultBytes:#,0}-byte budget");
+        Assert.Equal(4, root.GetProperty("count").GetInt32());
         Assert.True(root.TryGetProperty("truncated", out var truncated) && !truncated.GetBoolean(), "an uncut timeline says truncated: false");
         Assert.Equal(4, root.GetProperty("sweeps_returned").GetInt32());
         Assert.Equal(JsonValueKind.Null, root.GetProperty("budget_note").ValueKind);
@@ -118,7 +155,7 @@ public sealed class McpSweepAnalyzeResponseBudgetLiveTests
         Assert.Equal(4, sweeps.GetArrayLength());
         foreach (var sweep in sweeps.EnumerateArray())
         {
-            Assert.False(sweep.TryGetProperty("report", out _), "a timeline entry carries header facts, not the stored document");
+            Assert.Equal(6, sweep.GetProperty("report").GetProperty("servers").GetArrayLength());
             Assert.Equal(JsonValueKind.String, sweep.GetProperty("sweep_id").ValueKind);
             Assert.Equal(JsonValueKind.String, sweep.GetProperty("swept_at").ValueKind);
             Assert.True(sweep.GetProperty("alerts_enabled").GetBoolean());
@@ -131,7 +168,7 @@ public sealed class McpSweepAnalyzeResponseBudgetLiveTests
         Assert.Equal(ids[0].ToString(CultureInfo.InvariantCulture), latest.GetProperty("sweep_id").GetString());
         var report = latest.GetProperty("report");
         Assert.Equal(JsonValueKind.Object, report.ValueKind);
-        Assert.Equal(40, report.GetProperty("servers").GetArrayLength());
+        Assert.Equal(6, report.GetProperty("servers").GetArrayLength());
         Assert.Equal(2, latest.GetProperty("verdicts").GetArrayLength());
     }
 
