@@ -59,20 +59,20 @@ public sealed class ChangeWatchWindowEdgeLiveTests
     private static async Task<JsonNode> ResultAsync(NpgsqlConnection c, CancellationToken ct) =>
         JsonNode.Parse((await TextAsync(c, "SELECT result_json FROM config.change_watches", ct))!)!;
 
-    /// <summary>One wait collection of a SQL Server target: <paramref name="deltaMs"/> over <paramref name="intervalSeconds"/>, stored at <paramref name="at"/>.</summary>
-    private static Task WaitRowAsync(NpgsqlConnection c, DateTime at, long deltaMs, int intervalSeconds, CancellationToken ct) =>
+    /// <summary>One wait row of a SQL Server target: <paramref name="deltaMs"/> over <paramref name="intervalSeconds"/>, stored at <paramref name="at"/>.</summary>
+    private static Task WaitRowAsync(NpgsqlConnection c, DateTime at, long deltaMs, int intervalSeconds, CancellationToken ct, string waitType = "PAGEIOLATCH_SH") =>
         SeedAsync(c, "wait_stats", new Dictionary<string, object>
         {
-            ["server_id"] = ServerId, ["server_name"] = ServerName, ["collection_time"] = Naive(at), ["wait_type"] = "PAGEIOLATCH_SH",
+            ["server_id"] = ServerId, ["server_name"] = ServerName, ["collection_time"] = Naive(at), ["wait_type"] = waitType,
             ["delta_wait_time_ms"] = deltaMs, ["sample_interval_seconds"] = intervalSeconds,
         }, ct);
 
-    /// <summary>One wait collection of an Aurora target, in microseconds as the collector stores it.</summary>
-    private static Task PgWaitRowAsync(NpgsqlConnection c, DateTime at, long deltaMs, int intervalSeconds, CancellationToken ct) =>
+    /// <summary>One wait row of an Aurora target, in microseconds as the collector stores it.</summary>
+    private static Task PgWaitRowAsync(NpgsqlConnection c, DateTime at, long deltaMs, int intervalSeconds, CancellationToken ct, string waitEvent = "DataFileRead") =>
         SeedAsync(c, "pg_wait_stats", new Dictionary<string, object>
         {
             ["server_id"] = PgServerId, ["server_name"] = PgServerName, ["collection_time"] = Naive(at),
-            ["wait_type"] = "IO", ["wait_event"] = "DataFileRead", ["delta_waits"] = 100L, ["delta_wait_time_us"] = deltaMs * 1000, ["sample_interval_seconds"] = intervalSeconds,
+            ["wait_type"] = "IO", ["wait_event"] = waitEvent, ["delta_waits"] = 100L, ["delta_wait_time_us"] = deltaMs * 1000, ["sample_interval_seconds"] = intervalSeconds,
         }, ct);
 
     private static async Task PgWaitsAsync(NpgsqlConnection c, DateTime start, double msPerSecond, CancellationToken ct)
@@ -137,6 +137,67 @@ public sealed class ChangeWatchWindowEdgeLiveTests
 
             var after = (double)Measure(await ResultAsync(h.Connection, ct), "total_wait_ms_per_second")["after"]!;
             Assert.InRange(after, 120, 145);
+            Assert.Equal("flat", await TextAsync(h.Connection, "SELECT result FROM config.change_watches", ct));
+        });
+    }
+
+    /// <summary>#8078: <c>sample_interval_seconds</c> is a per-row figure. A wait type that returns after missing some passes stores the
+    /// seconds since its own previous sighting, several cadences, while its siblings in the same collection store one cadence. The measure
+    /// rates each row over its own interval, so the returning type's longer interval never re-rates its siblings: two steady types at 500
+    /// and 100 ms/s and a third seen every fifth minute (600 ms over its own 300 s, 2 ms/s) read 600.4 ms/s over the hour's 3,600 s.</summary>
+    [Fact]
+    public async Task AWaitTypeThatReturnsAfterMissingPasses_DoesNotDeflateTheWindowsWaitRate()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            var change = h.Now.AddMinutes(-90);
+            await SeedWaitsAsync(h.Connection, change.AddMinutes(-60), 600, ct);
+            for (var minute = 1; minute <= 60; minute++)
+            {
+                await WaitRowAsync(h.Connection, change.AddMinutes(minute), 500L * 60, 60, ct, "SOS_SCHEDULER_YIELD");
+                await WaitRowAsync(h.Connection, change.AddMinutes(minute), 100L * 60, 60, ct);
+                if (minute % 5 == 0)
+                {
+                    await WaitRowAsync(h.Connection, change.AddMinutes(minute), 600, 300, ct, "CXCONSUMER");
+                }
+            }
+
+            await h.Store.RecordChangesAsync(ServerId, ServerName, await OneChange(change, "max degree of parallelism"), ct);
+            await h.NewPass().EvaluateDueAsync(ct);
+
+            var wait = Measure(await ResultAsync(h.Connection, ct), "total_wait_ms_per_second");
+            Assert.Equal(600.0, (double)wait["before"]!, 1);
+            Assert.Equal(600.4, (double)wait["after"]!, 1);
+            Assert.Equal("flat", await TextAsync(h.Connection, "SELECT result FROM config.change_watches", ct));
+        });
+    }
+
+    /// <summary>The Aurora twin of the test above: the wait collector there also stores each (wait_type, wait_event) row's own interval.</summary>
+    [Fact]
+    public async Task AnAuroraWaitEventThatReturnsAfterMissingPasses_DoesNotDeflateTheWindowsWaitRate()
+    {
+        await RunAsync(true, async (h, ct) =>
+        {
+            await AddServerAsync(h.Connection, PgServerId, PgServerName, "postgres", ct);
+            var change = h.Now.AddMinutes(-90);
+            await PgWaitsAsync(h.Connection, change.AddMinutes(-60), 600, ct);
+            for (var minute = 1; minute <= 60; minute++)
+            {
+                await PgWaitRowAsync(h.Connection, change.AddMinutes(minute), 500L * 60, 60, ct, "DataFileWrite");
+                await PgWaitRowAsync(h.Connection, change.AddMinutes(minute), 100L * 60, 60, ct);
+                if (minute % 5 == 0)
+                {
+                    await PgWaitRowAsync(h.Connection, change.AddMinutes(minute), 600, 300, ct, "WALSync");
+                }
+            }
+
+            await h.Store.RecordChangesAsync(PgServerId, PgServerName,
+                new[] { new ChangeWatchChange("pg_config:work_mem", "pg_config", change, "work_mem") }, ct);
+            await h.NewPass().EvaluateDueAsync(ct);
+
+            var wait = Measure(await ResultAsync(h.Connection, ct), "total_wait_ms_per_second");
+            Assert.Equal(600.0, (double)wait["before"]!, 1);
+            Assert.Equal(600.4, (double)wait["after"]!, 1);
             Assert.Equal("flat", await TextAsync(h.Connection, "SELECT result FROM config.change_watches", ct));
         });
     }

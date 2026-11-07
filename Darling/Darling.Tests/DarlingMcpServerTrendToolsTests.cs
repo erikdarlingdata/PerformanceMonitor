@@ -735,6 +735,78 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
         }
     }
 
+    /// <summary>#8078: <c>sample_interval_seconds</c> is a per-row figure. A wait type that returns after missing some passes stores the
+    /// seconds since its own previous sighting, several cadences, while its siblings in the same collection store one cadence. The total
+    /// rates each row over its own interval and sums the rates, so the returning type's longer interval never re-rates its siblings: two
+    /// steady types at 500 and 100 ms/s read 600 on every point (602 where the third type lands, 600 ms over its own 300 s), the hour reads
+    /// 600.4, and the total of every wait type is never below one type's own trend over the same rows.</summary>
+    [Fact]
+    public async Task TotalWaits_RatesEachRowOverItsOwnInterval_SoAReturningWaitTypeDoesNotDeflateThePoint()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live server-trend test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            /* The hour before the top of the current hour: sixty one-minute collections that one 60-minute bucket holds whole. */
+            var now = DateTime.UtcNow;
+            var end = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Utc);
+            var start = end.AddHours(-1);
+            const string Insert = "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms, sample_interval_seconds) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)";
+            for (var m = 0; m < 60; m++)
+            {
+                var t = DarlingMcpTestData.Naive(start.AddMinutes(m));
+                await DarlingMcpTestData.ExecAsync(connection, ct, Insert, CollectionIdGenerator.Next(), t, ServerId, ServerName, "SOS_SCHEDULER_YIELD", 100L, 30000L, 60);
+                await DarlingMcpTestData.ExecAsync(connection, ct, Insert, CollectionIdGenerator.Next(), t, ServerId, ServerName, "PAGEIOLATCH_SH", 50L, 6000L, 60);
+                if (m % 5 == 4)
+                {
+                    /* Seen every fifth pass only: 600 ms over the 300 s since its own previous sighting, 2 ms/s. */
+                    await DarlingMcpTestData.ExecAsync(connection, ct, Insert, CollectionIdGenerator.Next(), t, ServerId, ServerName, "CXCONSUMER", 1L, 600L, 300);
+                }
+            }
+
+            var asOf = end.ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+            var hour = JsonDocument.Parse(await DarlingMcpServerTrendTools.GetServerTrend(postgres, "total_waits", ServerName, 1, asOf, bucket_minutes: 60)).RootElement;
+            var hourPoint = Assert.Single(hour.GetProperty("trend").EnumerateArray());
+            var hourRate = hourPoint.GetProperty("wait_time_ms_per_second").GetDouble();
+            Assert.Equal(600.4, hourRate, 2);
+
+            var minutes = JsonDocument.Parse(await DarlingMcpServerTrendTools.GetServerTrend(postgres, "total_waits", ServerName, 1, asOf)).RootElement;
+            var points = minutes.GetProperty("trend").EnumerateArray().Select(p => p.GetProperty("wait_time_ms_per_second").GetDouble()).ToArray();
+            Assert.Equal(60, points.Length);
+            Assert.All(points, p => Assert.True(Math.Abs(p - 600) < 0.01 || Math.Abs(p - 602) < 0.01, $"a one-minute point reads {p} ms/s"));
+
+            /* The busiest type alone over the same rows and the same hour: 500 ms/s. The total of every type cannot read below it. */
+            await using var sosCommand = postgres.CreateCommand(DarlingDataReader.WaitTrendBucketedSql);
+            sosCommand.Parameters.Add(new NpgsqlParameter { Value = ServerId });
+            sosCommand.Parameters.Add(new NpgsqlParameter { Value = "SOS_SCHEDULER_YIELD" });
+            sosCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DarlingMcpTestData.Naive(start) });
+            sosCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DarlingMcpTestData.Naive(end) });
+            sosCommand.Parameters.Add(new NpgsqlParameter { Value = 60 });
+            await using var sos = await sosCommand.ExecuteReaderAsync(ct);
+            Assert.True(await sos.ReadAsync(ct));
+            var sosRate = sos.GetDouble(1);
+            Assert.Equal(500.0, sosRate, 2);
+            Assert.True(hourRate >= sosRate, $"the total of every wait type reads {hourRate} ms/s, below SOS_SCHEDULER_YIELD alone at {sosRate}");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) => await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         var sql = string.Join(" ", Tables.Select(t => $"DELETE FROM {t} WHERE server_id = {ServerId};")) + $" DELETE FROM servers WHERE server_id = {ServerId};";
