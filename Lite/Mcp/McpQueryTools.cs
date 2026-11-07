@@ -1435,15 +1435,10 @@ public sealed class McpQueryTools
 
     /// <summary>
     /// The grain of get_query_trend's bucketed points (#7907): what each figure of a point is once a point holds the
-    /// collections of one bucket. Its own sentence rather than <see cref="TrendBuckets.AggregateNote"/>, because this
-    /// read's figures are sums and execution-weighted averages, not rates over seconds, and it has no peak fields.
+    /// collections of one bucket, in the sentence <see cref="TrendBuckets.QueryTrendNote"/> both SKUs write (#8063).
     /// </summary>
     private static TrendGrain QueryTrendBucketed(int bucketMinutes, bool requested, int autoPoints) =>
-        new(TrendBuckets.Word(bucketMinutes), bucketMinutes,
-            $"Each point holds the collections in one {TrendBuckets.Adjective(bucketMinutes)} bucket and is stamped at the bucket's start (the first point at the window's start); collection_count says how many. "
-            + "execution_count, cpu_ms, elapsed_ms, logical_reads, logical_writes, physical_reads, rows and spills are summed across those collections, and avg_cpu_ms and avg_elapsed_ms are those sums divided by the summed executions, so a busy collection weighs more than a quiet one. "
-            + "min_dop and max_dop are the extremes across the plans that ran in the bucket, query_plan_hash is null when more than one plan ran in it, and plan_count counts its distinct plans. "
-            + TrendBuckets.Sizing(requested, autoPoints));
+        new(TrendBuckets.Word(bucketMinutes), bucketMinutes, TrendBuckets.QueryTrendNote(bucketMinutes, requested, autoPoints));
 
     /// <summary>
     /// How far past the requested start the first served point may sit before the answer calls itself

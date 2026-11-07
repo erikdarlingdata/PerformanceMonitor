@@ -28,6 +28,9 @@ namespace Darling.Tests;
 /// under one <c>collection_time</c> with nothing to tell them apart. The rows are now summed per collection, the DOP
 /// pair spans them, and the plan hash is the hash only when every row at that time carries the same one.
 /// (The hourly tier's sum is asserted in <see cref="WebReadReachLiveTests"/>, which holds the TimescaleDB store.)
+/// The two raw-tier reads ask for one hour, the window the shared ladder serves at one-minute points (#8063), so each
+/// collection is its own point and the fold is asserted at collection grain; <see cref="QueryTrendBucketingLiveTests"/>
+/// asserts the same fold across a bucket's collections.
 /// </summary>
 public sealed class QueryTrendOnePointLiveTests
 {
@@ -53,7 +56,7 @@ public sealed class QueryTrendOnePointLiveTests
         var bodySucceeded = false;
         try
         {
-            var first = DateTime.UtcNow.AddHours(-3);
+            var first = DateTime.UtcNow.AddMinutes(-30);
             first = new DateTime(first.Year, first.Month, first.Day, first.Hour, first.Minute, 0, DateTimeKind.Unspecified);
             var second = first.AddMinutes(5);
             var third = first.AddMinutes(10);
@@ -68,7 +71,7 @@ public sealed class QueryTrendOnePointLiveTests
             await InsertAsync(connection, ct, third, "0xH1", 4, 40, 50, 4, 1, 1, "0xONLY");
 
             await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
-            var json = await DarlingMcpTrendTools.GetQueryTrend(postgres, QueryHash, Db, ServerName, 24, cancellationToken: ct);
+            var json = await DarlingMcpTrendTools.GetQueryTrend(postgres, QueryHash, Db, ServerName, 1, cancellationToken: ct);
             using var doc = JsonDocument.Parse(json);
             Assert.False(doc.RootElement.TryGetProperty("error", out _), json);
             Assert.Equal("raw", doc.RootElement.GetProperty("source").GetString());
@@ -127,7 +130,7 @@ public sealed class QueryTrendOnePointLiveTests
         var bodySucceeded = false;
         try
         {
-            var first = DateTime.UtcNow.AddHours(-3);
+            var first = DateTime.UtcNow.AddMinutes(-30);
             first = new DateTime(first.Year, first.Month, first.Day, first.Hour, first.Minute, 0, DateTimeKind.Unspecified);
             var second = first.AddMinutes(5);
             var third = first.AddMinutes(10);
@@ -142,7 +145,7 @@ public sealed class QueryTrendOnePointLiveTests
             await InsertAsync(connection, ct, third, "0xH1", 0, 0, 0, 0, 1, 8, "0xSTALE");
 
             await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
-            var json = await DarlingMcpTrendTools.GetQueryTrend(postgres, QueryHash, Db, ServerName, 24, cancellationToken: ct);
+            var json = await DarlingMcpTrendTools.GetQueryTrend(postgres, QueryHash, Db, ServerName, 1, cancellationToken: ct);
             using var doc = JsonDocument.Parse(json);
             Assert.False(doc.RootElement.TryGetProperty("error", out _), json);
             var points = doc.RootElement.GetProperty("trend").EnumerateArray().ToArray();

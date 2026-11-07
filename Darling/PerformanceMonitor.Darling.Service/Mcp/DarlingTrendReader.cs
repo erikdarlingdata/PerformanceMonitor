@@ -97,13 +97,17 @@ internal static class DarlingTrendReader
         public long UnratedCollections { get; init; }
     }
 
-    /// <summary>One point of a single query's per-collection history (Lite's <c>QueryStatsHistoryRow</c>,
-    /// the columns get_query_trend surfaces): the interval deltas + DOP spread + the plan hash. Time metrics
-    /// are microseconds (converted to ms by the tool, matching Lite).</summary>
+    /// <summary>One point of a single query's history (Lite's <c>QueryStatsHistoryRow</c>, the columns get_query_trend
+    /// surfaces): the interval deltas + DOP spread + the plan hash, summed over the collections of one bucket (#8063),
+    /// <see cref="CollectionTime"/> the bucket's start. Time metrics are microseconds (converted to ms by the tool,
+    /// matching Lite). <see cref="FirstCollectionTime"/> is the earliest collection the bucket holds (the rollup's hour
+    /// on the hourly tier), and <see cref="CollectionCount"/> how many it holds, null on the hourly tier, whose rollup
+    /// does not count them.</summary>
     public sealed record QueryHistoryPoint(
         DateTime CollectionTime, long DeltaExecutions, long DeltaCpuUs, long DeltaElapsedUs,
         long DeltaLogicalReads, long DeltaLogicalWrites, long DeltaPhysicalReads, long DeltaRows,
-        long DeltaSpills, int? MinDop, int? MaxDop, string? QueryPlanHash, int? PlanCount = null);
+        long DeltaSpills, int? MinDop, int? MaxDop, string? QueryPlanHash, int? PlanCount = null,
+        DateTime? FirstCollectionTime = null, int? CollectionCount = null);
 
     /// <summary>
     /// Which physical tier answered a query-history read, and over what window (#2353).
@@ -133,10 +137,11 @@ internal static class DarlingTrendReader
     /// time. <c>bucket</c> is projected as <c>collection_time</c> so the series column name does not change
     /// underneath a caller that got a raw answer last time.</para>
     ///
-    /// <para><b>One point per hour (#7608).</b> The rollup keeps one row per <c>sql_handle</c> per hour, so a
+    /// <para><b>One point per bucket (#7608, #8063).</b> The rollup keeps one row per <c>sql_handle</c> per hour, so a
     /// statement with many handles gave many rows under one <c>collection_time</c>, with nothing to tell them
-    /// apart. The three measures are summed per <c>bucket</c>, so a window of N hours gives at most N points.
-    /// A stitched relation (<see cref="RollupCoverage.StitchedRelationSql"/>) splits at one bucket boundary
+    /// apart. The three measures are summed per bucket of <c>$6</c> minutes (a whole number of hours) over the
+    /// rollup's <c>bucket</c>, so a window of N hours gives at most N points at 60 minutes and fewer at a wider
+    /// width. A stitched relation (<see cref="RollupCoverage.StitchedRelationSql"/>) splits at one bucket boundary
     /// (<c>bucket &lt; F</c> / <c>bucket &gt;= F</c>), so each hour comes from one relation and the sum never
     /// counts an hour twice.</para>
     /// </summary>
@@ -1507,25 +1512,29 @@ internal static class DarlingTrendReader
     /* ─────────────────────────── single-query history trend ─────────────────────────── */
 
     /// <summary>
-    /// A single query's per-collection history — Lite's <c>GetQueryStatsHistoryAsync</c>, focused to the
-    /// columns get_query_trend surfaces: the interval deltas + DOP spread + plan hash for one
-    /// (database, query_hash) over the window, oldest first. Reads the base <c>query_stats</c> table because
-    /// it projects no text — a read that wanted <c>query_text</c> or <c>query_plan_xml</c> would have to go
-    /// through <c>v_query_stats</c> to resolve the #1767 payload dimensions. $1 server_id, $2 database_name,
-    /// $3 query_hash, $4/$5 window (naive UTC).
+    /// A single query's raw-tier history in time buckets — Lite's <c>GetQueryStatsHistoryAsync</c> folded by
+    /// <c>McpQueryTools.BucketPoints</c>, focused to the columns get_query_trend surfaces: the interval deltas + DOP
+    /// spread + plan hash for one (database, query_hash) over the window, oldest first. Reads the base
+    /// <c>query_stats</c> table because it projects no text — a read that wanted <c>query_text</c> or
+    /// <c>query_plan_xml</c> would have to go through <c>v_query_stats</c> to resolve the #1767 payload dimensions.
+    /// $1 server_id, $2 database_name, $3 query_hash, $4/$5 window (naive UTC), $6 the bucket width in minutes.
     ///
-    /// <para><b>One point per collection (#7608).</b> One <c>query_hash</c> can run under several
+    /// <para><b>One point per bucket (#7608, #8063).</b> One <c>query_hash</c> can run under several
     /// <c>sql_handle</c>s or plans, and the collector writes one row per handle per collection, so the rows are
-    /// grouped by <c>collection_time</c>: the deltas are summed. The DOP pair (<c>MIN</c> of the minimums,
-    /// <c>MAX</c> of the maximums), <c>query_plan_hash</c> and <c>plan_count</c> (distinct hashes) come only from
-    /// the rows that ran in the interval (<c>delta_execution_count &gt; 0</c>), so a stale plan's lifetime DOP
-    /// does not ride along. When no row at that time ran, the point still shows its plan from all its rows, but
-    /// the DOP pair is NULL: the DOP describes an execution and there was none. The hash is the one every such
-    /// row carries, and NULL when they differ or one has none.</para>
+    /// grouped by the bucket their collection falls in — <c>date_bin</c> of <c>$6</c> minutes from the shared origin
+    /// (<see cref="TrendBuckets.OriginSql"/>), the first clamped to the window's start, as every bucketed trend's is
+    /// — and the deltas are summed across the bucket's collections and handles. <c>first_collection_time</c> is the
+    /// earliest collection the bucket holds, the coverage the tool reports, and <c>collection_count</c> how many
+    /// distinct collections it holds. The DOP pair (<c>MIN</c> of the minimums, <c>MAX</c> of the maximums),
+    /// <c>query_plan_hash</c> and <c>plan_count</c> (distinct hashes) come only from the rows that ran in the bucket
+    /// (<c>delta_execution_count &gt; 0</c>), so a stale plan's lifetime DOP does not ride along. When no row in the
+    /// bucket ran, the point still shows its plan from all its rows, but the DOP pair is NULL: the DOP describes an
+    /// execution and there was none. The hash is the one every such row carries, and NULL when they differ or one
+    /// has none.</para>
     /// </summary>
-    public const string QueryHistorySql = """
+    public const string QueryHistorySql = $"""
         SELECT
-            collection_time,
+            bucket_start AS collection_time,
             CAST(SUM(delta_execution_count) AS bigint) AS delta_execution_count,
             CAST(SUM(delta_worker_time) AS bigint) AS delta_worker_time,
             CAST(SUM(delta_elapsed_time) AS bigint) AS delta_elapsed_time,
@@ -1539,22 +1548,30 @@ internal static class DarlingTrendReader
             CASE WHEN MIN(query_plan_hash) FILTER (WHERE ran) = MAX(query_plan_hash) FILTER (WHERE ran)
                   AND COUNT(query_plan_hash) FILTER (WHERE ran) = COUNT(*) FILTER (WHERE ran)
                  THEN MIN(query_plan_hash) FILTER (WHERE ran) END AS query_plan_hash,
-            CAST(COUNT(DISTINCT query_plan_hash) FILTER (WHERE ran) AS int) AS plan_count
+            CAST(COUNT(DISTINCT query_plan_hash) FILTER (WHERE ran) AS int) AS plan_count,
+            MIN(collection_time) AS first_collection_time,
+            CAST(COUNT(DISTINCT collection_time) AS int) AS collection_count
         FROM
         (
             SELECT
-                qs.*,
-                COALESCE(qs.delta_execution_count, 0) > 0
-                OR NOT bool_or(COALESCE(qs.delta_execution_count, 0) > 0) OVER (PARTITION BY qs.collection_time) AS ran
-            FROM query_stats AS qs
-            WHERE qs.server_id = $1
-            AND   qs.database_name = $2
-            AND   qs.query_hash = $3
-            AND   qs.collection_time >= $4
-            AND   qs.collection_time <= $5
-        ) AS q
-        GROUP BY collection_time
-        ORDER BY collection_time
+                q.*,
+                COALESCE(q.delta_execution_count, 0) > 0
+                OR NOT bool_or(COALESCE(q.delta_execution_count, 0) > 0) OVER (PARTITION BY q.bucket_start) AS ran
+            FROM
+            (
+                SELECT
+                    qs.*,
+                    GREATEST(date_bin(CAST($6 AS integer) * INTERVAL '1 minute', qs.collection_time, {TrendBuckets.OriginSql}), $4) AS bucket_start
+                FROM query_stats AS qs
+                WHERE qs.server_id = $1
+                AND   qs.database_name = $2
+                AND   qs.query_hash = $3
+                AND   qs.collection_time >= $4
+                AND   qs.collection_time <= $5
+            ) AS q
+        ) AS b
+        GROUP BY bucket_start
+        ORDER BY bucket_start
         """;
 
     /* The tier ladder — aliases of DurationTrendRouting since #3653; see the block comment above
@@ -1644,20 +1661,25 @@ internal static class DarlingTrendReader
     public static async Task<QueryHistoryResult> GetQueryHistoryAsync(
         NpgsqlDataSource postgres, int serverId, string databaseName, string queryHash, DateTime startUtc, DateTime endUtc,
         DateTime? nowUtc = null, bool hourlyAvailable = true, TierCoverage coverage = default, string? hourlyRelation = null,
-        CancellationToken cancellationToken = default)
+        int bucketMinutes = 1, CancellationToken cancellationToken = default)
     {
         var tier = ResolveTier(startUtc, nowUtc ?? DateTime.UtcNow, hourlyAvailable, coverage);
 
         /* #3653 (Q12): the caller that probed the store passes the hourly relation it resolved
            (RollupCoverage.HourlyRelationFor — the interval-honest successor where it reaches as far as the
-           legacy for this window); a caller that has not probed reads the legacy, which every store has. */
+           legacy for this window); a caller that has not probed reads the legacy, which every store has.
+           #8063: both tiers gather their rows into buckets of bucketMinutes; the tool resolves the width (TrendBuckets.Resolve,
+           raised to the rollup's hour on the hourly tier), and the default of one minute leaves each collection, or each
+           rollup hour, its own point. */
         var items = tier == RetentionTier.Raw
-            ? await ReadQueryHistoryAsync(postgres, QueryHistorySql, serverId, databaseName, queryHash, startUtc, endUtc, cancellationToken)
-            : await ReadQueryHistoryAsync(postgres, QueryHistoryHourlySqlFor(hourlyRelation ?? TimescaleSupport.QueryStatsHourlyView), serverId, databaseName, queryHash, startUtc, endUtc, cancellationToken);
+            ? await ReadQueryHistoryAsync(postgres, QueryHistorySql, serverId, databaseName, queryHash, startUtc, endUtc, bucketMinutes, cancellationToken)
+            : await ReadQueryHistoryAsync(postgres, QueryHistoryHourlySqlFor(hourlyRelation ?? TimescaleSupport.QueryStatsHourlyView), serverId, databaseName, queryHash, startUtc, endUtc, bucketMinutes, cancellationToken);
 
-        /* #7416 item 21: the aged-out reason only when the start is older than what the answering tier keeps. */
+        /* #7416 item 21: the aged-out reason only when the start is older than what the answering tier keeps. The coverage
+           begins at the first collection the store held (#8063), not at the first bucket's stamp, which is clamped to the
+           window's start. */
         var (effectiveStart, truncated, startOlderThanTier) = DurationTrendRouting.DescribeCoverage(
-            items.Count > 0 ? items[0].CollectionTime : null, startUtc,
+            items.Count > 0 ? items[0].FirstCollectionTime ?? items[0].CollectionTime : null, startUtc,
             DurationTrendRouting.TierFloorUtc(tier, hourlyAvailable, nowUtc ?? DateTime.UtcNow));
 
         return new QueryHistoryResult(
@@ -1671,7 +1693,7 @@ internal static class DarlingTrendReader
 
     private static async Task<List<QueryHistoryPoint>> ReadQueryHistoryAsync(
         NpgsqlDataSource postgres, string sql, int serverId, string databaseName, string queryHash,
-        DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken)
+        DateTime startUtc, DateTime endUtc, int bucketMinutes, CancellationToken cancellationToken)
     {
         var items = new List<QueryHistoryPoint>();
         await using var command = postgres.CreateCommand(sql);
@@ -1681,6 +1703,7 @@ internal static class DarlingTrendReader
         DarlingMcpReadParameters.AddText(command, queryHash);
         DarlingMcpReadParameters.AddTimestamp(command, startUtc);
         DarlingMcpReadParameters.AddTimestamp(command, endUtc);
+        DarlingMcpReadParameters.AddInt(command, bucketMinutes);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -1697,7 +1720,9 @@ internal static class DarlingTrendReader
                 reader.IsDBNull(9) ? null : Convert.ToInt32(reader.GetValue(9)),
                 reader.IsDBNull(10) ? null : Convert.ToInt32(reader.GetValue(10)),
                 reader.IsDBNull(11) ? null : reader.GetString(11),
-                reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12))));
+                reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12)),
+                reader.IsDBNull(13) ? null : reader.GetDateTime(13),
+                reader.IsDBNull(14) ? null : Convert.ToInt32(reader.GetValue(14))));
         }
 
         return items;
