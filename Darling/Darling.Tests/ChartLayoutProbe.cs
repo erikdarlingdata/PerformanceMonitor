@@ -349,6 +349,8 @@ internal static class ChartLayoutProbe
         ["LatchStatsChart"] = 5,
         ["SpinlockStatsChart"] = 5,
         ["CollectorDurationChart"] = 41,
+        ["SickSpinlocksChart"] = 6,
+        ["CpuComparisonChart"] = 2,
     };
 
     /// <summary>Fills a chart on the tab with <paramref name="series"/> made-up time series that have long names, and gives it the legend
@@ -585,6 +587,80 @@ internal static class ChartLayoutProbe
             var name = string.Concat(NameOf(chart).Where(char.IsLetterOrDigit));
             chart.Plot.GetImage(w, h).SavePng(Path.Combine(dir, $"{tabName}-{windowName}-{name}.png"));
         }
+    }
+
+    /// <summary>Saves the whole hosted window for looking at it. Set CHART_LAYOUT_PNG_DIR to a folder.</summary>
+    public static void SaveWindow(Window window, string name)
+    {
+        var dir = Environment.GetEnvironmentVariable("CHART_LAYOUT_PNG_DIR");
+        if (string.IsNullOrEmpty(dir) || window.Content is not FrameworkElement content)
+        {
+            return;
+        }
+
+        Directory.CreateDirectory(dir);
+        var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap((int)content.ActualWidth, (int)content.ActualHeight, 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(content);
+        var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+        encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
+        using var stream = File.Create(Path.Combine(dir, $"window-{name}.png"));
+        encoder.Save(stream);
+    }
+
+    /// <summary>#8220: the Query Heatmap's labels on a settled chart that plots <paramref name="columns"/> time buckets and <paramref name="rows"/> value
+    /// buckets. An X label stays on one line and keeps 10 px clear of the next; a Y label keeps 4 px clear of the next. One line per defect.</summary>
+    public static List<string> MeasureHeatmapLabels(WpfPlot chart, int columns, int rows, out string reading)
+    {
+        var problems = new List<string>();
+        var plot = chart.Plot;
+        var rect = plot.RenderManager.LastRender.DataRect;
+        using var paint = Paint.NewDisposablePaint();
+
+        var xTicks = plot.Axes.Bottom.TickGenerator.Ticks.Where(t => t.IsMajor).OrderBy(t => t.Position).ToList();
+        var xStyle = plot.Axes.Bottom.TickLabelStyle;
+        var xPixels = rect.Width / columns;
+        var minGap = double.MaxValue;
+        for (var i = 0; i < xTicks.Count; i++)
+        {
+            if (xTicks[i].Label.Contains('\n', StringComparison.Ordinal))
+            {
+                problems.Add($"the X label '{xTicks[i].Label.Replace("\n", "\\n", StringComparison.Ordinal)}' is on more than one line");
+            }
+
+            if (i > 0)
+            {
+                var gap = ((xTicks[i].Position - xTicks[i - 1].Position) * xPixels)
+                    - ((xStyle.Measure(xTicks[i].Label, paint).Width + xStyle.Measure(xTicks[i - 1].Label, paint).Width) / 2);
+                minGap = Math.Min(minGap, gap);
+                if (gap < 10)
+                {
+                    problems.Add($"X labels '{xTicks[i - 1].Label}' and '{xTicks[i].Label}' are {gap:0.#} px apart, under 10");
+                }
+            }
+        }
+
+        var yTicks = plot.Axes.Left.TickGenerator.Ticks.Where(t => t.IsMajor).OrderBy(t => t.Position).ToList();
+        var yStyle = plot.Axes.Left.TickLabelStyle;
+        var yPixels = rect.Height / rows;
+        var minYGap = double.MaxValue;
+        for (var i = 1; i < yTicks.Count; i++)
+        {
+            var gap = ((yTicks[i].Position - yTicks[i - 1].Position) * yPixels)
+                - ((yStyle.Measure(yTicks[i].Label, paint).Height + yStyle.Measure(yTicks[i - 1].Label, paint).Height) / 2);
+            minYGap = Math.Min(minYGap, gap);
+            if (gap < 4)
+            {
+                problems.Add($"Y labels '{yTicks[i - 1].Label}' and '{yTicks[i].Label}' are {gap:0.#} px apart, under 4");
+            }
+        }
+
+        if (rect.Height < LegendRuleMinPlotHeight - 0.5)
+        {
+            problems.Add($"the plot is {rect.Height:0.#} px tall, under the {LegendRuleMinPlotHeight} px floor");
+        }
+
+        reading = $"plot {rect.Width:0}x{rect.Height:0}, {xTicks.Count} X labels (tightest gap {(minGap == double.MaxValue ? 0 : minGap):0} px), {yTicks.Count} Y labels (tightest gap {(minYGap == double.MaxValue ? 0 : minYGap):0} px)";
+        return problems;
     }
 
     // ---- Feeding a chart through its own render method with a made-up reply ----

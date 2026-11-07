@@ -2140,7 +2140,10 @@
                          counts per (5-min bin x per-execution magnitude bucket). Right-click drills into
                          Active Queries for the clicked bin's window. -->
                     <TabItem Header="Query Heatmap">
-                        <Grid>
+                        <!-- #8220: the tab scrolls when the chart card cannot keep a plot of 120 DIPs: the grid is as tall as the viewport but never under
+                             MinHeight (the metric row, the banner and a 280 DIP card). -->
+                        <ScrollViewer x:Name="HeatmapScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <Grid Height="{Binding ViewportHeight, ElementName=HeatmapScroll}" MinHeight="360">
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
@@ -2167,6 +2170,7 @@
                                 <scottplot:WpfPlot x:Name="QueryHeatmapChart" MouseMove="HeatmapChart_MouseMove" MouseLeave="HeatmapChart_MouseLeave"/>
                             </ui:ChartPanel>
                         </Grid>
+                        </ScrollViewer>
                     </TabItem>
                 </TabControl>
             </Grid>
