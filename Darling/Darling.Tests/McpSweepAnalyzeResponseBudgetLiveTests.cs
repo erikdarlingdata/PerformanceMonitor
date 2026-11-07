@@ -150,34 +150,7 @@ public sealed class McpSweepAnalyzeResponseBudgetLiveTests
         await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
         await using var postgres = NpgsqlDataSource.Create(WithSearchPath(scratch));
         const string serverName = "analyze-budget-many";
-        var serverId = ServerIdHelper.GetDeterministicHashCode(serverName);
-
-        await using (var connection = await postgres.OpenConnectionAsync(ct))
-        {
-            var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
-            var windowStart = windowEnd.AddHours(-4);
-            await RegisterServerAsync(connection, serverId, serverName, ct);
-            await PlantWaitAsync(connection, serverId, serverName, windowEnd.AddHours(-30), "OLD_WAIT", 1_000L, ct);
-            foreach (var waitType in ScoredWaitTypes)
-            {
-                await PlantWaitAsync(connection, serverId, serverName, windowStart, waitType, 0L, ct);
-                for (var i = 1; i <= 16; i++)
-                    await PlantWaitAsync(connection, serverId, serverName, windowStart.AddMinutes(15 * i), waitType, 900_000L, ct);
-            }
-            for (var i = 0; i < 40; i++)
-                await PlantBlockingAsync(connection, serverId, serverName, windowStart.AddMinutes(3 + (i * 6)), 70 + i, ct);
-            for (var i = 0; i < 6; i++)
-                await PlantDeadlockAsync(connection, serverId, serverName, windowStart.AddMinutes(20 + (i * 30)), ct);
-            /* Six queries whose plan regressed inside the window: the PLAN_REGRESSION finding carries five
-               force-plan targets (the finding's cap), the shape the issue measured at about 15 KB. */
-            for (long q = 1; q <= 6; q++)
-            {
-                await PlantQueryStorePlanAsync(connection, serverId, serverName, q, planId: (q * 10) + 1, "0xCHEAP" + q, cpuUs: 100_000,
-                    firstIntervalId: 1, lastExec: windowEnd.AddDays(-5), windowEnd, ct);
-                await PlantQueryStorePlanAsync(connection, serverId, serverName, q, planId: (q * 10) + 2, "0xCOSTLY" + q, cpuUs: 100_000 * (2 + (q / 2.0)),
-                    firstIntervalId: 11, lastExec: windowEnd, windowEnd, ct);
-            }
-        }
+        await SeedManyFindingsAsync(postgres, serverName, ct);
 
         var json = await DarlingMcpTools.AnalyzeServer(new DarlingAnalysisService(postgres), postgres, serverName, 4);
         Assert.StartsWith("{", json, StringComparison.Ordinal);
@@ -199,6 +172,38 @@ public sealed class McpSweepAnalyzeResponseBudgetLiveTests
         var severities = findings.EnumerateArray().Select(f => f.GetProperty("severity").GetDouble()).ToList();
         for (var i = 1; i < severities.Count; i++)
             Assert.True(severities[i] <= severities[i - 1], $"finding {i} ({severities[i]}) is more severe than finding {i - 1} ({severities[i - 1]}); the cut must keep the most severe");
+    }
+
+    /// <summary>The same window anchored with as_of: nothing is persisted on an anchored run, so the findings the
+    /// cut left off are not in the store, and the note must not send the reader to get_analysis_findings for
+    /// them. It says the cut findings were not saved and names hours_back as the way to see them.</summary>
+    [Fact]
+    public async Task AnalyzeServer_AnAnchoredWindowOfManyFindings_SaysTheCutFindingsWereNotSaved()
+    {
+        var cs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live analyze_server budget test.");
+        var ct = Ct;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        await using var postgres = NpgsqlDataSource.Create(WithSearchPath(scratch));
+        const string serverName = "analyze-budget-anchored";
+        var windowEnd = await SeedManyFindingsAsync(postgres, serverName, ct);
+
+        var asOf = DateTime.SpecifyKind(windowEnd, DateTimeKind.Utc).ToString("o");
+        var json = await DarlingMcpTools.AnalyzeServer(new DarlingAnalysisService(postgres), postgres, serverName, 4, asOf);
+        Assert.StartsWith("{", json, StringComparison.Ordinal);
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        Assert.Equal("findings", root.GetProperty("status").GetString());
+        Assert.False(root.GetProperty("persisted").GetBoolean());
+        Assert.True(Encoding.UTF8.GetByteCount(json) <= McpResponseBudget.DefaultBytes,
+            $"the reply is {Encoding.UTF8.GetByteCount(json):#,0} bytes, over the {McpResponseBudget.DefaultBytes:#,0}-byte budget");
+        Assert.True(root.TryGetProperty("truncated", out var truncated) && truncated.GetBoolean(), "a cut reply says truncated: true");
+        var note = root.GetProperty("truncation_note").GetString()!;
+        Assert.DoesNotContain("get_analysis_findings", note, StringComparison.Ordinal);
+        Assert.Contains("not persisted", note, StringComparison.Ordinal);
+        Assert.Contains("narrow hours_back", note, StringComparison.Ordinal);
     }
 
     /// <summary>One wait type over the window: one or two findings, well under the budget. Nothing is cut and
@@ -243,6 +248,39 @@ public sealed class McpSweepAnalyzeResponseBudgetLiveTests
     }
 
     /* ---------------- seeding ---------------- */
+
+    /// <summary>Every scored wait type saturated for a four-hour window ending a minute ago, 40 blocking events,
+    /// six deadlocks and six regressed queries (the PLAN_REGRESSION finding carries five force-plan targets, the
+    /// finding's cap, the shape the issue measured at about 15 KB): about 44 KB of findings before any cut.
+    /// Returns the window's end.</summary>
+    private static async Task<DateTime> SeedManyFindingsAsync(NpgsqlDataSource postgres, string serverName, CancellationToken ct)
+    {
+        var serverId = ServerIdHelper.GetDeterministicHashCode(serverName);
+        var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+        var windowStart = windowEnd.AddHours(-4);
+        await using var connection = await postgres.OpenConnectionAsync(ct);
+        await RegisterServerAsync(connection, serverId, serverName, ct);
+        await PlantWaitAsync(connection, serverId, serverName, windowEnd.AddHours(-30), "OLD_WAIT", 1_000L, ct);
+        foreach (var waitType in ScoredWaitTypes)
+        {
+            await PlantWaitAsync(connection, serverId, serverName, windowStart, waitType, 0L, ct);
+            for (var i = 1; i <= 16; i++)
+                await PlantWaitAsync(connection, serverId, serverName, windowStart.AddMinutes(15 * i), waitType, 900_000L, ct);
+        }
+        for (var i = 0; i < 40; i++)
+            await PlantBlockingAsync(connection, serverId, serverName, windowStart.AddMinutes(3 + (i * 6)), 70 + i, ct);
+        for (var i = 0; i < 6; i++)
+            await PlantDeadlockAsync(connection, serverId, serverName, windowStart.AddMinutes(20 + (i * 30)), ct);
+        for (long q = 1; q <= 6; q++)
+        {
+            await PlantQueryStorePlanAsync(connection, serverId, serverName, q, planId: (q * 10) + 1, "0xCHEAP" + q, cpuUs: 100_000,
+                firstIntervalId: 1, lastExec: windowEnd.AddDays(-5), windowEnd, ct);
+            await PlantQueryStorePlanAsync(connection, serverId, serverName, q, planId: (q * 10) + 2, "0xCOSTLY" + q, cpuUs: 100_000 * (2 + (q / 2.0)),
+                firstIntervalId: 11, lastExec: windowEnd, windowEnd, ct);
+        }
+
+        return windowEnd;
+    }
 
     /// <summary>The wait types <c>FactScorer</c> grades, each one its own fact and its own story root.</summary>
     private static readonly string[] ScoredWaitTypes =
