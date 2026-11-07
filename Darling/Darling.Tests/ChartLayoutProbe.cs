@@ -329,6 +329,8 @@ internal static class ChartLayoutProbe
         ["LatchStatsChart"] = 5,
         ["SpinlockStatsChart"] = 5,
         ["CollectorDurationChart"] = 41,
+        ["SickSpinlocksChart"] = 6,
+        ["CpuComparisonChart"] = 2,
     };
 
     /// <summary>Fills a chart on the tab with <paramref name="series"/> made-up time series that have long names, and gives it the legend
