@@ -365,4 +365,71 @@ public sealed class FindQueriesByTextSampleIndexLiveTests
 
         Assert.Null(await SampleIndexValidAsync(data, ct));
     }
+    /// <summary>One budget covers the source: the sample statement runs under what the matched-digest read left of the 4 s, not the 4 s again. The
+    /// clock is injected (1.5 s spent), so the remainder is a fixed 2.5 s, and the hook reads it back from the sample statement's connection.</summary>
+    [Fact]
+    public async Task TheSampleStatement_RunsUnderWhatIsLeftOfTheBudget()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await FindQueriesByTextIndexScopeLiveTests.OpenScratchAsync(ct);
+        await using var data = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await CreateTrigramIndexByHandAsync(data, ct);
+        var tracker = new QueryTextTrigramIndexTracker();
+        tracker.Configure(true);
+        string? timeout = null;
+        var budget = new DarlingMcpFindQueriesByTextTools.SourceBudget(4000)
+        {
+            ElapsedClock = () => TimeSpan.FromMilliseconds(1500),
+            BeforeStatement = async (connection, transaction, token) =>
+            {
+                await using var setting = new NpgsqlCommand("SELECT current_setting('statement_timeout')", connection, transaction);
+                timeout = (string?)await setting.ExecuteScalarAsync(token);
+            },
+        };
+
+        var reply = JsonDocument.Parse(await DarlingMcpFindQueriesByTextTools.FindQueriesByText(
+            data, "orders_77 where", null, null, 20, McpDataDetail.Full, DarlingMcpFindQueriesByTextTools.SourceBudget.Default, budget, ct, tracker)).RootElement;
+
+        var planCache = reply.GetProperty("sources").GetProperty("plan_cache");
+        AssertProbe(planCache, 1);
+        Assert.Equal(2500, TimeoutMilliseconds(timeout));
+    }
+
+    /// <summary>A budget the matched-digest read spent leaves nothing for the sample statement: the source is stopped and the sample statement never runs.</summary>
+    [Fact]
+    public async Task ABudgetTheDigestReadSpent_StopsTheSource_BeforeTheSampleStatement()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await FindQueriesByTextIndexScopeLiveTests.OpenScratchAsync(ct);
+        await using var data = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await CreateTrigramIndexByHandAsync(data, ct);
+        var tracker = new QueryTextTrigramIndexTracker();
+        tracker.Configure(true);
+        var ran = false;
+        var budget = new DarlingMcpFindQueriesByTextTools.SourceBudget(4000)
+        {
+            ElapsedClock = () => TimeSpan.FromMilliseconds(4000),
+            BeforeStatement = (_, _, _) => { ran = true; return Task.CompletedTask; },
+        };
+
+        var reply = JsonDocument.Parse(await DarlingMcpFindQueriesByTextTools.FindQueriesByText(
+            data, "orders_77 where", null, null, 20, McpDataDetail.Full, DarlingMcpFindQueriesByTextTools.SourceBudget.Default, budget, ct, tracker)).RootElement;
+
+        var planCache = reply.GetProperty("sources").GetProperty("plan_cache");
+        Assert.Equal("stopped", planCache.GetProperty("status").GetString());
+        Assert.Equal(0, planCache.GetProperty("returned").GetInt32());
+        Assert.Empty(planCache.GetProperty("rows").EnumerateArray());
+        Assert.False(ran, "the sample statement ran with no budget left");
+    }
+
+    /// <summary><c>current_setting('statement_timeout')</c> comes back in the largest unit that divides it evenly ("2500ms", "4s").</summary>
+    private static int TimeoutMilliseconds(string? setting)
+    {
+        Assert.NotNull(setting);
+        var value = setting!;
+        if (value.EndsWith("ms", StringComparison.Ordinal)) return int.Parse(value[..^2], CultureInfo.InvariantCulture);
+        if (value.EndsWith("min", StringComparison.Ordinal)) return int.Parse(value[..^3], CultureInfo.InvariantCulture) * 60000;
+        if (value.EndsWith("s", StringComparison.Ordinal)) return int.Parse(value[..^1], CultureInfo.InvariantCulture) * 1000;
+        return int.Parse(value, CultureInfo.InvariantCulture);
+    }
 }

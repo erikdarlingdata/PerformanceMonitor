@@ -95,6 +95,14 @@ public sealed class DarlingMcpFindQueriesByTextTools
     internal sealed record SourceBudget(int Milliseconds, double TestDelaySeconds = 0)
     {
         public static SourceBudget Default { get; } = new(BudgetMilliseconds);
+
+        /// <summary>#7849 test seam: the clock the budget is spent against, as the time elapsed since the source's first statement could start. Null is
+        /// a real stopwatch. A test hands in a clock it sets by hand, so the remainder the sample statement runs under is a fixed number, not a race.</summary>
+        public Func<TimeSpan>? ElapsedClock { get; init; }
+
+        /// <summary>#7849 test seam: called on the source's connection, in its transaction, just before the statement that follows a read in the same
+        /// budget (the all-servers sample statement), once its <c>statement_timeout</c> is the remainder, so a test can read the setting back.</summary>
+        public Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task>? BeforeStatement { get; init; }
     }
 
     /// <summary>Query Store text. $1 server_id, $2 database or null, $3 the escaped pattern, $4 row cap + 1. The whole text comes back so the judge
@@ -598,16 +606,26 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
     /// <summary>What one source's read came to, before the reply names its horizon.</summary>
     private sealed record SourceOutcome<TRow>(string Status, string? Message, int Returned, bool Truncated, IReadOnlyList<TRow> Rows);
 
-    /// <summary>The source read with its statement chosen inside the transaction (#7849): <paramref name="choose"/> may read first, under the same
-    /// <c>statement_timeout</c>, and hand back the statement that fits what it found, or null when there is nothing left to read and the source is
-    /// empty. A read that runs out anywhere in it is <c>stopped</c>.</summary>
+    /// <summary>The source read with its statement chosen inside the transaction (#7849): <paramref name="choose"/> may read first, and hand back the
+    /// statement that fits what it found, or null when there is nothing left to read and the source is empty. One budget covers the source:
+    /// <c>statement_timeout</c> starts at the budget, and the statement that follows the read runs under what the read left of it, so the source
+    /// takes at most the budget before it is <c>stopped</c>, whichever statement runs out and even when the read spent it all.</summary>
     private static async Task<SourceOutcome<TRow>> RunSourceAsync<TRaw, TRow>(
         NpgsqlDataSource postgres, SourceBudget budget, int limit,
         Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<SourceStatement?>> choose,
         string stoppedAdvice, Func<NpgsqlDataReader, TRaw> read, Func<TRaw, TRow> shape, CancellationToken cancellationToken)
     {
         var rows = new List<TRaw>();
-        var started = DateTime.UtcNow;
+        var stopwatch = new System.Diagnostics.Stopwatch();
+        TimeSpan Elapsed() => budget.ElapsedClock?.Invoke() ?? stopwatch.Elapsed;
+        SourceOutcome<TRow> Stopped() => new(
+            "stopped",
+            $"Stopped after {Elapsed().TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture)} s: the {budget.Milliseconds / 1000.0:0.#} s budget for this source ran out before the search finished, "
+                + "so the rows below (none) are not a complete answer. "
+                + stoppedAdvice,
+            0,
+            false,
+            Array.Empty<TRow>());
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
@@ -618,6 +636,7 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
                 await set.ExecuteNonQueryAsync(cancellationToken);
             }
 
+            stopwatch.Start();
             if (budget.TestDelaySeconds > 0)
             {
                 var delaySql = "SELECT pg_sleep(" + budget.TestDelaySeconds.ToString(CultureInfo.InvariantCulture) + ")";
@@ -628,6 +647,23 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
             var statement = await choose(connection, transaction, cancellationToken);
             if (statement is not null)
             {
+                /* The statement after a read in this transaction gets what the read left of the budget, not the budget again. */
+                var remaining = budget.Milliseconds - (long)Elapsed().TotalMilliseconds;
+                if (remaining <= 0)
+                {
+                    return Stopped();
+                }
+
+                await using (var arm = new NpgsqlCommand("SET LOCAL statement_timeout = " + remaining.ToString(CultureInfo.InvariantCulture), connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
+                {
+                    await arm.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                if (budget.BeforeStatement is not null)
+                {
+                    await budget.BeforeStatement(connection, transaction, cancellationToken);
+                }
+
                 await using var command = new NpgsqlCommand(statement.Sql, connection, transaction);
                 command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
                 statement.Bind(command.Parameters);
@@ -641,15 +677,7 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.QueryCanceled)
         {
-            var seconds = (DateTime.UtcNow - started).TotalSeconds;
-            return new SourceOutcome<TRow>(
-                "stopped",
-                $"Stopped after {seconds.ToString("0.0", CultureInfo.InvariantCulture)} s: the {budget.Milliseconds / 1000.0:0.#} s budget for this source ran out before the search finished, "
-                    + "so the rows below (none) are not a complete answer. "
-                    + stoppedAdvice,
-                0,
-                false,
-                Array.Empty<TRow>());
+            return Stopped();
         }
 
         var truncated = rows.Count > limit;
