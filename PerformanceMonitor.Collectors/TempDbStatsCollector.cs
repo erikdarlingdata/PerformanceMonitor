@@ -161,13 +161,27 @@ OPTION(RECOMPILE);
    page it has allocated since it connected and the *_dealloc_page_count columns every page it has released, so the
    pages it holds now are the difference. The figure, the ranking and the sessions-using-tempdb count all take that
    difference, so a long-lived session that churns temp tables is measured by its hold, not by everything it has
-   ever allocated. */
+   ever allocated. A session is a consumer only while that difference is above zero: the pick filters on it, so a
+   server where no session holds pages returns no row here and the reader stores the no-row shape (session 0,
+   0.00 MB, 0 sessions) rather than some session at 0.00 MB, and the count takes the same filter. The difference
+   can read below zero for a moment while a release lands, so the figure is clamped at 0 the way the active query
+   snapshot clamps it. */
 SELECT /* PerformanceMonitorLite */ TOP (1)
     session_id = ssu.session_id,
-    tempdb_mb = CONVERT(decimal(18,2), ((ssu.user_objects_alloc_page_count - ssu.user_objects_dealloc_page_count) + (ssu.internal_objects_alloc_page_count - ssu.internal_objects_dealloc_page_count)) * 8 / 1024.0),
-    total_sessions = (SELECT COUNT_BIG(*) FROM sys.dm_db_session_space_usage WHERE (user_objects_alloc_page_count - user_objects_dealloc_page_count) + (internal_objects_alloc_page_count - internal_objects_dealloc_page_count) > 0)
+    tempdb_mb = CONVERT(decimal(18,2), CASE WHEN held.page_count < 0 THEN 0. ELSE held.page_count * 8 / 1024.0 END),
+    total_sessions =
+    (
+        SELECT COUNT_BIG(*)
+        FROM sys.dm_db_session_space_usage AS s
+        WHERE (s.user_objects_alloc_page_count - s.user_objects_dealloc_page_count) + (s.internal_objects_alloc_page_count - s.internal_objects_dealloc_page_count) > 0
+    )
 FROM sys.dm_db_session_space_usage AS ssu
-ORDER BY ((ssu.user_objects_alloc_page_count - ssu.user_objects_dealloc_page_count) + (ssu.internal_objects_alloc_page_count - ssu.internal_objects_dealloc_page_count)) DESC
+CROSS APPLY
+(
+    SELECT page_count = (ssu.user_objects_alloc_page_count - ssu.user_objects_dealloc_page_count) + (ssu.internal_objects_alloc_page_count - ssu.internal_objects_dealloc_page_count)
+) AS held
+WHERE held.page_count > 0
+ORDER BY held.page_count DESC
 OPTION(RECOMPILE);";
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
