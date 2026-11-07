@@ -229,7 +229,7 @@ public static partial class PgTargetScorer
         },
         new()
         {
-            Description = "ANOMALY_PG_BAD_ACTOR_SHARE fired for this statement — its share of the window is beyond its own hour-of-week normal",
+            Description = "ANOMALY_PG_BAD_ACTOR_SHARE fired for this statement: its share of the window is beyond its own hour-of-week normal",
             /* unmeasured: BadActorOwnNormalBoost, chosen, not measured — see its declaration. */
             Boost = BadActorOwnNormalBoost,
             Predicate = facts => OwnNormalAnomalyNames(facts, key),

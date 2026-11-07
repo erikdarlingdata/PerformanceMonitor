@@ -128,7 +128,7 @@ LIMIT 5000";
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))
         {
             _logger?.LogWarning(
-                "[PgPileupSnapshotReader] pileup window read failed for server {ServerId} — this sweep's evaluation is skipped, the next sweep re-reads: {Message}",
+                "[PgPileupSnapshotReader] pileup window read failed for server {ServerId}, this sweep's evaluation is skipped, the next sweep re-reads: {Message}",
                 serverId, ex.Message);
             rows.Clear();
         }

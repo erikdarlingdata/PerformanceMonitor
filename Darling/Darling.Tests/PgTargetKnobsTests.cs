@@ -519,7 +519,7 @@ public sealed class PgTargetKnobsTests
     {
         var knob = Config(PgTargetFactKeys.ConfigMaxWalSize, 1024);
         var quiet = PgTargetAdvice.Compose(PgTargetFactKeys.ConfigMaxWalSize, Lookup(knob))!;
-        Assert.Equal("max_wal_size is 1 GB — the shipped default", quiet.Headline);
+        Assert.Equal("max_wal_size is 1 GB: the shipped default", quiet.Headline);
         Assert.Contains("convention finding", quiet.Investigation, StringComparison.Ordinal);
         Assert.Contains("max_wal_size is 1 GB", quiet.Remediation, StringComparison.Ordinal);
 
@@ -545,7 +545,7 @@ public sealed class PgTargetKnobsTests
     {
         var knob = Config(PgTargetFactKeys.ConfigSharedBuffers, 128);
         var quiet = PgTargetAdvice.Compose(PgTargetFactKeys.ConfigSharedBuffers, Lookup(knob))!;
-        Assert.Equal("shared_buffers is 128 MB — the initdb default", quiet.Headline);
+        Assert.Equal("shared_buffers is 128 MB: the initdb default", quiet.Headline);
         Assert.Contains("convention finding", quiet.Investigation, StringComparison.Ordinal);
         Assert.Contains("quarter of the host's RAM", quiet.Remediation, StringComparison.Ordinal);
         Assert.Contains("restart", quiet.Remediation, StringComparison.Ordinal);
@@ -576,14 +576,14 @@ public sealed class PgTargetKnobsTests
         /* PG 15 stock: no pg_stat_io. */
         var pg15 = Scored(Buffer(missShare: 0.20, blocksPerSec: 800, evictionsTracked: false, turnoversPerHour: null, bgwriterTracked: true, haltShare: 0.05));
         var advice15 = PgTargetAdvice.Compose(PgTargetFactKeys.BufferCachePressure, Lookup(pg15))!;
-        Assert.StartsWith("Buffer cache under pressure — 20 % of block requests left shared_buffers", advice15.Headline, StringComparison.Ordinal);
+        Assert.StartsWith("Buffer cache under pressure: 20 % of block requests left shared_buffers", advice15.Headline, StringComparison.Ordinal);
         Assert.Contains("pg_stat_io arrived in PostgreSQL 16", advice15.Investigation, StringComparison.Ordinal);
         Assert.Contains("rests on the hit ratio and the bgwriter only", advice15.Investigation, StringComparison.Ordinal);
 
         /* Aurora 16: hit ratio stated, not graded; evictions carry the headline. */
         var aurora = Scored(Buffer(missShare: 0.40, blocksPerSec: 800, suppressed: true, evictionsTracked: true, turnoversPerHour: 3.0));
         var adviceAurora = PgTargetAdvice.Compose(PgTargetFactKeys.BufferCachePressure, Lookup(aurora))!;
-        Assert.StartsWith("Buffer cache under pressure — shared_buffers turned over 3 times per hour", adviceAurora.Headline, StringComparison.Ordinal);
+        Assert.StartsWith("Buffer cache under pressure: shared_buffers turned over 3 times per hour", adviceAurora.Headline, StringComparison.Ordinal);
         Assert.Contains("not graded on Aurora", adviceAurora.Investigation, StringComparison.Ordinal);
         Assert.Contains("40 % were served from outside shared_buffers", adviceAurora.Investigation, StringComparison.Ordinal);
 
@@ -599,9 +599,9 @@ public sealed class PgTargetKnobsTests
     [Fact]
     public void TheConventionCards_StateTheValueRead_AndTheStaticShapeNamesTheDefault()
     {
-        Assert.Equal("effective_cache_size is 4 GB — the compiled default",
+        Assert.Equal("effective_cache_size is 4 GB: the compiled default",
             PgTargetAdvice.Compose(PgTargetFactKeys.ConfigEffectiveCacheSize, Lookup(Config(PgTargetFactKeys.ConfigEffectiveCacheSize, 4096)))!.Headline);
-        Assert.Equal("random_page_cost is 4.0 — the spinning-disk default",
+        Assert.Equal("random_page_cost is 4.0: the spinning-disk default",
             PgTargetAdvice.Compose(PgTargetFactKeys.ConfigRandomPageCost, Lookup(Config(PgTargetFactKeys.ConfigRandomPageCost, 4.0)))!.Headline);
         Assert.Equal("random_page_cost is 1.1",
             PgTargetAdvice.Compose(PgTargetFactKeys.ConfigRandomPageCost, Lookup(Config(PgTargetFactKeys.ConfigRandomPageCost, 1.1)))!.Headline);
@@ -792,10 +792,10 @@ public sealed class PgTargetKnobsTests
 
                 var sharedBuffers = findings.Single(f => f.GetProperty("root_fact").GetProperty("key").GetString() == PgTargetFactKeys.ConfigSharedBuffers);
                 Assert.Equal(128, sharedBuffers.GetProperty("root_fact").GetProperty("value").GetDouble(), precision: 6);
-                Assert.Equal("shared_buffers is 128 MB — the initdb default", sharedBuffers.GetProperty("advice").GetProperty("headline").GetString());
+                Assert.Equal("shared_buffers is 128 MB: the initdb default", sharedBuffers.GetProperty("advice").GetProperty("headline").GetString());
                 var maxWal = findings.Single(f => f.GetProperty("root_fact").GetProperty("key").GetString() == PgTargetFactKeys.ConfigMaxWalSize);
                 Assert.Equal(1024, maxWal.GetProperty("root_fact").GetProperty("value").GetDouble(), precision: 6);
-                Assert.Equal("max_wal_size is 1 GB — the shipped default", maxWal.GetProperty("advice").GetProperty("headline").GetString());
+                Assert.Equal("max_wal_size is 1 GB: the shipped default", maxWal.GetProperty("advice").GetProperty("headline").GetString());
             }
 
             /* ── the churning target: PG_CHECKPOINT_PRESSURE → CONFIG_PG_MAX_WAL_SIZE with the measured numbers. */
@@ -812,7 +812,7 @@ public sealed class PgTargetKnobsTests
                 Assert.Equal(PgTargetFactKeys.ConfigMaxWalSize, story.GetProperty("leaf_fact").GetProperty("key").GetString());
 
                 var advice = story.GetProperty("advice");
-                Assert.Equal("Checkpoints are being forced by WAL volume — 240 of 240 checkpoints (100 %) were requested, not timed", advice.GetProperty("headline").GetString());
+                Assert.Equal("Checkpoints are being forced by WAL volume: 240 of 240 checkpoints (100 %) were requested, not timed", advice.GetProperty("headline").GetString());
                 var investigation = advice.GetProperty("investigation").GetString()!;
                 Assert.Contains("240 requested", investigation, StringComparison.Ordinal);
                 Assert.Contains("0 timed", investigation, StringComparison.Ordinal);

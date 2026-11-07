@@ -23,7 +23,7 @@ internal static class FinOpsRollupRouting
         if (string.Equals(routed, sql, StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
-                $"FinOps {what} CAGG routing found nothing to replace — its raw fragment has drifted from the SQL (#1661).");
+                $"FinOps {what} CAGG routing found nothing to replace: its raw fragment has drifted from the SQL (#1661).");
         }
 
         return routed;

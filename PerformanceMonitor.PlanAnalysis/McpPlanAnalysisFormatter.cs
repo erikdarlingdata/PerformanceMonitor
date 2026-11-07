@@ -105,7 +105,7 @@ public static class McpPlanAnalysisFormatter
     /// honesty ("corroboration, with caveats"); <c>impact_basis</c> — the real A15/A16 item, an unlabelled
     /// statement-scoped percent — stays.</para>
     /// </summary>
-    public const string MissingIndexCaveat = "Missing-index requests are weak evidence: uses are plan-cache-bounded and \"impact\" is one operator's estimated cost. A request corroborates a measured-slow plan; it never drives a finding. Any new index can regress other statements and adds write cost — test it.";
+    public const string MissingIndexCaveat = "Missing-index requests are weak evidence: uses are plan-cache-bounded and \"impact\" is one operator's estimated cost. A request corroborates a measured-slow plan; it never drives a finding. Any new index can regress other statements and adds write cost: test it.";
 
     /// <summary>
     /// Parses plan XML, runs the analyzer, and builds a structured JSON result.

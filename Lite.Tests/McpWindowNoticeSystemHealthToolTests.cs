@@ -507,7 +507,7 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
         var root = Root(await CallAsync(tool));
 
         AssertCovered(root.GetProperty("hints"), WindowStart);
-        Assert.EndsWith(", so nothing happened in this window — widen hours_back to reach the most recent events.", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        Assert.EndsWith(", so nothing happened in this window: widen hours_back to reach the most recent events.", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
     }
 
     /// <summary>The tool's type was captured before the window and not in it (the second rung): the keys say nothing in the window was read.</summary>

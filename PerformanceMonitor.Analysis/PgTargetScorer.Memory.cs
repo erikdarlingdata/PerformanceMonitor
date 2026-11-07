@@ -247,14 +247,14 @@ public static partial class PgTargetScorer
                 [
                     new AmplifierDefinition
                     {
-                        Description = "PG_HOST_MEMORY_PRESSURE co-fires — the host's reclaimable memory is measurably short, so the configured worst case is being felt",
+                        Description = "PG_HOST_MEMORY_PRESSURE co-fires: the host's reclaimable memory is measurably short, so the configured worst case is being felt",
                         /* unmeasured: KnobCoFireBoost (see PgTargetScorer.Write.cs) — 0.4 × 1.25 = 0.5, the D5 line. */
                         Boost = KnobCoFireBoost,
                         Predicate = PressureFired,
                     },
                     new AmplifierDefinition
                     {
-                        Description = "PG_TEMP_SPILL co-fires — sorts and hashes are already spilling past work_mem, so the per-backend term is real, not a ceiling",
+                        Description = "PG_TEMP_SPILL co-fires: sorts and hashes are already spilling past work_mem, so the per-backend term is real, not a ceiling",
                         /* unmeasured: KnobCoFireBoost (see PgTargetScorer.Write.cs) — 0.4 × 1.25 = 0.5, the D5 line. */
                         Boost = KnobCoFireBoost,
                         Predicate = SpillFired,
@@ -275,7 +275,7 @@ public static partial class PgTargetScorer
                 [
                     new AmplifierDefinition
                     {
-                        Description = "CONFIG_PG_MEMORY_OVERCOMMIT fired — the configured worst case exceeds this host, and the arithmetic predicted the shortage",
+                        Description = "CONFIG_PG_MEMORY_OVERCOMMIT fired: the configured worst case exceeds this host, and the arithmetic predicted the shortage",
                         /* unmeasured: HostMemoryCauseBoost (see the constant). */
                         Boost = HostMemoryCauseBoost,
                         Predicate = facts => facts.TryGetValue(PgTargetFactKeys.ConfigMemoryOvercommit, out var sum) && sum.BaseSeverity > 0,

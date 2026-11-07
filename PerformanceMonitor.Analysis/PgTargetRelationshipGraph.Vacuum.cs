@@ -58,52 +58,52 @@ public sealed partial class PgTargetRelationshipGraph
     {
         /* wraparound ↔ backlog: the forced freeze vacuum queues behind tables autovacuum is already losing. */
         AddEdge(PgTargetFactKeys.WraparoundTrend, PgTargetFactKeys.AutovacuumBacklog, VacuumCategory,
-            "PG_AUTOVACUUM_BACKLOG fired — tables are persistently past their own trigger line, so the forced anti-wraparound vacuum queues behind work autovacuum is already losing",
+            "PG_AUTOVACUUM_BACKLOG fired: tables are persistently past their own trigger line, so the forced anti-wraparound vacuum queues behind work autovacuum is already losing",
             facts => Fired(facts, PgTargetFactKeys.AutovacuumBacklog));
         AddEdge(PgTargetFactKeys.AutovacuumBacklog, PgTargetFactKeys.WraparoundTrend, VacuumCategory,
-            "PG_WRAPAROUND_TREND fired — the backlog is already showing as a freeze age at or past the engine's own line",
+            "PG_WRAPAROUND_TREND fired: the backlog is already showing as a freeze age at or past the engine's own line",
             facts => Fired(facts, PgTargetFactKeys.WraparoundTrend));
 
         /* backlog ↔ hold: dead tuples newer than the held horizon are unremovable, however often autovacuum runs. */
         AddEdge(PgTargetFactKeys.AutovacuumBacklog, PgTargetFactKeys.XminHold, VacuumCategory,
-            "PG_XMIN_HOLD fired — dead tuples newer than the held horizon are unremovable, so the backlog cannot clear however often autovacuum runs",
+            "PG_XMIN_HOLD fired: dead tuples newer than the held horizon are unremovable, so the backlog cannot clear however often autovacuum runs",
             facts => Fired(facts, PgTargetFactKeys.XminHold));
         AddEdge(PgTargetFactKeys.XminHold, PgTargetFactKeys.AutovacuumBacklog, VacuumCategory,
-            "PG_AUTOVACUUM_BACKLOG fired — the damage the hold is doing: tables past their line and staying there",
+            "PG_AUTOVACUUM_BACKLOG fired, the damage the hold is doing: tables past their line and staying there",
             facts => Fired(facts, PgTargetFactKeys.AutovacuumBacklog));
 
         /* wraparound ↔ hold: a held horizon stops freezing outright — VACUUM freezes only what is older than it. */
         AddEdge(PgTargetFactKeys.WraparoundTrend, PgTargetFactKeys.XminHold, VacuumCategory,
-            "PG_XMIN_HOLD fired — a held horizon stops freezing outright, so the forced vacuum cannot advance relfrozenxid past the holder",
+            "PG_XMIN_HOLD fired: a held horizon stops freezing outright, so the forced vacuum cannot advance relfrozenxid past the holder",
             facts => Fired(facts, PgTargetFactKeys.XminHold));
         AddEdge(PgTargetFactKeys.XminHold, PgTargetFactKeys.WraparoundTrend, VacuumCategory,
-            "PG_WRAPAROUND_TREND fired — the held horizon is already showing as a freeze age autovacuum cannot bring down",
+            "PG_WRAPAROUND_TREND fired: the held horizon is already showing as a freeze age autovacuum cannot bring down",
             facts => Fired(facts, PgTargetFactKeys.WraparoundTrend));
 
         /* config leaves under the backlog. */
         AddEdge(PgTargetFactKeys.AutovacuumBacklog, PgTargetFactKeys.ConfigAutovacuumOff, VacuumCategory,
-            "CONFIG_PG_AUTOVACUUM_OFF — autovacuum is off server-wide; the backlog is by configuration",
+            "CONFIG_PG_AUTOVACUUM_OFF: autovacuum is off server-wide; the backlog is by configuration",
             facts => Fired(facts, PgTargetFactKeys.ConfigAutovacuumOff));
         AddEdge(PgTargetFactKeys.AutovacuumBacklog, PgTargetFactKeys.ConfigMaintWorkMem, VacuumCategory,
-            "CONFIG_PG_MAINT_WORK_MEM — the dead-tuple memory each autovacuum pass may use bounds how much of the backlog one run can clear",
+            "CONFIG_PG_MAINT_WORK_MEM: the dead-tuple memory each autovacuum pass may use bounds how much of the backlog one run can clear",
             facts => Fired(facts, PgTargetFactKeys.ConfigMaintWorkMem));
 
         /* the per-table disable ↔ the backlog it causes (#3691 step 22): both directions, gated on the SAME table. */
         AddEdge(PgTargetFactKeys.AutovacuumBacklog, PgTargetFactKeys.ConfigAutovacuumDisabled, VacuumCategory,
-            "CONFIG_PG_AUTOVACUUM_DISABLED — this table has autovacuum_enabled = off; the engine computed the line and was told not to act on it",
+            "CONFIG_PG_AUTOVACUUM_DISABLED: this table has autovacuum_enabled = off; the engine computed the line and was told not to act on it",
             facts => Fired(facts, PgTargetFactKeys.ConfigAutovacuumDisabled)
                 && SameTable(facts, PgTargetFactKeys.AutovacuumBacklog, PgTargetFactKeys.ConfigAutovacuumDisabled));
         AddEdge(PgTargetFactKeys.ConfigAutovacuumDisabled, PgTargetFactKeys.AutovacuumBacklog, VacuumCategory,
-            "PG_AUTOVACUUM_BACKLOG fired on the same table — the damage the reloption is doing: past its own line and staying there",
+            "PG_AUTOVACUUM_BACKLOG fired on the same table, the damage the reloption is doing: past its own line and staying there",
             facts => Fired(facts, PgTargetFactKeys.AutovacuumBacklog)
                 && SameTable(facts, PgTargetFactKeys.AutovacuumBacklog, PgTargetFactKeys.ConfigAutovacuumDisabled));
 
         /* server-wide off ↔ per-table off: the launcher being off subsumes the reloption. */
         AddEdge(PgTargetFactKeys.ConfigAutovacuumOff, PgTargetFactKeys.ConfigAutovacuumDisabled, VacuumCategory,
-            "CONFIG_PG_AUTOVACUUM_DISABLED — a table with its own reloption off, moot while the launcher is off server-wide; the server setting subsumes it",
+            "CONFIG_PG_AUTOVACUUM_DISABLED: a table with its own reloption off, moot while the launcher is off server-wide; the server setting subsumes it",
             facts => Fired(facts, PgTargetFactKeys.ConfigAutovacuumDisabled));
         AddEdge(PgTargetFactKeys.ConfigAutovacuumDisabled, PgTargetFactKeys.ConfigAutovacuumOff, VacuumCategory,
-            "CONFIG_PG_AUTOVACUUM_OFF fired — autovacuum is off server-wide as well, so re-enabling the table alone changes nothing until the launcher runs",
+            "CONFIG_PG_AUTOVACUUM_OFF fired: autovacuum is off server-wide as well, so re-enabling the table alone changes nothing until the launcher runs",
             facts => Fired(facts, PgTargetFactKeys.ConfigAutovacuumOff));
     }
 

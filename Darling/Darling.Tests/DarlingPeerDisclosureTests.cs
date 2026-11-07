@@ -440,8 +440,8 @@ public sealed class DarlingPeerDisclosureTests
         var text = DarlingMcpInstructions.Build(TwoPeers());
 
         Assert.Contains(Use1Covers, text, StringComparison.Ordinal);
-        Assert.Contains("prod-sql-use2-monitor-01 — the readable replicas", text, StringComparison.Ordinal);
-        Assert.Contains("prod-sql-pg-monitor-01 — the Aurora PostgreSQL clusters", text, StringComparison.Ordinal);
+        Assert.Contains("prod-sql-use2-monitor-01: the readable replicas", text, StringComparison.Ordinal);
+        Assert.Contains("prod-sql-pg-monitor-01: the Aurora PostgreSQL clusters", text, StringComparison.Ordinal);
 
         /* The point of the section is that a peer is NAMED, never contacted — say so where the agent will
            read it, or it will try to route a query at the sibling. */
@@ -650,7 +650,7 @@ public sealed class DarlingPeerDisclosureTests
             new[] { Registered("prod-sql-use1-beta-01") }, "prod-sql-use2-beta-01", overlapping);
 
         var sentence = Sentence(error);
-        Assert.Contains("these peer stores: box2 — the replicas; box3 — the archive replicas", sentence, StringComparison.Ordinal);
+        Assert.Contains("these peer stores: box2: the replicas; box3: the archive replicas", sentence, StringComparison.Ordinal);
         Assert.Contains("Those are SEPARATE Darling stores", sentence, StringComparison.Ordinal);
         Assert.DoesNotContain("That is a SEPARATE Darling store", sentence, StringComparison.Ordinal);
     }
@@ -692,7 +692,7 @@ public sealed class DarlingPeerDisclosureTests
                 new[] { Registered("prod-sql-use1-beta-01") },
                 "prod-sql-use2-beta-01");
 
-            Assert.Contains("peer store box2 — the replicas", Sentence(error), StringComparison.Ordinal);
+            Assert.Contains("peer store box2: the replicas", Sentence(error), StringComparison.Ordinal);
         }
         finally
         {

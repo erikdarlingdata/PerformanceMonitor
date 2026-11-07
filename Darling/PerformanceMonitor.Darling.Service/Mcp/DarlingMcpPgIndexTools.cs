@@ -149,7 +149,7 @@ public sealed class DarlingMcpPgIndexTools
                     "empty",
                     $"No index bloat rows for {resolved.DisplayName} in the last {hours_back} "
                     + "hour(s). This collector runs DAILY, so a window shorter than a day can be empty "
-                    + "on a perfectly healthy server — widen it before concluding anything. "
+                    + "on a perfectly healthy server: widen it before concluding anything. "
                     + coverage.Message), cancellationToken, windowEnd.AddHours(-hours_back));
             }
 
@@ -335,17 +335,17 @@ public sealed class DarlingMcpPgIndexTools
                      + "read. Measured against pgstatindex ground truth on a live 2,500-index target, "
                      + "median absolute error is 2.79 percentage points and p90 is 6.63, which is close "
                      + "enough to decide WHICH index to act on and not close enough to justify a REINDEX "
-                     + "on its own — use exact_measurement_command for that, on the one index concerned. "
+                     + "on its own: use exact_measurement_command for that, on the one index concerned. "
                      + "Rank on estimated_reclaimable_bytes and never on a percentage: a small index at a "
                      + "terrible density is worth kilobytes. Rows carrying a skipped_reason have NO "
                      + "answer, never a clean one, and the reason separates the remediable from the "
                      + "structural: a never-analyzed parent needs an ANALYZE and invisible column widths "
                      + "need the pg_read_all_data grant, while PARTIAL and DEDUPLICATED indexes cannot be "
-                     + "modelled at any grant or statistics freshness — PostgreSQL 13+ stores duplicate "
+                     + "modelled at any grant or statistics freshness, PostgreSQL 13+ stores duplicate "
                      + "keys once in a posting list, so real storage is denser than per-tuple arithmetic "
                      + "can predict and a correct model still over-predicts. Those are exactly what the "
                      + "exact function is for. This census has no size floor, so it counts MORE indexes "
-                     + "than get_pg_index_usage, which floors at 64 kB — the difference is that floor and "
+                     + "than get_pg_index_usage, which floors at 64 kB: the difference is that floor and "
                      + "nothing else."
                      + (measured > 0
                          ? $" {measured} of the {rows.Count} row(s) returned are older pgstatindex "
@@ -359,7 +359,7 @@ public sealed class DarlingMcpPgIndexTools
                      + (empty > 0
                          ? $" {empty} row(s) have NO skipped_reason and a null avg_leaf_density: those "
                            + "indexes are EMPTY. pgstatindex has no leaf pages to derive a density from, so "
-                           + "there is no density to report — the measurement succeeded and found nothing, "
+                           + "there is no density to report: the measurement succeeded and found nothing, "
                            + "which is why estimated_reclaimable_bytes is 0 rather than null."
                          : string.Empty)
                      + (truncated
@@ -500,7 +500,7 @@ public sealed class DarlingMcpPgIndexTools
                    partial-coverage answer in a form it can branch on. */
                 coverage = coverage.Arm.ToString(),
                 note = "n_distinct is a RATIO of table rows when negative and an absolute count when "
-                     + "positive — check the sign before comparing two columns. correlation near ±1 is "
+                     + "positive: check the sign before comparing two columns. correlation near ±1 is "
                      + "what makes an index range scan cheap. A null common_value_count means the column "
                      + "has no most-common-value list at all, not that the list is empty. "
                      + (truncated

@@ -1234,13 +1234,13 @@ public class FactScorer
             });
         }
 
-        Sibling("ANOMALY_SESSION_SPIKE", "Session-count anomaly co-fired — the surge is visible in connections too");
-        Sibling("ANOMALY_BATCH_REQUESTS", "Batch-request anomaly co-fired — the surge is visible in throughput too");
-        Sibling("ANOMALY_CPU_SPIKE", "CPU anomaly co-fired — the surge is consuming CPU far above this server's norm");
-        Sibling("ANOMALY_QUERY_DURATION", "Query-duration anomaly co-fired — the surge is slowing queries");
+        Sibling("ANOMALY_SESSION_SPIKE", "Session-count anomaly co-fired: the surge is visible in connections too");
+        Sibling("ANOMALY_BATCH_REQUESTS", "Batch-request anomaly co-fired: the surge is visible in throughput too");
+        Sibling("ANOMALY_CPU_SPIKE", "CPU anomaly co-fired: the surge is consuming CPU far above this server's norm");
+        Sibling("ANOMALY_QUERY_DURATION", "Query-duration anomaly co-fired: the surge is slowing queries");
         amplifiers.Add(new()
         {
-            Description = "SQL Server CPU >= 80% — the surge is consuming real CPU, not just moving a counter",
+            Description = "SQL Server CPU >= 80%: the surge is consuming real CPU, not just moving a counter",
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue("CPU_SQL_PERCENT", out var cpu) && cpu.Value >= 80
         });
@@ -1257,25 +1257,25 @@ public class FactScorer
     [
         new()
         {
-            Description = "Read latency at the absolute concerning bar — slow for any server, not only against this baseline",
+            Description = "Read latency at the absolute concerning bar: slow for any server, not only against this baseline",
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue("IO_READ_LATENCY_MS", out var io) && io.BaseSeverity >= 0.5
         },
         new()
         {
-            Description = "Wait-profile anomaly co-fired — queries are waiting on the slow reads",
+            Description = "Wait-profile anomaly co-fired: queries are waiting on the slow reads",
             Boost = 0.3,
             Predicate = facts => AnomalyCoFired(facts, "ANOMALY_WAIT_PROFILE")
         },
         new()
         {
-            Description = "Write-latency anomaly co-fired — the storage path is slow in both directions",
+            Description = "Write-latency anomaly co-fired: the storage path is slow in both directions",
             Boost = 0.3,
             Predicate = facts => AnomalyCoFired(facts, "ANOMALY_WRITE_LATENCY")
         },
         new()
         {
-            Description = "PAGEIOLATCH waits elevated — buffer pool misses confirm the read pressure",
+            Description = "PAGEIOLATCH waits elevated: buffer pool misses confirm the read pressure",
             Boost = 0.2,
             Predicate = facts => HasSignificantWait(facts, "PAGEIOLATCH_SH", 0.10)
                               || HasSignificantWait(facts, "PAGEIOLATCH_EX", 0.10)
@@ -1291,25 +1291,25 @@ public class FactScorer
     [
         new()
         {
-            Description = "Write latency at the absolute concerning bar — slow for any server, not only against this baseline",
+            Description = "Write latency at the absolute concerning bar: slow for any server, not only against this baseline",
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue("IO_WRITE_LATENCY_MS", out var io) && io.BaseSeverity >= 0.5
         },
         new()
         {
-            Description = "Wait-profile anomaly co-fired — queries are waiting on the slow writes",
+            Description = "Wait-profile anomaly co-fired: queries are waiting on the slow writes",
             Boost = 0.3,
             Predicate = facts => AnomalyCoFired(facts, "ANOMALY_WAIT_PROFILE")
         },
         new()
         {
-            Description = "Read-latency anomaly co-fired — the storage path is slow in both directions",
+            Description = "Read-latency anomaly co-fired: the storage path is slow in both directions",
             Boost = 0.3,
             Predicate = facts => AnomalyCoFired(facts, "ANOMALY_READ_LATENCY")
         },
         new()
         {
-            Description = "WRITELOG waits elevated — transaction log I/O confirms the write pressure",
+            Description = "WRITELOG waits elevated: transaction log I/O confirms the write pressure",
             Boost = 0.2,
             Predicate = facts => HasSignificantWait(facts, "WRITELOG", 0.05)
         }
@@ -1324,31 +1324,31 @@ public class FactScorer
     [
         new()
         {
-            Description = "Read-latency anomaly co-fired — the wait shift is storage-bound",
+            Description = "Read-latency anomaly co-fired: the wait shift is storage-bound",
             Boost = 0.3,
             Predicate = facts => AnomalyCoFired(facts, "ANOMALY_READ_LATENCY")
         },
         new()
         {
-            Description = "Write-latency anomaly co-fired — the wait shift is log/storage-bound",
+            Description = "Write-latency anomaly co-fired: the wait shift is log/storage-bound",
             Boost = 0.3,
             Predicate = facts => AnomalyCoFired(facts, "ANOMALY_WRITE_LATENCY")
         },
         new()
         {
-            Description = "Query-duration anomaly co-fired — the waits are landing on user queries",
+            Description = "Query-duration anomaly co-fired: the waits are landing on user queries",
             Boost = 0.3,
             Predicate = facts => AnomalyCoFired(facts, "ANOMALY_QUERY_DURATION")
         },
         new()
         {
-            Description = "CPU anomaly co-fired — a load surge is driving the wait shift",
+            Description = "CPU anomaly co-fired: a load surge is driving the wait shift",
             Boost = 0.2,
             Predicate = facts => AnomalyCoFired(facts, "ANOMALY_CPU_SPIKE")
         },
         new()
         {
-            Description = "Session-count anomaly co-fired — a connection surge is driving the wait shift",
+            Description = "Session-count anomaly co-fired: a connection surge is driving the wait shift",
             Boost = 0.2,
             Predicate = facts => AnomalyCoFired(facts, "ANOMALY_SESSION_SPIKE")
         }
@@ -1364,32 +1364,32 @@ public class FactScorer
     [
         new()
         {
-            Description = "Memory-pressure notifications present — the engine itself is reporting pressure",
+            Description = "Memory-pressure notifications present: the engine itself is reporting pressure",
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue("MEMORY_PRESSURE_EVENTS", out var mp) && mp.BaseSeverity > 0
         },
         new()
         {
-            Description = "Memory grant waiters present — grants competing for the same memory",
+            Description = "Memory grant waiters present: grants competing for the same memory",
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue("MEMORY_GRANT_PENDING", out var mg) && mg.Value >= 1
         },
         new()
         {
-            Description = "RESOURCE_SEMAPHORE waits present — grant pressure visible in wait stats",
+            Description = "RESOURCE_SEMAPHORE waits present: grant pressure visible in wait stats",
             Boost = 0.2,
             Predicate = facts => facts.TryGetValue("RESOURCE_SEMAPHORE", out var rs) && ClearsRootBar(rs)
         },
         new()
         {
-            Description = "PAGEIOLATCH waits elevated — buffer pool churning under the pressure",
+            Description = "PAGEIOLATCH waits elevated: buffer pool churning under the pressure",
             Boost = 0.2,
             Predicate = facts => HasSignificantWait(facts, "PAGEIOLATCH_SH", 0.10)
                               || HasSignificantWait(facts, "PAGEIOLATCH_EX", 0.10)
         },
         new()
         {
-            Description = "Read-latency anomaly co-fired — the churn is reaching storage",
+            Description = "Read-latency anomaly co-fired: the churn is reaching storage",
             Boost = 0.2,
             Predicate = facts => AnomalyCoFired(facts, "ANOMALY_READ_LATENCY")
         }
@@ -1403,14 +1403,14 @@ public class FactScorer
     [
         new()
         {
-            Description = "Three or more sensitive plans — systemic parameter-sniffing problem",
+            Description = "Three or more sensitive plans: systemic parameter-sniffing problem",
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue("PARAMETER_SENSITIVITY", out var f)
                               && f.Metadata.GetValueOrDefault("offender_count") >= 3
         },
         new()
         {
-            Description = "Memory grant varies with the plan — classic sniffing fingerprint",
+            Description = "Memory grant varies with the plan: classic sniffing fingerprint",
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue("PARAMETER_SENSITIVITY", out var f)
                               && f.Metadata.GetValueOrDefault("grant_divergence") > 0
@@ -1424,7 +1424,7 @@ public class FactScorer
         },
         new()
         {
-            Description = "Memory grant pressure present — sensitive plans competing for grants",
+            Description = "Memory grant pressure present: sensitive plans competing for grants",
             Boost = 0.2,
             Predicate = facts => facts.TryGetValue("MEMORY_GRANT_PENDING", out var f) && f.BaseSeverity > 0
         }
@@ -1438,7 +1438,7 @@ public class FactScorer
     [
         new()
         {
-            Description = "Three or more regressed queries — systemic plan-choice instability",
+            Description = "Three or more regressed queries: systemic plan-choice instability",
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue("PLAN_REGRESSION", out var f)
                               && f.Metadata.GetValueOrDefault("offender_count") >= 3
@@ -1453,13 +1453,13 @@ public class FactScorer
         },
         new()
         {
-            Description = "CPU spike present — regressed plan likely driving it",
+            Description = "CPU spike present: regressed plan likely driving it",
             Boost = 0.25,
             Predicate = facts => facts.TryGetValue("CPU_SPIKE", out var f) && ClearsRootBar(f)
         },
         new()
         {
-            Description = "SQL Server CPU elevated — regressed plan contributing",
+            Description = "SQL Server CPU elevated: regressed plan contributing",
             Boost = 0.2,
             Predicate = facts => facts.TryGetValue("CPU_SQL_PERCENT", out var f) && ClearsRootBar(f)
         }
@@ -1473,19 +1473,19 @@ public class FactScorer
     [
         new()
         {
-            Description = "CXPACKET significant — parallelism consuming schedulers",
+            Description = "CXPACKET significant: parallelism consuming schedulers",
             Boost = 0.2,
             Predicate = facts => HasSignificantWait(facts, "CXPACKET", 0.10)
         },
         new()
         {
-            Description = "THREADPOOL waits present — escalating to thread exhaustion",
+            Description = "THREADPOOL waits present: escalating to thread exhaustion",
             Boost = 0.3,
             Predicate = facts => facts.ContainsKey("THREADPOOL") && facts["THREADPOOL"].BaseSeverity > 0
         },
         new()
         {
-            Description = "SQL Server CPU > 80% — confirmed CPU saturation",
+            Description = "SQL Server CPU > 80%: confirmed CPU saturation",
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue("CPU_SQL_PERCENT", out var cpu) && cpu.Value >= 80
         }
@@ -1499,31 +1499,31 @@ public class FactScorer
     [
         new()
         {
-            Description = "SOS_SCHEDULER_YIELD high — CPU starvation from parallelism",
+            Description = "SOS_SCHEDULER_YIELD high: CPU starvation from parallelism",
             Boost = 0.3,
             Predicate = facts => HasSignificantWait(facts, "SOS_SCHEDULER_YIELD", 0.25)
         },
         new()
         {
-            Description = "THREADPOOL waits present — thread exhaustion cascade",
+            Description = "THREADPOOL waits present: thread exhaustion cascade",
             Boost = 0.4,
             Predicate = facts => facts.ContainsKey("THREADPOOL") && facts["THREADPOOL"].BaseSeverity > 0
         },
         new()
         {
-            Description = "CTFP at default (5) — too low for most workloads",
+            Description = "CTFP at default (5): too low for most workloads",
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue("CONFIG_CTFP", out var ctfp) && ctfp.Value <= 5
         },
         new()
         {
-            Description = "MAXDOP at 0 — unlimited parallelism",
+            Description = "MAXDOP at 0: unlimited parallelism",
             Boost = 0.2,
             Predicate = facts => facts.TryGetValue("CONFIG_MAXDOP", out var maxdop) && maxdop.Value == 0
         },
         new()
         {
-            Description = "Queries running with DOP > 8 — excessive parallelism confirmed",
+            Description = "Queries running with DOP > 8: excessive parallelism confirmed",
             Boost = 0.2,
             Predicate = facts => facts.TryGetValue("QUERY_HIGH_DOP", out var dop) && dop.BaseSeverity > 0
         }
@@ -1542,20 +1542,20 @@ public class FactScorer
     [
         new()
         {
-            Description = "CXPACKET significant — parallel queries consuming thread pool",
+            Description = "CXPACKET significant: parallel queries consuming thread pool",
             Boost = 0.5,
             Predicate = facts => HasSignificantWait(facts, "CXPACKET", 0.10)
         },
         new()
         {
-            Description = "Runnable-task queue backed up — schedulers under real CPU pressure",
+            Description = "Runnable-task queue backed up: schedulers under real CPU pressure",
             Boost = 0.5,
             Predicate = facts => facts.TryGetValue("RUNNABLE_TASKS", out var rt)
                               && rt.Metadata.GetValueOrDefault("runnable_tasks_warning") >= 1.0
         },
         new()
         {
-            Description = "Lock contention present — blocked queries holding worker threads",
+            Description = "Lock contention present: blocked queries holding worker threads",
             Boost = 0.3,
             Predicate = facts => facts.ContainsKey("LCK") && facts["LCK"].BaseSeverity >= 0.5
         }
@@ -1569,19 +1569,19 @@ public class FactScorer
     [
         new()
         {
-            Description = "SOS_SCHEDULER_YIELD elevated — CPU pressure alongside I/O pressure",
+            Description = "SOS_SCHEDULER_YIELD elevated: CPU pressure alongside I/O pressure",
             Boost = 0.1,
             Predicate = facts => HasSignificantWait(facts, "SOS_SCHEDULER_YIELD", 0.15)
         },
         new()
         {
-            Description = "Read latency > 20ms — confirmed disk I/O bottleneck",
+            Description = "Read latency > 20ms: confirmed disk I/O bottleneck",
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue("IO_READ_LATENCY_MS", out var io) && io.Value >= 20
         },
         new()
         {
-            Description = "Memory grant waiters present — grants competing with buffer pool",
+            Description = "Memory grant waiters present: grants competing with buffer pool",
             Boost = 0.2,
             Predicate = facts => facts.TryGetValue("MEMORY_GRANT_PENDING", out var mg) && mg.Value >= 1
         }
@@ -1596,19 +1596,19 @@ public class FactScorer
     [
         new()
         {
-            Description = "TempDB usage elevated — latch contention likely on TempDB allocation pages",
+            Description = "TempDB usage elevated: latch contention likely on TempDB allocation pages",
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue("TEMPDB_USAGE", out var t) && ClearsRootBar(t)
         },
         new()
         {
-            Description = "CXPACKET significant — parallel operations amplifying latch contention",
+            Description = "CXPACKET significant: parallel operations amplifying latch contention",
             Boost = 0.2,
             Predicate = facts => HasSignificantWait(facts, "CXPACKET", 0.10)
         },
         new()
         {
-            Description = "SOS_SCHEDULER_YIELD elevated — latch spinning contributing to CPU pressure",
+            Description = "SOS_SCHEDULER_YIELD elevated: latch spinning contributing to CPU pressure",
             Boost = 0.2,
             Predicate = facts => HasSignificantWait(facts, "SOS_SCHEDULER_YIELD", 0.15)
         }
@@ -1621,20 +1621,20 @@ public class FactScorer
     [
         new()
         {
-            Description = "Head blocker sleeping with open transaction — abandoned transaction pattern",
+            Description = "Head blocker sleeping with open transaction: abandoned transaction pattern",
             Boost = 0.4,
             Predicate = facts => facts.TryGetValue("BLOCKING_EVENTS", out var f)
                               && f.Metadata.GetValueOrDefault("sleeping_blocker_count") > 0
         },
         new()
         {
-            Description = "Lock contention waits elevated — blocking visible in wait stats",
+            Description = "Lock contention waits elevated: blocking visible in wait stats",
             Boost = 0.3,
             Predicate = facts => facts.ContainsKey("LCK") && facts["LCK"].BaseSeverity >= 0.3
         },
         new()
         {
-            Description = "Deadlocks also present — blocking escalating to deadlocks",
+            Description = "Deadlocks also present: blocking escalating to deadlocks",
             Boost = 0.3,
             Predicate = facts => facts.ContainsKey("DEADLOCKS") && facts["DEADLOCKS"].BaseSeverity > 0
         }
@@ -1648,20 +1648,20 @@ public class FactScorer
     [
         new()
         {
-            Description = "Apex head blocker is sleeping — abandoned transaction at the top of the chain",
+            Description = "Apex head blocker is sleeping: abandoned transaction at the top of the chain",
             Boost = 0.4,
             Predicate = facts => facts.TryGetValue("BLOCKING_CHAIN", out var f)
                               && f.Metadata.GetValueOrDefault("worst_apex_sleeping") > 0
         },
         new()
         {
-            Description = "Deadlocks also present — chain blocking escalating to deadlocks",
+            Description = "Deadlocks also present: chain blocking escalating to deadlocks",
             Boost = 0.3,
             Predicate = facts => facts.ContainsKey("DEADLOCKS") && facts["DEADLOCKS"].BaseSeverity > 0
         },
         new()
         {
-            Description = "THREADPOOL waits present — chain victims pinning worker threads",
+            Description = "THREADPOOL waits present: chain victims pinning worker threads",
             Boost = 0.3,
             Predicate = facts => facts.ContainsKey("THREADPOOL") && facts["THREADPOOL"].BaseSeverity > 0
         }
@@ -1675,19 +1675,19 @@ public class FactScorer
     [
         new()
         {
-            Description = "SOS_SCHEDULER_YIELD elevated — compilation competing for CPU",
+            Description = "SOS_SCHEDULER_YIELD elevated: compilation competing for CPU",
             Boost = 0.3,
             Predicate = facts => HasSignificantWait(facts, "SOS_SCHEDULER_YIELD", 0.25)
         },
         new()
         {
-            Description = "SQL Server CPU > 80% — compilation a measurable share of CPU load",
+            Description = "SQL Server CPU > 80%: compilation a measurable share of CPU load",
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue("CPU_SQL_PERCENT", out var cpu) && cpu.Value >= 80
         },
         new()
         {
-            Description = "RESOURCE_SEMAPHORE also present — broad memory starvation, not isolated compile pressure",
+            Description = "RESOURCE_SEMAPHORE also present: broad memory starvation, not isolated compile pressure",
             Boost = 0.2,
             Predicate = facts => facts.TryGetValue("RESOURCE_SEMAPHORE", out var rs) && ClearsRootBar(rs)
         }
@@ -1700,20 +1700,20 @@ public class FactScorer
     [
         new()
         {
-            Description = "Blocking events also present — systemic contention pattern",
+            Description = "Blocking events also present: systemic contention pattern",
             Boost = 0.3,
             Predicate = facts => facts.ContainsKey("BLOCKING_EVENTS") && facts["BLOCKING_EVENTS"].BaseSeverity > 0
         },
         new()
         {
-            Description = "Reader/writer lock waits present — RCSI could prevent some deadlocks",
+            Description = "Reader/writer lock waits present: RCSI could prevent some deadlocks",
             Boost = 0.3,
             Predicate = facts => (facts.TryGetValue("LCK_M_S", out var lckS) && ClearsRootBar(lckS))
                               || (facts.TryGetValue("LCK_M_IS", out var lckIS) && ClearsRootBar(lckIS))
         },
         new()
         {
-            Description = "Databases without RCSI — reader/writer isolation amplifying deadlocks",
+            Description = "Databases without RCSI: reader/writer isolation amplifying deadlocks",
             Boost = 0.2,
             Predicate = facts => facts.TryGetValue("DB_CONFIG", out var db) && db.Metadata.GetValueOrDefault("rcsi_off_count") > 0
         }
@@ -1726,19 +1726,19 @@ public class FactScorer
     [
         new()
         {
-            Description = "Blocked process reports present — confirmed blocking events",
+            Description = "Blocked process reports present: confirmed blocking events",
             Boost = 0.3,
             Predicate = facts => facts.ContainsKey("BLOCKING_EVENTS") && facts["BLOCKING_EVENTS"].BaseSeverity > 0
         },
         new()
         {
-            Description = "Deadlocks present — lock contention escalating to deadlocks",
+            Description = "Deadlocks present: lock contention escalating to deadlocks",
             Boost = 0.3,
             Predicate = facts => facts.ContainsKey("DEADLOCKS") && facts["DEADLOCKS"].BaseSeverity > 0
         },
         new()
         {
-            Description = "THREADPOOL waits present — blocking causing thread exhaustion",
+            Description = "THREADPOOL waits present: blocking causing thread exhaustion",
             Boost = 0.3,
             Predicate = facts => facts.ContainsKey("THREADPOOL") && facts["THREADPOOL"].BaseSeverity > 0
         }
@@ -1755,7 +1755,7 @@ public class FactScorer
     [
         new()
         {
-            Description = "I/O latency elevated — auto_shrink may be causing fragmentation and I/O pressure",
+            Description = "I/O latency elevated: auto_shrink may be causing fragmentation and I/O pressure",
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue("DB_CONFIG", out var db)
                               && db.Metadata.GetValueOrDefault("auto_shrink_on_count") > 0
@@ -1763,7 +1763,7 @@ public class FactScorer
         },
         new()
         {
-            Description = "LCK_M_S waits — readers blocked by writers, RCSI would eliminate shared lock waits",
+            Description = "LCK_M_S waits: readers blocked by writers, RCSI would eliminate shared lock waits",
             Boost = 0.5,
             Predicate = facts => facts.TryGetValue("DB_CONFIG", out var db)
                               && db.Metadata.GetValueOrDefault("rcsi_off_count") > 0
@@ -1771,7 +1771,7 @@ public class FactScorer
         },
         new()
         {
-            Description = "LCK_M_IS waits — intent-shared locks blocked by writers, RCSI would eliminate these",
+            Description = "LCK_M_IS waits: intent-shared locks blocked by writers, RCSI would eliminate these",
             Boost = 0.4,
             Predicate = facts => facts.TryGetValue("DB_CONFIG", out var db)
                               && db.Metadata.GetValueOrDefault("rcsi_off_count") > 0
@@ -1779,7 +1779,7 @@ public class FactScorer
         },
         new()
         {
-            Description = "Deadlocks with reader/writer lock waits — RCSI eliminates reader/writer deadlocks",
+            Description = "Deadlocks with reader/writer lock waits: RCSI eliminates reader/writer deadlocks",
             Boost = 0.4,
             Predicate = facts => facts.TryGetValue("DB_CONFIG", out var db)
                               && db.Metadata.GetValueOrDefault("rcsi_off_count") > 0
@@ -1796,13 +1796,13 @@ public class FactScorer
     [
         new()
         {
-            Description = "TempDB usage elevated — growing TempDB on a nearly full volume",
+            Description = "TempDB usage elevated: growing TempDB on a nearly full volume",
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue("TEMPDB_USAGE", out var t) && ClearsRootBar(t)
         },
         new()
         {
-            Description = "Query spills present — spills to disk on a nearly full volume",
+            Description = "Query spills present: spills to disk on a nearly full volume",
             Boost = 0.2,
             Predicate = facts => facts.TryGetValue("QUERY_SPILLS", out var s) && ClearsRootBar(s)
         }
@@ -1815,13 +1815,13 @@ public class FactScorer
     [
         new()
         {
-            Description = "SOS_SCHEDULER_YIELD elevated — scheduler pressure confirms CPU saturation",
+            Description = "SOS_SCHEDULER_YIELD elevated: scheduler pressure confirms CPU saturation",
             Boost = 0.3,
             Predicate = facts => HasSignificantWait(facts, "SOS_SCHEDULER_YIELD", 0.25)
         },
         new()
         {
-            Description = "CXPACKET significant — parallelism contributing to CPU load",
+            Description = "CXPACKET significant: parallelism contributing to CPU load",
             Boost = 0.2,
             Predicate = facts => HasSignificantWait(facts, "CXPACKET", 0.10)
         }
@@ -1835,19 +1835,19 @@ public class FactScorer
     [
         new()
         {
-            Description = "SOS_SCHEDULER_YIELD elevated — scheduler pressure during CPU spike",
+            Description = "SOS_SCHEDULER_YIELD elevated: scheduler pressure during CPU spike",
             Boost = 0.3,
             Predicate = facts => HasSignificantWait(facts, "SOS_SCHEDULER_YIELD", 0.25)
         },
         new()
         {
-            Description = "CXPACKET significant — parallelism contributing to CPU spike",
+            Description = "CXPACKET significant: parallelism contributing to CPU spike",
             Boost = 0.2,
             Predicate = facts => HasSignificantWait(facts, "CXPACKET", 0.10)
         },
         new()
         {
-            Description = "THREADPOOL waits present — CPU spike causing thread exhaustion",
+            Description = "THREADPOOL waits present: CPU spike causing thread exhaustion",
             Boost = 0.4,
             Predicate = facts => facts.ContainsKey("THREADPOOL") && facts["THREADPOOL"].BaseSeverity > 0
         }
@@ -1860,7 +1860,7 @@ public class FactScorer
     [
         new()
         {
-            Description = "PAGEIOLATCH waits elevated — buffer pool misses confirm I/O pressure",
+            Description = "PAGEIOLATCH waits elevated: buffer pool misses confirm I/O pressure",
             Boost = 0.3,
             Predicate = facts => HasSignificantWait(facts, "PAGEIOLATCH_SH", 0.10)
                               || HasSignificantWait(facts, "PAGEIOLATCH_EX", 0.10)
@@ -1874,7 +1874,7 @@ public class FactScorer
     [
         new()
         {
-            Description = "WRITELOG waits elevated — transaction log I/O bottleneck confirmed",
+            Description = "WRITELOG waits elevated: transaction log I/O bottleneck confirmed",
             Boost = 0.3,
             Predicate = facts => HasSignificantWait(facts, "WRITELOG", 0.05)
         }
@@ -1887,13 +1887,13 @@ public class FactScorer
     [
         new()
         {
-            Description = "RESOURCE_SEMAPHORE waits present — memory grant pressure in wait stats",
+            Description = "RESOURCE_SEMAPHORE waits present: memory grant pressure in wait stats",
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue("RESOURCE_SEMAPHORE", out var rs) && ClearsRootBar(rs)
         },
         new()
         {
-            Description = "Query spills present — queries running with insufficient memory grants",
+            Description = "Query spills present: queries running with insufficient memory grants",
             Boost = 0.2,
             Predicate = facts => facts.TryGetValue("QUERY_SPILLS", out var s) && ClearsRootBar(s)
         }
@@ -1906,13 +1906,13 @@ public class FactScorer
     [
         new()
         {
-            Description = "Memory grant waiters present — insufficient memory for query grants",
+            Description = "Memory grant waiters present: insufficient memory for query grants",
             Boost = 0.3,
             Predicate = facts => facts.TryGetValue("MEMORY_GRANT_PENDING", out var mg) && mg.Value >= 1
         },
         new()
         {
-            Description = "RESOURCE_SEMAPHORE waits — grant pressure visible in wait stats",
+            Description = "RESOURCE_SEMAPHORE waits: grant pressure visible in wait stats",
             Boost = 0.2,
             Predicate = facts => facts.TryGetValue("RESOURCE_SEMAPHORE", out var rs) && ClearsRootBar(rs)
         }

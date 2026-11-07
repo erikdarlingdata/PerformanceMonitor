@@ -34,12 +34,12 @@ public sealed class DarlingMcpPgXminTools
     {
         "session" =>
             "A backend is holding an old snapshot. Find it in pg_stat_activity by the holder pid. "
-            + "'idle in transaction' means the application opened a transaction and stopped using it — fix "
+            + "'idle in transaction' means the application opened a transaction and stopped using it: fix "
             + "the client, or bound it with idle_in_transaction_session_timeout. A genuinely long-running "
             + "query is a different problem: make it faster rather than killing it blindly.",
         "replication_slot" =>
             "A replication slot is retaining an old xmin. If it is inactive and nothing consumes it, it is "
-            + "abandoned and should be dropped — an inactive slot also retains WAL without limit by default "
+            + "abandoned and should be dropped: an inactive slot also retains WAL without limit by default "
             + "and can fill the volume. Common orphan sources: a removed CDC task, a finished blue/green "
             + "deployment, or a failed major-version upgrade.",
         "replication_slot_catalog" =>
@@ -48,8 +48,8 @@ public sealed class DarlingMcpPgXminTools
             + "produces exactly this.",
         "standby_feedback" =>
             "A standby with hot_standby_feedback=on is reporting its xmin back, so a long-running query on "
-            + "the REPLICA is preventing cleanup on the primary. That trade is deliberate — it stops the "
-            + "replica's queries being cancelled — so the fix is usually the replica query, not the setting. "
+            + "the REPLICA is preventing cleanup on the primary. That trade is deliberate: it stops the "
+            + "replica's queries being cancelled, so the fix is usually the replica query, not the setting. "
             + "Note this is expected to be absent on Aurora, whose replicas share the storage volume.",
         "prepared_transaction" =>
             "An orphaned prepared (two-phase) transaction. These survive disconnects and restarts and hold "
@@ -125,7 +125,7 @@ public sealed class DarlingMcpPgXminTools
                         hours_back,
                         status = "unavailable",
                         captures_in_window = 0,
-                        message = $"No holder rows and no successful pg_xmin_horizon captures are logged for {resolved.DisplayName} in the last {hours_back} hour(s), so this is not a report that nothing holds the horizon — the collector did not look (or its collection_log rows are missing). Check get_collection_health for this server before reading the absence as clear.",
+                        message = $"No holder rows and no successful pg_xmin_horizon captures are logged for {resolved.DisplayName} in the last {hours_back} hour(s), so this is not a report that nothing holds the horizon: the collector did not look (or its collection_log rows are missing). Check get_collection_health for this server before reading the absence as clear.",
                     }, McpHelpers.JsonOptions), postgres, resolved.ServerId, resolved.DisplayName, cancellationToken);
                 }
 
@@ -150,7 +150,7 @@ public sealed class DarlingMcpPgXminTools
                                 : "Nothing is holding back the xmin horizon in this window")
                                 + $": the collector captured {capturesInWindow} time(s) and recorded no holder",
                         coveredClaim: ". Vacuum is free to "
-                            + "reclaim dead rows, so bloat growth has a different cause — look at whether "
+                            + "reclaim dead rows, so bloat growth has a different cause: look at whether "
                             + "autovacuum is being triggered at all (per-table thresholds and dead-tuple "
                             + "counts) rather than at whether it is being blocked."),
                 }, McpHelpers.JsonOptions), emptyNotice), cancellationToken, now.AddHours(-hours_back));
@@ -203,8 +203,8 @@ public sealed class DarlingMcpPgXminTools
                    collection_log — every time the collector LOOKED, held or not. */
                 captures_in_window = capturesInWindow,
                 pct_denominator = capturesInWindow > 0
-                    ? "pct_of_window_winning = samples_as_winner / captures_in_window; captures_in_window counts the collector's SUCCESS rows in collection_log for this window, so it includes captures that found no holder. It can undercount if a log write was skipped, in which case a share can exceed 100 — it is not clamped."
-                    : "pct_of_window_winning is null: collection_log holds no successful pg_xmin_horizon capture in this window to divide by, though holder rows exist — read samples_as_winner as a count, not a share.",
+                    ? "pct_of_window_winning = samples_as_winner / captures_in_window; captures_in_window counts the collector's SUCCESS rows in collection_log for this window, so it includes captures that found no holder. It can undercount if a log write was skipped, in which case a share can exceed 100: it is not clamped."
+                    : "pct_of_window_winning is null: collection_log holds no successful pg_xmin_horizon capture in this window to divide by, though holder rows exist, read samples_as_winner as a count, not a share.",
                 /* Lead with the actionable pair: which cause, and what to do about that cause. */
                 winning_source = winner.source,
                 winning_holder = winner.holder,

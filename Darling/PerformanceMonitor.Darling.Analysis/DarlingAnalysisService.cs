@@ -368,7 +368,7 @@ public sealed class DarlingAnalysisService
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1068:CancellationToken parameters must come last",
         Justification = "The two tokens are at positions 4 and 5 and the Darling worker passes them POSITIONALLY. " +
                         "Moving asOfUtc ahead of them to satisfy the rule would silently rebind that call site's " +
-                        "arguments — a compiling change of meaning on the one caller that matters. Appending is the " +
+                        "arguments: a compiling change of meaning on the one caller that matters. Appending is the " +
                         "only edit that cannot do that, and Lite's twin keeps the same order so the two stay transplantable.")]
     public async Task<List<AnalysisFinding>> AnalyzeAsync(
         int serverId, string serverName, int hoursBack = 4, CancellationToken cancellationToken = default,
@@ -547,7 +547,7 @@ public sealed class DarlingAnalysisService
 
                 _logger?.LogWarning(
                     "[DarlingAnalysisService] No observed collection in the analysis window for {Server} ({Start} to {End}) " +
-                    "despite {Span:F1}h of total history — collection may be down ({FactCount} point-in-time fact(s) only)",
+                    "despite {Span:F1}h of total history: collection may be down ({FactCount} point-in-time fact(s) only)",
                     context.ServerName, context.TimeRangeStart, context.TimeRangeEnd, dataSpanHours, facts.Count);
 
                 LastAnalysisTime = DateTime.UtcNow;
@@ -580,7 +580,7 @@ public sealed class DarlingAnalysisService
                    volume. */
                 _logger?.LogInformation(
                     "[DarlingAnalysisService] The collector observed the analysis window for {Server} ({Start} to {End}) " +
-                    "but emitted no fact over it — {Coverage}; nothing rose to a fact, and an all-clear from this pass rests on that coverage",
+                    "but emitted no fact over it: {Coverage}; nothing rose to a fact, and an all-clear from this pass rests on that coverage",
                     context.ServerName, context.TimeRangeStart, context.TimeRangeEnd, context.Coverage!.Describe());
             }
 
@@ -589,7 +589,7 @@ public sealed class DarlingAnalysisService
                 /* Logged, not just carried: a scheduled pass has no payload to put the caveat in, and
                    the persisted findings from this pass were rated against the observed hours. */
                 _logger?.LogWarning(
-                    "[DarlingAnalysisService] Partial collection coverage for {Server}: {Coverage} — rates in this pass are per observed time, and the COLLECTION_GAP fact records the hole",
+                    "[DarlingAnalysisService] Partial collection coverage for {Server}: {Coverage}, rates in this pass are per observed time, and the COLLECTION_GAP fact records the hole",
                     context.ServerName, partial.Describe());
             }
 
@@ -716,7 +716,7 @@ public sealed class DarlingAnalysisService
             _logger?.LogInformation(
                 "[DarlingAnalysisService] Analysis complete for {Server}: {Count} finding(s), highest severity {Severity:F2}{Exploratory}",
                 context.ServerName, findings.Count, findings.Count > 0 ? findings.Max(f => f.Severity) : 0,
-                context.PersistFindings ? string.Empty : " (anchored window — exploratory, not persisted)");
+                context.PersistFindings ? string.Empty : " (anchored window, exploratory, not persisted)");
 
             return findings;
         }
@@ -743,13 +743,13 @@ public sealed class DarlingAnalysisService
             {
                 case AnalysisAbandonKind.Shutdown:
                     _logger?.LogInformation(
-                        "[DarlingAnalysisService] Analysis abandoned at shutdown for {Server} — this pass's findings are lost by design; the next pass recomputes them ({Detail})",
+                        "[DarlingAnalysisService] Analysis abandoned at shutdown for {Server}: this pass's findings are lost by design; the next pass recomputes them ({Detail})",
                         context.ServerName, ex.Message);
                     break;
 
                 case AnalysisAbandonKind.Timeout:
                     _logger?.LogWarning(
-                        "[DarlingAnalysisService] Analysis for {Server} was cancelled at its per-pass budget and unwound as asked — this cycle produces no findings and the next one recomputes them. A pass that keeps hitting this is not finishing inside its budget, which is a server whose analysis is quietly getting less complete, not a stop ({Detail})",
+                        "[DarlingAnalysisService] Analysis for {Server} was cancelled at its per-pass budget and unwound as asked: this cycle produces no findings and the next one recomputes them. A pass that keeps hitting this is not finishing inside its budget, which is a server whose analysis is quietly getting less complete, not a stop ({Detail})",
                         context.ServerName, ex.Message);
                     break;
 
@@ -1477,7 +1477,7 @@ ORDER BY event_time_local";
             var notYetComparable = (int)attributionFact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaNotYetComparable);
 
             _logger?.LogInformation(
-                "[DarlingAnalysisService] Configuration change attributed for {Server} ({Families}): {Settings} {Verb} {AnchorAt:u} ({AnchorSource}), compare over ±{Hours} h ({AfterHours:0.#} h after so far) — {Worse} worse, {Better} better{NotYetComparable}, {Stable} stable{Unavailable}",
+                "[DarlingAnalysisService] Configuration change attributed for {Server} ({Families}): {Settings} {Verb} {AnchorAt:u} ({AnchorSource}), compare over ±{Hours} h ({AfterHours:0.#} h after so far), {Worse} worse, {Better} better{NotYetComparable}, {Stable} stable{Unavailable}",
                 context.ServerName, latest.Families, string.Join(ConfigChangeAttribution.SettingSeparator, latest.Changes.Select(c => c.Name)),
                 anchor is null ? "first observed at" : "changed at", anchorTime,
                 anchor is null ? "configuration snapshot" : "default trace, msg 15457",

@@ -93,13 +93,13 @@ public sealed class McpMissMessageParityPinTests
     public static TheoryData<string> SharedMissFragments() => new()
     {
         /* get_wait_types */
-        "This server has collected wait stats before, so this window was quiet — widen hours_back to find the most recent samples.",
+        "This server has collected wait stats before, so this window was quiet: widen hours_back to find the most recent samples.",
         "Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled.",
 
         /* get_collection_log. Byte-identical in DarlingMcpDataTools and Lite McpHealthTools, and it was
            the only shared miss sentence this list did not name. Darling's sentinel population gets its
            OWN sentences ahead of these three, so what is compared here stays the monitored-server text. */
-        "This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs.",
+        "This server HAS collected before, so this window is genuinely quiet rather than broken: widen hours_back to find the most recent runs.",
 
         /* #4966: the covered-window variants of the quiet and all-clear CLAIMS, byte-identical on both SKUs. Each sits after
            the message's own factual first sentence, which is kept on a cut window too. The cut-window claims are two
@@ -107,20 +107,20 @@ public sealed class McpMissMessageParityPinTests
         "The blocking collectors have run successfully for this server, so there was no blocking or deadlock in this window.",
         "this is the all-clear for this read.",
         "A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected.",
-        "This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist.",
+        "This says nothing about the window as a whole: the filters were applied, so unfiltered runs may well exist.",
 
         /* #4966: the server-instructions sentence naming the three window keys (both apps' instructions carry it). */
         "`window_truncated` true: the window starts before the store's data, not a cut page (`effective_start`, `truncation_note`).",
 
         /* get_memory_clerks */
-        "This read returns the LATEST snapshot rather than a window, so an empty result is never a quiet period — a live SQL Server always has memory clerks.",
+        "This read returns the LATEST snapshot rather than a window, so an empty result is never a quiet period: a live SQL Server always has memory clerks.",
 
         /* get_mute_rules */
-        "No mute rules are configured for this store, so no alert is being suppressed anywhere — a quiet alert history is genuine rather than muted.",
-        "disabled or expired, so nothing is being suppressed. Pass enabled_only=false to list them — this is a lapsed mute, not an absent one.",
+        "No mute rules are configured for this store, so no alert is being suppressed anywhere: a quiet alert history is genuine rather than muted.",
+        "disabled or expired, so nothing is being suppressed. Pass enabled_only=false to list them: this is a lapsed mute, not an absent one.",
 
         /* compare_analysis */
-        "in EITHER window, so there is nothing to compare — this is NOT a report that nothing changed.",
+        "in EITHER window, so there is nothing to compare: this is NOT a report that nothing changed.",
         "The BASELINE window produced no facts at all, so every fact below counts as a new issue only because there was nothing to compare it against.",
         "The COMPARISON window produced no facts at all, so every fact below counts as a resolved issue only because there is nothing in the recent window to compare against.",
 
@@ -130,12 +130,12 @@ public sealed class McpMissMessageParityPinTests
            per observed time while the other said nothing. analyze_server (findings and the scoped
            all-clear), get_analysis_facts (the partial caveat and the unobserved miss), compare_analysis
            (either side partly collected, and the closing warning). */
-        "Rates and fractions below are per observed time, so they are not deflated by the gap — but the unobserved stretch could have held anything, and nothing here speaks for it. Check get_collection_health for why collection stopped.",
-        "of this window the collector observed — a PARTIAL reading, not a full all-clear. ",
+        "Rates and fractions below are per observed time, so they are not deflated by the gap, but the unobserved stretch could have held anything, and nothing here speaks for it. Check get_collection_health for why collection stopped.",
+        "of this window the collector observed: a PARTIAL reading, not a full all-clear. ",
         ". The unobserved stretch could have held anything, and nothing here speaks for it; check get_collection_health for why collection stopped.",
         "Every fraction-of-period and per-hour value below is per OBSERVED time (period_duration_ms × coverage_fraction, or observed_hours), not per nominal window; the COLLECTION_GAP fact carries the hole.",
         ", so no windowed fact (wait fractions, blocking or deadlock rates) exists to show.",
-        "point-in-time fact(s) — configuration and current state — could still be read; audit_config reports those.",
+        "point-in-time fact(s) (configuration and current state) could still be read; audit_config reports those.",
         "The BASELINE window was only partly collected: ",
         "The COMPARISON window was only partly collected: ",
         ". Its rates are per observed time, and its windowed facts are absent where nothing was observed.",
@@ -153,12 +153,12 @@ public sealed class McpMissMessageParityPinTests
            ComparisonBanding, and cannot drift; what lives twice is the sentence each tool body puts on the
            payload about what a verdict is, and the description that promises it. */
         "Each row is banded by how far its VALUE moved on this server's own scale (band_source says which rule; band_rules states them), not by the severity formula's slope. One window against one window cannot show that a change caused anything: a same-hour-yesterday comparison at N=1 vs N=1 is a difference, not an experiment. Count families, not rows, to count causes.",
-        "What \\\"worse\\\" does NOT mean: this is one window against one window — same-hour-yesterday at N=1 vs N=1 cannot show that a change CAUSED anything (DB time on an unchanged server routinely varies severalfold day to day), and a partly collected side flags every verdict with coverage_caveat.",
+        "What \\\"worse\\\" does NOT mean: this is one window against one window, same-hour-yesterday at N=1 vs N=1 cannot show that a change CAUSED anything (DB time on an unchanged server routinely varies severalfold day to day), and a partly collected side flags every verdict with coverage_caveat.",
 
         /* get_query_heatmap (#2484) — the three empty branches, one of which (a collected but IDLE
            window) no other read has. */
-        "so this is NOT a report of a quiet server — there is nothing to draw. query_stats is a PERIODIC table rather than an edge table: the collector writes rows every cycle for whatever is in the plan cache, so an empty history means nobody looked. Check get_collection_health for this server.",
-        " hour(s), so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.",
+        "so this is NOT a report of a quiet server: there is nothing to draw. query_stats is a PERIODIC table rather than an edge table: the collector writes rows every cycle for whatever is in the plan cache, so an empty history means nobody looked. Check get_collection_health for this server.",
+        " hour(s), so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health: a collector that stopped looks exactly like this.",
         " hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid",
         " Delta-based collection also needs a SECOND cycle before the first non-zero row exists.",
 
@@ -167,18 +167,18 @@ public sealed class McpMissMessageParityPinTests
            of it would be a divergence for nothing. Only the never-collected half needs its own words,
            because "no lock contention" is the wrong thing to hear about a server nothing was stored for. */
         "No lock waits recorded for ",
-        ", so this is NOT a report of a server without lock contention — nothing has been stored for it at all. ",
+        ", so this is NOT a report of a server without lock contention: nothing has been stored for it at all. ",
 
         /* get_daily_summary_range (#2484) — the two empty branches. The first is the one that is easy to
            get wrong: a day with ANY collection appears even when quiet, so no days at all cannot mean a
            quiet stretch. */
-        ". A day with ANY collection appears here even when every signal was quiet, so this range is outside what the store holds for this server rather than a stretch of quiet days — widen days_back, or move as_of.",
-        ", so the calendar is empty because nothing has been collected — not because those days were quiet. Check that the service is running and that the server is enabled for collection.",
+        ". A day with ANY collection appears here even when every signal was quiet, so this range is outside what the store holds for this server rather than a stretch of quiet days: widen days_back, or move as_of.",
+        ", so the calendar is empty because nothing has been collected, not because those days were quiet. Check that the service is running and that the server is enabled for collection.",
 
         /* The instructions' miss-vocabulary paragraph (#2511). The engine-gap MESSAGE itself is built by
            CollectorEngineCapability and is byte-identical by construction rather than by pinning; what lives
            twice, and therefore belongs here, is the paragraph that teaches a caller how to read it. */
-        "`not_collected` means this server does not collect that at all — and when the reason is the engine, the gap is permanent",
+        "`not_collected` means this server does not collect that at all, and when the reason is the engine, the gap is permanent",
 
         /* The PostgreSQL half of the same paragraph (#2532). An agent over MCP has no tabs: it asks a
            read by name, so the instructions are the only place it can be told which family answers on
@@ -210,15 +210,15 @@ public sealed class McpMissMessageParityPinTests
            get_analysis_facts (the baseline_confidence disambiguation), plus the instructions rows. */
         "confidence is an EVIDENCE score, not a probability: 0.20 for the fired symptom alone, plus up to 0.48 for the share of the root fact's amplifier checks (its expected companions) that matched and up to 0.32 for the depth of the evidence chain",
         "Rank by severity for impact and by confidence for how much of the engine's own corroboration showed up; do not multiply them.",
-        "Rows persisted before this definition carried a PATH-LENGTH statistic under the same name, with a lone symptom at 1.0 — confidence_basis labels those rows path-shape and they must not be read as corroborated.",
-        "For ANOMALY_* facts the metadata carries baseline_confidence — the baseline's own trustworthiness (tier x sample density), which the scorer multiplies into that fact's severity; it is a different quantity from a finding's confidence in analyze_server.",
+        "Rows persisted before this definition carried a PATH-LENGTH statistic under the same name, with a lone symptom at 1.0: confidence_basis labels those rows path-shape and they must not be read as corroborated.",
+        "For ANOMALY_* facts the metadata carries baseline_confidence: the baseline's own trustworthiness (tier x sample density), which the scorer multiplies into that fact's severity; it is a different quantity from a finding's confidence in analyze_server.",
 
         /* #3691: the facts read runs the anomaly detector on both SKUs, and the sentence teaching a caller
            that ANOMALY_* facts are on this read — with which metadata and at what cost — lives twice in the
            get_analysis_facts description. A SKU whose description dropped it would send its callers back to
            analyze_server for gate metadata the facts read now carries. */
         "The anomaly detector runs on this read too, so the ANOMALY_* facts the full pass would score are here with the gate metadata the pass scored them on (deviation_sigma against fire_threshold, baseline_samples, baseline_tier, baseline_low_quality), including the ones that fired but stayed under the finding floor; the cost is the detector's baseline reads on top of the collector's.",
-        "Each finding's `confidence` is an evidence score (0.20 for the symptom alone, more as the root fact's amplifier checks match and the chain deepens — a lone uncorroborated symptom is 0.20, never 1.0) and `confidence_basis` says in words what it rests on",
+        "Each finding's `confidence` is an evidence score (0.20 for the symptom alone, more as the root fact's amplifier checks match and the chain deepens, a lone uncorroborated symptom is 0.20, never 1.0) and `confidence_basis` says in words what it rests on",
         "(an ANOMALY_* fact's `baseline_confidence` is the baseline's trustworthiness, not a finding's `confidence`)",
 
         /* #3541 A9 / A13. The purged-day refusal (get_daily_summary), the filtered-miss sentences
@@ -227,31 +227,31 @@ public sealed class McpMissMessageParityPinTests
            to say WHICH kind of nothing came back, and a SKU that reworded one alone would send its callers to
            a different next step. The negative-span refusal is built by McpHelpers.ValidateUncappedWindow and
            is shared by construction; what lives twice is the call, pinned by McpPageContractTests. */
-        "): the per-signal tables the health band reads (deadlocks, blocking, CPU, memory, waits) have been purged for that day, so no health verdict is possible and the counts would be zeros by construction, not by measurement. Longer-lived sources may still record the day — collection_runs and alert_count below are real where non-zero.",
-        ". The filter was applied in SQL over the whole window, so this is the window's answer rather than a page artefact — drop parallel_only / min_dop to see the unfiltered ranking", // #7522: Lite's closing step differs (Lite keeps no plans), so only the shared part is pinned
-        ". The filters were applied in SQL over the whole window, so unfiltered snapshots may well exist — drop them to see what the window holds.",
+        "): the per-signal tables the health band reads (deadlocks, blocking, CPU, memory, waits) have been purged for that day, so no health verdict is possible and the counts would be zeros by construction, not by measurement. Longer-lived sources may still record the day: collection_runs and alert_count below are real where non-zero.",
+        ". The filter was applied in SQL over the whole window, so this is the window's answer rather than a page artefact: drop parallel_only / min_dop to see the unfiltered ranking", // #7522: Lite's closing step differs (Lite keeps no plans), so only the shared part is pinned
+        ". The filters were applied in SQL over the whole window, so unfiltered snapshots may well exist: drop them to see what the window holds.",
 
         /* #3541 A12 — the health-parser family's four-rung empty ladder, now one EmptyAsync per SKU that all
            nine reads climb. The rung sentences sit between interpolation holes (server, hours, event type,
            stamp), so what is compared is the literal text a caller receives. The dead rung keeps the
            "system_health session is started" sentence EngineCapabilityMissTests pins on both SKUs. */
         ". Events ARE being captured, so this is the healthy answer for this read rather than missing data.",
-        ", so nothing happened in this window — widen hours_back to reach the most recent events.",
-        " — so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot, and a wider window would not change it.",
+        ", so nothing happened in this window: widen hours_back to reach the most recent events.",
+        "), so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot, and a wider window would not change it.",
         "No system_health events of ANY type have EVER been captured for ",
-        ", so this is NOT an all-clear — there is nothing here to be clear about. This read is served from the collected system_health ring buffer: check that collection is running for this server and that its system_health session is started before concluding nothing happened.",
+        ", so this is NOT an all-clear: there is nothing here to be clear about. This read is served from the collected system_health ring buffer: check that collection is running for this server and that its system_health session is started before concluding nothing happened.",
 
         /* #3541 A12 — get_query_store_regressions' per-percent reason (a 0 baseline has no ratio), the
            trend trio's unrated-point note, get_pvs_stats' three share reasons, and get_table_index_sizes'
            history note. Each is emitted by a helper or envelope builder that lives once per SKU. */
-        " is null: no_baseline — ",
+        " is null: no_baseline, ",
         " is 0, so the ratio has no denominator; this is NOT 0% change. Compare ",
-        " collection(s) had no knowable rate: a rate is a collection's work divided by the seconds it accrued over, and that denominator is unknowable two ways — the collection's STORED sample interval is 0 (a restart or counter reset: the collector could not difference its two snapshots, so the zeros beside it were never measured), or the collection is rated against the PREVIOUS one and has none inside the window (the window's first collection where no interval was stored, or one landing in the same second as its predecessor). Unknowable is not 0 — such a collection is left out of its point's rates rather than counted as zero, and a point that held nothing else carries null rates (",
-        "pvs_size_mb was not reported by sys.dm_tran_persistent_version_store_stats in this capture, so the share is unknown — not zero.",
-        "database_data_size_mb was not captured for this database, so there is no denominator — the share is unknown, not zero.",
-        "database_data_size_mb is 0, so the share has no denominator — the share is unknown, not zero.",
-        " rather than re-measured over a shorter span under the same name. Read growth_over_available_history_* — it spans exactly growth_window_days.",
-        "the store holds a single day of snapshots for this server, so no growth is knowable yet — every growth figure is null, not 0",
+        " collection(s) had no knowable rate: a rate is a collection's work divided by the seconds it accrued over, and that denominator is unknowable two ways, the collection's STORED sample interval is 0 (a restart or counter reset: the collector could not difference its two snapshots, so the zeros beside it were never measured), or the collection is rated against the PREVIOUS one and has none inside the window (the window's first collection where no interval was stored, or one landing in the same second as its predecessor). Unknowable is not 0: such a collection is left out of its point's rates rather than counted as zero, and a point that held nothing else carries null rates (",
+        "pvs_size_mb was not reported by sys.dm_tran_persistent_version_store_stats in this capture, so the share is unknown, not zero.",
+        "database_data_size_mb was not captured for this database, so there is no denominator: the share is unknown, not zero.",
+        "database_data_size_mb is 0, so the share has no denominator: the share is unknown, not zero.",
+        " rather than re-measured over a shorter span under the same name. Read growth_over_available_history_*: it spans exactly growth_window_days.",
+        "the store holds a single day of snapshots for this server, so no growth is knowable yet: every growth figure is null, not 0",
 
         /* #3653 Q11 — errors one shape. The instructions paragraph that teaches a caller the FIFTH status
            word: every tool's caught exception is McpHelpers.FormatError's {status:"error", message, hints}
@@ -260,7 +260,7 @@ public sealed class McpMissMessageParityPinTests
            twice is the sentence teaching an agent to branch on `status` rather than on prose, and a SKU that
            reworded it alone would teach one client to read a failure as text again. The example envelope is
            pinned byte-for-byte because it is the one place the shape is spelled out for a reader. */
-        "Every tool failure — an exception the tool caught while reading — is the same envelope with `status` = `error`: `{\"status\":\"error\",\"message\":\"Error during <tool_name>: <what went wrong>\",\"hints\":{\"operation\":\"<tool_name>\"}}`.",
+        "Every tool failure (an exception the tool caught while reading) is the same envelope with `status` = `error`: `{\"status\":\"error\",\"message\":\"Error during <tool_name>: <what went wrong>\",\"hints\":{\"operation\":\"<tool_name>\"}}`.",
         "It is the fifth `status` word: the four above say what kind of nothing the store holds, `error` says the read did not complete, so retry it or report it rather than reading it as an all-clear. Branch on `status`, not on the message text. Data results keep their own shape and never carry a top-level `message`, which is how the envelope is told apart from data without a schema.",
 
         /* #3739 — refusals one shape. The sentences that teach a caller the SIXTH status word: a refusal (a
@@ -273,8 +273,8 @@ public sealed class McpMissMessageParityPinTests
            shared. The example envelope is pinned byte-for-byte for the reason the failure's is. The count of status words
            that follows is not shared since #5506 part 3: Darling adds a seventh, busy (a long read refused at its queue),
            which Lite does not have. */
-        "A refusal — a `server_name` that does not resolve, an `hours_back` outside its range, a `limit` past its ceiling, a required parameter that was not sent — is neither a failure nor a miss and has its own word: the same envelope with `status` = `invalid`: `{\"status\":\"invalid\",\"message\":\"<what was refused, and what is accepted>\",\"hints\":{\"parameter\":\"<parameter_name>\"}}`.",
-        "The read did not run because the request as given cannot be served; `hints.parameter` names the knob to change and the message says what it accepts, so fix that and call again — retrying it unchanged answers the same way. It is the word the write tools already use for a body that will not parse, and it means the same thing there.",
+        "A refusal, a `server_name` that does not resolve, an `hours_back` outside its range, a `limit` past its ceiling, a required parameter that was not sent, is neither a failure nor a miss and has its own word: the same envelope with `status` = `invalid`: `{\"status\":\"invalid\",\"message\":\"<what was refused, and what is accepted>\",\"hints\":{\"parameter\":\"<parameter_name>\"}}`.",
+        "The read did not run because the request as given cannot be served; `hints.parameter` names the knob to change and the message says what it accepts, so fix that and call again, retrying it unchanged answers the same way. It is the word the write tools already use for a body that will not parse, and it means the same thing there.",
     };
 
     [Theory]

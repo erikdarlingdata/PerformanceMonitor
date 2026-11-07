@@ -126,7 +126,7 @@ public static partial class PgTargetScorer
         [
             new AmplifierDefinition
             {
-                Description = "Compute-bound: at least four fifths of backend time was burning CPU, and ANOMALY_PG_CPU_BURN fired — cores busy ran above this server's own hour-of-week routine",
+                Description = "Compute-bound: at least four fifths of backend time was burning CPU, and ANOMALY_PG_CPU_BURN fired, cores busy ran above this server's own hour-of-week routine",
                 /* unmeasured: CpuDecompositionCoFireBoost (see the constant) — 0.4 × 1.5 = 0.6. */
                 Boost = CpuDecompositionCoFireBoost,
                 Predicate = facts => IsDominant(facts, KernelBurnShareKey)

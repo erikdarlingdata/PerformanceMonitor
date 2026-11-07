@@ -40,7 +40,7 @@ public sealed class DarlingMcpSlowReadTools
     private static readonly string[] s_surfaces = { "web", "compose", "mcp" };
 
     [McpServerTool(Name = "get_slow_reads"), Description(
-        "Gets the monitoring tool's OWN slow or failed reads — each with the arguments it was asked with, the source "
+        "Gets the monitoring tool's OWN slow or failed reads: each with the arguments it was asked with, the source "
         + "that answered, and its slowest statements. Not a monitored SQL Server or PostgreSQL target. Newest first. "
         + "Optional server_name, surface (web/compose/mcp) and route filter. Empty means none was recorded, not a failure. "
         + "caller names who read it (MCP client name and version, or a salted web-session hash); no personal data. "

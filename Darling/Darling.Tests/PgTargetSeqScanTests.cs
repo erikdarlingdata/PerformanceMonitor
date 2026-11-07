@@ -401,10 +401,10 @@ public sealed class PgTargetSeqScanTests
 
         Assert.Equal($"Statement queryid {ScanQueryId} scans public.orders (1 GB) sequentially at least 5× per hour, keeping 1% of the rows it reads", block.Headline);
         var inv = block.Investigation;
-        Assert.StartsWith($"Statement queryid {ScanQueryId} was captured 20 times in 4 observed hours (5 per hour — a lower bound: only executions slower than auto_explain.log_min_duration are logged) with a Seq Scan over public.orders carrying a Filter; across those captures the filter removed 99% of the rows the scan read", inv, StringComparison.Ordinal);
-        Assert.Contains("(columns: customer_id, status) filtered 99% of the rows it evaluated (990,000 of 1,000,000, sampled at 0.01 — counts are of the sample, not scaled); the planner's worst row estimate on it was off by 12.5×.", inv, StringComparison.Ordinal);
+        Assert.StartsWith($"Statement queryid {ScanQueryId} was captured 20 times in 4 observed hours (5 per hour, a lower bound: only executions slower than auto_explain.log_min_duration are logged) with a Seq Scan over public.orders carrying a Filter; across those captures the filter removed 99% of the rows the scan read", inv, StringComparison.Ordinal);
+        Assert.Contains("(columns: customer_id, status) filtered 99% of the rows it evaluated (990,000 of 1,000,000, sampled at 0.01: counts are of the sample, not scaled); the planner's worst row estimate on it was off by 12.5×.", inv, StringComparison.Ordinal);
         Assert.Contains("The relation's heap is 1 GB (pg_table_bloat_stats, newest sample).", inv, StringComparison.Ordinal);
-        Assert.Contains("All three gates hold — selective (≥ 90% filtered), large (≥ 256 MB), recurring (≥ 3 captures per observed hour)", inv, StringComparison.Ordinal);
+        Assert.Contains("All three gates hold: selective (≥ 90% filtered), large (≥ 256 MB), recurring (≥ 3 captures per observed hour)", inv, StringComparison.Ordinal);
         Assert.Contains("PG_BAD_ACTOR fired for the same queryid", inv, StringComparison.Ordinal);
         Assert.Contains("PG_PLAN_REGRESSION fired on the same queryid (20 ms → 200 ms per call)", inv, StringComparison.Ordinal);
         Assert.Contains("chosen, not measured (threshold_lineage = 0)", inv, StringComparison.Ordinal);
@@ -422,7 +422,7 @@ public sealed class PgTargetSeqScanTests
         Assert.Contains("the scan rate above is the floor of what the scan costs, not its size", rem, StringComparison.Ordinal);
         /* The maintainer's prose discipline (2026-09-20): the suggestion is CORROBORATION and comes last; the regression
            caveat rides with it; the impact is an ESTIMATE, the counts SAMPLED, the captures bounded by the log threshold. */
-        Assert.Contains("A new index can cause regressions elsewhere — plan changes on other statements that read public.orders, write amplification on every insert, update and delete to it, and storage — so test it against the workload before it reaches production.", rem, StringComparison.Ordinal);
+        Assert.Contains("A new index can cause regressions elsewhere: plan changes on other statements that read public.orders, write amplification on every insert, update and delete to it, and storage, so test it against the workload before it reaches production.", rem, StringComparison.Ordinal);
         Assert.Contains("What it might save is an ESTIMATE from the plan's own numbers, not a promise", rem, StringComparison.Ordinal);
         Assert.Contains("pg_qualstats' SAMPLE (sample_rate 0.01), not the full count", rem, StringComparison.Ordinal);
         Assert.DoesNotMatch(new Regex(@"\d+(\.\d+)?% (faster|improvement|saving)"), rem);
@@ -454,7 +454,7 @@ public sealed class PgTargetSeqScanTests
 
         /* No predicate sampled: the unknown is said, the gate fails on it. */
         var unsampled = Scan(selectivity: null, heap: GiB, perHour: 5, columns: null);
-        Assert.Contains("pg_qualstats recorded no predicate for this statement on the relation — its default sample_rate is 1 / max_connections", PgTargetAdvice.Compose(PgTargetFactKeys.SeqScanAdvisory, new[] { unsampled }.ToFactLookup())!.Investigation, StringComparison.Ordinal);
+        Assert.Contains("pg_qualstats recorded no predicate for this statement on the relation: its default sample_rate is 1 / max_connections", PgTargetAdvice.Compose(PgTargetFactKeys.SeqScanAdvisory, new[] { unsampled }.ToFactLookup())!.Investigation, StringComparison.Ordinal);
         /* No size sampled, no Actual Rows: both unknowns said. */
         var blind = Scan(selectivity: 0.99, heap: null, perHour: 5);
         blind.Metadata.Remove("rows_removed_share_1");
@@ -708,7 +708,7 @@ public sealed class PgTargetSeqScanTests
                 var advice = card.GetProperty("advice");
                 Assert.Equal($"Statement queryid {ScanQueryId} scans public.big (1 GB) sequentially at least 5× per hour, keeping 1% of the rows it reads", advice.GetProperty("headline").GetString());
                 var investigation = advice.GetProperty("investigation").GetString()!;
-                Assert.Contains("was captured 20 times in 4 observed hours (5 per hour — a lower bound", investigation, StringComparison.Ordinal);
+                Assert.Contains("was captured 20 times in 4 observed hours (5 per hour, a lower bound", investigation, StringComparison.Ordinal);
                 Assert.Contains("(columns: customer_id, region) filtered 99% of the rows it evaluated (990,000 of 1,000,000, sampled at 0.01", investigation, StringComparison.Ordinal);
                 Assert.Contains("All three gates hold", investigation, StringComparison.Ordinal);
                 Assert.Contains($"queryid {OtherQueryId} at 1 per hour, heap 40 MB (under the bars)", investigation, StringComparison.Ordinal);
@@ -716,7 +716,7 @@ public sealed class PgTargetSeqScanTests
                 Assert.Contains("CREATE INDEX CONCURRENTLY ON public.big (customer_id, region);", remediation, StringComparison.Ordinal);
                 Assert.Contains("Its cost: every insert, update and delete on public.big maintains it from then on", remediation, StringComparison.Ordinal);
                 Assert.Contains("off by 8.4×, so ANALYZE public.big first", remediation, StringComparison.Ordinal);
-                Assert.Contains("A new index can cause regressions elsewhere — plan changes on other statements that read public.big", remediation, StringComparison.Ordinal);
+                Assert.Contains("A new index can cause regressions elsewhere: plan changes on other statements that read public.big", remediation, StringComparison.Ordinal);
                 Assert.Contains("ESTIMATE from the plan's own numbers, not a promise", remediation, StringComparison.Ordinal);
                 Assert.True(remediation.IndexOf("The questions before any access path", StringComparison.Ordinal) < remediation.IndexOf("CREATE INDEX", StringComparison.Ordinal));
                 var tools = card.GetProperty("next_tools").EnumerateArray().Select(t => t.GetProperty("tool").GetString()!).ToList();

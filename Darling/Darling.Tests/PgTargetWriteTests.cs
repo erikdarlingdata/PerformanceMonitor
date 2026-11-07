@@ -371,7 +371,7 @@ public sealed class PgTargetWriteTests
         var knob = Config(PgTargetFactKeys.ConfigMaxWalSize, 1024, notApplicable: true);
 
         var pressureBlock = PgTargetAdvice.Compose(PgTargetFactKeys.CheckpointPressure, Lookup(pressure, knob))!;
-        Assert.Equal("Checkpoint pressure is not applicable on Aurora — the storage layer owns checkpointing", pressureBlock.Headline);
+        Assert.Equal("Checkpoint pressure is not applicable on Aurora: the storage layer owns checkpointing", pressureBlock.Headline);
         Assert.Contains("60 timed checkpoints an hour", pressureBlock.Investigation, StringComparison.Ordinal);
         Assert.Contains("requested share of 0 %", pressureBlock.Investigation, StringComparison.Ordinal);
         Assert.Contains("get_pg_write_stats", pressureBlock.Remediation, StringComparison.Ordinal);
@@ -379,13 +379,13 @@ public sealed class PgTargetWriteTests
         Assert.DoesNotContain("checkpoint_completion_target", pressureBlock.Remediation, StringComparison.Ordinal);
 
         var knobBlock = PgTargetAdvice.Compose(PgTargetFactKeys.ConfigMaxWalSize, Lookup(pressure, knob))!;
-        Assert.Equal("max_wal_size is 1 GB — not a finding on Aurora, where the engine does not consult it", knobBlock.Headline);
+        Assert.Equal("max_wal_size is 1 GB, not a finding on Aurora, where the engine does not consult it", knobBlock.Headline);
         Assert.Contains("does not govern", knobBlock.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("shipped default", knobBlock.Investigation, StringComparison.Ordinal);
 
         /* Stock PostgreSQL's blocks are lane 2's, untouched: the same facts without the flag compose the sizing arithmetic. */
         var stockBlock = PgTargetAdvice.Compose(PgTargetFactKeys.ConfigMaxWalSize, Lookup(Pressure(0.0, 240), Config(PgTargetFactKeys.ConfigMaxWalSize, 1024)))!;
-        Assert.Equal("max_wal_size is 1 GB — the shipped default", stockBlock.Headline);
+        Assert.Equal("max_wal_size is 1 GB: the shipped default", stockBlock.Headline);
     }
 
     [Fact]
@@ -432,7 +432,7 @@ public sealed class PgTargetWriteTests
         anomaly.Metadata["baseline_ratio"] = 9.2 / 1.05;   /* peak over the robust centre (the median), as the detector stamps it */
 
         var leading = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyWalVolume, Lookup(anomaly, Pressure(0.1, 48)))!;
-        Assert.Equal("WAL volume spiked to 9.2 MB/s — 7 times its usual variation above its normal level for this time of week", leading.Headline);
+        Assert.Equal("WAL volume spiked to 9.2 MB/s: 7 times its usual variation above its normal level for this time of week", leading.Headline);
         Assert.Contains("7 times its usual variation above its 1.1 MB/s normal level", leading.Investigation, StringComparison.Ordinal);
         Assert.Contains("8.76× the 1.1 MB/s this server routinely writes", leading.Investigation, StringComparison.Ordinal);
         Assert.Contains("leading edge", leading.Investigation, StringComparison.Ordinal);

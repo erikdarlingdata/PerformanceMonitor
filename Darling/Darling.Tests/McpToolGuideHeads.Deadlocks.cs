@@ -67,7 +67,7 @@ public sealed class McpToolGuideHeadsDeadlocksTests
         var served = McpToolGuideTests.Served("get_deadlocks");
         Assert.Contains(served.ParameterDescriptionLengths, p => p.Parameter == "dedup_key" && p.Length <= 200);
         Assert.Contains(
-            "dedup_key: Optional alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects. The fingerprint scan runs over the window BEFORE limit, up to the scan ceiling the payload reports as rows_examined / scan_truncated.",
+            "dedup_key: Optional alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key: paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects. The fingerprint scan runs over the window BEFORE limit, up to the scan ceiling the payload reports as rows_examined / scan_truncated.",
             served.Tail!, StringComparison.Ordinal);
     }
 }

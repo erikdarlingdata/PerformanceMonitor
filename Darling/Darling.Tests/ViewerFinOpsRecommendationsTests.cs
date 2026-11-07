@@ -86,7 +86,7 @@ public sealed class ViewerFinOpsRecommendationsTests
         Assert.Equal(2, recs.Count);
 
         var blocker = recs[0];
-        Assert.Equal("TDE in use — Enterprise Edition downgrade blocker", blocker.Finding);
+        Assert.Equal("TDE in use: Enterprise Edition downgrade blocker", blocker.Finding);
         Assert.Equal("Low", blocker.Severity);
         Assert.Equal("High", blocker.Confidence);
         Assert.Null(blocker.EstMonthlySavings); // a blocker carries no savings estimate
@@ -145,7 +145,7 @@ public sealed class ViewerFinOpsRecommendationsTests
         var rec = Assert.Single(recs);
         Assert.Equal("High", rec.Severity);
         Assert.Equal("Medium", rec.Confidence);              // downgraded from High by the AG signal
-        Assert.Equal("Enterprise Edition — review Availability Group requirements before downgrading", rec.Finding);
+        Assert.Equal("Enterprise Edition: review Availability Group requirements before downgrading", rec.Finding);
         Assert.Equal(400m, rec.EstMonthlySavings);
         Assert.Contains("Basic Availability Groups", rec.Detail, StringComparison.Ordinal);
     }
@@ -164,7 +164,7 @@ public sealed class ViewerFinOpsRecommendationsTests
         Assert.Equal("Licensing", rec.Category);
         Assert.Equal("Low", rec.Severity);
         Assert.Equal("High", rec.Confidence);
-        Assert.Equal("Enterprise Edition — Availability Group secondary replica", rec.Finding);
+        Assert.Equal("Enterprise Edition: Availability Group secondary replica", rec.Finding);
         Assert.Null(rec.EstMonthlySavings);                  // decision belongs to the AG on the primary
         Assert.Contains("secondary replica", rec.Detail, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("same SQL Server edition", rec.Detail, StringComparison.Ordinal);

@@ -157,11 +157,11 @@ public sealed class DarlingMcpTrendTools
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
                             factual: $"No memory samples recorded for {resolved.DisplayName} in the last {hours_back} hour(s)",
-                            coveredClaim: ". This server HAS collected memory stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples."),
+                            coveredClaim: ". This server HAS collected memory stats before, so this window is genuinely quiet rather than broken: widen hours_back to find the most recent samples."),
                         emptyNotice.AsHints())
                     : McpHelpers.Status(
                         "unavailable",
-                        $"No memory stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — the memory_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_memory_stats will be equally empty until it does.", emptyNotice.AsHints());
+                        $"No memory stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window: the memory_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_memory_stats will be equally empty until it does.", emptyNotice.AsHints());
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, memoryAnswer, cancellationToken, now.AddHours(-hours_back));
             }
 
@@ -187,7 +187,7 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_perfmon_trend"), Description("Gets one performance counter over time in buckets, ending at as_of. counter_kind says the unit: gauge - value is the bucket average, delta_value and sample_interval_seconds null (no delta for a level); rate - per-second is delta_value divided by sample_interval_seconds, never delta_value alone or when the interval is 0; other - delta_value is a non-rate change; null - classify by name (ends in /sec = rate). No points never returns empty: not_collected covers a gated engine, Page Life Expectancy, or an unknown counter name; unavailable: no counter at all collected in the window. <<GUIDE>> Gets one performance counter over time in time buckets. hours_back reaches 720 (30 days). Use get_perfmon_stats first to see available counter names. artifacts_set_aside counts an isolated single-sample Wait Statistics spike excluded from the sums before bucketing (notes explains it); it is not a missing-data count. counter_kind (from the stored cntr_type) says what a point's number is: 'gauge' — value is the bucket's average reading and peak_value its highest, delta_value and sample_interval_seconds are null because a level has no delta; 'rate' — the per-second figure is delta_value divided by sample_interval_seconds, never delta_value alone, and never where sample_interval_seconds is 0 (no delta was knowable), and each point carries it as per_second (null where the interval is 0); 'other' — delta_value is the change of an average/fraction numerator, not a rate and not a level; null — the rows predate the stored type or the instances mix types, so classify by name (a name ending in /sec is a rate)." + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_perfmon_trend"), Description("Gets one performance counter over time in buckets, ending at as_of. counter_kind says the unit: gauge - value is the bucket average, delta_value and sample_interval_seconds null (no delta for a level); rate - per-second is delta_value divided by sample_interval_seconds, never delta_value alone or when the interval is 0; other - delta_value is a non-rate change; null - classify by name (ends in /sec = rate). No points never returns empty: not_collected covers a gated engine, Page Life Expectancy, or an unknown counter name; unavailable: no counter at all collected in the window. <<GUIDE>> Gets one performance counter over time in time buckets. hours_back reaches 720 (30 days). Use get_perfmon_stats first to see available counter names. artifacts_set_aside counts an isolated single-sample Wait Statistics spike excluded from the sums before bucketing (notes explains it); it is not a missing-data count. counter_kind (from the stored cntr_type) says what a point's number is: 'gauge', value is the bucket's average reading and peak_value its highest, delta_value and sample_interval_seconds are null because a level has no delta; 'rate', the per-second figure is delta_value divided by sample_interval_seconds, never delta_value alone, and never where sample_interval_seconds is 0 (no delta was knowable), and each point carries it as per_second (null where the interval is 0); 'other', delta_value is the change of an average/fraction numerator, not a rate and not a level; null, the rows predate the stored type or the instances mix types, so classify by name (a name ending in /sec is a rate)." + BaselineDiscontinuities.DescriptionSentence)]
     public static Task<string> GetPerfmonTrend(
         NpgsqlDataSource postgres,
         [Description("The exact counter name, e.g. 'Batch Requests/sec'. get_perfmon_stats lists the names.")] string counter_name,
@@ -262,7 +262,7 @@ public sealed class DarlingMcpTrendTools
                    the collected names so the caller can correct it. */
                 return McpHelpers.Status(
                     "not_collected",
-                    $"No trend data for counter '{counter_name}'. It may not be a counter this server collects — see hints.collected_counters for the {collected.Count} that are.",
+                    $"No trend data for counter '{counter_name}'. It may not be a counter this server collects: see hints.collected_counters for the {collected.Count} that are.",
                     new { collected_counters = collected });
             }
 
@@ -385,11 +385,11 @@ public sealed class DarlingMcpTrendTools
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
                             factual: $"No file I/O samples recorded for {resolved.DisplayName} in the last {hours_back} hour(s)",
-                            coveredClaim: ". This server HAS collected file I/O stats before, so this window is genuinely quiet rather than broken — widen hours_back, or read it as no measurable read or write activity on any file in this window."),
+                            coveredClaim: ". This server HAS collected file I/O stats before, so this window is genuinely quiet rather than broken: widen hours_back, or read it as no measurable read or write activity on any file in this window."),
                         echo, emptyNotice.AsHints())
                     : McpHelpers.StatusForDatabase(
                         "unavailable",
-                        $"No file I/O stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — the file_io_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_file_io_stats will be equally empty until it does.", echo, emptyNotice.AsHints());
+                        $"No file I/O stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window: the file_io_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_file_io_stats will be equally empty until it does.", echo, emptyNotice.AsHints());
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, fileIoAnswer, cancellationToken, start);
             }
 
@@ -507,7 +507,7 @@ public sealed class DarlingMcpTrendTools
                         "empty",
                         $"No history found for query_hash '{query_hash}' in database '{database_name}' in the " +
                         $"{history.Source} tier over the last {hours_back} hours. This means nothing was recorded " +
-                        "for that query_hash in that window in the tier searched — confirm the hash and database " +
+                        "for that query_hash in that window in the tier searched: confirm the hash and database " +
                         "with get_top_queries_by_cpu before concluding the query did not run.",
                         emptyNotice.AsHints()), cancellationToken, now.AddHours(-hours_back));
             }
@@ -916,7 +916,7 @@ public sealed class DarlingMcpTrendTools
                     return EmptyStatus(
                         "unavailable",
                         NeverSampledMessage(resolved.DisplayName, "Query Store",
-                            "Query Store may be OFF on this server's databases — that, not an absence of slow queries, is the usual cause. Check QUERY_STORE = ON per database, then that collection is running for this server."),
+                            "Query Store may be OFF on this server's databases, that, not an absence of slow queries, is the usual cause. Check QUERY_STORE = ON per database, then that collection is running for this server."),
                         disclosure, databases);
                 }
 
@@ -930,7 +930,7 @@ public sealed class DarlingMcpTrendTools
                 {
                     return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, EmptyStatus(
                         "empty",
-                        $"No Query Store samples were recorded for {ScopedServer(resolved.DisplayName, databases)} between {head:o} — the oldest hour the corrected rollup has materialized — and the end of the window. This server HAS been sampled before, so that stretch is genuinely quiet; the part of the window before {head:o} is unserved rather than quiet (the rollup has not materialized it and this read no longer ranks the raw slab for it, #2736) — run --backfill-rollups to materialize it. Widening hours_back finds newer samples only; it cannot reach the unserved head.",
+                        $"No Query Store samples were recorded for {ScopedServer(resolved.DisplayName, databases)} between {head:o} (the oldest hour the corrected rollup has materialized), and the end of the window. This server HAS been sampled before, so that stretch is genuinely quiet; the part of the window before {head:o} is unserved rather than quiet (the rollup has not materialized it and this read no longer ranks the raw slab for it, #2736): run --backfill-rollups to materialize it. Widening hours_back finds newer samples only; it cannot reach the unserved head.",
                         disclosure, databases), cancellationToken, startUtc);
                 }
 
@@ -1184,7 +1184,7 @@ public sealed class DarlingMcpTrendTools
         envelope["unrated_collections"] = unratedCollections;
         envelope["unrated_note"] = unratedCollections == 0
             ? null
-            : $"{unratedCollections} collection(s) had no knowable rate: a rate is a collection's work divided by the seconds it accrued over, and that denominator is unknowable two ways — the collection's STORED sample interval is 0 (a restart or counter reset: the collector could not difference its two snapshots, so the zeros beside it were never measured), or the collection is rated against the PREVIOUS one and has none inside the window (the window's first collection where no interval was stored, or one landing in the same second as its predecessor). Unknowable is not 0 — such a collection is left out of its point's rates rather than counted as zero, and a point that held nothing else carries null rates ({unrated} here).";
+            : $"{unratedCollections} collection(s) had no knowable rate: a rate is a collection's work divided by the seconds it accrued over, and that denominator is unknowable two ways, the collection's STORED sample interval is 0 (a restart or counter reset: the collector could not difference its two snapshots, so the zeros beside it were never measured), or the collection is rated against the PREVIOUS one and has none inside the window (the window's first collection where no interval was stored, or one landing in the same second as its predecessor). Unknowable is not 0: such a collection is left out of its point's rates rather than counted as zero, and a point that held nothing else carries null rates ({unrated} here).";
         envelope["trend"] = points.Select(p => new
         {
             time = p.CollectionTime.ToString("o"),
@@ -1260,7 +1260,7 @@ public sealed class DarlingMcpTrendTools
             routing["unserved_before"] = floor.ToString("o");
             routing["unserved_note"] =
                 "The rollup has not materialized history before unserved_before, and this read no longer " +
-                "falls back to ranking the raw slab for it (that rank is the #2736 timeout) — points " +
+                "falls back to ranking the raw slab for it (that rank is the #2736 timeout): points " +
                 "before that instant are missing, not zero. Run --backfill-rollups to materialize deeper " +
                 "history.";
         }
@@ -1287,10 +1287,10 @@ public sealed class DarlingMcpTrendTools
 
     /// <summary>The two-state sentence pair the trio shares with Lite's twins, word for word (#2484, #2485).</summary>
     private static string QuietWindowMessage(string serverName, int hours_back, string what) =>
-        $"No {what} samples were recorded for {serverName} in the last {hours_back} hour(s). This server HAS been sampled before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.";
+        $"No {what} samples were recorded for {serverName} in the last {hours_back} hour(s). This server HAS been sampled before, so this window is genuinely quiet rather than broken: widen hours_back to find the most recent samples.";
 
     private static string NeverSampledMessage(string serverName, string what, string checkThis) =>
-        $"No {what} samples have EVER been recorded for {serverName}. This is not an empty window — nothing at all has been stored for this server, so it is NOT a quiet server. {checkThis}";
+        $"No {what} samples have EVER been recorded for {serverName}. This is not an empty window: nothing at all has been stored for this server, so it is NOT a quiet server. {checkThis}";
 
     /// <summary>
     /// The empty answer for the two ROUTED Performance-Trends siblings (#2484, #2485, #3541 A2), in three
@@ -1352,7 +1352,7 @@ public sealed class DarlingMcpTrendTools
             var floor = route.Coverage.HourlyFloorUtc;
             var reach = floor is DateTime f
                 ? (f <= startUtc
-                    ? $"The rollup has materialized history from {f:o}, which covers the whole window, so nothing was recorded for {(databases.IsAll ? "this server" : scoped)} in it in the tier searched — a quiet stretch, or a refresh gap inside the rollup (check get_collection_health)."
+                    ? $"The rollup has materialized history from {f:o}, which covers the whole window, so nothing was recorded for {(databases.IsAll ? "this server" : scoped)} in it in the tier searched: a quiet stretch, or a refresh gap inside the rollup (check get_collection_health)."
                     : $"The rollup has materialized history only from {f:o}; the part of the window before that is UNSERVED rather than quiet, and the raw rows for it were dropped by retention. Run --backfill-rollups to materialize deeper history.")
                 : "The rollup has materialized NOTHING yet, so this is a coverage gap rather than a quiet server: the raw rows for this span were dropped by retention and only --backfill-rollups can materialize them.";
 
@@ -1385,7 +1385,7 @@ public sealed class DarlingMcpTrendTools
         {
             return EmptyStatus(
                 "empty",
-                $"No {what} samples were recorded for {scoped} between {storeOldest:o} — the oldest {route.RawTable} row this store holds for any server — and the end of the window. This server HAS been sampled before, so that stretch is genuinely quiet; the part of the window before {storeOldest:o} predates the store's history rather than being quiet, and widening hours_back cannot reach it.",
+                $"No {what} samples were recorded for {scoped} between {storeOldest:o}: the oldest {route.RawTable} row this store holds for any server, and the end of the window. This server HAS been sampled before, so that stretch is genuinely quiet; the part of the window before {storeOldest:o} predates the store's history rather than being quiet, and widening hours_back cannot reach it.",
                 disclosure, databases);
         }
 
@@ -1398,7 +1398,7 @@ public sealed class DarlingMcpTrendTools
 
         return EmptyStatus(
             "empty",
-            $"No {what} samples were recorded for {scoped} in the part of the last {hours_back} hour(s) that the raw tier still holds. {oldest}, and the window as requested starts at {startUtc:o} — the part before raw's reach is UNSERVED rather than quiet, because the hourly rollup ({route.HourlyView}) that would serve deeper history has materialized less than raw holds. This server HAS been sampled before. Widening hours_back reaches further into what raw no longer holds and cannot help; run --backfill-rollups to materialize the rollup, which is what serves deeper history.",
+            $"No {what} samples were recorded for {scoped} in the part of the last {hours_back} hour(s) that the raw tier still holds. {oldest}, and the window as requested starts at {startUtc:o}: the part before raw's reach is UNSERVED rather than quiet, because the hourly rollup ({route.HourlyView}) that would serve deeper history has materialized less than raw holds. This server HAS been sampled before. Widening hours_back reaches further into what raw no longer holds and cannot help; run --backfill-rollups to materialize the rollup, which is what serves deeper history.",
             disclosure, databases);
     }
 

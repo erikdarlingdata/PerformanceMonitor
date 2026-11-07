@@ -136,7 +136,7 @@ LIMIT 5000";
         catch (Exception ex)
         {
             _logger?.LogWarning(
-                "[PileupSnapshotReader] pileup window read failed for server {ServerId} — this cycle's evaluation is skipped, the next cycle re-reads: {Message}",
+                "[PileupSnapshotReader] pileup window read failed for server {ServerId}, this cycle's evaluation is skipped, the next cycle re-reads: {Message}",
                 serverId, ex.Message);
             rows.Clear();
         }
