@@ -448,8 +448,8 @@
                                                 <DataGridTextColumn Header="Database" Binding="{Binding DatabaseDisplay}" SortMemberPath="DatabaseName" Width="*"/>
                                                 <DataGridTextColumn Header="CPU %" Binding="{Binding PctCpu, StringFormat=N1}" Width="60" ElementStyle="{StaticResource NumericCell}"/>
                                                 <DataGridTextColumn Header="IO %" Binding="{Binding PctIo, StringFormat=N1}" Width="55" ElementStyle="{StaticResource NumericCell}"/>
-                                                <DataGridTextColumn Header="CPU (ms)" Binding="{Binding CpuTimeMs, StringFormat=N0}" Width="80" ElementStyle="{StaticResource NumericCell}"/>
-                                                <DataGridTextColumn Header="Execs" Binding="{Binding ExecutionCount, StringFormat=N0}" Width="70" ElementStyle="{StaticResource NumericCell}"/>
+                                                <DataGridTextColumn Header="CPU (ms)" Binding="{Binding CpuTimeMs, StringFormat=N0}" Width="Auto" MinWidth="80" ElementStyle="{StaticResource NumericCell}"/>
+                                                <DataGridTextColumn Header="Execs" Binding="{Binding ExecutionCount, StringFormat=N0}" Width="Auto" MinWidth="70" ElementStyle="{StaticResource NumericCell}"/>
                                             </DataGrid.Columns>
                                         </DataGrid>
                                     </GroupBox>
@@ -457,9 +457,9 @@
                                         <DataGrid x:Name="FinOpsTopAvgGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" MinHeight="40" MaxHeight="200">
                                             <DataGrid.Columns>
                                                 <DataGridTextColumn Header="Database" Binding="{Binding DatabaseDisplay}" SortMemberPath="DatabaseName" Width="*"/>
-                                                <DataGridTextColumn Header="Avg CPU (ms)" Binding="{Binding AvgCpuMs, StringFormat=N2}" Width="95" ElementStyle="{StaticResource NumericCell}"/>
-                                                <DataGridTextColumn Header="Avg IO (MB)" Binding="{Binding AvgIoMb, StringFormat=N2}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
-                                                <DataGridTextColumn Header="Execs" Binding="{Binding ExecutionCount, StringFormat=N0}" Width="70" ElementStyle="{StaticResource NumericCell}"/>
+                                                <DataGridTextColumn Header="Avg CPU (ms)" Binding="{Binding AvgCpuMs, StringFormat=N2}" Width="Auto" MinWidth="95" ElementStyle="{StaticResource NumericCell}"/>
+                                                <DataGridTextColumn Header="Avg IO (MB)" Binding="{Binding AvgIoMb, StringFormat=N2}" Width="Auto" MinWidth="90" ElementStyle="{StaticResource NumericCell}"/>
+                                                <DataGridTextColumn Header="Execs" Binding="{Binding ExecutionCount, StringFormat=N0}" Width="Auto" MinWidth="70" ElementStyle="{StaticResource NumericCell}"/>
                                             </DataGrid.Columns>
                                         </DataGrid>
                                     </GroupBox>

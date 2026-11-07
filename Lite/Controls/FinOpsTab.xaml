@@ -542,12 +542,12 @@
                                                 <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
                                             </DataGridTextColumn.ElementStyle>
                                         </DataGridTextColumn>
-                                        <DataGridTextColumn Header="CPU (ms)" Binding="{Binding CpuTimeMs, StringFormat='{}{0:N0}'}" Width="85">
+                                        <DataGridTextColumn Header="CPU (ms)" Binding="{Binding CpuTimeMs, StringFormat='{}{0:N0}'}" Width="Auto" MinWidth="85">
                                             <DataGridTextColumn.ElementStyle>
                                                 <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
                                             </DataGridTextColumn.ElementStyle>
                                         </DataGridTextColumn>
-                                        <DataGridTextColumn Header="Execs" Binding="{Binding ExecutionCount, StringFormat='{}{0:N0}'}" Width="70">
+                                        <DataGridTextColumn Header="Execs" Binding="{Binding ExecutionCount, StringFormat='{}{0:N0}'}" Width="Auto" MinWidth="70">
                                             <DataGridTextColumn.ElementStyle>
                                                 <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
                                             </DataGridTextColumn.ElementStyle>
@@ -568,17 +568,17 @@
                               LoadingRow="MarkedGrid_LoadingRow">
                                     <DataGrid.Columns>
                                         <DataGridTextColumn Header="Database" Binding="{Binding DatabaseDisplay}" SortMemberPath="DatabaseName" Width="*"/>
-                                        <DataGridTextColumn Header="Avg CPU (ms)" Binding="{Binding AvgCpuMs, StringFormat='{}{0:N2}'}" Width="110">
+                                        <DataGridTextColumn Header="Avg CPU (ms)" Binding="{Binding AvgCpuMs, StringFormat='{}{0:N2}'}" Width="Auto" MinWidth="110">
                                             <DataGridTextColumn.ElementStyle>
                                                 <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
                                             </DataGridTextColumn.ElementStyle>
                                         </DataGridTextColumn>
-                                        <DataGridTextColumn Header="Avg IO (MB)" Binding="{Binding AvgIoMb, StringFormat='{}{0:N2}'}" Width="105">
+                                        <DataGridTextColumn Header="Avg IO (MB)" Binding="{Binding AvgIoMb, StringFormat='{}{0:N2}'}" Width="Auto" MinWidth="105">
                                             <DataGridTextColumn.ElementStyle>
                                                 <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
                                             </DataGridTextColumn.ElementStyle>
                                         </DataGridTextColumn>
-                                        <DataGridTextColumn Header="Execs" Binding="{Binding ExecutionCount, StringFormat='{}{0:N0}'}" Width="70">
+                                        <DataGridTextColumn Header="Execs" Binding="{Binding ExecutionCount, StringFormat='{}{0:N0}'}" Width="Auto" MinWidth="70">
                                             <DataGridTextColumn.ElementStyle>
                                                 <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
                                             </DataGridTextColumn.ElementStyle>
