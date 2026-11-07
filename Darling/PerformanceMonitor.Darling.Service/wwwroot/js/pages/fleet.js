@@ -85,6 +85,29 @@ export function problemServerCount(d) {
   return ((d && d.worst_servers) || []).length + ((d && d.additional_problem_count) || 0);
 }
 
+/* #8095: a Healthy-banded card the problem list holds for a tile no band reads (#7561). The roll-up's band tiles leave such a server under
+   Healthy, so every count that includes it says how many of its servers are of this kind: "1 Critical" above "3 need attention" is then
+   reconcilable on one screen. The predicate and the bands are the service's and are not changed here. */
+export function isHealthyWithAdvisory(c) {
+  return c.band === "Healthy" && c.has_advisory_tile === true;
+}
+
+function advisorySplit(n) {
+  return n > 0 ? " (" + n + " healthy with " + (n === 1 ? "an advisory" : "advisories") + ")" : "";
+}
+
+/* How many of the cards the attention filter left are Healthy with an advisory. Set by redrawCards from the filtered list it draws, read by
+   attentionNotice beside the count, so the notice's sentence and the grid come from the same list. */
+let shownHealthyWithAdvisories = 0;
+
+/** The overflow line under the problem list: the servers past the list's cap, and how many of those are Healthy with an advisory. A card the
+    list already names is in the rows, not past them, so it is not counted again. */
+export function moreNeedAttentionText(d) {
+  const listed = new Set(((d && d.worst_servers) || []).map((r) => r.display_name));
+  const advisory = ((d && d.cards) || []).filter((c) => isHealthyWithAdvisory(c) && !listed.has(c.display_name)).length;
+  return "+ " + d.additional_problem_count + " more need attention" + advisorySplit(advisory);
+}
+
 /* What the filter did, shown beside the cards it left. Word-for-word the desktop viewer's
    FleetRollup.AttentionFilterCountText (#2424), because the point of doing all three surfaces at once is
    that a reader moving between them meets one vocabulary rather than three. The all-clear arms matter as
@@ -332,7 +355,43 @@ function showStoreFailure(body, inPlace, message) {
 function storeFleetBody(d, store, own) {
   if (!d.total_servers) return [emptyStrip("No servers are enabled in this store yet.")];
   const cards = (d.cards || []).slice().sort(SORTS.severity);
-  return [rollup(d), el("div", { class: "grid server-grid" }, cards.map((c) => serverCard(c, store, own)))];
+  /* #8095: the single-store page's reading aids, inside the section: the problem list, its overflow line and the updated stamp. The controls
+     (Search, the attention filter, grouping, Silence) stay out, as renderStoreFleets says. The overflow line is a count alone here, because
+     there is no filter for it to switch on, and a row of the list opens its server in this section's store. */
+  return [
+    rollup(d),
+    ...storeAttentionNodes(d, store),
+    el("div", { class: "grid server-grid" }, cards.map((c) => serverCard(c, store, own))),
+    el("div", { class: "meta fleet-store-updated", text: "Updated " + localTime(d.generated_at) }),
+  ];
+}
+
+/** A store section's all-healthy line, or its "Needs attention" list with the overflow count (#2437, #7561), the single-store page's shape
+    without the page's filter: the overflow line is a count alone here, and a row opens its server in `store`. */
+function storeAttentionNodes(d, store) {
+  if (problemServerCount(d) === 0) {
+    return [
+      el("div", { class: "all-healthy" }, [
+        el("span", { class: "dot band-Healthy" }),
+        "All " + d.total_servers + " server" + (d.total_servers === 1 ? "" : "s") + " healthy.",
+      ]),
+    ];
+  }
+  const nodes = [
+    el("h3", { class: "section-title", text: "Needs attention" }),
+    VIZ.bandlist(d, {
+      rowsKey: "worst_servers",
+      primaryKey: "display_name",
+      bandKey: "band",
+      bandLabelKey: "band_label",
+      advisoryKey: "advisory_tiles",
+      reasonKey: "reason",
+      navKey: "display_name",
+      navStore: store,
+    }),
+  ];
+  if ((d.additional_problem_count || 0) > 0) nodes.push(el("div", { class: "attention-more muted", text: moreNeedAttentionText(d) }));
+  return nodes;
 }
 
 export async function renderFleet(main, opts) {
@@ -397,7 +456,7 @@ export async function renderFleet(main, opts) {
       nodes.push(
         el("div", {
           class: "attention-link",
-          text: "+ " + d.additional_problem_count + " more need attention",
+          text: moreNeedAttentionText(d),
           title: "Show only the servers that need attention",
           onActivate: () => setAttentionOnly(true),
         })
@@ -433,6 +492,7 @@ function redrawCards() {
      page head scrolls away, so a reader who has scrolled down to the grid would see a short fleet and nothing
      saying why. A filtered grid that looks unfiltered is a worse defect than the dead end it replaced, so the
      notice sits on the grid and carries its own way out. */
+  shownHealthyWithAdvisories = matched.filter(isHealthyWithAdvisory).length;
   const notice = attentionOnly ? attentionNotice(matched.length, searched.length) : null;
 
   if (fleetGrouped && lastTags.length) {
@@ -469,9 +529,10 @@ function attentionNotice(shown, total) {
   const label = term ? "Needs attention only, matching “" + term + "”" : "Needs attention only";
   const searchFoundNothing = term !== "" && total === 0;
   const kind = searchFoundNothing ? "none" : shown > 0 ? "warn" : "ok";
+  /* #8095: the count is the viewer's sentence; the split after it says how many of the shown cards are Healthy with an advisory. */
   const sentence = searchFoundNothing
     ? label + " — nothing matches that term, so no server was judged."
-    : label + " — " + attentionCountText(shown, total, term !== "") + ".";
+    : label + " — " + attentionCountText(shown, total, term !== "") + advisorySplit(shownHealthyWithAdvisories) + ".";
 
   return el("div", { class: "attention-note " + kind, role: "status" }, [
     el("span", { text: sentence }),
@@ -603,7 +664,7 @@ function attentionControl() {
   attentionToggle = cb;
   return el("label", {
     class: "attention-control",
-    title: "Show only the cards that are not Healthy — Critical, Warning or Offline. Uncheck to show the whole fleet again.",
+    title: "Show only the servers that need attention: any band other than Healthy, or a Healthy band with a warning tile. Uncheck to show the whole fleet again.",
   }, [cb, el("span", { text: "Needs attention only" })]);
 }
 

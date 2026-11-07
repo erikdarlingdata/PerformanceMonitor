@@ -135,6 +135,8 @@ namespace PerformanceMonitor.Ui
             var dictionaries = Application.Current.Resources.MergedDictionaries;
             dictionaries.Clear();
             dictionaries.Add(dictionary);
+            /* #8144: after the color theme, so a theme switch (which clears the list above) keeps the shared text styles. */
+            dictionaries.Add(new ResourceDictionary { Source = SharedStylesUri });
 
             ThemeChanged?.Invoke(theme);
         }
@@ -242,7 +244,7 @@ namespace PerformanceMonitor.Ui
             {
                 try
                 {
-                    var compiled = new ResourceDictionary { Source = ThemeUri(name) };
+                    var compiled = new ResourceDictionary { Source = ThemeUriProvider(name) };
                     foreach (var key in ThemeColorOverrides.ExposedKeys)
                     {
                         if (!palette.ContainsKey(key) && compiled[key] is Color color)
@@ -323,11 +325,11 @@ namespace PerformanceMonitor.Ui
             var overrides = Overrides.For(name);
             if (overrides.Count == 0)
             {
-                return new ResourceDictionary { Source = ThemeUri(name) };
+                return new ResourceDictionary { Source = ThemeUriProvider(name) };
             }
 
             var regenerated = TryBuildRegenerated(name, overrides);
-            return regenerated ?? new ResourceDictionary { Source = ThemeUri(name) };
+            return regenerated ?? new ResourceDictionary { Source = ThemeUriProvider(name) };
         }
 
         /// <summary>
@@ -385,6 +387,22 @@ namespace PerformanceMonitor.Ui
                 return null;
             }
         }
+
+        /// <summary>
+        /// #8144: the text styles both apps share (page title, panel title, panel subtitle, KPI value, empty hint). It lives in this
+        /// assembly, so one URI serves Lite and the Viewer. <see cref="Apply"/> merges it after the color theme.
+        /// <para>Built on each read, like <see cref="ThemeUri"/>, and not in a static field initializer: a <c>pack://</c> URI parses only
+        /// after WPF has registered the pack scheme, which an <c>Application</c> does when it is built. This type's initializer can run
+        /// before that, in a process whose first touch of the type is a plain member such as <see cref="OverridesFilePath"/>, and a
+        /// pack URI built there throws <see cref="UriFormatException"/> and fails the type for the rest of the process (#8170).</para>
+        /// </summary>
+        public static Uri SharedStylesUri => new("pack://application:,,,/PerformanceMonitor.Ui;component/Themes/SharedStyles.xaml");
+
+        /// <summary>
+        /// Where a theme's compiled dictionary is loaded from. The running app's own <c>Themes/</c> folder, which a test host does not
+        /// have: a test points it at the app assembly's pack URI to drive <see cref="Apply"/> end to end, then puts <see cref="ThemeUri"/> back.
+        /// </summary>
+        public static Func<string, Uri> ThemeUriProvider { get; set; } = ThemeUri;
 
         /// <summary>The compiled dictionary's pack URI for a theme — the pre-#3577 load path.</summary>
         public static Uri ThemeUri(string theme) => theme switch

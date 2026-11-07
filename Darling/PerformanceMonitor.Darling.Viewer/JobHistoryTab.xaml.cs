@@ -176,6 +176,9 @@ public partial class JobHistoryTab : UserControl
                 ? ReadHalfAsync("categories", "category", () => service.GetJobHistoryCategoriesAsync(windowStartUtc, windowIsLive ? null : windowEndUtc, serverId: serverId), choicesKey)
                 : null;
             var choicesTask = serversTask is null || categoriesTask is null ? null : JoinChoicesAsync(serversTask, categoriesTask);
+            /* #8133: at All Servers every server with runs in the window is guaranteed its share of the cap, so one busy server cannot fill
+               the page alone. */
+            _dataService.ShareJobHistoryCapPerServer = true;
             var readTask = _dataService.GetJobHistoryAsync(sinceUtc, serverId, RowCap, untilUtc: windowIsLive ? null : windowEndUtc, runStatus: statusFilter, category: categoryFilter);
             await ViewerServerTab.AwaitReadWatchingProbeAsync(readTask, dataStartTask, "Job History");
             var all = await readTask;

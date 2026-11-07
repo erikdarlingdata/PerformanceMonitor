@@ -56,6 +56,7 @@ public partial class FinOpsTab : UserControl
     public FinOpsTab()
     {
         InitializeComponent();
+        ViewerChartCards.Attach(this); // #8151: "0 throughout" in a card whose chart plots only zeros
 
         /* #5562: the shared time range pickers. The old combos opened on 24 hours (the heatmap on 30 days); the pickers
            open on the same, drawn in the display zone in force. Every FinOps read takes "hours back from now" (the heatmap
@@ -274,7 +275,7 @@ public partial class FinOpsTab : UserControl
         try
         {
             await LoadFinOpsAsync();
-            StatusChanged?.Invoke($"{_server.DisplayName} — refreshed {DateTime.Now:HH:mm:ss}");
+            StatusChanged?.Invoke($"{_server.DisplayName} — refreshed {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {

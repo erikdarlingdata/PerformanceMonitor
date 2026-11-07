@@ -1,0 +1,47 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!--
+        #8144: the text styles both apps share, so a title is the same size in Lite and in the Viewer. ThemeManager.Apply merges
+        this dictionary after the color theme, so a theme switch keeps it. It holds no colors of its own: every brush is looked up
+        by key at run time and so follows the active theme. Body text stays at 12. Spacing is 4, 8, 12 and 16.
+    -->
+
+    <!-- The title of a page or a tab. -->
+    <Style x:Key="PageTitleText" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="18"/>
+        <Setter Property="FontWeight" Value="SemiBold"/>
+        <Setter Property="Foreground" Value="{DynamicResource ForegroundBrush}"/>
+    </Style>
+
+    <!-- The title of a card, such as a chart panel. -->
+    <Style x:Key="PanelTitleText" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="14"/>
+        <Setter Property="FontWeight" Value="SemiBold"/>
+        <Setter Property="Foreground" Value="{DynamicResource ForegroundBrush}"/>
+    </Style>
+
+    <!-- The line under a card title. -->
+    <Style x:Key="PanelSubtitleText" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="11"/>
+        <Setter Property="Foreground" Value="{DynamicResource ForegroundMutedBrush}"/>
+    </Style>
+
+    <!-- The big number on a KPI card. -->
+    <Style x:Key="KpiValueText" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="22"/>
+        <Setter Property="FontWeight" Value="Bold"/>
+        <Setter Property="Foreground" Value="{DynamicResource ForegroundBrush}"/>
+    </Style>
+
+    <!-- The one centered sentence a surface shows when it has nothing to draw. Collapsed until the host turns it on. -->
+    <Style x:Key="EmptyHint" TargetType="TextBlock">
+        <Setter Property="Foreground" Value="{DynamicResource ForegroundMutedBrush}"/>
+        <Setter Property="HorizontalAlignment" Value="Center"/>
+        <Setter Property="VerticalAlignment" Value="Center"/>
+        <Setter Property="TextWrapping" Value="Wrap"/>
+        <Setter Property="TextAlignment" Value="Center"/>
+        <Setter Property="MaxWidth" Value="480"/>
+        <Setter Property="IsHitTestVisible" Value="False"/>
+        <Setter Property="Visibility" Value="Collapsed"/>
+    </Style>
+</ResourceDictionary>

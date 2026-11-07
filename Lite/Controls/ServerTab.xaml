@@ -329,7 +329,9 @@
                                 <ComboBoxItem Content="Avg Wait Time (ms/wait)"/>
                             </ComboBox>
                         </StackPanel>
-                        <ScottPlot:WpfPlot Grid.Row="1" x:Name="WaitStatsChart"/>
+                        <ui:ChartPanel Title="Wait Stats" Grid.Row="1">
+                            <ScottPlot:WpfPlot x:Name="WaitStatsChart"/>
+                        </ui:ChartPanel>
                     </Grid>
                 </Grid>
             </TabItem>
@@ -341,10 +343,18 @@
                         <TabItem Header="Performance Trends">
                             <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                                 <ui:ChartGridPanel MaxColumns="2">
-                                    <ScottPlot:WpfPlot x:Name="QueryDurationTrendChart"/>
-                                    <ScottPlot:WpfPlot x:Name="ProcDurationTrendChart"/>
-                                    <ScottPlot:WpfPlot x:Name="QueryStoreDurationTrendChart"/>
-                                    <ScottPlot:WpfPlot x:Name="ExecutionCountTrendChart"/>
+                                    <ui:ChartPanel Title="Query Duration">
+                                        <ScottPlot:WpfPlot x:Name="QueryDurationTrendChart"/>
+                                    </ui:ChartPanel>
+                                    <ui:ChartPanel Title="Procedure Duration">
+                                        <ScottPlot:WpfPlot x:Name="ProcDurationTrendChart"/>
+                                    </ui:ChartPanel>
+                                    <ui:ChartPanel Title="Query Store Duration">
+                                        <ScottPlot:WpfPlot x:Name="QueryStoreDurationTrendChart"/>
+                                    </ui:ChartPanel>
+                                    <ui:ChartPanel Title="Execution Count">
+                                        <ScottPlot:WpfPlot x:Name="ExecutionCountTrendChart"/>
+                                    </ui:ChartPanel>
                                 </ui:ChartGridPanel>
                             </ScrollViewer>
                         </TabItem>
@@ -390,11 +400,11 @@
                                         <DataGridTextColumn Binding="{Binding CollectionTimeLocal}" Width="140" SortMemberPath="CollectionTime">
                                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         </DataGridTextColumn>
-                                        <DataGridTemplateColumn Width="500">
+                                        <DataGridTemplateColumn Width="320">
                                             <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryText" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Query Text" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
                                                                                         <DataGridTemplateColumn.CellTemplate>
                                                 <DataTemplate>
-                                                    <TextBlock Text="{Binding QueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2"
+                                                    <TextBlock Text="{Binding QueryText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" Margin="5,2"
                                                                ToolTip="{Binding QueryText}"/>
                                                 </DataTemplate>
                                             </DataGridTemplateColumn.CellTemplate>
@@ -515,24 +525,35 @@
                                       Sorting="QueryStatsGrid_Sorting"
                                       MouseDoubleClick="QueryStatsGrid_MouseDoubleClick">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Header="Tag" Binding="{Binding QueryTag}" Width="140"/>
                                     <DataGridTextColumn Binding="{Binding DatabaseDisplay}" SortMemberPath="DatabaseName" Width="120">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding ModuleName}" Width="200">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ModuleName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Module" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
-                                    </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding LastExecutionTimeLocal}" Width="140" SortMemberPath="LastExecutionTime">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastExecutionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Execution" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
-                                    </DataGridTextColumn>
+                                    <DataGridTemplateColumn SortMemberPath="TotalExecutions" Width="90">
+                                        <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalExecutions" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Executions" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
+                                        <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                                            <ui:BarChartCell Value="{Binding TotalExecutions}" Maximum="{Binding BarMaxExecutions, RelativeSource={RelativeSource AncestorType={x:Type controls:ServerTab}}}" Text="{Binding TotalExecutions, StringFormat=N0}"/>
+                                        </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                    <DataGridTemplateColumn SortMemberPath="TotalCpuMs" Width="110">
+                                        <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Total CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
+                                        <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                                            <ui:BarChartCell Value="{Binding TotalCpuMs}" Maximum="{Binding BarMaxTotalCpu, RelativeSource={RelativeSource AncestorType={x:Type controls:ServerTab}}}" Text="{Binding TotalCpuMs, StringFormat=N1}"/>
+                                        </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                    <DataGridTemplateColumn SortMemberPath="TotalElapsedMs" Width="130">
+                                        <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalElapsedMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Total Duration (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
+                                        <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                                            <ui:BarChartCell Value="{Binding TotalElapsedMs}" Maximum="{Binding BarMaxTotalElapsed, RelativeSource={RelativeSource AncestorType={x:Type controls:ServerTab}}}" Text="{Binding TotalElapsedMs, StringFormat=N1}"/>
+                                        </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
                                     <DataGridTextColumn Binding="{Binding CreationTimeLocal}" Width="140" SortMemberPath="CreationTime">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CreationTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Creation Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTemplateColumn Width="500">
+                                    <DataGridTemplateColumn Width="320">
                                         <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryText" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Query Text" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
                                                                                 <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
-                                                <TextBlock Text="{Binding QueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2"
+                                                <TextBlock Text="{Binding QueryText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" Margin="5,2"
                                                            ToolTip="{Binding QueryText}"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
@@ -546,20 +567,18 @@
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>
-                                    <DataGridTemplateColumn SortMemberPath="TotalExecutions" Width="90">
-                                        <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalExecutions" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Executions" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
-                                        <DataGridTemplateColumn.CellTemplate><DataTemplate>
-                                            <ui:BarChartCell Value="{Binding TotalExecutions}" Maximum="{Binding BarMaxExecutions, RelativeSource={RelativeSource AncestorType={x:Type controls:ServerTab}}}" Text="{Binding TotalExecutions, StringFormat=N0}"/>
-                                        </DataTemplate></DataGridTemplateColumn.CellTemplate>
-                                    </DataGridTemplateColumn>
-                                    <DataGridTemplateColumn SortMemberPath="TotalCpuMs" Width="110">
-                                        <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Total CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
-                                        <DataGridTemplateColumn.CellTemplate><DataTemplate>
-                                            <ui:BarChartCell Value="{Binding TotalCpuMs}" Maximum="{Binding BarMaxTotalCpu, RelativeSource={RelativeSource AncestorType={x:Type controls:ServerTab}}}" Text="{Binding TotalCpuMs, StringFormat=N1}"/>
-                                        </DataTemplate></DataGridTemplateColumn.CellTemplate>
-                                    </DataGridTemplateColumn>
+                                    <DataGridTextColumn Header="Tag" Binding="{Binding QueryTag}" Width="140"/>
                                     <DataGridTextColumn Binding="{Binding AvgCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="100">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Avg CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding AvgElapsedMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="120">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgElapsedMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Avg Duration (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding ModuleName}" Width="200">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ModuleName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Module" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding LastExecutionTimeLocal}" Width="140" SortMemberPath="LastExecutionTime">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastExecutionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Execution" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding WorkerTimePerSecond, StringFormat=N1}" ElementStyle="{StaticResource NumericCell}" Width="120">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="WorkerTimePerSecond" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Peak CPU (ms/s)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
@@ -569,15 +588,6 @@
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding TotalClrMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalClrMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Total CLR (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
-                                    </DataGridTextColumn>
-                                    <DataGridTemplateColumn SortMemberPath="TotalElapsedMs" Width="130">
-                                        <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalElapsedMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Total Duration (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
-                                        <DataGridTemplateColumn.CellTemplate><DataTemplate>
-                                            <ui:BarChartCell Value="{Binding TotalElapsedMs}" Maximum="{Binding BarMaxTotalElapsed, RelativeSource={RelativeSource AncestorType={x:Type controls:ServerTab}}}" Text="{Binding TotalElapsedMs, StringFormat=N1}"/>
-                                        </DataTemplate></DataGridTemplateColumn.CellTemplate>
-                                    </DataGridTemplateColumn>
-                                    <DataGridTextColumn Binding="{Binding AvgElapsedMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="120">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgElapsedMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Avg Duration (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTemplateColumn SortMemberPath="TotalLogicalReads" Width="100">
                                         <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalLogicalReads" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Total Reads" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
@@ -706,11 +716,11 @@
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
                                         <DataGridTextColumn.Header><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTemplateColumn Width="500">
+                                    <DataGridTemplateColumn Width="320">
                                         <DataGridTemplateColumn.Header><TextBlock Text="Query Text" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTemplateColumn.Header>
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
-                                                <TextBlock Text="{Binding QueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2"
+                                                <TextBlock Text="{Binding QueryText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" Margin="5,2"
                                                            ToolTip="{Binding QueryText}"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
@@ -951,11 +961,11 @@
                                     <!-- #1981: parity with the other two comparison grids' text columns. This is a
                                          REPRESENTATIVE statement captured from inside the procedure (latest text
                                          sharing the module's sql_handle), not the definition. -->
-                                    <DataGridTemplateColumn Width="500">
+                                    <DataGridTemplateColumn Width="320">
                                         <DataGridTemplateColumn.Header><TextBlock Text="Statement (representative)" FontWeight="Bold"/></DataGridTemplateColumn.Header>
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
-                                                <TextBlock Text="{Binding QueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2"
+                                                <TextBlock Text="{Binding QueryText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" Margin="5,2"
                                                            ToolTip="{Binding QueryText}"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
@@ -1051,11 +1061,11 @@
                                     <DataGridTextColumn Binding="{Binding FirstExecutionTimeLocal}" Width="140" SortMemberPath="FirstExecutionTime">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FirstExecutionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="First Execution" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTemplateColumn Width="500">
+                                    <DataGridTemplateColumn Width="320">
                                         <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryText" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Query Text" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
                                                                                 <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
-                                                <TextBlock Text="{Binding QueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2"
+                                                <TextBlock Text="{Binding QueryText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" Margin="5,2"
                                                            ToolTip="{Binding QueryText}"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
@@ -1247,11 +1257,11 @@
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
                                         <DataGridTextColumn.Header><TextBlock Text="Database" FontWeight="Bold"/></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTemplateColumn Width="500">
+                                    <DataGridTemplateColumn Width="320">
                                         <DataGridTemplateColumn.Header><TextBlock Text="Query Text" FontWeight="Bold"/></DataGridTemplateColumn.Header>
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
-                                                <TextBlock Text="{Binding QueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2"
+                                                <TextBlock Text="{Binding QueryText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" Margin="5,2"
                                                            ToolTip="{Binding QueryText}"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
@@ -1332,11 +1342,11 @@
                                         <DataGridTextColumn Binding="{Binding CollectionTimeLocal}" Width="150" SortMemberPath="CollectionTime">
                                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         </DataGridTextColumn>
-                                        <DataGridTemplateColumn Width="500" SortMemberPath="QueryText">
+                                        <DataGridTemplateColumn Width="320" SortMemberPath="QueryText">
                                             <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryText" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Query Text" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
                                             <DataGridTemplateColumn.CellTemplate>
                                                 <DataTemplate>
-                                                    <TextBlock Text="{Binding QueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2"
+                                                    <TextBlock Text="{Binding QueryText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" Margin="5,2"
                                                                ToolTip="{Binding QueryText}"/>
                                                 </DataTemplate>
                                             </DataGridTemplateColumn.CellTemplate>
@@ -1448,9 +1458,11 @@
                                            Padding="8,4" FontWeight="Bold"
                                            Foreground="{DynamicResource ForegroundBrush}"
                                            Background="#22FFAA00"/>
-                                <ScottPlot:WpfPlot Grid.Row="2" x:Name="QueryHeatmapChart"
-                                                    MouseMove="HeatmapChart_MouseMove"
-                                                    MouseLeave="HeatmapChart_MouseLeave"/>
+                                <ui:ChartPanel Title="Query Heatmap" Grid.Row="2">
+                                    <ScottPlot:WpfPlot x:Name="QueryHeatmapChart"
+                                                        MouseMove="HeatmapChart_MouseMove"
+                                                        MouseLeave="HeatmapChart_MouseLeave"/>
+                                </ui:ChartPanel>
                             </Grid>
                         </TabItem>
                     </TabControl>
@@ -1498,7 +1510,9 @@
             <!-- CPU Tab -->
             <TabItem Header="CPU">
                 <Grid Margin="8">
-                    <ScottPlot:WpfPlot x:Name="CpuChart"/>
+                    <ui:ChartPanel Title="CPU">
+                        <ScottPlot:WpfPlot x:Name="CpuChart"/>
+                    </ui:ChartPanel>
                 </Grid>
             </TabItem>
 
@@ -1565,7 +1579,9 @@
                             </Border>
 
                             <!-- Memory Trend Chart -->
-                            <ScottPlot:WpfPlot Grid.Row="1" x:Name="MemoryChart"/>
+                            <ui:ChartPanel Title="Memory" Grid.Row="1">
+                                <ScottPlot:WpfPlot x:Name="MemoryChart"/>
+                            </ui:ChartPanel>
                         </Grid></ScrollViewer>
                     </TabItem>
 
@@ -1614,7 +1630,9 @@
                                     <RowDefinition Height="*"/>
                                     <RowDefinition Height="Auto"/>
                                 </Grid.RowDefinitions>
-                                <ScottPlot:WpfPlot Grid.Row="0" x:Name="MemoryClerksChart"/>
+                                <ui:ChartPanel Title="Memory Clerks" Grid.Row="0">
+                                    <ScottPlot:WpfPlot x:Name="MemoryClerksChart"/>
+                                </ui:ChartPanel>
                                 <Border Grid.Row="1" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12,8" Margin="0,8,0,0">
                                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
                                         <TextBlock Text="Non-BP Total:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
@@ -1635,8 +1653,12 @@
                                 <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                                 <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                             </Grid.RowDefinitions>
-                            <ScottPlot:WpfPlot Grid.Row="0" x:Name="MemoryGrantSizingChart" Margin="0,0,0,4"/>
-                            <ScottPlot:WpfPlot Grid.Row="1" x:Name="MemoryGrantActivityChart" Margin="0,4,0,0"/>
+                            <ui:ChartPanel Title="Memory Grant Sizing" Grid.Row="0" Margin="0,0,0,4">
+                                <ScottPlot:WpfPlot x:Name="MemoryGrantSizingChart"/>
+                            </ui:ChartPanel>
+                            <ui:ChartPanel Title="Memory Grant Activity" Grid.Row="1" Margin="0,4,0,0">
+                                <ScottPlot:WpfPlot x:Name="MemoryGrantActivityChart"/>
+                            </ui:ChartPanel>
                         </Grid></ScrollViewer>
                     </TabItem>
 
@@ -1652,7 +1674,9 @@
                                        Padding="8,4" FontWeight="Bold"
                                        Foreground="{DynamicResource ForegroundBrush}"
                                        Background="#22FFAA00"/>
-                            <ScottPlot:WpfPlot Grid.Row="1" x:Name="MemoryPressureEventsChart"/>
+                            <ui:ChartPanel Title="Memory Pressure Events" Grid.Row="1">
+                                <ScottPlot:WpfPlot x:Name="MemoryPressureEventsChart"/>
+                            </ui:ChartPanel>
                             <!-- Shown only where the memory_pressure_events collector does not collect for this server and the chart has no points. -->
                             <TextBlock Grid.Row="1" x:Name="MemoryPressureEventsNoDataMessage" Text="No memory pressure events in the selected time window." Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
                         </Grid>
@@ -1674,10 +1698,14 @@
                                     <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                                 </Grid.RowDefinitions>
                                 <Border Grid.Row="0" Margin="0,0,0,4">
-                                    <ScottPlot:WpfPlot x:Name="FileIoReadChart"/>
+                                    <ui:ChartPanel Title="Read Latency">
+                                        <ScottPlot:WpfPlot x:Name="FileIoReadChart"/>
+                                    </ui:ChartPanel>
                                 </Border>
                                 <Border Grid.Row="1" Margin="0,4,0,0">
-                                    <ScottPlot:WpfPlot x:Name="FileIoWriteChart"/>
+                                    <ui:ChartPanel Title="Write Latency">
+                                        <ScottPlot:WpfPlot x:Name="FileIoWriteChart"/>
+                                    </ui:ChartPanel>
                                 </Border>
                             </Grid></ScrollViewer>
                         </TabItem>
@@ -1691,10 +1719,14 @@
                                     <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                                 </Grid.RowDefinitions>
                                 <Border Grid.Row="0" Margin="0,0,0,4">
-                                    <ScottPlot:WpfPlot x:Name="FileIoReadThroughputChart"/>
+                                    <ui:ChartPanel Title="Read Throughput">
+                                        <ScottPlot:WpfPlot x:Name="FileIoReadThroughputChart"/>
+                                    </ui:ChartPanel>
                                 </Border>
                                 <Border Grid.Row="1" Margin="0,4,0,0">
-                                    <ScottPlot:WpfPlot x:Name="FileIoWriteThroughputChart"/>
+                                    <ui:ChartPanel Title="Write Throughput">
+                                        <ScottPlot:WpfPlot x:Name="FileIoWriteThroughputChart"/>
+                                    </ui:ChartPanel>
                                 </Border>
                             </Grid></ScrollViewer>
                         </TabItem>
@@ -1712,16 +1744,23 @@
                         <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                     </Grid.RowDefinitions>
 
+                    <!-- #8144: every chart in the group sits in a ChartPanel card, so the group keeps its plots one width. -->
                     <Border Grid.Row="0" Margin="0,0,0,4">
-                        <ScottPlot:WpfPlot x:Name="TempDbChart"/>
+                        <ui:ChartPanel Title="tempdb">
+                            <ScottPlot:WpfPlot x:Name="TempDbChart"/>
+                        </ui:ChartPanel>
                     </Border>
 
                     <Border Grid.Row="1" Margin="0,4,0,4">
-                        <ScottPlot:WpfPlot x:Name="TempDbSizeChart"/>
+                        <ui:ChartPanel Title="tempdb Size">
+                            <ScottPlot:WpfPlot x:Name="TempDbSizeChart"/>
+                        </ui:ChartPanel>
                     </Border>
 
                     <Border Grid.Row="2" Margin="0,4,0,0">
-                        <ScottPlot:WpfPlot x:Name="TempDbFileIoChart"/>
+                        <ui:ChartPanel Title="tempdb File I/O Latency">
+                            <ScottPlot:WpfPlot x:Name="TempDbFileIoChart"/>
+                        </ui:ChartPanel>
                     </Border>
 
                     <!-- Shown over the usage and size charts when tempdb_stats recorded a named skip such as PERMISSIONS and the window has no tempdb rows (#6861). -->
@@ -1761,21 +1800,27 @@
                                            Foreground="{DynamicResource ForegroundBrush}"
                                            Background="#22FFAA00"/>
                                 <Border Grid.Row="1" Margin="0,0,0,4">
-                                    <ScottPlot:WpfPlot x:Name="LockWaitTrendChart"/>
+                                    <ui:ChartPanel Title="Lock Wait Time">
+                                        <ScottPlot:WpfPlot x:Name="LockWaitTrendChart"/>
+                                    </ui:ChartPanel>
                                 </Border>
                                 <TextBlock x:Name="BlockingTrendTruncationBanner" Grid.Row="2" Visibility="Collapsed"
                                            Padding="8,4" FontWeight="Bold"
                                            Foreground="{DynamicResource ForegroundBrush}"
                                            Background="#22FFAA00"/>
                                 <Border Grid.Row="3" Margin="0,4,0,4">
-                                    <ScottPlot:WpfPlot x:Name="BlockingTrendChart"/>
+                                    <ui:ChartPanel Title="Blocking Trend">
+                                        <ScottPlot:WpfPlot x:Name="BlockingTrendChart"/>
+                                    </ui:ChartPanel>
                                 </Border>
                                 <TextBlock x:Name="DeadlockTrendTruncationBanner" Grid.Row="4" Visibility="Collapsed"
                                            Padding="8,4" FontWeight="Bold"
                                            Foreground="{DynamicResource ForegroundBrush}"
                                            Background="#22FFAA00"/>
                                 <Border Grid.Row="5" Margin="0,4,0,0">
-                                    <ScottPlot:WpfPlot x:Name="DeadlockTrendChart"/>
+                                    <ui:ChartPanel Title="Deadlocks">
+                                        <ScottPlot:WpfPlot x:Name="DeadlockTrendChart"/>
+                                    </ui:ChartPanel>
                                 </Border>
                             </Grid></ScrollViewer>
                         </TabItem>
@@ -1795,10 +1840,14 @@
                                            Foreground="{DynamicResource ForegroundBrush}"
                                            Background="#22FFAA00"/>
                                 <Border Grid.Row="1" Margin="0,0,0,4">
-                                    <ScottPlot:WpfPlot x:Name="CurrentWaitsDurationChart"/>
+                                    <ui:ChartPanel Title="Total Wait Duration">
+                                        <ScottPlot:WpfPlot x:Name="CurrentWaitsDurationChart"/>
+                                    </ui:ChartPanel>
                                 </Border>
                                 <Border Grid.Row="2" Margin="0,4,0,0">
-                                    <ScottPlot:WpfPlot x:Name="CurrentWaitsBlockedChart"/>
+                                    <ui:ChartPanel Title="Blocked Sessions">
+                                        <ScottPlot:WpfPlot x:Name="CurrentWaitsBlockedChart"/>
+                                    </ui:ChartPanel>
                                 </Border>
                                 <!-- Both charts read waiting_tasks, which stores a row only when a collection found a task waiting or blocked, so a quiet server draws few points and a gap means nothing was waiting. -->
                                 <TextBlock Grid.Row="3" x:Name="CurrentWaitsSparseNote" Padding="8,4" FontStyle="Italic" TextWrapping="Wrap"
@@ -2078,20 +2127,28 @@
                                            Foreground="{DynamicResource ForegroundBrush}"
                                            Background="#22FFAA00"/>
                                 <Border Grid.Row="1" Grid.Column="0" Margin="0,0,4,4">
-                                    <ScottPlot:WpfPlot x:Name="BlockingDurationChart"/>
+                                    <ui:ChartPanel Title="Block Duration">
+                                        <ScottPlot:WpfPlot x:Name="BlockingDurationChart"/>
+                                    </ui:ChartPanel>
                                 </Border>
                                 <Border Grid.Row="1" Grid.Column="1" Margin="4,0,0,4">
-                                    <ScottPlot:WpfPlot x:Name="BlockingTotalDurationChart"/>
+                                    <ui:ChartPanel Title="Total Block Duration">
+                                        <ScottPlot:WpfPlot x:Name="BlockingTotalDurationChart"/>
+                                    </ui:ChartPanel>
                                 </Border>
                                 <TextBlock x:Name="BlockingStatsDeadlockTruncationBanner" Grid.Row="2" Grid.ColumnSpan="2" Visibility="Collapsed"
                                            Padding="8,4" FontWeight="Bold"
                                            Foreground="{DynamicResource ForegroundBrush}"
                                            Background="#22FFAA00"/>
                                 <Border Grid.Row="3" Grid.Column="0" Margin="0,4,4,0">
-                                    <ScottPlot:WpfPlot x:Name="DeadlockWaitChart"/>
+                                    <ui:ChartPanel Title="Deadlock Wait">
+                                        <ScottPlot:WpfPlot x:Name="DeadlockWaitChart"/>
+                                    </ui:ChartPanel>
                                 </Border>
                                 <Border Grid.Row="3" Grid.Column="1" Margin="4,4,0,0">
-                                    <ScottPlot:WpfPlot x:Name="DeadlockTotalWaitChart"/>
+                                    <ui:ChartPanel Title="Total Deadlock Wait">
+                                        <ScottPlot:WpfPlot x:Name="DeadlockTotalWaitChart"/>
+                                    </ui:ChartPanel>
                                 </Border>
                                 <Border Grid.Row="4" Grid.ColumnSpan="2" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12,8" Margin="0,4,0,0">
                                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
@@ -2158,7 +2215,9 @@
                         </Grid>
                     </Border>
 
-                    <ScottPlot:WpfPlot Grid.Column="1" x:Name="PerfmonChart"/>
+                    <ui:ChartPanel Title="Performance Counters" Grid.Column="1">
+                        <ScottPlot:WpfPlot x:Name="PerfmonChart"/>
+                    </ui:ChartPanel>
                 </Grid>
             </TabItem>
 
@@ -2387,21 +2446,21 @@
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="200">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding StateDisplay}" Width="200">
+                                    <DataGridTextColumn Binding="{Binding StateDisplay}" Width="Auto" MinWidth="120">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="StateDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="State" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
-                                    </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding ReadonlyReasonDisplay}" Width="190">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ReadonlyReasonDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Read-Only Reason" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
-                                    </DataGridTextColumn>
-                                    <DataGridTextColumn Header="Used MB" Binding="{Binding CurrentStorageMb, StringFormat=N0}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Cap MB" Binding="{Binding MaxStorageMb, StringFormat=N0}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="% of Cap" Binding="{Binding PercentOfCapDisplay}" SortMemberPath="PercentOfCap" Width="80" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Binding="{Binding SizeBasedCleanupMode}" Width="130">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SizeBasedCleanupMode" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Size Cleanup" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Header="Stale Days" Binding="{Binding StaleQueryThresholdDays}" Width="85" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Max Plans/Query" Binding="{Binding MaxPlansPerQuery}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Interval Min" Binding="{Binding IntervalLengthMinutes}" Width="95" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Binding="{Binding SizeBasedCleanupMode}" Width="130">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SizeBasedCleanupMode" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Size Cleanup" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Used MB" Binding="{Binding CurrentStorageMb, StringFormat=N0}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Cap MB" Binding="{Binding MaxStorageMb, StringFormat=N0}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="% of Cap" Binding="{Binding PercentOfCapDisplay}" SortMemberPath="PercentOfCap" Width="80" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Binding="{Binding ReadonlyReasonDisplay}" Width="Auto">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ReadonlyReasonDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Read-Only Reason" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
                                     <!-- v64 (#3796): the two capture modes, trailing like the store columns and the MCP payload. ALL is the
                                          plan-churn factory; a dash is a pre-rung row (or, for wait stats, a 2016 engine), never OFF. -->
                                     <DataGridTextColumn Binding="{Binding CaptureModeDisplay}" Width="125">
@@ -2520,7 +2579,9 @@
 
                     <!-- Latch wait-time trend (top 5 classes by delta wait) + per-class latest-snapshot grid. -->
                     <TextBlock Grid.Row="0" x:Name="LatchStatsWindowTruncatedBanner" Visibility="Collapsed" Padding="8,4" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Background="#22FFAA00"/>
-                    <ScottPlot:WpfPlot Grid.Row="1" x:Name="LatchStatsChart"/>
+                    <ui:ChartPanel Title="Latch Waits" Grid.Row="1">
+                        <ScottPlot:WpfPlot x:Name="LatchStatsChart"/>
+                    </ui:ChartPanel>
                     <Expander Grid.Row="2" Header="Latch classes (latest snapshot)" IsExpanded="False" Margin="0,4,0,0">
                         <DataGrid x:Name="LatchStatsGrid"
                                   AutoGenerateColumns="False" IsReadOnly="True"
@@ -2561,7 +2622,9 @@
 
                     <!-- Spinlock collisions trend (top 5 spinlocks by delta collisions) + per-spinlock snapshot grid. -->
                     <TextBlock Grid.Row="3" x:Name="SpinlockStatsWindowTruncatedBanner" Visibility="Collapsed" Padding="8,4" Margin="0,8,0,0" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Background="#22FFAA00"/>
-                    <ScottPlot:WpfPlot Grid.Row="4" x:Name="SpinlockStatsChart" Margin="0,8,0,0"/>
+                    <ui:ChartPanel Title="Spinlock Collisions" Grid.Row="4" Margin="0,8,0,0">
+                        <ScottPlot:WpfPlot x:Name="SpinlockStatsChart"/>
+                    </ui:ChartPanel>
                     <Expander Grid.Row="5" Header="Spinlocks (latest snapshot)" IsExpanded="False" Margin="0,4,0,0">
                         <DataGrid x:Name="SpinlockStatsGrid"
                                   AutoGenerateColumns="False" IsReadOnly="True"
@@ -2617,7 +2680,9 @@
                         <RowDefinition Height="2*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
-                    <ScottPlot:WpfPlot Grid.Row="0" x:Name="CpuSchedulerChart"/>
+                    <ui:ChartPanel Title="CPU Scheduler" Grid.Row="0">
+                        <ScottPlot:WpfPlot x:Name="CpuSchedulerChart"/>
+                    </ui:ChartPanel>
                     <!-- Metric/value latest-snapshot grid: a single-row point-in-time collector has no
                          natural top-N, so its snapshot is a labelled metric list; warning rows highlight. -->
                     <DataGrid Grid.Row="1" x:Name="CpuSchedulerGrid"
@@ -2655,7 +2720,9 @@
                         <RowDefinition Height="*"/>
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
-                    <ScottPlot:WpfPlot Grid.Row="0" x:Name="PlanCacheChart"/>
+                    <ui:ChartPanel Title="Plan Cache Size" Grid.Row="0">
+                        <ScottPlot:WpfPlot x:Name="PlanCacheChart"/>
+                    </ui:ChartPanel>
                     <Border Grid.Row="1" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12,8" Margin="0,8,0,0">
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
                             <TextBlock Text="Total Plans:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
@@ -2683,15 +2750,16 @@
                  for the non-chartable attribution (top application / top host by connections + distinct
                  databases). RefreshVisibleTabAsync index 16. -->
             <TabItem Header="Session Stats">
-                <Grid Margin="8">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8"><!-- #8144: the card's header takes room, so the tab scrolls when the chart cannot keep its minimum height -->
+                <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="300">
                     <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
-                    <TextBlock Grid.Row="0" Text="Session Counts Over Time (every session on the server, background and the monitor included)" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8"/>
-                    <ScottPlot:WpfPlot Grid.Row="1" x:Name="SessionStatsChart"/>
-                    <Border Grid.Row="2" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12,8" Margin="0,4,0,0">
+                    <ui:ChartPanel Title="Session Counts Over Time" Subtitle="Every session on the server, background and the monitor included" Grid.Row="0">
+                        <ScottPlot:WpfPlot x:Name="SessionStatsChart"/>
+                    </ui:ChartPanel>
+                    <Border Grid.Row="1" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12,8" Margin="0,4,0,0">
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
                             <TextBlock Text="Top Application:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                             <TextBlock x:Name="SessionStatsTopAppText" Text="N/A" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Margin="0,0,20,0"/>
@@ -2704,12 +2772,14 @@
                         </StackPanel>
                     </Border>
                 </Grid>
+                </ScrollViewer>
             </TabItem>
 
             <!-- Collection Health Tab -->
             <TabItem x:Name="CollectionHealthTab" Header="Collection Health">
                 <Grid Margin="8">
                     <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
@@ -2721,7 +2791,11 @@
                          the loop has been skipping slots; the all-clear says so plainly. -->
                     <TextBlock Grid.Row="1" x:Name="SkippedCyclesSummary" TextWrapping="Wrap"
                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,8"/>
-                    <TabControl Grid.Row="2" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
+                    <!-- #8101: one connection failure that reached several collectors in one cycle, worded once: when, how many rows it
+                         explains, and whether each of them missed that run alone. Collapsed when the rows' newest errors hold none. -->
+                    <TextBlock Grid.Row="2" x:Name="ConnectionFailureSummary" Visibility="Collapsed" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,8"/>
+                    <TabControl Grid.Row="3" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                         <TabItem Header="Health Summary">
                             <DataGrid x:Name="CollectionHealthGrid"
                                       AutoGenerateColumns="False" IsReadOnly="True"
@@ -2735,6 +2809,19 @@
                                     <DataGridTextColumn Binding="{Binding DisplayStatus}" Width="100">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DisplayStatus" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Status" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
+                                    <!-- #8101: the newest error sits beside the band it did not move, so a HEALTHY row with Errors 1 says what the error was
+                                         without a sideways scroll. The message is trimmed to the cell and whole in its tooltip. -->
+                                    <DataGridTextColumn Binding="{Binding LastErrorFormatted}" Width="140" SortMemberPath="LastErrorTime">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastErrorFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Error At" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTemplateColumn Width="320" SortMemberPath="LastError">
+                                        <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastError" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Error" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding LastError}" TextTrimming="CharacterEllipsis" ToolTip="{Binding LastError}"/>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
                                     <DataGridTextColumn Binding="{Binding TotalRuns, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalRuns" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Runs" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
@@ -2761,12 +2848,6 @@
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding LastRunFormatted}" Width="140" SortMemberPath="LastRunTime">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastRunFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Run" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
-                                    </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding LastErrorFormatted}" Width="140" SortMemberPath="LastErrorTime">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastErrorFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Error At" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
-                                    </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding LastError}" Width="*">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastError" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Error" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <!-- #1837: what a NON-failing run reported. Blank for a plainly healthy collector; "(all N runs)" is the persistently-empty case. A collector's label=value counts read as its latest NOTED run's ("latest run:" when every run carried them). Informational only - the Status column's band is unchanged. -->
                                     <DataGridTextColumn Binding="{Binding NoteFormatted}" Width="*">
@@ -2822,7 +2903,16 @@
                             </Grid>
                         </TabItem>
                         <TabItem Header="Duration Trends">
-                            <ScottPlot:WpfPlot x:Name="CollectorDurationChart" Margin="4"/>
+                            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #8086: scrolls when the legend leaves the plot under its share of the chart -->
+                            <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="260">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                                </Grid.RowDefinitions>
+                                <ui:ChartPanel Title="Collector Duration" Subtitle="Slowest run per bucket" Margin="4">
+                                    <ScottPlot:WpfPlot x:Name="CollectorDurationChart"/>
+                                </ui:ChartPanel>
+                            </Grid>
+                        </ScrollViewer>
                         </TabItem>
                     </TabControl>
                 </Grid>
@@ -2850,10 +2940,10 @@
                             <Grid ui:ChartGroup.IsAligned="True" x:Name="CorruptionEventsCharts" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="420">
                                 <Grid.RowDefinitions><RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/><RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/></Grid.RowDefinitions>
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                <Border Grid.Row="0" Grid.Column="0" Margin="2"><ScottPlot:WpfPlot x:Name="BadPagesChart"/></Border>
-                                <Border Grid.Row="0" Grid.Column="1" Margin="2"><ScottPlot:WpfPlot x:Name="DumpRequestsChart"/></Border>
-                                <Border Grid.Row="1" Grid.Column="0" Margin="2"><ScottPlot:WpfPlot x:Name="AccessViolationsChart"/></Border>
-                                <Border Grid.Row="1" Grid.Column="1" Margin="2"><ScottPlot:WpfPlot x:Name="WriteAccessViolationsChart"/></Border>
+                                <Border Grid.Row="0" Grid.Column="0" Margin="2"><ui:ChartPanel Title="Bad Pages"><ScottPlot:WpfPlot x:Name="BadPagesChart"/></ui:ChartPanel></Border>
+                                <Border Grid.Row="0" Grid.Column="1" Margin="2"><ui:ChartPanel Title="Dump Requests"><ScottPlot:WpfPlot x:Name="DumpRequestsChart"/></ui:ChartPanel></Border>
+                                <Border Grid.Row="1" Grid.Column="0" Margin="2"><ui:ChartPanel Title="Access Violations"><ScottPlot:WpfPlot x:Name="AccessViolationsChart"/></ui:ChartPanel></Border>
+                                <Border Grid.Row="1" Grid.Column="1" Margin="2"><ui:ChartPanel Title="Write Access Violations"><ScottPlot:WpfPlot x:Name="WriteAccessViolationsChart"/></ui:ChartPanel></Border>
                             </Grid></ScrollViewer>
                             <TextBlock Grid.Row="1" x:Name="CorruptionEventsNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
                         </Grid>
@@ -2871,10 +2961,10 @@
                             <Grid ui:ChartGroup.IsAligned="True" x:Name="ContentionEventsCharts" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="420">
                                 <Grid.RowDefinitions><RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/><RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/></Grid.RowDefinitions>
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                <Border Grid.Row="0" Grid.Column="0" Margin="2"><ScottPlot:WpfPlot x:Name="NonYieldingTasksChart"/></Border>
-                                <Border Grid.Row="0" Grid.Column="1" Margin="2"><ScottPlot:WpfPlot x:Name="LatchWarningsChart"/></Border>
-                                <Border Grid.Row="1" Grid.Column="0" Margin="2"><ScottPlot:WpfPlot x:Name="SickSpinlocksChart"/></Border>
-                                <Border Grid.Row="1" Grid.Column="1" Margin="2"><ScottPlot:WpfPlot x:Name="CpuComparisonChart"/></Border>
+                                <Border Grid.Row="0" Grid.Column="0" Margin="2"><ui:ChartPanel Title="Non-Yielding Tasks"><ScottPlot:WpfPlot x:Name="NonYieldingTasksChart"/></ui:ChartPanel></Border>
+                                <Border Grid.Row="0" Grid.Column="1" Margin="2"><ui:ChartPanel Title="Latch Warnings"><ScottPlot:WpfPlot x:Name="LatchWarningsChart"/></ui:ChartPanel></Border>
+                                <Border Grid.Row="1" Grid.Column="0" Margin="2"><ui:ChartPanel Title="Sick Spinlocks"><ScottPlot:WpfPlot x:Name="SickSpinlocksChart"/></ui:ChartPanel></Border>
+                                <Border Grid.Row="1" Grid.Column="1" Margin="2"><ui:ChartPanel Title="CPU Comparison"><ScottPlot:WpfPlot x:Name="CpuComparisonChart"/></ui:ChartPanel></Border>
                             </Grid></ScrollViewer>
                             <TextBlock Grid.Row="1" x:Name="ContentionEventsNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
                         </Grid>
@@ -3084,9 +3174,9 @@
                                 <DataGrid x:Name="SignificantWaitsGrid" AutoGenerateColumns="False" IsReadOnly="True" RowStyle="{StaticResource GridRowStyle}" HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                     <DataGrid.Columns>
                                         <DataGridTextColumn Binding="{Binding EventTimeLocal}" Width="145" SortMemberPath="EventTime"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EventTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Event Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
-                                        <DataGridTemplateColumn Width="560">
+                                        <DataGridTemplateColumn Width="320">
                                             <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryText" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Query Text" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
-                                            <DataGridTemplateColumn.CellTemplate><DataTemplate><TextBlock Text="{Binding QueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2" ToolTip="{Binding QueryText}"/></DataTemplate></DataGridTemplateColumn.CellTemplate>
+                                            <DataGridTemplateColumn.CellTemplate><DataTemplate><TextBlock Text="{Binding QueryText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" Margin="5,2" ToolTip="{Binding QueryText}"/></DataTemplate></DataGridTemplateColumn.CellTemplate>
                                         </DataGridTemplateColumn>
                                         <DataGridTextColumn Binding="{Binding WaitType}" Width="190"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="WaitType" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Wait Type" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding DurationMs, StringFormat=N0}" Width="105" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DurationMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Duration ms" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>

@@ -15,8 +15,8 @@ namespace PerformanceMonitor.Ui;
 
 /// <summary>
 /// A ScottPlot bottom-axis tick generator for a chart whose X is the UTC instant (#4766): ticks sit at whole
-/// wall-clock times of the display zone, labelled in that zone, with the date on the first tick and at every date
-/// change. It replaces <c>DateTimeAutomatic</c> on such an axis because that generator places ticks at whole
+/// wall-clock times of the display zone, labelled in that zone, with the date only on a tick where the date changes
+/// (#8086). It replaces <c>DateTimeAutomatic</c> on such an axis because that generator places ticks at whole
 /// multiples of the X value, which are whole UTC times, not whole local ones (a chart in India would put "10:00"
 /// at 04:30Z), and it cannot tell a repeated hour from a skipped one.
 ///
@@ -29,13 +29,15 @@ namespace PerformanceMonitor.Ui;
 /// tick, and one that happened twice has a tick at each occurrence (<see cref="DisplayZone.WallTicks"/>), both
 /// labelled with the same clock text: the crosshair and hover add the offset that tells them apart.</para>
 ///
-/// <para><b>Labels.</b> "HH:mm" on the 24-hour clock. The first tick, and any tick on a different wall date from the
-/// one before it, prints the month and day above the time in the culture's own order (the same pattern
-/// <see cref="AxesExtensions.DateTimeTicksBottomDateChange"/> prints).</para>
+/// <para><b>Labels.</b> One line, "HH:mm" on the 24-hour clock. A tick on a different wall date from the one before it
+/// prints the month and day in front of the time, in the culture's own order (the same pattern
+/// <see cref="AxesExtensions.DateTimeTicksBottomDateChange"/> prints), so a window inside one day shows no date: the
+/// toolbar already names the range, and a second label line cost every chart a band of plot (#8086). When the step is a
+/// whole day every tick is a new date, and the label is the date alone.</para>
 /// </summary>
 public sealed class DisplayZoneTickGenerator : ScottPlot.TickGenerators.IDateTimeTickGenerator
 {
-    /// <summary>The closest two ticks may sit, in pixels: room for a two-line date-and-time label.</summary>
+    /// <summary>The closest two ticks may sit, in pixels: room for a one-line date-and-time label beside a time-only one.</summary>
     internal const double MinPixelsPerTick = 80;
 
     /// <summary>The steps a chart picks from, finest first. Every one divides a day.</summary>
@@ -106,14 +108,26 @@ public sealed class DisplayZoneTickGenerator : ScottPlot.TickGenerators.IDateTim
         }
 
         var ticks = new ScottPlot.Tick[wallTicks.Count];
+        var dayStep = step >= TimeSpan.FromDays(1);
         DateTime? previousDate = null;
         for (var i = 0; i < ticks.Length; i++)
         {
             var wall = wallTicks[i].Wall;
             var time = wall.ToString("HH:mm", CultureInfo.InvariantCulture);
-            var label = previousDate is null || wall.Date != previousDate.Value
-                ? wall.ToString(_monthDayPattern, _culture) + "\n" + time
-                : time;
+            string label;
+            if (dayStep)
+            {
+                label = wall.ToString(_monthDayPattern, _culture);
+            }
+            else if (previousDate is not null && wall.Date != previousDate.Value)
+            {
+                label = wall.ToString(_monthDayPattern, _culture) + " " + time;
+            }
+            else
+            {
+                label = time;
+            }
+
             previousDate = wall.Date;
             ticks[i] = ScottPlot.Tick.Major(wallTicks[i].Utc.ToOADate(), label);
         }

@@ -92,6 +92,7 @@
             </Style>
 
             <ui:HeatIntensityToBrushConverter x:Key="HeatBrush"/>
+            <ui:OneLineTextConverter x:Key="OneLine"/>
         </ResourceDictionary>
     </UserControl.Resources>
 
@@ -498,7 +499,7 @@
                             <DataGridTextColumn Header="Max SQL Server CPU %" Binding="{Binding MaxCpuPct}" Width="100">
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="Mem Ratio" Binding="{Binding MemoryRatio, StringFormat='{}{0:N2}'}" Width="95">
+                            <DataGridTextColumn Header="Mem Ratio" Binding="{Binding MemoryRatio, StringFormat='{}{0:N2}'}" Width="Auto" MinWidth="95">
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
                         </DataGrid.Columns>
@@ -542,12 +543,12 @@
                                                 <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
                                             </DataGridTextColumn.ElementStyle>
                                         </DataGridTextColumn>
-                                        <DataGridTextColumn Header="CPU (ms)" Binding="{Binding CpuTimeMs, StringFormat='{}{0:N0}'}" Width="85">
+                                        <DataGridTextColumn Header="CPU (ms)" Binding="{Binding CpuTimeMs, StringFormat='{}{0:N0}'}" Width="Auto" MinWidth="85">
                                             <DataGridTextColumn.ElementStyle>
                                                 <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
                                             </DataGridTextColumn.ElementStyle>
                                         </DataGridTextColumn>
-                                        <DataGridTextColumn Header="Execs" Binding="{Binding ExecutionCount, StringFormat='{}{0:N0}'}" Width="70">
+                                        <DataGridTextColumn Header="Execs" Binding="{Binding ExecutionCount, StringFormat='{}{0:N0}'}" Width="Auto" MinWidth="70">
                                             <DataGridTextColumn.ElementStyle>
                                                 <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
                                             </DataGridTextColumn.ElementStyle>
@@ -568,17 +569,17 @@
                               LoadingRow="MarkedGrid_LoadingRow">
                                     <DataGrid.Columns>
                                         <DataGridTextColumn Header="Database" Binding="{Binding DatabaseDisplay}" SortMemberPath="DatabaseName" Width="*"/>
-                                        <DataGridTextColumn Header="Avg CPU (ms)" Binding="{Binding AvgCpuMs, StringFormat='{}{0:N2}'}" Width="110">
+                                        <DataGridTextColumn Header="Avg CPU (ms)" Binding="{Binding AvgCpuMs, StringFormat='{}{0:N2}'}" Width="Auto" MinWidth="110">
                                             <DataGridTextColumn.ElementStyle>
                                                 <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
                                             </DataGridTextColumn.ElementStyle>
                                         </DataGridTextColumn>
-                                        <DataGridTextColumn Header="Avg IO (MB)" Binding="{Binding AvgIoMb, StringFormat='{}{0:N2}'}" Width="105">
+                                        <DataGridTextColumn Header="Avg IO (MB)" Binding="{Binding AvgIoMb, StringFormat='{}{0:N2}'}" Width="Auto" MinWidth="105">
                                             <DataGridTextColumn.ElementStyle>
                                                 <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
                                             </DataGridTextColumn.ElementStyle>
                                         </DataGridTextColumn>
-                                        <DataGridTextColumn Header="Execs" Binding="{Binding ExecutionCount, StringFormat='{}{0:N0}'}" Width="70">
+                                        <DataGridTextColumn Header="Execs" Binding="{Binding ExecutionCount, StringFormat='{}{0:N0}'}" Width="Auto" MinWidth="70">
                                             <DataGridTextColumn.ElementStyle>
                                                 <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
                                             </DataGridTextColumn.ElementStyle>
@@ -1013,9 +1014,11 @@
                       <TextBlock Grid.Row="0" x:Name="ObjectSubstrateCaveat" TextWrapping="Wrap" Margin="0,0,0,4"
                                  FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                  Text="Object / reserved footprint (daily). This is per-object reservation, not file allocation — it may not fully explain a database's file-level growth (log / free space)."/>
-                      <ScottPlot:WpfPlot Grid.Row="1" x:Name="ObjectGrowthHeatmapChart"
-                                         MouseMove="ObjectHeatmapChart_MouseMove"
-                                         MouseLeave="ObjectHeatmapChart_MouseLeave"/>
+                      <ui:ChartPanel Title="Object Growth Heatmap" Grid.Row="1">
+                          <ScottPlot:WpfPlot x:Name="ObjectGrowthHeatmapChart"
+                                             MouseMove="ObjectHeatmapChart_MouseMove"
+                                             MouseLeave="ObjectHeatmapChart_MouseLeave"/>
+                      </ui:ChartPanel>
                       <DataGrid Grid.Row="2" x:Name="ObjectGrowthDetailGrid" Margin="0,6,0,0"
                                 ScrollViewer.HorizontalScrollBarVisibility="Auto"
                                 AutoGenerateColumns="False" IsReadOnly="True" CanUserSortColumns="True"
@@ -1030,7 +1033,7 @@
                               <DataGridTextColumn Header="Schema" Binding="{Binding SchemaName}" Width="100"/>
                               <DataGridTextColumn Header="Table" Binding="{Binding TableName}" Width="220"/>
                               <DataGridTextColumn Header="Reserved MB" Binding="{Binding CurrentReservedMb, StringFormat='{}{0:N1}'}" Width="110" ElementStyle="{StaticResource RightAlign}"/>
-                              <DataGridTextColumn Header="Used MB" Binding="{Binding CurrentUsedMb, StringFormat='{}{0:N1}'}" Width="100" ElementStyle="{StaticResource RightAlign}"/>
+                              <DataGridTextColumn Header="Used MB" Binding="{Binding CurrentUsedMb, StringFormat='{}{0:N1}'}" Width="Auto" MinWidth="100" ElementStyle="{StaticResource RightAlign}"/>
                               <DataGridTextColumn Header="Rows" Binding="{Binding TotalRows, StringFormat='{}{0:N0}'}" Width="110" ElementStyle="{StaticResource RightAlign}"/>
                               <DataGridTextColumn Header="Indexes" Binding="{Binding IndexCount}" Width="80" ElementStyle="{StaticResource RightAlign}"/>
                               <DataGridTextColumn Header="Growth MB" Binding="{Binding Growth30dMb, StringFormat='{}{0:N1}', TargetNullValue='n/a'}" Width="110" ElementStyle="{StaticResource RightAlign}"/>
@@ -1061,11 +1064,11 @@
                               <DataGridTextColumn Header="Type" Binding="{Binding IndexTypeDesc}" Width="140"/>
                               <DataGridTextColumn Header="Reserved MB" Binding="{Binding ReservedMb, StringFormat='{}{0:N1}'}" Width="110" ElementStyle="{StaticResource RightAlign}"/>
                               <DataGridTextColumn Header="Rows" Binding="{Binding TotalRows, StringFormat='{}{0:N0}'}" Width="110" ElementStyle="{StaticResource RightAlign}"/>
-                              <DataGridTextColumn Header="Seeks" Binding="{Binding UserSeeks, StringFormat='{}{0:N0}'}" Width="90" ElementStyle="{StaticResource RightAlign}"/>
-                              <DataGridTextColumn Header="Scans" Binding="{Binding UserScans, StringFormat='{}{0:N0}'}" Width="90" ElementStyle="{StaticResource RightAlign}"/>
-                              <DataGridTextColumn Header="Lookups" Binding="{Binding UserLookups, StringFormat='{}{0:N0}'}" Width="90" ElementStyle="{StaticResource RightAlign}"/>
-                              <DataGridTextColumn Header="Total Reads" Binding="{Binding TotalReads, StringFormat='{}{0:N0}'}" Width="100" ElementStyle="{StaticResource RightAlign}"/>
-                              <DataGridTextColumn Header="Updates" Binding="{Binding UserUpdates, StringFormat='{}{0:N0}'}" Width="100" ElementStyle="{StaticResource RightAlign}"/>
+                              <DataGridTextColumn Header="Seeks" Binding="{Binding UserSeeks, StringFormat='{}{0:N0}'}" Width="Auto" MinWidth="90" ElementStyle="{StaticResource RightAlign}"/>
+                              <DataGridTextColumn Header="Scans" Binding="{Binding UserScans, StringFormat='{}{0:N0}'}" Width="Auto" MinWidth="90" ElementStyle="{StaticResource RightAlign}"/>
+                              <DataGridTextColumn Header="Lookups" Binding="{Binding UserLookups, StringFormat='{}{0:N0}'}" Width="Auto" MinWidth="90" ElementStyle="{StaticResource RightAlign}"/>
+                              <DataGridTextColumn Header="Total Reads" Binding="{Binding TotalReads, StringFormat='{}{0:N0}'}" Width="Auto" MinWidth="100" ElementStyle="{StaticResource RightAlign}"/>
+                              <DataGridTextColumn Header="Updates" Binding="{Binding UserUpdates, StringFormat='{}{0:N0}'}" Width="Auto" MinWidth="100" ElementStyle="{StaticResource RightAlign}"/>
                               <DataGridTextColumn Header="Last Access" Binding="{Binding LastUserAccess, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="140"/>
                               <!-- One snapshot for every row; a column rather than a label keeps this grid's time where every other snapshot grid has it. -->
                               <DataGridTextColumn Header="Collected" Binding="{Binding CollectionTimeLocal}" Width="150" SortMemberPath="CollectionTime"/>
@@ -1451,8 +1454,10 @@
                      "what is it now". One line per top-5 database by current PVS size, 7 days; legend
                      labels carry each database's latest %-of-database. Collapsed until the loader has
                      points, so an ADR-less server shows no dead chart. -->
-                <ui:ChartGridPanel Grid.Row="2" MaxColumns="1" HeightFill="0.4" MinChartHeight="220" Margin="10,0,10,8">
-                    <ScottPlot:WpfPlot x:Name="PvsTrendChart" Visibility="Collapsed"/>
+                <ui:ChartGridPanel Grid.Row="2" MaxColumns="1" HeightFill="0.4" MinChartHeight="280" Margin="10,0,10,8">
+                    <ui:ChartPanel x:Name="PvsTrendCard" Title="PVS Off-Row Size" Visibility="Collapsed">
+                        <ScottPlot:WpfPlot x:Name="PvsTrendChart"/>
+                    </ui:ChartPanel>
                 </ui:ChartGridPanel>
                 <Grid Grid.Row="3" Margin="10,0,10,10">
                     <DataGrid x:Name="PvsStatsDataGrid"
@@ -2358,7 +2363,7 @@
                                     <DataGridTemplateColumn Header="Query Preview" Width="350">
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
-                                                <TextBlock Text="{Binding QueryPreview}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2" ToolTip="{Binding FullQueryText}"/>
+                                                <TextBlock Text="{Binding QueryPreview, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" Margin="5,2" ToolTip="{Binding FullQueryText}"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>
@@ -2438,7 +2443,7 @@
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalGrantees" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Grantees" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding TotalWaiters, StringFormat='{}{0:N0}'}" Width="100">
+                                    <DataGridTextColumn Binding="{Binding TotalWaiters, StringFormat='{}{0:N0}'}" Width="Auto" MinWidth="100">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalWaiters" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Waiters" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                                     </DataGridTextColumn>
@@ -2446,7 +2451,7 @@
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TimeoutErrors" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Timeouts" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding ForcedGrants, StringFormat='{}{0:N0}'}" Width="95">
+                                    <DataGridTextColumn Binding="{Binding ForcedGrants, StringFormat='{}{0:N0}'}" Width="Auto" MinWidth="95">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ForcedGrants" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Forced" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                                     </DataGridTextColumn>
@@ -2550,7 +2555,7 @@
                             </DataGridTemplateColumn.Header>
                             <DataGridTemplateColumn.CellTemplate>
                                 <DataTemplate>
-                                    <TextBlock Text="{Binding SampleQueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2" ToolTip="{Binding FullQueryText}"/>
+                                    <TextBlock Text="{Binding SampleQueryText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" Margin="5,2" ToolTip="{Binding FullQueryText}"/>
                                 </DataTemplate>
                             </DataGridTemplateColumn.CellTemplate>
                         </DataGridTemplateColumn>
@@ -2609,7 +2614,7 @@
                                 <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
                             </DataGridTextColumn.ElementStyle>
                         </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding TotalReads, StringFormat='{}{0:N0}'}" Width="100">
+                        <DataGridTextColumn Binding="{Binding TotalReads, StringFormat='{}{0:N0}'}" Width="Auto" MinWidth="100">
                             <DataGridTextColumn.Header>
                                 <StackPanel Orientation="Horizontal">
                                     <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalReads" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -2631,7 +2636,7 @@
                                 <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
                             </DataGridTextColumn.ElementStyle>
                         </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding TotalWrites, StringFormat='{}{0:N0}'}" Width="95">
+                        <DataGridTextColumn Binding="{Binding TotalWrites, StringFormat='{}{0:N0}'}" Width="Auto" MinWidth="95">
                             <DataGridTextColumn.Header>
                                 <StackPanel Orientation="Horizontal">
                                     <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalWrites" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -2908,7 +2913,7 @@
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding SampleCount, StringFormat='{}{0:N0}'}" Width="105">
+                            <DataGridTextColumn Binding="{Binding SampleCount, StringFormat='{}{0:N0}'}" Width="Auto" MinWidth="105">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SampleCount" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -3157,10 +3162,10 @@
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="Monthly ($)" Binding="{Binding MonthlyCost, StringFormat='{}{0:N0}'}" Width="100">
+                            <DataGridTextColumn Header="Monthly ($)" Binding="{Binding MonthlyCost, StringFormat='{}{0:N0}'}" Width="Auto" MinWidth="100">
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="Annual ($)" Binding="{Binding AnnualCost, StringFormat='{}{0:N0}'}" Width="100">
+                            <DataGridTextColumn Header="Annual ($)" Binding="{Binding AnnualCost, StringFormat='{}{0:N0}'}" Width="Auto" MinWidth="100">
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
                             <DataGridTextColumn Header="Health" Binding="{Binding HealthScore, TargetNullValue='-'}" Width="75">

@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -48,6 +49,21 @@ public static class DarlingPgTrendReader
         double? EstimatedWaitMsPerSecond,
         int? BackendCount,
         bool CounterReset);
+
+    /// <summary>
+    /// #8074: the stored source a wait trend is read from. The pg_wait_sampling extension and the service's own sampler both
+    /// write <c>pg_wait_sampling</c>; Aurora's cumulative counters write <c>pg_wait_stats</c>, and the sampler collector is gated
+    /// off there, so a trend read over <c>pg_wait_sampling</c> alone is empty on every Aurora target. Resolved from the
+    /// registry's engine kind, the fact the two collectors' own gates read.
+    /// </summary>
+    public enum PgWaitTrendArm
+    {
+        /// <summary>Sampled profile rows in <c>pg_wait_sampling</c>: the <c>extension_sampled</c> and <c>service_sampled</c> instruments.</summary>
+        Sampled,
+
+        /// <summary>Per-collection deltas of the engine's cumulative wait counters in <c>pg_wait_stats</c>: the <c>engine_cumulative</c> instrument.</summary>
+        EngineCumulative,
+    }
 
     /// <param name="MeanExecMs">The interval's total execution time over its calls — what one execution
     /// cost during that interval, which is the number a regression moves.</param>
@@ -135,6 +151,60 @@ public static class DarlingPgTrendReader
         WHERE prev_samples IS NOT NULL
         ORDER BY collection_time
         """;
+
+    /// <summary>
+    /// #8074: the engine_cumulative arm of the wait trend, over <c>pg_wait_stats</c>. One point per collection, as the sampler
+    /// arm has, but the differencing is the collector's: <c>delta_wait_time_us</c> and <c>delta_waits</c> are the change since
+    /// the previous collection, worked out when that reading was in hand, and <c>sample_interval_seconds</c> is the seconds
+    /// between the two. A row with no measured interval (the first sighting of the event, or the collection after a counter
+    /// reset or a gap, where the collector re-baselines and writes 0 for both) is the series' left edge and not a point, which
+    /// is the sampler arm's rule for its first snapshot. The counters carry no backend count and no sample period: the rate is
+    /// measured wait time per second of the interval, and the count is the number of waits that completed in it.
+    /// <para>The divisor is the collection's CADENCE, the shortest interval any of its rated rows measured, with every rated row's
+    /// delta credited whole: a row that returns after a skipped cycle carries the gap it spanned as its interval, and dividing the
+    /// total by that longer gap under-reports the collection. Over the cadence the point equals the sum of its rows' rates.</para>
+    /// <para>$1 server_id, $2 wait_event, $3/$4 window (naive UTC). Bounded by <c>idx_pg_wait_stats_time (server_id,
+    /// collection_time)</c>, so a hypertable touches only the window's chunks.</para>
+    /// </summary>
+    public const string WaitTrendEngineSql = """
+        SELECT
+            collection_time,
+            CAST(SUM(delta_waits) FILTER (WHERE sample_interval_seconds > 0) AS bigint) AS delta_waits,
+            CAST(SUM(delta_wait_time_us) FILTER (WHERE sample_interval_seconds > 0) / 1000.0
+                 / NULLIF(MIN(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0), 0) AS double precision) AS wait_ms_per_second
+        FROM pg_wait_stats
+        WHERE server_id = $1
+        AND   wait_event = $2
+        AND   collection_time >= $3
+        AND   collection_time <= $4
+        AND   sample_interval_seconds > 0
+        GROUP BY collection_time
+        ORDER BY collection_time
+        """;
+
+    /// <summary>
+    /// #8074: the engine_cumulative arm's automatic choice: the event that accrued the most wait time in the window on the
+    /// engine's counters. Ranked on the collector's deltas, so a restart inside the window costs nothing (the collector
+    /// re-baselines and writes no interval for that collection). Background-worker and client-idle waits never reach the table,
+    /// so nothing is excluded here; an event the engine reports but does not name cannot be followed by name and is skipped.
+    /// $1 server_id, $2/$3 window.
+    /// </summary>
+    public const string DominantWaitEventEngineSql = """
+        SELECT wait_event
+        FROM pg_wait_stats
+        WHERE server_id = $1
+        AND   wait_event IS NOT NULL
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        AND   sample_interval_seconds > 0
+        GROUP BY wait_event
+        HAVING SUM(delta_wait_time_us) > 0
+        ORDER BY SUM(delta_wait_time_us) DESC, wait_event
+        LIMIT 1
+        """;
+
+    /// <summary>#8074: the registry's engine kind, which picks the wait trend's arm. $1 server_id.</summary>
+    public const string WaitTrendArmSql = "SELECT engine_kind FROM servers WHERE server_id = $1";
 
     /// <summary>
     /// One statement over time, by <c>queryid</c>.
@@ -470,6 +540,74 @@ public static class DarlingPgTrendReader
         return points;
     }
 
+    /// <summary>
+    /// #8074: which arm this server's wait trend is read from: <see cref="PgWaitTrendArm.EngineCumulative"/> when the registry
+    /// says the target is Aurora PostgreSQL (the pg_wait_stats collector's own gate), otherwise <see cref="PgWaitTrendArm.Sampled"/>.
+    /// A server the registry does not hold, or one whose kind no connect has stamped, reads the sampler, which is what every
+    /// stock target collects.
+    /// </summary>
+    public static async Task<PgWaitTrendArm> GetWaitTrendArmAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(WaitTrendArmSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(serverId);
+        var kind = await command.ExecuteScalarAsync(cancellationToken) as string;
+        return MonitoredEngineKind.IsAurora(kind) ? PgWaitTrendArm.EngineCumulative : PgWaitTrendArm.Sampled;
+    }
+
+    /// <summary>The dominant wait event on <paramref name="arm"/>: the sampler's most-sampled waiting event, or the engine
+    /// counters' event with the most wait time (<see cref="DominantWaitEventEngineSql"/>).</summary>
+    public static async Task<string?> GetDominantWaitEventAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, PgWaitTrendArm arm,
+        CancellationToken cancellationToken = default)
+    {
+        if (arm != PgWaitTrendArm.EngineCumulative)
+        {
+            return await GetDominantWaitEventAsync(postgres, serverId, startUtc, endUtc, cancellationToken);
+        }
+
+        await using var command = postgres.CreateCommand(DominantWaitEventEngineSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+        return await command.ExecuteScalarAsync(cancellationToken) as string;
+    }
+
+    /// <summary>The wait trend on <paramref name="arm"/>: the sampler's differenced profile, or the engine counters' per-collection
+    /// deltas (<see cref="WaitTrendEngineSql"/>), in the one point shape.</summary>
+    public static async Task<List<PgWaitTrendPoint>> GetWaitTrendAsync(
+        NpgsqlDataSource postgres, int serverId, string waitEvent, DateTime startUtc, DateTime endUtc, PgWaitTrendArm arm,
+        CancellationToken cancellationToken = default)
+    {
+        if (arm != PgWaitTrendArm.EngineCumulative)
+        {
+            return await GetWaitTrendAsync(postgres, serverId, waitEvent, startUtc, endUtc, cancellationToken);
+        }
+
+        var points = new List<PgWaitTrendPoint>();
+        await using var command = postgres.CreateCommand(WaitTrendEngineSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(waitEvent);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            points.Add(new PgWaitTrendPoint(
+                reader.GetDateTime(0),
+                reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
+                reader.IsDBNull(2) ? (double?)null : reader.GetDouble(2),
+                /* The native counters carry no backend count, and the collector re-baselines at a reset, so no point spans one. */
+                BackendCount: null,
+                CounterReset: false));
+        }
+
+        return points;
+    }
+
     /// <summary>Runs <see cref="QueryDurationTrendBucketedSql"/> (#3960): one point per bucket holding a rated
     /// snapshot, <c>MeanExecMs</c> 0 where nothing ran (the tool publishes null there, as it always did).</summary>
     public static async Task<List<PgQueryDurationTrendPoint>> GetQueryDurationBucketsAsync(
@@ -544,7 +682,8 @@ public static class DarlingPgTrendReader
     /// <c>track_io_timing</c> is off, where the underlying time is 0 and the quotient would claim
     /// sub-microsecond I/O rather than an unmeasured one.</param>
     /// <param name="WriteCountersTracked">False on Amazon Aurora, where backends do not write data files and
-    /// the whole write side is NULL. The zeros beside it then mean unmeasured, not idle.</param>
+    /// the whole write side is unmeasured, whether the engine reports it as NULL or as 0 (#8092: gated on the
+    /// registry's engine kind as well as on the column). The zeros beside it then mean unmeasured, not idle.</param>
     /// <param name="BytesMeasured">PostgreSQL 18's measured byte totals are present.
     /// <paramref name="BytesEstimable"/> is the pre-18 alternative — <c>op_bytes</c>, the block size, times
     /// the operation count. Exactly one of the two is true on any given server, and they are different
@@ -714,7 +853,8 @@ public static class DarlingPgTrendReader
                 read_bytes    - LAG(read_bytes)    OVER series AS raw_read_bytes,
                 write_bytes   - LAG(write_bytes)   OVER series AS raw_write_bytes,
                 /* Whether this combination tracks writes AT ALL, as opposed to having written nothing.
-                   Aurora reports NULL here across the board; a self-managed target reports numbers. */
+                   Aurora reports NULL or 0 here across the board, so the C# gate on the registry's engine
+                   kind settles it there; a self-managed target reports numbers. */
                 (writes IS NOT NULL)     AS writes_tracked,
                 /* read_bytes is the probe for all three byte columns: a WAL row legitimately reports no
                    extend_bytes, so extend_bytes IS NOT NULL would answer "not measured" for a row that
@@ -1499,7 +1639,11 @@ public static class DarlingPgTrendReader
                 reader.IsDBNull(27) ? (double?)null : reader.GetDouble(27)));
         }
 
-        return points;
+        /* #8092: on an Aurora target the write side is unmeasured whatever the engine wrote into the counter, the
+           same gate GetPgIoPageAsync applies to its rows. */
+        return points.Count > 0 && await DarlingPgIoReader.IsAuroraTargetAsync(postgres, serverId, cancellationToken)
+            ? points.Select(p => p with { WriteCountersTracked = false }).ToList()
+            : points;
     }
 
     public static async Task<List<PgDatabaseTrendPoint>> GetDatabaseTrendAsync(
