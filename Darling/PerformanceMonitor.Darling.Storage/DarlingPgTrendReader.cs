@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -544,7 +545,8 @@ public static class DarlingPgTrendReader
     /// <c>track_io_timing</c> is off, where the underlying time is 0 and the quotient would claim
     /// sub-microsecond I/O rather than an unmeasured one.</param>
     /// <param name="WriteCountersTracked">False on Amazon Aurora, where backends do not write data files and
-    /// the whole write side is NULL. The zeros beside it then mean unmeasured, not idle.</param>
+    /// the whole write side is unmeasured, whether the engine reports it as NULL or as 0 (#8092: gated on the
+    /// registry's engine kind as well as on the column). The zeros beside it then mean unmeasured, not idle.</param>
     /// <param name="BytesMeasured">PostgreSQL 18's measured byte totals are present.
     /// <paramref name="BytesEstimable"/> is the pre-18 alternative — <c>op_bytes</c>, the block size, times
     /// the operation count. Exactly one of the two is true on any given server, and they are different
@@ -714,7 +716,8 @@ public static class DarlingPgTrendReader
                 read_bytes    - LAG(read_bytes)    OVER series AS raw_read_bytes,
                 write_bytes   - LAG(write_bytes)   OVER series AS raw_write_bytes,
                 /* Whether this combination tracks writes AT ALL, as opposed to having written nothing.
-                   Aurora reports NULL here across the board; a self-managed target reports numbers. */
+                   Aurora reports NULL or 0 here across the board, so the C# gate on the registry's engine
+                   kind settles it there; a self-managed target reports numbers. */
                 (writes IS NOT NULL)     AS writes_tracked,
                 /* read_bytes is the probe for all three byte columns: a WAL row legitimately reports no
                    extend_bytes, so extend_bytes IS NOT NULL would answer "not measured" for a row that
@@ -1499,7 +1502,11 @@ public static class DarlingPgTrendReader
                 reader.IsDBNull(27) ? (double?)null : reader.GetDouble(27)));
         }
 
-        return points;
+        /* #8092: on an Aurora target the write side is unmeasured whatever the engine wrote into the counter, the
+           same gate GetPgIoPageAsync applies to its rows. */
+        return points.Count > 0 && await DarlingPgIoReader.IsAuroraTargetAsync(postgres, serverId, cancellationToken)
+            ? points.Select(p => p with { WriteCountersTracked = false }).ToList()
+            : points;
     }
 
     public static async Task<List<PgDatabaseTrendPoint>> GetDatabaseTrendAsync(

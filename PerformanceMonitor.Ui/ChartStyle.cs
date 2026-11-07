@@ -212,6 +212,28 @@ namespace PerformanceMonitor.Ui
         }
 
         /// <summary>
+        /// #8086: a chart whose every drawn value is zero shows a flat line on a Y axis that starts at 0. ScottPlot's autoscale of a
+        /// flat line is a symmetric range around it (-1 to 1), which draws the line in the middle of nothing. Only a chart whose
+        /// Y axis goes below zero while all its data is zero is changed, so limits a caller set (0 to 105 for CPU) stay.
+        /// </summary>
+        public static void FloorAllZeroYAxis(ScottPlot.Plot plot)
+        {
+            var seen = false;
+            foreach (var plottable in plot.PlottableList)
+            {
+                if (!plottable.LegendItems.Any()) continue;
+                var limits = plottable.GetAxisLimits();
+                if (!double.IsFinite(limits.Bottom) || !double.IsFinite(limits.Top)) continue;
+                if (limits.Bottom != 0 || limits.Top != 0) return;
+                seen = true;
+            }
+
+            if (!seen || plot.Axes.GetLimits().Bottom >= 0) return;
+            var (yMin, yMax) = ComputeYLimitsWithLegendPadding(0, 0);
+            plot.Axes.SetLimitsY(yMin, yMax);
+        }
+
+        /// <summary>
         /// Pure Y-limit math behind <see cref="SetChartYLimitsWithLegendPadding"/>, extracted so it can be
         /// unit-tested without a WPF control. Floors at zero for non-negative data so high-magnitude charts
         /// get no dead-band below the lines; only genuinely-negative data gets a 10%-of-range below-zero
