@@ -102,6 +102,51 @@ public sealed class OverviewBaselineBandTests
         });
     }
 
+    private static void AssertOutline(Polygon polygon, (double X, double Y)[] expected)
+    {
+        var actual = polygon.Coordinates;
+        Assert.Equal(expected.Length, actual.Length);
+        for (var i = 0; i < expected.Length; i++)
+        {
+            Assert.Equal(expected[i].X, actual[i].X, 9);
+            Assert.Equal(expected[i].Y, actual[i].Y, 6);
+        }
+    }
+
+    /// <summary>
+    /// #8162: the drawn edge is the step every point is judged against: flat across each hour and vertical at the hour boundary, so a
+    /// mark always means "outside the band you see". Two neighbouring hours with different bands make one run (one polygon), and a third
+    /// hour after a gap makes a second. The outline is read from the plottables' own coordinates.
+    /// </summary>
+    [Fact]
+    public void TheBandEdge_StepsAtTheHourBoundary_InsteadOfSlopingBetweenHours()
+    {
+        StaTestThread.Run(() =>
+        {
+            var control = NewControl();
+            double Hour(double minutes) => T0 + minutes / 1440.0;
+            IReadOnlyList<BaselineBand.HourStep> steps =
+            [
+                BaselineBand.MakeStep(Hour(0), Hour(60), 100, 50),     // 0 to 200
+                BaselineBand.MakeStep(Hour(60), Hour(120), 1000, 100), // 800 to 1200
+                BaselineBand.MakeStep(Hour(180), Hour(240), 400, 25),  // 350 to 450, after a one hour gap
+            ];
+            var data = new List<(double Time, double Value)> { (Hour(10), 150), (Hour(70), 900), (Hour(190), 400) };
+
+            control.UpdateLane(control.WaitStatsChart, "Wait", data, "#FFB74D", baseline: steps, minAnomalyValue: 100);
+
+            var plot = control.WaitStatsChart.Plot;
+            var polygons = plot.GetPlottables<Polygon>().ToList();
+            Assert.Equal(2, polygons.Count);
+
+            // The first run: the upper edge steps 200 then 1200, the lower edge (walked back) steps 800 then 0. No point sits between hours.
+            AssertOutline(
+                polygons[0],
+                [(Hour(0), 200), (Hour(60), 200), (Hour(60), 1200), (Hour(120), 1200), (Hour(120), 800), (Hour(60), 800), (Hour(60), 0), (Hour(0), 0)]);
+            AssertOutline(polygons[1], [(Hour(180), 450), (Hour(240), 450), (Hour(240), 350), (Hour(180), 350)]);
+        });
+    }
+
     /// <summary>
     /// #7644: the band steps by hour, and each point is judged against its own hour's step. Two hours with different bands and a
     /// third with none: 500 is above the first hour's band (marked), below the second hour's band (marked, a drop), 1000 sits inside

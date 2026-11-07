@@ -81,11 +81,11 @@ public static class BaselineBand
         => new(fromX, toX, mean, Math.Max(0, mean - 2 * effectiveStdDev), mean + 2 * effectiveStdDev);
 
     /// <summary>
-    /// #8162: draws the band as one translucent fill, not a rectangle per hour. The edges run straight from each hour's value (taken
-    /// at the middle of its hour) to the next hour's, so the band has no steps, and its first and last hours hold their value out to
-    /// the run's ends. Hours that have no step split the band: each run of neighbouring steps is one fill, and a gap stays empty.
-    /// The dashed mean follows the same path. The fill is added first so it paints behind the lane's series. Each hour's own step
-    /// still decides which points get a mark: the fill is the picture of the range, not the rule.
+    /// #8162: draws the band as one translucent fill, not a rectangle per hour. Each hour is flat across its own width and the edge
+    /// is vertical at the hour boundary, so what is drawn is the same step every point is judged against: a mark always means
+    /// "outside the band you see". Hours that have no step split the band: each run of neighbouring steps is one fill (no seams,
+    /// no outline), and a gap stays empty. The dashed mean is stepped the same way. The fill is added first so it paints behind
+    /// the lane's series.
     /// </summary>
     public static void AddBand(ScottPlot.Plot plot, IReadOnlyList<HourStep> steps, string hexColor)
     {
@@ -136,13 +136,16 @@ public static class BaselineBand
         return runs;
     }
 
-    /// <summary>One edge of a run: the run's start, the middle of each hour at <paramref name="value"/>, the run's end.</summary>
+    /// <summary>One edge of a run, stepped: for each hour its value at the hour's start and at its end.</summary>
     private static List<ScottPlot.Coordinates> Edge(List<HourStep> run, Func<HourStep, double> value)
     {
-        var points = new List<ScottPlot.Coordinates> { new(run[0].FromX, value(run[0])) };
+        var points = new List<ScottPlot.Coordinates>(run.Count * 2);
         foreach (var step in run)
-            points.Add(new((step.FromX + step.ToX) / 2, value(step)));
-        points.Add(new(run[^1].ToX, value(run[^1])));
+        {
+            points.Add(new(step.FromX, value(step)));
+            points.Add(new(step.ToX, value(step)));
+        }
+
         return points;
     }
 }
