@@ -61,34 +61,46 @@
         </Grid.RowDefinitions>
 
         <!-- Header Controls -->
-        <WrapPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" MinHeight="36">
+        <WrapPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8,10,4" MinHeight="36">
             <TextBlock Text="Job History" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold" FontSize="14"
                        Foreground="{DynamicResource ForegroundBrush}"/>
-            <TextBlock Text="Time Range:" VerticalAlignment="Center" Margin="5,0,4,0"
-                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
-            <ui:TimeRangePicker x:Name="RangePicker" VerticalAlignment="Center" RangeChanged="RangePicker_RangeChanged"/>
-            <TextBlock Text="Server:" VerticalAlignment="Center" Margin="12,0,4,0"
-                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
-            <ComboBox x:Name="ServerFilterComboBox" Width="150" VerticalAlignment="Center"
-                      SelectionChanged="Filter_SelectionChanged">
-                <ComboBoxItem Content="All Servers" Tag="" IsSelected="True"/>
-            </ComboBox>
-            <TextBlock Text="Status:" VerticalAlignment="Center" Margin="12,0,4,0"
-                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
-            <ComboBox x:Name="StatusFilterComboBox" Width="110" VerticalAlignment="Center"
-                      SelectionChanged="Filter_SelectionChanged">
-                <ComboBoxItem Content="All Statuses" Tag="" IsSelected="True"/>
-                <ComboBoxItem Content="Failed" Tag="0"/>
-                <ComboBoxItem Content="Succeeded" Tag="1"/>
-                <ComboBoxItem Content="Retry" Tag="2"/>
-                <ComboBoxItem Content="Canceled" Tag="3"/>
-            </ComboBox>
-            <TextBlock Text="Category:" VerticalAlignment="Center" Margin="12,0,4,0"
-                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
-            <ComboBox x:Name="CategoryFilterComboBox" Width="150" VerticalAlignment="Center"
-                      SelectionChanged="Filter_SelectionChanged">
-                <ComboBoxItem Content="All Categories" Tag="" IsSelected="True"/>
-            </ComboBox>
+            <!-- #8219: the label and its control wrap together. -->
+            <StackPanel Orientation="Horizontal" Margin="5,0,0,4">
+                <TextBlock Text="Time Range:" VerticalAlignment="Center" Margin="0,0,4,0"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <ui:TimeRangePicker x:Name="RangePicker" VerticalAlignment="Center" RangeChanged="RangePicker_RangeChanged"/>
+            </StackPanel>
+            <!-- #8219: the label and its control wrap together. -->
+            <StackPanel Orientation="Horizontal" Margin="12,0,0,4">
+                <TextBlock Text="Server:" VerticalAlignment="Center" Margin="0,0,4,0"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <ComboBox x:Name="ServerFilterComboBox" Width="150" VerticalAlignment="Center"
+                          SelectionChanged="Filter_SelectionChanged">
+                    <ComboBoxItem Content="All Servers" Tag="" IsSelected="True"/>
+                </ComboBox>
+            </StackPanel>
+            <!-- #8219: the label and its control wrap together. -->
+            <StackPanel Orientation="Horizontal" Margin="12,0,0,4">
+                <TextBlock Text="Status:" VerticalAlignment="Center" Margin="0,0,4,0"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <ComboBox x:Name="StatusFilterComboBox" Width="110" VerticalAlignment="Center"
+                          SelectionChanged="Filter_SelectionChanged">
+                    <ComboBoxItem Content="All Statuses" Tag="" IsSelected="True"/>
+                    <ComboBoxItem Content="Failed" Tag="0"/>
+                    <ComboBoxItem Content="Succeeded" Tag="1"/>
+                    <ComboBoxItem Content="Retry" Tag="2"/>
+                    <ComboBoxItem Content="Canceled" Tag="3"/>
+                </ComboBox>
+            </StackPanel>
+            <!-- #8219: the label and its control wrap together. -->
+            <StackPanel Orientation="Horizontal" Margin="12,0,0,4">
+                <TextBlock Text="Category:" VerticalAlignment="Center" Margin="0,0,4,0"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <ComboBox x:Name="CategoryFilterComboBox" Width="150" VerticalAlignment="Center"
+                          SelectionChanged="Filter_SelectionChanged">
+                    <ComboBoxItem Content="All Categories" Tag="" IsSelected="True"/>
+                </ComboBox>
+            </StackPanel>
             <Button Content="Refresh" Click="RefreshButton_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
             <TextBlock x:Name="JobCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"
                        FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>

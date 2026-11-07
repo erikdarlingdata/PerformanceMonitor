@@ -101,9 +101,8 @@ public sealed class AxesExtensionsTests
             var serverTime = new DateTime(2026, 1, 15, 10, 0, 0);
             var label = formatter(serverTime);
 
-            var culture = CultureInfo.CurrentCulture;
-            Assert.Contains(serverTime.AddHours(1).ToString("t", culture), label, StringComparison.Ordinal);
-            Assert.DoesNotContain(serverTime.ToString("t", culture), label, StringComparison.Ordinal);
+            Assert.Contains(serverTime.AddHours(1).ToString("HH:mm", CultureInfo.InvariantCulture), label, StringComparison.Ordinal);
+            Assert.DoesNotContain(serverTime.ToString("HH:mm", CultureInfo.InvariantCulture), label, StringComparison.Ordinal);
         }
         finally
         {
@@ -125,7 +124,7 @@ public sealed class AxesExtensionsTests
             var plotted = new DateTime(2026, 1, 15, 10, 0, 0);
             var label = formatter(plotted);
 
-            Assert.Contains(plotted.ToString("t", CultureInfo.CurrentCulture), label, StringComparison.Ordinal);
+            Assert.Contains(plotted.ToString("HH:mm", CultureInfo.InvariantCulture), label, StringComparison.Ordinal);
         }
         finally
         {

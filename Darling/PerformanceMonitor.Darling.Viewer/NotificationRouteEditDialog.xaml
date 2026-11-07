@@ -85,7 +85,7 @@
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
             <ComboBox Grid.Column="0" x:Name="FamilyCombo" SelectedIndex="0" SelectionChanged="FamilyCombo_SelectionChanged"
-                      ToolTip="A family routes every alert in it. Choose 'Exact metric name…' to route one alert by its metric_name (as shown in Alert History); an exact route also catches that alert's recovery. 'Every metric (*)' appears once a server or a tag is chosen, and catches whatever no other route for that scope matches.">
+                      ToolTip="A family routes every alert in it. Choose 'Exact metric name…' to route one alert by its metric_name (as shown in Alert History); an exact route also catches that alert's recovery. 'Every analysis finding (Analysis: *)' catches every analysis finding and can be used at any scope; within one scope it comes after a route for the finding's category and before a family. 'Every metric (*)' appears once a server or a tag is chosen, and catches whatever no other route for that scope matches.">
                 <!-- Items are filled in code from AlertFamily.All so the list is the closed taxonomy, never a copy. -->
             </ComboBox>
             <TextBox Grid.Column="2" x:Name="ExactMetricBox" IsEnabled="False"

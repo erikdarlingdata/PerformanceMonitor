@@ -151,6 +151,23 @@ public sealed class NotificationRoutesMcpTests : IDisposable
     }
 
     [Fact]
+    public async Task AnAnalysisAllRoute_ReportsMatchKindAnalysisAll_InThePerformanceFamily_AtAnyScope()
+    {
+        /* #7999 */
+        var fleet = await _store.InsertAsync(Route("Analysis: *", slack: SlackUrl));
+        var scoped = await _store.InsertAsync(Route("Analysis: *", server: _serverA, slack: SlackUrl));
+        var category = await _store.InsertAsync(Route("Analysis: queries", slack: SlackUrl));
+
+        using var doc = JsonDocument.Parse(await ReadAsync());
+        var routes = doc.RootElement.GetProperty("routes").EnumerateArray().ToDictionary(r => r.GetProperty("route_id").GetInt32());
+
+        Assert.Equal("analysis_all", routes[fleet].GetProperty("match_kind").GetString());
+        Assert.Equal("performance", routes[fleet].GetProperty("family").GetString());
+        Assert.Equal("analysis_all", routes[scoped].GetProperty("match_kind").GetString());
+        Assert.Equal("analysis_category", routes[category].GetProperty("match_kind").GetString());
+    }
+
+    [Fact]
     public async Task AnUnreadableScope_IsReportedAsScopeUnreadable_NotShownAsAnOrdinaryActiveRoute()
     {
         var ids = await SeedAsync();

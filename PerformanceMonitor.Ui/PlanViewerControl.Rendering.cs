@@ -459,8 +459,7 @@ public partial class PlanViewerControl
 
         AddRow("Estimated Number of Rows Per Execution", MetricFormatter.FormatEstimatedRows(child.EstimateRows));
 
-        var executions = 1.0 + child.EstimateRebinds + child.EstimateRewinds;
-        var estimatedRowsAllExec = child.EstimateRows * executions;
+        var estimatedRowsAllExec = child.EstimateRows * EstimatedExecutions(child);
         AddRow("Estimated Number of Rows for All Executions", MetricFormatter.FormatEstimatedRows(estimatedRowsAllExec));
 
         if (child.EstimatedRowSize > 0)
