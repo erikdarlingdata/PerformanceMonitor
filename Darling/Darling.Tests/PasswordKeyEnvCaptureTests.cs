@@ -12,8 +12,13 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 using static Darling.Tests.RepoFile;
@@ -154,13 +159,87 @@ public sealed class PasswordKeyEnvCaptureTests
     }
 
     /// <summary>
-    /// The pin above covers every child the service starts only while the processes are started in one file. A second
-    /// file that builds a <see cref="ProcessStartInfo"/> fails here, so its author checks that the capture runs before it.
-    /// The CLI verbs never capture: they are short-lived and start no managed store, and an operator's shell keeps the
-    /// variable anyway.
+    /// The runtime order on the path that starts pg_ctl, not only the text order above: the worker's real start, with
+    /// a managed store, reaches the store's construction with the variable already gone from its environment and from
+    /// what a child would inherit. The store factory records both and throws, so nothing is started and no PostgreSQL is
+    /// needed. Windows only, because the worker refuses a managed store anywhere else.
     /// </summary>
     [Fact]
-    public void OnlyTheManagedStoreStartsProcesses_AndTheCliNeverCaptures()
+    public async Task TheWorker_HasRemovedTheVariable_WhenItBuildsTheManagedStore()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "postgres.managed requires Windows.");
+
+        var (pkcs8, _) = NewKey();
+        var name = UniqueVariable();
+        var root = Directory.CreateTempSubdirectory("password-key-env-order-").FullName;
+        var previousConfig = Environment.GetEnvironmentVariable("DARLING_CONFIG");
+        try
+        {
+            var configPath = Path.Combine(root, "darling.json");
+            await File.WriteAllTextAsync(
+                configPath,
+                "{\"postgres\":{\"managed\":true,\"port\":55999,\"dataDirectory\":" + JsonSerializer.Serialize(Path.Combine(root, "pg")) +
+                    "},\"passwordKey\":" + JsonSerializer.Serialize("env:" + name) + "}",
+                TestContext.Current.CancellationToken);
+            Environment.SetEnvironmentVariable("DARLING_CONFIG", configPath);
+            Environment.SetEnvironmentVariable(name, Convert.ToBase64String(pkcs8));
+
+            var reached = new TaskCompletionSource<(string? Variable, bool Inherited)>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var worker = new DarlingWorker(
+                NullLogger<DarlingWorker>.Instance, NullLoggerFactory.Instance, new McpRuntimeState(), new WebRuntimeState(),
+                new MonitoredServerRegistryState(), new CollectorRuntimeState(), new WebTlsCertificateState(),
+                new BaselineCache(), new ReadLatencyAccumulator())
+            {
+                ManagedPostgresFactoryOverride = (_, _) =>
+                {
+                    reached.TrySetResult((Environment.GetEnvironmentVariable(name), new ProcessStartInfo().Environment.ContainsKey(name)));
+                    throw new InvalidOperationException("the test stops the worker where it would build the managed store");
+                },
+            };
+
+            using var stop = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+            await worker.StartAsync(stop.Token);
+            try
+            {
+                var (variable, inherited) = await reached.Task.WaitAsync(TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
+                /* Not Assert.Null: its failure message would print the value. */
+                Assert.True(variable is null, "the passwordKey variable was still in the worker's environment where it builds the managed store");
+                Assert.False(inherited, "a child started where the managed store is built would inherit the passwordKey variable");
+            }
+            finally
+            {
+                stop.Cancel();
+                try
+                {
+                    await worker.ExecuteTask!.WaitAsync(TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken);
+                }
+                catch (Exception ex) when (ex is InvalidOperationException or OperationCanceledException)
+                {
+                    /* The factory's own throw, or the stop: the worker ending is all this waits for. */
+                }
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("DARLING_CONFIG", previousConfig);
+            Environment.SetEnvironmentVariable(name, null);
+            DarlingPasswordKeySource.ForgetCaptured(name);
+            CryptographicOperations.ZeroMemory(pkcs8);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// The pin above covers every child the service starts only while the processes are started in one file. This
+    /// scans the service project's own source files (not the projects it references, and not library code) for the text
+    /// <c>new ProcessStartInfo</c> or <c>Process.Start(</c>, and expects them only in <c>DarlingManagedPostgres.cs</c>; a
+    /// second file that matches fails here, so its author checks that the capture runs before it. Libraries can start
+    /// processes too (Azure.Identity's developer credentials, the AWS SDK's <c>credential_process</c>), but only while
+    /// connecting to a monitored server, which is always after a config load and its capture. The CLI verbs never
+    /// capture: they are short-lived and start no managed store, and an operator's shell keeps the variable anyway.
+    /// </summary>
+    [Fact]
+    public void InTheServiceProjectsOwnSource_OnlyTheManagedStoreStartsProcesses_AndTheCliNeverCaptures()
     {
         var directory = PathTo("Darling", "PerformanceMonitor.Darling.Service");
         var separator = Path.DirectorySeparatorChar;

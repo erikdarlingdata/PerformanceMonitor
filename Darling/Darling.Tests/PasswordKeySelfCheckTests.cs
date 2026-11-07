@@ -213,6 +213,9 @@ public sealed class PasswordKeySelfCheckTests : IDisposable
         Assert.Contains("Fixtures/PasswordSeal", paths, StringComparison.Ordinal);
         Assert.Contains("PerformanceMonitor.Darling.Service/DarlingOwnedSecrets.cs", paths, StringComparison.Ordinal);
         Assert.Contains("PerformanceMonitor.Darling.Storage/PasswordSeal.cs", paths, StringComparison.Ordinal);
+        /* The vector group opens a sealed value bound to a connection: the binding's fields and canonical form. */
+        Assert.Contains("PerformanceMonitor.Darling.Storage/PasswordBinding.cs", paths, StringComparison.Ordinal);
+        Assert.Contains("PerformanceMonitor.Darling.Storage/ServerConnectionIdentity.cs", paths, StringComparison.Ordinal);
 
         /* The nightly reaches this job only as a reusable workflow: the trigger and the call must both stay. The nightly
            job's own has_changes/map_only gate is expected; it runs on every dev change. */

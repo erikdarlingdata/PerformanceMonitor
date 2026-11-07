@@ -40,6 +40,8 @@ on:
       - 'Darling/PerformanceMonitor.Darling.Service/DarlingOwnedSecrets.cs'
       - 'Darling/PerformanceMonitor.Darling.Service/DarlingManagedRoles.cs'
       - 'Darling/PerformanceMonitor.Darling.Storage/PasswordSeal.cs'
+      - 'Darling/PerformanceMonitor.Darling.Storage/PasswordBinding.cs'
+      - 'Darling/PerformanceMonitor.Darling.Storage/ServerConnectionIdentity.cs'
       - 'Darling/Darling.Tests/Fixtures/PasswordSeal/**'
       - 'Darling/PerformanceMonitor.Darling.Storage/PgSchemaGenerator.cs'
       - 'Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs'
