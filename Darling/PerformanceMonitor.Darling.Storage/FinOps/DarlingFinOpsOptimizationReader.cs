@@ -90,9 +90,11 @@ ORDER BY ds.total_size_mb DESC";
     /// <summary>
     /// The routed <c>db_activity</c>: every WHOLE hour from <paramref name="relationSql"/> (the stitched database-grain hourly rollup) from
     /// <paramref name="ceilingHourUtc"/>, UNION ALL the raw leading edge <c>[$2, ceilingHour)</c> the bucket grain cannot slice, UNION ALL the raw
-    /// trailing edge <c>[watermark, now)</c> the aggregate has not materialized yet. The rollup's <c>execution_count_sum</c> and
-    /// <c>last_execution_time_max</c> are the same sums and maxima the raw CTE takes, so the outer statement reads the same two columns
-    /// either way. The interval-honest filter rides on the raw arms only: the stitched relation's successor carries it in its own definition.
+    /// trailing edge <c>[watermark, now)</c> the aggregate has not materialized yet. The rollup's <c>execution_count_sum</c> is the raw CTE's
+    /// interval-honest sum. Its <c>last_execution_time_max</c> covers the rows the relation itself holds: on the legacy hourly rollup every
+    /// sampled row with a delta, as the raw CTE's <c>MAX(last_execution_time)</c> does, and on the interval-honest successor the honest rows
+    /// only, because that aggregate's definition filters restart rows (<c>sample_interval_seconds = 0</c>) out of every column, the maximum
+    /// included. The interval-honest filter rides on the raw arms only. The outer statement reads the same two columns either way.
     /// </summary>
     private static string IdleActivityForCagg(string relationSql, DateTime ceilingHourUtc, DateTime watermarkUtc)
     {
