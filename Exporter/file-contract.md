@@ -81,6 +81,8 @@ Each entry in `tables` has these fields.
 
 A field that does not apply to a table is left out or null. New fields can appear in any manifest without a version bump.
 
+`columns` is read back from the written file, in the core manifest and in the optional manifest alike, so it matches what `DESCRIBE` of the file returns.
+
 ## 4. Rows can arrive twice
 
 The same row can show up in more than one file. Causes:

@@ -156,7 +156,7 @@ public static class OptionalTableRunner
                             RowCount = part.RowCount,
                             ByteSize = part.ByteSize,
                             Sha256 = part.Sha256,
-                            Columns = [],
+                            Columns = ManifestColumn.OfParquetFile(AbsolutePath(options, part.RelativePath)),
                             StoreQueryElapsedMs = result.StoreQueryElapsedMs,
                             WriteElapsedMs = result.WriteElapsedMs,
                             MissingContentCount = 0,
@@ -302,7 +302,7 @@ public static class OptionalTableRunner
                         RowCount = part.RowCount,
                         ByteSize = part.ByteSize,
                         Sha256 = part.Sha256,
-                        Columns = [],
+                        Columns = ManifestColumn.OfParquetFile(AbsolutePath(options, part.RelativePath)),
                         StoreQueryElapsedMs = result.StoreQueryElapsedMs,
                         WriteElapsedMs = result.WriteElapsedMs,
                         MissingContentCount = 0,
@@ -385,7 +385,7 @@ public static class OptionalTableRunner
                         RowCount = part.RowCount,
                         ByteSize = part.ByteSize,
                         Sha256 = part.Sha256,
-                        Columns = [],
+                        Columns = ManifestColumn.OfParquetFile(AbsolutePath(options, part.RelativePath)),
                         StoreQueryElapsedMs = result.StoreQueryElapsedMs,
                         WriteElapsedMs = result.WriteElapsedMs,
                         MissingContentCount = 0,
@@ -410,7 +410,7 @@ public static class OptionalTableRunner
                         RowCount = result.RollupPart.RowCount,
                         ByteSize = result.RollupPart.ByteSize,
                         Sha256 = result.RollupPart.Sha256,
-                        Columns = [],
+                        Columns = ManifestColumn.OfParquetFile(AbsolutePath(options, result.RollupPart.RelativePath)),
                         StoreQueryElapsedMs = 0,
                         WriteElapsedMs = result.WriteElapsedMs,
                         MissingContentCount = 0,
@@ -617,7 +617,7 @@ public static class OptionalTableRunner
                 RowCount = textRows.Count,
                 ByteSize = byteSize,
                 Sha256 = sha256,
-                Columns = [],
+                Columns = ManifestColumn.OfParquetFile(absolutePath),
                 StoreQueryElapsedMs = storeStopwatch.Elapsed.TotalMilliseconds,
                 WriteElapsedMs = writeStopwatch.Elapsed.TotalMilliseconds,
                 MissingContentCount = 0,
@@ -656,7 +656,7 @@ public static class OptionalTableRunner
             RowCount = rowCount,
             ByteSize = byteSize,
             Sha256 = sha256,
-            Columns = [],
+            Columns = ManifestColumn.OfParquetFile(outputPath),
             StoreQueryElapsedMs = 0,
             WriteElapsedMs = 0,
             MissingContentCount = 0,
@@ -673,6 +673,10 @@ public static class OptionalTableRunner
         var hash = SHA256.HashData(stream);
         return Convert.ToHexStringLower(hash);
     }
+
+    /// <summary>The on-disk path of a part the manifest names by its store-relative `/` path.</summary>
+    private static string AbsolutePath(ExportOptions options, string relativePath) =>
+        Path.Combine(options.OutDir, options.Store, relativePath.Replace('/', Path.DirectorySeparatorChar));
 
     /// <summary>
     /// Runs one Hourly-grain table: the window's single raw read into <see cref="HourlyRollupExporter"/>, which rolls
@@ -721,7 +725,7 @@ public static class OptionalTableRunner
                 RowCount = result.Part.RowCount,
                 ByteSize = result.Part.ByteSize,
                 Sha256 = result.Part.Sha256,
-                Columns = [],
+                Columns = ManifestColumn.OfParquetFile(AbsolutePath(options, result.Part.RelativePath)),
                 StoreQueryElapsedMs = result.StoreQueryElapsedMs,
                 WriteElapsedMs = result.WriteElapsedMs,
                 MissingContentCount = 0,
