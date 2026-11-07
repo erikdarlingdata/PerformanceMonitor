@@ -78,6 +78,7 @@ public partial class ViewerServerTab
         var (startUtc, endUtc) = GetWindowUtc();
         CpuSchedRenderer.Render(CpuSchedulerChart, _cpuSchedulerHover, data,
             ChartXStart(startUtc, endUtc), endUtc.ToOADate());
+        ViewerChartCards.SetUnit(CpuSchedulerChart, "count"); // #8151: the shared renderer names the axis; the card carries the name
         KeepPlottedInView(CpuSchedulerChart, startUtc, endUtc);
     }
 

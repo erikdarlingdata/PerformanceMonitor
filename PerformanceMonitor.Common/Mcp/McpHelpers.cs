@@ -578,6 +578,8 @@ internal static class McpHelpers
         " window_truncated is true when the first point served is later than the start of the window: the store holds nothing earlier in this window at this tier. " +
         "It does not say why (retention, a query first seen later, a server that collected later); effective_start / " +
         "effective_hours_back say where the answer begins. A trend that names the tier (get_query_trend and the duration trends) " +
+        "allows the first point 90 minutes of slack before it says truncated (an hourly bucket can begin up to an hour after a start that falls mid-hour, " +
+        "and a raw series a collection cadence or two late), so inside that slack effective_start is later than the start while window_truncated stays false. Such a trend " +
         "adds start_older_than_tier, true only when the start is older than the tier that answered keeps (tier_keeps_days says how long): " +
         "only then has the earlier part aged out of that tier. That is the window floor, not a page cut: no limit " +
         "changes it. WIRE CHANGE: formerly named truncated.";

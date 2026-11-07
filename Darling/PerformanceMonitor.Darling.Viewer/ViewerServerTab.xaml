@@ -17,6 +17,11 @@
         timer refreshes only the active inner tab of the visible server tab.
     -->
     <UserControl.Resources>
+        <ResourceDictionary>
+        <ResourceDictionary.MergedDictionaries>
+            <!-- #8144: the Viewer's EmptyHint and the other shared text styles come from the shared dictionary, not a copy here. -->
+            <ResourceDictionary Source="pack://application:,,,/PerformanceMonitor.Ui;component/Themes/SharedStyles.xaml"/>
+        </ResourceDictionary.MergedDictionaries>
         <BooleanToVisibilityConverter x:Key="BoolToVis"/>
         <ui:OneLineTextConverter x:Key="OneLine"/>
         <local:PgBytesConverter x:Key="PgBytes"/>
@@ -25,17 +30,6 @@
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="Foreground" Value="{DynamicResource ForegroundBrush}"/>
             <Setter Property="Margin" Value="0,0,0,6"/>
-        </Style>
-
-        <Style x:Key="EmptyHint" TargetType="TextBlock">
-            <Setter Property="Foreground" Value="{DynamicResource ForegroundMutedBrush}"/>
-            <Setter Property="HorizontalAlignment" Value="Center"/>
-            <Setter Property="VerticalAlignment" Value="Center"/>
-            <Setter Property="TextWrapping" Value="Wrap"/>
-            <Setter Property="TextAlignment" Value="Center"/>
-            <Setter Property="MaxWidth" Value="480"/>
-            <Setter Property="IsHitTestVisible" Value="False"/>
-            <Setter Property="Visibility" Value="Collapsed"/>
         </Style>
 
         <!-- Dark grid chrome shared by the per-server grids (relocated from MainWindow's
@@ -414,6 +408,7 @@
             <Setter Property="ContextMenu" Value="{StaticResource QueryStorePlanContextMenu}"/>
         </Style>
 
+            </ResourceDictionary>
     </UserControl.Resources>
 
     <Grid>
@@ -618,7 +613,9 @@
                             <ComboBoxItem Content="Avg Wait Time (ms/wait)"/>
                         </ComboBox>
                     </StackPanel>
-                    <scottplot:WpfPlot Grid.Row="1" x:Name="WaitStatsChart"/>
+                    <ui:ChartPanel Title="Wait stats" Grid.Row="1">
+                        <scottplot:WpfPlot x:Name="WaitStatsChart"/>
+                    </ui:ChartPanel>
                 </Grid>
             </Grid>
         </TabItem>
@@ -659,10 +656,18 @@
                     <TabItem Header="Performance Trends">
                         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #6652: scrolls when the charts cannot all keep their minimum height -->
                         <ui:ChartGridPanel MaxColumns="2">
-                            <scottplot:WpfPlot x:Name="QueryDurationTrendChart"/>
-                            <scottplot:WpfPlot x:Name="ProcDurationTrendChart"/>
-                            <scottplot:WpfPlot x:Name="QueryStoreDurationTrendChart"/>
-                            <scottplot:WpfPlot x:Name="ExecutionCountTrendChart"/>
+                            <ui:ChartPanel Title="Query duration">
+                                <scottplot:WpfPlot x:Name="QueryDurationTrendChart"/>
+                            </ui:ChartPanel>
+                            <ui:ChartPanel Title="Procedure duration">
+                                <scottplot:WpfPlot x:Name="ProcDurationTrendChart"/>
+                            </ui:ChartPanel>
+                            <ui:ChartPanel Title="Query Store duration">
+                                <scottplot:WpfPlot x:Name="QueryStoreDurationTrendChart"/>
+                            </ui:ChartPanel>
+                            <ui:ChartPanel Title="Executions">
+                                <scottplot:WpfPlot x:Name="ExecutionCountTrendChart"/>
+                            </ui:ChartPanel>
                         </ui:ChartGridPanel>
                         </ScrollViewer>
                     </TabItem>
@@ -2147,9 +2152,9 @@
                                        Padding="8,4" FontWeight="Bold"
                                        Foreground="{DynamicResource ForegroundBrush}"
                                        Background="#22FFAA00"/>
-                            <scottplot:WpfPlot Grid.Row="2" x:Name="QueryHeatmapChart"
-                                                MouseMove="HeatmapChart_MouseMove"
-                                                MouseLeave="HeatmapChart_MouseLeave"/>
+                            <ui:ChartPanel Title="Query heatmap" Grid.Row="2">
+                                <scottplot:WpfPlot x:Name="QueryHeatmapChart" MouseMove="HeatmapChart_MouseMove" MouseLeave="HeatmapChart_MouseLeave"/>
+                            </ui:ChartPanel>
                         </Grid>
                     </TabItem>
                 </TabControl>
@@ -2210,7 +2215,9 @@
             <TabControl x:Name="CpuSubTabControl" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                 <TabItem Header="CPU Utilization">
                     <Grid Margin="8">
-                        <scottplot:WpfPlot x:Name="CpuChart"/>
+                        <ui:ChartPanel Title="CPU utilization">
+                            <scottplot:WpfPlot x:Name="CpuChart"/>
+                        </ui:ChartPanel>
                     </Grid>
                 </TabItem>
                 <TabItem Header="CPU Scheduler">
@@ -2220,7 +2227,9 @@
                             <RowDefinition Height="2*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
-                        <scottplot:WpfPlot Grid.Row="0" x:Name="CpuSchedulerChart"/>
+                        <ui:ChartPanel Title="Scheduler tasks" Grid.Row="0">
+                            <scottplot:WpfPlot x:Name="CpuSchedulerChart"/>
+                        </ui:ChartPanel>
                         <DataGrid Grid.Row="1" x:Name="CpuSchedulerGrid" Style="{StaticResource DarkGrid}" Margin="0,8,0,0"
                                   HeadersVisibility="Column" AutoGenerateColumns="False">
                             <DataGrid.RowStyle>
@@ -2316,7 +2325,9 @@
                         </Border>
 
                         <!-- Memory Trend Chart -->
-                        <scottplot:WpfPlot Grid.Row="1" x:Name="MemoryChart"/>
+                        <ui:ChartPanel Title="Memory" Grid.Row="1">
+                            <scottplot:WpfPlot x:Name="MemoryChart"/>
+                        </ui:ChartPanel>
                     </Grid>
                     </ScrollViewer>
                 </TabItem>
@@ -2366,7 +2377,9 @@
                                 <RowDefinition Height="*"/>
                                 <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
-                            <scottplot:WpfPlot Grid.Row="0" x:Name="MemoryClerksChart"/>
+                            <ui:ChartPanel Title="Memory clerks" Grid.Row="0">
+                                <scottplot:WpfPlot x:Name="MemoryClerksChart"/>
+                            </ui:ChartPanel>
                             <Border Grid.Row="1" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12,8" Margin="0,8,0,0">
                                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
                                     <TextBlock Text="Non-BP Total:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
@@ -2387,8 +2400,12 @@
                             <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                             <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                         </Grid.RowDefinitions>
-                        <scottplot:WpfPlot Grid.Row="0" x:Name="MemoryGrantSizingChart" Margin="0,0,0,4"/>
-                        <scottplot:WpfPlot Grid.Row="1" x:Name="MemoryGrantActivityChart" Margin="0,4,0,0"/>
+                        <ui:ChartPanel Title="Memory grant sizing" Grid.Row="0" Margin="0,0,0,4">
+                            <scottplot:WpfPlot x:Name="MemoryGrantSizingChart"/>
+                        </ui:ChartPanel>
+                        <ui:ChartPanel Title="Memory grant activity" Grid.Row="1" Margin="0,4,0,0">
+                            <scottplot:WpfPlot x:Name="MemoryGrantActivityChart"/>
+                        </ui:ChartPanel>
                     </Grid></ScrollViewer>
                 </TabItem>
 
@@ -2462,7 +2479,9 @@
                             <RowDefinition Height="*" MinHeight="90"/>
                             <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
-                        <scottplot:WpfPlot Grid.Row="0" x:Name="PlanCacheChart"/>
+                        <ui:ChartPanel Title="Plan cache size" Grid.Row="0">
+                            <scottplot:WpfPlot x:Name="PlanCacheChart"/>
+                        </ui:ChartPanel>
                         <!-- Plan Cache by Type (#6388): every (cacheobjtype, objtype) group at the newest snapshot in the window, the read
                              get_plan_cache_bloat serves as cache_types. -->
                         <DataGrid Grid.Row="1" x:Name="PlanCacheByTypeGrid" Style="{StaticResource DarkGrid}" Margin="0,8,0,0">
@@ -2515,7 +2534,9 @@
                                    Padding="8,4" FontWeight="Bold"
                                    Foreground="{DynamicResource ForegroundBrush}"
                                    Background="#22FFAA00"/>
-                        <scottplot:WpfPlot Grid.Row="1" x:Name="MemoryPressureEventsChart"/>
+                        <ui:ChartPanel Title="Memory pressure events" Grid.Row="1">
+                            <scottplot:WpfPlot x:Name="MemoryPressureEventsChart"/>
+                        </ui:ChartPanel>
                         <!-- Shown only where the memory_pressure_events collector does not run (Azure SQL Database) or has never run for this server. -->
                         <TextBlock Grid.Row="1" x:Name="MemoryPressureEventsNoDataMessage" Style="{StaticResource EmptyHint}"/>
                     </Grid>
@@ -2543,10 +2564,14 @@
                                 <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                             </Grid.RowDefinitions>
                             <Border Grid.Row="0" Margin="0,0,0,4">
-                                <scottplot:WpfPlot x:Name="FileIoReadChart"/>
+                                <ui:ChartPanel Title="Read latency">
+                                    <scottplot:WpfPlot x:Name="FileIoReadChart"/>
+                                </ui:ChartPanel>
                             </Border>
                             <Border Grid.Row="1" Margin="0,4,0,0">
-                                <scottplot:WpfPlot x:Name="FileIoWriteChart"/>
+                                <ui:ChartPanel Title="Write latency">
+                                    <scottplot:WpfPlot x:Name="FileIoWriteChart"/>
+                                </ui:ChartPanel>
                             </Border>
                         </Grid>
                         </ScrollViewer>
@@ -2559,10 +2584,14 @@
                                 <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                             </Grid.RowDefinitions>
                             <Border Grid.Row="0" Margin="0,0,0,4">
-                                <scottplot:WpfPlot x:Name="FileIoReadThroughputChart"/>
+                                <ui:ChartPanel Title="Read throughput">
+                                    <scottplot:WpfPlot x:Name="FileIoReadThroughputChart"/>
+                                </ui:ChartPanel>
                             </Border>
                             <Border Grid.Row="1" Margin="0,4,0,0">
-                                <scottplot:WpfPlot x:Name="FileIoWriteThroughputChart"/>
+                                <ui:ChartPanel Title="Write throughput">
+                                    <scottplot:WpfPlot x:Name="FileIoWriteThroughputChart"/>
+                                </ui:ChartPanel>
                             </Border>
                         </Grid></ScrollViewer>
                     </TabItem>
@@ -2582,15 +2611,21 @@
                 </Grid.RowDefinitions>
 
                 <Border Grid.Row="0" Margin="0,0,0,4">
-                    <scottplot:WpfPlot x:Name="TempDbChart"/>
+                    <ui:ChartPanel Title="tempdb">
+                        <scottplot:WpfPlot x:Name="TempDbChart"/>
+                    </ui:ChartPanel>
                 </Border>
 
                 <Border Grid.Row="1" Margin="0,4,0,4">
-                    <scottplot:WpfPlot x:Name="TempDbSizeChart"/>
+                    <ui:ChartPanel Title="tempdb allocated size">
+                        <scottplot:WpfPlot x:Name="TempDbSizeChart"/>
+                    </ui:ChartPanel>
                 </Border>
 
                 <Border Grid.Row="2" Margin="0,4,0,0">
-                    <scottplot:WpfPlot x:Name="TempDbFileIoChart"/>
+                    <ui:ChartPanel Title="tempdb file latency">
+                        <scottplot:WpfPlot x:Name="TempDbFileIoChart"/>
+                    </ui:ChartPanel>
                 </Border>
 
                 <!-- Shown over the usage and size charts when tempdb_stats recorded a named skip such as PERMISSIONS for this server and the window has no tempdb rows (#6861). -->
@@ -2642,21 +2677,27 @@
                                        Foreground="{DynamicResource ForegroundBrush}"
                                        Background="#22FFAA00"/>
                             <Border Grid.Row="1" Margin="0,0,0,4">
-                                <scottplot:WpfPlot x:Name="LockWaitTrendChart"/>
+                                <ui:ChartPanel Title="Lock waits">
+                                    <scottplot:WpfPlot x:Name="LockWaitTrendChart"/>
+                                </ui:ChartPanel>
                             </Border>
                             <TextBlock Grid.Row="2" x:Name="BlockingTrendTruncationBanner" Visibility="Collapsed"
                                        Padding="8,4" FontWeight="Bold"
                                        Foreground="{DynamicResource ForegroundBrush}"
                                        Background="#22FFAA00"/>
                             <Border Grid.Row="3" Margin="0,4,0,4">
-                                <scottplot:WpfPlot x:Name="BlockingTrendChart"/>
+                                <ui:ChartPanel Title="Blocking">
+                                    <scottplot:WpfPlot x:Name="BlockingTrendChart"/>
+                                </ui:ChartPanel>
                             </Border>
                             <TextBlock Grid.Row="4" x:Name="DeadlockTrendTruncationBanner" Visibility="Collapsed"
                                        Padding="8,4" FontWeight="Bold"
                                        Foreground="{DynamicResource ForegroundBrush}"
                                        Background="#22FFAA00"/>
                             <Border Grid.Row="5" Margin="0,4,0,0">
-                                <scottplot:WpfPlot x:Name="DeadlockTrendChart"/>
+                                <ui:ChartPanel Title="Deadlocks">
+                                    <scottplot:WpfPlot x:Name="DeadlockTrendChart"/>
+                                </ui:ChartPanel>
                             </Border>
                         </Grid>
                         </ScrollViewer>
@@ -2701,20 +2742,28 @@
                                        Foreground="{DynamicResource ForegroundBrush}"
                                        Background="#22FFAA00"/>
                             <Border Grid.Row="1" Grid.Column="0" Margin="0,0,4,4">
-                                <scottplot:WpfPlot x:Name="BlockingDurationChart"/>
+                                <ui:ChartPanel Title="Block duration">
+                                    <scottplot:WpfPlot x:Name="BlockingDurationChart"/>
+                                </ui:ChartPanel>
                             </Border>
                             <Border Grid.Row="1" Grid.Column="1" Margin="4,0,0,4">
-                                <scottplot:WpfPlot x:Name="BlockingTotalDurationChart"/>
+                                <ui:ChartPanel Title="Total block duration">
+                                    <scottplot:WpfPlot x:Name="BlockingTotalDurationChart"/>
+                                </ui:ChartPanel>
                             </Border>
                             <TextBlock Grid.Row="2" Grid.ColumnSpan="2" x:Name="BlockingStatsDeadlockTruncationBanner" Visibility="Collapsed"
                                        Padding="8,4" FontWeight="Bold"
                                        Foreground="{DynamicResource ForegroundBrush}"
                                        Background="#22FFAA00"/>
                             <Border Grid.Row="3" Grid.Column="0" Margin="0,4,4,0">
-                                <scottplot:WpfPlot x:Name="DeadlockWaitChart"/>
+                                <ui:ChartPanel Title="Deadlock wait">
+                                    <scottplot:WpfPlot x:Name="DeadlockWaitChart"/>
+                                </ui:ChartPanel>
                             </Border>
                             <Border Grid.Row="3" Grid.Column="1" Margin="4,4,0,0">
-                                <scottplot:WpfPlot x:Name="DeadlockTotalWaitChart"/>
+                                <ui:ChartPanel Title="Total deadlock wait">
+                                    <scottplot:WpfPlot x:Name="DeadlockTotalWaitChart"/>
+                                </ui:ChartPanel>
                             </Border>
                             <Border Grid.Row="4" Grid.ColumnSpan="2" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12,8" Margin="0,4,0,0">
                                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
@@ -2752,10 +2801,14 @@
                                        Foreground="{DynamicResource ForegroundBrush}"
                                        Background="#22FFAA00"/>
                             <Border Grid.Row="1" Margin="0,0,0,4">
-                                <scottplot:WpfPlot x:Name="CurrentWaitsDurationChart"/>
+                                <ui:ChartPanel Title="Total wait duration">
+                                    <scottplot:WpfPlot x:Name="CurrentWaitsDurationChart"/>
+                                </ui:ChartPanel>
                             </Border>
                             <Border Grid.Row="2" Margin="0,4,0,0">
-                                <scottplot:WpfPlot x:Name="CurrentWaitsBlockedChart"/>
+                                <ui:ChartPanel Title="Blocked sessions">
+                                    <scottplot:WpfPlot x:Name="CurrentWaitsBlockedChart"/>
+                                </ui:ChartPanel>
                             </Border>
                             <!-- Both charts read waiting_tasks, which stores a row only when a collection found a task waiting or blocked, so a quiet server draws few points and a gap means nothing was waiting. -->
                             <TextBlock Grid.Row="3" x:Name="CurrentWaitsSparseNote" Padding="8,4" FontStyle="Italic" TextWrapping="Wrap"
@@ -3053,7 +3106,9 @@
                     </Grid>
                 </Border>
 
-                <scottplot:WpfPlot Grid.Column="1" x:Name="PerfmonChart"/>
+                <ui:ChartPanel Title="Performance counters" Grid.Column="1">
+                    <scottplot:WpfPlot x:Name="PerfmonChart"/>
+                </ui:ChartPanel>
             </Grid>
         </TabItem>
 
@@ -3075,7 +3130,9 @@
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" Text="Session Counts Over Time (every session on the server, background and the monitor included)" Style="{StaticResource SectionHeader}"/>
-                <scottplot:WpfPlot Grid.Row="1" x:Name="SessionStatsChart"/>
+                <ui:ChartPanel Title="Sessions" Grid.Row="1">
+                    <scottplot:WpfPlot x:Name="SessionStatsChart"/>
+                </ui:ChartPanel>
                 <!-- Sessions by Application (#6388): the newest per-application snapshot, the read get_session_stats serves as applications. -->
                 <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,8,0,0">
                     <TextBlock Text="Sessions by Application (newest snapshot, user sessions with an application name, the monitor left out)" Style="{StaticResource SectionHeader}" VerticalAlignment="Center" Margin="0,0,16,0"/>
@@ -3578,16 +3635,24 @@
                             <!-- Borderless tiles matching every other chart tab; each chart identifies itself
                                  via its descriptive Y-axis label (like File I/O's "Read Latency (ms)"). -->
                             <Border Grid.Row="0" Grid.Column="0" Margin="2">
-                                <scottplot:WpfPlot x:Name="BadPagesChart"/>
+                                <ui:ChartPanel Title="Bad pages">
+                                    <scottplot:WpfPlot x:Name="BadPagesChart"/>
+                                </ui:ChartPanel>
                             </Border>
                             <Border Grid.Row="0" Grid.Column="1" Margin="2">
-                                <scottplot:WpfPlot x:Name="DumpRequestsChart"/>
+                                <ui:ChartPanel Title="Dump requests">
+                                    <scottplot:WpfPlot x:Name="DumpRequestsChart"/>
+                                </ui:ChartPanel>
                             </Border>
                             <Border Grid.Row="1" Grid.Column="0" Margin="2">
-                                <scottplot:WpfPlot x:Name="AccessViolationsChart"/>
+                                <ui:ChartPanel Title="Access violations">
+                                    <scottplot:WpfPlot x:Name="AccessViolationsChart"/>
+                                </ui:ChartPanel>
                             </Border>
                             <Border Grid.Row="1" Grid.Column="1" Margin="2">
-                                <scottplot:WpfPlot x:Name="WriteAccessViolationsChart"/>
+                                <ui:ChartPanel Title="Write access violations">
+                                    <scottplot:WpfPlot x:Name="WriteAccessViolationsChart"/>
+                                </ui:ChartPanel>
                             </Border>
                         </Grid></ScrollViewer>
                         <TextBlock Grid.Row="1" x:Name="CorruptionEventsNoDataMessage" Style="{StaticResource EmptyHint}"/>
@@ -3611,16 +3676,24 @@
                             <!-- Borderless tiles matching every other chart tab; each chart identifies itself
                                  via its descriptive Y-axis label / legend (like File I/O's "Read Latency (ms)"). -->
                             <Border Grid.Row="0" Grid.Column="0" Margin="2">
-                                <scottplot:WpfPlot x:Name="NonYieldingTasksChart"/>
+                                <ui:ChartPanel Title="Non-yielding tasks">
+                                    <scottplot:WpfPlot x:Name="NonYieldingTasksChart"/>
+                                </ui:ChartPanel>
                             </Border>
                             <Border Grid.Row="0" Grid.Column="1" Margin="2">
-                                <scottplot:WpfPlot x:Name="LatchWarningsChart"/>
+                                <ui:ChartPanel Title="Latch warnings">
+                                    <scottplot:WpfPlot x:Name="LatchWarningsChart"/>
+                                </ui:ChartPanel>
                             </Border>
                             <Border Grid.Row="1" Grid.Column="0" Margin="2">
-                                <scottplot:WpfPlot x:Name="SickSpinlocksChart"/>
+                                <ui:ChartPanel Title="Sick spinlocks">
+                                    <scottplot:WpfPlot x:Name="SickSpinlocksChart"/>
+                                </ui:ChartPanel>
                             </Border>
                             <Border Grid.Row="1" Grid.Column="1" Margin="2">
-                                <scottplot:WpfPlot x:Name="CpuComparisonChart"/>
+                                <ui:ChartPanel Title="CPU: SQL Server and other">
+                                    <scottplot:WpfPlot x:Name="CpuComparisonChart"/>
+                                </ui:ChartPanel>
                             </Border>
                         </Grid></ScrollViewer>
                         <TextBlock Grid.Row="1" x:Name="ContentionEventsNoDataMessage" Style="{StaticResource EmptyHint}"/>
@@ -3959,7 +4032,9 @@
                            Padding="8,4" FontWeight="Bold"
                            Foreground="{DynamicResource ForegroundBrush}"
                            Background="#22FFAA00"/>
-                <scottplot:WpfPlot Grid.Row="1" x:Name="LatchStatsChart"/>
+                <ui:ChartPanel Title="Latch waits" Grid.Row="1">
+                    <scottplot:WpfPlot x:Name="LatchStatsChart"/>
+                </ui:ChartPanel>
                 <Expander Grid.Row="2" Header="Latch classes (latest snapshot)" IsExpanded="False" Margin="0,4,0,0">
                     <DataGrid x:Name="LatchStatsGrid" Style="{StaticResource DarkGrid}" MaxHeight="220" Margin="0,4,0,0">
                         <DataGrid.Columns>
@@ -3984,7 +4059,9 @@
                            Padding="8,4" FontWeight="Bold"
                            Foreground="{DynamicResource ForegroundBrush}"
                            Background="#22FFAA00"/>
-                <scottplot:WpfPlot Grid.Row="4" x:Name="SpinlockStatsChart" Margin="0,8,0,0"/>
+                <ui:ChartPanel Title="Spinlock backoffs" Grid.Row="4" Margin="0,8,0,0">
+                    <scottplot:WpfPlot x:Name="SpinlockStatsChart"/>
+                </ui:ChartPanel>
                 <Expander Grid.Row="5" Header="Spinlocks (latest snapshot)" IsExpanded="False" Margin="0,4,0,0">
                     <DataGrid x:Name="SpinlockStatsGrid" Style="{StaticResource DarkGrid}" MaxHeight="220" Margin="0,4,0,0">
                         <DataGrid.Columns>
@@ -4017,6 +4094,7 @@
         <TabItem x:Name="CollectionHealthTab" Header="Collection Health">
             <Grid Margin="8">
                 <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
@@ -4056,12 +4134,16 @@
                      collection has been falling behind; the all-clear says so plainly, and a failed read says it could not be read. -->
                 <TextBlock x:Name="SkippedCyclesLine" Grid.Row="1" TextWrapping="Wrap" Margin="0,0,0,8"
                            Foreground="{DynamicResource ForegroundBrush}"/>
+                <!-- #8101: one connection failure that reached several collectors in one cycle, worded once: when, how many rows it
+                     explains, and whether each of them missed that run alone. Collapsed when the rows' newest errors hold none. -->
+                <TextBlock x:Name="ConnectionFailureLine" Grid.Row="2" Visibility="Collapsed" TextWrapping="Wrap" Margin="0,0,0,8"
+                           Foreground="{DynamicResource ForegroundBrush}"/>
                 <!-- #3691 part a2: the persisted analysis collection caveats (V141, part a1) — data
                      families the scheduled analysis pass currently cannot read on this server, and why.
                      Collapsed (Visibility=Collapsed, set in code-behind) when the list is empty, which is
                      also what a pre-V141 store reads as (GetCollectionCaveatsAsync returns an empty list
                      rather than throwing on the missing table). -->
-                <Expander x:Name="CollectionCaveatsExpander" Grid.Row="2" Header="Analysis could not read these data families"
+                <Expander x:Name="CollectionCaveatsExpander" Grid.Row="3" Header="Analysis could not read these data families"
                           IsExpanded="True" Margin="0,0,0,8" Visibility="Collapsed">
                     <DataGrid x:Name="CollectionCaveatsGrid" Style="{StaticResource DarkGrid}" MaxHeight="160" Margin="0,4,0,0">
                         <DataGrid.Columns>
@@ -4072,7 +4154,7 @@
                         </DataGrid.Columns>
                     </DataGrid>
                 </Expander>
-                <TabControl Grid.Row="3" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
+                <TabControl Grid.Row="4" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                     <TabItem Header="Health Summary">
                         <DataGrid x:Name="CollectionHealthGrid" Style="{StaticResource DarkGrid}"
                                   MouseDoubleClick="CollectionHealthGrid_MouseDoubleClick">
@@ -4093,6 +4175,19 @@
                                 <DataGridTextColumn Binding="{Binding DisplayStatus}" Width="100" MinWidth="100">
                                     <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DisplayStatus" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Status" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
+                                <!-- #8101: the newest error sits beside the band it did not move, so a HEALTHY row with Errors 1 says what the error was
+                                     without a sideways scroll. The message is trimmed to the cell and whole in its tooltip. -->
+                                <DataGridTextColumn Binding="{Binding LastErrorFormatted}" Width="140" MinWidth="140" SortMemberPath="LastErrorTime">
+                                    <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastErrorFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Error At" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTemplateColumn Width="320" MinWidth="200" SortMemberPath="LastError">
+                                    <DataGridTemplateColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastError" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Error" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTemplateColumn.Header>
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding LastError}" TextTrimming="CharacterEllipsis" ToolTip="{Binding LastError}"/>
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
                                 <DataGridTextColumn Binding="{Binding TotalRuns, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80" MinWidth="80">
                                     <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalRuns" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Runs" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
@@ -4119,12 +4214,6 @@
                                 </DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding LastRunFormatted}" Width="140" MinWidth="140" SortMemberPath="LastRunTime">
                                     <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastRunFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Run" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
-                                </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding LastErrorFormatted}" Width="140" MinWidth="140" SortMemberPath="LastErrorTime">
-                                    <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastErrorFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Error At" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
-                                </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding LastError}" Width="*" MinWidth="160">
-                                    <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastError" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Error" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                                 <!-- #1837: what a NON-failing run reported. Blank for a plainly healthy collector; "(all N runs)" is the persistently-empty case. A collector's label=value counts read as its latest NOTED run's ("latest run:" when every run carried them). Informational only - the Status column's band is unchanged. -->
                                 <DataGridTextColumn Binding="{Binding NoteFormatted}" Width="*" MinWidth="160">
@@ -4235,7 +4324,9 @@
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                                 </Grid.RowDefinitions>
-                                <scottplot:WpfPlot x:Name="CollectorDurationChart" Margin="4"/>
+                                <ui:ChartPanel Title="Collector duration" Margin="4">
+                                    <scottplot:WpfPlot x:Name="CollectorDurationChart"/>
+                                </ui:ChartPanel>
                             </Grid>
                         </ScrollViewer>
                     </TabItem>

@@ -1788,7 +1788,8 @@ export function zeroFilledPoints(points, xKey, seriesCfg, bucketMinutes, win, co
   return out.length === gridCount ? out : out.sort((a, b) => timeOf(a) - timeOf(b));
 }
 
-/* bandlist: desc = { rowsKey, primaryKey, bandKey, bandLabelKey?, reasonKey?, navKey?, emptyText? } */
+/* bandlist: desc = { rowsKey, primaryKey, bandKey, bandLabelKey?, reasonKey?, navKey?, navStore?, emptyText? }
+   navStore is the store a row's server opens in (#8095, the front door's store sections); absent, the current store. */
 function vizBandlist(data, desc) {
   const rows = getPath(data, desc.rowsKey) || [];
   if (!rows.length) return emptyStrip(desc.emptyText || "Nothing to show.");
@@ -1808,7 +1809,7 @@ function vizBandlist(data, desc) {
       const props = { class: "row " + bandClass(band) };
       if (desc.navKey) {
         const target = getPath(r, desc.navKey);
-        if (target) props.onActivate = () => navigateServer(target);
+        if (target) props.onActivate = () => navigateServer(target, desc.navStore);
       }
       return el("div", props, [
         el("span", { class: "dot " + bandClass(band) }),

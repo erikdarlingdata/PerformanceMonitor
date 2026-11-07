@@ -48,7 +48,8 @@ namespace PerformanceMonitor.Darling.Tests;
 ///
 /// <para>#8138: the MCP's host-object lens (<c>TopQueriesByHostObjectSql</c>, <c>roll_up_by_host_object</c>) has the same
 /// two ranking passes and the same lookup, so the plan fact covers it too, and its own behaviour is pinned through the
-/// reader: a proc-hosted group takes the newest text of any of its fragments, ad-hoc groups keep their own.</para>
+/// reader: a proc-hosted group takes the newest text of any of its fragments, ad-hoc groups keep their own, and the
+/// orphan-digest and zero-interval rows read as its lookup read them.</para>
 ///
 /// <para>The seed is anchored through <see cref="LiveClock"/>: the plan test reads EXPLAIN, and a window seeded from the
 /// wall clock moves across chunk boundaries with the hour (#5608).</para>
@@ -90,34 +91,6 @@ public sealed class TopQueriesTextOneScanLiveTests
             var hostPlan = await ExplainAsync(connection, hostSql, ct, serverId, start, end,
                 P(NpgsqlDbType.Integer, Top), P(NpgsqlDbType.Array | NpgsqlDbType.Text, null), P(NpgsqlDbType.Integer, 0), P(NpgsqlDbType.Integer, Candidates), P(NpgsqlDbType.Array | NpgsqlDbType.Text, null));
             AssertTextIsALookupOnTheCappedRows("TopQueriesByHostObjectSql", hostPlan, windowPasses: 2);
-        });
-
-    [Fact]
-    public Task TheHostObjectLens_TakesTheNewestFragmentsText_AndKeepsTheAdHocAndHostedTexts() =>
-        WithSeedAsync(async (_, connectionString, serverId, now, ct) =>
-        {
-            /* #8138: through get_top_queries_by_cpu with roll_up_by_host_object. A proc-hosted group is one row per (database,
-               host object) and its text is the newest text of ANY of its fragments; an ad-hoc group keeps its own hash and
-               its own text; two host objects sharing a hash stay two rows with their own texts. */
-            var expected = new Dictionary<string, string>(StringComparer.Ordinal)
-            {
-                ["D0/*/dbo.Frag"] = "a8136 e7 fragment new",
-                ["D2/*/dbo.E4Host"] = "a8136 e4 inline newest",
-                ["D2/*/dbo.OtherHost"] = "a8136 e6 other host text",
-                ["D1/0xE1/(null)"] = "a8136 e1 older text",
-                ["D1/0xE2/(null)"] = "a8136 e2 text B (collected last)",
-                ["D2/0xE3/(null)"] = "a8136 e3 inline text",
-                ["/0xE5/(null)"] = "a8136 e5 null database text",
-            };
-
-            await using var postgres = NpgsqlDataSource.Create(connectionString);
-            var rows = await DarlingDataReader.GetTopQueriesByCpuAsync(postgres, serverId, now.AddHours(-24), now.AddMinutes(5), Top, DatabaseFilter.All, rollUpByHostObject: true, cancellationToken: ct);
-            var texts = rows.ToDictionary(r => r.HostObjectName is null ? Key(r.DatabaseName, r.QueryHash, null) : $"{r.DatabaseName}/*/{r.HostObjectName}", r => r.QueryText, StringComparer.Ordinal);
-            foreach (var (key, text) in expected)
-            {
-                Assert.True(texts.TryGetValue(key, out var got), $"the host-object page has no row for {key}; it has [{string.Join(", ", texts.Keys)}]");
-                Assert.Equal(text, got);
-            }
         });
 
     [Fact]
@@ -190,6 +163,34 @@ public sealed class TopQueriesTextOneScanLiveTests
             /* The measures of E9 are the honest row's alone: one execution, not two rows' worth of anything. */
             Assert.Equal(10, mcpRows.Single(r => r.QueryHash == "0xE9").TotalExecutions);
         }, collectorEdges: true);
+
+    [Fact]
+    public Task TheHostObjectLens_TakesTheNewestFragmentsText_AndKeepsTheAdHocAndHostedTexts() =>
+        WithSeedAsync(async (_, connectionString, serverId, now, ct) =>
+        {
+            /* #8138: through get_top_queries_by_cpu with roll_up_by_host_object. A proc-hosted group is one row per (database,
+               host object) and its text is the newest text of ANY of its fragments; an ad-hoc group keeps its own hash and
+               its own text; two host objects sharing a hash stay two rows with their own texts. */
+            var expected = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["D0/*/dbo.Frag"] = "a8136 e7 fragment new",
+                ["D2/*/dbo.E4Host"] = "a8136 e4 inline newest",
+                ["D2/*/dbo.OtherHost"] = "a8136 e6 other host text",
+                ["D1/0xE1/(null)"] = "a8136 e1 older text",
+                ["D1/0xE2/(null)"] = "a8136 e2 text B (collected last)",
+                ["D2/0xE3/(null)"] = "a8136 e3 inline text",
+                ["/0xE5/(null)"] = "a8136 e5 null database text",
+            };
+
+            await using var postgres = NpgsqlDataSource.Create(connectionString);
+            var rows = await DarlingDataReader.GetTopQueriesByCpuAsync(postgres, serverId, now.AddHours(-24), now.AddMinutes(5), Top, DatabaseFilter.All, rollUpByHostObject: true, cancellationToken: ct);
+            var texts = rows.ToDictionary(r => r.HostObjectName is null ? Key(r.DatabaseName, r.QueryHash, null) : $"{r.DatabaseName}/*/{r.HostObjectName}", r => r.QueryText, StringComparer.Ordinal);
+            foreach (var (key, text) in expected)
+            {
+                Assert.True(texts.TryGetValue(key, out var got), $"the host-object page has no row for {key}; it has [{string.Join(", ", texts.Keys)}]");
+                Assert.Equal(text, got);
+            }
+        });
 
     [Fact]
     public Task TheHostObjectLens_ReadsTheOrphanDigestAndTheZeroIntervalRow_AsTheLookupDid() =>

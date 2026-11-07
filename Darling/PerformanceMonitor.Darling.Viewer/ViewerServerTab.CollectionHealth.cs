@@ -93,8 +93,23 @@ public partial class ViewerServerTab
             _collectionHealthFilterMgr!.UpdateData, _collectionLogFilterMgr!.UpdateData, RenderCollectorDurationChart, ShowCollectionCaveats);
 
         ShowServerConnectionState();
+        ShowConnectionFailures(healthTask.Result);
         await ShowSkippedCyclesAsync();
         await ShowSweepPressureAsync();
+    }
+
+    /// <summary>
+    /// #8101: one connection failure that reached several collectors in one cycle is worded once above the grid, in the display
+    /// zone the rows print their instants in, rather than left as one ERROR on each of their rows with nothing to join them.
+    /// Collapsed when the rows' newest errors hold no such event.
+    /// </summary>
+    private void ShowConnectionFailures(List<CollectorHealthRow> health)
+    {
+        var line = CollectionConnectionFailures.SummaryLine(
+            health.Select(row => new CollectorErrorSample(row.CollectorName, row.LastErrorTime, row.LastError, row.ErrorCount)),
+            utc => ViewerTimeHelper.FormatForDisplay(utc, "yyyy-MM-dd HH:mm:ss"));
+        ConnectionFailureLine.Text = line ?? string.Empty;
+        ConnectionFailureLine.Visibility = line is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
     /// <summary>The web's tooltip for "Run all collectors now" while the server is unreachable (collector-run.js OFFLINE_TIP).</summary>
@@ -685,7 +700,7 @@ public partial class ViewerServerTab
 
         CollectorDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         ReapplyAxisColors(CollectorDurationChart);
-        CollectorDurationChart.Plot.YLabel("Slowest run per bucket (ms)");
+        CollectorDurationChart.Plot.YLabel("ms");
         CollectorDurationChart.Plot.Axes.AutoScaleY();
         CollectorDurationChart.Plot.Axes.SetLimitsX(ChartXStart(CollectorDurationChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ShowChartLegend(CollectorDurationChart);

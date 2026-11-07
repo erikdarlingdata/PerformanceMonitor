@@ -175,6 +175,11 @@ public sealed partial class ViewerDataService
     /// speaks the same names as the rest of the viewer.
     /// </para>
     /// </summary>
+    /// <summary>#8133: when set, an All Servers job-history read guarantees each server with rows in the window its share of the row cap
+    /// (<see cref="JobHistoryFilter.ShareCapPerServer"/>) before the newest runs of the rest. The Job History tab sets it; every other
+    /// caller reads the newest runs of the whole fleet.</summary>
+    internal bool ShareJobHistoryCapPerServer { get; set; }
+
     public async Task<List<ViewerJobHistoryRow>> GetJobHistoryAsync(
         DateTime sinceUtc, int? serverId = null, int limit = 2000, DateTime? untilUtc = null, int? runStatus = null, string? category = null,
         CancellationToken cancellationToken = default)
@@ -187,13 +192,18 @@ public sealed partial class ViewerDataService
            and one busy server (a job every minute) fills it with its latest runs, so a filter applied to the rows afterwards never
            saw an older failure on a quieter server: the All Servers grid lost runs the single-server grid showed. The reader's
            filters run inside the per-server top-N, so the cap counts only matching runs. They do not touch the job stats (the long-running
-           flag and the last success come from the job's successful outcomes, whatever status the grid is filtered to). */
-        var filter = untilUtc is null && runStatus is null && string.IsNullOrWhiteSpace(category)
+           flag and the last success come from the job's successful outcomes, whatever status the grid is filtered to).
+           #8133: with ShareJobHistoryCapPerServer an All Servers read guarantees every server with rows in the window its share of the
+           cap (JobHistoryFilter.ShareCapPerServer), so one server that runs a job every minute cannot fill the page alone and a
+           fleet that fits under the cap comes back whole. One server reads its whole cap either way. */
+        var share = serverId is null && ShareJobHistoryCapPerServer;
+        var filter = untilUtc is null && runStatus is null && string.IsNullOrWhiteSpace(category) && !share
             ? null
             : new JobHistoryFilter(
                 RunStatus: runStatus,
                 Category: string.IsNullOrWhiteSpace(category) ? null : category,
-                UntilUtc: untilUtc is { } until ? until.AddTicks(-TimeSpan.TicksPerMicrosecond) : null);
+                UntilUtc: untilUtc is { } until ? until.AddTicks(-TimeSpan.TicksPerMicrosecond) : null,
+                ShareCapPerServer: share);
         var dtos = await DarlingJobHistoryReader.GetAsync(
             _dataSource, sinceUtc, serverId, limit, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, filter, cancellationToken);
 

@@ -15,17 +15,11 @@
         ACTIVE sub-tab loads (Lite's visible-only rule) and the shell's fleet-refresh timer refreshes it.
     -->
     <UserControl.Resources>
-        <Style x:Key="EmptyHint" TargetType="TextBlock">
-            <Setter Property="Foreground" Value="{DynamicResource ForegroundMutedBrush}"/>
-            <Setter Property="HorizontalAlignment" Value="Center"/>
-            <Setter Property="VerticalAlignment" Value="Center"/>
-            <Setter Property="TextWrapping" Value="Wrap"/>
-            <Setter Property="TextAlignment" Value="Center"/>
-            <Setter Property="MaxWidth" Value="480"/>
-            <Setter Property="IsHitTestVisible" Value="False"/>
-            <Setter Property="Visibility" Value="Collapsed"/>
-        </Style>
-
+        <ResourceDictionary>
+        <ResourceDictionary.MergedDictionaries>
+            <!-- #8144: the Viewer's EmptyHint and the other shared text styles come from the shared dictionary, not a copy here. -->
+            <ResourceDictionary Source="pack://application:,,,/PerformanceMonitor.Ui;component/Themes/SharedStyles.xaml"/>
+        </ResourceDictionary.MergedDictionaries>
         <!-- Dark grid chrome shared by the FinOps grids (copied from ViewerServerTab.xaml — same setters,
              zero visual change). -->
         <Style x:Key="DarkGridHeader" TargetType="DataGridColumnHeader">
@@ -244,6 +238,7 @@
         <Style x:Key="FinOpsQueryPlanRowStyle" TargetType="DataGridRow" BasedOn="{StaticResource DarkGridRow}">
             <Setter Property="ContextMenu" Value="{StaticResource FinOpsQueryPlanContextMenu}"/>
         </Style>
+            </ResourceDictionary>
     </UserControl.Resources>
 
     <Grid Margin="0,8,0,0">
@@ -570,7 +565,9 @@
                                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="2*"/><RowDefinition Height="3*"/></Grid.RowDefinitions>
                                 <TextBlock Grid.Row="0" TextWrapping="Wrap" Margin="0,0,0,4" FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Text="Object / reserved footprint (daily). This is per-object reservation, not file allocation — it may not fully explain a database's file-level growth (log / free space)."/>
-                                <scottplot:WpfPlot Grid.Row="1" x:Name="FinOpsObjectGrowthHeatmapChart" MouseMove="FinOpsObjectHeatmapChart_MouseMove" MouseLeave="FinOpsObjectHeatmapChart_MouseLeave"/>
+                                <ui:ChartPanel Title="Object growth heatmap" Grid.Row="1">
+                                    <scottplot:WpfPlot x:Name="FinOpsObjectGrowthHeatmapChart" MouseMove="FinOpsObjectHeatmapChart_MouseMove" MouseLeave="FinOpsObjectHeatmapChart_MouseLeave"/>
+                                </ui:ChartPanel>
                                 <DataGrid Grid.Row="2" x:Name="FinOpsObjectGrowthDetailGrid" Margin="0,6,0,0" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}"
                                           HorizontalScrollBarVisibility="Auto" MouseDoubleClick="FinOpsObjectGrowthGrid_DoubleClick">
                                     <DataGrid.Columns>
@@ -752,7 +749,9 @@
                              legend labels carry each database's latest %-of-database. Collapsed until the
                              loader has points, so an ADR-less server shows no dead chart. -->
                         <ui:ChartGridPanel Grid.Row="3" MaxColumns="1" HeightFill="0.4" MinChartHeight="220" Margin="10,0,10,8">
-                            <scottplot:WpfPlot x:Name="FinOpsPvsTrendChart" Visibility="Collapsed"/>
+                            <ui:ChartPanel Title="PVS off-row size" Visibility="{Binding Visibility, ElementName=FinOpsPvsTrendChart}">
+                                <scottplot:WpfPlot x:Name="FinOpsPvsTrendChart" Visibility="Collapsed"/>
+                            </ui:ChartPanel>
                         </ui:ChartGridPanel>
                         <Grid Grid.Row="4" Margin="10,0,10,10">
                             <DataGrid x:Name="FinOpsPvsStatsDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" HorizontalScrollBarVisibility="Auto">

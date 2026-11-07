@@ -21,7 +21,7 @@
  * fleet-wide: the picker stays visible on that tab and its build ignores the choice.
  */
 
-import { storeHash, el, mount, readTool, onPageLeave, loadingStrip, errorStrip, emptyStrip } from "../util.js";
+import { storeHash, el, mount, readTool, onPageLeave, loadingStrip, errorStrip, emptyStrip, noticeStrip } from "../util.js";
 import { setPanelSignal } from "../panels.js";
 import { showPageWhenSettled, dropWaitingSwap } from "../refresh-in-place.js";
 import { orderServers } from "../server-order.js";
@@ -152,6 +152,9 @@ function tabBar(server, active) {
   );
 }
 
+/** #8095: the one line the page shows above its tabs when the server list holds no SQL Server target. */
+export const ONLY_POSTGRES_LINE = "FinOps covers SQL Server targets, and this store has none. Every panel below says so for its own data.";
+
 function serverPicker(rows, server, tabId) {
   const sel = el(
     "select",
@@ -213,7 +216,11 @@ export function renderFinops(main, server, tabId, opts) {
     head.appendChild(el("div", { class: "spacer" }));
     head.appendChild(serverPicker(rows, chosen, active.id));
     setPanelSignal(controller.signal);
+    /* #8095: a store whose every target is PostgreSQL has nothing for most of these tabs to show. Said once here, above the panels that each
+       say "not collected" for their own data, so the page reads as one fact about the store rather than twelve separate gaps. */
+    const onlyPostgres = rows.length > 0 && rows.every(isPostgresRow);
     mount(body, [
+      onlyPostgres ? noticeStrip(ONLY_POSTGRES_LINE) : null,
       tabBar(chosen, active),
       el("div", { class: "finops-panel" }, [active.build(chosen, { signal: controller.signal, postgres: isPostgresRow(row) })]),
     ]);
