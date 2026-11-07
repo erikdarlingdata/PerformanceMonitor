@@ -4052,12 +4052,16 @@
                      collection has been falling behind; the all-clear says so plainly, and a failed read says it could not be read. -->
                 <TextBlock x:Name="SkippedCyclesLine" Grid.Row="1" TextWrapping="Wrap" Margin="0,0,0,8"
                            Foreground="{DynamicResource ForegroundBrush}"/>
+                <!-- #8101: one connection failure that reached several collectors in one cycle, worded once: when, how many rows it
+                     explains, and whether each of them missed that run alone. Collapsed when the rows' newest errors hold none. -->
+                <TextBlock x:Name="ConnectionFailureLine" Grid.Row="2" Visibility="Collapsed" TextWrapping="Wrap" Margin="0,0,0,8"
+                           Foreground="{DynamicResource ForegroundBrush}"/>
                 <!-- #3691 part a2: the persisted analysis collection caveats (V141, part a1) — data
                      families the scheduled analysis pass currently cannot read on this server, and why.
                      Collapsed (Visibility=Collapsed, set in code-behind) when the list is empty, which is
                      also what a pre-V141 store reads as (GetCollectionCaveatsAsync returns an empty list
                      rather than throwing on the missing table). -->
-                <Expander x:Name="CollectionCaveatsExpander" Grid.Row="2" Header="Analysis could not read these data families"
+                <Expander x:Name="CollectionCaveatsExpander" Grid.Row="3" Header="Analysis could not read these data families"
                           IsExpanded="True" Margin="0,0,0,8" Visibility="Collapsed">
                     <DataGrid x:Name="CollectionCaveatsGrid" Style="{StaticResource DarkGrid}" MaxHeight="160" Margin="0,4,0,0">
                         <DataGrid.Columns>
@@ -4068,7 +4072,7 @@
                         </DataGrid.Columns>
                     </DataGrid>
                 </Expander>
-                <TabControl Grid.Row="3" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
+                <TabControl Grid.Row="4" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                     <TabItem Header="Health Summary">
                         <DataGrid x:Name="CollectionHealthGrid" Style="{StaticResource DarkGrid}"
                                   MouseDoubleClick="CollectionHealthGrid_MouseDoubleClick">
@@ -4088,6 +4092,19 @@
                                 <DataGridTextColumn Binding="{Binding DisplayStatus}" Width="100" MinWidth="100">
                                     <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DisplayStatus" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Status" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
+                                <!-- #8101: the newest error sits beside the band it did not move, so a HEALTHY row with Errors 1 says what the error was
+                                     without a sideways scroll. The message is trimmed to the cell and whole in its tooltip. -->
+                                <DataGridTextColumn Binding="{Binding LastErrorFormatted}" Width="140" MinWidth="140" SortMemberPath="LastErrorTime">
+                                    <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastErrorFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Error At" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTemplateColumn Width="320" MinWidth="200" SortMemberPath="LastError">
+                                    <DataGridTemplateColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastError" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Error" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTemplateColumn.Header>
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding LastError}" TextTrimming="CharacterEllipsis" ToolTip="{Binding LastError}"/>
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
                                 <DataGridTextColumn Binding="{Binding TotalRuns, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80" MinWidth="80">
                                     <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalRuns" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Runs" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
@@ -4114,12 +4131,6 @@
                                 </DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding LastRunFormatted}" Width="140" MinWidth="140" SortMemberPath="LastRunTime">
                                     <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastRunFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Run" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
-                                </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding LastErrorFormatted}" Width="140" MinWidth="140" SortMemberPath="LastErrorTime">
-                                    <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastErrorFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Error At" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
-                                </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding LastError}" Width="*" MinWidth="160">
-                                    <DataGridTextColumn.Header><DockPanel><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastError" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Error" FontWeight="Bold" VerticalAlignment="Center" TextWrapping="Wrap"/></DockPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                                 <!-- #1837: what a NON-failing run reported. Blank for a plainly healthy collector; "(all N runs)" is the persistently-empty case. A collector's label=value counts read as its latest NOTED run's ("latest run:" when every run carried them). Informational only - the Status column's band is unchanged. -->
                                 <DataGridTextColumn Binding="{Binding NoteFormatted}" Width="*" MinWidth="160">
