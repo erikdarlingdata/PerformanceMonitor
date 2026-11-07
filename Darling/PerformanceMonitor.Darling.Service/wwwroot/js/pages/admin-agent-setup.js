@@ -51,7 +51,7 @@ export const slackChannelIdOk = (text) => String(text ?? "").trim() === "" || SL
 /** #7656: the bot setup text shown under the Slack bot channel box, one paragraph each, in the order a person does the work. */
 export const SLACK_BOT_SETUP_TEXT = [
   "The bot posts one Slack thread per investigation request into this channel, as the bot, not through the alert webhook. Leave the box blank and this route opens no threads.",
-  "Requests that opened before you set the channel get no thread.",
+  "Requests that opened before you set the channel get no thread. A post not sent within 7 days of its event is never sent.",
   "Make one Slack app and install it once with every scope it needs, so nobody reinstalls it later. Bot token scopes: chat:write, app_mentions:read, channels:history and groups:history. App-level token scope: connections:write. Save the bot token and the app-level token in the Slack bot tokens form under the routes here, or in the desktop Settings window.",
   "Invite the bot to the channel. The bot posts only in channels it belongs to; a post to a channel it is not in fails with not_in_channel. A private channel works once the bot is invited.",
   "Store the channel id, not the channel name. Names change; ids do not. An id starts with C or G and is shown in the channel's details in Slack.",
