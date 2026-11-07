@@ -154,7 +154,7 @@ public sealed class FlatTabsFocusTests
                 /* The wheel moves the row by whole tabs, too. */
                 for (var i = 0; i < 3; i++)
                 {
-                    scroll.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, Environment.TickCount, -120) { RoutedEvent = UIElement.PreviewMouseWheelEvent });
+                    scroll.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, 0, -120) { RoutedEvent = UIElement.PreviewMouseWheelEvent });
                     StaTestThread.WaitForIdle(window.Dispatcher, TimeSpan.FromSeconds(10));
                     problems.AddRange(PartialTabs(tabs, scroll, $"{theme} {width}x{height} after wheel {i + 1}"));
                 }
@@ -270,7 +270,7 @@ public sealed class FlatTabsFocusTests
                 /* Scroll the wheel until the selected tab (the first) is a hidden one, so the menu has to mark it. */
                 for (var i = 0; i < 12 && Fits((TabItem)tabs.SelectedItem, scroll); i++)
                 {
-                    scroll.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, Environment.TickCount, -120) { RoutedEvent = UIElement.PreviewMouseWheelEvent });
+                    scroll.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, 0, -120) { RoutedEvent = UIElement.PreviewMouseWheelEvent });
                     StaTestThread.WaitForIdle(window.Dispatcher, TimeSpan.FromSeconds(10));
                 }
 
