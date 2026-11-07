@@ -44,7 +44,7 @@ public sealed record SchemaWriteCounts(int VersionsWritten, int Dropped);
 /// #7643: writes one database's read into the versioned store. One transaction: a changed object closes its current version and opens a
 /// new one with its children, a complete read closes what it no longer finds (a targeted read: what it asked for and no longer finds)
 /// with a dropped version, and the capture state is stored last. A read with no difference writes no version. Column lists are stored
-/// comma-joined in catalog order, and a list with no entries is null.
+/// joined and escaped by SchemaCatalogReader.JoinList (SplitList reads them), and a list with no entries is null.
 /// </summary>
 public static class SchemaVersionStore
 {
@@ -85,6 +85,7 @@ WHERE server_id IS NOT DISTINCT FROM $1 AND ag_group_id IS NOT DISTINCT FROM $2 
         ArgumentNullException.ThrowIfNull(w);
 
         await using var tx = await c.BeginTransactionAsync(ct);
+        await LockHistoryAsync(c, tx, w, ct);
         var current = await LoadCurrentAsync(c, tx, w.Key, w.DatabaseName, ct);
         var readIds = new HashSet<int>(w.Read.Select(d => d.ObjectId));
         var claimed = new HashSet<int>();
@@ -92,7 +93,7 @@ WHERE server_id IS NOT DISTINCT FROM $1 AND ag_group_id IS NOT DISTINCT FROM $2 
         var dropped = 0;
 
         /* Current rows the read does not show under their own id: the only ones a read object may be matched to by name. */
-        var byName = new Dictionary<string, StoredSchemaObject>(StringComparer.OrdinalIgnoreCase);
+        var byName = new Dictionary<string, StoredSchemaObject>(StringComparer.Ordinal);
         foreach (var row in current.Values.Where(r => !readIds.Contains(r.ObjectId)))
         {
             byName[NameKey(row.Schema, row.Name)] = row;
@@ -167,6 +168,18 @@ WHERE server_id IS NOT DISTINCT FROM $1 AND ag_group_id IS NOT DISTINCT FROM $2 
         await UpsertStateAsync(c, tx, w.NewState, ct);
         await tx.CommitAsync(ct);
         return new SchemaWriteCounts(versions, dropped);
+    }
+
+    /* One writer per (history key, database) at a time: two passes of one availability group's servers, or overlapping passes, would
+       otherwise both load the same current rows and both write the next version. The lock is held to the transaction's end. */
+    private static async Task LockHistoryAsync(NpgsqlConnection c, NpgsqlTransaction tx, SchemaDatabaseWrite w, CancellationToken ct)
+    {
+        var keyText = w.Key.AgGroupId is { } ag
+            ? "ag:" + ag.ToString("D") + "|" + w.DatabaseName
+            : "server:" + w.Key.ServerId?.ToString(System.Globalization.CultureInfo.InvariantCulture) + "|" + w.DatabaseName;
+        await using var cmd = new NpgsqlCommand("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", c, tx);
+        Param(cmd, NpgsqlDbType.Text, "schema_versions|" + keyText);
+        await cmd.ExecuteNonQueryAsync(ct);
     }
 
     private static string NameKey(string schema, string name) => schema + "\u0001" + name;
@@ -353,8 +366,8 @@ FROM collect.schema_objects WHERE version_id = $1", c, tx);
             await import.WriteAsync(i.IsUnique, NpgsqlDbType.Boolean, ct);
             await import.WriteAsync(i.IsPrimaryKey, NpgsqlDbType.Boolean, ct);
             await import.WriteAsync(i.IsUniqueConstraint, NpgsqlDbType.Boolean, ct);
-            await WriteTextAsync(import, JoinList(i.KeyColumns), ct);
-            await WriteTextAsync(import, JoinList(i.IncludedColumns), ct);
+            await WriteTextAsync(import, SchemaCatalogReader.JoinList(i.KeyColumns), ct);
+            await WriteTextAsync(import, SchemaCatalogReader.JoinList(i.IncludedColumns), ct);
             await WriteTextAsync(import, i.FilterDefinition, ct);
             await WriteTextAsync(import, i.DataCompression, ct);
             await import.WriteAsync(i.IsDisabled, NpgsqlDbType.Boolean, ct);
@@ -381,10 +394,10 @@ FROM collect.schema_objects WHERE version_id = $1", c, tx);
             await import.WriteAsync(k.Kind.ToString(), NpgsqlDbType.Char, ct);
             await import.WriteAsync(k.Name, NpgsqlDbType.Text, ct);
             await WriteTextAsync(import, k.Definition, ct);
-            await WriteTextAsync(import, JoinList(k.FkColumns), ct);
+            await WriteTextAsync(import, SchemaCatalogReader.JoinList(k.FkColumns), ct);
             await WriteTextAsync(import, k.ReferencedSchema, ct);
             await WriteTextAsync(import, k.ReferencedTable, ct);
-            await WriteTextAsync(import, JoinList(k.ReferencedColumns), ct);
+            await WriteTextAsync(import, SchemaCatalogReader.JoinList(k.ReferencedColumns), ct);
             await WriteTextAsync(import, k.DeleteAction, ct);
             await WriteTextAsync(import, k.UpdateAction, ct);
             await import.WriteAsync(k.IsDisabled, NpgsqlDbType.Boolean, ct);
@@ -450,7 +463,6 @@ ON CONFLICT (server_id, database_name) DO UPDATE SET
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    private static string? JoinList(IReadOnlyList<string> items) => items.Count == 0 ? null : string.Join(",", items);
 
     private static DateTime Naive(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
 

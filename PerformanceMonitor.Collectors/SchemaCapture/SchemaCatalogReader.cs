@@ -129,7 +129,7 @@ public static class SchemaCatalogReader
     }
 
     /* The inverse of the catalog query's escaping: a comma separates names, a backslash escapes a backslash or a comma. */
-    internal static IReadOnlyList<string> SplitList(string? joined)
+    public static IReadOnlyList<string> SplitList(string? joined)
     {
         if (string.IsNullOrEmpty(joined))
         {
@@ -158,5 +158,15 @@ public static class SchemaCatalogReader
 
         items.Add(sb.ToString());
         return items;
+    }
+
+    /* The exact inverse of SplitList: a backslash and a comma are escaped with a backslash, the names are joined by commas, and a list
+       with no names is null. The store writes its column lists with this, and its readers split them with SplitList. */
+    public static string? JoinList(IReadOnlyList<string> items)
+    {
+        ArgumentNullException.ThrowIfNull(items);
+        return items.Count == 0
+            ? null
+            : string.Join(",", items.Select(i => i.Replace("\\", "\\\\", StringComparison.Ordinal).Replace(",", "\\,",StringComparison.Ordinal)));
     }
 }

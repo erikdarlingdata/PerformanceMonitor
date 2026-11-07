@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ * Copyright (c) 2026 Erik Darling, Darling Data\b LLC
  *
  * This file is part of the SQL Server Performance Monitor.
  *
@@ -19,9 +19,9 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #7643 on a live store: the schema version writer. A baseline writes baseline versions, an unchanged read writes nothing, a changed
-/// definition closes the old version and opens a new one with current children, a recreated object keeps its history, a rename and a
-/// drop are versions of their own, and a history key shared by two servers of one availability group is one history.
+/// #7643 on a\b live store: the schema\b version writer. A baseline writes baseline versions, an unchanged read writes nothing, a\b changed
+/// definition closes the old version and opens a\b new one with current children, a\b recreated object keeps its history, a\b rename and a\b
+/// drop are versions of their own, and a\b history key shared by two servers of one availability group is one history.
 /// </summary>
 /* #1776 own-store: each test mints its own scratch database through ScratchPostgres. */
 public sealed class SchemaVersionStoreLiveTests
@@ -34,7 +34,7 @@ public sealed class SchemaVersionStoreLiveTests
     {
         var ct = TestContext.Current.CancellationToken;
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to run the schema version store live tests.");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to run the schema\b version store live tests.");
         await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
         var bodySucceeded = false;
         try
@@ -269,6 +269,72 @@ public sealed class SchemaVersionStoreLiveTests
             Assert.Equal("newest_index_event", await Scalar(c, "SELECT change_login FROM collect.schema_objects WHERE object_id = 10 AND valid_to IS NULL", ct));
             Assert.Equal("App-3", await Scalar(c, "SELECT change_app FROM collect.schema_objects WHERE object_id = 10 AND valid_to IS NULL", ct));
             Assert.Equal("dropper", await Scalar(c, "SELECT change_login FROM collect.schema_objects WHERE object_id = 11 AND change_kind = 'dropped'", ct));
+        });
+    }
+
+    [Fact]
+    public async Task Apply_TwoConcurrentPassesForTheSameKey_LeaveOneCurrentVersionPerObject()
+    {
+        await WithStoreAsync(async (c, ct) =>
+        {
+            var connectionString = c.ConnectionString;
+            var ag = new SchemaHistoryKey(null, Guid.Parse("76430000-0000-0000-0000-0000000000a2"), "AgTwo");
+            await SchemaVersionStore.ApplyAsync(c, Write(new[] { Table(10, "Orders", "Id") }, s_t0, baseline: true, key: ag, by: "baseline"), ct);
+
+            var read = new[] { Table(10, "Orders", "Id", "Total"), Table(20, "Items", "Id") };
+            async Task PassAsync(int server)
+            {
+                await using var other = new NpgsqlConnection(connectionString);
+                await other.OpenAsync(ct);
+                await SchemaVersionStore.ApplyAsync(other, Write(read, s_t0.AddHours(1), key: ag, server: server), ct);
+            }
+
+            await Task.WhenAll(PassAsync(1), PassAsync(2));
+
+            Assert.Equal("2", await Scalar(c, "SELECT count(*) FROM collect.schema_objects WHERE valid_to IS NULL", ct));
+            Assert.Equal("1", await Scalar(c, "SELECT count(*) FROM collect.schema_objects WHERE valid_to IS NULL AND object_id = 10", ct));
+            Assert.Equal("1", await Scalar(c, "SELECT count(*) FROM collect.schema_objects WHERE valid_to IS NULL AND object_id = 20", ct));
+            Assert.Equal("3", await Scalar(c, "SELECT count(*) FROM collect.schema_objects", ct));
+        });
+    }
+
+    [Fact]
+    public async Task Apply_ColumnNamesWithCommaAndBackslash_RoundTripThroughTheStoredLists()
+    {
+        await WithStoreAsync(async (c, ct) =>
+        {
+            var t = Table(10, "Orders", "a,b", "a\\b", "plain");
+            t = t with
+            {
+                Indexes = new List<SchemaIndex> { new(2, "IX_Odd", "NONCLUSTERED", false, false, false, new[] { "a,b", "a\\b" }, new[] { "plain" }, null, "NONE", false) }
+            };
+            await SchemaVersionStore.ApplyAsync(c, Write(new[] { t }, s_t0, baseline: true, by: "baseline"), ct);
+
+            var keys = await Scalar(c, "SELECT key_columns FROM collect.schema_indexes WHERE name = 'IX_Odd'", ct);
+            Assert.Equal(new[] { "a,b", "a\\b" },SchemaCatalogReader.SplitList(keys));
+            var included = await Scalar(c, "SELECT included_columns FROM collect.schema_indexes WHERE name = 'IX_Odd'", ct);
+            Assert.Equal(new[] { "plain" }, SchemaCatalogReader.SplitList(included));
+        });
+    }
+
+    [Fact]
+    public async Task Apply_NamesDifferingOnlyByCase_AreNotTheSameObject()
+    {
+        await WithStoreAsync(async (c, ct) =>
+        {
+            await SchemaVersionStore.ApplyAsync(c, Write(new[] { Table(10, "Orders", "Id"), Table(11, "orders", "Id") }, s_t0, baseline: true, by: "baseline"), ct);
+            var counts = await SchemaVersionStore.ApplyAsync(c, Write(new[] { Table(30, "orders", "Id") }, s_t0.AddHours(1)), ct);
+
+            /* Only the row with the exact name is adopted (same definition, new id); the other case variant is gone and dropped. */
+            Assert.Equal(new SchemaWriteCounts(1, 1), counts);
+            Assert.Equal("30", await Scalar(c, "SELECT object_id FROM collect.schema_objects WHERE object_name = 'orders' AND valid_to IS NULL", ct));
+            Assert.Equal("1", await Scalar(c, "SELECT count(*) FROM collect.schema_objects WHERE change_kind = 'dropped' AND object_id = 10", ct));
+
+            /* A read that differs from every gone row only by case adopts none of them: created, and the old row dropped. */
+            var third = await SchemaVersionStore.ApplyAsync(c, Write(new[] { Table(40, "ORDERS", "Id") }, s_t0.AddHours(2)), ct);
+            Assert.Equal(new SchemaWriteCounts(2, 1), third);
+            Assert.Equal("1", await Scalar(c, "SELECT count(*) FROM collect.schema_objects WHERE change_kind = 'created' AND object_id = 40 AND valid_to IS NULL", ct));
+            Assert.Equal("1", await Scalar(c, "SELECT count(*) FROM collect.schema_objects WHERE change_kind = 'dropped' AND object_id = 30", ct));
         });
     }
 }
