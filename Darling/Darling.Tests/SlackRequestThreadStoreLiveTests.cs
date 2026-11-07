@@ -187,6 +187,105 @@ public sealed class SlackRequestThreadStoreLiveTests
             Assert.Equal("C0765600003", (await store.FindAsync(s_other, ct))!.ChannelId);
         });
     }
+
+    private static async Task<int> AddRouteAsync(NpgsqlConnection connection, string metric, string channel, bool enabled, CancellationToken ct) =>
+        int.Parse(await ActionProposalStoreLiveTests.ScalarAsync(connection,
+            $"INSERT INTO config.config_notification_routes (metric_match, slack_url, slack_bot_channel, enabled) VALUES ('{metric}', 'sealed-{metric}', '{channel}', {enabled}) RETURNING route_id", ct),
+            System.Globalization.CultureInfo.InvariantCulture);
+
+    private static Task AddRequestAsync(NpgsqlConnection connection, Guid requestId, int routeId, string openedAt, string? practiceOf, CancellationToken ct) =>
+        ActionProposalStoreLiveTests.ExecAsync(connection,
+            $"INSERT INTO config.investigation_requests (request_id, route_id, server_id, server_name, family, first_metric, first_alert_at, last_alert_at, window_until, expires_at, opened_at, max_severity, trigger_kind, practice_of) "
+            + $"VALUES ('{requestId}', {routeId}, 7656, 'srv-7656', 'blocking', 'Blocking', {openedAt}, {openedAt}, now() + interval '1 hour', now() + interval '1 hour', {openedAt}, 'critical', 'alert', {(practiceOf is null ? "NULL" : $"'{practiceOf}'")})", ct);
+
+    private static async Task<long> JournalAsync(NpgsqlConnection connection, Guid requestId, int routeId, string eventKind, string actor, string? reason, string? detailJson, string eventTime, CancellationToken ct) =>
+        long.Parse(await ActionProposalStoreLiveTests.ScalarAsync(connection,
+            $"INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, reason, detail) VALUES ({eventTime}, '{requestId}', {routeId}, 7656, '{eventKind}', '{actor}', {(reason is null ? "NULL" : $"'{reason}'")}, {(detailJson is null ? "NULL" : $"'{detailJson}'::jsonb")}) RETURNING journal_id", ct),
+            System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// The pending read against the store: both arms (the post kinds, and an <c>action_called</c> row older than ten minutes with no
+    /// result as <c>action_unknown</c>), in journal order, with the claim's number among the request's claims, the called row's detail on
+    /// a change's result row, the report's verdict and root cause on the reported row, the request's opened time, and the exclusions: a
+    /// kind off the post list, a row with its mark, a practice request, a disabled route's request, a route with no channel, a called
+    /// row whose result came, and a row older than the window. The limit cuts the list in order.
+    /// </summary>
+    [Fact]
+    public async Task ThePendingRead_ReturnsBothArmsInJournalOrder_WithTheClaimNumber_AndLeavesOutPracticeDisabledMarkedAndOldRows()
+    {
+        await WithStoreAsync(async (connection, threads, ct) =>
+        {
+            var rows = (ISlackThreadRowSource)threads;
+            /* The fixture's two requests sit on a route id this test does not control: out of the way. */
+            await ActionProposalStoreLiveTests.ExecAsync(connection, $"DELETE FROM config.investigation_requests WHERE request_id IN ('{s_request}', '{s_other}')", ct);
+            var live = await AddRouteAsync(connection, "Blocking", "C0765600LIVE", enabled: true, ct);
+            var disabled = await AddRouteAsync(connection, "CPU", "C0765600OFF", enabled: false, ct);
+            var noChannel = await AddRouteAsync(connection, "Jobs", "", enabled: true, ct);
+            var request = Guid.Parse("76560000-0000-0000-0000-0000000000c1");
+            var practice = Guid.Parse("76560000-0000-0000-0000-0000000000c2");
+            var offRoute = Guid.Parse("76560000-0000-0000-0000-0000000000c3");
+            var noChannelRequest = Guid.Parse("76560000-0000-0000-0000-0000000000c4");
+            await AddRequestAsync(connection, request, live, "now() - interval '30 minutes'", null, ct);
+            await AddRequestAsync(connection, practice, live, "now() - interval '30 minutes'", request.ToString(), ct);
+            await AddRequestAsync(connection, offRoute, disabled, "now() - interval '30 minutes'", null, ct);
+            await AddRequestAsync(connection, noChannelRequest, noChannel, "now() - interval '30 minutes'", null, ct);
+
+            var old = await JournalAsync(connection, request, live, "closed", "person:erik", "stale", null, "now() - interval '8 days'", ct);
+            var opened = await JournalAsync(connection, request, live, "opened", "service", "Blocking", null, "now() - interval '30 minutes'", ct);
+            await JournalAsync(connection, request, live, "joined", "service", "CPU", null, "now() - interval '29 minutes'", ct);
+            var firstClaim = await JournalAsync(connection, request, live, "claimed", "agent:atlas", null, null, "now() - interval '28 minutes'", ct);
+            var unknownCall = await JournalAsync(connection, request, live, "action_called", "agent:atlas", null, """{"tool":"kill_session","target":{"id":"session 87","database":"Sales"}}""", "now() - interval '20 minutes'", ct);
+            var answeredCall = await JournalAsync(connection, request, live, "action_called", "agent:atlas", null, """{"tool":"evict_plan","target":{"id":"plan 0x1"}}""", "now() - interval '19 minutes'", ct);
+            var done = await JournalAsync(connection, request, live, "action_done", "agent:atlas", null, $$$"""{"called_id":{{{answeredCall}}}}""", "now() - interval '18 minutes'", ct);
+            var secondClaim = await JournalAsync(connection, request, live, "claimed", "agent:beta", null, null, "now() - interval '15 minutes'", ct);
+            var youngCall = await JournalAsync(connection, request, live, "action_called", "agent:beta", null, """{"tool":"set_config"}""", "now() - interval '2 minutes'", ct);
+            var reported = await JournalAsync(connection, request, live, "reported", "agent:beta", "needs_person", null, "now() - interval '5 minutes'", ct);
+            await ActionProposalStoreLiveTests.ExecAsync(connection,
+                $"INSERT INTO config.investigation_reports (request_id, report_format, agent_id, claim_id, verdict, root_cause, evidence, server_id) VALUES ('{request}', 1, 'agent:beta', '{Guid.NewGuid()}', 'needs_person', 'A plan regressed.', '[{{\"k\":1}}]'::jsonb, 7656)", ct);
+            var resolved = await JournalAsync(connection, request, live, "resolved", "service", "Blocking", null, "now() - interval '1 minute'", ct);
+            await JournalAsync(connection, practice, live, "opened", "service", "Blocking", null, "now() - interval '30 minutes'", ct);
+            await JournalAsync(connection, offRoute, disabled, "opened", "service", "CPU", null, "now() - interval '30 minutes'", ct);
+            await JournalAsync(connection, noChannelRequest, noChannel, "opened", "service", "Jobs", null, "now() - interval '30 minutes'", ct);
+            Assert.True(await threads.MarkOnceAsync(request, live, 7656, $"claimed:{firstClaim}", $"slack_thread:{request:D}:claimed:{firstClaim}", ct));
+
+            var now = DateTime.UtcNow;
+            var pending = await rows.PendingSlackThreadRowsAsync(PerformanceMonitor.Darling.Service.Chat.SlackThreadPass.PostedEvents, now.AddDays(-7), now.AddMinutes(-10), 100, ct);
+
+            Assert.Equal(
+                [$"request|{opened}", $"action_unknown:{unknownCall}|{unknownCall}", $"action_done:{done}|{done}", $"claimed:{secondClaim}|{secondClaim}", $"reported:{reported}|{reported}", $"resolved:{resolved}|{resolved}"],
+                pending.Select(r => $"{r.PostKey}|{r.JournalId}").ToArray());
+            Assert.All(pending, r =>
+            {
+                Assert.Equal(request, r.RequestId);
+                Assert.Equal(live, r.RouteId);
+                Assert.Equal(7656, r.ServerId);
+                Assert.Equal("srv-7656", r.ServerName);
+                Assert.Equal("Blocking", r.Metric);
+                Assert.Equal("critical", r.Severity);
+                Assert.Equal("alert", r.Trigger);
+                Assert.Null(r.FollowUpOf);
+                Assert.Equal(DateTimeKind.Utc, r.OpenedAtUtc.Kind);
+                Assert.InRange(r.OpenedAtUtc, now.AddMinutes(-31), now.AddMinutes(-29));
+            });
+            var unknown = pending[1];
+            Assert.Equal("action_unknown", unknown.Event);
+            Assert.Contains("session 87", unknown.DetailJson, StringComparison.Ordinal);
+            Assert.Contains("evict_plan", pending[2].CalledDetailJson, StringComparison.Ordinal);
+            Assert.Equal(2, pending[3].ClaimNo);
+            Assert.Equal(0, pending[2].ClaimNo);
+            Assert.Equal("needs_person", pending[4].Verdict);
+            Assert.Equal("A plan regressed.", pending[4].RootCause);
+            Assert.Null(pending[5].Verdict);
+            Assert.DoesNotContain(pending, r => r.JournalId == youngCall || r.JournalId == answeredCall || r.JournalId == firstClaim || r.JournalId == old);
+
+            /* The limit takes the first rows in order; the window reaches the old row when it is widened; a sent mark on the parent takes it out. */
+            Assert.Equal([$"request|{opened}", $"action_unknown:{unknownCall}|{unknownCall}"],
+                (await rows.PendingSlackThreadRowsAsync(PerformanceMonitor.Darling.Service.Chat.SlackThreadPass.PostedEvents, now.AddDays(-7), now.AddMinutes(-10), 2, ct)).Select(r => $"{r.PostKey}|{r.JournalId}").ToArray());
+            Assert.Equal($"closed:{old}", (await rows.PendingSlackThreadRowsAsync(PerformanceMonitor.Darling.Service.Chat.SlackThreadPass.PostedEvents, now.AddDays(-9), now.AddMinutes(-10), 100, ct))[0].PostKey);
+            Assert.True(await threads.MarkOnceAsync(request, live, 7656, "request", $"slack_thread:{request:D}:request", ct));
+            Assert.DoesNotContain(await rows.PendingSlackThreadRowsAsync(PerformanceMonitor.Darling.Service.Chat.SlackThreadPass.PostedEvents, now.AddDays(-7), now.AddMinutes(-10), 100, ct), r => r.PostKey == "request");
+        });
+    }
 }
 
 /// <summary>

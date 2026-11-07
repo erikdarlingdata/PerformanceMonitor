@@ -62,7 +62,8 @@ public sealed class SettingsSlackBotPosts(Func<string> token, string? apiBase = 
 
 /// <summary>
 /// #7656: one pass of the Slack thread posts, after the other request-event sends. It reads the journal rows of the kinds in
-/// <see cref="PostedEvents"/> that have no post mark, with no time window (a mark, not a window, says what was posted), in journal
+/// <see cref="PostedEvents"/> from the last <see cref="ReadWindow"/> that have no post mark (a mark says what was posted; the window
+/// bounds what each pass reads, so a pass costs the window's rows and not the journal's), in journal
 /// order, so a request's <c>opened</c> row posts first and opens its thread, and every later row replies in it. A follow-up's request
 /// post replies in its <c>follow_up_of</c> parent's thread and inherits it, one level deep: the parent's stored thread is used when it
 /// exists and sits in the route's current bot channel, else the follow-up opens a thread of its own. A change whose result never came
@@ -71,8 +72,9 @@ public sealed class SettingsSlackBotPosts(Func<string> token, string? apiBase = 
 /// <para>A request gets its parent post only when it opened at or after the time its route got its bot channel
 /// (<see cref="NotificationRoute.SlackBotChannelSetAt"/>), so a route that gets a channel later does not post every open request's
 /// history. The stamp gates the parent post alone: a request with a stored thread keeps posting its later rows into it when the channel
-/// changes. A request opened before the stamp gets no thread, its rows are marked with the gate as the reason and never posted, and a
-/// follow-up of it starts a thread of its own.</para>
+/// changes. A request opened before the stamp gets no thread, its rows are marked with the gate as the reason and never posted,
+/// whichever pass reads them (each row carries its request's opened time, so a later row read in a later pass is gated the same
+/// way as its parent), and a follow-up of it starts a thread of its own.</para>
 ///
 /// <para>When a parent post fails, the request has no thread, so its later posts are skipped with one log line and marked, never
 /// posted at the top level. A 429 ends the pass: the post's mark is released, the channel waits for Retry-After in the shared
@@ -82,6 +84,11 @@ public sealed class SlackThreadPass
 {
     /// <summary>The most rows one pass takes.</summary>
     public const int BatchSize = 100;
+
+    /// <summary>How far back a pass reads. A row older than this is neither read nor marked, so the read walks the journal's time index
+    /// over a week of rows rather than the whole journal when nothing is pending. A week holds a 429's wait many times over, and a bot
+    /// token set within a week of the channel posts that week's requests.</summary>
+    public static readonly TimeSpan ReadWindow = TimeSpan.FromDays(7);
 
     /// <summary>How long a change's <c>action_called</c> row stands with no result row before the thread says the result is unknown.
     /// The same wait as a proposal's unknown state.</summary>
@@ -151,7 +158,7 @@ public sealed class SlackThreadPass
 
         var now = DateTime.SpecifyKind(_utcNow(), DateTimeKind.Utc);
         var routes = _routes();
-        var rows = await _rows.PendingSlackThreadRowsAsync(PostedEvents, now - UnknownAfter, BatchSize, cancellationToken);
+        var rows = await _rows.PendingSlackThreadRowsAsync(PostedEvents, now - ReadWindow, now - UnknownAfter, BatchSize, cancellationToken);
         var posted = 0;
         var skippedRequests = new HashSet<Guid>();
         var gatedRequests = new HashSet<Guid>();
@@ -193,18 +200,13 @@ public sealed class SlackThreadPass
             }
 
             /* The gate: a parent that would open a thread of its own posts only when the request opened at or after the route got its
-               channel. The opened row's time is the request's opened time. A gated request's rows are marked with the gate as the reason,
-               so the next pass does not read them; a stored thread (the channel changed under a request in flight) is not gated, since
-               its parent is already marked and its later rows reply in that thread. */
-            if (isParent && threadRequest == row.RequestId && route.SlackBotChannelSetAt is DateTime setAt && row.EventTimeUtc < setAt)
+               channel. A gated request's rows are marked with the gate as the reason, so the next pass does not read them; a stored
+               thread (the channel changed under a request in flight) is not gated, since its parent is already marked and its later
+               rows reply in that thread. */
+            var openedBeforeChannel = route.SlackBotChannelSetAt is DateTime setAt && row.OpenedAtUtc < setAt;
+            if (isParent && threadRequest == row.RequestId && openedBeforeChannel)
             {
-                await _threads.MarkSkippedAsync(row.RequestId, row.RouteId, row.ServerId, row.PostKey, SlackThreadPosts.OnceKey(row.RequestId, row.PostKey), OpenedBeforeChannel, cancellationToken);
-                if (gatedRequests.Add(row.RequestId))
-                {
-                    _logger.LogInformation("Slack thread posts for investigation request {RequestId} are skipped: it opened at {OpenedAt:O}, before the route's bot channel was set at {SetAt:O}",
-                        row.RequestId, row.EventTimeUtc, setAt);
-                }
-
+                await MarkGatedAsync(row, gatedRequests, cancellationToken);
                 continue;
             }
 
@@ -229,9 +231,11 @@ public sealed class SlackThreadPass
                     }
 
                     break;
-                case SlackThreadPostOutcome.NoThread when gatedRequests.Contains(row.RequestId):
-                    /* A later row of a request the gate skipped in this pass: marked with the gate as the reason, never posted at the top level. */
-                    await _threads.MarkSkippedAsync(row.RequestId, row.RouteId, row.ServerId, row.PostKey, SlackThreadPosts.OnceKey(row.RequestId, row.PostKey), OpenedBeforeChannel, cancellationToken);
+                case SlackThreadPostOutcome.NoThread when openedBeforeChannel:
+                    /* A later row of a request the gate skipped, in this pass or an earlier one (a request's rows are read 100 at a time
+                       across requests, so its parent and its later rows often land in different passes): the request has no thread and
+                       opened before the channel, so the row is marked with the gate as the reason and never posted at the top level. */
+                    await MarkGatedAsync(row, gatedRequests, cancellationToken);
                     break;
                 case SlackThreadPostOutcome.NoThread:
                     /* The parent post failed in this pass or an earlier one: the row is marked so it is not read again, and never posted at the top level. */
@@ -248,6 +252,18 @@ public sealed class SlackThreadPass
         }
 
         return posted;
+    }
+
+    /* The gate's mark: the same mark row and once key a sent post gets, with the gate as the reason, so the read never returns the row
+       again and the journal says why it was not posted. One log line per request per pass. */
+    private async Task MarkGatedAsync(SlackThreadJournalRow row, HashSet<Guid> gatedRequests, CancellationToken cancellationToken)
+    {
+        await _threads.MarkSkippedAsync(row.RequestId, row.RouteId, row.ServerId, row.PostKey, SlackThreadPosts.OnceKey(row.RequestId, row.PostKey), OpenedBeforeChannel, cancellationToken);
+        if (gatedRequests.Add(row.RequestId))
+        {
+            _logger.LogInformation("Slack thread posts for investigation request {RequestId} are skipped: it opened at {OpenedAt:O}, before the route's bot channel was set",
+                row.RequestId, row.OpenedAtUtc);
+        }
     }
 
     /// <summary>PURE: the post of one journal row, at <paramref name="mode"/>. Every collected value goes through the builders' one escape.</summary>

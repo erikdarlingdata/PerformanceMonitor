@@ -15,6 +15,7 @@ using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Chat;
@@ -75,13 +76,13 @@ public sealed class SlackThreadPassTests
             return Task.CompletedTask;
         }
 
-        /* Every unmarked row comes back whatever the kinds asked for, so a test can hand the pass a row from the do-not-post list and
-           see the pass itself refuse it. The kinds asked for are kept for the test that reads them. */
-        public Task<IReadOnlyList<SlackThreadJournalRow>> PendingSlackThreadRowsAsync(IReadOnlyList<string> events, DateTime unknownBeforeUtc, int limit, CancellationToken cancellationToken)
+        /* Every unmarked row inside the window comes back whatever the kinds asked for, so a test can hand the pass a row from the
+           do-not-post list and see the pass itself refuse it. The kinds asked for are kept for the test that reads them. */
+        public Task<IReadOnlyList<SlackThreadJournalRow>> PendingSlackThreadRowsAsync(IReadOnlyList<string> events, DateTime sinceUtc, DateTime unknownBeforeUtc, int limit, CancellationToken cancellationToken)
         {
             EventsAsked = events;
             IReadOnlyList<SlackThreadJournalRow> pending = Rows
-                .Where(r => !Marks.Contains(SlackThreadPosts.OnceKey(r.RequestId, r.PostKey)))
+                .Where(r => r.EventTimeUtc >= sinceUtc && !Marks.Contains(SlackThreadPosts.OnceKey(r.RequestId, r.PostKey)))
                 .OrderBy(r => r.JournalId)
                 .Take(limit)
                 .ToList();
@@ -104,11 +105,28 @@ public sealed class SlackThreadPassTests
         }
     }
 
+    /// <summary>A row at Now less 30 minutes plus its journal id in seconds. Its request opened at <paramref name="openedAt"/>, else at the
+    /// row's own time, which is the opened row's time for the request's first row and within seconds of it for the rest.</summary>
     private static SlackThreadJournalRow Row(long journalId, string eventKind, Guid requestId, string actor = "agent:a", string? reason = null,
-        string? detailJson = null, Guid? followUpOf = null, int claimNo = 0, string? calledDetailJson = null, string? verdict = null, string? rootCause = null) =>
+        string? detailJson = null, Guid? followUpOf = null, int claimNo = 0, string? calledDetailJson = null, string? verdict = null, string? rootCause = null,
+        DateTime? openedAt = null) =>
         new(journalId, eventKind, Now.AddMinutes(-30).AddSeconds(journalId), actor, reason, detailJson,
             eventKind == "opened" ? SlackThreadPosts.RequestKey : eventKind == "action_unknown" ? SlackThreadPosts.UnknownKey(journalId) : SlackThreadPosts.EventKey(eventKind, journalId),
-            requestId, RouteId, ServerId: 3, "prod-sql-01", "CPU", "critical", "alert", followUpOf, calledDetailJson, claimNo, verdict, rootCause);
+            requestId, RouteId, ServerId: 3, "prod-sql-01", "CPU", "critical", "alert", followUpOf, calledDetailJson, claimNo, verdict, rootCause,
+            openedAt ?? Now.AddMinutes(-30).AddSeconds(journalId));
+
+    /// <summary>Keeps every line the pass logs, with its level, so a test can say a pass warned nothing.</summary>
+    private sealed class ListLogger : ILogger
+    {
+        public readonly List<(LogLevel Level, string Message)> Lines = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            Lines.Add((logLevel, formatter(state, exception)));
+    }
 
     /// <summary>Sets when the route got its bot channel. By reflection, so the test names the member it needs when it is missing.</summary>
     private static void Stamp(NotificationRoute route, DateTime setAtUtc)
@@ -118,7 +136,7 @@ public sealed class SlackThreadPassTests
         property!.SetValue(route, setAtUtc);
     }
 
-    private static (SlackThreadPass Pass, SlackPostThrottle Throttle) Pass(MemoryStore store, QueuePosts posts, Func<DateTime> now, string channel = Channel, DateTime? channelSetAt = null)
+    private static (SlackThreadPass Pass, SlackPostThrottle Throttle) Pass(MemoryStore store, QueuePosts posts, Func<DateTime> now, string channel = Channel, DateTime? channelSetAt = null, ILogger? logger = null)
     {
         var throttle = new SlackPostThrottle();
         var poster = new SlackThreadPoster(store, posts, NullLogger<SlackThreadPoster>.Instance, throttle, now);
@@ -129,7 +147,7 @@ public sealed class SlackThreadPassTests
         }
 
         var routes = new List<NotificationRoute> { route };
-        var pass = new SlackThreadPass(store, store, poster, throttle, () => routes, NullLogger.Instance, McpDataDetail.Full, () => "https://pm.example", now);
+        var pass = new SlackThreadPass(store, store, poster, throttle, () => routes, logger ?? NullLogger.Instance, McpDataDetail.Full, () => "https://pm.example", now);
         return (pass, throttle);
     }
 
@@ -335,7 +353,44 @@ public sealed class SlackThreadPassTests
         Assert.Contains(SlackThreadPosts.OnceKey(R1, SlackThreadPosts.EventKey("claimed", 3)), store.Marks);
         Assert.Contains(SlackThreadPosts.OnceKey(R1, SlackThreadPosts.EventKey("resolved", 5)), store.Marks);
         Assert.All(store.Marks, key => Assert.Equal(SlackThreadPass.OpenedBeforeChannel, store.SkipReasons[key]));
-        Assert.Empty(await store.PendingSlackThreadRowsAsync(SlackThreadPass.PostedEvents, Now, 100, CancellationToken.None));
+        Assert.Empty(await store.PendingSlackThreadRowsAsync(SlackThreadPass.PostedEvents, Now - SlackThreadPass.ReadWindow, Now, 100, CancellationToken.None));
+        Assert.Equal(0, await pass.RunOnceAsync(CancellationToken.None));
+        Assert.Empty(posts.Posts);
+    }
+
+    /// <summary>The gate holds across passes. A gated request's rows are read 100 at a time across requests, so its opened row and its
+    /// later rows often land in different passes: here the request has 130 rows, the first pass gates the parent and marks the 99 rows
+    /// behind it, and the second pass reads the other 30 with the parent's mark already on disk. Every row is marked with the gate as
+    /// the reason, nothing is posted, and no pass warns that a parent post was not delivered.</summary>
+    [Fact]
+    public async Task AGatedRequestWhoseRowsSpanTwoPasses_MarksEveryRowWithTheGateReason_AndWarnsNothing()
+    {
+        var store = new MemoryStore();
+        var posts = new QueuePosts();
+        var logger = new ListLogger();
+        var openedAt = Now.AddMinutes(-30).AddSeconds(1);
+        store.Rows.Add(Row(1, "opened", R1, actor: "service", reason: "CPU", openedAt: openedAt));
+        for (var id = 2L; id <= 130; id++)
+        {
+            store.Rows.Add(Row(id, "claimed", R1, actor: "agent:atlas", claimNo: (int)id - 1, openedAt: openedAt));
+        }
+
+        Assert.True(store.Rows.Count > SlackThreadPass.BatchSize, "the rows must span two passes");
+        var (pass, _) = Pass(store, posts, () => Now, channelSetAt: Now.AddMinutes(-20), logger: logger);
+
+        Assert.Equal(0, await pass.RunOnceAsync(CancellationToken.None));
+        Assert.Equal(SlackThreadPass.BatchSize, store.Marks.Count);
+        Assert.Equal(0, await pass.RunOnceAsync(CancellationToken.None));
+
+        Assert.Empty(posts.Posts);
+        Assert.Empty(store.Threads);
+        Assert.Equal(130, store.Marks.Count);
+        Assert.All(store.Rows, row => Assert.Contains(SlackThreadPosts.OnceKey(R1, row.PostKey), store.Marks));
+        Assert.All(store.Marks, key => Assert.Equal(SlackThreadPass.OpenedBeforeChannel, store.SkipReasons[key]));
+        Assert.DoesNotContain(logger.Lines, line => line.Level >= LogLevel.Warning);
+        Assert.Equal(2, logger.Lines.Count(line => line.Message.Contains("before the route's bot channel was set", StringComparison.Ordinal)));
+
+        Assert.Empty(await store.PendingSlackThreadRowsAsync(SlackThreadPass.PostedEvents, Now - SlackThreadPass.ReadWindow, Now, 100, CancellationToken.None));
         Assert.Equal(0, await pass.RunOnceAsync(CancellationToken.None));
         Assert.Empty(posts.Posts);
     }
