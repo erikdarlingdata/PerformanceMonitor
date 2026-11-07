@@ -293,13 +293,15 @@ WITH per_collection AS (
     SELECT collection_time,
            CAST(SUM(GREATEST(delta_wait_time_us, 0)) FILTER (WHERE lower(wait_type) IS DISTINCT FROM 'cpu') AS DOUBLE PRECISION) / 1000.0 AS total_wait_ms,
            /* #8106: each (wait_type, wait_event) row carries its own sample_interval_seconds, the seconds since that
-              event's previous sighting, so each row is rated over its OWN interval and the rates are summed. A row
-              whose interval is 0 adds nothing; a collection whose every row is 0 (a restart) has no rate and is not
-              a sample; a pre-V128 collection (no stored interval) rates its total over the LAG. */
+              event's previous sighting, so the collection credits every row measured over a positive interval whole
+              and rates the sum over its cadence, the shortest interval any of its rows measured (the total then equals
+              the sum of its parts). A row whose interval is 0 adds nothing; a collection whose every row is 0 (a
+              restart) has no cadence and is not a sample; a pre-V128 collection (no stored interval) rates its total
+              over the LAG. */
            CASE WHEN MAX(sample_interval_seconds) IS NULL
                 THEN coalesce(CAST(SUM(GREATEST(delta_wait_time_us, 0)) FILTER (WHERE lower(wait_type) IS DISTINCT FROM 'cpu') AS DOUBLE PRECISION), 0) / 1000.0 / NULLIF(extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))), 0)
-                WHEN MAX(sample_interval_seconds) > 0
-                THEN coalesce(SUM(CAST(GREATEST(delta_wait_time_us, 0) AS DOUBLE PRECISION) / NULLIF(sample_interval_seconds, 0)) FILTER (WHERE lower(wait_type) IS DISTINCT FROM 'cpu'), 0) / 1000.0
+                ELSE coalesce(CAST(SUM(GREATEST(delta_wait_time_us, 0)) FILTER (WHERE lower(wait_type) IS DISTINCT FROM 'cpu' AND sample_interval_seconds > 0) AS DOUBLE PRECISION), 0) / 1000.0
+                     / MIN(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0)
            END AS ms_per_sec
     FROM pg_wait_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
@@ -325,13 +327,15 @@ WITH per_collection AS (
     SELECT collection_time,
            CAST(SUM(GREATEST(delta_wait_time_us, 0)) FILTER (WHERE lower(wait_type) IS DISTINCT FROM 'cpu') AS DOUBLE PRECISION) / 1000.0 AS total_wait_ms,
            /* #8106: each (wait_type, wait_event) row carries its own sample_interval_seconds, the seconds since that
-              event's previous sighting, so each row is rated over its OWN interval and the rates are summed. A row
-              whose interval is 0 adds nothing; a collection whose every row is 0 (a restart) has no rate and is not
-              a sample; a pre-V128 collection (no stored interval) rates its total over the LAG. */
+              event's previous sighting, so the collection credits every row measured over a positive interval whole
+              and rates the sum over its cadence, the shortest interval any of its rows measured (the total then equals
+              the sum of its parts). A row whose interval is 0 adds nothing; a collection whose every row is 0 (a
+              restart) has no cadence and is not a sample; a pre-V128 collection (no stored interval) rates its total
+              over the LAG. */
            CASE WHEN MAX(sample_interval_seconds) IS NULL
                 THEN coalesce(CAST(SUM(GREATEST(delta_wait_time_us, 0)) FILTER (WHERE lower(wait_type) IS DISTINCT FROM 'cpu') AS DOUBLE PRECISION), 0) / 1000.0 / NULLIF(extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))), 0)
-                WHEN MAX(sample_interval_seconds) > 0
-                THEN coalesce(SUM(CAST(GREATEST(delta_wait_time_us, 0) AS DOUBLE PRECISION) / NULLIF(sample_interval_seconds, 0)) FILTER (WHERE lower(wait_type) IS DISTINCT FROM 'cpu'), 0) / 1000.0
+                ELSE coalesce(CAST(SUM(GREATEST(delta_wait_time_us, 0)) FILTER (WHERE lower(wait_type) IS DISTINCT FROM 'cpu' AND sample_interval_seconds > 0) AS DOUBLE PRECISION), 0) / 1000.0
+                     / MIN(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0)
            END AS ms_per_sec
     FROM pg_wait_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3

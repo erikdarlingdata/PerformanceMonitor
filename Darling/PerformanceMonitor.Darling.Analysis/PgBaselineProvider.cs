@@ -950,7 +950,7 @@ LIMIT 1";
     {
         MetricNames.BatchRequests => (TimescaleSupport.LegacyPerfmonBaselineView, TimescaleSupport.PerfmonIntervalBaselineView),
         /* #8106: the wait pair's legacy is now #3653's interval-honest aggregate, superseded by the per-row rate supply. */
-        MetricNames.WaitStats or MetricNames.WaitMsPerSec => (TimescaleSupport.WaitStatsIntervalBaselineView, TimescaleSupport.WaitStatsRateBaselineView),
+        MetricNames.WaitStats or MetricNames.WaitMsPerSec => (TimescaleSupport.WaitStatsIntervalBaselineView, TimescaleSupport.WaitStatsCadenceBaselineView),
         _ => null,
     };
 
@@ -1594,7 +1594,7 @@ clean AS (
             MetricNames.WaitStats => @"
 WITH per_collection AS (
     SELECT collection_time, total_wait_ms, sample_interval_seconds
-    FROM wait_stats_rate_baseline
+    FROM wait_stats_cadence_baseline
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 ),
 with_lag AS (
@@ -1792,30 +1792,26 @@ WITH clean AS (
                collections, one pair in the same second: old text count 3 / mean 66.7, END alone count 3 /
                mean 100, this text count 2 / mean 100. The same-second row is unknowable, not idle, and a
                baseline has no honest bucket for it. */
-            /* #8106: the supply is wait_stats_rate_baseline, which carries summed_row_rates, each row's delta over its OWN
-               stored interval summed over the collection, beside the summed delta. A collection with a stored interval
-               reads that sum as its rate, so a wait type that returned after missing some passes (its own interval several
-               cadences long) no longer divides its siblings' deltas; a pre-column collection (NULL interval) still rates
-               the summed delta over LAG(collection_time). The interval spine, the with_rate WHERE, the restart LAG and
-               its NULL-interval gate are the text above, unchanged. */
+            /* #8106: the supply is wait_stats_cadence_baseline, whose sample_interval_seconds is the collection's CADENCE, the
+               shortest interval any of its rows measured, where wait_stats_interval_baseline carried the longest. The summed
+               delta over the cadence credits a wait type that returned after missing some passes whole, on the collection that
+               observed it, so its longer interval no longer divides its siblings' deltas and the baseline's total equals the
+               sum of its parts. The text is #3653's, FROM apart. */
             MetricNames.WaitMsPerSec => @"
 WITH per_collection AS (
     SELECT collection_time,
            total_wait_ms::DOUBLE PRECISION AS total_wait_ms,
-           summed_row_rates,
            sample_interval_seconds,
            CASE WHEN sample_interval_seconds IS NULL
                 THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
                 ELSE sample_interval_seconds
            END AS interval_sec
-    FROM wait_stats_rate_baseline
+    FROM wait_stats_cadence_baseline
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 ),
 with_rate AS (
     SELECT collection_time, sample_interval_seconds,
-           CASE WHEN sample_interval_seconds IS NULL THEN total_wait_ms / interval_sec
-                ELSE summed_row_rates
-           END AS ms_per_sec
+           CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END AS ms_per_sec
     FROM per_collection
     WHERE interval_sec IS NOT NULL AND interval_sec > 0
 ),

@@ -819,7 +819,7 @@ WITH clean AS (
             // Wait ms per second (chart shows this, not total ms per collection)
             /* #3540: the collection's STORED interval where it has one, the LAG only for pre-v60 collections;
                a restart collection has no rate and the with_rate WHERE drops it exactly as it always dropped
-               the window's first row. #8106: the rate is the sum of each row's delta over its own interval.
+               the window's first row. #8106: the rate is the collection's positive-interval deltas over its cadence.
                #3653 (A10): the QUALIFY restart heuristic is gated on the collection having NO stored
                interval — the WaitStats arm's reasoning: a measured zero rate is idle, and the restart the
                heuristic hunts for was already dropped as an interval-0 collection one CTE up. */
@@ -827,14 +827,15 @@ WITH clean AS (
 WITH per_collection AS (
     SELECT collection_time,
            MAX(sample_interval_seconds) AS stored_interval_seconds,
-           /* #8106: each row rated over its OWN stored interval and the rates summed (the anomaly's window read
-              takes the same shape, so the window and the baseline it is scored against agree); a restart
-              collection (every row 0) has no rate and is dropped by with_rate's WHERE, a pre-v60 collection
-              rates its summed delta over the LAG. */
+           /* #8106: the collection's positive-interval deltas over its cadence, the shortest stored interval any of
+              its rows measured, so the total equals the sum of its parts (the anomaly's window read takes the same
+              shape, so the window and the baseline it is scored against agree); a restart collection (every row 0)
+              has no cadence and is dropped by with_rate's WHERE, a pre-v60 collection rates its summed delta over
+              the LAG. */
            CASE WHEN MAX(sample_interval_seconds) IS NULL
                 THEN SUM(delta_wait_time_ms)::DOUBLE PRECISION / NULLIF(extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))), 0)
-                WHEN MAX(sample_interval_seconds) > 0
-                THEN SUM(delta_wait_time_ms::DOUBLE PRECISION / NULLIF(sample_interval_seconds, 0))
+                ELSE SUM(delta_wait_time_ms) FILTER (WHERE sample_interval_seconds > 0)::DOUBLE PRECISION
+                     / MIN(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0)
            END AS ms_per_sec
     FROM v_wait_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3

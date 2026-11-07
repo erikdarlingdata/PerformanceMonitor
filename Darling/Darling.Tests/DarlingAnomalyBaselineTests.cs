@@ -385,12 +385,13 @@ public sealed class DarlingAnomalyBaselineTests
             }
         }
 
-        /* The rate arms read the STORED interval first and derive one from LAG only where it is NULL; the successor (#8106) reads the
-           collection's rate as its summed row rates where the interval is stored. */
+        /* The rate arms read the STORED interval first and derive one from LAG only where it is NULL; since #8106 the stored interval the
+           successor carries is the collection's cadence, so the successor and legacy texts differ only in the relation they read. */
         Assert.Contains("CASE WHEN sample_interval_seconds IS NULL", PgBaselineProvider.GetBaselineQuery(MetricNames.WaitMsPerSec)!, StringComparison.Ordinal);
-        Assert.Contains("ELSE summed_row_rates", PgBaselineProvider.GetBaselineQuery(MetricNames.WaitMsPerSec)!, StringComparison.Ordinal);
         Assert.Contains("CASE WHEN sample_interval_seconds IS NULL", PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitMsPerSec)!, StringComparison.Ordinal);
-        Assert.DoesNotContain("summed_row_rates", PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitMsPerSec)!, StringComparison.Ordinal);
+        Assert.Equal(
+            PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitMsPerSec)!.Replace("FROM wait_stats_interval_baseline", "FROM wait_stats_cadence_baseline", StringComparison.Ordinal),
+            PgBaselineProvider.GetBaselineQuery(MetricNames.WaitMsPerSec)!);
         Assert.DoesNotContain("sample_interval_seconds", PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.BatchRequests)!, StringComparison.Ordinal);
     }
 
@@ -875,7 +876,7 @@ public sealed class DarlingAnomalyBaselineTests
            itself); the shape pinned here holds for both the successor and the legacy text. */
         foreach (var (sql, supply) in new[]
         {
-            (PgBaselineProvider.GetBaselineQuery(MetricNames.WaitStats)!, "FROM wait_stats_rate_baseline"),
+            (PgBaselineProvider.GetBaselineQuery(MetricNames.WaitStats)!, "FROM wait_stats_cadence_baseline"),
             (PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitStats)!, "FROM wait_stats_interval_baseline"),
         })
         {
@@ -966,17 +967,8 @@ public sealed class DarlingAnomalyBaselineTests
             Assert.True(exclusionAt > fromCteAt, "the exclusion must filter OUTSIDE the windowed CTE");
 
             /* The rate arm yields NULL, never 0, for a non-positive interval; the ELSE that rated it 0 is gone
-               from both texts. #8106: the successor rates a stored-interval collection as its summed row rates and
-               keeps the LAG-rated form for a pre-column collection; the legacy text (#3653's) keeps the guarded arm. */
-            if (sql == PgBaselineProvider.GetBaselineQuery(MetricNames.WaitMsPerSec))
-            {
-                Assert.Contains("CASE WHEN sample_interval_seconds IS NULL THEN total_wait_ms / interval_sec", sql, StringComparison.Ordinal);
-                Assert.Contains("ELSE summed_row_rates", sql, StringComparison.Ordinal);
-            }
-            else
-            {
-                Assert.Contains("CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END AS ms_per_sec", sql, StringComparison.Ordinal);
-            }
+               from both texts. */
+            Assert.Contains("CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END AS ms_per_sec", sql, StringComparison.Ordinal);
             Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
             Assert.True(rateFilterAt > sql.IndexOf("END AS ms_per_sec", StringComparison.Ordinal), "the > 0 filter is with_rate's own WHERE, under the arm it guards");
         }

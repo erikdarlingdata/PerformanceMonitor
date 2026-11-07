@@ -512,15 +512,15 @@ public sealed class EmptySupersededBaselineLiveTests
             await stop.ExecuteNonQueryAsync(ct);
         }
 
-        /* The successor (wait_stats_rate_baseline) comes from the ordinary ensure sweep, WITH NO DATA — an
+        /* The successor (wait_stats_cadence_baseline) comes from the ordinary ensure sweep, WITH NO DATA — an
            empty successor, half of this test's state. Nothing ever inserts into collect.wait_stats on this
            scratch database, so the LEGACY's real-time aggregation stays empty too, once created below. */
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
-        /* #8106: the pair under test is the newest, wait_stats_interval_baseline -> wait_stats_rate_baseline; the legacy is created by hand
+        /* #8106: the pair under test is the newest, wait_stats_interval_baseline -> wait_stats_cadence_baseline; the legacy is created by hand
            from its retained CREATE text, as the ensure sweep no longer knows its name. */
         const string legacy = TimescaleSupport.WaitStatsIntervalBaselineView;
-        const string successor = TimescaleSupport.WaitStatsRateBaselineView;
+        const string successor = TimescaleSupport.WaitStatsCadenceBaselineView;
 
         await using (var create = new NpgsqlCommand(TimescaleSupport.CreateWaitStatsIntervalBaselineSql, connection) { CommandTimeout = 120 })
         {
@@ -584,10 +584,10 @@ public sealed class EmptySupersededBaselineLiveTests
 
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
-        /* #8106: the pair under test is the newest, wait_stats_interval_baseline -> wait_stats_rate_baseline; the legacy is created by hand
+        /* #8106: the pair under test is the newest, wait_stats_interval_baseline -> wait_stats_cadence_baseline; the legacy is created by hand
            from its retained CREATE text, as the ensure sweep no longer knows its name. */
         const string legacy = TimescaleSupport.WaitStatsIntervalBaselineView;
-        const string successor = TimescaleSupport.WaitStatsRateBaselineView;
+        const string successor = TimescaleSupport.WaitStatsCadenceBaselineView;
 
         await using (var create = new NpgsqlCommand(TimescaleSupport.CreateWaitStatsIntervalBaselineSql, connection) { CommandTimeout = 120 })
         {
@@ -670,13 +670,13 @@ public sealed class EmptySupersededBaselineLiveTests
             await stop.ExecuteNonQueryAsync(ct);
         }
 
-        /* The successor (wait_stats_rate_baseline) comes from the ordinary ensure sweep, WITH NO DATA. */
+        /* The successor (wait_stats_cadence_baseline) comes from the ordinary ensure sweep, WITH NO DATA. */
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
-        /* #8106: the pair under test is the newest, wait_stats_interval_baseline -> wait_stats_rate_baseline; the legacy is created by hand
+        /* #8106: the pair under test is the newest, wait_stats_interval_baseline -> wait_stats_cadence_baseline; the legacy is created by hand
            from its retained CREATE text, as the ensure sweep no longer knows its name. */
         const string legacy = TimescaleSupport.WaitStatsIntervalBaselineView;
-        const string successor = TimescaleSupport.WaitStatsRateBaselineView;
+        const string successor = TimescaleSupport.WaitStatsCadenceBaselineView;
 
         await using (var create = new NpgsqlCommand(TimescaleSupport.CreateWaitStatsIntervalBaselineSql, connection) { CommandTimeout = 120 })
         {

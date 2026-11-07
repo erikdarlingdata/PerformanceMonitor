@@ -484,11 +484,11 @@ LIMIT 1";
         cmd.CommandText = @"
 WITH per_collection AS (
     SELECT collection_time,
-           /* #8106: each row rated over its OWN interval, as the rate read below rates the window. */
+           /* #8106: the bar's positive-interval rows over the collection's cadence, as the rate read below rates the window. */
            CASE WHEN MAX(sample_interval_seconds) IS NULL
                 THEN COALESCE(SUM(delta_wait_time_ms) FILTER (WHERE wait_type NOT IN (" + AnomalyThresholds.YoungBaselineBarExcludedWaitsSqlList + @")), 0)::DOUBLE PRECISION / NULLIF(extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))), 0)
-                WHEN MAX(sample_interval_seconds) > 0
-                THEN COALESCE(SUM(delta_wait_time_ms::DOUBLE PRECISION / NULLIF(sample_interval_seconds, 0)) FILTER (WHERE wait_type NOT IN (" + AnomalyThresholds.YoungBaselineBarExcludedWaitsSqlList + @")), 0)
+                ELSE COALESCE(SUM(delta_wait_time_ms) FILTER (WHERE wait_type NOT IN (" + AnomalyThresholds.YoungBaselineBarExcludedWaitsSqlList + @") AND sample_interval_seconds > 0), 0)::DOUBLE PRECISION
+                     / MIN(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0)
            END AS bar_ms_per_sec
     FROM v_wait_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
@@ -547,14 +547,17 @@ WITH per_collection AS (
            SUM(delta_wait_time_ms)::DOUBLE PRECISION AS total_wait_ms,
            /* #8106: sample_interval_seconds is a per-row figure, the seconds since that wait type's own previous
               sighting, so a type that returns after missing some passes stores several cadences beside its
-              siblings' one. Each row is rated over its OWN interval and the rates are summed; a row whose
-              interval is 0 (a first sighting or a counter reset: no delta knowable) adds nothing, and a
-              collection whose EVERY row is 0 (a restart) has no rate and is not a sample. A pre-v60 collection
+              siblings' one. The collection credits every row measured over a positive interval WHOLE and rates
+              the sum over its cadence, the shortest interval any of its rows measured, so the window's total
+              equals the sum of its parts (rating each row over its own interval and summing the rates would
+              credit the returning row with only cadence/interval of its delta). A row whose interval is 0 (a
+              first sighting or a counter reset: no delta knowable) adds nothing, and a collection whose EVERY
+              row is 0 (a restart) has no cadence, no rate, and is not a sample. A pre-v60 collection
               stored no interval on any row: its summed delta is rated over the LAG this read always used. */
            CASE WHEN MAX(sample_interval_seconds) IS NULL
                 THEN SUM(delta_wait_time_ms)::DOUBLE PRECISION / NULLIF(extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))), 0)
-                WHEN MAX(sample_interval_seconds) > 0
-                THEN SUM(delta_wait_time_ms::DOUBLE PRECISION / NULLIF(sample_interval_seconds, 0))
+                ELSE SUM(delta_wait_time_ms) FILTER (WHERE sample_interval_seconds > 0)::DOUBLE PRECISION
+                     / MIN(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0)
            END AS ms_per_sec
     FROM v_wait_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3

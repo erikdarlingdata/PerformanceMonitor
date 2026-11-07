@@ -126,30 +126,30 @@ public sealed class WaitRateRowIntervalLiveTests
         await ExecuteAsync(connection, TimescaleSupport.CreateWaitStatsIntervalBaselineSql, ct);
         await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 252, ct);
         await ExecuteAsync(connection, "DELETE FROM darling_schema_version WHERE version >= 255", ct);
-        Assert.False(await RelationExistsAsync(connection, TimescaleSupport.WaitStatsRateBaselineView, ct));
+        Assert.False(await RelationExistsAsync(connection, TimescaleSupport.WaitStatsCadenceBaselineView, ct));
         Assert.Equal(252, await ScalarAsync<int>(connection, "SELECT max(version) FROM darling_schema_version", ct));
 
         await PgMigrations.MigrateAsync(connection, ct);
-        Assert.True(await RelationExistsAsync(connection, TimescaleSupport.WaitStatsRateBaselineView, ct), "V255 creates the successor on a store whose wait_stats is a hypertable");
-        Assert.True(await ScalarAsync<bool>(connection, TimescaleSupport.BaselineRelationIsContinuousAggregateSql(TimescaleSupport.WaitStatsRateBaselineView), ct));
+        Assert.True(await RelationExistsAsync(connection, TimescaleSupport.WaitStatsCadenceBaselineView, ct), "V255 creates the successor on a store whose wait_stats is a hypertable");
+        Assert.True(await ScalarAsync<bool>(connection, TimescaleSupport.BaselineRelationIsContinuousAggregateSql(TimescaleSupport.WaitStatsCadenceBaselineView), ct));
         Assert.Equal(StorageVersion.SchemaVersion, await ScalarAsync<int>(connection, "SELECT max(version) FROM darling_schema_version", ct));
 
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
         await TimescaleSupport.BackfillBaselineAggregatesAsync(connection, null, ct);
-        Assert.Equal(hour, await ScalarAsync<DateTime>(connection, $"SELECT min(bucket) FROM collect.{TimescaleSupport.WaitStatsRateBaselineView} WHERE server_id = {ServerId}", ct));
+        Assert.Equal(hour, await ScalarAsync<DateTime>(connection, $"SELECT min(bucket) FROM collect.{TimescaleSupport.WaitStatsCadenceBaselineView} WHERE server_id = {ServerId}", ct));
         /* timescaledb_information.jobs reports a continuous aggregate's jobs under the user view's own identity. */
         Assert.True(await ScalarAsync<long>(connection,
-            $"SELECT count(*) FROM timescaledb_information.jobs WHERE hypertable_schema = 'collect' AND hypertable_name = '{TimescaleSupport.WaitStatsRateBaselineView}' AND proc_name = 'policy_refresh_continuous_aggregate'", ct) == 1,
+            $"SELECT count(*) FROM timescaledb_information.jobs WHERE hypertable_schema = 'collect' AND hypertable_name = '{TimescaleSupport.WaitStatsCadenceBaselineView}' AND proc_name = 'policy_refresh_continuous_aggregate'", ct) == 1,
             "the ensure sweep gives the successor its refresh policy");
 
         /* The interval supply still holds the hour and the successor reaches it, so the provider reads the successor and the corrected figure. */
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var bucket = await new PgBaselineProvider(postgres).GetBaselineAsync(ServerId, MetricNames.WaitMsPerSec, DateTime.UtcNow, ct);
-        Assert.Equal(600.4, bucket.Mean, 2);
+        Assert.Equal(602.0, bucket.Mean, 2);
 
         /* The interval supply is not dropped yet: the successor's oldest bucket is two days old, the tier is 35. */
         var verdict = await TimescaleSupport.JudgeSupersededBaselineRelationAsync(
-            connection, TimescaleSupport.WaitStatsIntervalBaselineView, TimescaleSupport.WaitStatsRateBaselineView, DateTime.UtcNow, ct);
+            connection, TimescaleSupport.WaitStatsIntervalBaselineView, TimescaleSupport.WaitStatsCadenceBaselineView, DateTime.UtcNow, ct);
         Assert.Equal(TimescaleSupport.SupersededBaselineDecision.SuccessorShort, verdict.Decision);
         Assert.Equal(0, await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, null, DateTime.UtcNow, ct));
         Assert.True(await RelationExistsAsync(connection, TimescaleSupport.WaitStatsIntervalBaselineView, ct));
@@ -161,14 +161,14 @@ public sealed class WaitRateRowIntervalLiveTests
 
     /// <summary>The viewer's probe: the successor relation is the V255 sentinel and the top arm.</summary>
     [Fact]
-    public void TheProbe_MapsTheRateBaselineToTheSchemaVersion_AndItsAbsenceTo252()
+    public void TheProbe_MapsTheCadenceBaselineToTheSchemaVersion_AndItsAbsenceTo252()
     {
         var map = typeof(ViewerDataService).GetMethod(
             nameof(ViewerDataService.MapProbedSchemaVersion),
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
         var parameters = map.GetParameters();
-        var rate = Array.FindIndex(parameters, p => p.Name == "hasWaitStatsRateBaseline");
-        Assert.True(rate >= 0, "the probe has a hasWaitStatsRateBaseline sentinel");
+        var rate = Array.FindIndex(parameters, p => p.Name == "hasWaitStatsCadenceBaseline");
+        Assert.True(rate >= 0, "the probe has a hasWaitStatsCadenceBaseline sentinel");
         Assert.Equal(parameters.Length - 1, rate);
 
         var allTrue = Enumerable.Repeat((object)true, parameters.Length).ToArray();

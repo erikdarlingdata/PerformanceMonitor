@@ -2724,7 +2724,7 @@ END
 $do$;";
 
     /// <summary>
-    /// V255 (#8106): the per-row wait rate baseline supply, <c>collect.wait_stats_rate_baseline</c>, created where the store can hold it
+    /// V255 (#8106): the cadence wait baseline supply, <c>collect.wait_stats_cadence_baseline</c>, created where the store can hold it
     /// at migration time so the upgraded store carries its successor from this rung on. On a store without TimescaleDB it is the plain
     /// fallback view over <c>collect.wait_stats</c>, the same view the ensure sweep derives. On a TimescaleDB store whose
     /// <c>wait_stats</c> is already a hypertable (every upgrading store) it is the continuous aggregate, <c>WITH NO DATA</c>, which is
@@ -2743,7 +2743,7 @@ BEGIN
     /* timescaledb_information only exists once the extension has been created; to_regclass probes it without raising, and
        the hypertable read goes through EXECUTE so the reference is parsed only when it runs. */
     IF to_regclass('timescaledb_information.continuous_aggregates') IS NULL THEN
-        EXECUTE '" + TimescaleSupport.CreateBaselineFallbackViewSql(TimescaleSupport.WaitStatsRateBaselineView, TimescaleSupport.CreateWaitStatsRateBaselineSql).Replace("'", "''") + @"';
+        EXECUTE '" + TimescaleSupport.CreateBaselineFallbackViewSql(TimescaleSupport.WaitStatsCadenceBaselineView, TimescaleSupport.CreateWaitStatsCadenceBaselineSql).Replace("'", "''") + @"';
         RETURN;
     END IF;
 
@@ -2751,7 +2751,7 @@ BEGIN
     INTO v_hypertable;
 
     IF v_hypertable THEN
-        EXECUTE '" + TimescaleSupport.CreateWaitStatsRateBaselineSql.Replace("'", "''") + @"';
+        EXECUTE '" + TimescaleSupport.CreateWaitStatsCadenceBaselineSql.Replace("'", "''") + @"';
     END IF;
 END $$;";
 
@@ -3265,7 +3265,7 @@ $rung$;";
         new Migration(250, "memory-pressure-node", V250Sql),
         new Migration(251, "compose-stamp-late-mark-offset-zero", V251Sql),
         new Migration(252, "slack-bot-threads", V252Sql),
-        new Migration(255, "wait-stats-rate-baseline", V255Sql),
+        new Migration(255, "wait-stats-cadence-baseline", V255Sql),
     };
 
     /// <summary>

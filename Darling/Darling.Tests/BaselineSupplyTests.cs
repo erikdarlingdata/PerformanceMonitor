@@ -95,10 +95,10 @@ public class BaselineSupplyTests
            and the legacy one they still fall back to are shared the same way. */
         var waitStats = PgBaselineProvider.GetBaselineQuery(MetricNames.WaitStats)!;
         var waitRate = PgBaselineProvider.GetBaselineQuery(MetricNames.WaitMsPerSec)!;
-        Assert.Contains("FROM wait_stats_rate_baseline", waitStats, StringComparison.Ordinal);
-        Assert.Contains("FROM wait_stats_rate_baseline", waitRate, StringComparison.Ordinal);
-        Assert.Contains("delta_wait_time_ms >= 0", TimescaleSupport.CreateWaitStatsRateBaselineSql, StringComparison.Ordinal);
-        Assert.Contains("sample_interval_seconds IS DISTINCT FROM 0", TimescaleSupport.CreateWaitStatsRateBaselineSql, StringComparison.Ordinal);
+        Assert.Contains("FROM wait_stats_cadence_baseline", waitStats, StringComparison.Ordinal);
+        Assert.Contains("FROM wait_stats_cadence_baseline", waitRate, StringComparison.Ordinal);
+        Assert.Contains("delta_wait_time_ms >= 0", TimescaleSupport.CreateWaitStatsCadenceBaselineSql, StringComparison.Ordinal);
+        Assert.Contains("sample_interval_seconds IS DISTINCT FROM 0", TimescaleSupport.CreateWaitStatsCadenceBaselineSql, StringComparison.Ordinal);
 
         /* #8106: the legacy supply the wait pair falls back to is #3653's interval-honest aggregate, which shares the filter. */
         var legacyWaitStats = PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitStats)!;
@@ -453,12 +453,11 @@ public class BaselineSupplyTests
         Assert.Contains("sample_interval_seconds IS DISTINCT FROM 0", waits, StringComparison.Ordinal);
         Assert.Contains("max(sample_interval_seconds) AS sample_interval_seconds", waits, StringComparison.Ordinal);
 
-        /* #8106: the per-row rate successor derives too, carrying the summed row rates and the cadence. */
+        /* #8106: the cadence successor derives too, carrying the collection's shortest interval. */
         var rates = TimescaleSupport.CreateBaselineFallbackViewSql(
-            TimescaleSupport.WaitStatsRateBaselineView, TimescaleSupport.CreateWaitStatsRateBaselineSql);
-        Assert.StartsWith("CREATE OR REPLACE VIEW collect.wait_stats_rate_baseline AS", rates, StringComparison.Ordinal);
+            TimescaleSupport.WaitStatsCadenceBaselineView, TimescaleSupport.CreateWaitStatsCadenceBaselineSql);
+        Assert.StartsWith("CREATE OR REPLACE VIEW collect.wait_stats_cadence_baseline AS", rates, StringComparison.Ordinal);
         Assert.Contains("sample_interval_seconds IS DISTINCT FROM 0", rates, StringComparison.Ordinal);
-        Assert.Contains("sum(delta_wait_time_ms::double precision / NULLIF(sample_interval_seconds, 0)) AS summed_row_rates", rates, StringComparison.Ordinal);
         Assert.Contains("min(sample_interval_seconds) AS sample_interval_seconds", rates, StringComparison.Ordinal);
 
         /* The legacy pair still derives (the live retirement test builds its plain-view fixture from it). */
@@ -496,27 +495,26 @@ public class BaselineSupplyTests
             Assert.DoesNotContain("sample_interval_seconds", legacy, StringComparison.Ordinal);
         }
 
-        /* #8106: the per-row rate wait supply carries the same filter, its interval as the collection's cadence, and the summed row rates. */
-        Assert.Contains("AND   sample_interval_seconds IS DISTINCT FROM 0", TimescaleSupport.CreateWaitStatsRateBaselineSql, StringComparison.Ordinal);
-        Assert.Contains("min(sample_interval_seconds) AS sample_interval_seconds", TimescaleSupport.CreateWaitStatsRateBaselineSql, StringComparison.Ordinal);
-        Assert.Contains("sum(delta_wait_time_ms::double precision / NULLIF(sample_interval_seconds, 0)) AS summed_row_rates", TimescaleSupport.CreateWaitStatsRateBaselineSql, StringComparison.Ordinal);
-        Assert.DoesNotContain("sample_interval_seconds > 0", TimescaleSupport.CreateWaitStatsRateBaselineSql, StringComparison.Ordinal);
+        /* #8106: the cadence wait supply carries the same filter and its interval as the collection's cadence, the shortest any row measured. */
+        Assert.Contains("AND   sample_interval_seconds IS DISTINCT FROM 0", TimescaleSupport.CreateWaitStatsCadenceBaselineSql, StringComparison.Ordinal);
+        Assert.Contains("min(sample_interval_seconds) AS sample_interval_seconds", TimescaleSupport.CreateWaitStatsCadenceBaselineSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("sample_interval_seconds > 0", TimescaleSupport.CreateWaitStatsCadenceBaselineSql, StringComparison.Ordinal);
 
         /* Registered under the successor names; the superseded names are registered NOWHERE the ensure sweep reads. */
         var registered = TimescaleSupport.BaselineAggregates.Select(a => a.View).ToArray();
         Assert.Contains(TimescaleSupport.PerfmonIntervalBaselineView, registered);
-        Assert.Contains(TimescaleSupport.WaitStatsRateBaselineView, registered);
+        Assert.Contains(TimescaleSupport.WaitStatsCadenceBaselineView, registered);
         Assert.DoesNotContain(TimescaleSupport.LegacyPerfmonBaselineView, registered);
         Assert.DoesNotContain(TimescaleSupport.LegacyWaitStatsBaselineView, registered);
         Assert.DoesNotContain(TimescaleSupport.WaitStatsIntervalBaselineView, registered);
         Assert.Equal(TimescaleSupport.CreatePerfmonIntervalBaselineSql,
             TimescaleSupport.BaselineAggregates.Single(a => a.View == TimescaleSupport.PerfmonIntervalBaselineView).CreateSql);
-        Assert.Equal(TimescaleSupport.CreateWaitStatsRateBaselineSql,
-            TimescaleSupport.BaselineAggregates.Single(a => a.View == TimescaleSupport.WaitStatsRateBaselineView).CreateSql);
+        Assert.Equal(TimescaleSupport.CreateWaitStatsCadenceBaselineSql,
+            TimescaleSupport.BaselineAggregates.Single(a => a.View == TimescaleSupport.WaitStatsCadenceBaselineView).CreateSql);
 
         /* Every generation resolves to its raw table, so the backfill probe and the retirement fixture share one map. */
         Assert.Equal("perfmon_stats", TimescaleSupport.SourceTableFor(TimescaleSupport.PerfmonIntervalBaselineView));
-        Assert.Equal("wait_stats", TimescaleSupport.SourceTableFor(TimescaleSupport.WaitStatsRateBaselineView));
+        Assert.Equal("wait_stats", TimescaleSupport.SourceTableFor(TimescaleSupport.WaitStatsCadenceBaselineView));
         Assert.Equal("wait_stats", TimescaleSupport.SourceTableFor(TimescaleSupport.WaitStatsIntervalBaselineView));
         Assert.Equal("perfmon_stats", TimescaleSupport.SourceTableFor(TimescaleSupport.LegacyPerfmonBaselineView));
         Assert.Equal("wait_stats", TimescaleSupport.SourceTableFor(TimescaleSupport.LegacyWaitStatsBaselineView));
@@ -552,7 +550,7 @@ public class BaselineSupplyTests
     {
         Assert.Equal(7, TimescaleSupport.BaselineAggregates.Length);
         Assert.Equal(TimescaleSupport.PerfmonIntervalBaselineView, TimescaleSupport.BaselineAggregates[0].View);
-        Assert.Equal(TimescaleSupport.WaitStatsRateBaselineView, TimescaleSupport.BaselineAggregates[1].View);
+        Assert.Equal(TimescaleSupport.WaitStatsCadenceBaselineView, TimescaleSupport.BaselineAggregates[1].View);
 
         /* The order's count is the hourly registry plus the seven baselines — 6 + 7 = 13 since #3653's LC
            freeze (was 9 + 7 = 16 during Q12, and
@@ -567,7 +565,7 @@ public class BaselineSupplyTests
            unbounded members start at position 3; the baseline pair takes 4 and 5, and the heaviest starts at :16. */
         Assert.Equal(15, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
         Assert.Equal(4, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.PerfmonIntervalBaselineView));
-        Assert.Equal(5, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.WaitStatsRateBaselineView));
+        Assert.Equal(5, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.WaitStatsCadenceBaselineView));
         Assert.Equal(16, TimescaleSupport.HeaviestRefreshStartMinute);
         Assert.Equal(950, TimescaleSupport.RefreshSlotWarningSeconds);
     }
@@ -585,7 +583,7 @@ public class BaselineSupplyTests
         var living = TimescaleSupport.BaselineAggregates.Select(a => a.View).ToHashSet(StringComparer.Ordinal);
         var retired = TimescaleSupport.RetiredBaselineRelations.ToHashSet(StringComparer.Ordinal);
 
-        /* #8106: three pairs. The wait chain is wait_stats_baseline -> wait_stats_interval_baseline -> wait_stats_rate_baseline, so the
+        /* #8106: three pairs. The wait chain is wait_stats_baseline -> wait_stats_interval_baseline -> wait_stats_cadence_baseline, so the
            middle relation is a successor in one pair and the legacy of the next; a successor is living unless it is itself superseded. */
         var legacies = TimescaleSupport.SupersededBaselineRelations.Select(s => s.Legacy).ToHashSet(StringComparer.Ordinal);
         Assert.Equal(3, TimescaleSupport.SupersededBaselineRelations.Length);
@@ -602,7 +600,7 @@ public class BaselineSupplyTests
            already gone could never drop. */
         var order = TimescaleSupport.SupersededBaselineRelations.Select(s => s.Legacy).ToList();
         Assert.True(order.IndexOf(TimescaleSupport.LegacyWaitStatsBaselineView) < order.IndexOf(TimescaleSupport.WaitStatsIntervalBaselineView));
-        Assert.Equal((TimescaleSupport.WaitStatsIntervalBaselineView, TimescaleSupport.WaitStatsRateBaselineView), TimescaleSupport.SupersededBaselineRelations[^1]);
+        Assert.Equal((TimescaleSupport.WaitStatsIntervalBaselineView, TimescaleSupport.WaitStatsCadenceBaselineView), TimescaleSupport.SupersededBaselineRelations[^1]);
 
         var pairs = TimescaleSupport.SupersededBaselineRelations.ToHashSet();
         Assert.Contains(PgBaselineProvider.SupersededSupplyFor(MetricNames.BatchRequests)!.Value, pairs);

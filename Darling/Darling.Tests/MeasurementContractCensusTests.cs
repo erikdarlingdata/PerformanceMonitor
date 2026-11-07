@@ -166,10 +166,10 @@ public sealed class MeasurementContractCensusTests
     private static readonly (string File, string Source)[] IntervalAliasPassthroughsDefendedByTheAggregatePredicate =
     {
         ("Darling/PerformanceMonitor.Darling.Analysis/PgBaselineProvider.cs", TimescaleSupport.PerfmonIntervalBaselineView),
-        /* #8106: the WaitMsPerSec arm reads wait_stats_rate_baseline; its legacy text, #3653's arm over wait_stats_interval_baseline, stays
+        /* #8106: the WaitMsPerSec arm reads wait_stats_cadence_baseline; its legacy text, #3653's arm over wait_stats_interval_baseline, stays
            for the window the successor does not yet reach, so both sources carry the passthrough. */
         ("Darling/PerformanceMonitor.Darling.Analysis/PgBaselineProvider.cs", TimescaleSupport.WaitStatsIntervalBaselineView),
-        ("Darling/PerformanceMonitor.Darling.Analysis/PgBaselineProvider.cs", TimescaleSupport.WaitStatsRateBaselineView),
+        ("Darling/PerformanceMonitor.Darling.Analysis/PgBaselineProvider.cs", TimescaleSupport.WaitStatsCadenceBaselineView),
     };
 
     /// <summary>#8106: the CREATE text of a superseded supply that is itself a #3653 successor. Not registered, so the census reads its
@@ -972,7 +972,7 @@ public sealed class MeasurementContractCensusTests
                 TimescaleSupport.QueryStatsIntervalHourlyView,
                 TimescaleSupport.QueryStatsIoHourlyView,
                 TimescaleSupport.WaitStatsIntervalBaselineView,
-                TimescaleSupport.WaitStatsRateBaselineView,
+                TimescaleSupport.WaitStatsCadenceBaselineView,
             }.OrderBy(v => v, StringComparer.Ordinal),
             carrying);
         /* #8106: a carrying aggregate is registered, or is a superseded legacy (wait_stats_interval_baseline carries the predicate and
