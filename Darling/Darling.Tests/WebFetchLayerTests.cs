@@ -172,32 +172,6 @@ public sealed class WebFetchLayerTests
         Assert.Contains("let renderGeneration = 0;", server, StringComparison.Ordinal);
     }
 
-    /// <summary>The poll loop skips re-rendering the route while the LAST render's reads are still outstanding
-    /// — evaluated from a page-agnostic in-flight counter, so it works for every page without each one exposing
-    /// its own "am I still loading" flag. The sidebar/view-list/AG-nav probe still runs every tick regardless;
-    /// only the heavier per-page render waits. #7935: the shell's reads count in the same counter, so each caller
-    /// of refreshPage() asks before refreshShell() starts this tick's reads.</summary>
-    [Fact]
-    public void AppJs_RefreshSkipsARouteRenderWhileItsLastOneIsStillInFlight()
-    {
-        var app = AppJs;
-
-        // refreshPage() has two callers, refresh() and schedulerTick(). Each takes the in-flight answer before
-        // refreshShell() and re-renders the page only when no read of the last render was outstanding.
-        Assert.Equal(2, app.Split("refreshPage();").Length - 1);
-        foreach (var caller in new[] { "function refresh(force) {", "function schedulerTick() {" })
-        {
-            var at = app.IndexOf(caller, StringComparison.Ordinal);
-            Assert.True(at >= 0, caller + " not found");
-            var end = app.IndexOf("\nfunction ", at + 1, StringComparison.Ordinal);
-            var guardAt = app.IndexOf("&& !hasInFlightReads();", at, StringComparison.Ordinal);
-            var shellAt = app.IndexOf("refreshShell();", at, StringComparison.Ordinal);
-            var pageAt = app.IndexOf("if (pageGo) refreshPage();", at, StringComparison.Ordinal);
-            Assert.True(guardAt >= 0 && shellAt > guardAt && pageAt > shellAt && (end < 0 || pageAt < end),
-                "the in-flight check must run before the shell's reads start and before the page is re-rendered, in " + caller);
-        }
-    }
-
     /* ---------------------------------------------------------------------------------------------------
        #4222d — shell-level auto-refresh play/pause, plus the #/triage poll-cost guard.
        --------------------------------------------------------------------------------------------------- */

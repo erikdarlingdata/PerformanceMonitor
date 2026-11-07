@@ -79,8 +79,13 @@ Date.now = () => now;
 let tick = null;
 globalThis.setInterval = (fn) => { tick = fn; return 1; };
 globalThis.clearInterval = () => {};
-globalThis.setTimeout = () => 0;
-globalThis.clearTimeout = () => {};
+/* The page's timers are tracked against the same clock and fired when it passes their due time (releaseDue), never by wall-clock
+   time, so a scenario's counts do not depend on how long its flushes take. */
+const timerDelay = (ms) => ms;
+let timers = new Map(); let timerSeq = 0;
+globalThis.setTimeout = (fn, ms = 0, ...args) => { const handle = ++timerSeq; timers.set(handle, { at: now + timerDelay(ms), run: () => fn(...args) }); return handle; };
+globalThis.clearTimeout = (handle) => { timers.delete(handle); };
+const fireDueTimers = () => { for (const [handle, t] of [...timers]) if (t.at <= now) { timers.delete(handle); t.run(); } };
 
 let fetches = 0; let renders = 0; const fetchLog = [];
 let fetchDelayMs = 0; // simulated time a read takes: each fetch holds open until the clock passes this
@@ -96,7 +101,7 @@ globalThis.fetch = (url) => {
     pending.push({ at: now + fetchDelayMs, done: () => resolve({ ok: false, status: 500, json: async () => ({}), text: async () => "" }) });
   });
 };
-const releaseDue = () => { const due = pending.filter((p) => p.at <= now); pending = pending.filter((p) => p.at > now); due.forEach((p) => p.done()); };
+const releaseDue = () => { fireDueTimers(); const due = pending.filter((p) => p.at <= now); pending = pending.filter((p) => p.at > now); due.forEach((p) => p.done()); };
 const drain = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
 
 // Advances the clock one second at a time, running the scheduler tick, and returns the fetches that started.
@@ -110,7 +115,7 @@ let n = 0; let bootDelay = 0;
 async function boot(stored, hash = "#/server/alpha") {
   storage = new Map();
   if (stored) storage.set("darling.pageRefresh", stored);
-  pending.forEach((p) => p.done()); pending = []; fetchDelayMs = bootDelay; tick = null;
+  pending.forEach((p) => p.done()); pending = []; timers = new Map(); fetchDelayMs = bootDelay; tick = null;
   await drain();
   location.hash = hash;
   await import(pathToFileURL(path.join(jsDir, "app.js")).href + "?run=" + (++n));
@@ -303,6 +308,32 @@ out.next5m = await secondsToNextRead("5m");
   await advance(3);
   out.returnRendersAfter = renders - r1;
   out.returnFleetReadsAfter = fleetReads(log1);
+}
+
+// #7935: a scheduler tick where the page and the shell are both due re-renders the page in the same pass as the shell's reads
+// start, so one /api/fleet serves the sidebar and the page. The ticks that follow while that render's reads are still in flight
+// do not start it again (#4191): every read of the render is sent once.
+{
+  const fleetReads = (from) => fetchLog.slice(from).filter((l) => l.includes("/api/fleet")).length;
+  const repeated = (from) => { const seen = new Map(); for (const l of fetchLog.slice(from)) { const u = l.slice(l.indexOf(" ") + 1); seen.set(u, (seen.get(u) || 0) + 1); } return [...seen].filter(([, n]) => n > 1).map(([u]) => u); };
+  await fresh("1m", "#/server/alpha");
+  // The boot render's fleet read answers at the first tick and its panel reads at the second, so the page is due 62 s after boot
+  // and the shell 60 s after. Ticks run to 59 s with nothing due; the next one lands three seconds late and finds both due.
+  await advance(59);
+  fetchDelayMs = 5000; // this pass's reads take 5 s, so the ticks that follow land while the render's reads are in flight
+  const log0 = fetchLog.length; const r0 = renders;
+  now += 3000; releaseDue(); await drain(); tick(); await drain();
+  out.tickShellReads = fetchLog.slice(log0).filter((l) => l.includes("/api/views")).length;
+  out.tickFleetReads = fleetReads(log0);
+  // The page's panel reads follow the fleet answer: let the pass's reads answer with no tick in between, so a render that started
+  // in the pass shows now and one that waited for a later tick does not.
+  now += 5000; releaseDue(); await drain();
+  out.tickRendersBeforeTick = renders - r0;
+  await advance(12); // the panel reads answer at 70 s; ticks at 66 to 74 s see the render in flight, then settled
+  out.tickRendersAfter = renders - r0;
+  out.tickFleetReadsAfter = fleetReads(log0);
+  out.tickRepeatedReads = repeated(log0);
+  fetchDelayMs = 0;
 }
 
 console.log(JSON.stringify(out));

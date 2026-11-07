@@ -179,4 +179,20 @@ public sealed class WebPageRefreshIntervalBehaviourTests
         Assert.Equal(1, r.GetProperty("returnRendersAfter").GetInt32());
         Assert.Equal(1, r.GetProperty("returnFleetReadsAfter").GetInt32());
     }
+
+    [Fact]
+    public void ATickDueForThePageAndTheShell_RendersThePageOnceInTheSamePass_WithOneFleetRead()
+    {
+        // #7935: the scheduler tick decides whether the page may render before the shell's reads start. A tick that finds both due
+        // renders the page in the same pass, so one /api/fleet serves the sidebar and the page, instead of the page waiting out the
+        // shell's reads and sending its own fleet read a tick later.
+        var r = Run();
+        Assert.Equal(1, r.GetProperty("tickShellReads").GetInt32());
+        Assert.Equal(1, r.GetProperty("tickFleetReads").GetInt32());
+        Assert.Equal(1, r.GetProperty("tickRendersBeforeTick").GetInt32());
+        Assert.Equal(1, r.GetProperty("tickFleetReadsAfter").GetInt32());
+        // #4191: the ticks that land while that render's reads are still in flight do not start it again, so no read is sent twice.
+        Assert.Equal(1, r.GetProperty("tickRendersAfter").GetInt32());
+        Assert.Empty(r.GetProperty("tickRepeatedReads").EnumerateArray());
+    }
 }
