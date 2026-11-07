@@ -45,7 +45,7 @@
         "Category": "Licensing",
         "Severity": "Low",
         "Confidence": "High",
-        "Finding": "TDE in use — Enterprise Edition downgrade blocker",
+        "Finding": "TDE in use: Enterprise Edition downgrade blocker",
         "Detail": "The following databases use Transparent Data Encryption: OrdersA, SalesA. TDE must be removed before downgrading to Standard Edition.",
         "EstMonthlySavings": null
       },
@@ -85,7 +85,7 @@
         "Category": "Cloud",
         "Severity": "Low",
         "Confidence": "High",
-        "Finding": "Stable CPU utilization (avg 21.8%, CV 0.06) — reserved capacity candidate",
+        "Finding": "Stable CPU utilization (avg 21.8%, CV 0.06): reserved capacity candidate",
         "Detail": "CPU utilization is consistently 21.8% with low variance (±1.4%). Reserved pricing typically saves 30-40% over pay-as-you-go for predictable workloads.",
         "EstMonthlySavings": null
       }
@@ -135,7 +135,7 @@
         "Category": "Licensing",
         "Severity": "Low",
         "Confidence": "High",
-        "Finding": "TDE in use — Enterprise Edition downgrade blocker",
+        "Finding": "TDE in use: Enterprise Edition downgrade blocker",
         "Detail": "The following databases use Transparent Data Encryption: OrdersA, SalesA. TDE must be removed before downgrading to Standard Edition.",
         "EstMonthlySavings": null
       },
@@ -175,7 +175,7 @@
         "Category": "Cloud",
         "Severity": "Low",
         "Confidence": "High",
-        "Finding": "Stable CPU utilization (avg 21.8%, CV 0.06) — reserved capacity candidate",
+        "Finding": "Stable CPU utilization (avg 21.8%, CV 0.06): reserved capacity candidate",
         "Detail": "CPU utilization is consistently 21.8% with low variance (±1.4%). Reserved pricing typically saves 30-40% over pay-as-you-go for predictable workloads.",
         "EstMonthlySavings": null
       }
@@ -187,7 +187,7 @@
         "Category": "Cloud",
         "Severity": "Low",
         "Confidence": "High",
-        "Finding": "Stable CPU utilization (avg 21.8%, CV 0.06) — reserved capacity candidate",
+        "Finding": "Stable CPU utilization (avg 21.8%, CV 0.06): reserved capacity candidate",
         "Detail": "CPU utilization is consistently 21.8% with low variance (±1.4%). Reserved pricing typically saves 30-40% over pay-as-you-go for predictable workloads.",
         "EstMonthlySavings": null
       }
@@ -197,7 +197,7 @@
         "Category": "Cloud",
         "Severity": "Low",
         "Confidence": "High",
-        "Finding": "Stable CPU utilization (avg 21.8%, CV 0.06) — reserved capacity candidate",
+        "Finding": "Stable CPU utilization (avg 21.8%, CV 0.06): reserved capacity candidate",
         "Detail": "CPU utilization is consistently 21.8% with low variance (±1.4%). Reserved pricing typically saves 30-40% over pay-as-you-go for predictable workloads.",
         "EstMonthlySavings": null
       }

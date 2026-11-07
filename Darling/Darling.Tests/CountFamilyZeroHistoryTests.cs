@@ -130,8 +130,8 @@ public sealed class CountFamilyZeroHistoryTests
     // ---------------------------------------------------------------- the advice arm
 
     [Theory]
-    [InlineData("ANOMALY_BLOCKING_SPIKE", 12, "12 blocked process reports this window — against a month in which this hour saw none", "standard blocking event threshold")]
-    [InlineData("ANOMALY_DEADLOCK_SPIKE", 4, "4 deadlocks this window — against a month in which this hour saw none", "standard deadlock threshold")]
+    [InlineData("ANOMALY_BLOCKING_SPIKE", 12, "12 blocked process reports this window, against a month in which this hour saw none", "standard blocking event threshold")]
+    [InlineData("ANOMALY_DEADLOCK_SPIKE", 4, "4 deadlocks this window, against a month in which this hour saw none", "standard deadlock threshold")]
     public void ZeroHistoryFact_ReadsAsAMeasuredZero_NotAFirstOccurrence(string key, long count, string headline, string thresholdClause)
     {
         var fact = CountFact(key, count, perHour: count / 4.0, ZeroHistory());
@@ -142,7 +142,7 @@ public sealed class CountFamilyZeroHistoryTests
         var block = Compose(fact);
 
         Assert.Equal(headline, block.Headline);
-        Assert.Contains("is not thin — it is a measured ZERO: 30 baseline samples across 30 distinct days, not one of them above zero", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("is not thin, it is a measured ZERO: 30 baseline samples across 30 distinct days, not one of them above zero", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("extremity", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("workload change, a deploy, or a one-off job", block.Investigation, StringComparison.Ordinal);
         Assert.Contains(thresholdClause, block.Remediation, StringComparison.Ordinal);
@@ -159,10 +159,10 @@ public sealed class CountFamilyZeroHistoryTests
     {
         var block = Compose(CountFact("ANOMALY_BLOCKING_SPIKE", 12, perHour: 3.0, Thin()));
 
-        Assert.Equal("12 blocked process reports this window — first occurrence, no baseline yet", block.Headline);
+        Assert.Equal("12 blocked process reports this window: first occurrence, no baseline yet", block.Headline);
         // #7537: the blocking spike's text ends with the sentence naming its unit (report rows, not waits).
         Assert.StartsWith(
-            "12 blocked process reports this window — a first occurrence, with no established baseline for this hour-of-week yet to compare against. " +
+            "12 blocked process reports this window: a first occurrence, with no established baseline for this hour-of-week yet to compare against. " +
             "Treat it as a new event, not a proven regression: check whether it coincides with a workload change, a deploy, or a one-off before treating it as chronic. This counts blocked process report rows",
             block.Investigation, StringComparison.Ordinal);
         Assert.Equal(
@@ -179,7 +179,7 @@ public sealed class CountFamilyZeroHistoryTests
         Assert.Equal("deadlock rate spiked to 3× its baseline for this time of week", block.Headline);
         Assert.Equal(
             "24 deadlocks this window — about 3× the normal rate for this hour-of-week (baseline 2). " +
-            "This is a spike against the time-of-week baseline, not necessarily a sustained problem — check whether it coincides with a workload change or a one-off event.",
+            "This is a spike against the time-of-week baseline, not necessarily a sustained problem: check whether it coincides with a workload change or a one-off event.",
             block.Investigation);
         Assert.Equal(
             "If it recurs or sustains, it will cross the standard deadlock threshold and appear on the Recommendations tab " +

@@ -172,7 +172,7 @@ public sealed class DarlingMcpStoreHostTools
                        store's disk at all (postgres.connectionString can point anywhere). */
                     note = profile.IsManagedStore
                         ? null
-                        : "This is the service's own disk, not necessarily the store's — a bring-your-own postgres.connectionString may point at a different host entirely.",
+                        : "This is the service's own disk, not necessarily the store's: a bring-your-own postgres.connectionString may point at a different host entirely.",
                 },
                 managed = profile.IsManagedStore,
                 store = new

@@ -40,11 +40,11 @@ public static partial class PgTargetAdvice
     }
 
     private static readonly AdviceBlock s_hitRatioPointer = new(
-        Headline: "Buffer-cache hit ratio — read from PG_BUFFER_CACHE_PRESSURE, not from a fact of its own",
+        Headline: "Buffer-cache hit ratio: read from PG_BUFFER_CACHE_PRESSURE, not from a fact of its own",
         Investigation:
             "The hit ratio (blks_hit against blks_hit + blks_read from pg_stat_database) is one arm of the buffer-cache " +
-            "composite, PG_BUFFER_CACHE_PRESSURE, so that the one condition it measures — a working set larger than " +
-            "shared_buffers — is counted once. No PG_HIT_RATIO fact is emitted; this key is declared and inert.",
+            "composite, PG_BUFFER_CACHE_PRESSURE, so that the one condition it measures: a working set larger than " +
+            "shared_buffers, is counted once. No PG_HIT_RATIO fact is emitted; this key is declared and inert.",
         Remediation: "See PG_BUFFER_CACHE_PRESSURE and CONFIG_PG_SHARED_BUFFERS.");
 
     private static AdviceBlock ComposeDeadlockRate(IReadOnlyDictionary<string, Fact> facts)
@@ -54,7 +54,7 @@ public static partial class PgTargetAdvice
         if (rate is null)
         {
             return new AdviceBlock(
-                Headline: "Deadlock rate — the engine's own per-database counter, per observed hour",
+                Headline: "Deadlock rate: the engine's own per-database counter, per observed hour",
                 Investigation:
                     "pg_stat_database.deadlocks counts every deadlock the engine detected and broke, in every database, " +
                     "whether or not any log capture saw it. This finding is that counter's consecutive-sample differences " +
@@ -73,7 +73,7 @@ public static partial class PgTargetAdvice
         sb.Append("pg_stat_database.deadlocks is the engine's own count: every deadlock it detected and broke, in every " +
                   "database, including ones no session the log parser sees was party to. Over ")
           .Append(DbHours(observedHours)).Append(" of observed time the engine counted ").Append(DbCount(counter))
-          .Append(counter == 1 ? " deadlock" : " deadlocks").Append(" — ")
+          .Append(counter == 1 ? " deadlock" : " deadlocks").Append(": ")
           .Append(rate.Value.ToString("0.##", CultureInfo.InvariantCulture)).Append(" per hour");
         if (!string.IsNullOrEmpty(rate.DatabaseName))
         {
@@ -105,7 +105,7 @@ public static partial class PgTargetAdvice
           .Append(" per hour), the same ones the fleet card bands this server on.");
 
         return new AdviceBlock(
-            Headline: $"{rate.Value.ToString("0.##", CultureInfo.InvariantCulture)} deadlocks per hour over {DbHours(observedHours)} — the engine counted {DbCount(counter)}" +
+            Headline: $"{rate.Value.ToString("0.##", CultureInfo.InvariantCulture)} deadlocks per hour over {DbHours(observedHours)}: the engine counted {DbCount(counter)}" +
                       (hasExemplars ? $"; {DbCount(exemplars)} {(exemplars == 1 ? "was" : "were")} captured from the log" : string.Empty),
             Investigation: sb.ToString(),
             Remediation: DeadlockRemediation());
@@ -114,7 +114,7 @@ public static partial class PgTargetAdvice
     private static string DeadlockRemediation() =>
         "Read the captured graphs (get_pg_deadlocks, then get_pg_deadlock_detail for one) for the lock modes and the " +
         "statements on each side; the victim_statement and the participants' relations name the access pattern. Fix the " +
-        "ordering in the application — every transaction touching the same set of rows or tables in the same order — before " +
+        "ordering in the application (every transaction touching the same set of rows or tables in the same order), before " +
         "any setting. deadlock_timeout only decides how long a waiter sits before the detector runs; lowering it finds the " +
         "same deadlocks sooner and costs detector runs on every long wait. Counter-objective of retry-on-40P01 in the " +
         "application: it hides the rate this fact measures, so keep the counter in view after adding it.";
@@ -142,15 +142,15 @@ public static partial class PgTargetAdvice
         if (top is not null)
         {
             var sb = new StringBuilder(advice.Remediation.Length + 400);
-            sb.Append(advice.Remediation.TrimEnd()).Append(" Here: the shape to fix first is the one that recurred most — ")
+            sb.Append(advice.Remediation.TrimEnd()).Append(" Here: the shape to fix first is the one that recurred most, ")
               .Append(DescribeShape(top)).Append(". ");
             sb.Append(top.ParticipantCount switch
             {
                 2 => "Two participants is the ordering deadlock: two transactions that take the same two locks in opposite " +
                      "order, and the fix is to make every code path that touches those resources take them in ONE order (the " +
                      "measured population's every captured graph has this shape). ",
-                > 2 => $"{top.ParticipantCount.Value.ToString("N0", CultureInfo.InvariantCulture)} participants is a chain, not a pair: several transactions each waiting on the next — " +
-                       "typically a hot row or a lock-escalating batch under concurrency — and re-ordering two code paths will not " +
+                > 2 => $"{top.ParticipantCount.Value.ToString("N0", CultureInfo.InvariantCulture)} participants is a chain, not a pair: several transactions each waiting on the next, " +
+                       "typically a hot row or a lock-escalating batch under concurrency, and re-ordering two code paths will not " +
                        "break it; shorten the transactions that hold the contended lock, or serialise the batch. ",
                 _ => string.Empty,
             });
@@ -197,9 +197,9 @@ public static partial class PgTargetAdvice
         /* The reading of the shape count: one shape over several reports is a recurring pattern; as many shapes
            as reports is no recurrence yet; one report is neither and gets no gloss. */
         sb.Append(summary.DistinctShapes == 1 && summary.ReportsCaptured > 1
-            ? " — one access pattern, recurring"
+            ? ": one access pattern, recurring"
             : summary.DistinctShapes > 1 && summary.DistinctShapes == summary.ReportsCaptured
-                ? " — every report its own pattern, none recurring yet"
+                ? ": every report its own pattern, none recurring yet"
                 : string.Empty);
         sb.Append(". The most frequent ").Append(DescribeShape(top)).Append(", seen ")
           .Append(DbCount(top.Reports)).Append(top.Reports == 1 ? " time" : " times");
@@ -232,7 +232,7 @@ public static partial class PgTargetAdvice
         if (tps is null)
         {
             return new AdviceBlock(
-                Headline: "Transaction throughput — context, not a finding",
+                Headline: "Transaction throughput: context, not a finding",
                 Investigation:
                     "xact_commit + xact_rollback per second of observed time, differenced from the one-minute pg_database_stats " +
                     "series across every database. Context (severity 0): throughput is what the other facts are read against, " +
@@ -251,7 +251,7 @@ public static partial class PgTargetAdvice
                 $"{DbCount(tps.Metadata.GetValueOrDefault(PgTargetScorer.CounterIntervalsKey))} consecutive-sample intervals. " +
                 "Context (severity 0): this is the denominator the other facts are read against, and the deviation from this " +
                 "server's own hour-of-week baseline is the anomaly family's. A rollback share in the tens of percent is worth a " +
-                "look on its own — serialization failures, deadlock victims (PG_DEADLOCK_RATE) and application-side aborts all land here.",
+                "look on its own: serialization failures, deadlock victims (PG_DEADLOCK_RATE) and application-side aborts all land here.",
             Remediation: "Nothing to change on throughput alone; read the facts beside it.");
     }
 

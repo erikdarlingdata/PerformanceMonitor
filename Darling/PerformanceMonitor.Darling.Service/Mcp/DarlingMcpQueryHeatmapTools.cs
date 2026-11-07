@@ -277,7 +277,7 @@ public sealed class DarlingMcpQueryHeatmapTools
 
             return McpHelpers.Status(
                     "unavailable",
-                    $"No query stats have EVER been collected for {serverName}, so this is NOT a report of a quiet server — there is nothing to draw. query_stats is a PERIODIC table rather than an edge table: the collector writes rows every cycle for whatever is in the plan cache, so an empty history means nobody looked. Check get_collection_health for this server.");
+                    $"No query stats have EVER been collected for {serverName}, so this is NOT a report of a quiet server: there is nothing to draw. query_stats is a PERIODIC table rather than an edge table: the collector writes rows every cycle for whatever is in the plan cache, so an empty history means nobody looked. Check get_collection_health for this server.");
         }
 
         if (!hasInWindow)
@@ -285,7 +285,7 @@ public sealed class DarlingMcpQueryHeatmapTools
             /* #7459: this answer says unavailable now, which the caller's EmptyAsync leaves as it is, so the offline check is asked here. */
             return await DarlingServerOfflineNote.UnavailableOrEmptyAsync(postgres, serverId, serverName, end, McpHelpers.Status(
                 "unavailable",
-                $"{serverName} has query stats from outside this window but nothing collected IN the last {hours_back} hour(s), so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.",
+                $"{serverName} has query stats from outside this window but nothing collected IN the last {hours_back} hour(s), so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health: a collector that stopped looks exactly like this.",
                 notice.AsHints()), cancellationToken);
         }
 

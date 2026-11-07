@@ -65,8 +65,8 @@ public static partial class PgTargetAdvice
         var headline = fact is null
             ? $"{display} waits are a large share of this server's waiting"
             : sampled
-                ? $"{display} waits — about {WaitBackendEquivalents(fact.Value)} of a backend, estimated from sampling ({KnobPct(KnobMeta(fact, PgTargetScorer.WaitShareOfWaitTimeKey) ?? 0)} of all waiting)"
-                : $"{display} waits — {WaitBackendEquivalents(fact.Value)} of a backend continuously, {KnobPct(KnobMeta(fact, PgTargetScorer.WaitShareOfWaitTimeKey) ?? 0)} of all waiting";
+                ? $"{display} waits, about {WaitBackendEquivalents(fact.Value)} of a backend, estimated from sampling ({KnobPct(KnobMeta(fact, PgTargetScorer.WaitShareOfWaitTimeKey) ?? 0)} of all waiting)"
+                : $"{display} waits: {WaitBackendEquivalents(fact.Value)} of a backend continuously, {KnobPct(KnobMeta(fact, PgTargetScorer.WaitShareOfWaitTimeKey) ?? 0)} of all waiting";
 
         var investigation = new StringBuilder(960);
         AppendWaitEvidence(investigation, fact, display, sampled);
@@ -112,10 +112,10 @@ public static partial class PgTargetAdvice
                watches 30 s of each 300 s cycle and V133 stores what it watched, so the fraction is per second WATCHED
                — the honest rate — and a reader must not divide the same seconds by the wall interval again. */
             if (intervalMs > 0 && Math.Abs(intervalMs - observedMs) / intervalMs > 0.05)
-                sb.Append(" spanning ").Append(KnobSeconds(intervalMs / 1000.0)).Append(" of wall clock — the sampler watches part of each cycle and the fraction is per second watched");
+                sb.Append(" spanning ").Append(KnobSeconds(intervalMs / 1000.0)).Append(" of wall clock: the sampler watches part of each cycle and the fraction is per second watched");
             sb.Append("), ").Append(display)
               .Append(" was seen in ").Append(KnobNum(samples)).Append(" backend-samples at a ").Append(KnobNum(period))
-              .Append(" ms sampling period — about ").Append(KnobSeconds(waitMs / 1000.0))
+              .Append(" ms sampling period, about ").Append(KnobSeconds(waitMs / 1000.0))
               .Append(" of waiting, estimated from sampling, which is ").Append(WaitBackendEquivalents(fact.Value))
               .Append(" of one backend waiting on this continuously. ");
             if (!sampledMsKnown)
@@ -123,8 +123,8 @@ public static partial class PgTargetAdvice
                           "pg_wait_sampling extension, which watches the whole interval), so they are read over their whole interval; on " +
                           "the service-side sampler that reads about a tenth of the true rate. ");
             sb.Append("The estimate cannot see a wait shorter than ").Append(KnobNum(period))
-              .Append(" ms and rounds a continuous wait to the nearest period per backend-sample, and the count is per BACKEND-sample — " +
-                      "ten backends waiting one second is ten seconds of waiting — so this is time summed over tasks, not a share " +
+              .Append(" ms and rounds a continuous wait to the nearest period per backend-sample, and the count is per BACKEND-sample: " +
+                      "ten backends waiting one second is ten seconds of waiting, so this is time summed over tasks, not a share " +
                       "of the server's clock, and it can exceed one. ");
             if (peakBackends > 1)
                 sb.Append("At most ").Append(KnobNum(peakBackends)).Append(" backends were seen waiting on it in one collection. ");
@@ -138,7 +138,7 @@ public static partial class PgTargetAdvice
             sb.Append("Over ").Append(KnobSeconds(observedMs / 1000.0)).Append(" of observed wait-counter time (")
               .Append(KnobNum(collections)).Append(" one-minute collections), the engine measured ")
               .Append(KnobSeconds(waitMs / 1000.0)).Append(" of ").Append(display).Append(" waiting across ")
-              .Append(KnobNum(count)).Append(" completed waits — ").Append(WaitBackendEquivalents(fact.Value))
+              .Append(KnobNum(count)).Append(" completed waits: ").Append(WaitBackendEquivalents(fact.Value))
               .Append(" of one backend waiting on this continuously (time summed over tasks per second of wall clock; it can exceed one). ");
             var restarts = KnobMeta(fact, PgTargetScorer.WaitRestartCollectionsKey) ?? 0;
             if (restarts > 0)
@@ -166,16 +166,16 @@ public static partial class PgTargetAdvice
     private static readonly AdviceBlock s_sampledWaitProfileStatic = new(
         Headline: "The server's sampled wait profile shifted well above its normal for this time of week (estimated from sampling)",
         Investigation:
-            "The window's peak all-types wait rate — milliseconds of sampled waiting per second the sampler was watching, " +
+            "The window's peak all-types wait rate, milliseconds of sampled waiting per second the sampler was watching, " +
             "estimated from sampling (pg_wait_sampling: Δ backend-samples × the sampling period, over each collection's " +
-            "sampled_ms), CPU/Running excluded — judged against this server's hour-of-week baseline of the same estimate. " +
+            "sampled_ms), CPU/Running excluded, judged against this server's hour-of-week baseline of the same estimate. " +
             "A profile shift says the server was seen waiting far more than it usually is at this hour; the named wait " +
             "types say on what. The estimate cannot see a wait shorter than the sampling period and counts per " +
             "backend-sample, so it is time summed over tasks, not a share of the clock." + s_anomalyHedge,
         Remediation:
             "get_pg_wait_sampling over this window shows which wait types and which statements drove the shift; chase the " +
-            "dominant one with its own playbook (Lock — the holder via get_pg_blocking, lock_timeout, " +
-            "idle_in_transaction_session_timeout; IO — the buffer-cache and checkpoint findings; LWLock:WALWrite — the WAL " +
+            "dominant one with its own playbook (Lock, the holder via get_pg_blocking, lock_timeout, " +
+            "idle_in_transaction_session_timeout; IO, the buffer-cache and checkpoint findings; LWLock:WALWrite, the WAL " +
             "device and commit batching). If the elevated profile persists across windows the threshold-based sampled wait " +
             "finding for the leading wait will fire and the standard advice applies.");
 
@@ -226,15 +226,15 @@ public static partial class PgTargetAdvice
         {
             return s_sampledWaitProfileStatic with
             {
-                Headline = $"The server's sampled wait profile reached {currentText} ms/sec — against a {s_baselineSpan} baseline in which the sampler saw no waiting in this hour (estimated from sampling)",
+                Headline = $"The server's sampled wait profile reached {currentText} ms/sec, against a {s_baselineSpan} baseline in which the sampler saw no waiting in this hour (estimated from sampling)",
                 Investigation =
                     $"The all-types wait rate estimated from sampling peaked at about {currentText} ms of sampled waiting per second the " +
                     $"sampler was watching this window (mean {meanText} ms/sec; CPU/Running excluded), led by {led}. This server's " +
-                    $"{s_baselineSpan} sampled-wait baseline for this hour-of-week is not thin — it is a measured ZERO: {ZeroHistoryRestsOn(fact)}, " +
+                    $"{s_baselineSpan} sampled-wait baseline for this hour-of-week is not thin, it is a measured ZERO: {ZeroHistoryRestsOn(fact)}, " +
                     "not one of them above zero. That makes this an extremity rather than a deviation to count against its usual variation or a multiple of a " +
                     "normal rate: the sampled wait rate went from never-happens to this, and a rate that is zero has no multiple to print. " +
                     "It fired because the peak reached the sampled wait-profile bar on its absolute level, so the change itself is the " +
-                    "lead — the named contributors are where to look." + instrument + s_anomalyHedge,
+                    "lead: the named contributors are where to look." + instrument + s_anomalyHedge,
             };
         }
 
@@ -247,7 +247,7 @@ public static partial class PgTargetAdvice
                     $"The all-types wait rate estimated from sampling peaked at about {currentText} ms of sampled waiting per second the " +
                     $"sampler was watching this window (mean {meanText} ms/sec; CPU/Running excluded), led by {led}. This server's " +
                     "hour-of-week sampled-wait baseline is too thin to trust a deviation against yet, so this fired on its absolute level " +
-                    "— a first look at where the server is seen waiting, not a proven shift." + instrument + s_anomalyHedge,
+                    ": a first look at where the server is seen waiting, not a proven shift." + instrument + s_anomalyHedge,
             };
         }
 
@@ -261,12 +261,12 @@ public static partial class PgTargetAdvice
         return s_sampledWaitProfileStatic with
         {
             Headline = modifiedZ > 0
-                ? $"The server's sampled wait profile shifted to {currentText} ms/sec — {modifiedZ.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)} times its usual variation above its normal level for this time of week (estimated from sampling)"
+                ? $"The server's sampled wait profile shifted to {currentText} ms/sec: {modifiedZ.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)} times its usual variation above its normal level for this time of week (estimated from sampling)"
                 : $"The server's sampled wait profile shifted to about {ratio.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)}× its baseline for this time of week (estimated from sampling)",
             Investigation =
                 $"The all-types wait rate estimated from sampling peaked at about {currentText} ms of sampled waiting per second the " +
-                $"sampler was watching this window (mean {meanText} ms/sec, also above the bar; CPU/Running excluded) — {deviation} for " +
-                $"this hour-of-week — led by {led}. This is a shift in the overall sampled wait profile, and the named contributors are " +
+                $"sampler was watching this window (mean {meanText} ms/sec, also above the bar; CPU/Running excluded): {deviation} for " +
+                $"this hour-of-week, led by {led}. This is a shift in the overall sampled wait profile, and the named contributors are " +
                 "where to look." + instrument + s_anomalyHedge,
         };
     }
@@ -284,7 +284,7 @@ public static partial class PgTargetAdvice
         {
             sb.Append("Lock is the heavyweight-lock class: relation, transactionid, tuple, extend, advisory and the rest. PostgreSQL " +
                       "grants them in arrival order behind whatever conflicting mode is already held, and by default a waiter waits " +
-                      "forever (lock_timeout = 0) — so a Lock fraction is a queue, and the queue's head is one session holding something " +
+                      "forever (lock_timeout = 0), so a Lock fraction is a queue, and the queue's head is one session holding something " +
                       "the others need. Because of MVCC, plain readers and writers never queue on each other here; what does is DDL, " +
                       "explicit LOCK TABLE, TRUNCATE, and row-level conflicts between writers on the same rows. ");
             AppendCoFire(sb, facts, PgTargetFactKeys.ConnectionSaturation,
@@ -295,8 +295,8 @@ public static partial class PgTargetAdvice
         {
             sb.Append("Lock:relation is a wait for a lock on a whole table or index. Under MVCC a SELECT never blocks an UPDATE and " +
                       "an UPDATE never blocks a SELECT, so a relation-lock queue is not readers versus writers: it is a session " +
-                      "holding a mode the waiters conflict with — ALTER TABLE, an index build without CONCURRENTLY, REINDEX, VACUUM FULL, " +
-                      "CLUSTER, TRUNCATE, LOCK TABLE, or an autovacuum that is truncating — or an ACCESS EXCLUSIVE request queued " +
+                      "holding a mode the waiters conflict with, ALTER TABLE, an index build without CONCURRENTLY, REINDEX, VACUUM FULL, " +
+                      "CLUSTER, TRUNCATE, LOCK TABLE, or an autovacuum that is truncating, or an ACCESS EXCLUSIVE request queued " +
                       "behind ordinary traffic and stacking every later statement behind itself. The holder is very often a " +
                       "transaction that finished its work and stayed open (idle in transaction). ");
             AppendCoFire(sb, facts, PgTargetFactKeys.ConnectionSaturation,
@@ -307,7 +307,7 @@ public static partial class PgTargetAdvice
         {
             sb.Append("LWLock is the lightweight-lock class: latches on shared-memory structures (WAL insert and write, the buffer " +
                       "mapping table, buffer content, the lock manager's partitions). Each is held for microseconds by design, so a " +
-                      "sustained LWLock fraction is many backends contending for the same structure at once — the WAL, one hot page, " +
+                      "sustained LWLock fraction is many backends contending for the same structure at once: the WAL, one hot page, " +
                       "or the lock manager when a transaction touches more relations than its sixteen fast-path slots (partitioned " +
                       "tables, wide joins). The named standout in this window, if one fired, says which. ");
         }
@@ -330,7 +330,7 @@ public static partial class PgTargetAdvice
         }
         else if (key == PgTargetFactKeys.WaitKey("IO", "DataFileRead"))
         {
-            sb.Append("IO:DataFileRead is a backend waiting for a heap or index page to arrive from the file system — a shared_buffers " +
+            sb.Append("IO:DataFileRead is a backend waiting for a heap or index page to arrive from the file system: a shared_buffers " +
                       "miss, served either from the operating system's page cache (fast, but still a system call and a copy) or from " +
                       "the device. It is the cost of a working set larger than the buffer cache, of a sequential scan over a table " +
                       "the cache does not hold, or of an index that is not there. ");
@@ -340,7 +340,7 @@ public static partial class PgTargetAdvice
         }
         else if (key == PgTargetFactKeys.WaitKey("IO", "WALSync"))
         {
-            sb.Append("IO:WALSync is a backend waiting for fsync on a WAL segment — the durability cost paid at commit, by the committing " +
+            sb.Append("IO:WALSync is a backend waiting for fsync on a WAL segment: the durability cost paid at commit, by the committing " +
                       "backend or by the WAL writer on its behalf. It is bounded below by the WAL device's sync latency and scales " +
                       "with commits per second and with WAL bytes per commit. ");
             AppendCoFire(sb, facts, PgTargetFactKeys.CheckpointPressure,
@@ -352,7 +352,7 @@ public static partial class PgTargetAdvice
             sb.Append("IPC is backends waiting on other backends: parallel workers and their leader exchanging tuples, a leader waiting " +
                       "for workers to start or finish, synchronous replication waiting for a standby's acknowledgement, logical " +
                       "replication and NOTIFY hand-offs, and the checkpointer signalling. A sustained IPC fraction is coordination " +
-                      "cost — parallelism that does not pay for itself, or a standby that is slow to confirm. ");
+                      "cost: parallelism that does not pay for itself, or a standby that is slow to confirm. ");
         }
 
         return sb.ToString();
@@ -384,7 +384,7 @@ public static partial class PgTargetAdvice
                 sb.Append("Run schema changes with the CONCURRENTLY form where it exists (index builds, index drops, REINDEX) and the " +
                           "rest inside a lock_timeout-guarded retry loop in a quiet window; never VACUUM FULL or CLUSTER a live table " +
                           "as a routine (counter-objective: CONCURRENTLY builds take longer and cannot run inside a transaction block). " +
-                          "Do not reach for a reader/writer isolation change — PostgreSQL already has MVCC; this queue is a held lock, " +
+                          "Do not reach for a reader/writer isolation change: PostgreSQL already has MVCC; this queue is a held lock, " +
                           "not a read blocking a write. ");
             }
             AppendCoFire(sb, facts, PgTargetFactKeys.ConnectionSaturation,
@@ -394,22 +394,22 @@ public static partial class PgTargetAdvice
         {
             sb.Append("Read the named LWLock standouts for this window (get_pg_wait_stats or get_pg_wait_sampling, by event): WALWrite " +
                       "and WALInsert point at the WAL path; BufferMapping and BufferContent at one hot page or a buffer cache too small " +
-                      "for the working set (size shared_buffers to the working set — counter-objective: memory taken from the page cache " +
+                      "for the working set (size shared_buffers to the working set, counter-objective: memory taken from the page cache " +
                       "and from work_mem); LockManager at transactions touching more than sixteen relations, where the fix is fewer " +
                       "partitions touched per statement or fewer relations per transaction (counter-objective: a schema change, not a " +
                       "setting). No setting lowers LWLock waits directly. ");
         }
         else if (key == PgTargetFactKeys.WaitKey("LWLock", "WALWrite") || key == PgTargetFactKeys.WaitKey("IO", "WALSync"))
         {
-            sb.Append("Measure the WAL volume's write and sync latency first — this wait is bounded below by the device. Then reduce WAL " +
+            sb.Append("Measure the WAL volume's write and sync latency first: this wait is bounded below by the device. Then reduce WAL " +
                       "bytes per commit: commit in batches where the application allows (counter-objective: a failure loses the batch), " +
-                      "avoid full-page-image storms by raising the checkpoint ceiling so checkpoints run on the clock (max_wal_size — " +
+                      "avoid full-page-image storms by raising the checkpoint ceiling so checkpoints run on the clock (max_wal_size, " +
                       "counter-objective: pg_wal footprint and crash-recovery replay length), and enable wal_compression when the WAL is " +
                       "full-page-image heavy (counter-objective: CPU per WAL record on the backends writing it). wal_buffers above its " +
                       "auto-tuned default helps only when many backends fill it between writes. Durability settings are not a lever " +
                       "here: a commit that waits for its WAL to reach the device is doing what it promised. ");
             AppendCoFire(sb, facts, PgTargetFactKeys.CheckpointPressure,
-                "Resolve PG_CHECKPOINT_PRESSURE first — the requested checkpoints are the WAL inflation this wait is paying for. ");
+                "Resolve PG_CHECKPOINT_PRESSURE first: the requested checkpoints are the WAL inflation this wait is paying for. ");
         }
         else if (key == PgTargetFactKeys.WaitKey("IO", null))
         {
@@ -423,7 +423,7 @@ public static partial class PgTargetAdvice
             sb.Append("Check whether the reads are misses the cache should have absorbed: get_pg_database_stats for the hit ratio, " +
                       "get_pg_buffer_usage for what the cache holds. If shared_buffers is at the initdb default, size it to the working " +
                       "set (counter-objective: memory taken from the operating system's page cache, which serves the misses today, and " +
-                      "from work_mem). Then look at the statements doing the reading — get_pg_top_queries by shared blocks read — for a " +
+                      "from work_mem). Then look at the statements doing the reading (get_pg_top_queries by shared blocks read), for a " +
                       "sequential scan a predicate could avoid; this advice states the evidence and does not write index DDL. ");
             AppendCoFire(sb, facts, PgTargetFactKeys.BufferCachePressure,
                 "Resolve PG_BUFFER_CACHE_PRESSURE alongside this: the same cache shortage is behind both facts. ");
@@ -431,9 +431,9 @@ public static partial class PgTargetAdvice
         else if (key == PgTargetFactKeys.WaitKey("IPC", null))
         {
             sb.Append("Name the event (get_pg_wait_stats or get_pg_wait_sampling): ParallelFinish / ExecuteGather / MessageQueue* are " +
-                      "parallel query — lower max_parallel_workers_per_gather or raise parallel_setup_cost for the statements that do " +
+                      "parallel query, lower max_parallel_workers_per_gather or raise parallel_setup_cost for the statements that do " +
                       "not gain from workers (counter-objective: the statements that did gain run longer); SyncRep is synchronous " +
-                      "replication waiting on the standby — a standby or network latency problem, not a primary setting (changing the " +
+                      "replication waiting on the standby, a standby or network latency problem, not a primary setting (changing the " +
                       "replication level is a durability posture, not a lever here). ");
         }
 

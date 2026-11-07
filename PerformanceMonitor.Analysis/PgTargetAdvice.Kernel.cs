@@ -29,13 +29,13 @@ public static partial class PgTargetAdvice
     /// decomposition alike. The statement first — CPU is burned by statements, and <c>pg_stat_kcache</c> names them.</summary>
     private const string CpuBurnLevers =
         "Start with the statement: get_pg_kernel_stats ranks this window's statements by the CPU they burned (user and system " +
-        "time from the kernel, not elapsed time), and get_pg_top_queries has the same query_id's text, calls and mean time — a " +
+        "time from the kernel, not elapsed time), and get_pg_top_queries has the same query_id's text, calls and mean time, a " +
         "query that BURNS tops the first list and one that WAITS tops the second, so the two orderings differ on purpose. " +
         "Then the engine's CPU levers, each with its cost: max_parallel_workers_per_gather decides how many cores one query may " +
-        "take — raising it makes that query faster and leaves fewer cores for everything else, lowering it does the reverse; " +
-        "jit spends compile CPU on every eligible plan and pays it back only on long analytic statements — on a short-statement " +
+        "take, raising it makes that query faster and leaves fewer cores for everything else, lowering it does the reverse; " +
+        "jit spends compile CPU on every eligible plan and pays it back only on long analytic statements, on a short-statement " +
         "OLTP workload it is CPU spent for nothing, on a reporting one turning it off costs the speedup; and a high plan-CPU " +
-        "share means planning itself is the burn — prepared statements and plan_cache_mode are the levers there, at the cost " +
+        "share means planning itself is the burn, prepared statements and plan_cache_mode are the levers there, at the cost " +
         "of the generic plan not fitting every parameter. No host CPU percent is known here: pg_stat_kcache counts CPU " +
         "seconds, not cores installed, so read the host's own metrics for the ceiling before adding cores.";
 
@@ -62,13 +62,13 @@ public static partial class PgTargetAdvice
         {
             var offered = (KnobMeta(burn, "reason_pg_stat_kcache_available") ?? 0) > 0;
             var reason = offered
-                ? "the server offers pg_stat_kcache but it is created in no database the collector connected to — one CREATE EXTENSION pg_stat_kcache away, in the database whose statements should be measured"
+                ? "the server offers pg_stat_kcache but it is created in no database the collector connected to: one CREATE EXTENSION pg_stat_kcache away, in the database whose statements should be measured"
                 : "this server does not offer pg_stat_kcache at all (Aurora PostgreSQL does not ship it; a managed or self-hosted PostgreSQL without the package installed reads the same way)";
             return new AdviceBlock(
                 Headline: "Kernel CPU per statement is not measurable on this server",
                 Investigation:
                     $"pg_stat_kcache is not installed here, so no per-statement CPU time exists to sum: {reason}. No cores-busy figure is " +
-                    "stated and nothing is graded — an absent instrument is not an idle server. The reading comes from pg_extension_availability, " +
+                    "stated and nothing is graded: an absent instrument is not an idle server. The reading comes from pg_extension_availability, " +
                     "the daily capture of what this server has, could have and cannot have; it is read, not inferred from an empty table.",
                 Remediation: offered
                     ? "CREATE EXTENSION pg_stat_kcache (it rides on pg_stat_statements, which must be in shared_preload_libraries) in the " +
@@ -85,8 +85,8 @@ public static partial class PgTargetAdvice
                 Headline: "CPU burned by statements this window, in cores busy",
                 Investigation:
                     "The window's user-plus-system-plus-plan CPU seconds per wall second across every statement pg_stat_kcache tracks " +
-                    "(pg_kernel_stats, differenced per statement with stats_since honoured) — cores busy. Context, not a finding: no core " +
-                    "count is collected, so there is no percentage and no absolute bar — it is graded only by ANOMALY_PG_CPU_BURN against " +
+                    "(pg_kernel_stats, differenced per statement with stats_since honoured): cores busy. Context, not a finding: no core " +
+                    "count is collected, so there is no percentage and no absolute bar, it is graded only by ANOMALY_PG_CPU_BURN against " +
                     "this server's own hour-of-week routine. Per top-level statement only: background processes, autovacuum and nested " +
                     "statements are outside the sum, so it is a floor on the host's CPU, never a host CPU percent.",
                 Remediation: CpuBurnLevers);
@@ -99,8 +99,8 @@ public static partial class PgTargetAdvice
         var resets = KnobMeta(burn, "reset_count") ?? 0;
         var sb = new StringBuilder(640);
         sb.Append("Over the observed window this server's statements burned ").Append(Cores(cores))
-          .Append(" busy on average — peaking at ").Append(Cores(peak)).Append(" in one collection interval, a per-collection mean of ")
-          .Append(Cores(mean)).Append(" — ").Append(KnobPct(userShare)).Append(" of the execution CPU in user time and the rest in the kernel");
+          .Append(" busy on average: peaking at ").Append(Cores(peak)).Append(" in one collection interval, a per-collection mean of ")
+          .Append(Cores(mean)).Append(": ").Append(KnobPct(userShare)).Append(" of the execution CPU in user time and the rest in the kernel");
         if (planShare > 0)
             sb.Append("; planning was ").Append(KnobPct(planShare)).Append(" of all CPU counted");
         sb.Append(". ");
@@ -108,7 +108,7 @@ public static partial class PgTargetAdvice
         if (resets > 0)
             sb.Append("Statistics were reset ").Append(KnobNum(resets)).Append(" time(s) inside the window, so the sums are a floor. ");
         sb.Append("Context, not a finding: no core count is collected for this server, so ").Append(Cores(peak))
-          .Append(" busy is not a percentage of anything — it is graded only by ANOMALY_PG_CPU_BURN against this server's own hour-of-week " +
+          .Append(" busy is not a percentage of anything: it is graded only by ANOMALY_PG_CPU_BURN against this server's own hour-of-week " +
                   "routine. The figure is pg_stat_kcache's, per top-level statement: background processes, autovacuum and nested statements " +
                   "are outside it, so it is a floor on the host's CPU and never a host CPU percent.");
 
@@ -126,7 +126,7 @@ public static partial class PgTargetAdvice
         sb.Append("Statement ").Append(QueryId(topId));
         if (!string.IsNullOrEmpty(burn.ObjectName))
             sb.Append(" in ").Append(burn.ObjectName);
-        sb.Append(" burned ").Append(KnobPct(share)).Append(" of it — the CPU bad actor, ranked by kernel time, which is not the same " +
+        sb.Append(" burned ").Append(KnobPct(share)).Append(" of it: the CPU bad actor, ranked by kernel time, which is not the same " +
                   "ordering as the elapsed-time top statements. ");
     }
 
@@ -147,12 +147,12 @@ public static partial class PgTargetAdvice
                 Investigation:
                     "CPU seconds the kernel charged to statements (pg_stat_kcache, per top-level statement) against the wait time the wait " +
                     "profile measured or estimated over the same window, each as a rate over its own source's observed time and then as " +
-                    "shares of the two together — burn_share, wait_share and the IO wait's slice. Context, not a finding: a split is " +
+                    "shares of the two together: burn_share, wait_share and the IO wait's slice. Context, not a finding: a split is " +
                     "always worth reading and never alone a problem. It becomes a finding when one side holds at least four fifths and " +
-                    "that side's own instrument fired — the CPU-burn anomaly for compute-bound, a named wait crossing its bar for wait-bound.",
+                    "that side's own instrument fired: the CPU-burn anomaly for compute-bound, a named wait crossing its bar for wait-bound.",
                 Remediation:
                     "Compute-bound: the statements (get_pg_kernel_stats, get_pg_top_queries) and the CPU levers on the PG_CPU_BURN_CORES card. " +
-                    "Wait-bound: the wait cards and get_pg_wait_stats — the CPU is not the constraint, whatever the backends are queued on is.");
+                    "Wait-bound: the wait cards and get_pg_wait_stats, the CPU is not the constraint, whatever the backends are queued on is.");
         }
 
         var waitShare = KnobMeta(split, PgTargetScorer.KernelWaitShareKey) ?? (1 - burnShare);
@@ -175,10 +175,10 @@ public static partial class PgTargetAdvice
               "wait shorter than the period and counts per backend-sample; the CPU side is the kernel's measured time. "
             : "The wait side is the engine's measured wait time (pg_wait_stats deltas); the CPU side is the kernel's measured time. ");
         sb.Append(computeBound
-            ? "Compute-bound: the backends were running, not queued — adding wait tuning here would move nothing; the statements burning " +
+            ? "Compute-bound: the backends were running, not queued, adding wait tuning here would move nothing; the statements burning " +
               "the cores are the lever, and whether the host has more cores to give is not known from this reading. "
             : waitBound
-                ? "Wait-bound: the backends were parked, not running — the CPU is not the constraint, and the wait cards name what is. "
+                ? "Wait-bound: the backends were parked, not running, the CPU is not the constraint, and the wait cards name what is. "
                 : "Mixed: neither side holds four fifths, so both the statements and the waits are worth a look before either is blamed. ");
         sb.Append("Context, not a finding on its own: the split becomes a finding only when the dominant side's own instrument fired in the same window.");
 
@@ -193,7 +193,7 @@ public static partial class PgTargetAdvice
             Investigation: sb.ToString(),
             Remediation: computeBound
                 ? CpuBurnLevers
-                : "Read the wait side first: get_pg_wait_stats for the profile and the PG_WAIT_* cards for the named waits that fired — each " +
+                : "Read the wait side first: get_pg_wait_stats for the profile and the PG_WAIT_* cards for the named waits that fired, each " +
                   "names PostgreSQL's own lever for that wait with its cost. CPU levers (parallelism, jit) would change nothing here: the " +
                   "backends were not running. If the IO slice is the bulk of the waiting, the buffer-cache and checkpoint cards carry the " +
                   "sizing arithmetic.");
@@ -206,8 +206,8 @@ public static partial class PgTargetAdvice
     private static AdviceBlock CpuBurnStatic => s_cpuBurnStatic ??= new(
         Headline: "CPU burned by statements ran well above this server's normal for this time of week",
         Investigation:
-            "The window's peak cores busy — user-plus-system-plus-plan CPU seconds per wall second across every statement pg_stat_kcache " +
-            "tracks, from pg_kernel_stats differenced per statement with stats_since honoured — was judged against this server's " +
+            "The window's peak cores busy: user-plus-system-plus-plan CPU seconds per wall second across every statement pg_stat_kcache " +
+            "tracks, from pg_kernel_stats differenced per statement with stats_since honoured, was judged against this server's " +
             "hour-of-week baseline of the same rate over the last 30 days, and the window's MEAN had to clear the same gate, so this is " +
             "cores busy for much of the window, not one hot minute. No core count is known here: this is a deviation from the server's " +
             "own routine, not a percentage of its capacity." + s_anomalyHedge,
@@ -251,7 +251,7 @@ public static partial class PgTargetAdvice
                 sb.Append(' ');
             AppendTopStatement(sb, burn);
         }
-        sb.Append(" How many cores this server has is not known from this reading — ").Append(Cores(KnobMeta(fact, "peak_cores_busy") ?? 0))
+        sb.Append(" How many cores this server has is not known from this reading: ").Append(Cores(KnobMeta(fact, "peak_cores_busy") ?? 0))
           .Append(" busy may be a fraction of a large host or all of a small one; the host's own metrics answer that.");
 
         return block with { Investigation = block.Investigation + sb.ToString().TrimEnd() };

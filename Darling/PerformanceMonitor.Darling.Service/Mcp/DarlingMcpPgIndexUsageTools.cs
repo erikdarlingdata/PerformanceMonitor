@@ -409,7 +409,7 @@ public sealed class DarlingMcpPgIndexUsageTools
                      + "acceptable because this index exists. Counts are cumulative since each database's "
                      + "statistics were last reset, which is reported per index. Indexes under 64 kB are "
                      + "deliberately not reported here, so this count is LOWER than get_pg_index_bloat's "
-                     + "complete btree census — the difference is that floor, not a missing read."
+                     + "complete btree census: the difference is that floor, not a missing read."
                      + (resetSeen
                          ? " At least one index's database had its statistics RESET, or lost to a crash restart, inside "
                          + "this window, so its windowed scan count is clamped at zero rather than negative "

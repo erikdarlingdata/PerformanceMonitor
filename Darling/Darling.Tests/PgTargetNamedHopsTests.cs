@@ -182,7 +182,7 @@ public class PgTargetNamedHopsTests
         var sentence = advice.Investigation.Substring(rootAlone.Investigation.Length);
         var idleHeadline = FactAdvice.Compose(PgTargetFactKeys.IdleInTransaction, byKey)!.Headline;
         Assert.Equal(
-            $" {FactIdentity.SentenceMarker} `{PgTargetFactKeys.IdleInTransaction}` (severity 1.20) — `billing-worker as billing` on `appdb`: {idleHeadline}.",
+            $" {FactIdentity.SentenceMarker} `{PgTargetFactKeys.IdleInTransaction}` (severity 1.20): `billing-worker as billing` on `appdb`: {idleHeadline}.",
             sentence);
         Assert.Contains("billing-worker", sentence, StringComparison.Ordinal);
         Assert.Contains("appdb", sentence, StringComparison.Ordinal);

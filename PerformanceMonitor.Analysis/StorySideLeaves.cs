@@ -130,7 +130,7 @@ public static class StorySideLeaves
         foreach (var key in sideLeafKeys)
         {
             var headline = FactAdvice.Compose(key, factsByKey)?.Headline?.Trim();
-            var body = string.IsNullOrEmpty(headline) ? $"`{key}`" : $"`{key}` — {headline}";
+            var body = string.IsNullOrEmpty(headline) ? $"`{key}`" : $"`{key}`: {headline}";
             sentences.Append(' ').Append(SentenceMarker).Append(' ').Append(body);
             if (!EndsWithTerminator(body))
                 sentences.Append('.');

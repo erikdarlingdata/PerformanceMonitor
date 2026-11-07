@@ -480,7 +480,7 @@ public class StorySideLeafTests
         Assert.Null(StorySideLeaves.Sentence([], byKey));
 
         const string maintSentence =
-            "`CONFIG_PG_MAINT_WORK_MEM` — maintenance_work_mem is being tested by public.hot's 5,250 dead tuples.";
+            "`CONFIG_PG_MAINT_WORK_MEM`: maintenance_work_mem is being tested by public.hot's 5,250 dead tuples.";
         Assert.Equal(
             $" {StorySideLeaves.SentenceMarker} {maintSentence}",
             StorySideLeaves.Sentence([PgTargetFactKeys.ConfigMaintWorkMem], byKey));

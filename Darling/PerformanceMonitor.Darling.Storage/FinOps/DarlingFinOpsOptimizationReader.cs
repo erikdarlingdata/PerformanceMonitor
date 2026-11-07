@@ -214,7 +214,7 @@ SELECT 'Internal Objects', l.internal_object_reserved_mb, p.max_internal_mb,
 FROM latest l CROSS JOIN peak p
 UNION ALL
 SELECT 'Version Store', l.version_store_reserved_mb, p.max_version_store_mb,
-    CASE WHEN p.max_version_store_mb > 2048 THEN 'Version store pressure — check long-running transactions' ELSE '' END
+    CASE WHEN p.max_version_store_mb > 2048 THEN 'Version store pressure: check long-running transactions' ELSE '' END
 FROM latest l CROSS JOIN peak p
 UNION ALL
 SELECT 'Total Reserved', l.total_reserved_mb, p.max_total_mb, ''

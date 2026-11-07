@@ -294,14 +294,14 @@ public static partial class PgTargetScorer
             [
                 new AmplifierDefinition
                 {
-                    Description = "PG_CONNECTION_SATURATION co-fired — sessions are at the connection ceiling, and parked or queued sessions hold the locks these backends are waiting for",
+                    Description = "PG_CONNECTION_SATURATION co-fired: sessions are at the connection ceiling, and parked or queued sessions hold the locks these backends are waiting for",
                     /* unmeasured: WaitCoFireBoost (see the constant). */
                     Boost = WaitCoFireBoost,
                     Predicate = facts => facts.TryGetValue(PgTargetFactKeys.ConnectionSaturation, out var saturation) && saturation.BaseSeverity > 0,
                 },
                 new AmplifierDefinition
                 {
-                    Description = "PG_IDLE_IN_TRANSACTION co-fired — a parked transaction is holding locks it is not using",
+                    Description = "PG_IDLE_IN_TRANSACTION co-fired: a parked transaction is holding locks it is not using",
                     /* unmeasured: WaitCoFireBoost (see the constant). */
                     Boost = WaitCoFireBoost,
                     Predicate = facts => facts.TryGetValue(PgTargetFactKeys.IdleInTransaction, out var parked) && parked.BaseSeverity > 0,
@@ -315,7 +315,7 @@ public static partial class PgTargetScorer
             [
                 new AmplifierDefinition
                 {
-                    Description = "PG_CHECKPOINT_PRESSURE co-fired — WAL volume is forcing checkpoints ahead of checkpoint_timeout, and commits are queued behind the same WAL",
+                    Description = "PG_CHECKPOINT_PRESSURE co-fired: WAL volume is forcing checkpoints ahead of checkpoint_timeout, and commits are queued behind the same WAL",
                     /* unmeasured: WaitCoFireBoost (see the constant). */
                     Boost = WaitCoFireBoost,
                     Predicate = facts => facts.TryGetValue(PgTargetFactKeys.CheckpointPressure, out var pressure) && pressure.BaseSeverity > 0,
@@ -329,7 +329,7 @@ public static partial class PgTargetScorer
             [
                 new AmplifierDefinition
                 {
-                    Description = "PG_BUFFER_CACHE_PRESSURE co-fired — the data file reads these backends wait on are buffer-cache misses",
+                    Description = "PG_BUFFER_CACHE_PRESSURE co-fired: the data file reads these backends wait on are buffer-cache misses",
                     /* unmeasured: WaitCoFireBoost (see the constant). */
                     Boost = WaitCoFireBoost,
                     Predicate = facts => facts.TryGetValue(PgTargetFactKeys.BufferCachePressure, out var pressure) && pressure.BaseSeverity > 0,

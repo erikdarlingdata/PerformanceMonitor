@@ -72,13 +72,13 @@ public static partial class PgTargetAdvice
     private static AdviceBlock ComposeEffectiveCacheSize(IReadOnlyDictionary<string, Fact> facts)
     {
         var fact = KnobFact(facts, PgTargetFactKeys.ConfigEffectiveCacheSize);
-        var stated = fact is null ? "at the compiled default of 4 GB" : $"{KnobMb(fact.Value)}" + (fact.Value == PgTargetScorer.EffectiveCacheSizeDefaultMb ? " — the compiled default" : string.Empty);
+        var stated = fact is null ? "at the compiled default of 4 GB" : $"{KnobMb(fact.Value)}" + (fact.Value == PgTargetScorer.EffectiveCacheSizeDefaultMb ? ": the compiled default" : string.Empty);
 
         return new AdviceBlock(
             Headline: $"effective_cache_size is {stated}",
             Investigation:
                 "`effective_cache_size` is the planner's assumption about how much of the data the operating system's page " +
-                "cache and shared_buffers together can hold. It allocates nothing — it is a cost-model input, and at 4 GB it " +
+                "cache and shared_buffers together can hold. It allocates nothing, it is a cost-model input, and at 4 GB it " +
                 "tells the planner on a 256 GB host the same thing it tells a 4 GB one: that most random page fetches will " +
                 "miss and index scans are expensive. initdb does not write it, so an untouched install runs at the compiled " +
                 "value indefinitely. This is a convention finding: it is not amplified by any workload evidence and roots " +
@@ -94,7 +94,7 @@ public static partial class PgTargetAdvice
     private static AdviceBlock ComposeRandomPageCost(IReadOnlyDictionary<string, Fact> facts)
     {
         var fact = KnobFact(facts, PgTargetFactKeys.ConfigRandomPageCost);
-        var stated = fact is null ? "at the compiled default of 4.0" : fact.Value.ToString("0.0#", CultureInfo.InvariantCulture) + (fact.Value == PgTargetScorer.RandomPageCostDefault ? " — the spinning-disk default" : string.Empty);
+        var stated = fact is null ? "at the compiled default of 4.0" : fact.Value.ToString("0.0#", CultureInfo.InvariantCulture) + (fact.Value == PgTargetScorer.RandomPageCostDefault ? ": the spinning-disk default" : string.Empty);
 
         return new AdviceBlock(
             Headline: $"random_page_cost is {stated}",
@@ -102,7 +102,7 @@ public static partial class PgTargetAdvice
                 "`random_page_cost` is the planner's ratio of a random page read to a sequential one (seq_page_cost = 1.0). 4.0 " +
                 "encodes a spinning disk, where a seek costs several sequential blocks; on SSD, NVMe and cloud block storage " +
                 "the ratio is close to 1, and at 4.0 the planner under-uses indexes on exactly the storage where they are " +
-                "cheapest. This is a convention finding — a cost-model assumption, not a measurement — and is never " +
+                "cheapest. This is a convention finding (a cost-model assumption, not a measurement), and is never " +
                 "amplified: the tuning literature's example of a directionally wrong rule is an I/O-cost-class rule applied " +
                 "without knowing the storage, so the card says what the value is and what the convention is, and stops.",
             Remediation:
@@ -129,17 +129,17 @@ public static partial class PgTargetAdvice
         }
 
         return new AdviceBlock(
-            Headline: $"track_io_timing is {stated} — block read and write times are not being measured",
+            Headline: $"track_io_timing is {stated}: block read and write times are not being measured",
             Investigation:
                 "With `track_io_timing` off, `blk_read_time` and `blk_write_time` in pg_stat_statements and pg_stat_database " +
-                "read as zero, and every I/O question this product can otherwise answer per statement — which queries wait " +
-                "on storage, how much of a statement's time is disk — has no data behind it. This is a monitoring-coverage " +
+                "read as zero, and every I/O question this product can otherwise answer per statement, which queries wait " +
+                "on storage, how much of a statement's time is disk: has no data behind it. This is a monitoring-coverage " +
                 "advisory (the PostgreSQL analogue of a Query Store that is not capturing): nothing is wrong with the server, " +
                 "something is missing from what can be seen of it.",
             Remediation:
                 "Turn `track_io_timing` on (reloadable, no restart; on a managed service it is a parameter-group change). " +
                 "Counter-objective: each I/O then takes a clock reading, which is negligible on a host with a fast clock source " +
-                "and measurable on one without — run `pg_test_timing` first if the platform is unknown, and expect the " +
+                "and measurable on one without, run `pg_test_timing` first if the platform is unknown, and expect the " +
                 "per-statement I/O columns to start from zero at the moment of the change, not to backfill.");
     }
 
@@ -154,7 +154,7 @@ public static partial class PgTargetAdvice
             Investigation:
                 "`checkpoint_timeout` is the clock that starts a checkpoint when WAL volume has not already started one; it is " +
                 "stated beside a checkpoint-pressure finding so the requested-vs-timed ratio has its denominator. It is context " +
-                "in this analysis — no card roots on it.",
+                "in this analysis: no card roots on it.",
             Remediation:
                 "Tune it with max_wal_size, not instead of it: a longer timeout means fewer, larger checkpoints and a longer " +
                 "crash recovery; the checkpoint pressure finding, if it fired, carries the measured WAL rate to size against.");
@@ -171,7 +171,7 @@ public static partial class PgTargetAdvice
             Investigation:
                 "`wal_compression` compresses the full-page images written after each checkpoint, which are often the bulk of " +
                 "WAL on a write-heavy server; it is stated beside a checkpoint-pressure finding because fewer WAL bytes per " +
-                "checkpoint interval is one of the two ways to reach max_wal_size less often. It is context — no card roots on it.",
+                "checkpoint interval is one of the two ways to reach max_wal_size less often. It is context: no card roots on it.",
             Remediation:
                 "Consider enabling it (lz4 or zstd on PostgreSQL 15+, pglz before) when the checkpoint pressure finding shows a " +
                 "high full-page-image share. Counter-objective: CPU per WAL record, on the backends writing it.");

@@ -91,8 +91,8 @@ public sealed class DarlingMcpPgPredicateTools
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status(
                         "empty",
                         $"No predicate statistics for {resolved.DisplayName} in the last {hours_back} "
-                        + "hour(s). pg_qualstats SAMPLES executions — at the default 1% rate a low-traffic "
-                        + "database can genuinely record nothing — and it needs shared_preload_libraries "
+                        + "hour(s). pg_qualstats SAMPLES executions, at the default 1% rate a low-traffic "
+                        + "database can genuinely record nothing, and it needs shared_preload_libraries "
                         + "plus a restart to be active at all.",
                         emptyNotice.AsHints()), cancellationToken, emptyStart);
             }

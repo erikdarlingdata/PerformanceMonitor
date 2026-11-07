@@ -396,7 +396,7 @@ public sealed class PgTargetIoTests
 
         var write = WriteFact(4.0, ops: 3_000);
         var writeBlock = FactAdvice.Compose(PgTargetFactKeys.IoWriteLatencyMs, Lookup(write))!;
-        Assert.Contains("4.0 ms per operation over the 4 observed hours — stated, not graded", writeBlock.Headline, StringComparison.Ordinal);
+        Assert.Contains("4.0 ms per operation over the 4 observed hours: stated, not graded", writeBlock.Headline, StringComparison.Ordinal);
         Assert.Contains("No bar grades it yet", writeBlock.Investigation, StringComparison.Ordinal);
     }
 

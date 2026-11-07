@@ -36,7 +36,7 @@ internal static class PgConfigAuditText
     };
 
     private const string AuroraCheckpointSentence =
-        "Not applicable on Aurora PostgreSQL: the storage layer owns checkpointing, so this value is what the parameter group holds rather than a schedule the engine keeps — read write pressure through get_pg_io_stats and the instance CPU and wait findings instead.";
+        "Not applicable on Aurora PostgreSQL: the storage layer owns checkpointing, so this value is what the parameter group holds rather than a schedule the engine keeps, read write pressure through get_pg_io_stats and the instance CPU and wait findings instead.";
 
     /// <param name="fact">The scored fact.</param>
     /// <param name="setting">The setting name the row shows.</param>

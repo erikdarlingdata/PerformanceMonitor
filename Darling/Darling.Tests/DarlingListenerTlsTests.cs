@@ -62,7 +62,7 @@ public sealed class DarlingListenerTlsTests
         Assert.Equal(DarlingWebTls.TlsShape.Invalid, outcome.Shape);
         Assert.Equal(
             "MCP server TLS is misconfigured (" + DarlingWebTls.Describe(block, "mcp").Problem
-            + ") — refusing to expose; binding loopback-only.",
+            + "): refusing to expose; binding loopback-only.",
             Assert.Single(log.At(LogLevel.Critical)));
         Assert.Null(state.Read());
     }
@@ -91,7 +91,7 @@ public sealed class DarlingListenerTlsTests
         Assert.Equal(string.Empty, published.Thumbprint);
         Assert.Equal(
             $"MCP server TLS certificate could not be loaded (mcp.network.tls.pfxPath '{absent}' does not exist or is not readable)"
-            + " — refusing to expose; binding loopback-only.",
+            + ": refusing to expose; binding loopback-only.",
             Assert.Single(log.At(LogLevel.Critical)));
     }
 
@@ -194,7 +194,7 @@ public sealed class DarlingListenerTlsTests
             Assert.Empty(log.At(LogLevel.Warning));
             Assert.Equal(
                 $"{labels.Surface} TLS is misconfigured ({section}.network.tls is present but sets none of pfxPath, certPath, keyPath or store. "
-                + "Check the key names, or remove the block for plain HTTP.) — refusing to expose; binding loopback-only.",
+                + "Check the key names, or remove the block for plain HTTP.): refusing to expose; binding loopback-only.",
                 Assert.Single(log.At(LogLevel.Critical)));
         }
     }
@@ -212,7 +212,7 @@ public sealed class DarlingListenerTlsTests
         DarlingListenerTls.Resolve(
             invalid, new WebTlsCertificateState(), ListenerTlsLabels.Web, new WebTlsConfig { CertPath = "/certs/a.crt" }, Listen, Port, null);
         Assert.Equal(
-            "Web dashboard TLS is misconfigured (web.network.tls sets certPath with no keyPath — a PEM certificate cannot serve TLS without its private key.) — refusing to expose; binding loopback-only.",
+            "Web dashboard TLS is misconfigured (web.network.tls sets certPath with no keyPath — a PEM certificate cannot serve TLS without its private key.): refusing to expose; binding loopback-only.",
             Assert.Single(invalid.At(LogLevel.Critical)));
 
         // Load failure.
@@ -221,7 +221,7 @@ public sealed class DarlingListenerTlsTests
         DarlingListenerTls.Resolve(
             failed, new WebTlsCertificateState(), ListenerTlsLabels.Web, new WebTlsConfig { PfxPath = absent }, Listen, Port, null);
         Assert.Equal(
-            $"Web dashboard TLS certificate could not be loaded (web.network.tls.pfxPath '{absent}' does not exist or is not readable) — refusing to expose; binding loopback-only.",
+            $"Web dashboard TLS certificate could not be loaded (web.network.tls.pfxPath '{absent}' does not exist or is not readable): refusing to expose; binding loopback-only.",
             Assert.Single(failed.At(LogLevel.Critical)));
 
         // Expired.
@@ -230,7 +230,7 @@ public sealed class DarlingListenerTlsTests
         DarlingListenerTls.Resolve(
             expiredLog, new WebTlsCertificateState(), ListenerTlsLabels.Web, WritePfx(temp, expired), Listen, Port, null);
         Assert.Equal(
-            $"Web dashboard TLS certificate cannot be used (the certificate expired on {U(expired.NotAfter)} — TLS cannot be served with it) — refusing to expose; binding loopback-only.",
+            $"Web dashboard TLS certificate cannot be used (the certificate expired on {U(expired.NotAfter)} — TLS cannot be served with it): refusing to expose; binding loopback-only.",
             Assert.Single(expiredLog.At(LogLevel.Critical)));
 
         // Not yet valid.
@@ -239,7 +239,7 @@ public sealed class DarlingListenerTlsTests
         DarlingListenerTls.Resolve(
             futureLog, new WebTlsCertificateState(), ListenerTlsLabels.Web, WritePfx(temp, future), Listen, Port, null);
         Assert.Equal(
-            $"Web dashboard TLS certificate cannot be used (the certificate is not valid until {U(future.NotBefore)} (check the system clock) — TLS cannot be served with it yet) — refusing to expose; binding loopback-only.",
+            $"Web dashboard TLS certificate cannot be used (the certificate is not valid until {U(future.NotBefore)} (check the system clock) — TLS cannot be served with it yet): refusing to expose; binding loopback-only.",
             Assert.Single(futureLog.At(LogLevel.Critical)));
 
         // Usable, no iPAddress SAN for the listen IP, a PEM pair with a stray password: three lines in order.

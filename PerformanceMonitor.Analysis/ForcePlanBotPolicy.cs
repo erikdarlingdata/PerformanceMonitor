@@ -349,7 +349,7 @@ public static class ForcePlanBotPolicy
         {
             blockers.Add(new ForcePlanBlocker(
                 ReasonApcEnabledForDatabase,
-                $"plan_correction: force_last_good_plan_actual_state = {state.ForceLastGoodPlanActualState} for {target.Database} at {FactRemediation.Stamp(state.EnablementObservedAtUtc)} — automatic plan correction owns plan forcing on this database; the bot stands down rather than be the second forcer (#3652: a manual force on a plan the engine is verifying replaces AUTO forcing and removes its revert path)"));
+                $"plan_correction: force_last_good_plan_actual_state = {state.ForceLastGoodPlanActualState} for {target.Database} at {FactRemediation.Stamp(state.EnablementObservedAtUtc)}, automatic plan correction owns plan forcing on this database; the bot stands down rather than be the second forcer (#3652: a manual force on a plan the engine is verifying replaces AUTO forcing and removes its revert path)"));
         }
 
         if (state is not null && FactRemediation.ApcNamesPlanAsRegressed(target, state))
@@ -358,7 +358,7 @@ public static class ForcePlanBotPolicy
             var reason = string.IsNullOrEmpty(state.ApcStateReason) ? string.Empty : $" / {state.ApcStateReason}";
             blockers.Add(new ForcePlanBlocker(
                 ReasonApcNamesPlanAsRegressed,
-                $"plan_correction: recommendation state {state.ApcState}{reason} with regressed_plan_id = {state.ApcRegressedPlanId} (the plan proposed here, {target.PlanId}) and last_good_plan_id = {lastGood} at {FactRemediation.Stamp(state.ApcObservedAtUtc)} — the engine's own open recommendation calls this plan the worse one; an unattended force would pin the plan automatic plan correction wants replaced"));
+                $"plan_correction: recommendation state {state.ApcState}{reason} with regressed_plan_id = {state.ApcRegressedPlanId} (the plan proposed here, {target.PlanId}) and last_good_plan_id = {lastGood} at {FactRemediation.Stamp(state.ApcObservedAtUtc)}, the engine's own open recommendation calls this plan the worse one; an unattended force would pin the plan automatic plan correction wants replaced"));
         }
 
         if (state is null)
@@ -367,13 +367,13 @@ public static class ForcePlanBotPolicy
                 ReasonStateUnavailable,
                 string.IsNullOrWhiteSpace(stateUnavailableReason)
                     ? $"the forcing and automatic-plan-correction state read returned no row for plan {target.PlanId} of query {target.QueryId} in {target.Database}; an unattended force cannot proceed on an unknown engine state"
-                    : $"{stateUnavailableReason.Trim()} — an unattended force cannot proceed on an unknown engine state"));
+                    : $"{stateUnavailableReason.Trim()}: an unattended force cannot proceed on an unknown engine state"));
         }
         else if (state.IsEmpty)
         {
             blockers.Add(new ForcePlanBlocker(
                 ReasonStateUnavailable,
-                $"the forcing and automatic-plan-correction state read ran and observed nothing for this target inside the last {ForcePlanTargetState.Lookback.TotalHours:0} hours: no query_store_stats row for plan {target.PlanId}, no forced sibling plan of query {target.QueryId}, no plan_correction recommendation, and no plan_correction capture for {target.Database} at all — FORCE_LAST_GOOD_PLAN enablement is unknown for this database, and an unattended force cannot proceed on unknown"));
+                $"the forcing and automatic-plan-correction state read ran and observed nothing for this target inside the last {ForcePlanTargetState.Lookback.TotalHours:0} hours: no query_store_stats row for plan {target.PlanId}, no forced sibling plan of query {target.QueryId}, no plan_correction recommendation, and no plan_correction capture for {target.Database} at all, FORCE_LAST_GOOD_PLAN enablement is unknown for this database, and an unattended force cannot proceed on unknown"));
         }
         else if (enablementIsCollected && state.EnablementObservedAtUtc is null)
         {
@@ -384,7 +384,7 @@ public static class ForcePlanBotPolicy
                collector's own AppliesTo): on a server it never collects from, nothing was ever going to be there. */
             blockers.Add(new ForcePlanBlocker(
                 ReasonApcEnablementUnknown,
-                $"plan_correction: no force_last_good_plan_actual_state row for {target.Database} in the last {ForcePlanTargetState.Lookback.TotalHours:0} hours — whether automatic plan correction owns plan forcing on this database is unknown (its captures skipped it, or the collector is off), and an unattended force cannot proceed on unknown"));
+                $"plan_correction: no force_last_good_plan_actual_state row for {target.Database} in the last {ForcePlanTargetState.Lookback.TotalHours:0} hours, whether automatic plan correction owns plan forcing on this database is unknown (its captures skipped it, or the collector is off), and an unattended force cannot proceed on unknown"));
         }
 
         return blockers;

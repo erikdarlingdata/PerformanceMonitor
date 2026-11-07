@@ -508,7 +508,7 @@ public sealed class PgTargetMemoryTests
         var pressured = new List<Fact> { Sum(2.5), Pressure(sustained: 0.05) };
         new FactScorer().ScoreAll(pressured);
         var lifted = PgTargetAdvice.Compose(PgTargetFactKeys.ConfigMemoryOvercommit, pressured.ToFactLookup())!;
-        Assert.EndsWith("— more than double", lifted.Headline, StringComparison.Ordinal);
+        Assert.EndsWith(": more than double", lifted.Headline, StringComparison.Ordinal);
         Assert.Contains("PG_HOST_MEMORY_PRESSURE co-fires", lifted.Investigation, StringComparison.Ordinal);
         Assert.Contains("2× band is measured against the dogfood fleet", lifted.Investigation, StringComparison.Ordinal);
         var pressure = PgTargetAdvice.Compose(PgTargetFactKeys.HostMemoryPressure, pressured.ToFactLookup())!;
@@ -571,7 +571,7 @@ public sealed class PgTargetMemoryTests
                  {
                      "At the window's peak of 50 backends", "over 1440 sampled instants", "the same peak PG_SESSION_SATURATION divides by",
                      "the backend term is 600 MB and the sum is 4.8 GB, 0.3× of", "that is the ratio graded.",
-                     "The settings permit 3.92× if all max_connections sorted at once — a ceiling the window's concurrency never approached: peak 50 of 5000; stated, not graded.",
+                     "The settings permit 3.92× if all max_connections sorted at once: a ceiling the window's concurrency never approached: peak 50 of 5000; stated, not graded.",
                      "max_connections 5000 × work_mem 4 MB", "Under 1.0× the model fits the box",
                  })
             Assert.Contains(expected, quiet.Investigation, StringComparison.Ordinal);
@@ -580,7 +580,7 @@ public sealed class PgTargetMemoryTests
         /* Basis 1, approached (4,000 of 5,000 = 80 %): fires, and the sentence says the ceiling was approached. */
         var busy = Compose(4000, 1440);
         Assert.StartsWith("The worst-case memory at the window's peak of 4000 backends is ", busy.Headline, StringComparison.Ordinal);
-        Assert.EndsWith("— more than double", busy.Headline, StringComparison.Ordinal);
+        Assert.EndsWith(": more than double", busy.Headline, StringComparison.Ordinal);
         Assert.Contains("a ceiling the window's concurrency approached: peak 4000 of 5000; stated, not graded.", busy.Investigation, StringComparison.Ordinal);
         Assert.Contains("At or past 1.0× the backends this window actually ran CAN exceed physical memory if each spills once", busy.Investigation, StringComparison.Ordinal);
         Assert.Contains("advisory (0.4)", busy.Investigation, StringComparison.Ordinal);

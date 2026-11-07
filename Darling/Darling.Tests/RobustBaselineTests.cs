@@ -834,7 +834,7 @@ public sealed class RobustBaselineTests
         var legacy = Profile(withMean: false, robust: true, isNew: false);
         var legacyStory = Story(legacy);
         Assert.DoesNotContain("window's mean", legacyStory, StringComparison.Ordinal);
-        Assert.Contains("peaked at about 3200 ms/sec this window — roughly 16× the 200 ms/sec normal", legacyStory, StringComparison.Ordinal);
+        Assert.Contains("peaked at about 3200 ms/sec this window, roughly 16× the 200 ms/sec normal", legacyStory, StringComparison.Ordinal);
 
         /* The grade is the peak's, before and after the pair. */
         Assert.Equal(Score(legacy), Score(gateArm));
@@ -1126,8 +1126,8 @@ public sealed class RobustBaselineTests
         /* The third advice shape: the quantity, that this hour saw NONE of it, the samples AND days the claim
            rests on — and no σ figure, because the stored one is a cap rather than a measurement. */
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyBlocking, new Dictionary<string, Fact> { [PgTargetFactKeys.AnomalyBlocking] = extremity })!;
-        Assert.Equal("Blocked sessions per capture reached 92 sessions — against a month in which this hour saw none", block.Headline);
-        Assert.Contains("is not thin — it is a measured ZERO: 257 baseline samples across 30 distinct days, not one of them above zero", block.Investigation, StringComparison.Ordinal);
+        Assert.Equal("Blocked sessions per capture reached 92 sessions, against a month in which this hour saw none", block.Headline);
+        Assert.Contains("is not thin, it is a measured ZERO: 257 baseline samples across 30 distinct days, not one of them above zero", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("far outside its normal range", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("times its usual variation above", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("first occurrence", block.Investigation, StringComparison.Ordinal);

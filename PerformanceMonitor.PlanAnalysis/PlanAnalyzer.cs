@@ -467,7 +467,7 @@ public static partial class PlanAnalyzer
                     // Note adaptive joins that chose Nested Loops at runtime — the grant
                     // was sized for a hash join that never happened.
                     if (stmt.RootNode != null && HasAdaptiveJoinChoseNestedLoop(stmt.RootNode))
-                        message += " An adaptive join in this plan executed as a Nested Loop at runtime — the memory grant was sized for the hash join alternative that wasn't used.";
+                        message += " An adaptive join in this plan executed as a Nested Loop at runtime: the memory grant was sized for the hash join alternative that wasn't used.";
 
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
@@ -646,7 +646,7 @@ public static partial class PlanAnalyzer
                     {
                         RuleNumber = 30,
                         WarningType = "Wide Index Suggestion",
-                        Message = $"Missing index suggestion for {mi.Table} has {includeCount} INCLUDE columns. This is a \"kitchen sink\" index — SQL Server suggests covering every column the query touches, but the resulting index would be very wide and expensive to maintain. Evaluate which columns are actually needed, or consider a narrower index with fewer includes.",
+                        Message = $"Missing index suggestion for {mi.Table} has {includeCount} INCLUDE columns. This is a \"kitchen sink\" index: SQL Server suggests covering every column the query touches, but the resulting index would be very wide and expensive to maintain. Evaluate which columns are actually needed, or consider a narrower index with fewer includes.",
                         Severity = PlanWarningSeverity.Warning
                     });
                 }
@@ -669,7 +669,7 @@ public static partial class PlanAnalyzer
                     {
                         RuleNumber = 30,
                         WarningType = "Duplicate Index Suggestions",
-                        Message = $"{count} missing index suggestions target {mi.Table}. Multiple suggestions for the same table often overlap — consolidate into fewer, broader indexes rather than creating all of them.",
+                        Message = $"{count} missing index suggestions target {mi.Table}. Multiple suggestions for the same table often overlap: consolidate into fewer, broader indexes rather than creating all of them.",
                         Severity = PlanWarningSeverity.Warning
                     });
                     // Only warn once per table
@@ -914,7 +914,7 @@ public static partial class PlanAnalyzer
         if (!cfg.IsRuleDisabled(2) && node.LogicalOp == "Eager Spool" &&
             node.PhysicalOp.Contains("Index", StringComparison.OrdinalIgnoreCase))
         {
-            var message = "SQL Server is building a temporary index in TempDB at runtime because no suitable permanent index exists. This is expensive — it builds the index from scratch on every execution. Create a permanent index on the underlying table to eliminate this operator entirely.";
+            var message = "SQL Server is building a temporary index in TempDB at runtime because no suitable permanent index exists. This is expensive: it builds the index from scratch on every execution. Create a permanent index on the underlying table to eliminate this operator entirely.";
             if (!string.IsNullOrEmpty(node.SuggestedIndex))
                 message += $"\n\nCreate this index:\n{node.SuggestedIndex}";
 
@@ -991,7 +991,7 @@ public static partial class PlanAnalyzer
                         {
                             RuleNumber = 5,
                             WarningType = "Row Estimate Mismatch",
-                            Message = $"Estimated {node.EstimateRows:N0} vs {actualDisplay} — {factor:F0}x {direction}. {harm}",
+                            Message = $"Estimated {node.EstimateRows:N0} vs {actualDisplay}: {factor:F0}x {direction}. {harm}",
                             Severity = factor >= 100 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
                         });
                     }
@@ -1125,7 +1125,7 @@ public static partial class PlanAnalyzer
         // Check RID Lookup first — it's more specific (PhysicalOp) and also has Lookup=true
         if (!cfg.IsRuleDisabled(10) && node.PhysicalOp.StartsWith("RID Lookup", StringComparison.OrdinalIgnoreCase))
         {
-            var message = "RID Lookup — this table is a heap (no clustered index). SQL Server found rows via a nonclustered index but had to follow row identifiers back to unordered heap pages. Heap lookups are more expensive than key lookups because pages are not sorted and may have forwarding pointers. Add a clustered index to the table.";
+            var message = "RID Lookup: this table is a heap (no clustered index). SQL Server found rows via a nonclustered index but had to follow row identifiers back to unordered heap pages. Heap lookups are more expensive than key lookups because pages are not sorted and may have forwarding pointers. Add a clustered index to the table.";
             if (!string.IsNullOrEmpty(node.Predicate))
                 message += $" Predicate: {Truncate(node.Predicate, 200)}";
 
@@ -1139,7 +1139,7 @@ public static partial class PlanAnalyzer
         }
         else if (!cfg.IsRuleDisabled(10) && node.Lookup)
         {
-            var lookupMsg = "Key Lookup — SQL Server found rows via a nonclustered index but had to go back to the clustered index for additional columns.";
+            var lookupMsg = "Key Lookup: SQL Server found rows via a nonclustered index but had to go back to the clustered index for additional columns.";
 
             // Show what columns the lookup is fetching
             if (!string.IsNullOrEmpty(node.OutputColumns))
@@ -1182,13 +1182,13 @@ public static partial class PlanAnalyzer
                 "ISNULL/COALESCE wrapping column" =>
                     "ISNULL/COALESCE wrapping a column prevents an index seek. Rewrite the predicate to avoid wrapping the column, e.g. use \"WHERE col = @val OR col IS NULL\" instead of \"WHERE ISNULL(col, '') = @val\".",
                 "Leading wildcard LIKE pattern" =>
-                    "Leading wildcard LIKE prevents an index seek — SQL Server must scan every row. If substring search performance is critical, consider a full-text index or a trigram-based approach.",
+                    "Leading wildcard LIKE prevents an index seek: SQL Server must scan every row. If substring search performance is critical, consider a full-text index or a trigram-based approach.",
                 "CASE expression in predicate" =>
                     "CASE expression in a predicate prevents an index seek. Rewrite using separate WHERE clauses combined with OR, or split into multiple queries.",
                 UnverifiedNonSargableReason =>
                     "The predicate could not be fully checked for patterns that prevent an index seek within the analysis time limit (a very long or complex predicate), so it may be non-SARGable. Review it by hand.",
                 _ when nonSargableReason.StartsWith("Function call", StringComparison.OrdinalIgnoreCase) =>
-                    $"{nonSargableReason} prevents an index seek. Remove the function from the column side — apply it to the parameter instead, or create a computed column with the expression and index that.",
+                    $"{nonSargableReason} prevents an index seek. Remove the function from the column side: apply it to the parameter instead, or create a computed column with the expression and index that.",
                 _ =>
                     $"{nonSargableReason} prevents an index seek, forcing a scan."
             };
@@ -1222,8 +1222,8 @@ public static partial class PlanAnalyzer
                 severity = PlanWarningSeverity.Critical;
 
             var message = node.HasActualStats && node.ActualRowsRead > 0
-                ? $"Scan with residual predicate — SQL Server read {node.ActualRowsRead:N0} rows to return {node.ActualRows:N0}, filtering after the fact."
-                : "Scan with residual predicate — SQL Server is reading every row and filtering after the fact.";
+                ? $"Scan with residual predicate: SQL Server read {node.ActualRowsRead:N0} rows to return {node.ActualRows:N0}, filtering after the fact."
+                : "Scan with residual predicate: SQL Server is reading every row and filtering after the fact.";
             if (!string.IsNullOrEmpty(scanImpact.Summary))
                 message += $" {scanImpact.Summary}";
 
@@ -1340,7 +1340,7 @@ public static partial class PlanAnalyzer
                     {
                         RuleNumber = 34,
                         WarningType = "Bare Scan",
-                        Message = $"{scanKind} reads the full table with no predicate, outputting {colCount} columns. A nonclustered rowstore index isn't a great fit for wide outputs, but if this is an analytical or aggregate-style query, a columnstore index (CCI or NCCI) can scan the same data far more cheaply — column count doesn't penalize columnstore the way it does rowstore indexes.",
+                        Message = $"{scanKind} reads the full table with no predicate, outputting {colCount} columns. A nonclustered rowstore index isn't a great fit for wide outputs, but if this is an analytical or aggregate-style query, a columnstore index (CCI or NCCI) can scan the same data far more cheaply: column count doesn't penalize columnstore the way it does rowstore indexes.",
                         Severity = PlanWarningSeverity.Warning
                     });
                 }
@@ -1368,7 +1368,7 @@ public static partial class PlanAnalyzer
                     {
                         RuleNumber = 33,
                         WarningType = "Estimated Plan CE Guess",
-                        Message = $"Estimated {node.EstimateRows:N0} rows from {node.TableCardinality:N0} row table — {guessDesc}. " +
+                        Message = $"Estimated {node.EstimateRows:N0} rows from {node.TableCardinality:N0} row table: {guessDesc}. " +
                                   $"The optimizer may be using a default guess instead of accurate statistics. " +
                                   $"If actual selectivity is much lower, an index on the predicate columns could help significantly.",
                         Severity = PlanWarningSeverity.Warning
@@ -1389,8 +1389,8 @@ public static partial class PlanAnalyzer
                    uses to build a dynamic seek range through the conversion, so the index is still sought. The
                    cost of the mismatch is the wider range and the guessed estimate for it. */
                 var reason = hasMismatch
-                    ? "Mismatched data types between the column and the parameter/literal. The optimizer built a dynamic seek range through the conversion, so the index is still sought, but the range is wider than an exact match and the row estimate for it is a guess. Match your data types — don't pass nvarchar to a varchar column, or int to a bigint column."
-                    : "CONVERT/CAST wrapping a column in the predicate. The optimizer built a dynamic seek range through the conversion, so the index is still sought, but the range is wider than an exact match and the row estimate for it is a guess. Match your data types — convert the parameter/literal instead of the column.";
+                    ? "Mismatched data types between the column and the parameter/literal. The optimizer built a dynamic seek range through the conversion, so the index is still sought, but the range is wider than an exact match and the row estimate for it is a guess. Match your data types: don't pass nvarchar to a varchar column, or int to a bigint column."
+                    : "CONVERT/CAST wrapping a column in the predicate. The optimizer built a dynamic seek range through the conversion, so the index is still sought, but the range is wider than an exact match and the row estimate for it is a guess. Match your data types: convert the parameter/literal instead of the column.";
 
                 node.Warnings.Add(new PlanWarning
                 {
@@ -1425,7 +1425,7 @@ public static partial class PlanAnalyzer
                 {
                     RuleNumber = 14,
                     WarningType = "Lazy Spool Ineffective",
-                    Message = $"Lazy spool has low cache hit ratio ({source}): {rebinds:N0} rebinds (cache misses), {rewinds:N0} rewinds (cache hits) — {ratio}. The spool is caching results but rarely reusing them, adding overhead for no benefit.",
+                    Message = $"Lazy spool has low cache hit ratio ({source}): {rebinds:N0} rebinds (cache misses), {rewinds:N0} rewinds (cache hits), {ratio}. The spool is caching results but rarely reusing them, adding overhead for no benefit.",
                     Severity = severity
                 });
             }
@@ -1451,7 +1451,7 @@ public static partial class PlanAnalyzer
                 {
                     RuleNumber = 15,
                     WarningType = "Join OR Clause",
-                    Message = $"OR in a join predicate. SQL Server rewrote the OR as {constantScanBranches.Count} separate lookups, each evaluated independently — this multiplies the work on the inner side. Rewrite as separate queries joined with UNION ALL. For example, change \"FROM a JOIN b ON a.x = b.x OR a.y = b.y\" to \"FROM a JOIN b ON a.x = b.x UNION ALL FROM a JOIN b ON a.y = b.y\".",
+                    Message = $"OR in a join predicate. SQL Server rewrote the OR as {constantScanBranches.Count} separate lookups, each evaluated independently: this multiplies the work on the inner side. Rewrite as separate queries joined with UNION ALL. For example, change \"FROM a JOIN b ON a.x = b.x OR a.y = b.y\" to \"FROM a JOIN b ON a.x = b.x UNION ALL FROM a JOIN b ON a.y = b.y\".",
                     Severity = PlanWarningSeverity.Warning
                 });
             }
@@ -1515,7 +1515,7 @@ public static partial class PlanAnalyzer
                 // Cause/recommendation
                 var hasParams = stmt.Parameters.Count > 0;
                 if (hasParams)
-                    details.Add("This may be caused by parameter sniffing — the optimizer chose Nested Loops based on a sniffed value that produced far fewer outer rows.");
+                    details.Add("This may be caused by parameter sniffing: the optimizer chose Nested Loops based on a sniffed value that produced far fewer outer rows.");
                 else
                     details.Add("Consider whether a hash or merge join would be more appropriate for this row count.");
 
@@ -1544,8 +1544,8 @@ public static partial class PlanAnalyzer
                 RuleNumber = 17,
                 WarningType = "Many-to-Many Merge Join",
                 Message = node.HasActualStats
-                    ? $"Many-to-many Merge Join — SQL Server created a worktable in TempDB ({node.ActualLogicalReads:N0} logical reads) because both sides have duplicate values in the join columns."
-                    : "Many-to-many Merge Join — SQL Server will create a worktable in TempDB because both sides have duplicate values in the join columns.",
+                    ? $"Many-to-many Merge Join: SQL Server created a worktable in TempDB ({node.ActualLogicalReads:N0} logical reads) because both sides have duplicate values in the join columns."
+                    : "Many-to-many Merge Join: SQL Server will create a worktable in TempDB because both sides have duplicate values in the join columns.",
                 Severity = PlanWarningSeverity.Warning
             });
         }
@@ -1567,7 +1567,7 @@ public static partial class PlanAnalyzer
             {
                 RuleNumber = 23,
                 WarningType = "Table-Valued Function",
-                Message = $"Table-valued function: {funcName}. Multi-statement TVFs have no statistics — SQL Server guesses 1 row (before SQL Server 2014) or 100 rows (SQL Server 2014 and later) regardless of actual size, unless interleaved execution (SQL Server 2017 and later) runs the function first and uses its real row count. Rewrite as an inline table-valued function if possible, or dump the function results into a #temp table and join to that instead.",
+                Message = $"Table-valued function: {funcName}. Multi-statement TVFs have no statistics: SQL Server guesses 1 row (before SQL Server 2014) or 100 rows (SQL Server 2014 and later) regardless of actual size, unless interleaved execution (SQL Server 2017 and later) runs the function first and uses its real row count. Rewrite as an inline table-valued function if possible, or dump the function results into a #temp table and join to that instead.",
                 Severity = PlanWarningSeverity.Warning
             });
         }
@@ -1670,7 +1670,7 @@ public static partial class PlanAnalyzer
                 {
                     RuleNumber = 28,
                     WarningType = "NOT IN with Nullable Column",
-                    Message = $"Row Count Spool with {rewinds:N0} rewinds. This pattern occurs when NOT IN is used with a nullable column — SQL Server cannot use an efficient Anti Semi Join because it must check for NULL values on every outer row. Rewrite as NOT EXISTS, or add WHERE column IS NOT NULL to the subquery.",
+                    Message = $"Row Count Spool with {rewinds:N0} rewinds. This pattern occurs when NOT IN is used with a nullable column: SQL Server cannot use an efficient Anti Semi Join because it must check for NULL values on every outer row. Rewrite as NOT EXISTS, or add WHERE column IS NOT NULL to the subquery.",
                     Severity = rewinds > 1_000_000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
                 });
             }
@@ -2719,23 +2719,23 @@ public static partial class PlanAnalyzer
         var wt = waitType.ToUpperInvariant();
         return wt switch
         {
-            _ when wt.StartsWith("PAGEIOLATCH", StringComparison.Ordinal) => "I/O — reading data from disk",
-            _ when wt.Contains("IO_COMPLETION", StringComparison.Ordinal) => "I/O — spills to TempDB or eager writes",
-            _ when wt == "SOS_SCHEDULER_YIELD" => "CPU — scheduler yielding",
-            _ when wt.StartsWith("CXPACKET", StringComparison.Ordinal) || wt.StartsWith("CXCONSUMER", StringComparison.Ordinal) => "parallelism — thread skew",
-            _ when wt.StartsWith("CXSYNC", StringComparison.Ordinal) => "parallelism — exchange synchronization",
-            _ when wt == "HTBUILD" => "hash — building hash table",
-            _ when wt == "HTDELETE" => "hash — cleaning up hash table",
-            _ when wt == "HTREPARTITION" => "hash — repartitioning",
+            _ when wt.StartsWith("PAGEIOLATCH", StringComparison.Ordinal) => "I/O: reading data from disk",
+            _ when wt.Contains("IO_COMPLETION", StringComparison.Ordinal) => "I/O: spills to TempDB or eager writes",
+            _ when wt == "SOS_SCHEDULER_YIELD" => "CPU: scheduler yielding",
+            _ when wt.StartsWith("CXPACKET", StringComparison.Ordinal) || wt.StartsWith("CXCONSUMER", StringComparison.Ordinal) => "parallelism: thread skew",
+            _ when wt.StartsWith("CXSYNC", StringComparison.Ordinal) => "parallelism: exchange synchronization",
+            _ when wt == "HTBUILD" => "hash: building hash table",
+            _ when wt == "HTDELETE" => "hash: cleaning up hash table",
+            _ when wt == "HTREPARTITION" => "hash: repartitioning",
             _ when wt.StartsWith("HT", StringComparison.Ordinal) => "hash operation",
             _ when wt == "BPSORT" => "batch sort",
             _ when wt == "BMPBUILD" => "bitmap filter build",
             _ when wt.Contains("MEMORY_ALLOCATION_EXT", StringComparison.Ordinal) => "memory allocation",
-            _ when wt.StartsWith("PAGELATCH", StringComparison.Ordinal) => "page latch — in-memory contention",
+            _ when wt.StartsWith("PAGELATCH", StringComparison.Ordinal) => "page latch: in-memory contention",
             _ when wt.StartsWith("LATCH_", StringComparison.Ordinal) => "latch contention",
             _ when wt.StartsWith("LCK_", StringComparison.Ordinal) => "lock contention",
             _ when wt == "LOGBUFFER" => "transaction log writes",
-            _ when wt == "ASYNC_NETWORK_IO" => "network — client not consuming results",
+            _ when wt == "ASYNC_NETWORK_IO" => "network: client not consuming results",
             _ when wt == "SOS_PHYS_PAGE_CACHE" => "physical page cache contention",
             _ => ""
         };

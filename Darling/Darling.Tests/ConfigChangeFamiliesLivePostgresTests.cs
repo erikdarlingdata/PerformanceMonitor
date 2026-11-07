@@ -139,7 +139,7 @@ public sealed class ConfigChangeFamiliesLivePostgresTests
             Assert.Null(finding.DatabaseName);
             var advice = FactAdvice.TryReadStoryText(finding.StoryText)!;
             Assert.StartsWith("Configuration changed: 2 configuration changes observed together", advice.Headline, StringComparison.Ordinal);
-            Assert.Contains($"`{Maxdop}` 0 → 8, trace flag 4199 enabled (GLOBAL) — first observed", advice.Investigation, StringComparison.Ordinal);
+            Assert.Contains($"`{Maxdop}` 0 → 8, trace flag 4199 enabled (GLOBAL), first observed", advice.Investigation, StringComparison.Ordinal);
             Assert.DoesNotContain("earlier configuration change", advice.Investigation, StringComparison.Ordinal);
             Assert.Contains("the server configuration history / the trace flag history list the change", advice.Remediation, StringComparison.Ordinal);
 

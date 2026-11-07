@@ -40,7 +40,7 @@ public sealed partial class PgTargetRelationshipGraph
            transaction's damage. Gated on the chain's OWN head state, not merely on both being present: a chain
            under an ACTIVE head and an unrelated parked holder elsewhere are two findings. */
         AddEdge(PgTargetFactKeys.BlockingChain, PgTargetFactKeys.IdleInTransaction, BlockingCategory,
-            "The chain's head blocker was idle in transaction and PG_IDLE_IN_TRANSACTION fired — the waiters are queued behind a parked transaction the application never closed",
+            "The chain's head blocker was idle in transaction and PG_IDLE_IN_TRANSACTION fired: the waiters are queued behind a parked transaction the application never closed",
             facts => facts.TryGetValue(PgTargetFactKeys.BlockingChain, out var chain)
                 && chain.Metadata.GetValueOrDefault(PgTargetScorer.BlockingHeadIsIdleInTransactionKey) > 0
                 && facts.TryGetValue(PgTargetFactKeys.IdleInTransaction, out var parked) && parked.BaseSeverity > 0);
@@ -49,21 +49,21 @@ public sealed partial class PgTargetRelationshipGraph
            story and walks to the other; the pid seam is exact within one window on one server (a pid is one backend's
            lifetime; the long-runner read and the edge read are the same captures). */
         AddEdge(PgTargetFactKeys.BlockingChain, PgTargetFactKeys.LongRunningQuery, BlockingCategory,
-            "PG_LONG_RUNNING_QUERY fired on the chain's head pid — the locks are held by a statement still running",
+            "PG_LONG_RUNNING_QUERY fired on the chain's head pid: the locks are held by a statement still running",
             facts => HeadIsTheRunner(facts));
         AddEdge(PgTargetFactKeys.LongRunningQuery, PgTargetFactKeys.BlockingChain, BlockingCategory,
-            "PG_BLOCKING_CHAIN fired with this runner's pid as its head — sessions are queued behind the locks this statement holds",
+            "PG_BLOCKING_CHAIN fired with this runner's pid as its head: sessions are queued behind the locks this statement holds",
             facts => HeadIsTheRunner(facts));
 
         /* The written event leads to the sampled chain that names the root. */
         AddEdge(PgTargetFactKeys.LockWaitEvents, PgTargetFactKeys.BlockingChain, BlockingCategory,
-            "PG_BLOCKING_CHAIN fired in the same window — the sample names the head the engine's log line cannot",
+            "PG_BLOCKING_CHAIN fired in the same window: the sample names the head the engine's log line cannot",
             facts => facts.TryGetValue(PgTargetFactKeys.BlockingChain, out var chain) && chain.BaseSeverity > 0);
 
         /* The deviation folds onto the fact that grades the duration (PgTargetFactKeys.AnomalyToFamilies names the
            same fold for the reconciler); the edge is what puts both in one story when the anomaly outranks. */
         AddEdge(PgTargetFactKeys.AnomalyBlocking, PgTargetFactKeys.BlockingChain, BlockingCategory,
-            "PG_BLOCKING_CHAIN fired — the unusual blocked-session count has a sampled chain with a named head behind it",
+            "PG_BLOCKING_CHAIN fired: the unusual blocked-session count has a sampled chain with a named head behind it",
             facts => facts.TryGetValue(PgTargetFactKeys.BlockingChain, out var chain) && chain.BaseSeverity > 0);
     }
 

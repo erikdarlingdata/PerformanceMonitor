@@ -37,7 +37,7 @@
         "Metric": "Version Store",
         "CurrentMb": 100.00,
         "Peak24hMb": 2500.00,
-        "Warning": "Version store pressure — check long-running transactions"
+        "Warning": "Version store pressure: check long-running transactions"
       },
       {
         "Metric": "Total Reserved",

@@ -43,11 +43,11 @@ public static partial class PgTargetAdvice
 {
     private static readonly string s_anomalyHedge =
         " This is a deviation from this server's own normal for this time of day and week, not necessarily a " +
-        "sustained problem — check whether it lines up with a workload change, a deploy, or a one-off job before " +
+        "sustained problem: check whether it lines up with a workload change, a deploy, or a one-off job before " +
         "treating it as chronic.";
 
     private static readonly string s_anomalyRemediation =
-        "If it was a one-time event — a report run, a backfill, a deploy — no action beyond awareness. If it " +
+        "If it was a one-time event (a report run, a backfill, a deploy), no action beyond awareness. If it " +
         "recurs or sustains, it will cross the standard thresholds and appear on the Recommendations tab with its " +
         "own detail on a later window; treat it then with the matching PostgreSQL advice. The hour-of-week " +
         "baseline is this server's own 30 days of one-minute history, so a server whose workload changed for " +
@@ -65,7 +65,7 @@ public static partial class PgTargetAdvice
     private static readonly AdviceBlock s_sessionStatic = new(
         Headline: "Far more sessions were connected than this server's normal for this time of week",
         Investigation:
-            "The window's peak instance-wide session count (total_sessions from pg_session_states — every backend " +
+            "The window's peak instance-wide session count (total_sessions from pg_session_states, every backend " +
             "pg_stat_activity reports, PostgreSQL's own background processes included) was judged against this " +
             "server's hour-of-week baseline. A session surge is often a connection-pool leak, a retry storm, or a " +
             "deploy that opened a second pool; if the connection-saturation finding fired in the same window this " +
@@ -76,7 +76,7 @@ public static partial class PgTargetAdvice
         Headline: "Instance CPU ran well above this instance's normal for this time of week (Aurora)",
         Investigation:
             "The window's peak percent of the CONFIGURED capacity ceiling (acu_utilization_percent from " +
-            "pg_cpu_utilization — Performance Insights, Aurora only) was judged against this instance's " +
+            "pg_cpu_utilization, Performance Insights, Aurora only) was judged against this instance's " +
             "hour-of-week baseline. The raw cpu_percent is percent of the capacity currently allocated and is not " +
             "the deviation: on a serverless instance a single busy core reads 100 while the instance sits well " +
             "under its ceiling." + s_anomalyHedge,
@@ -85,13 +85,13 @@ public static partial class PgTargetAdvice
     private static readonly AdviceBlock s_deadlockStatic = new(
         Headline: "The deadlock rate ran well above this server's normal for this time of week",
         Investigation:
-            "Deadlocks per observed hour — the engine's own pg_stat_database.deadlocks counter, differenced with " +
-            "stats_reset honoured — judged against this server's hour-of-week baseline of the same rate. The " +
+            "Deadlocks per observed hour: the engine's own pg_stat_database.deadlocks counter, differenced with " +
+            "stats_reset honoured, judged against this server's hour-of-week baseline of the same rate. The " +
             "counter counts every deadlock the engine resolved; the log capture (pg_deadlocks) holds the exemplars " +
             "and can hold fewer. If the deadlock-rate finding fired in the same window this anomaly is part of that " +
             "story." + s_anomalyHedge,
         Remediation:
-            "Read the exemplars: get_pg_deadlocks shows the captured graphs for the window — the statements, the " +
+            "Read the exemplars: get_pg_deadlocks shows the captured graphs for the window, the statements, the " +
             "relations and the lock modes on each side. A deadlock is a transaction-ordering fault in the " +
             "application; the durable fix is a consistent lock order or shorter transactions, and " +
             "deadlock_timeout only changes how long the engine waits before checking. If the rate recurs it will " +
@@ -100,14 +100,14 @@ public static partial class PgTargetAdvice
     private static readonly AdviceBlock s_waitProfileStatic = new(
         Headline: "The server's wait profile shifted well above its normal for this time of week (Aurora)",
         Investigation:
-            "The window's peak all-types wait rate — milliseconds of waiting per second of observed time, the " +
-            "engine measured it (aurora_stat_system_waits deltas in pg_wait_stats), CPU excluded — judged against " +
+            "The window's peak all-types wait rate: milliseconds of waiting per second of observed time, the " +
+            "engine measured it (aurora_stat_system_waits deltas in pg_wait_stats), CPU excluded, judged against " +
             "this cluster's hour-of-week baseline. A profile shift says the cluster waited far more than it usually " +
             "does at this hour; the named wait types say on what." + s_anomalyHedge,
         Remediation:
             "get_pg_wait_stats over this window shows which wait types drove the shift; chase the dominant one " +
-            "with its own playbook (Lock — lock_timeout, transaction scoping, idle_in_transaction_session_timeout; " +
-            "IO — the buffer-cache and checkpoint findings; LWLock:WALWrite — commit rate and synchronous_commit " +
+            "with its own playbook (Lock, lock_timeout, transaction scoping, idle_in_transaction_session_timeout; " +
+            "IO, the buffer-cache and checkpoint findings; LWLock:WALWrite, commit rate and synchronous_commit " +
             "posture). If the elevated profile persists across windows the threshold-based finding for the " +
             "leading wait will fire and the standard advice applies.");
 
@@ -211,9 +211,9 @@ public static partial class PgTargetAdvice
             var restsOn = ZeroHistoryRestsOn(fact);
             return fallback with
             {
-                Headline = $"{noun} reached {fmt(observed)} — against a month in which this hour saw none",
+                Headline = $"{noun} reached {fmt(observed)}, against a month in which this hour saw none",
                 Investigation =
-                    $"{noun} reached {fmt(observed)} this window. This server's baseline for this hour-of-week is not thin — it " +
+                    $"{noun} reached {fmt(observed)} this window. This server's baseline for this hour-of-week is not thin, it " +
                     $"is a measured ZERO: {restsOn}, not one of them above zero. So this is not a deviation to be counted in " +
                     "its usual variation, it is an extremity: the quantity went from never-happens to this, and there is no dispersion to " +
                     "divide by precisely because there was nothing to divide. " + SourceSentence(fallback) +
@@ -226,11 +226,11 @@ public static partial class PgTargetAdvice
         {
             return fallback with
             {
-                Headline = $"{noun} reached {fmt(observed)} — first occurrence, no baseline yet for this time of week",
+                Headline = $"{noun} reached {fmt(observed)}: first occurrence, no baseline yet for this time of week",
                 Investigation =
                     $"{noun} reached {fmt(observed)} this window. This server's hour-of-week baseline is too thin to " +
                     $"trust a deviation against yet{samplesClause}, so this fired on its absolute level, not on a " +
-                    "measured deviation — treat it as a first look at what this hour does, not a proven regression." + s_anomalyHedge,
+                    "measured deviation: treat it as a first look at what this hour does, not a proven regression." + s_anomalyHedge,
             };
         }
 
@@ -245,7 +245,7 @@ public static partial class PgTargetAdvice
 
         return fallback with
         {
-            Headline = $"{noun} spiked to {fmt(observed)} — {Sigma(sigma)} times its usual variation above its normal level for this time of week",
+            Headline = $"{noun} spiked to {fmt(observed)}: {Sigma(sigma)} times its usual variation above its normal level for this time of week",
             Investigation = inv.ToString(),
         };
     }
@@ -258,7 +258,7 @@ public static partial class PgTargetAdvice
         if (ReferenceEquals(block, s_cpuStatic)) return block;
 
         var raw = fact.Metadata.TryGetValue("peak_cpu_percent", out var rawPct)
-            ? $" The raw cpu_percent peaked at {rawPct.ToString("0.#", CultureInfo.InvariantCulture)}% of the capacity currently allocated — a core was pinned — which is reported, not graded: on a serverless instance that figure reads 100 whenever one core is busy for a minute."
+            ? $" The raw cpu_percent peaked at {rawPct.ToString("0.#", CultureInfo.InvariantCulture)}% of the capacity currently allocated (a core was pinned), which is reported, not graded: on a serverless instance that figure reads 100 whenever one core is busy for a minute."
             : string.Empty;
         return block with { Investigation = block.Investigation + raw };
     }
@@ -302,14 +302,14 @@ public static partial class PgTargetAdvice
         {
             return s_deadlockStatic with
             {
-                Headline = $"{countText} deadlock{plural} this window ({rateText}/hour) — against a {s_baselineSpan} baseline in which this hour saw none",
+                Headline = $"{countText} deadlock{plural} this window ({rateText}/hour), against a {s_baselineSpan} baseline in which this hour saw none",
                 Investigation =
                     $"The engine counted {countText} deadlock{plural}{over} ({rateText} per observed hour, from " +
                     $"pg_stat_database.deadlocks differenced with stats_reset honoured).{topDb} This server's {s_baselineSpan} baseline for " +
-                    $"this hour-of-week is not thin — it is a measured ZERO: {ZeroHistoryRestsOn(fact)}, not one of them above zero. That " +
+                    $"this hour-of-week is not thin, it is a measured ZERO: {ZeroHistoryRestsOn(fact)}, not one of them above zero. That " +
                     "makes this an extremity rather than a multiple of a normal rate: the deadlock rate went from never-happens to this, " +
                     "and a rate that is zero has no multiple to print. It fired because the rate reached the deadlock-rate warning tier, " +
-                    "so the change itself is the lead — find what changed." + s_anomalyHedge,
+                    "so the change itself is the lead: find what changed." + s_anomalyHedge,
             };
         }
 
@@ -317,12 +317,12 @@ public static partial class PgTargetAdvice
         {
             return s_deadlockStatic with
             {
-                Headline = $"{countText} deadlock{plural} this window ({rateText}/hour) — first occurrence, no baseline yet",
+                Headline = $"{countText} deadlock{plural} this window ({rateText}/hour): first occurrence, no baseline yet",
                 Investigation =
                     $"The engine counted {countText} deadlock{plural}{over} ({rateText} per observed hour, from " +
                     $"pg_stat_database.deadlocks differenced with stats_reset honoured).{topDb} This server's hour-of-week deadlock " +
                     "baseline is too thin to trust a ratio against yet, so this fired because the rate reached the deadlock-rate " +
-                    "warning tier, not because it deviated from a measured normal — treat it as a new event, not a proven regression." + s_anomalyHedge,
+                    "warning tier, not because it deviated from a measured normal: treat it as a new event, not a proven regression." + s_anomalyHedge,
             };
         }
 
@@ -330,10 +330,10 @@ public static partial class PgTargetAdvice
         var baselineRate = fact.Metadata.GetValueOrDefault("baseline_rate");
         return s_deadlockStatic with
         {
-            Headline = $"The deadlock rate reached {rateText}/hour — about {ratio.ToString("0.#", CultureInfo.InvariantCulture)}× its baseline for this time of week",
+            Headline = $"The deadlock rate reached {rateText}/hour, about {FactAdvice.RatioText(ratio)}× its baseline for this time of week",
             Investigation =
-                $"The engine counted {countText} deadlock{plural}{over} — {rateText} per observed hour, about " +
-                $"{ratio.ToString("0.#", CultureInfo.InvariantCulture)}× the {baselineRate.ToString("0.#", CultureInfo.InvariantCulture)}/hour this server normally " +
+                $"The engine counted {countText} deadlock{plural}{over}: {rateText} per observed hour, about " +
+                $"{FactAdvice.RatioText(ratio)}× the {baselineRate.ToString("0.#", CultureInfo.InvariantCulture)}/hour this server normally " +
                 $"sees at this hour-of-week (pg_stat_database.deadlocks differenced with stats_reset honoured).{topDb}" + s_anomalyHedge,
         };
     }
@@ -374,14 +374,14 @@ public static partial class PgTargetAdvice
         {
             return s_waitProfileStatic with
             {
-                Headline = $"The cluster's wait profile reached {currentText} ms/sec — against a {s_baselineSpan} baseline in which this hour saw no waiting",
+                Headline = $"The cluster's wait profile reached {currentText} ms/sec, against a {s_baselineSpan} baseline in which this hour saw no waiting",
                 Investigation =
                     $"The all-types wait rate the engine measured peaked at about {currentText} ms of waiting per second of observed " +
                     $"time this window (CPU excluded{plainMean}), led by {led}. This cluster's {s_baselineSpan} wait baseline for this " +
-                    $"hour-of-week is not thin — it is a measured ZERO: {ZeroHistoryRestsOn(fact)}, not one of them above zero. That makes " +
+                    $"hour-of-week is not thin, it is a measured ZERO: {ZeroHistoryRestsOn(fact)}, not one of them above zero. That makes " +
                     "this an extremity rather than a deviation to count against its usual variation or a multiple of a normal rate: the wait rate went from " +
                     "never-happens to this, and a rate that is zero has no multiple to print. It fired because the peak reached the " +
-                    "wait-profile bar on its absolute level, so the change itself is the lead — the named contributors are where to look." + s_anomalyHedge,
+                    "wait-profile bar on its absolute level, so the change itself is the lead: the named contributors are where to look." + s_anomalyHedge,
             };
         }
 
@@ -393,7 +393,7 @@ public static partial class PgTargetAdvice
                 Investigation =
                     $"The all-types wait rate the engine measured peaked at about {currentText} ms of waiting per second of observed " +
                     $"time this window (CPU excluded{plainMean}), led by {led}. This cluster's hour-of-week wait baseline is too thin to trust " +
-                    "a deviation against yet, so this fired on its absolute level — a first look at where the cluster waits, not a " +
+                    "a deviation against yet, so this fired on its absolute level: a first look at where the cluster waits, not a " +
                     "proven shift." + s_anomalyHedge,
             };
         }
@@ -406,24 +406,28 @@ public static partial class PgTargetAdvice
         /* The mean against the same baseline the peak was judged on: its robust sigmas on the gate arm (mean_modified_z
            > 0), else its multiple on the ratio arm; the stamped mean_ratio first, the quotient as the belt for a fact
            stamped without it. */
+        /* A mean that prints the same as the peak is one delta, so there is no window-versus-sample contrast to state. */
+        var wholeWindow = windowMean is { } wm && wm.ToString("0.#", CultureInfo.InvariantCulture) == currentText
+            ? "."
+            : ", so the whole window sat high, not one delta.";
         var meanSentence = windowMean is not { } meanValue
             ? string.Empty
             : meanModifiedZ > 0
-                ? $" The window's mean rate was {meanValue.ToString("0.#", CultureInfo.InvariantCulture)} ms/sec against a routine of {mean.ToString("0.#", CultureInfo.InvariantCulture)} — {Sigma(meanModifiedZ)} times its usual variation above it — so the whole window sat high, not one delta."
+                ? $" The window's mean rate was {meanValue.ToString("0.#", CultureInfo.InvariantCulture)} ms/sec against a routine of {mean.ToString("0.#", CultureInfo.InvariantCulture)} ({Sigma(meanModifiedZ)} times its usual variation above it){wholeWindow}"
                 : meanRatio > 0 || mean > 0
-                    ? $" The window's mean rate was {meanValue.ToString("0.#", CultureInfo.InvariantCulture)} ms/sec against a routine of {mean.ToString("0.#", CultureInfo.InvariantCulture)} — about {(meanRatio > 0 ? meanRatio : meanValue / mean).ToString("0.#", CultureInfo.InvariantCulture)}× it — so the whole window sat high, not one delta."
+                    ? $" The window's mean rate was {meanValue.ToString("0.#", CultureInfo.InvariantCulture)} ms/sec against a routine of {mean.ToString("0.#", CultureInfo.InvariantCulture)}, about {FactAdvice.RatioText(meanRatio > 0 ? meanRatio : meanValue / mean)}× it{wholeWindow}"
                     : string.Empty;
         var deviation = modifiedZ > 0
             ? $"{Sigma(modifiedZ)} times its usual variation above its {mean.ToString("0.#", CultureInfo.InvariantCulture)} ms/sec baseline"
-            : $"about {ratio.ToString("0.#", CultureInfo.InvariantCulture)}× its {mean.ToString("0.#", CultureInfo.InvariantCulture)} ms/sec baseline";
+            : $"about {FactAdvice.RatioText(ratio)}× its {mean.ToString("0.#", CultureInfo.InvariantCulture)} ms/sec baseline";
         return s_waitProfileStatic with
         {
             Headline = modifiedZ > 0
-                ? $"The cluster's wait profile shifted to {currentText} ms/sec — {Sigma(modifiedZ)} times its usual variation above its normal level for this time of week"
-                : $"The cluster's wait profile shifted to about {ratio.ToString("0.#", CultureInfo.InvariantCulture)}× its baseline for this time of week",
+                ? $"The cluster's wait profile shifted to {currentText} ms/sec: {Sigma(modifiedZ)} times its usual variation above its normal level for this time of week"
+                : $"The cluster's wait profile shifted to about {FactAdvice.RatioText(ratio)}× its baseline for this time of week",
             Investigation =
                 $"The all-types wait rate the engine measured peaked at about {currentText} ms of waiting per second of observed " +
-                $"time this window (CPU excluded) — {deviation} for this hour-of-week — led by {led}.{meanSentence} This is a shift in the overall " +
+                $"time this window (CPU excluded): {deviation} for this hour-of-week, led by {led}.{meanSentence} This is a shift in the overall " +
                 "wait profile, and the named contributors are where to look." + s_anomalyHedge,
         };
     }

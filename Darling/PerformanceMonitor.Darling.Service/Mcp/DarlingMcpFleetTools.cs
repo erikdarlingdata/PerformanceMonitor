@@ -48,7 +48,7 @@ public sealed class DarlingMcpFleetTools
         "memory_mb, buffer_pool_mb and threads are always null (no DMV equivalent), not a gap. <<GUIDE>> " +
         "Gets the whole fleet's health at a glance: one pre-banded card per monitored server (CPU, memory, " +
         "blocking, deadlocks, worker threads, and collector health, each with a Healthy/Warning/Critical band), " +
-        "plus a rollup — counts by band, cross-server blocking and deadlock totals, and a worst-first 'needs " +
+        "plus a rollup, counts by band, cross-server blocking and deadlock totals, and a worst-first 'needs " +
         "attention' ranking (worst_servers: a server whose band is Warning or worse, or whose band is Healthy but " +
         "carries a Warning-level Identity capacity, Agent alerts, Database state or Protection tile; advisory_tiles on the row names " +
         "those tiles and the band stays Healthy). database_states on the card lists the databases not in their expected state (the Database State alert's " +
@@ -61,13 +61,13 @@ public sealed class DarlingMcpFleetTools
         "cpu_source names which collector produced each card's total_cpu_percent, so a missing number is never " +
         "ambiguous: RingBuffer (SQL Server, and the only arm that also fills cpu_percent / " +
         "other_process_cpu_percent with the per-process split), PerformanceInsights (an Aurora PostgreSQL " +
-        "target's instance CPU from the AWS API, total only — no per-process breakdown exists), NotCollected " +
-        "(a source that applies here produced no current reading — check get_collection_health), or " +
+        "target's instance CPU from the AWS API, total only, no per-process breakdown exists), NotCollected " +
+        "(a source that applies here produced no current reading, check get_collection_health), or " +
         "NoSourceForEngine (a PostgreSQL target not known to be Aurora, INCLUDING plain RDS for PostgreSQL: " +
         "PostgreSQL exposes no instance-CPU counter and the Performance Insights ingest is gated to Aurora, " +
         "so that null is structural and no grant or upgrade changes it). A PostgreSQL target's memory_mb, " +
         "buffer_pool_mb and the whole threads block are null for " +
-        "the same structural reason and no band is claimed for them — those metrics are SQL Server DMV " +
+        "the same structural reason and no band is claimed for them: those metrics are SQL Server DMV " +
         "readings with no PostgreSQL equivalent collected; get_pg_buffer_usage, get_pg_kernel_stats and " +
         "get_pg_session_states are the reads that answer the nearest PostgreSQL questions. A PostgreSQL " +
         "target's deadlock_count IS measured: it is the server's own pg_stat_database.deadlocks counter, " +
@@ -87,12 +87,12 @@ public sealed class DarlingMcpFleetTools
         "healthy/failed/collector_count, collector_severity, deadlock_collector_band and deadlock_source, and the " +
         "fleet's servers_with_collection_failures and deadlock_coverage, come from one 7-day scan of the collection " +
         "log that does not depend on hours_back and is shared by every overview call of the same minute on this " +
-        "host — 0 means this call ran it, anything up to 59 means a scan that many seconds before generated_at " +
+        "host, 0 means this call ran it, anything up to 59 means a scan that many seconds before generated_at " +
         "did. Everything else on the payload was read for this call. Racing several calls with different " +
         "hours_back values buys nothing on that half and costs the window-bound reads N times over: call once " +
         "with the widest window and derive, or sequence the calls. " +
         "detail defaults to \"summary\" (#4198): the rollup, band counts and worst_servers, WITHOUT the " +
-        "per-server cards array — #4198 measured that array at 67-81 KB on a fleet this size, large enough " +
+        "per-server cards array, #4198 measured that array at 67-81 KB on a fleet this size, large enough " +
         "that Claude Code refused it inline outright. Pass detail=\"cards\" for the full per-server detail " +
         "this tool returned before #4198, once you already know which server needs it; cards_included says " +
         "which shape you got, and a summary response's cards_note repeats the lever. worst_only and band " +
@@ -105,7 +105,7 @@ public sealed class DarlingMcpFleetTools
         [Description("Hours of blocking/deadlock history the per-server cards and fleet totals window over. Default 1.")] int hours_back = 1,
         [Description("\"summary\" (default): rollup, band counts, worst_servers, no cards array. \"cards\": adds every server's full card, this tool's shape before #4198. See tool guide.")] string detail = "summary",
         [Description("Cards-only: keep only cards already in worst_servers (the needs-attention list). No effect under detail=\"summary\". Default false.")] bool worst_only = false,
-        [Description("Cards-only filter: keep only cards at this FleetHealthBand — \"healthy\", \"warning\", \"critical\", or \"offline\" (case-insensitive). Ignored under detail=\"summary\". Omit for every band.")] string? band = null,
+        [Description("Cards-only filter: keep only cards at this FleetHealthBand, \"healthy\", \"warning\", \"critical\", or \"offline\" (case-insensitive). Ignored under detail=\"summary\". Omit for every band.")] string? band = null,
         MonitoredServerRegistryState? registryState = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)

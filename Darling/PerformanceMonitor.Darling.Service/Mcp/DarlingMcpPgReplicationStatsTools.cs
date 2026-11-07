@@ -89,7 +89,7 @@ public sealed class DarlingMcpPgReplicationStatsTools
                                 + "hour(s)",
                             coveredClaim: ". On a server with no replicas that is the expected answer.",
                             tail: " If a "
-                                + "replica is supposed to be attached, check get_pg_replication_slots — a slot "
+                                + "replica is supposed to be attached, check get_pg_replication_slots: a slot "
                                 + "that persists with nothing connected to it retains WAL indefinitely, which is "
                                 + "the case worth acting on."),
                         emptyNotice.AsHints()), emptyNotice), cancellationToken, windowStart);
@@ -129,7 +129,7 @@ public sealed class DarlingMcpPgReplicationStatsTools
                 truncated,
                 note = "Read the worst_* columns, not just the latest: lag is spiky and a sample catches "
                      + "one instant. `samples` against `total_samples` says how much of the window each "
-                     + "replica was actually connected for — a replica present in only a few captures "
+                     + "replica was actually connected for: a replica present in only a few captures "
                      + "reconnected repeatedly, which the latest lag figure alone would hide.",
                 replicas,
             }, McpHelpers.JsonOptions), notice);

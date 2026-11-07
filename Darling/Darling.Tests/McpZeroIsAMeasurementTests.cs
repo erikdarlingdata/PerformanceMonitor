@@ -400,7 +400,7 @@ public sealed class McpZeroIsAMeasurementTests
     public void ThePvsReason_IsNullOnlyWhenTheShareIsDefined_IncludingADefinedZero()
     {
         Assert.Null(DarlingMcpPvsTools.PctReason(pvsMeasured: true, databaseDataSizeMb: 1280));
-        Assert.Contains("unknown — not zero", DarlingMcpPvsTools.PctReason(pvsMeasured: false, databaseDataSizeMb: 1280), StringComparison.Ordinal);
+        Assert.Contains("unknown, not zero", DarlingMcpPvsTools.PctReason(pvsMeasured: false, databaseDataSizeMb: 1280), StringComparison.Ordinal);
         Assert.Contains("no denominator", DarlingMcpPvsTools.PctReason(pvsMeasured: true, databaseDataSizeMb: null), StringComparison.Ordinal);
         Assert.Contains("no denominator", DarlingMcpPvsTools.PctReason(pvsMeasured: true, databaseDataSizeMb: 0), StringComparison.Ordinal);
     }

@@ -562,7 +562,7 @@ public sealed class PgTargetQueriesTests
         Assert.Contains("No statement in this pass was beyond its own hour-of-week normal, so this card is context", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("or it has no trustworthy own-normal yet (first seen; a young store)", block.Investigation, StringComparison.Ordinal);
         /* The absolute share, named as routine context with the measured figures. */
-        Assert.Contains("The absolute share (at or above 60%) is context: on the measured fleet a top statement's share of a busy hour is at or above 25% 85% of the time and at or above 60% 44% of the time — routine", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("The absolute share (at or above 60%) is context: on the measured fleet a top statement's share of a busy hour is at or above 25% 85% of the time and at or above 60% 44% of the time, routine", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("re-keyed by a major upgrade", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("occurrence history restarts at one", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("threshold_lineage = 1", block.Investigation, StringComparison.Ordinal);
@@ -581,20 +581,20 @@ public sealed class PgTargetQueriesTests
         /* Named by the anomaly: the routine and the sigma are the sentence that says what decided. */
         var named = Detect(HeavyQueryId, 0.6002, mean: 0.22, stddev: 0.04, (MediumQueryId, 1), (LightQueryId, 0)).Anomaly!;
         var beyond = PgTargetAdvice.Compose(key, Lookup(fact, named))!;
-        Assert.Equal("One statement shape held 60% of the window's execution time — and its peak share of a single collection ran 9.5 times its usual variation above its own normal for this hour", beyond.Headline);
-        Assert.Contains("This is 9.5 times its usual variation above the statement's OWN hour-of-week normal (its own routine of 22% ± 4% for this hour-of-week) — which is the grade (ANOMALY_PG_BAD_ACTOR_SHARE, walked into this card)", beyond.Investigation, StringComparison.Ordinal);
+        Assert.Equal("One statement shape held 60% of the window's execution time and its peak share of a single collection ran 9.5 times its usual variation above its own normal for this hour", beyond.Headline);
+        Assert.Contains("This is 9.5 times its usual variation above the statement's OWN hour-of-week normal (its own routine of 22% ± 4% for this hour-of-week), which is the grade (ANOMALY_PG_BAD_ACTOR_SHARE, walked into this card)", beyond.Investigation, StringComparison.Ordinal);
 
         /* Within its own normal (the anomaly names another statement, this one's verdict is 1): context, said so. */
         var within = PgTargetAdvice.Compose(PgTargetFactKeys.BadActorKey(MediumQueryId), Lookup(BadActor(MediumQueryId, 0.3), named))!;
-        Assert.EndsWith(" — within its own normal for this hour", within.Headline, StringComparison.Ordinal);
+        Assert.EndsWith(": within its own normal for this hour", within.Headline, StringComparison.Ordinal);
         Assert.Contains("This is WITHIN the statement's own hour-of-week normal", within.Investigation, StringComparison.Ordinal);
         Assert.Contains("a routine dominant statement, not a bad actor by its own history", within.Investigation, StringComparison.Ordinal);
         Assert.Contains("The absolute share (between 25% and 60%) is context", within.Investigation, StringComparison.Ordinal);
 
         /* No own normal yet (verdict 0): first seen, and never the absolute share standing in. */
         var none = PgTargetAdvice.Compose(PgTargetFactKeys.BadActorKey(LightQueryId), Lookup(BadActor(LightQueryId, 0.1), named))!;
-        Assert.EndsWith(" — no own-normal yet", none.Headline, StringComparison.Ordinal);
-        Assert.Contains("The statement has no trustworthy own-normal yet — first seen, or on a store too young", none.Investigation, StringComparison.Ordinal);
+        Assert.EndsWith(": no own-normal yet", none.Headline, StringComparison.Ordinal);
+        Assert.Contains("The statement has no trustworthy own-normal yet (first seen, or on a store too young", none.Investigation, StringComparison.Ordinal);
         Assert.Contains("never the absolute share standing in for a baseline", none.Investigation, StringComparison.Ordinal);
         Assert.Contains("The absolute share (under 25%) is context", none.Investigation, StringComparison.Ordinal);
 
@@ -602,7 +602,7 @@ public sealed class PgTargetQueriesTests
         var also = Detect(MediumQueryId, 0.55, mean: 0.10, stddev: 0.02, (HeavyQueryId, 2)).Anomaly!;
         var alsoBeyond = PgTargetAdvice.Compose(key, Lookup(fact, also))!;
         Assert.Contains("This statement is also beyond its OWN hour-of-week normal this window; the pass's own-normal anomaly (ANOMALY_PG_BAD_ACTOR_SHARE) names queryid 42", alsoBeyond.Investigation, StringComparison.Ordinal);
-        Assert.EndsWith(" — and its peak share of a single collection ran 22.5 times its usual variation above its own normal for this hour", alsoBeyond.Headline, StringComparison.Ordinal);
+        Assert.EndsWith(" and its peak share of a single collection ran 22.5 times its usual variation above its own normal for this hour", alsoBeyond.Headline, StringComparison.Ordinal);
     }
 
     /// <summary>#3691: <c>max_exec_peakmem_bytes</c> is a CONTEXT fact carried the same way <c>max_exec_ms</c>
@@ -683,7 +683,7 @@ public sealed class PgTargetQueriesTests
         var card = BadActor(HeavyQueryId, 0.0006);
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyBadActorShare, Lookup(named, card))!;
 
-        Assert.Equal("One statement reached 100% of a single collection's execution time — against a history in which it held none of this hour", block.Headline);
+        Assert.Equal("One statement reached 100% of a single collection's execution time, against a history in which it held none of this hour", block.Headline);
         Assert.DoesNotContain("30.5", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("±", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("never above zero at this hour-of-week", block.Investigation, StringComparison.Ordinal);
@@ -694,7 +694,7 @@ public sealed class PgTargetQueriesTests
 
         /* The statement's own card walks into the same anomaly: its headline suffix and verdict sentence read the same way. */
         var walked = PgTargetAdvice.Compose(PgTargetFactKeys.BadActorKey(HeavyQueryId), Lookup(BadActor(HeavyQueryId, 0.0006), named))!;
-        Assert.EndsWith(" — and its peak share of a single collection came against a history in which it held none of this hour", walked.Headline, StringComparison.Ordinal);
+        Assert.EndsWith(" and its peak share of a single collection came against a history in which it held none of this hour", walked.Headline, StringComparison.Ordinal);
         Assert.Contains("This was scored at the display cap (25) against the statement's OWN hour-of-week normal", walked.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("usual variation", walked.Headline, StringComparison.Ordinal);
         Assert.DoesNotContain("usual variation", walked.Investigation, StringComparison.Ordinal);
@@ -707,7 +707,7 @@ public sealed class PgTargetQueriesTests
         var card = BadActor(HeavyQueryId, 0.612);
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyBadActorShare, Lookup(named, card))!;
 
-        Assert.Equal("One statement reached 61% of a single collection's execution time — 9.8 times its usual variation above its own normal for this hour", block.Headline);
+        Assert.Equal("One statement reached 61% of a single collection's execution time: 9.8 times its usual variation above its own normal for this hour", block.Headline);
         Assert.Contains("Statement queryid -1234567890123456789 held 61.2% of the window's total statement execution time. Its own normal is judged on its share of each collection's execution time, not on that window total: against its own routine of 22% ± 4% for this hour-of-week, it sat 9.8 times its usual variation above normal on the window's peak per-collection share (61.2%) and 9.8 times on its mean (61.2%), over 48 baseline samples.", block.Investigation, StringComparison.Ordinal);
         /* The card's figures, borrowed so the anomaly's story states the same numbers. */
         Assert.Contains("The statement ran 2,640 calls averaging 227.4 ms per call this window; its PG_BAD_ACTOR card carries the rest", block.Investigation, StringComparison.Ordinal);
@@ -1120,7 +1120,7 @@ public sealed class PgTargetQueriesTests
                 /* #7567: the share beside the deviation is the per-collection peak it was measured on, and the capped value reads as a floor. */
                 var headline = advice.GetProperty("headline").GetString()!;
                 Assert.StartsWith("One statement reached ", headline, StringComparison.Ordinal);
-                Assert.EndsWith("% of a single collection's execution time — at least 25 times its usual variation above its own normal for this hour", headline, StringComparison.Ordinal);
+                Assert.EndsWith("% of a single collection's execution time: at least 25 times its usual variation above its own normal for this hour", headline, StringComparison.Ordinal);
                 var investigation = advice.GetProperty("investigation").GetString()!;
                 Assert.Contains("queryid -1234567890123456789", investigation, StringComparison.Ordinal);
                 Assert.Contains("against its own routine of 10% ± 0.1% for this hour-of-week", investigation, StringComparison.Ordinal);

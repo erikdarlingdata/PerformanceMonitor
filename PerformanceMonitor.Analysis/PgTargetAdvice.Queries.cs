@@ -56,20 +56,20 @@ public static partial class PgTargetAdvice
             "taken over EVERY shape that ran in the window, not over the handful returned. A large share alone is " +
             "routine: on the measured fleet (50 Aurora PostgreSQL clusters, 2026-09-20) the top statement of a busy " +
             "hour holds at least a quarter of it 85 % of the time and at least six tenths 44 % of the time, so this " +
-            "card is CONTEXT — the fleet-measured busy floor admitted it, and the share bars are named lines, not " +
+            "card is CONTEXT, the fleet-measured busy floor admitted it, and the share bars are named lines, not " +
             "the grade. The grade is the statement's deviation from its OWN hour-of-week share baseline " +
             "(ANOMALY_PG_BAD_ACTOR_SHARE): a statement at its usual share is the workload; a statement far above its " +
             "usual share is the story, and that anomaly walks into this card when it fires. A statement first seen, " +
-            "or on a store too young to hold its normal, has no own-normal yet and stays a context card — never " +
+            "or on a store too young to hold its normal, has no own-normal yet and stays a context card, never " +
             "graded on the absolute share in its place. The statement is identified by queryid, which is stable " +
             "within a PostgreSQL major version and is RE-KEYED by a major upgrade (and by a change to " +
             "compute_query_id or the extension version), so this finding's occurrence history restarts at one " +
-            "across an upgrade — the drill-down carries the normalised text and a hash of it, which is how the same " +
+            "across an upgrade: the drill-down carries the normalised text and a hash of it, which is how the same " +
             "statement is recognised on the other side.",
         Remediation:
             "Read the statement's own deltas in the drill-down and in get_pg_top_queries, then decide which factor of " +
             "total = calls × mean to move. Fewer calls (caching, batching, removing a per-row round trip) trades " +
-            "result freshness and application change; a cheaper call (a plan that touches fewer pages — an index " +
+            "result freshness and application change; a cheaper call (a plan that touches fewer pages, an index " +
             "on the filtered or joined columns, a rewritten predicate, fresh statistics) trades write amplification " +
             "and vacuum work on the indexed table, and a new index can change other statements' plans, so it is a " +
             "thing to test. get_pg_plans has the captured plan when auto_explain is " +
@@ -115,7 +115,7 @@ public static partial class PgTargetAdvice
         if (databases > 1)
             inv.Append(CultureInfo.InvariantCulture, $" The same shape ran against {databases:0} databases; the figures are the total across them.");
         if (tempBlocks > 0)
-            inv.Append(CultureInfo.InvariantCulture, $" It wrote {tempBlocks:N0} temp blocks in the window — part of any work_mem spill story on this server.");
+            inv.Append(CultureInfo.InvariantCulture, $" It wrote {tempBlocks:N0} temp blocks in the window: part of any work_mem spill story on this server.");
 
         /* The statement's own normal: the sentence that says what decided. */
         inv.Append(' ').Append(OwnNormalSentence(ownNormal, anomaly, queryId, share));
@@ -150,17 +150,17 @@ public static partial class PgTargetAdvice
         Headline: "One statement held far more of the window's execution time than is normal for it at this hour",
         Investigation:
             "One statement's share of the window's total execution time (pg_stat_statements' stored deltas, every " +
-            "shape that ran) was judged against THAT STATEMENT's own hour-of-week share over the last 30 days — the " +
-            "share it usually takes at this hour on this day of the week — and both the window's peak per-collection " +
+            "shape that ran) was judged against THAT STATEMENT's own hour-of-week share over the last 30 days: the " +
+            "share it usually takes at this hour on this day of the week, and both the window's peak per-collection " +
             "share and its mean cleared the cutoff, so one busy minute does not fire it. This is the bad actor's " +
             "grade: a statement at its usual share, however large, is the workload; a statement far above its usual " +
-            "share is the story, and the absolute share is context — on the measured fleet the top statement of a " +
+            "share is the story, and the absolute share is context, on the measured fleet the top statement of a " +
             "busy hour routinely holds a quarter to six tenths of it. The statement's PG_BAD_ACTOR card carries the " +
             "share, the calls, the per-call mean and the drill-down's text, and this anomaly walks into it. queryid " +
             "is re-keyed by a major upgrade, so the statement's own baseline restarts with it." + s_anomalyHedge,
         Remediation:
             "get_pg_query_duration_trend for the statement says whether its mean STEPPED (a plan change) or its calls " +
-            "did (a workload change) — the first question; get_pg_top_queries shows the window's other statements " +
+            "did (a workload change): the first question; get_pg_top_queries shows the window's other statements " +
             "beside it; get_pg_plans has the captured plan where auto_explain is configured. " + s_anomalyRemediation);
 
     /// <summary>
@@ -214,7 +214,7 @@ public static partial class PgTargetAdvice
         inv.Append(s_anomalyHedge);
 
         var rem = new StringBuilder();
-        rem.Append(CultureInfo.InvariantCulture, $"get_pg_query_duration_trend for queryid {queryId} says whether its mean STEPPED (a plan change) or its calls did (a workload change) — the first question.");
+        rem.Append(CultureInfo.InvariantCulture, $"get_pg_query_duration_trend for queryid {queryId} says whether its mean STEPPED (a plan change) or its calls did (a workload change): the first question.");
         rem.Append(LeversSentence());
         rem.Append(' ').Append(s_anomalyRemediation);
 
@@ -223,8 +223,8 @@ public static partial class PgTargetAdvice
             /* #7567: the headline's share is the one the deviation was measured on (the peak per-collection share), never the
                window's, so the number and the "times" beside it describe the same thing. A zero-history bucket has no "times". */
             Headline = zeroHistory
-                ? string.Format(CultureInfo.InvariantCulture, "One statement reached {0:0}% of a single collection's execution time — against a history in which it held none of this hour", peakShare * 100)
-                : string.Format(CultureInfo.InvariantCulture, "One statement reached {0:0}% of a single collection's execution time — {1} times its usual variation above its own normal for this hour", peakShare * 100, Sigma(sigma)),
+                ? string.Format(CultureInfo.InvariantCulture, "One statement reached {0:0}% of a single collection's execution time, against a history in which it held none of this hour", peakShare * 100)
+                : string.Format(CultureInfo.InvariantCulture, "One statement reached {0:0}% of a single collection's execution time: {1} times its usual variation above its own normal for this hour", peakShare * 100, Sigma(sigma)),
             Investigation = inv.ToString(),
             Remediation = rem.ToString(),
         };
@@ -249,22 +249,22 @@ public static partial class PgTargetAdvice
         {
             case 2 when anomaly is not null && string.Equals(anomaly.ObjectName, queryId, StringComparison.Ordinal) && IsZeroHistory(anomaly):
                 return string.Format(CultureInfo.InvariantCulture,
-                    "This was scored at the display cap ({0:0.#}) against the statement's OWN hour-of-week normal ({1}) — which is the grade (ANOMALY_PG_BAD_ACTOR_SHARE, walked into this card): the statement holds far more of the window than it usually holds of this hour.",
+                    "This was scored at the display cap ({0:0.#}) against the statement's OWN hour-of-week normal ({1}), which is the grade (ANOMALY_PG_BAD_ACTOR_SHARE, walked into this card): the statement holds far more of the window than it usually holds of this hour.",
                     AnomalyThresholds.SigmaDisplayCap, RoutineClause(anomaly));
             case 2 when anomaly is not null && string.Equals(anomaly.ObjectName, queryId, StringComparison.Ordinal):
                 return string.Format(CultureInfo.InvariantCulture,
-                    "This is {0} times its usual variation above the statement's OWN hour-of-week normal ({1}) — which is the grade (ANOMALY_PG_BAD_ACTOR_SHARE, walked into this card): the statement holds far more of the window than it usually holds of this hour.",
+                    "This is {0} times its usual variation above the statement's OWN hour-of-week normal ({1}), which is the grade (ANOMALY_PG_BAD_ACTOR_SHARE, walked into this card): the statement holds far more of the window than it usually holds of this hour.",
                     Sigma(anomaly.Metadata.GetValueOrDefault("deviation_sigma")), RoutineClause(anomaly));
             case 2:
                 return string.Format(CultureInfo.InvariantCulture,
                     "This statement is also beyond its OWN hour-of-week normal this window; the pass's own-normal anomaly (ANOMALY_PG_BAD_ACTOR_SHARE) names queryid {0}, the statement furthest beyond its normal, and this card is context beside it.",
                     anomaly?.ObjectName ?? "?");
             case 1:
-                return "This is WITHIN the statement's own hour-of-week normal — the share it usually takes at this hour on this day of the week — so the card is context: a routine dominant statement, not a bad actor by its own history.";
+                return "This is WITHIN the statement's own hour-of-week normal (the share it usually takes at this hour on this day of the week), so the card is context: a routine dominant statement, not a bad actor by its own history.";
             case 0:
-                return "The statement has no trustworthy own-normal yet — first seen, or on a store too young to hold its hour-of-week share — so nothing grades it: the card is context, never the absolute share standing in for a baseline.";
+                return "The statement has no trustworthy own-normal yet (first seen, or on a store too young to hold its hour-of-week share), so nothing grades it: the card is context, never the absolute share standing in for a baseline.";
             default:
-                return "No statement in this pass was beyond its own hour-of-week normal, so this card is context: either this statement is within the share it usually takes at this hour, or it has no trustworthy own-normal yet (first seen; a young store) — the two read the same until its history exists.";
+                return "No statement in this pass was beyond its own hour-of-week normal, so this card is context: either this statement is within the share it usually takes at this hour, or it has no trustworthy own-normal yet (first seen; a young store), the two read the same until its history exists.";
         }
     }
 
@@ -312,21 +312,21 @@ public static partial class PgTargetAdvice
                 ? string.Format(CultureInfo.InvariantCulture, "between {0:0}% and {1:0}%", PgTargetScorer.BadActorShareConcerning * 100, PgTargetScorer.BadActorShareCritical * 100)
                 : string.Format(CultureInfo.InvariantCulture, "under {0:0}%", PgTargetScorer.BadActorShareConcerning * 100);
         return string.Format(CultureInfo.InvariantCulture,
-            " The absolute share ({0}) is context: on the measured fleet a top statement's share of a busy hour is at or above {1:0}% 85% of the time and at or above {2:0}% 44% of the time — routine, which is why the share does not grade this card and the fleet-measured busy floor only admits it.",
+            " The absolute share ({0}) is context: on the measured fleet a top statement's share of a busy hour is at or above {1:0}% 85% of the time and at or above {2:0}% 44% of the time, routine, which is why the share does not grade this card and the fleet-measured busy floor only admits it.",
             band, PgTargetScorer.BadActorShareConcerning * 100, PgTargetScorer.BadActorShareCritical * 100);
     }
 
     private static string LeversSentence() =>
-        " If the mean is already small for what the statement does, the lever is running it less often — caching, batching, removing a per-row round trip — which trades result freshness and needs an application change." +
-        " If the mean is large, the lever is one execution — a plan that touches fewer pages: an index on the filtered or joined columns, a rewritten predicate, fresh statistics — which trades write amplification and vacuum work on the indexed table, and a new index can change other statements' plans, so it is a thing to test, not a promise." +
+        " If the mean is already small for what the statement does, the lever is running it less often (caching, batching, removing a per-row round trip), which trades result freshness and needs an application change." +
+        " If the mean is large, the lever is one execution, a plan that touches fewer pages: an index on the filtered or joined columns, a rewritten predicate, fresh statistics, which trades write amplification and vacuum work on the indexed table, and a new index can change other statements' plans, so it is a thing to test, not a promise." +
         " get_pg_query_duration_trend for this queryid says whether the mean STEPPED (a plan change) or the calls did (a workload change); get_pg_plans has the captured plan when auto_explain is configured.";
 
     private static string HeadlineSuffix(int? ownNormal, Fact? anomaly) => ownNormal switch
     {
-        2 when anomaly is not null && IsZeroHistory(anomaly) => " — and its peak share of a single collection came against a history in which it held none of this hour",
-        2 when anomaly is not null => string.Format(CultureInfo.InvariantCulture, " — and its peak share of a single collection ran {0} times its usual variation above its own normal for this hour", Sigma(anomaly.Metadata.GetValueOrDefault("deviation_sigma"))),
-        1 => " — within its own normal for this hour",
-        0 => " — no own-normal yet",
+        2 when anomaly is not null && IsZeroHistory(anomaly) => ", and its peak share of a single collection came against a history in which it held none of this hour",
+        2 when anomaly is not null => string.Format(CultureInfo.InvariantCulture, ", and its peak share of a single collection ran {0} times its usual variation above its own normal for this hour", Sigma(anomaly.Metadata.GetValueOrDefault("deviation_sigma"))),
+        1 => ": within its own normal for this hour",
+        0 => ": no own-normal yet",
         _ => string.Empty,
     };
 

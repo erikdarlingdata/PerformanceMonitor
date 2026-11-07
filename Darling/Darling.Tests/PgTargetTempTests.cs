@@ -267,10 +267,10 @@ public sealed class PgTargetTempTests
         var lookup = facts.ToDictionary(f => f.Key, StringComparer.Ordinal);
 
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.TempSpill, lookup)!;
-        Assert.Equal("Temp-file spill: 2 MB/s of observed time — 28 GB across 239 temp files in the window, 100% of it in appdb", block.Headline);
-        Assert.Contains("this server wrote 28 GB in 239 temp files — 2 MB/s, 0.017 files/s, an average of 120 MB per file", block.Investigation, StringComparison.Ordinal);
+        Assert.Equal("Temp-file spill: 2 MB/s of observed time, 28 GB across 239 temp files in the window, 100% of it in appdb", block.Headline);
+        Assert.Contains("this server wrote 28 GB in 239 temp files: 2 MB/s, 0.017 files/s, an average of 120 MB per file", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("the counters were reset 1 time(s) in the window (1 rewind(s) seen), each clamped to zero", block.Investigation, StringComparison.Ordinal);
-        Assert.Contains("is fleet-measured — about the 99.7th percentile of the measured fleet's five-minute spill rates (threshold_lineage = 1)", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("is fleet-measured, about the 99.7th percentile of the measured fleet's five-minute spill rates (threshold_lineage = 1)", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("work_mem on this host is 4 MB, the shipped default", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("pg_temp_spill_statements", block.Investigation, StringComparison.Ordinal);
         /* The counter-objective with the host's numbers: 4 MB × 200 = 800 MB. */
@@ -290,7 +290,7 @@ public sealed class PgTargetTempTests
     {
         var lookup = new Dictionary<string, Fact>(StringComparer.Ordinal) { [PgTargetFactKeys.ConfigWorkMem] = Config(PgTargetFactKeys.ConfigWorkMem, 4) };
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.ConfigWorkMem, lookup)!;
-        Assert.Equal("work_mem is 4 MB — a value alone is not a finding", block.Headline);
+        Assert.Equal("work_mem is 4 MBa value alone is not a finding", block.Headline);
         Assert.Contains("evidence-gated (D5)", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("On this host it is 4 MB, the shipped default.", block.Investigation, StringComparison.Ordinal);
         Assert.StartsWith("Nothing to change on this value alone.", block.Remediation, StringComparison.Ordinal);
@@ -304,7 +304,7 @@ public sealed class PgTargetTempTests
         spill.Severity = 0.7;
         var lookup = new Dictionary<string, Fact>(StringComparer.Ordinal) { [PgTargetFactKeys.TempSpill] = spill };
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.TempSpill, lookup)!;
-        Assert.Contains("work_mem on this host is not known here — the config snapshot has not been collected", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("work_mem on this host is not known here (the config snapshot has not been collected", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("Here:", block.Remediation, StringComparison.Ordinal);
         Assert.DoesNotContain("4 MB", block.Investigation + block.Remediation, StringComparison.Ordinal);
     }
@@ -315,7 +315,7 @@ public sealed class PgTargetTempTests
         var rate = DeadlockRate(24.75, counter: 99, exemplars: 3, observedHours: 4);
         var lookup = new Dictionary<string, Fact>(StringComparer.Ordinal) { [PgTargetFactKeys.DeadlockRate] = rate };
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.DeadlockRate, lookup)!;
-        Assert.Equal("24.75 deadlocks per hour over 4 hours — the engine counted 99; 3 were captured from the log", block.Headline);
+        Assert.Equal("24.75 deadlocks per hour over 4 hours: the engine counted 99; 3 were captured from the log", block.Headline);
         Assert.Contains("the engine counted 99; 3 were captured from the log", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("99 of them in appdb", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("The two differ by design, not by defect", block.Investigation, StringComparison.Ordinal);
@@ -325,7 +325,7 @@ public sealed class PgTargetTempTests
         /* The exemplar read failed: the count is not fabricated as 0. */
         var noExemplars = DeadlockRate(3, counter: 12, exemplars: null, observedHours: 4);
         var block2 = PgTargetAdvice.Compose(PgTargetFactKeys.DeadlockRate, new Dictionary<string, Fact>(StringComparer.Ordinal) { [PgTargetFactKeys.DeadlockRate] = noExemplars })!;
-        Assert.Equal("3 deadlocks per hour over 4 hours — the engine counted 12", block2.Headline);
+        Assert.Equal("3 deadlocks per hour over 4 hours: the engine counted 12", block2.Headline);
         Assert.Contains("The log capture was not read this pass", block2.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("0 were captured", block2.Investigation, StringComparison.Ordinal);
     }
@@ -358,7 +358,7 @@ public sealed class PgTargetTempTests
         }
 
         Assert.Equal("1.68 transactions per second of observed time (1% rollbacks)", PgTargetAdvice.Compose(PgTargetFactKeys.Tps, lookup)!.Headline);
-        Assert.StartsWith("Buffer-cache hit ratio — read from PG_BUFFER_CACHE_PRESSURE", PgTargetAdvice.Static(PgTargetFactKeys.HitRatio)!.Headline, StringComparison.Ordinal);
+        Assert.StartsWith("Buffer-cache hit ratio: read from PG_BUFFER_CACHE_PRESSURE", PgTargetAdvice.Static(PgTargetFactKeys.HitRatio)!.Headline, StringComparison.Ordinal);
     }
 
     /* ───────────────────────── the SQL, by its own text ───────────────────────── */
