@@ -408,7 +408,11 @@ public partial class MainWindow : Window
                 isStoryMuted: async (serverId, storyPathHash) =>
                     (await muteReadStore.GetMutedStoryHashesAsync(serverId)).Contains(storyPathHash),
                 /* #7084 part 4: a finding that would page attaches to an engine alert still open on its server. */
-                findOpenEngineAlert: _alertHistoryStore.FindOpenEngineAlertAsync);
+                findOpenEngineAlert: _alertHistoryStore.FindOpenEngineAlertAsync,
+                /* #8012: a held story whose path loses a leaf is seeded from the wider path's page row. The wider path
+                   is found among the distinct paths this server has stored under the same root across the findings
+                   retention, so a restart long after the path shortened still finds it. */
+                getStoredStoryPaths: muteReadStore.GetStoryPathsAsync);
 
             _backgroundService = new CollectionBackgroundService(
                 _collectorService, _databaseInitializer, archiveService, retentionService, _serverManager,
