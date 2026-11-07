@@ -47,6 +47,8 @@ public sealed class FinOpsUtilizationCellFitTests
                 var avg = (DataGrid)tab.FindName("TopAvgGrid");
                 total.ItemsSource = Rows();
                 avg.ItemsSource = Rows();
+                Reveal(total);
+                tab.UpdateLayout();
                 ClippedTextProbe.Settle(window);
                 total.BringIntoView();
                 ClippedTextProbe.Settle(window);
@@ -73,6 +75,21 @@ public sealed class FinOpsUtilizationCellFitTests
         new() { DatabaseName = "tenant_b", CpuTimeMs = 987_654_321_098, ExecutionCount = 999_999_999_999, IoTotalMb = 98_765.43m, PctCpu = 30.1m, PctIo = 80.0m, AvgCpuMs = 1_234_567.89m, AvgIoMb = 123_456.78m },
         new() { DatabaseName = "tenant_c", CpuTimeMs = 4_210, ExecutionCount = 12_609, IoTotalMb = 1.5m, PctCpu = 0.3m, PctIo = 0.1m, AvgCpuMs = 0.33m, AvgIoMb = 0.01m },
     ];
+
+    /// <summary>
+    /// Selects the sub-tab that holds <paramref name="element"/>. A TabItem's content is in the visual tree only while it is selected, and
+    /// Utilization is not the first sub-tab, so a grid left on an unselected tab has no layout and realizes no rows.
+    /// </summary>
+    private static void Reveal(FrameworkElement element)
+    {
+        for (DependencyObject? at = element; at is not null; at = LogicalTreeHelper.GetParent(at))
+        {
+            if (at is TabItem item && ItemsControl.ItemsControlFromItemContainer(item) is TabControl owner)
+            {
+                owner.SelectedItem = item;
+            }
+        }
+    }
 
     /// <summary>
     /// Every realized cell of <paramref name="grid"/> whose text needs more width than its TextBlock was given, plus any of
