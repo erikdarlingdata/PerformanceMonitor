@@ -70,7 +70,7 @@ public static class SchemaCatalogQueries
     }
 
     private const string Prologue =
-        "SET NOCOUNT ON;\r\n"
+        "SET NOCOUNT ON; /* PerformanceMonitorLite */\r\n"
         + "IF OBJECT_ID(N'tempdb..#pm_schema_ids') IS NOT NULL DROP TABLE #pm_schema_ids;\r\n"
         + "CREATE TABLE #pm_schema_ids (object_id int NOT NULL PRIMARY KEY);\r\n";
 

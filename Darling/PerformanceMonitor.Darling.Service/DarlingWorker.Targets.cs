@@ -1342,7 +1342,11 @@ public sealed partial class DarlingWorker
                 /* null for the same reason as the on-load loop: an operator snapshot is not a body. */
                 using (snapshotSlot)
                 {
-                    totalRows += await RunOneAsync(server, runner, name, peerMaxAtDispatchMs: null, cancellationToken);
+                    /* #7643: a collector that tells a run the operator asked for from the sweep (the schema pass reads every database in full) sees it here. */
+                    using (DarlingSnapshotScope.Enter())
+                    {
+                        totalRows += await RunOneAsync(server, runner, name, peerMaxAtDispatchMs: null, cancellationToken);
+                    }
                 }
 
                 collectorsRun++;
@@ -3925,6 +3929,8 @@ LIMIT 1";
         ["query_store_forced_plans"] = (r, s, ct) => r.RunAsync(QueryStoreForcedPlansCollector.Instance, s, ct),
         ["query_store_hints"] = (r, s, ct) => r.RunAsync(QueryStoreHintsCollector.Instance, s, ct),
         ["identity_capacity"] = (r, s, ct) => r.RunAsync(IdentityCapacityCollector.Instance, s, ct),
+        /* #7643: the schema pass has its own run (events, probe, per-database catalog reads, versioned store), not the one-query path. */
+        ["schema_objects"] = (r, s, ct) => DarlingSchemaCapture.RunAsync(r, s, ct),
         ["agent_alerts"] = (r, s, ct) => r.RunAsync(AgentAlertsCollector.Instance, s, ct),
         ["database_protection"] = (r, s, ct) => r.RunAsync(DatabaseProtectionCollector.Instance, s, ct),
         ["pvs_stats"] = (r, s, ct) => r.RunAsync(PvsStatsCollector.Instance, s, ct),

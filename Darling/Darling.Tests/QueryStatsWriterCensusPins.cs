@@ -71,6 +71,9 @@ public sealed class QueryStatsWriterCensusPins
 {
     private const string RunnerFile = "PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs";
     private const string CopyWriterFile = "PerformanceMonitor.Darling.Service/Targets/RdsCopyWriter.cs";
+
+    /// <summary>#7643: the schema version store copies the child rows of a schema version (columns, indexes, constraints, triggers) into four fixed <c>collect.schema_*</c> tables, by literal COPY text.</summary>
+    private const string SchemaStoreFile = "PerformanceMonitor.Darling.Storage/SchemaVersionStore.cs";
     private const string TheWriter = "CopyBatchOnceAsync";
     private const string TableName = "query_stats";
     private const int LedgerRung = 164;
@@ -313,6 +316,12 @@ public sealed class QueryStatsWriterCensusPins
         var writers = new SortedSet<string>(FindLiteralWriters(sources), StringComparer.Ordinal);
         foreach (var site in FindImportSites(sources))
         {
+            if (site.File == SchemaStoreFile)
+            {
+                /* Its COPY text names a fixed schema_* table; a literal COPY of query_stats there is arm 1's hit, and the second fact reads the text. */
+                continue;
+            }
+
             if (site.File == CopyWriterFile && site.Definition == "definition")
             {
                 /* The helper copies over whatever its caller hands it, so the sites that matter are the callers, judged below. */
@@ -383,15 +392,22 @@ public sealed class QueryStatsWriterCensusPins
         var sources = LoadSources();
         var sites = FindImportSites(sources);
 
-        /* The runner's one site, and RdsCopyWriter's one, and nothing else. */
-        var expected = new SortedSet<string>(new[] { RunnerFile, CopyWriterFile }, StringComparer.Ordinal);
+        /* The runner's one site, RdsCopyWriter's one, and the schema version store's four (#7643), and nothing else. */
+        var expected = new SortedSet<string>(new[] { RunnerFile, CopyWriterFile, SchemaStoreFile }, StringComparer.Ordinal);
         var actual = new SortedSet<string>(sites.Select(s => s.File), StringComparer.Ordinal);
         Assert.True(
             actual.SetEquals(expected),
             WhyItMatters(
                 "Every COPY start must be on the register. Found COPY starts in: {" + string.Join(", ", actual)
                 + "}, expected: {" + string.Join(", ", expected) + "}."));
-        Assert.Equal(expected.Count, sites.Count);
+        Assert.Equal(expected.Count - 1, sites.Count(s => s.File != SchemaStoreFile));
+        var schemaSites = sites.Where(s => s.File == SchemaStoreFile).ToList();
+        Assert.NotEmpty(schemaSites);
+        Assert.All(schemaSites, s =>
+        {
+            Assert.Contains("COPY collect.schema_", s.Argument, StringComparison.Ordinal);
+            Assert.DoesNotContain(TableName + " ", s.Argument, StringComparison.OrdinalIgnoreCase);
+        });
 
         var textByFile = sources.ToDictionary(s => s.File, s => s.Text, StringComparer.Ordinal);
         /* RdsCopyWriter copies over the definition its caller passes, and no file but the register's calls it. */

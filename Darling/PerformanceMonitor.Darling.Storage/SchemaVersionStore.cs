@@ -430,7 +430,7 @@ FROM collect.schema_objects WHERE version_id = $1", c, tx);
         await import.CompleteAsync(ct);
     }
 
-    private static async Task UpsertStateAsync(NpgsqlConnection c, NpgsqlTransaction tx, SchemaCaptureStateRow s, CancellationToken ct)
+    internal static async Task UpsertStateAsync(NpgsqlConnection c, NpgsqlTransaction? tx, SchemaCaptureStateRow s, CancellationToken ct)
     {
         await using var cmd = new NpgsqlCommand(@"
 INSERT INTO collect.schema_capture_state (

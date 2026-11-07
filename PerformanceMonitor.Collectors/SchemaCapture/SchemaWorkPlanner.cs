@@ -76,6 +76,9 @@ public static class SchemaWorkPlanner
     private const int IndexType = 22601;
     private const int SchemaType = 17235;
 
+    /// <summary>The start of the reason a database is skipped while the session does not run.</summary>
+    public const string NoChangeTrackingPrefix = "No change tracking: ";
+
     private const string ObjectAltered = "object_altered";
     private const string ModuleEnd = "module_end";
 
@@ -103,7 +106,7 @@ public static class SchemaWorkPlanner
         ArgumentNullException.ThrowIfNull(inScope);
 
         var scope = new HashSet<string>(inScope, StringComparer.OrdinalIgnoreCase);
-        var sameSession = SameSession(serverState, session);
+        var sameSession = IsSameSession(serverState, session);
         var fresh = Fresh(batch, serverState, sameSession);
         var restarted = serverState?.SessionCreateTime is not null
             && session.CreateTimeUtc is not null
@@ -150,7 +153,7 @@ public static class SchemaWorkPlanner
 
         if (!session.Running)
         {
-            return Make(probe, SchemaDatabaseWork.Skip, "No change tracking: " + (session.FaultMessage ?? "the schema-changes session is not running."), key);
+            return Make(probe, SchemaDatabaseWork.Skip, NoChangeTrackingPrefix + (session.FaultMessage ?? "the schema-changes session is not running."), key);
         }
 
         if (restarted)
@@ -216,7 +219,7 @@ public static class SchemaWorkPlanner
 
     /* The create time the server reports for one running session is not stable to the millisecond: two reads of the same session were
        seen a few milliseconds apart. A real restart is a stop and a start, seconds apart at the least, so a second is the tolerance. */
-    private static bool SameSession(SchemaCaptureStateRow? serverState, SchemaSessionState session) =>
+    public static bool IsSameSession(SchemaCaptureStateRow? serverState, SchemaSessionState session) =>
         serverState?.SessionCreateTime is { } stored
         && session.CreateTimeUtc is { } now
         && (stored - now).Duration() < TimeSpan.FromSeconds(1);

@@ -133,6 +133,9 @@ public static class CollectorScheduleDefaults
         /* #6875 identity column capacity. A column fills over months, so a read every six hours is plenty and costs little: catalog views only,
            at most 21 rows per database. 90 days keeps enough samples for the time-to-exhaustion estimate. */
         ["identity_capacity"] = new(360, 90),
+        /* #7643 schema tracking: table and view definitions kept as versions. Off until switched on, because the change-tracking session needs
+           ALTER ANY EVENT SESSION. A pass reads the session and only the databases it names, so 15 minutes is cheap. Closed versions are kept 30 days. */
+        ["schema_objects"] = new(15, 30, DefaultEnabled: false),
         /* #1951 ADR persistent version store. Cadence and retention deliberately MATCH
            database_size_stats (60/90) rather than the per-minute health tier: PVS size is the same
            kind of slow-moving disk-pressure telemetry, it is read beside database sizes, and pairing

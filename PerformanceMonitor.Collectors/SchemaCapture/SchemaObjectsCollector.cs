@@ -20,8 +20,8 @@ namespace PerformanceMonitor.Collectors;
 /// read and written, so "nothing changed" and "nothing was read" are not the same stored answer. The definitions themselves go to the
 /// <c>schema_*</c> version tables, which the store writer owns.
 ///
-/// <para>The pass runs through <c>DarlingSchemaCapture</c>, not through the host's one-query path, so <see cref="BuildQuery"/> and
-/// <see cref="ReadAsync"/> are not used yet.</para>
+/// <para>The pass runs through <c>DarlingSchemaCapture</c>, not through the host's one-query path. <see cref="BuildQuery"/> is the
+/// per-pass database probe, so the definition is complete for anything that reads it, and <see cref="ReadAsync"/> is not used.</para>
 ///
 /// <para>A plain table on every store (<see cref="StaysPlainTable"/>).</para>
 /// </summary>
@@ -56,8 +56,10 @@ public sealed class SchemaObjectsCollector : CollectorDefinitionBase<SchemaObjec
     /// <summary>Darling stores and reads it; Lite has no twin (ruling 10-21: new collection is Darling-only).</summary>
     public override bool IsDarlingOnly => true;
 
-    public override CollectorQuery BuildQuery(CollectorContext context) =>
-        throw new NotSupportedException("schema_objects runs through DarlingSchemaCapture");
+    /// <summary>The session can be created on every target but an Amazon RDS Web or Express edition.</summary>
+    public override bool AppliesTo(CollectorTargetInfo target) => CollectorTargetInfo.XeSessionSupported(target);
+
+    public override CollectorQuery BuildQuery(CollectorContext context) => new(SchemaServerProbe.BuildSql());
 
     public override ValueTask<List<PassRow>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken) =>
         throw new NotSupportedException("schema_objects runs through DarlingSchemaCapture");

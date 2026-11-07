@@ -40,7 +40,7 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 {RingBufferXml.DeclareSql}
 
-SELECT /* PerformanceMonitorDarling */
+SELECT /* PerformanceMonitorLite */
     @ring_text = CONVERT(nvarchar(max), xet.target_data),
     @ring_session = xes.name
 FROM {targets} AS xet

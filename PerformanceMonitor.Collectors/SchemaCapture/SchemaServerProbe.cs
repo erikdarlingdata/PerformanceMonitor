@@ -34,7 +34,7 @@ public static class SchemaServerProbe
     public static string BuildSql() => @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT /* PerformanceMonitorDarling */
+SELECT /* PerformanceMonitorLite */
     name = d.name,
     database_id = d.database_id,
     state_desc = d.state_desc,
@@ -65,7 +65,7 @@ OPTION(RECOMPILE);";
     /// (the fork is null, which the planner reads as unchanged), and the database is a primary.
     /// </summary>
     public static string BuildAzureSql() => @"
-SELECT /* PerformanceMonitorDarling */
+SELECT /* PerformanceMonitorLite */
     name = d.name,
     database_id = d.database_id,
     state_desc = d.state_desc,

@@ -23,6 +23,7 @@ namespace Darling.Tests;
 /// <c>DARLING_TEST_SQL_USER</c> and <c>DARLING_TEST_SQL_PASSWORD</c>); <c>DARLING_TEST_SQL_READONLY=1</c> skips the class because it
 /// creates a session and a database. Each test uses its own install id and database, so it never touches another's.
 /// </summary>
+[Collection("schema-xe-live-sql")]
 public sealed class SchemaEventLiveSqlTests
 {
     private const string SkipMessage =

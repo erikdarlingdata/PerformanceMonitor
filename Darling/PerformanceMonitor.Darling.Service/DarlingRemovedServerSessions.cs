@@ -189,7 +189,7 @@ internal static class DarlingRemovedServerSessions
     /// that registration keeps. Elsewhere it is dropped from the server, or from each listed database but master. Nothing is opened
     /// for an install with no id. It never throws: the failure is logged, because a session left behind never stops the removal.
     /// </summary>
-    private static async Task DropSchemaSessionAsync(
+    internal static async Task<bool> DropSchemaSessionAsync(
         RemovedLongQueryServer removed,
         DarlingCollectorRunner runner,
         IReadOnlyList<MonitoredServer> others,
@@ -203,7 +203,7 @@ internal static class DarlingRemovedServerSessions
         var sessionName = SchemaChangesXeSession.TryNameFor(runner.InstallId);
         if (sessionName is null || !schemaOn(server.ServerId))
         {
-            return;
+            return true;
         }
 
         try
@@ -215,12 +215,12 @@ internal static class DarlingRemovedServerSessions
                 if (skipReason is not null)
                 {
                     logger.LogInformation("[{Server}] The schema-changes XE session was left in place on removal: {Reason}.", name, skipReason);
-                    return;
+                    return true;
                 }
 
                 await DropSchemaSessionInAsync(server, runner, string.Empty, sessionName, cancellationToken);
                 logger.LogInformation("[{Server}] Dropped the schema-changes XE session of the removed server", name);
-                return;
+                return true;
             }
 
             var registrations = DarlingWorker.LongQueryTraceRegistrations(
@@ -230,6 +230,7 @@ internal static class DarlingRemovedServerSessions
             var keptElsewhere = LongQueryTraceDatabases.KeptElsewhere(
                 server.ServerId.ToString(CultureInfo.InvariantCulture), server.Config.Host, listed, registrations, separatelyMonitored);
             var drop = LongQueryTraceDatabases.Plan(enabled: false, listed, Array.Empty<string>(), separatelyMonitored, keptElsewhere).Drop;
+            var allDropped = true;
             foreach (var database in drop)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -239,22 +240,27 @@ internal static class DarlingRemovedServerSessions
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
+                    allDropped = false;
                     logger.LogWarning(
                         "[{Server}] [{Database}] Could not drop the schema-changes XE session of the removed server; it may remain in the database: {Message}",
                         name, database, ex.Message);
                 }
             }
+
+            return allDropped;
         }
         catch (OperationCanceledException)
         {
             logger.LogWarning(
                 "[{Server}] The schema-changes XE session of the removed server was not dropped within {Seconds} seconds; it may remain on the server",
                 name, Timeout.TotalSeconds.ToString("0", CultureInfo.InvariantCulture));
+            return false;
         }
         catch (Exception ex)
         {
             logger.LogWarning(
                 "[{Server}] Could not drop the schema-changes XE session of the removed server; it may remain on the server: {Message}", name, ex.Message);
+            return false;
         }
     }
 

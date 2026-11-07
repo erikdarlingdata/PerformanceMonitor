@@ -21,6 +21,7 @@ namespace Darling.Tests;
 /// <c>DARLING_TEST_SQL_USER</c> / <c>DARLING_TEST_SQL_PASSWORD</c>), so it skips where the runner has no SQL Server. Each test creates
 /// and drops its own scratch database; <c>DARLING_TEST_SQL_READONLY=1</c> skips the class.
 /// </summary>
+[Collection("schema-xe-live-sql")]
 public sealed class SchemaCatalogLiveSqlTests
 {
     private static string? ConnectionString(string applicationName, string database = "master")

@@ -201,7 +201,7 @@ END;";
         return $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT /* PerformanceMonitorDarling */
+SELECT /* PerformanceMonitorLite */
     [exists] = CASE WHEN ses.name IS NOT NULL THEN 1 ELSE 0 END,
     is_running = CASE WHEN dxs.name IS NOT NULL THEN 1 ELSE 0 END,
     create_time = DATEADD(MINUTE, DATEDIFF(MINUTE, SYSDATETIME(), SYSUTCDATETIME()), dxs.create_time)

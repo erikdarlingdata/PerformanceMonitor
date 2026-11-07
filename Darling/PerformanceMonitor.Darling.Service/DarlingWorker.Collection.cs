@@ -2256,6 +2256,9 @@ public sealed partial class DarlingWorker
                never dispatched by RunDueCollectorsAsync and so the DROP-on-disable has nowhere else to run. */
             await ReconcileLongQueryTraceAsync(server, runner, stoppingToken);
 
+            /* #7643: the schema-changes session of a collector that is off is dropped once, for a server the store shows ran it. */
+            await DropSchemaSessionWhenOffAsync(server, runner, stoppingToken);
+
             /* #4961: the always-on deadlock and blocked-process sessions are ensured at connect and then once an hour, so a
                session dropped from outside comes back within the hour. */
             await EnsureAlwaysOnXeSessionsAsync(
@@ -2405,6 +2408,36 @@ public sealed partial class DarlingWorker
         }
 
         await ReconcileLongQueryTraceAsync(server, runner, enabled, registrations, serverSeparatelyMonitored, DateTime.UtcNow, _logger, cancellationToken, instanceGuard);
+    }
+
+    /// <summary>
+    /// #7643: drops this install's schema-changes session on a server whose <c>schema_objects</c> collector is off, where the store shows the
+    /// collector once ran there. A server that never ran it costs one store read and then nothing, and a dropped session is forgotten by the
+    /// store, so neither is retried on every sweep. SQL Server only: XE is not a PostgreSQL concept.
+    /// </summary>
+    private async Task DropSchemaSessionWhenOffAsync(ServerLoopState server, DarlingCollectorRunner runner, CancellationToken cancellationToken)
+    {
+        if (server.Runtime is not { } runtime || server.Retired || runtime.Target.Engine != CollectorTargetEngine.SqlServer)
+        {
+            return;
+        }
+
+        var serverId = server.Config.ServerId;
+        if (SchemaObjectsOn(serverId))
+        {
+            return;
+        }
+
+        var live = _registryState.Read()?.Servers;
+        var others = (live ?? Array.Empty<MonitoredServer>()).Where(other => other.ServerId != serverId).ToList();
+        await DarlingSchemaCapture.DropWhenDisabledAsync(
+            runner,
+            runtime,
+            others,
+            SchemaObjectsOn,
+            token => LongQueryTraceInstanceGuardFor(serverId, live, SchemaObjectsOn, (otherId, carrier) => runner.GetCollectorStateAsync(otherId, carrier, token)),
+            _logger,
+            cancellationToken);
     }
 
     /// <summary>

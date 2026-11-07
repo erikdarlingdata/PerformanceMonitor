@@ -396,7 +396,6 @@ public sealed class StoreSelfMetricsTests
             ["collect.schema_constraints"] = "the check and foreign key constraints of a schema_objects version, a child of it and deleted with it (V254 doc)",
             ["collect.schema_triggers"] = "the triggers of a schema_objects version, a child of it and deleted with it (V254 doc)",
             ["collect.schema_capture_state"] = "the schema capture cursor, one row per server and database, bytes too small to matter (V254 doc)",
-            ["collect.schema_capture_passes"] = "the schema capture pass log, one row per database per pass; its collector definition joins the catalog with the pass (V254 doc)",
             ["collect.plan_force_actions"] = "the force-plan bot's append-only audit ledger, not collected monitoring data (V107 doc)",
         };
 
