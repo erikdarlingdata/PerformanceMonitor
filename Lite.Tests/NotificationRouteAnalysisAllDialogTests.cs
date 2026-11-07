@@ -67,23 +67,48 @@ public sealed class NotificationRouteAnalysisAllDialogTests
     {
         StaTestThread.Run(() => WithTheme(() =>
         {
-            /* (a) a new route at All servers offers the item, and the Every metric item is not offered there. */
-            var fresh = Dialog();
-            var labels = Match(fresh).Items.Cast<ComboBoxItem>().Select(i => (string)i.Content).ToArray();
-            Assert.Contains(NotificationRouteKinds.AnalysisAllChoiceLabel, labels);
-            Assert.DoesNotContain("Every metric (*)", labels);
+            var dialogs = new List<Window>();
+            NotificationRouteEditDialog Open(NotificationRoute? existing = null)
+            {
+                var dialog = Dialog(existing);
+                dialogs.Add(dialog);
+                return dialog;
+            }
 
-            /* (b) a saved Analysis: * route opens with that item selected, and (c) saves the same text. */
-            var saved = new NotificationRoute(3, "Analysis: *", "", "https://hooks.example.test/x", "", "", "", true);
-            var opened = Dialog(saved);
-            Assert.Equal(NotificationRoute.AnalysisAllMatch, ((ComboBoxItem)Match(opened).SelectedItem).Tag);
-            Assert.Equal("Analysis: *", Build(opened).MetricMatch);
+            try
+            {
+                /* (a) a new route at All servers offers the item, and the Every metric item is not offered there. */
+                var fresh = Open();
+                var labels = Match(fresh).Items.Cast<ComboBoxItem>().Select(i => (string)i.Content).ToArray();
+                Assert.Contains(NotificationRouteKinds.AnalysisAllChoiceLabel, labels);
+                Assert.DoesNotContain("Every metric (*)", labels);
 
-            /* (d) choosing Exact metric name and typing a spelling of it saves the canonical text. */
-            var typed = Dialog();
-            Match(typed).SelectedItem = Match(typed).Items.Cast<ComboBoxItem>().Single(i => i.Tag is null);
-            ((TextBox)typed.FindName("ExactMetricBox")).Text = "analysis:  *";
-            Assert.Equal("Analysis: *", Build(typed).MetricMatch);
+                /* (b) a saved Analysis: * route opens with that item selected, and (c) saves the same text. */
+                var saved = new NotificationRoute(3, "Analysis: *", "", "https://hooks.example.test/x", "", "", "", true);
+                var opened = Open(saved);
+                Assert.Equal(NotificationRoute.AnalysisAllMatch, ((ComboBoxItem)Match(opened).SelectedItem).Tag);
+                Assert.Equal("Analysis: *", Build(opened).MetricMatch);
+
+                /* (d) choosing Exact metric name and typing a spelling of it saves the canonical text. */
+                var typed = Open();
+                Match(typed).SelectedItem = Match(typed).Items.Cast<ComboBoxItem>().Single(i => i.Tag is null);
+                ((TextBox)typed.FindName("ExactMetricBox")).Text = "analysis:  *";
+                Assert.Equal("Analysis: *", Build(typed).MetricMatch);
+
+                /* (e) the main path: a family route switched to the item saves Analysis: *, so (c) is not just a value carried through. */
+                var family = new NotificationRoute(4, AlertFamily.Performance, "", "https://hooks.example.test/y", "", "", "", true);
+                var switched = Open(family);
+                Match(switched).SelectedItem = Match(switched).Items.Cast<ComboBoxItem>().Single(i => Equals(i.Tag, NotificationRoute.AnalysisAllMatch));
+                Assert.Equal("Analysis: *", Build(switched).MetricMatch);
+            }
+            finally
+            {
+                /* Close every dialog, as InvestigationsWindowDroppedDetailTests does, so none stays in Application.Windows for the rest of the run. */
+                foreach (var dialog in dialogs)
+                {
+                    dialog.Close();
+                }
+            }
         }));
     }
 }

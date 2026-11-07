@@ -65,6 +65,12 @@ public sealed class ViewerNotificationRouteAnalysisAllDialogTests
             ((TextBox)typed.FindName("ExactMetricBox")).Text = "analysis:  *";
             Save(typed);
             Assert.Equal("Analysis: *", typed.Route.MetricMatch);
+
+            /* (e) the main path: a family route switched to the item saves Analysis: *, so (c) is not just a value carried through. */
+            var switched = new NotificationRouteEditDialog(null, new NotificationRouteRow { RouteId = 7, MetricMatch = AlertFamily.Performance, SmtpRecipients = "a@example.invalid" });
+            Match(switched).SelectedItem = Match(switched).Items.Cast<ComboBoxItem>().Single(i => Equals(i.Tag, NotificationRoute.AnalysisAllMatch));
+            Save(switched);
+            Assert.Equal("Analysis: *", switched.Route.MetricMatch);
         });
     }
 }

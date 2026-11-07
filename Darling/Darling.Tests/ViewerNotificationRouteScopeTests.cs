@@ -56,6 +56,9 @@ public sealed class ViewerNotificationRouteScopeTests
         Assert.Null(ViewerDataService.ValidateNotificationRoute(Row("*", tag: 10)));
         Assert.Null(ViewerDataService.ValidateNotificationRoute(Row("performance")));
         Assert.Null(ViewerDataService.ValidateNotificationRoute(Row("Deadlocks Detected", server: 2)));
+        /* #7999: unlike `*`, every analysis finding is accepted fleet-wide, in any spelling. */
+        Assert.Null(ViewerDataService.ValidateNotificationRoute(Row("Analysis: *")));
+        Assert.Null(ViewerDataService.ValidateNotificationRoute(Row("  analysis:   * ")));
 
         /* The write paths run the same check before the statement, so a refusal never reaches the store. */
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.NotificationRoutes.cs");
@@ -175,8 +178,6 @@ public sealed class ViewerNotificationRouteScopeTests
     {
         Assert.Equal("Every analysis finding", Row(match).MatchKindDisplay);
         Assert.Equal("Every analysis finding", Row(match, server: 1).MatchKindDisplay);
-        /* The store's own validation accepts it fleet-wide, unlike `*`. */
-        Assert.Null(ViewerDataService.ValidateNotificationRoute(Row(match)));
     }
 
     /* ---- the windows' source --------------------------------------------------------------------------------- */
