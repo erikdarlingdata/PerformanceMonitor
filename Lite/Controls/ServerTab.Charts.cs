@@ -1646,31 +1646,6 @@ public partial class ServerTab : UserControl
         }
 
         CorrelatedLanes.ReapplyTheme();
-        ReapplyTabItemStyles(this);
-    }
-
-    /// <summary>
-    /// #8221: a TabControl's ItemContainerStyle reaches a TabItem written in the XAML only once, when the item is prepared. After a
-    /// run-time theme switch the control holds the new theme's style but its tabs kept the old one, so the selected tab drew the Dark
-    /// fill and light ink on a Light or Cool Breeze page. Hands every tab the control's current style again.
-    /// </summary>
-    private static void ReapplyTabItemStyles(DependencyObject parent)
-    {
-        if (parent is TabControl { ItemContainerStyle: { } style } tabs)
-        {
-            foreach (var item in tabs.Items.OfType<TabItem>())
-            {
-                if (!ReferenceEquals(item.Style, style))
-                {
-                    item.Style = style;
-                }
-            }
-        }
-
-        foreach (var child in LogicalTreeHelper.GetChildren(parent).OfType<DependencyObject>())
-        {
-            ReapplyTabItemStyles(child);
-        }
     }
 
     /// <summary>

@@ -804,11 +804,12 @@ public sealed class ServerSummaryItem
     /* Freshness + per-metric severity thresholds live once in PerformanceMonitor.Common's
        ServerHealthThresholds / ServerHealthClassifier (#1562); this card keeps only the brush mapping. */
 
-    /* Per-severity dot / value brushes, frozen once (the viewer's dark-theme palette). */
-    private static readonly SolidColorBrush s_criticalBrush = MakeBrush("#E57373");
-    private static readonly SolidColorBrush s_warningBrush = MakeBrush("#FFD54F");
-    private static readonly SolidColorBrush s_healthyBrush = MakeBrush("#81C784");
-    private static readonly SolidColorBrush s_unknownBrush = MakeBrush("#888888");
+    /* Per-severity dot / value brushes. Read from the current theme each time (#8221): they were frozen once under whichever theme
+       loaded first. The Overview binds its cards again on a theme change. */
+    private static SolidColorBrush s_criticalBrush => MakeBrush("#E57373");
+    private static SolidColorBrush s_warningBrush => MakeBrush("#FFD54F");
+    private static SolidColorBrush s_healthyBrush => MakeBrush("#81C784");
+    private static SolidColorBrush s_unknownBrush => MakeBrush("#888888");
 
     public string DisplayName { get; set; } = "";
 
@@ -1704,6 +1705,12 @@ public sealed class ServerSummaryItem
 
     private static SolidColorBrush MakeBrush(string hex)
     {
+        /* #8221: on Light and Cool Breeze a band takes the theme's status brush (the Dark pale tones are 1.4:1 to 2.5:1 as card text). */
+        if (ThemedBandBrush.ForLightTheme(hex) is { } themedBrush)
+        {
+            return themedBrush;
+        }
+
         var color = (Color)ColorConverter.ConvertFromString(hex);
         var brush = new SolidColorBrush(color);
         brush.Freeze();

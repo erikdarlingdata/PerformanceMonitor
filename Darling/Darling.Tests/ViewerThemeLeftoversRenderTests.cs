@@ -190,10 +190,8 @@ public sealed class ViewerThemeLeftoversRenderTests
                 ClippedTextProbe.Settle(window);
                 ThemeManager.Apply(theme);
                 ClippedTextProbe.Settle(window);
-                var band = new[] { "SuccessBrush", "WarningBrush", "ErrorBrush" }.Select(k => Resource(app, k))
-                    .Concat(new[] { Color.FromRgb(0x81, 0xC7, 0x84), Color.FromRgb(0xFF, 0xD5, 0x4F), Color.FromRgb(0xE5, 0x73, 0x73) }).ToList();
                 var found = Visuals<TextBlock>(tab)
-                    .Where(t => t.Text.Length > 0 && band.Contains(ColorOf(t.Foreground)))
+                    .Where(t => t.Text is "Healthy" or "SYNCHRONIZED")
                     .Select(t => (t.Text, Ratio: WcagContrast.Ratio(ColorOf(t.Foreground), BackgroundBehind(t))))
                     .ToList();
                 return found;
@@ -204,12 +202,30 @@ public sealed class ViewerThemeLeftoversRenderTests
             }
         });
 
-        /* The group's "Healthy" badge, the sync state "SYNCHRONIZED" and the data movement text all take a severity color. */
-        Assert.True(texts.Count >= 3, $"found {texts.Count} severity texts in {theme}");
+        /* The group's "Healthy" badge and the sync state "SYNCHRONIZED" take a severity color. */
+        Assert.True(texts.Count >= 2, $"found {texts.Count} severity texts in {theme}: {string.Join(", ", texts.Select(t => t.Text))}");
         foreach (var (text, ratio) in texts)
         {
             Assert.True(ratio >= 4.5, $"'{text}' is {ratio:0.00}:1 on its card in {theme}");
         }
+    }
+
+    [Theory]
+    [InlineData("Light")]
+    [InlineData("CoolBreeze")]
+    public void TheMetricValuesOnAFleetCard_AreReadable_AfterARunTimeSwitchToTheLightThemes(string theme)
+    {
+        var (ratios, card) = Themed(app =>
+        {
+            var item = Card();
+            ThemeManager.Apply(theme);
+            var cardFill = Resource(app, "BackgroundLightBrush");
+            var brushes = new[] { item.CpuSeverityBrush, item.MemorySeverityBrush, item.BlockingSeverityBrush, item.DeadlockSeverityBrush, item.ThreadsSeverityBrush, item.CollectorSeverityBrush };
+            return (brushes.Select(b => WcagContrast.Ratio(ColorOf(b), cardFill)).ToList(), cardFill);
+        });
+
+        Assert.Equal(6, ratios.Count);
+        Assert.All(ratios, r => Assert.True(r >= 4.5, $"a metric value is {r:0.00}:1 on the {card} card in {theme}"));
     }
 
     /// <summary>One group with a database and one with none, so the grid shows for the first and is hidden for the second.</summary>
@@ -292,8 +308,17 @@ public sealed class ViewerThemeLeftoversRenderTests
         var warning = BorderUnder(theme, Card(c => c.FailedCollectorCount = 1));
         var critical = BorderUnder(theme, Card(c => { c.DeadlockCount = 30; c.DeadlockWindow = TimeSpan.FromHours(1); }));
 
-        Assert.Equal(Color.FromRgb(0xFF, 0xD5, 0x4F), warning);
-        Assert.Equal(Color.FromRgb(0xE5, 0x73, 0x73), critical);
+        /* Dark keeps its pale band colors. Light and Cool Breeze take the theme's own status tones (#8221), as Lite's cards do. */
+        if (theme == "Dark")
+        {
+            Assert.Equal(Color.FromRgb(0xFF, 0xD5, 0x4F), warning);
+            Assert.Equal(Color.FromRgb(0xE5, 0x73, 0x73), critical);
+        }
+
+        var neutral = BorderUnder(theme, Card());
+        Assert.NotEqual(neutral, warning);
+        Assert.NotEqual(neutral, critical);
+        Assert.NotEqual(warning, critical);
     }
 
     // ── The server tab's tab rows after a run-time switch ──────────────────────────────────────

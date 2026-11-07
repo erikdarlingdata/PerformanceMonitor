@@ -917,23 +917,10 @@ public class ServerSummaryItem
     /* #8221: the band colours are the Dark theme's pale tones, which are 1.4:1 to 2.5:1 on a Light or Cool Breeze card ("Online" and the
        CPU value read pale green on white). On those themes each band takes the theme's own status colour (4.5:1 or better on the card,
        #3609), so a card follows the theme it is drawn in. The cards are bound again on a theme change (MainWindow). */
-    private static readonly Dictionary<string, string> LightThemeBandKeys = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["#81C784"] = "SuccessBrush",
-        ["#E57373"] = "ErrorBrush",
-        ["#FFB74D"] = "WarningBrush",
-        ["#FFD54F"] = "WarningBrush",
-        ["#888888"] = "ForegroundMutedBrush",
-    };
-
     private static SolidColorBrush MakeBrush(string hex)
     {
-        if (ThemeManager.HasLightBackground
-            && LightThemeBandKeys.TryGetValue(hex, out var key)
-            && System.Windows.Application.Current?.TryFindResource(key) is SolidColorBrush themed)
+        if (ThemedBandBrush.ForLightTheme(hex) is { } themedBrush)
         {
-            var themedBrush = new SolidColorBrush(themed.Color);
-            themedBrush.Freeze();
             return themedBrush;
         }
 

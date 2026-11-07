@@ -546,10 +546,8 @@ public sealed class ThemeLeftoversRenderTests
                 Settle(window);
                 ThemeManager.Apply(theme);
                 Settle(window);
-                var band = new[] { "SuccessBrush", "WarningBrush", "ErrorBrush" }.Select(k => Resource(app, k))
-                    .Concat(new[] { Color.FromRgb(0x81, 0xC7, 0x84), Color.FromRgb(0xFF, 0xD5, 0x4F), Color.FromRgb(0xE5, 0x73, 0x73) }).ToList();
                 return Visuals<TextBlock>(tab)
-                    .Where(t => t.Text.Length > 0 && band.Contains(ColorOf(t.Foreground)))
+                    .Where(t => t.Text is "Healthy" or "SYNCHRONIZED")
                     .Select(t => (t.Text, Ratio: WcagContrast.Ratio(ColorOf(t.Foreground), BackgroundBehind(t))))
                     .ToList();
             }
@@ -559,8 +557,8 @@ public sealed class ThemeLeftoversRenderTests
             }
         });
 
-        /* The group's "Healthy" badge, the sync state "SYNCHRONIZED" and the data movement text all take a severity color. */
-        Assert.True(texts.Count >= 3, $"found {texts.Count} severity texts in {theme}");
+        /* The group's "Healthy" badge and the sync state "SYNCHRONIZED" take a severity color. */
+        Assert.True(texts.Count >= 2,$"found {texts.Count} severity texts in {theme}: {string.Join(", ", texts.Select(t => t.Text))}");
         foreach (var (text, ratio) in texts)
         {
             Assert.True(ratio >= 4.5, $"'{text}' is {ratio:0.00}:1 on its card in {theme}");

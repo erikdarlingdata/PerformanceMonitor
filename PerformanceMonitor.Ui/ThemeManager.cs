@@ -132,11 +132,16 @@ namespace PerformanceMonitor.Ui
 
             var dictionary = BuildDictionary(theme);
 
+            /* #8221: the tabs that got their style from their control, read before the swap and handed the control's new style after it. */
+            var tabItems = TabItemStyleRefresh.Capture();
+
             var dictionaries = Application.Current.Resources.MergedDictionaries;
             dictionaries.Clear();
             dictionaries.Add(dictionary);
             /* #8144: after the color theme, so a theme switch (which clears the list above) keeps the shared text styles. */
             dictionaries.Add(new ResourceDictionary { Source = SharedStylesUri });
+
+            TabItemStyleRefresh.Reapply(tabItems);
 
             ThemeChanged?.Invoke(theme);
         }
