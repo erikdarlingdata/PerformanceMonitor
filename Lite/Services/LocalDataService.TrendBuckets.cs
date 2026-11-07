@@ -617,9 +617,10 @@ ORDER BY 1";
         command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
         /* bucket_start is in UTC for a bucket of rows that had a sample_time_utc and in the server's clock for a bucket of
-           rows that had none, so each is stamped in the server's clock and ordered by its instant; a wall-clock start that
-           names two instants takes the first, as ServerClock.ToUtc does. */
-        var items = new List<(DateTime Instant, CpuBucketPoint Point)>();
+           rows that had none, so each is stamped in the server's clock and ordered by its instant, a UTC-cut bucket ahead
+           of a server-local one at the same instant so the two kinds never trade places between reads; a wall-clock start
+           that names two instants takes the first, as ServerClock.ToUtc does. */
+        var items = new List<(DateTime Instant, bool ServerLocal, CpuBucketPoint Point)>();
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
@@ -627,7 +628,7 @@ ORDER BY 1";
             var bucketIsServerLocal = reader.GetBoolean(8);
             var instant = bucketIsServerLocal ? serverClock.ToUtc(bucketStart) : bucketStart;
             var stamp = bucketIsServerLocal ? bucketStart : serverClock.ToServerLocal(bucketStart);
-            items.Add((instant, new CpuBucketPoint(
+            items.Add((instant, bucketIsServerLocal, new CpuBucketPoint(
                 stamp,
                 ToDouble(reader.GetValue(1)),
                 reader.IsDBNull(2) ? null : ToDouble(reader.GetValue(2)),
@@ -638,7 +639,7 @@ ORDER BY 1";
                 ToInt64(reader.GetValue(7)))));
         }
 
-        return items.OrderBy(i => i.Instant).Select(i => i.Point).ToList();
+        return items.OrderBy(i => i.Instant).ThenBy(i => i.ServerLocal).Select(i => i.Point).ToList();
     }
 
     /// <summary>
