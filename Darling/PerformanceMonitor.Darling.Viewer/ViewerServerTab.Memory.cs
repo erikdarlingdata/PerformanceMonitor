@@ -276,11 +276,31 @@ public partial class ViewerServerTab
         ReapplyAxisColors(MemoryChart);
         MemoryChart.Plot.YLabel("Memory (GB)");
 
-        var maxVal = totalMem.Max();
+        var maxVal = MemoryOverviewYMax(totalMem, targetMem, bufferPool, grantMb);
         SetChartYLimitsWithLegendPadding(MemoryChart, 0, maxVal);
 
         ShowChartLegend(MemoryChart);
         MemoryChart.Refresh();
+    }
+
+    /// <summary>
+    /// The top of the Memory Overview's data range, Lite's <c>MemoryOverviewYMax</c>: the largest sample across
+    /// every series the chart draws (Total Server Memory, Target Memory, Buffer Pool and Memory Grants), so the
+    /// Y axis the shared headroom is added to covers all four. Target Memory is the engine's ceiling and moves
+    /// with the host's free memory when no max server memory cap is set, so it can sit well above Total while
+    /// the workload holds Total where it is; a grant spike can do the same. An empty series is skipped, and
+    /// with nothing plotted the top is 0, which the shared helper widens to a visible band.
+    /// </summary>
+    internal static double MemoryOverviewYMax(params double[][] series)
+    {
+        double max = 0;
+        foreach (var values in series)
+        {
+            if (values.Length == 0) continue;
+            var seriesMax = values.Max();
+            if (seriesMax > max) max = seriesMax;
+        }
+        return max;
     }
 
     /// <summary>
