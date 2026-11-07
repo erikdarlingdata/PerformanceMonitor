@@ -451,9 +451,13 @@ public sealed class FleetRollup
     /// </summary>
     public bool IsAllClear => !HasProblems && UnknownCount == 0;
 
-    /// <summary>"+N more need attention" when the ranking overflows its cap, else empty.</summary>
-    public string AdditionalProblemText =>
-        AdditionalProblemCount > 0 ? $"+{AdditionalProblemCount} more need attention" : "";
+    /// <summary>#8115: how many of <see cref="AdditionalProblemCount"/> are Healthy-banded servers listed for a tile no band reads
+    /// (<see cref="FleetRankedServer.HasAdvisoryTile"/>). The band counts leave them under <see cref="HealthyCount"/>, so the overflow
+    /// line says how many of its servers are of that kind.</summary>
+    public int AdditionalAdvisoryCount { get; init; }
+
+    /// <summary>"+N more need attention (K healthy with advisories)" when the ranking overflows its cap, else empty.</summary>
+    public string AdditionalProblemText => FleetAttentionText.MoreText(AdditionalProblemCount, AdditionalAdvisoryCount);
 
     /// <summary>"N server(s) didn't report this cycle" when some registered server has no summary this
     /// cycle, else empty — the only place that gap is stated in words rather than silently absorbed into
@@ -746,6 +750,7 @@ public sealed class FleetRollup
             DeadlockCoverage = deadlockCoverage,
             WorstServers = worst,
             AdditionalProblemCount = Math.Max(0, problems.Count - worst.Count),
+            AdditionalAdvisoryCount = problems.Skip(worst.Count).Count(s => ClassifyBand(s) == FleetHealthBand.Healthy && s.HasAdvisoryTile),
         };
     }
 
@@ -1094,11 +1099,13 @@ public sealed class FleetRollup
     /// one is a worse defect than the one the filter fixes, so the active state carries its own arithmetic —
     /// including the all-clear case, which is otherwise an empty grid with nothing saying why.
     /// </summary>
-    public static string AttentionFilterCountText(int shown, int total)
+    public static string AttentionFilterCountText(int shown, int total, int healthyWithAdvisories = 0)
     {
         if (shown > 0)
         {
-            return $"showing {shown} of {total}";
+            /* #8115: the Healthy tile keeps a server listed for an advisory tile, so the count says how many of its servers are that kind,
+               in the web fleet page's words. */
+            return $"showing {shown} of {total}" + FleetAttentionText.AdvisorySplit(healthyWithAdvisories);
         }
 
         /* Nothing left to show. On a populated fleet that is the honest all-clear; with no cards at all it

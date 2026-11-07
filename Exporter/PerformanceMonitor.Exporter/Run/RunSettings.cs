@@ -97,6 +97,25 @@ public sealed record RunSettings
         return null;
     }
 
+    /// <summary>
+    /// Settings that are usable but worth a line in the run output. Today: an optional-registry table in
+    /// `families.fresh.tables`, which the export routes through the optional path (column policy, schema gate, chunk
+    /// guard, the optional manifest) exactly as if it were in `optional_tables`.
+    /// </summary>
+    public IReadOnlyList<string> Warnings()
+    {
+        var warnings = new List<string>();
+        foreach (var table in Families.FreshTables ?? [])
+        {
+            if (!ExportOptions.AllTables.Contains(table) && OptionalTables.TryGet(table) is not null)
+            {
+                warnings.Add($"families.fresh.tables names the optional table {table}; it is exported through the optional path, with its column policy, schema gate and chunk guard, and listed in the optional manifest, as if it were in optional_tables");
+            }
+        }
+
+        return warnings;
+    }
+
     public string ResolvedChildExe => ChildExe ?? Environment.ProcessPath ?? "darling-export";
     public string StatePath => Path.Combine(StateDir, "export-schedule.json");
 }
