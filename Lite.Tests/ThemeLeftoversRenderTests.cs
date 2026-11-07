@@ -207,18 +207,17 @@ public sealed class ThemeLeftoversRenderTests
 
     // ── Overview fleet card ────────────────────────────────────────────────────────────────────
 
-    [Theory]
-    [InlineData("Light")]
-    [InlineData("CoolBreeze")]
-    public void AHealthyFleetCard_HasABandBorder_AndReadableBandText_InTheLightThemes(string theme)
+    private static ServerSummaryItem FleetCard(int blocking, int deadlocks) => new()
     {
-        var (border, band, background, texts) = Themed(app =>
+        DisplayName = "SQL01", ServerName = "SQL01", IsOnline = true, CpuPercent = 20, OtherProcessCpuPercent = 5, MemoryMb = 32768,
+        BlockingCount = blocking, DeadlockCount = deadlocks,
+        LastCollectionTime = DateTime.UtcNow, CollectionFreshness = ServerFreshness.Fresh,
+    };
+
+    /// <summary>The border a fleet card renders under <paramref name="theme"/>, after the app was themed Dark and switched at run time.</summary>
+    private static (Color Border, Color Neutral, Color Band, Color Background, List<(string Text, Color Fore)> Texts) RenderedCard(string theme, ServerSummaryItem item) =>
+        Themed(app =>
         {
-            var item = new ServerSummaryItem
-            {
-                DisplayName = "SQL01", ServerName = "SQL01", IsOnline = true, CpuPercent = 20, OtherProcessCpuPercent = 5, MemoryMb = 32768,
-                LastCollectionTime = DateTime.UtcNow, CollectionFreshness = ServerFreshness.Fresh,
-            };
             ThemeManager.Apply(theme);
             var card = new ServerOverviewCard { DataContext = item };
             var window = new Window { Content = card, Width = 420, Height = 360 };
@@ -231,7 +230,7 @@ public sealed class ThemeLeftoversRenderTests
                     .Where(t => t.Text == "Online" || t.Text == item.CpuDisplay || t.Text == item.LastCollectionDisplay)
                     .Select(t => (t.Text, Fore: ColorOf(t.Foreground)))
                     .ToList();
-                return (ColorOf(box.BorderBrush), ColorOf(item.StatusBrush), ColorOf(box.Background), found);
+                return (ColorOf(box.BorderBrush), Resource(app, "CardBorderBrush"), ColorOf(item.StatusBrush), ColorOf(box.Background), found);
             }
             finally
             {
@@ -239,7 +238,39 @@ public sealed class ThemeLeftoversRenderTests
             }
         });
 
-        Assert.Equal(band, border);
+    [Theory]
+    [InlineData("Dark")]
+    [InlineData("Light")]
+    [InlineData("CoolBreeze")]
+    public void AHealthyFleetCard_HasTheThemesNeutralBorder_InEveryTheme(string theme)
+    {
+        var (border, neutral, band, _, _) = RenderedCard(theme, FleetCard(0, 0));
+
+        Assert.Equal(neutral, border);
+        Assert.NotEqual(band, border);
+    }
+
+    [Theory]
+    [InlineData("Dark")]
+    [InlineData("Light")]
+    [InlineData("CoolBreeze")]
+    public void AWarningAndACriticalFleetCard_KeepTheirBandBorder_InEveryTheme(string theme)
+    {
+        var (warning, neutralW, _, _, _) = RenderedCard(theme, FleetCard(3, 0));
+        var (critical, neutralC, _, _, _) = RenderedCard(theme, FleetCard(0, 2));
+
+        Assert.NotEqual(neutralW, warning);
+        Assert.NotEqual(neutralC, critical);
+        Assert.NotEqual(warning, critical);
+    }
+
+    [Theory]
+    [InlineData("Light")]
+    [InlineData("CoolBreeze")]
+    public void TheBandTextOnAFleetCard_IsReadable_InTheLightThemes(string theme)
+    {
+        var (_, _, _, background, texts) = RenderedCard(theme, FleetCard(0, 0));
+
         Assert.True(texts.Count >= 3, $"found {texts.Count} band texts");
         foreach (var (text, fore) in texts)
         {
@@ -368,7 +399,7 @@ public sealed class ThemeLeftoversRenderTests
             window.Show();
             try
             {
-                foreach (var theme in new[] { "Dark", "Light", "CoolBreeze" })
+                foreach (var theme in new[] { "initial", "Dark", "Light", "CoolBreeze" })
                 {
                     ThemeManager.Apply(theme);
                     Settle(window);
@@ -390,5 +421,62 @@ public sealed class ThemeLeftoversRenderTests
         Assert.Equal(3, results.Count);
         Assert.All(results, r => Assert.Equal(results[0].Cell, r.Cell));
         Assert.All(results, r => Assert.Equal(r.CellOpacity, r.SwatchOpacity, 2));
+    }
+
+    // ── The real server tab: selected main tabs after a run-time switch ────────────────────────
+
+    [Fact]
+    public void TheSelectedServerTabs_TakeTheCurrentThemesFillAndInk_AfterRunTimeSwitchesDarkLightCoolBreeze()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "ThemeLeftovers_" + Guid.NewGuid().ToString("N")[..8]);
+        System.IO.Directory.CreateDirectory(dir);
+        try
+        {
+            using var duckDb = new PerformanceMonitorLite.Database.DuckDbInitializer(System.IO.Path.Combine(dir, "test.duckdb"));
+            var seen = Themed(app =>
+            {
+                var server = new PerformanceMonitorLite.Models.ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "theme-test", DisplayName = "theme-test", IsEnabled = true };
+                var tab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
+                typeof(ServerTab).GetField("_suppressActiveQueriesAutoRefresh", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(tab, true);
+                var window = new Window { Content = tab, Width = 1280, Height = 800, Left = 0, Top = 0 };
+                window.Show();
+                try
+                {
+                    var main = (TabControl)tab.FindName("MainTabControl");
+                    var found = new List<(string Theme, string Tab, Color Fill, Color WantFill, Color Ink, Color WantInk, Color Underline, Color WantUnderline)>();
+                    foreach (var theme in new[] { "Dark", "Light", "CoolBreeze" })
+                    {
+                        ThemeManager.Apply(theme);
+                        foreach (var header in new[] { "System Events", "Configuration Changes" })
+                        {
+                            var item = main.Items.OfType<TabItem>().First(t => Equals(t.Header, header));
+                            main.SelectedItem = item;
+                            Settle(window);
+                            var chrome = (Border)item.Template.FindName("border", item);
+                            found.Add((theme, header, ColorOf(chrome.Background), Resource(app, "BackgroundLighterBrush"), ColorOf(item.Foreground), Resource(app, "ForegroundBrush"),
+                                ColorOf(chrome.BorderBrush), Resource(app, "AccentBrush")));
+                        }
+                    }
+
+                    return found;
+                }
+                finally
+                {
+                    window.Close();
+                }
+            });
+
+            Assert.Equal(6, seen.Count);
+            foreach (var r in seen)
+            {
+                Assert.True(r.Fill == r.WantFill, $"{r.Theme} {r.Tab}: the selected tab is filled {r.Fill}, the theme says {r.WantFill}");
+                Assert.True(r.Ink == r.WantInk, $"{r.Theme} {r.Tab}: the selected tab's text is {r.Ink}, the theme says {r.WantInk}");
+                Assert.True(r.Underline == r.WantUnderline, $"{r.Theme} {r.Tab}: the selected tab's underline is {r.Underline}, the theme says {r.WantUnderline}");
+            }
+        }
+        finally
+        {
+            try { System.IO.Directory.Delete(dir, true); } catch (System.IO.IOException) { }
+        }
     }
 }

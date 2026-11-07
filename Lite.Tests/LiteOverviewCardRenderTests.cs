@@ -112,7 +112,7 @@ public sealed class LiteOverviewCardRenderTests
     }
 
     [Theory]
-    [InlineData(0, 0, "#81C784")]   // healthy: the Healthy band colour (#8221)
+    [InlineData(0, 0, "#3A3D45")]   // healthy: the Dark theme's neutral card border (#8221; Light and Cool Breeze have their own, see ThemeLeftoversRenderTests)
     [InlineData(3, 0, "#FFB74D")]   // blocking: amber
     [InlineData(0, 2, "#E57373")]   // a deadlock: red
     public void TheCardBorder_IsTwoPixels_InTheServersBandColour(int blocking, int deadlocks, string expected)

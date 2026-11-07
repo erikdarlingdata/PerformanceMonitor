@@ -67,7 +67,7 @@ public class ServerCollectionFreshnessTests
     private const string RowAmber = "#FFFFB74D";
     private const string Red = "#FFE57373";
     private const string StatusAmber = "#FFFFD54F";
-    private const string HealthyBorder = "#FF81C784";   // #8221: a healthy card draws its band colour, not a near-black neutral
+    private const string NeutralBorder = "#FF3A3D45";   // #8221: the Dark theme's card border, which is also what a test with no theme loaded gets
     private const string UnknownGrey = "#FF888888";
 
     // ── The band itself, off the shared thresholds ────────────────────────────────────────────────────
@@ -213,7 +213,7 @@ public class ServerCollectionFreshnessTests
     }
 
     /// <summary>
-    /// The same card while collection is current is the control: green band border, green row. Without this the
+    /// The same card while collection is current is the control: neutral border, green row. Without this the
     /// test above would pass on a card that had simply been painted amber for everyone.
     /// </summary>
     [Fact]
@@ -221,7 +221,7 @@ public class ServerCollectionFreshnessTests
     {
         var healthy = QuietServer(TimeSpan.FromSeconds(20));
 
-        Assert.Equal(HealthyBorder, Hex(healthy.CardBorderBrush));
+        Assert.Equal(NeutralBorder, Hex(healthy.CardBorderBrush));
         Assert.Equal(Green, Hex(healthy.LastCollectionBrush));
     }
 
