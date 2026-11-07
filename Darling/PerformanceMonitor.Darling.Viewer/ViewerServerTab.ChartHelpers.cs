@@ -20,7 +20,11 @@ public partial class ViewerServerTab
 {
     private readonly ChartRenderHelper _chartHelper = new();
 
-    private void ClearChart(ScottPlot.WPF.WpfPlot chart) => _chartHelper.ClearChart(chart);
+    private void ClearChart(ScottPlot.WPF.WpfPlot chart)
+    {
+        _chartHelper.ClearChart(chart);
+        ViewerChartCards.AttachChart(chart); // #8151: the clear swapped in a new plot
+    }
 
     private void ShowChartLegend(ScottPlot.WPF.WpfPlot chart) => _chartHelper.ShowChartLegend(chart);
 
