@@ -460,8 +460,10 @@ public sealed class McpFilterSemanticsLivePostgresTests
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
             /* One reading of the clock (#5496), through LiveClock so a run can be placed at a day's last second: every
-               seed, the expected horizon and today's row come from this instant. */
+               seed, the expected horizon and today's row come from this instant. The reader's own horizon and default-date
+               clock is pinned to the same instant, since a midnight between the two readings moves both by a day. */
             var now = LiveClock.Now();
+            DarlingHealthReader.ClockForTests = () => now;
             var today = now.Date;
             /* Inside the collection log's 60-day horizon, outside the signals' 30 — the ghost stretch. */
             var ghostDay = today.AddDays(-45);
@@ -558,6 +560,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
         }
         finally
         {
+            DarlingHealthReader.ClockForTests = null;
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
         }
