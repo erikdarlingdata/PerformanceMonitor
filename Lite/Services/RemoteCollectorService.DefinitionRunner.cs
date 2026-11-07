@@ -1469,6 +1469,13 @@ public partial class RemoteCollectorService
             }
         }
 
+        /* #8146: the long-query read found this install's own session below the setting in an item it landed. Its rows and
+           position are stored above, so the session can be recreated with the setting now. Never fails the run. */
+        if (context.SessionRecreates.Count > 0)
+        {
+            await RecreateLongQuerySessionsBelowSettingAsync(server, context.Target.IsAzureSqlDb, context.SessionRecreates, cancellationToken);
+        }
+
         telemetry.SqlMs = sqlMs;
         telemetry.StorageMs = storageMs;
         telemetry.Fanout = fanout.Result;

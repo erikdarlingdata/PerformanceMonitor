@@ -728,6 +728,78 @@ public sealed class LongQueryCompletionsCollectorDefinitionTests
         Assert.True(context.PendingState.ContainsKey(RingBufferLossAccounting.StateKey));
     }
 
+    /* #8146: a live session whose limit is below the setting asks the host to recreate this install's own session, staged
+       with the item so it lands only with the item's write. A missing session (NULL) or one with no count limit (0) does not. */
+    [Theory]
+    [InlineData(1000L, true)]
+    [InlineData(5000L, false)]
+    [InlineData(null, false)]
+    [InlineData(0L, false)]
+    public async Task ReadAsync_SessionLimitBelowSetting_StagesARecreate(long? sessionLimit, bool expected)
+    {
+        var context = LimitContext(databaseName: null);
+        using var reader = LimitRead(sessionLimit is { } limit ? limit : DBNull.Value);
+
+        await LongQueryCompletionsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Empty(context.SessionRecreates);
+        context.LandStagedItemState();
+
+        if (expected)
+        {
+            var request = Assert.Single(context.SessionRecreates);
+            Assert.Null(request.DatabaseName);
+            Assert.Equal(1000, request.CurrentLimit);
+        }
+        else
+        {
+            Assert.Empty(context.SessionRecreates);
+        }
+    }
+
+    [Fact]
+    public async Task ReadAsync_SessionLimitBelowSetting_ADroppedItemRequestsNothing()
+    {
+        var context = LimitContext(databaseName: "alpha");
+        using var reader = LimitRead(1000L);
+
+        await LongQueryCompletionsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+        context.DropStagedItemState();
+        context.LandStagedItemState();
+
+        Assert.Empty(context.SessionRecreates);
+    }
+
+    [Fact]
+    public async Task ReadAsync_SessionLimitBelowSetting_NamesTheDatabaseOfADatabaseScopedSession()
+    {
+        var context = LimitContext(databaseName: "alpha");
+        using var reader = LimitRead(1000L);
+
+        await LongQueryCompletionsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+        context.LandStagedItemState();
+
+        Assert.Equal("alpha", Assert.Single(context.SessionRecreates).DatabaseName);
+    }
+
+    private static CollectorContext LimitContext(string? databaseName) => new()
+    {
+        ServerId = 42,
+        ServerName = "test-server",
+        CollectionTime = s_ringReadAt,
+        Deltas = s_deltas,
+        Target = new CollectorTargetInfo { IsAzureSqlDb = databaseName is not null },
+        RingBufferMaxEvents = 5000,
+        CurrentDatabaseName = databaseName,
+        State = RingPrior(34, 10),
+    };
+
+    /* No rows, then the trailing row: the three truncation columns, then the position with the session's limit. */
+    private static FakeCollectorDataReader LimitRead(object sessionLimit) =>
+        FakeCollectorDataReader.WithResultSets(
+            Array.Empty<object[]>(),
+            new[] { new object[] { false, 0L, DBNull.Value, 40L, 10L, s_ringCreated, 0L, sessionLimit, s_ringReadAt } });
+
     [Fact]
     public void LongQuery_DeclaresRingPositionStateKey()
     {

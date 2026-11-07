@@ -468,7 +468,12 @@ SELECT
 
             /* #8146: what the ring buffer evicted and the session dropped since the last run. */
             var truncated = reader.FieldCount > 0 && !reader.IsDBNull(0) && reader.GetBoolean(0);
-            RingBufferLossAccounting.Apply(context, RingBufferObservation.Read(reader, 3), truncated);
+            var observation = RingBufferObservation.Read(reader, 3);
+            RingBufferLossAccounting.Apply(context, observation, truncated);
+
+            /* #8146: a session keeps the limit it was created with, so this install's own session is recreated with the
+               setting, by the host, after this item's rows are written. */
+            LongQuerySessionRecreate.StageWhenBelowSetting(context, observation);
         }
 
         return rows;

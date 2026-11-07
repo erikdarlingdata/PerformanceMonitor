@@ -302,8 +302,25 @@ public sealed class CollectorContext
     /// </summary>
     public StagedMeasurements StagedItemMeasurements { get; } = new();
 
-    /// <summary>Moves everything staged for the current item into <see cref="PendingState"/> and
-    /// <see cref="Measurements"/>. Host-only: call it once the item's read and write have both succeeded.</summary>
+    /// <summary>
+    /// #8146: the long-query definition's request to recreate this install's own session for the ITEM it is reading
+    /// (<see cref="LongQuerySessionRecreate.StageWhenBelowSetting"/>), held under the same rule as <see cref="StagedItemState"/>:
+    /// it reaches <see cref="SessionRecreates"/> only when the host lands the item, so the session is never dropped before
+    /// the events it held were written.
+    /// </summary>
+    public LongQuerySessionRecreateRequest? StagedItemSessionRecreate { get; set; }
+
+    private readonly List<LongQuerySessionRecreateRequest> _sessionRecreates = new();
+
+    /// <summary>
+    /// #8146: the recreate requests of the items this run landed. The host acts on them after the run's rows and state are
+    /// stored, and never fails the run over them.
+    /// </summary>
+    public IReadOnlyList<LongQuerySessionRecreateRequest> SessionRecreates => _sessionRecreates;
+
+    /// <summary>Moves everything staged for the current item into <see cref="PendingState"/>,
+    /// <see cref="Measurements"/> and <see cref="SessionRecreates"/>. Host-only: call it once the item's read and write have
+    /// both succeeded.</summary>
     public void LandStagedItemState()
     {
         foreach (var (key, value) in StagedItemState)
@@ -313,7 +330,13 @@ public sealed class CollectorContext
 
         StagedItemState.Clear();
 
-        /* Unqualified on purpose: the labels were checked when they were staged, and the measurement-label sweep
+        if (StagedItemSessionRecreate is { } recreate)
+        {
+            _sessionRecreates.Add(recreate);
+            StagedItemSessionRecreate = null;
+        }
+
+        /* #8146: unqualified on purpose: the labels were checked when they were staged, and the measurement-label sweep
            (CollectorMeasurementSeamTests) reads `.Measure(` call sites as const labels, which these are not. */
         foreach (var staged in StagedItemMeasurements.Entries)
         {
@@ -336,6 +359,7 @@ public sealed class CollectorContext
     {
         StagedItemState.Clear();
         StagedItemMeasurements.Clear();
+        StagedItemSessionRecreate = null;
     }
 
     /// <summary>

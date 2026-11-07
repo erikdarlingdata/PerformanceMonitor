@@ -2596,6 +2596,13 @@ public sealed partial class DarlingCollectorRunner
             }
         }
 
+        /* #8146: the long-query read found this install's own session below the setting in an item it landed. Its rows and
+           position are stored above, so the session can be recreated with the setting now. Never fails the run. */
+        if (context.SessionRecreates.Count > 0)
+        {
+            await DarlingXeSessions.RecreateLongQuerySessionsBelowSettingAsync(server, this, context.SessionRecreates, _logger, cancellationToken);
+        }
+
         _logger?.LogDebug("Collected {RowCount} {Collector} rows for server '{Server}'",
             rowsWritten, definition.Name, server.Config.DisplayName);
         /* #2864: the drain forensics are recorded on the SUCCESS path too, not only on abandon. The

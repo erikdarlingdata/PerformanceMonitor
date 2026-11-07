@@ -156,6 +156,13 @@ public static class RingBufferLossNote
                 inv,
                 " This session's limit is {0:N0}, below the configured setting: it was created before the setting changed or by another install.",
                 loss.Limit);
+
+            /* #8146: the steps that apply it. Only the install's own long-query session is recreated for this; the shared
+               sessions are the operator's call, because other installs read them too. */
+            text += " The install's own long-query session is recreated automatically after its next read."
+                + " To apply it to the shared deadlock or blocked-process session, drop that session (Darling: --drop-xe-sessions;"
+                + " Lite: the drop SQL in lite-extended-events.md) and the next ensure recreates it with the setting;"
+                + " another install watching the same server may recreate it first with its own value.";
         }
 
         return text;

@@ -44,6 +44,29 @@ public sealed class XeRingBufferMaxEventsTests
         Assert.Equal(expected, StoreConfigProvider.ClampXeRingBufferMaxEvents(configured, logger: null));
     }
 
+    /* #8146: darling.json takes any JSON whole number, and a value too large for an int lands on the nearest bound, as Lite's does,
+       instead of failing the file's bind. */
+    [Theory]
+    [InlineData("{ \"xeRingBufferMaxEvents\": 20000000000 }", 10000)]
+    [InlineData("{ \"xeRingBufferMaxEvents\": -5 }", 1000)]
+    [InlineData("{ }", 1000)]
+    public void XeRingBufferMaxEvents_FromDarlingJson_ClampsAnyWholeNumber(string json, int expected)
+    {
+        var config = DarlingConfig.Parse(json);
+
+        Assert.Equal(expected, StoreConfigProvider.ClampXeRingBufferMaxEvents(config.XeRingBufferMaxEvents, logger: null));
+    }
+
+    [Fact]
+    public void XeRingBufferMaxEvents_TooLargeForAnInt_LogsTheValueGiven()
+    {
+        var logger = new CapturingTestLogger();
+
+        Assert.Equal(10000, StoreConfigProvider.ClampXeRingBufferMaxEvents(DarlingConfig.Parse("{ \"xeRingBufferMaxEvents\": 20000000000 }").XeRingBufferMaxEvents, logger));
+        Assert.Contains("20000000000", logger.Joined, StringComparison.Ordinal);
+        Assert.Contains("10000", logger.Joined, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void XeRingBufferMaxEvents_InRange_LogsNothing()
     {

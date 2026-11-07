@@ -74,6 +74,24 @@ public sealed class RingBufferLossNoteTests
         Assert.DoesNotContain("below the configured", RingBufferLossNote.Describe(CountCap));
     }
 
+    /* #8146: the sentence gives the steps that apply the setting: the own long-query session is recreated on its own, a shared
+       session is dropped (Darling's verb, Lite's drop SQL) and the next ensure recreates it. */
+    [Fact]
+    public void Describe_LimitBelowSetting_GivesTheSteps()
+    {
+        var text = RingBufferLossNote.Describe(CountCap + " ring_buffer_limit_below_setting=1");
+
+        Assert.Contains("long-query session is recreated automatically after its next read", text);
+        Assert.Contains("--drop-xe-sessions", text);
+        Assert.Contains("lite-extended-events.md", text);
+        Assert.Contains("the next ensure recreates it with the setting", text);
+        Assert.Contains("another install", text);
+
+        var clean = RingBufferLossNote.Describe(CountCap);
+        Assert.DoesNotContain("--drop-xe-sessions", clean);
+        Assert.DoesNotContain("recreated automatically", clean);
+    }
+
     [Fact]
     public void Describe_EvictedAndDropped_NamesBoth()
     {

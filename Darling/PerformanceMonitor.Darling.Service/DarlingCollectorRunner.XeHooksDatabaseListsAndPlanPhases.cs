@@ -93,6 +93,9 @@ public sealed partial class DarlingCollectorRunner
     /// </summary>
     internal ILegacyLongQueryRecords? LegacyLongQueryRecordsForTests { get; set; }
 
+    /// <summary>#8146: one recreate attempt of this install's own long-query session per server and database per hour, for the life of the process.</summary>
+    internal LongQuerySessionRecreateThrottle LongQuerySessionRecreateThrottle { get; } = new();
+
     private DarlingLegacyLongQuerySession? _legacyLongQuery;
 
     /// <summary>

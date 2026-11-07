@@ -60,6 +60,11 @@ public sealed class XeRingBufferMaxEventsSettingTests
     [InlineData("-5", 1000)]
     [InlineData("0", 1000)]
     [InlineData("\"abc\"", 1000)]
+    /* #8146: what lite-guide.md says of the edges: a fraction is dropped, a number past Int64 still clamps, and only a number
+       past double range is unusable and reads as the default. */
+    [InlineData("4321.7", 4321)]
+    [InlineData("99999999999999999999", 10000)]
+    [InlineData("1e999", 1000)]
     public void XeRingBufferMaxEvents_ReadsAndClamps(string written, int expected)
     {
         Assert.Equal(expected, LoadWith("{ \"xe_ring_buffer_max_events\": " + written + " }"));

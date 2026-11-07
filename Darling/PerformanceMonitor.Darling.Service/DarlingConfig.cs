@@ -258,10 +258,13 @@ public sealed class DarlingConfig
     /// log line. A session keeps the limit it was created with, so a changed value applies to sessions created afterwards,
     /// and the loss note says when a live session's limit is below it.
     ///
+    /// <para>A long, not an int, so any JSON whole number binds and one too large for an int still clamps to the nearest
+    /// bound, as Lite's <c>xe_ring_buffer_max_events</c> does (#8146).</para>
+    ///
     /// <para>A file-only knob like <see cref="ProcedureStatsPlanCycleInterval"/>: an edit takes effect on the next restart.</para>
     /// </summary>
     [JsonPropertyName("xeRingBufferMaxEvents")]
-    public int? XeRingBufferMaxEvents { get; set; }
+    public long? XeRingBufferMaxEvents { get; set; }
 
     /// <summary>
     /// #5158: whether <c>query_stats</c> fetches plan XML only for statement plans this host has not already
