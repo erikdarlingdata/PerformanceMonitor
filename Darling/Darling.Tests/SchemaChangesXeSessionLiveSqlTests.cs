@@ -85,7 +85,7 @@ public sealed class SchemaChangesXeSessionLiveSqlTests
 
             var again = await DarlingSchemaXeSession.EnsureAsync(connection, name, databaseScoped: false, logger: null, CancellationToken.None);
             Assert.True(again.Running);
-            Assert.Equal(state.CreateTimeUtc, again.CreateTimeUtc);
+            Assert.True((state.CreateTimeUtc!.Value - again.CreateTimeUtc!.Value).Duration() < TimeSpan.FromSeconds(1), "the server reports one session's create time a few milliseconds apart; the planner treats times within a second as one session");
         }
         finally
         {

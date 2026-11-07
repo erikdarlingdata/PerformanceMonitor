@@ -163,7 +163,7 @@ public class SchemaWorkPlannerTests
     {
         var plans = Plan(
             [Probe("SalesDb"), Probe("OpsDb")], States(Db("SalesDb"), Db("OpsDb")),
-            Batch(14, Event(13, "SalesDb"), Event(14, "SalesDb")));
+            Batch(11, Event(12, "SalesDb")));
 
         Assert.All(plans, p => Assert.Equal("events_lost", p.Reason));
         Assert.Equal(2, plans.Count);
