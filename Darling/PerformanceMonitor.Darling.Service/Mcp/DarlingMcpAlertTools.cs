@@ -1065,6 +1065,11 @@ public sealed partial class DarlingMcpAlertTools
             args["fallback_route_id"] = route.FallbackRouteId.Value;
         }
 
+        if (!string.IsNullOrWhiteSpace(route.SlackBotChannel))
+        {
+            args["slack_bot_channel"] = route.SlackBotChannel;
+        }
+
         if (!string.IsNullOrWhiteSpace(route.EmailRecipients))
         {
             args["email_recipients"] = route.EmailRecipients;
@@ -1121,6 +1126,8 @@ public sealed partial class DarlingMcpAlertTools
         /* #7109 (V238): whether a Level 3 action on the route waits for a person's approval (required or off), and whether the asker may approve it. */
         action_approval = r.ActionApproval,
         approval_single_person = r.ApprovalSinglePerson,
+        /* #7656 (V252): the Slack channel id the bot posts the route's request threads into; blank is none. */
+        slack_bot_channel = r.SlackBotChannel,
         /* #6036 (D8 of #5632 Phase C): the route an expired investigation request goes to first. Null = none; the name is the
            fallback route's metric_match. */
         fallback_route_id = r.FallbackRouteId,

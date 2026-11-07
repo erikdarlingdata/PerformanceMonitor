@@ -461,6 +461,12 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public string SlackWebhookUrl => Opened.Webhooks.SlackUrl;
     public string SlackProxyAddress => Opened.Webhooks.SlackProxy;
 
+    /// <summary>#7656: the opened Slack bot token, empty when none is set or the stored one would not open. Goes only into a bearer header.</summary>
+    public string SlackBotToken => Opened.Webhooks.SlackBotToken;
+
+    /// <summary>#7656: the opened Slack app-level token, empty when none is set or the stored one would not open.</summary>
+    public string SlackAppToken => Opened.Webhooks.SlackAppToken;
+
     /* Generic webhook (#1506) — enabled by a non-empty URL, the same no-speculative-enable-flag derivation
        the sibling channels use. */
     public bool GenericWebhookEnabled => !string.IsNullOrWhiteSpace(Opened.Webhooks.GenericUrl);

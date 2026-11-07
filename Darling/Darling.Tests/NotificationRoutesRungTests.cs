@@ -159,7 +159,7 @@ public sealed class NotificationRoutesRungTests
         var parent = DarlingManagedRoles.ViewerRestrictedConfigTables.Single(a => a.Table == "config_notification");
 
         Assert.Equal(new[] { "teams_url", "slack_url", "generic_url", "pagerduty_routing_key", "signing_key", "previous_signing_key" }, acl.SecretColumns);
-        Assert.Equal(new[] { "route_id", "metric_match", "smtp_recipients", "configured_channels", "enabled", "modified_at", "scope_server_id", "scope_tag_id" }.Concat(AgentColumns).Concat(new[] { "fallback_route_id", "previous_signing_key_until", "severities", "report_notice", "action_approval", "approval_single_person" }), acl.NonSecretColumns);
+        Assert.Equal(new[] { "route_id", "metric_match", "smtp_recipients", "configured_channels", "enabled", "modified_at", "scope_server_id", "scope_tag_id" }.Concat(AgentColumns).Concat(new[] { "fallback_route_id", "previous_signing_key_until", "severities", "report_notice", "action_approval", "approval_single_person", "slack_bot_channel", "slack_bot_channel_set_at" }), acl.NonSecretColumns);
 
         foreach (var column in DestinationColumns)
         {
@@ -169,7 +169,7 @@ public sealed class NotificationRoutesRungTests
         }
 
         /* Every column in the DDL is in exactly one list. */
-        var ddlColumns = new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "configured_channels", "enabled", "modified_at", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns).Concat(new[] { "signing_key", "previous_signing_key", "previous_signing_key_until", "fallback_route_id", "severities", "report_notice", "action_approval", "approval_single_person" }).ToList();
+        var ddlColumns = new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "configured_channels", "enabled", "modified_at", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns).Concat(new[] { "signing_key", "previous_signing_key", "previous_signing_key_until", "fallback_route_id", "severities", "report_notice", "action_approval", "approval_single_person", "slack_bot_channel", "slack_bot_channel_set_at" }).ToList();
         var classified = acl.SecretColumns.Concat(acl.NonSecretColumns).ToList();
         Assert.Equal(ddlColumns.OrderBy(c => c, StringComparer.Ordinal), classified.OrderBy(c => c, StringComparer.Ordinal));
         Assert.Equal(classified.Count, classified.Distinct(StringComparer.Ordinal).Count());
@@ -243,7 +243,9 @@ public sealed class NotificationRoutesRungTests
            below is unchanged. */
         /* V193 (#5998): the signing key columns come last on the service read; the viewer reads them by their own statements. */
         /* #6003 (D8): fallback_route_id follows them, set by init like the agent columns; the viewer reads and writes it since #6036. */
-        Assert.Equal(new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns).Concat(new[] { "signing_key", "previous_signing_key", "previous_signing_key_until", "fallback_route_id", "severities", "report_notice", "action_approval", "approval_single_person" }), serviceSelect);
+        /* V252 (#7656): slack_bot_channel_set_at is last. The row trigger writes it when the channel changes, so no writer names it, and the
+           service reads it for the thread pass's gate. */
+        Assert.Equal(new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns).Concat(new[] { "signing_key", "previous_signing_key", "previous_signing_key_until", "fallback_route_id", "severities", "report_notice", "action_approval", "approval_single_person", "slack_bot_channel", "slack_bot_channel_set_at" }), serviceSelect);
         Assert.EndsWith("ORDER BY route_id", StoreConfigProvider.NotificationRoutesSelectSql, StringComparison.Ordinal);
 
         /* The constructor's parameter order IS the SELECT's order, so a reader ordinal cannot re-map a column. */
@@ -257,7 +259,7 @@ public sealed class NotificationRoutesRungTests
             ColumnsOf(ViewerDataService.NotificationRoutesSelectNoSecretSql, "SELECT", "FROM"));
 
         var insert = ColumnsOf(ViewerDataService.NotificationRouteInsertSql, "(", ")");
-        Assert.Equal(new[] { "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns).Concat(new[] { "fallback_route_id", "severities", "report_notice", "action_approval", "approval_single_person", "modified_at" }), insert);
+        Assert.Equal(new[] { "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns).Concat(new[] { "fallback_route_id", "severities", "report_notice", "action_approval", "approval_single_person", "slack_bot_channel", "modified_at" }), insert);
         Assert.DoesNotContain("route_id", insert);
         Assert.Contains("RETURNING route_id", ViewerDataService.NotificationRouteInsertSql, StringComparison.Ordinal);
 
@@ -475,6 +477,7 @@ public sealed class NotificationRoutesLivePostgresTests
                 insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = "off" }); /* report_notice (V233, #6979) */
                 insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = "required" }); /* action_approval (V238, #7109) */
                 insert.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = false }); /* approval_single_person (V238, #7109) */
+                insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = "" }); /* slack_bot_channel (V252, #7656) */
                 routeId = Convert.ToInt32(await insert.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
             }
 

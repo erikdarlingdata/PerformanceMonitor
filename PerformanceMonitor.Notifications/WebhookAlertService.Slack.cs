@@ -736,7 +736,7 @@ public partial class WebhookAlertService
     /// The text is cut BEFORE it is escaped, on a whole character, so a cut never lands inside an entity; one that
     /// still has to be cut ends in <c>...</c>.
     /// </summary>
-    private static string SlackEscapedBounded(string? raw, int limit)
+    internal static string SlackEscapedBounded(string? raw, int limit)
     {
         if (string.IsNullOrEmpty(raw))
         {

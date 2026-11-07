@@ -48,7 +48,7 @@ public sealed partial class DarlingMcpAlertTools
         "Creates a route that decides WHICH alerts it covers and, when you pass them, where they go. " + DestinationsHelp + " " +
         "With no destination field the route is stored with every destination empty, so it has none of its own and each channel goes where it went before: to the next less specific matching route that sets that channel, else to the Settings > Notifications channels. " +
         "What it can set: metric_match (" + MatchHelp + "), a scope of one server or one tag (not both; * only with a scope), enabled, " +
-        "send_resolutions (inherit, always or never: the clear message to the channels this route resolves to), fallback_route_id (an existing route), severities (" + SeveritiesHelp + ") and report_notice (" + ReportNoticeHelp + "). " +
+        "send_resolutions (inherit, always or never: the clear message to the channels this route resolves to), fallback_route_id (an existing route), severities (" + SeveritiesHelp + "), report_notice (" + ReportNoticeHelp + ") and slack_bot_channel (" + SlackBotChannelHelp + "). " +
         "The database role this tool runs as has no INSERT on the routes table and no read or write on a destination column: the route is written by the store's own " +
         "config.create_notification_route function and its destinations by config.set_notification_route_destinations, in one transaction, so a destination that is refused leaves no route behind. " +
         "A destination is sealed for this route's own row, so it cannot be copied to another route. scope_server_id and scope_tag_id are ids from get_notification_routes or the server and tag reads; an id that names nothing is invalid. " +
@@ -73,6 +73,7 @@ public sealed partial class DarlingMcpAlertTools
         [Description("Operator token only: lease minutes, 5 to 120. Omit for the default (15).")] int? agent_lease_minutes = null,
         [Description("Operator token only: expiry minutes, 15 to 1440. Omit for the default (240).")] int? agent_expiry_minutes = null,
         [Description("Whether the route posts a chat notice when an agent files a report: off (default), needs_person_or_change or all (case-insensitive).")] string? report_notice = null,
+        [Description("The Slack channel id the bot posts this route's investigation request threads into: C or G, then capital letters and digits (for example C0123ABCDEF), never the channel's name. Omit for none.")] string? slack_bot_channel = null,
         DarlingMcpServedPolicy? served = null,
         ILogger? logger = null,
         PostgresConfig? postgresConfig = null,
@@ -82,13 +83,14 @@ public sealed partial class DarlingMcpAlertTools
             new RouteDestinationRequest(teams_webhook_url, slack_webhook_url, generic_webhook_url, pagerduty_routing_key, email_recipients),
             DarlingPasswordKey.Current, logger, cancellationToken,
             new RouteAgentRequest(agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes),
-            served?.Policy.OperatorActor, StoreRolesAreRunByOperator(postgresConfig), severities, report_notice);
+            served?.Policy.OperatorActor, StoreRolesAreRunByOperator(postgresConfig), severities, report_notice, slack_bot_channel);
 
     /// <summary>The create: the route and its destinations in one transaction (a sealed value is bound to the route's id, so the id comes first).</summary>
     internal static async Task<string> CreateNotificationRouteAsync(
         NpgsqlDataSource postgres, string metric_match, bool enabled, int? scope_server_id, int? scope_tag_id, string? send_resolutions,
         int? fallback_route_id, RouteDestinationRequest destinations, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken,
-        RouteAgentRequest? agent = null, string? operatorActor = null, bool selfManagedStore = true, string? severities = null, string? reportNotice = null)
+        RouteAgentRequest? agent = null, string? operatorActor = null, bool selfManagedStore = true, string? severities = null, string? reportNotice = null,
+        string? slackBotChannel = null)
     {
         try
         {
@@ -105,6 +107,11 @@ public sealed partial class DarlingMcpAlertTools
             if (ParseReportNotice(reportNotice, out var reportNoticeWord) is { } badReportNotice)
             {
                 return Outcome("invalid", badReportNotice);
+            }
+
+            if (ParseSlackBotChannel(slackBotChannel, out var slackBotChannelId) is { } badSlackBotChannel)
+            {
+                return Outcome("invalid", badSlackBotChannel);
             }
 
             var match = NormalizeRouteMatch(metric_match);
@@ -134,7 +141,7 @@ public sealed partial class DarlingMcpAlertTools
                     : new WebhookProxies("", "", "", "");
                 await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
                 await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-                const string createSql = "SELECT config.create_notification_route($1, $2, $3, $4, $5, $6, $7, $8)";
+                const string createSql = "SELECT config.create_notification_route($1, $2, $3, $4, $5, $6, $7, $8, $9)";
                 await using (var command = new NpgsqlCommand(createSql, connection) { Transaction = transaction })
                 {
                     command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -148,6 +155,7 @@ public sealed partial class DarlingMcpAlertTools
                     NotificationRouteWriter.AddNullableInt(command, fallback_route_id);
                     command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = severitiesWord });
                     command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = reportNoticeWord });
+                    command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = slackBotChannelId });
                     routeId = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
                 }
 
@@ -172,7 +180,7 @@ public sealed partial class DarlingMcpAlertTools
                 return Outcome("invalid", ex.Message);
             }
 
-            var fields = "metric_match, enabled, scope, send_resolutions, fallback_route_id, severities, report_notice" + (change is { Fields.Count: > 0 } ? ", " + DestinationFieldNames(change) : "")
+            var fields = "metric_match, enabled, scope, send_resolutions, fallback_route_id, severities, report_notice, slack_bot_channel" + (change is { Fields.Count: > 0 } ? ", " + DestinationFieldNames(change) : "")
                 + (agent.Any ? ", " + string.Join(", ", agent.Columns) : "");
             LogRouteWrite(logger, "create_notification_route", CallerOf(), routeId, fields);
             var stored = (await new PgNotificationRouteStore(postgres).LoadSummariesAsync(cancellationToken)).FirstOrDefault(r => r.RouteId == routeId);
@@ -202,7 +210,7 @@ public sealed partial class DarlingMcpAlertTools
         "An operator token changes any route, an agent route included: its match, scope, enabled flag, send_resolutions, fallback, destinations and agent fields. A change to the agent fields, or to the match, scope or enabled flag of a route with an agent setting, is journaled as route_agent_changed under operator: and the token's name. " +
         "A route's own destinations do not stop a change to what it matches. " +
         "Fields: metric_match (" + MatchHelp + "), enabled, scope (scope_server_id or scope_tag_id, the other is cleared; fleet_wide true clears both), " +
-        "send_resolutions (inherit, always or never), severities (" + SeveritiesHelp + "), report_notice (" + ReportNoticeHelp + ") and fallback_route_id (an existing route; clear_fallback true removes it), plus the destination fields. A field left out keeps its stored value. " +
+        "send_resolutions (inherit, always or never), severities (" + SeveritiesHelp + "), report_notice (" + ReportNoticeHelp + "), slack_bot_channel (" + SlackBotChannelHelp + "; - removes it) and fallback_route_id (an existing route; clear_fallback true removes it), plus the destination fields. A field left out keeps its stored value. " +
         "An operator token sets agent_level 0 to 3, or clear_agent_level true to put the level back to Inherit (null: the next level decides), not both. Clearing the level keeps the four limits, as the Viewer's Inherit does. " +
         "The same rules the Viewer's route window applies hold: * needs a scope, a route is scoped to one server or one tag, a route is not its own fallback, a webhook is an absolute http or https URL, recipients are plain addresses. " +
         "A route whose generic webhook has a signing key keeps its generic URL until the key is removed (remove_webhook_signing_key, or the Viewer). " +
@@ -243,6 +251,7 @@ public sealed partial class DarlingMcpAlertTools
         [Description("Operator token only: required makes a Level 3 action on this route wait for a person's approval. MCP sets only required, never off. Omit to keep.")] string? action_approval = null,
         [Description("Operator token only: false stops an asker from approving their own request's action on this route. MCP sets only false, never true. Omit to keep.")] bool? approval_single_person = null,
         [Description("Whether the route posts a chat notice when an agent files a report: off, needs_person_or_change or all (case-insensitive). Omit to keep.")] string? report_notice = null,
+        [Description("The Slack channel id the bot posts this route's investigation request threads into: C or G, then capital letters and digits (for example C0123ABCDEF), never the channel's name. Omit to keep; - removes it.")] string? slack_bot_channel = null,
         DarlingMcpServedPolicy? served = null,
         ILogger? logger = null,
         PostgresConfig? postgresConfig = null,
@@ -253,14 +262,14 @@ public sealed partial class DarlingMcpAlertTools
             DarlingPasswordKey.Current, logger, cancellationToken,
             new RouteAgentRequest(agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, clear_agent_level == true,
                 action_approval, approval_single_person),
-            served?.Policy.OperatorActor, StoreRolesAreRunByOperator(postgresConfig), severities, report_notice);
+            served?.Policy.OperatorActor, StoreRolesAreRunByOperator(postgresConfig), severities, report_notice, slack_bot_channel);
 
     /// <summary>The edit: the match, scope and flag columns and the destinations in one transaction.</summary>
     internal static async Task<string> UpdateNotificationRouteAsync(
         NpgsqlDataSource postgres, int route_id, string? metric_match, bool? enabled, int? scope_server_id, int? scope_tag_id, bool? fleet_wide,
         string? send_resolutions, int? fallback_route_id, bool? clear_fallback, RouteDestinationRequest destinations, IPasswordKeyRing ring,
         ILogger? logger, CancellationToken cancellationToken, RouteAgentRequest? agent = null, string? operatorActor = null,
-        bool selfManagedStore = true, string? severities = null, string? reportNotice = null)
+        bool selfManagedStore = true, string? severities = null, string? reportNotice = null, string? slackBotChannel = null)
     {
         try
         {
@@ -387,6 +396,23 @@ public sealed partial class DarlingMcpAlertTools
                 }
             }
 
+            /* #7656: the bot channel id. - removes it, as it removes a destination. */
+            var slackBotChannelNow = existing.SlackBotChannel;
+            if (slackBotChannel is not null)
+            {
+                var channelText = slackBotChannel.Trim() == NotificationRouteWriter.ClearMarker ? "" : slackBotChannel;
+                if (ParseSlackBotChannel(channelText, out var parsedSlackBotChannel) is { } badSlackBotChannel)
+                {
+                    return Outcome("invalid", badSlackBotChannel);
+                }
+
+                if (!string.Equals(parsedSlackBotChannel, existing.SlackBotChannel, StringComparison.Ordinal))
+                {
+                    slackBotChannelNow = parsedSlackBotChannel;
+                    columns.Add("slack_bot_channel");
+                }
+            }
+
             var fallback = existing.FallbackRouteId;
             if (clear_fallback == true)
             {
@@ -407,7 +433,7 @@ public sealed partial class DarlingMcpAlertTools
             /* The Viewer journals a match, scope or enabled change to a route with an agent setting (NotificationRouteWriter.AgentChange), so an
                operator's change to one is journaled too, by the agent function, with the before row the update function returns. */
             var journalsMatchOrFlag = operatorActor is not null && existing.AgentLevel is not null
-                && columns.Any(c => c is "metric_match" or "scope" or "enabled" or "severities" or "report_notice");
+                && columns.Any(c => c is "metric_match" or "scope" or "enabled" or "severities" or "report_notice" or "slack_bot_channel");
 
             /* #7109: another enabled Level 3 route with approval off, read from the same list, which a disable or reshape of this route could hand
                its metrics to. This route itself is left out: moving metrics off it never moves them onto it. */
@@ -462,7 +488,7 @@ public sealed partial class DarlingMcpAlertTools
                 string? before = null;
                 if (columns.Count > 0)
                 {
-                    const string updateSql = "SELECT config.update_notification_route($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)::text";
+                    const string updateSql = "SELECT config.update_notification_route($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)::text";
                     await using var command = new NpgsqlCommand(updateSql, connection) { Transaction = transaction };
                     command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
                     command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = route_id });
@@ -478,6 +504,7 @@ public sealed partial class DarlingMcpAlertTools
                     NotificationRouteWriter.AddNullableInt(command, fallback);
                     command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = severitiesNow });
                     command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = reportNoticeNow });
+                    command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = slackBotChannelNow });
                     before = await command.ExecuteScalarAsync(cancellationToken) as string;
                 }
 
@@ -709,6 +736,8 @@ public sealed partial class DarlingMcpAlertTools
             ["send_resolutions"] = existing.SendResolutions switch { true => "always", false => "never", _ => "inherit" },
             ["severities"] = existing.Severities,
             ["report_notice"] = existing.ReportNotice,
+            /* #7656: - puts a blank bot channel back, as it removes a destination. */
+            ["slack_bot_channel"] = string.IsNullOrWhiteSpace(existing.SlackBotChannel) ? NotificationRouteWriter.ClearMarker : existing.SlackBotChannel,
         };
         if (existing.ScopeServerId.HasValue)
         {
@@ -804,6 +833,16 @@ public sealed partial class DarlingMcpAlertTools
         }
 
         return "report_notice is off, needs_person_or_change or all.";
+    }
+
+    private const string SlackBotChannelHelp = "the Slack channel id the bot posts the route's investigation request threads into: C or G, then capital letters and digits, never the channel's name; blank is none";
+
+    /// <summary>The bot channel id (#7656): a Slack channel id, trimmed, or blank for none. Anything else is refused with the one shape sentence
+    /// (<see cref="SlackChannelId.RefusalText"/>).</summary>
+    private static string? ParseSlackBotChannel(string? text, out string id)
+    {
+        id = SlackChannelId.Normalize(text);
+        return SlackChannelId.Refusal(id);
     }
 
     private static string? ParseSendResolutions(string? text, out bool? value)

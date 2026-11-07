@@ -154,6 +154,41 @@ public partial class WebhookAlertService : IReportNoticeSends
             },
         };
 
+        blocks.AddRange(ReportNoticeSlackBodyBlocks(content));
+
+        var (requestUrl, changesUrl) = ReportNoticeLinks(content);
+        var links = new List<object>();
+        if (requestUrl is not null)
+        {
+            links.Add(new { type = "mrkdwn", text = $"<{SlackLinkTarget(requestUrl)}|Open the request>" });
+        }
+
+        if (changesUrl is not null)
+        {
+            links.Add(new { type = "mrkdwn", text = $"<{SlackLinkTarget(changesUrl)}|Open the agent changes>" });
+        }
+
+        if (links.Count > 0)
+        {
+            blocks.Add(new { type = "context", elements = links.ToArray() });
+        }
+
+        blocks.Add(new { type = "context", elements = new object[] { new { type = "mrkdwn", text = $"Sent by {branding.EditionName}" } } });
+        var color = content.Verdict == "needs_person" ? "#D13438" : "#0078D4";
+        return JsonSerializer.Serialize(new { attachments = new object[] { new { color, blocks } } }, s_jsonOptions);
+    }
+
+    /// <summary>
+    /// The body of a report notice as Slack blocks: the root cause's first line in a section of its own, bounded after escaping to
+    /// <see cref="ReportNoticeRootCauseLimit"/>, and the changes in a second section, each part of a change line bounded after escaping
+    /// (at most <see cref="ReportNoticeChangeLimit"/> lines, then a count of the rest). Each section stays inside
+    /// <see cref="SlackTextObjectLimit"/>. Empty when the content carries neither. The webhook notice and the bot's thread post both
+    /// build their body from here, so one bound holds for both.
+    /// </summary>
+    internal static List<object> ReportNoticeSlackBodyBlocks(ReportNoticeContent content)
+    {
+        ArgumentNullException.ThrowIfNull(content);
+        var blocks = new List<object>();
         if (!string.IsNullOrWhiteSpace(content.RootCauseFirstLine))
         {
             blocks.Add(new
@@ -182,26 +217,7 @@ public partial class WebhookAlertService : IReportNoticeSends
             blocks.Add(new { type = "section", text = new { type = "mrkdwn", text = string.Join("\n", lines) } });
         }
 
-        var (requestUrl, changesUrl) = ReportNoticeLinks(content);
-        var links = new List<object>();
-        if (requestUrl is not null)
-        {
-            links.Add(new { type = "mrkdwn", text = $"<{SlackLinkTarget(requestUrl)}|Open the request>" });
-        }
-
-        if (changesUrl is not null)
-        {
-            links.Add(new { type = "mrkdwn", text = $"<{SlackLinkTarget(changesUrl)}|Open the agent changes>" });
-        }
-
-        if (links.Count > 0)
-        {
-            blocks.Add(new { type = "context", elements = links.ToArray() });
-        }
-
-        blocks.Add(new { type = "context", elements = new object[] { new { type = "mrkdwn", text = $"Sent by {branding.EditionName}" } } });
-        var color = content.Verdict == "needs_person" ? "#D13438" : "#0078D4";
-        return JsonSerializer.Serialize(new { attachments = new object[] { new { color, blocks } } }, s_jsonOptions);
+        return blocks;
     }
 
     /// <summary>A link target inside a mrkdwn <c>&lt;url|label&gt;</c>: escaped, and a pipe percent-encoded so it cannot end the target early.</summary>
