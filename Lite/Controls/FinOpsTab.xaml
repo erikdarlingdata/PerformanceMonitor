@@ -1128,7 +1128,7 @@
                             <Style x:Key="RightAlign" TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
                         </DataGrid.Resources>
                         <DataGrid.Columns>
-                            <DataGridTextColumn Binding="{Binding DatabaseName}" Width="140">
+                            <DataGridTextColumn Binding="{Binding DatabaseName}" ElementStyle="{StaticResource TrimmedCell}" Width="120">
                                 <DataGridTextColumn.Header><StackPanel Orientation="Horizontal">
                                     <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/>
                                     <TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
@@ -1137,12 +1137,12 @@
                                  (the norm on Azure SQL DB) read as one object here. The filter Tag names the SAME
                                  property as the binding: the popup filter resolves Tag by reflection and a Tag
                                  that names a property the row does not expose filters nothing, silently. -->
-                            <DataGridTextColumn Binding="{Binding FullName}" Width="220">
+                            <DataGridTextColumn Binding="{Binding FullName}" ElementStyle="{StaticResource TrimmedCell}" Width="160">
                                 <DataGridTextColumn.Header><StackPanel Orientation="Horizontal">
                                     <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FullName" Click="FilterButton_Click" Margin="0,0,4,0"/>
                                     <TextBlock Text="Table" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding IndexName}" Width="180">
+                            <DataGridTextColumn Binding="{Binding IndexName}" ElementStyle="{StaticResource TrimmedCell}" Width="140">
                                 <DataGridTextColumn.Header><StackPanel Orientation="Horizontal">
                                     <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="IndexName" Click="FilterButton_Click" Margin="0,0,4,0"/>
                                     <TextBlock Text="Index" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
