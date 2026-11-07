@@ -195,13 +195,14 @@ internal static class LiteTimeRange
             "Query Heatmap" => "query_stats",
             _ => null
         },
-        "CPU" => "cpu_utilization",
+        "CPU" => subTab == "CPU Scheduler" ? "cpu_scheduler_stats" : "cpu_utilization",
         "Memory" => subTab switch
         {
             "Overview" => "memory_stats",
             "Memory Clerks" => "memory_clerks",
             "Memory Grants" => "memory_grant_stats",
             "Memory Pressure Events" => "memory_pressure_events",
+            "Plan Cache" => "plan_cache_stats",
             _ => null
         },
         "File I/O" => "file_io_stats",
@@ -218,8 +219,6 @@ internal static class LiteTimeRange
         "Perfmon" => "perfmon_stats",
         "Running Jobs" => "running_jobs",
         "Latches & Spinlocks" => "latch_stats",
-        "CPU Scheduler" => "cpu_scheduler_stats",
-        "Plan Cache" => "plan_cache_stats",
         "Session Stats" => "session_stats",
         "System Events" => subTab == "Default Trace" ? "default_trace_events" : "system_health_events",
         _ => null

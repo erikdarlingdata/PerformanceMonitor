@@ -36,6 +36,8 @@ public sealed class OperatorGroupStaticsCollectionTests
         typeof(DarlingStoreContentsGateTests),
         typeof(DarlingFileLoggerProviderTests),
         typeof(DarlingTlsKeyFileHardenTests),
+        typeof(DarlingPasswordKeyFileOwnerTests),
+        typeof(PasswordKeyValidateConfigAccountTests),
     };
 
     [Fact]
@@ -68,9 +70,11 @@ public sealed class OperatorGroupStaticsCollectionTests
             "DarlingFileLoggerProviderTests.cs",
             "DarlingFileSecurityTests.cs",
             "DarlingHardenFilesVerbTests.cs",
+            "DarlingPasswordKeyFileOwnerTests.cs",
             "DarlingSecretFileAccessTests.cs",
             "DarlingStoreFolderTests.cs",
             "DarlingTlsKeyFileHardenTests.cs",
+            "PasswordKeyValidateConfigAccountTests.cs",
         };
 
         var directory = PathTo("Darling", "Darling.Tests");

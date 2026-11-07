@@ -277,6 +277,21 @@ internal static class DarlingServiceKeyFile
         where TKey : class =>
         $"it is larger than {spec.MaxBytes.ToString(CultureInfo.InvariantCulture)} bytes, which no key this service writes is";
 
+    /// <summary>Reads <paramref name="stream"/> into <paramref name="buffer"/> until the stream ends or the buffer is full,
+    /// and returns how many bytes were read. A caller sizes the buffer to its limit plus one byte, so a count above the
+    /// limit means the file is larger, and no more than that is ever read, whatever the file grows to (#5366, #8006).</summary>
+    internal static int ReadBounded(Stream stream, byte[] buffer)
+    {
+        var length = 0;
+        int read;
+        while (length < buffer.Length && (read = stream.Read(buffer, length, buffer.Length - length)) > 0)
+        {
+            length += read;
+        }
+
+        return length;
+    }
+
     /// <summary>Reads the key from <paramref name="held"/>, the stream <see cref="Load{TKey}"/> judged the file through,
     /// or from the path when there is none (Unix, where mode and owner are the shared check's).</summary>
     private static ServiceKeyFileResult<TKey> Read<TKey>(string path, ServiceKeyFileSpec<TKey> spec, FileStream? held, string? discarded)
@@ -296,13 +311,7 @@ internal static class DarlingServiceKeyFile
             }
 
             buffer = new byte[spec.MaxBytes + 1];
-            var length = 0;
-            int read;
-            while (length < buffer.Length && (read = stream.Read(buffer, length, buffer.Length - length)) > 0)
-            {
-                length += read;
-            }
-
+            var length = ReadBounded(stream, buffer);
             if (length > spec.MaxBytes)
             {
                 return Refuse<TKey>(path, TooLarge(spec), untrusted: false, discarded);

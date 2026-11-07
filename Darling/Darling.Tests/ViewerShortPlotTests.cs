@@ -74,7 +74,7 @@ public sealed class ViewerShortPlotTests
     public void BlockingTrendAxisTitle_FitsTheMinimumRowWhole_AndTheSourceMovesToTheLegend()
     {
         var (text, size) = ChartAxisTitle.Fit(PerformanceMonitor.Darling.Viewer.ViewerServerTab.BlockingTrendAxisTitle, MinRowTitleSpace);
-        Assert.Equal(PerformanceMonitor.Ui.BlockingTrendLabels.AxisShort, text);
+        Assert.Equal(PerformanceMonitor.Darling.Viewer.ViewerServerTab.BlockingTrendAxisTitle, text);
         Assert.InRange(size, ChartAxisTitle.MinFontSize, ChartAxisTitle.BaseFontSize);
         Assert.Equal("Blocking Incidents (blocked-process-report)", BlockingSourceLabel.For("Blocking Incidents", new string?[] { "blocked-process-report" }));
     }

@@ -57,7 +57,8 @@ public sealed class ViewerFillColumnTests
 
     private static void AssertFixedColumnsKeepTheirWidth(Laid laid)
     {
-        var squeezed = laid.Columns.Where(c => !c.Fill && c.Declared > 0 && Math.Abs(c.Actual - c.Declared) > 0.5)
+        /* #8197: a column may grow to its header's width (DataGridHeaderFit), never shrink below what it was given. */
+        var squeezed = laid.Columns.Where(c => !c.Fill && c.Declared > 0 && c.Actual < c.Declared - 0.5)
             .Select(c => $"{c.Header} declared {c.Declared} got {c.Actual}").ToList();
         Assert.True(squeezed.Count == 0, "fixed columns lost width: " + string.Join("; ", squeezed));
     }
@@ -217,6 +218,8 @@ public sealed class ViewerFillColumnTests
         {
             var wide = Read(grid, declared);
             var first = grid.Columns[0];
+            /* #8197: the header floor keeps a drag from going below the header; this test is about the fill column taking the difference, so it lifts the floor. */
+            first.MinWidth = 20;
             first.Width = new DataGridLength(40);
             grid.RaiseEvent(new DragCompletedEventArgs(-60, 0, false) { RoutedEvent = Thumb.DragCompletedEvent, Source = grid });
             ClippedTextProbe.Settle(window);
@@ -228,7 +231,7 @@ public sealed class ViewerFillColumnTests
         Assert.True(wide.Scrollable < 1, $"nothing to scroll when the columns fit: {wide}");
         Assert.True(Math.Abs(wide.Total - wide.Viewport) < 2, $"the columns should fill the viewport: {wide}");
         Assert.Equal(40, pidWidth, 0.5);
-        Assert.Equal(wide.Columns.Single(c => c.Fill).Actual + 60, dragged.Columns.Single(c => c.Fill).Actual, 1.5);
+        Assert.Equal(wide.Columns.Single(c => c.Fill).Actual + (wide.Columns[0].Actual - 40), dragged.Columns.Single(c => c.Fill).Actual, 1.5);
         Assert.True(Math.Abs(dragged.Total - dragged.Viewport) < 2, $"the columns should still fill the viewport: {dragged}");
     }
 }

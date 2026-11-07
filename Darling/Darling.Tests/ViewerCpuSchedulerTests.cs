@@ -245,7 +245,9 @@ public sealed class ViewerCpuSchedulerProjectionTests
 
 /// <summary>
 /// Pins the rolled-up CPU-scheduler pressure classification
-/// (<see cref="CpuSchedulerMetrics.ClassifyCpuPressure"/>) against install/47's report.cpu_scheduler_pressure
+/// (<see cref="CpuSchedulerMetrics.ClassifyCpuPressure"/>) against install/47's report.cpu_scheduler_pressure, with one
+/// deliberate difference: the worker-exhaustion flag is tested ahead of the 90% utilization arm, where the proc tests it after, so
+/// the flag's CRITICAL is reachable above 90% here and only at exactly 90% there. Otherwise the banding is the proc's CASE
 /// CASE ordering: runnable task queue &gt; 50 / &gt; 20 / &gt; 10, then worker-utilization &gt; 90%, then the
 /// collector's warning flags; plus the paired recommendation.
 /// </summary>
