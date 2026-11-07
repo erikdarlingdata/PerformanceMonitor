@@ -1801,10 +1801,6 @@ END;", connection);
     /// catalogs are visibility-scoped per principal, so CREATE/START can report these even when
     /// the pre-check came back empty; they confirm the session is up (#1251, verbatim from Lite).
     /// </summary>
-    /// <summary><see cref="IsBenignXeSessionAlreadyPresent(SqlException)"/> for any exception; false when it is not a <see cref="SqlException"/>.</summary>
-    private static bool IsBenignXeSessionAlreadyPresentException(Exception ex) =>
-        ex is SqlException sql && IsBenignXeSessionAlreadyPresent(sql);
-
     internal static bool IsBenignXeSessionAlreadyPresent(SqlException ex)
     {
         if (ex.Errors.Count == 0)
@@ -1822,6 +1818,10 @@ END;", connection);
 
         return true;
     }
+
+    /// <summary><see cref="IsBenignXeSessionAlreadyPresent(SqlException)"/> for any exception; false when it is not a <see cref="SqlException"/>.</summary>
+    private static bool IsBenignXeSessionAlreadyPresentException(Exception ex) =>
+        ex is SqlException sql && IsBenignXeSessionAlreadyPresent(sql);
 }
 
 /// <summary>

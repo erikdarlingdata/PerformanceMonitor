@@ -123,7 +123,7 @@ When a second Windows user on the same machine launches Lite, they see the share
 
 | Key | Default | Notes |
 |---|---|---|
-| `xe_ring_buffer_max_events` | `1000` | The `max_events_limit` of the session's ring buffer. A ring buffer holds at most this many events or 4 MB (`max_memory`, fixed at 4096 KB), whichever fills first. SQL Server's own default is 1000, and a session at its limit evicts its oldest events before a collection reads them. A larger value holds more events between collections. Clamped to 1000-10000: a value outside that range is replaced by the nearest bound, and Lite logs one warning at start naming the key, the value given and the value used. File only, with no control in the Settings window. Edit and restart. |
+| `xe_ring_buffer_max_events` | `1000` | The `max_events_limit` of the session's ring buffer. A ring buffer holds at most this many events or 4 MB (`max_memory`, fixed at 4096 KB), whichever fills first. SQL Server's own default is 1000, and a session at its limit evicts its oldest events before a collection reads them. A larger value holds more events between collections. Clamped to 1000-10000: a value outside that range is replaced by the nearest bound, and Lite logs a warning naming the key, the value given and the value used each time it loads settings (at start and on every reload), not once. File only, with no control in the Settings window. Edit and restart. |
 
 **It applies when a session is created.** A session keeps the limit it was created with, so a changed value reaches only sessions created afterwards. To apply a new value to an existing session, recreate it:
 
@@ -132,15 +132,16 @@ When a second Windows user on the same machine launches Lite, they see the share
 
 **The deadlock and blocked-process sessions are shared by name across installs, so when two installs with different settings watch one server, whichever created the session wins. The loss note shows the session's actual limit.**
 
-**Where a loss shows.** When a collection finds that events were evicted from a ring buffer before the read, or that the session dropped events before they reached its targets, collection health shows a WARNING with a note that says how many, over what window, and what to do about it. The same note reaches the `ring_buffer_loss` key of the MCP tools `get_deadlocks`, `get_deadlock_trend`, `get_blocked_process_reports`, `get_blocking_trend`, `get_blocking_stats` and `get_long_query_completions` when the window they cover lost events (an empty answer carries it inside `hints`, and then does not call the window an all-clear). Read it like this:
+**Where a loss shows.** When a collection finds that events were evicted from a ring buffer before the read, or that the session dropped events before they reached its targets, collection health shows a WARNING on the run that found the loss, with a note that says how many, over what window, and what to do about it. The WARNING clears on the next clean run, because collection health reads only a collector's newest run; the MCP window answers keep the record for the whole window they cover. The same note reaches the `ring_buffer_loss` key of the MCP tools `get_deadlocks`, `get_deadlock_trend`, `get_blocked_process_reports`, `get_blocking_trend`, `get_blocking_stats` and `get_long_query_completions` when the window they cover lost events (an empty answer carries it inside `hints`, and then does not call the window an all-clear). Read it like this:
 
 - **Evicted** is the number of events that arrived and were pushed out of a full buffer before a collection read them. **Dropped** is a per-session number: events the session discarded from its own full buffers before they reached any target. For you they are the same loss. A larger event limit helps only with evicted events, so for dropped events the note advises collecting more often.
 - "At least N" means the previous read was truncated, so some events it held were never counted.
-- After a session restart the note says the loss cannot be counted, and it gives no number. A restart is routine, so this alone does not raise the WARNING.
+- After a session restart the note says the loss cannot be counted, and it gives no number: a window whose only lossy runs were restarts has `evicted_events` and `dropped_events` null, not 0, and `unknown_spans` counts the restarts. The window of a note names the runs that found the loss; each loss happened in the time before its run. A restart is routine, so this alone does not raise the WARNING.
 - The note advises raising `xe_ring_buffer_max_events` only when the event limit was the cap and the read was not truncated. When the buffer was full at its 4 MB memory cap, or the read was already truncated, a higher limit would not help: collect more often instead.
 - When the setting is above the session's actual limit, the note says so: the session was created before the setting changed, or by another install.
 - A value that makes collection health report a truncated ring buffer is too high. SQL Server cuts a ring buffer's XML at about 4 MB when it is read, so events held past that cut are not read.
 - Azure SQL Database registrations of the logical server (no database, or `master`) read deadlocks from a telemetry file and report no ring-buffer loss for them.
+- `get_blocked_process_reports` and `get_blocking_trend` with a `database_name` filter carry the whole session's loss, not the filtered database's: the buffer holds every database's events, and the loss then has a `database_filter_note` saying so.
 
 ### Appearance
 
