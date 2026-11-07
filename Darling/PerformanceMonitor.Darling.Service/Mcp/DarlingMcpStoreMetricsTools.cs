@@ -826,6 +826,12 @@ public sealed class DarlingMcpStoreMetricsTools
                 last_failed_at = trigramHealth.LastFailedUtc?.ToString("o", CultureInfo.InvariantCulture),
                 next_attempt_at = trigramHealth.NextAttemptUtc?.ToString("o", CultureInfo.InvariantCulture),
                 operator_statement = trigramHealth.OperatorStatement,
+                /* #7849: the sample index on query_stats that the same option builds. Ready does not wait for it: the all-servers search is served without it and reaches the samples through it once it is valid. */
+                sample_table = QueryTextTrigramIndex.SampleTableName,
+                sample_index_name = QueryTextTrigramIndex.SampleIndexName,
+                sample_index_exists = trigramHealth.SampleIndexExists,
+                sample_index_valid = trigramHealth.SampleIndexValid,
+                sample_index_size_bytes = trigramHealth.SampleIndexSizeBytes,
                 note = QueryTextTrigramIndex.Note(trigramHealth),
             };
 
