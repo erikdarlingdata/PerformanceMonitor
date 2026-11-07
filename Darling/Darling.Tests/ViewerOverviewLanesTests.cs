@@ -41,13 +41,12 @@ public sealed class ViewerOverviewLanesSqlTests
         Assert.Contains("collection_time >= $2", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
 
-        /* SUM across ALL wait types per collection (the single-line total), the collection's STORED interval
-           (MAX over its rows, 0 → NULL) with the LAG-derived interval only for pre-V127 collections (#3540),
-           and the per-second division with the delta CAST to double for the typed reader — no ELSE 0. */
+        /* SUM across ALL wait types per collection (the single-line total), each row rated over its own stored interval
+           (0 → NULL through NULLIF, #8078) with the LAG-derived interval only for pre-V127 collections (#3540), and the
+           per-second division with the delta CAST to double for the typed reader — no ELSE 0. The figures the shape
+           produces are pinned by the live server-trend test that seeds a wait type returning with a longer interval. */
         Assert.Contains("SUM(delta_wait_time_ms)", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
-        Assert.Contains("CASE WHEN MAX(sample_interval_seconds) IS NULL", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
         Assert.Contains("LAG(collection_time)", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
-        Assert.Contains("ELSE NULLIF(MAX(sample_interval_seconds), 0)", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
         Assert.Contains("CAST(SUM(rated_delta_ms) AS double precision) / SUM(rated_seconds) AS wait_time_ms_per_second", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
         Assert.DoesNotContain("ELSE 0", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY collection_time", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
