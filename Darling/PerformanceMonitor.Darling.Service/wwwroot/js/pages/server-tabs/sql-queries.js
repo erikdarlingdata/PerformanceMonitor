@@ -234,9 +234,9 @@ export function slicedTagCard(kind, cmp, build, compare = false) {
 export const DURATION_SERIES = [{ key: "value", label: "Avg duration" }];
 
 /* #2484: executions/sec, the viewer's fourth Performance-Trends chart. Charts executions_per_second and
-   not execution_count: the two are the same quantity, and the integer one reports ZERO on any server
-   running under one execution a second, which would draw a flat line along the axis for a server that is
-   simply quiet rather than idle. */
+   not execution_count: the first is the rate, a double that stays above the axis on a server running under
+   one execution a second (quiet, not idle); the second is the bucket's summed executions (#8073), a count
+   whose height follows the bucket width rather than the load. */
 export const EXECUTION_RATE_SERIES = [{ key: "executions_per_second", label: "Executions/sec" }];
 
 /* The Active Queries grid. With a wait filter set (a wait row or the wait trend chart opened this tab on a wait) it reads
