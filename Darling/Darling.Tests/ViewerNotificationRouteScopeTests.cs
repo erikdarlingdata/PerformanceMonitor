@@ -56,6 +56,9 @@ public sealed class ViewerNotificationRouteScopeTests
         Assert.Null(ViewerDataService.ValidateNotificationRoute(Row("*", tag: 10)));
         Assert.Null(ViewerDataService.ValidateNotificationRoute(Row("performance")));
         Assert.Null(ViewerDataService.ValidateNotificationRoute(Row("Deadlocks Detected", server: 2)));
+        /* #7999: unlike `*`, every analysis finding is accepted fleet-wide, in any spelling. */
+        Assert.Null(ViewerDataService.ValidateNotificationRoute(Row("Analysis: *")));
+        Assert.Null(ViewerDataService.ValidateNotificationRoute(Row("  analysis:   * ")));
 
         /* The write paths run the same check before the statement, so a refusal never reaches the store. */
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.NotificationRoutes.cs");
@@ -165,6 +168,16 @@ public sealed class ViewerNotificationRouteScopeTests
         Assert.Equal("Every metric", Row("*", server: 1).MatchKindDisplay);
         Assert.Equal("Family", Row("performance").MatchKindDisplay);
         Assert.Equal("Exact metric", Row("Deadlocks Detected").MatchKindDisplay);
+        Assert.Equal("Analysis category", Row("Analysis: queries").MatchKindDisplay);
+    }
+
+    [Theory]
+    [InlineData("Analysis: *")]
+    [InlineData("  analysis:   * ")]
+    public void TheKindColumn_NamesTheEveryAnalysisFindingMatch_AtAnyScope(string match)
+    {
+        Assert.Equal("Every analysis finding", Row(match).MatchKindDisplay);
+        Assert.Equal("Every analysis finding", Row(match, server: 1).MatchKindDisplay);
     }
 
     /* ---- the windows' source --------------------------------------------------------------------------------- */
