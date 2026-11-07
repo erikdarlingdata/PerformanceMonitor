@@ -77,6 +77,7 @@ public partial class ViewerServerTab
         double xMax = endUtc.ToOADate();
 
         SessionStatsRenderer.Render(SessionStatsChart, _sessionStatsHover, data, xMin, xMax);
+        ViewerChartCards.SetUnit(SessionStatsChart, "count"); // #8151: the shared renderer names the axis; the card carries the name
         KeepPlottedInView(SessionStatsChart, startUtc, endUtc);
 
         /* Summary panel reflects the latest snapshot in the window (Dashboard uses the last data point). */
