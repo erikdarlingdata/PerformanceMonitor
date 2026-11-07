@@ -141,6 +141,7 @@ public partial class ServerTab : UserControl
     /// renderer plotted a point older than that start (#7386), and refreshes the chart.</summary>
     internal void KeepPlottedInView(ScottPlot.WPF.WpfPlot chart, DateTime startUtc, DateTime endUtc)
     {
+        MarkAllZero(chart); // #8144: the shared renderers do not go through ShowChartLegend here
         if (ChartAxisStart.WidenToPlotted(chart.Plot, startUtc.ToOADate(), endUtc.ToOADate(), ServerDataStartUtc))
         {
             chart.Refresh();
