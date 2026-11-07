@@ -580,6 +580,10 @@ public class ServerSummaryItem
             return $"{TotalCpuPercent:F0}% (SQL {CpuPercent:F0}%)";
         }
     }
+    /// <summary>#8162: the CPU row's detail column, the host's other-process share ("Other: 5%"). Empty when the CPU figure is not shown
+    /// (stale, or never measured) or the server cannot report the other-process figure (#7682).</summary>
+    public string CpuDetail =>
+        CpuIsStale || !CpuPercent.HasValue || !OtherProcessCpuPercent.HasValue ? "" : $"Other: {OtherProcessCpuPercent:F0}%";
     public string MemoryDisplay => MemoryMb.HasValue ? $"{MemoryMb / 1024.0:F1} GB" : "--";
     public string BlockingDisplay => BlockingCount > 0 ? BlockingCount.ToString() : "0";
     public string DeadlockDisplay => DeadlockCount > 0 ? DeadlockCount.ToString() : "0";
