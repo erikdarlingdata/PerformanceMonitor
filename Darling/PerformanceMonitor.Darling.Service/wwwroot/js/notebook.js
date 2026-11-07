@@ -272,14 +272,45 @@ function buildNotebookEditor(main, ctx) {
     };
   }
 
-  const inner = { ...ctx, rebuildCells, refreshSaveState, previewScope };
+  const inner = { ...ctx, rebuildCells, rebuildCell, refreshSaveState, previewScope };
 
-  /* Reuse the dashboard composer's view-scope editor verbatim (default time range + template variables). */
-  const viewScopeSection = buildViewScopeSection(model, ctx.catalog, rebuildCells);
+  /* Reuse the dashboard composer's view-scope editor verbatim (default time range + template variables). A scope change runs
+     every panel's preview against the new scope, so it builds every cell editor again. */
+  const viewScopeSection = buildViewScopeSection(model, ctx.catalog, resetCells);
 
+  /* #7936: the editor node built for each cell, kept across an add, a remove and a move so an unchanged cell is neither built
+     again nor read again (a panel cell's preview is a compose run), and a field the author is typing in keeps its focus. Only the
+     nodes whose place changed move, and each node is told its place (its number and the ends of its reorder buttons). */
+  const built = new Map();
   function rebuildCells() {
-    mount(cellsBox, model.cells.map((cell, i) => buildCellEditor(cell, i, inner)));
+    for (const cell of Array.from(built.keys())) {
+      if (!model.cells.includes(cell)) built.delete(cell);
+    }
+    const nodes = model.cells.map((cell) => {
+      let node = built.get(cell);
+      if (!node) {
+        node = buildCellEditor(cell, inner);
+        built.set(cell, node);
+      }
+      return node;
+    });
+    Array.from(cellsBox.children).forEach((n) => {
+      if (!nodes.includes(n)) cellsBox.removeChild(n);
+    });
+    nodes.forEach((node, i) => {
+      if (cellsBox.children[i] !== node) cellsBox.insertBefore(node, cellsBox.children[i] || null);
+      cellPlacers.get(node)(i, nodes.length);
+    });
     refreshSaveState();
+  }
+  /* A cell whose own editor must be built again (its pinned window was removed). */
+  function rebuildCell(cell) {
+    built.delete(cell);
+    rebuildCells();
+  }
+  function resetCells() {
+    built.clear();
+    rebuildCells();
   }
 
   function refreshSaveState() {
@@ -370,46 +401,63 @@ function handleNotebookSaveError(res, saveStatus, ctx, main) {
 
 /* ─────────────────────────── one cell editor ─────────────────────────── */
 
-function buildCellEditor(cell, index, ctx) {
-  return cell.type === "markdown" ? buildMarkdownCellEditor(cell, index, ctx) : buildPanelCellEditor(cell, index, ctx);
+/* #7936: how each cell's editor node shows its place ("Cell N", the ends of its reorder buttons, a textarea's label), called
+   when the cells are placed and again whenever another cell is added, removed or moved, since the node itself is kept. */
+const cellPlacers = new WeakMap();
+
+function buildCellEditor(cell, ctx) {
+  return cell.type === "markdown" ? buildMarkdownCellEditor(cell, ctx) : buildPanelCellEditor(cell, ctx);
 }
 
 /* The shared cell head: "Cell N", a kind tag, and reorder/remove wired to model.cells (a11y: up/down buttons with
    labels + disabled at the ends, matching the dashboard panel reorder). Removing the last cell reseeds a markdown
-   cell so a notebook always has >=1 cell. */
-function cellHead(index, ctx, kindLabel) {
+   cell so a notebook always has >=1 cell. The cell's index is read when a button is clicked, since the head is kept
+   while other cells move around it. Returns the head and `place(index, count)`, which sets what the head shows. */
+function cellHead(cell, ctx, kindLabel) {
   const cells = ctx.model.cells;
+  const at = () => cells.indexOf(cell);
+  const title = el("span", { class: "cell-editor-title" });
   const upBtn = el("button", { class: "btn small icon", type: "button", text: "↑", title: "Move up", "aria-label": "Move cell up" });
   const downBtn = el("button", { class: "btn small icon", type: "button", text: "↓", title: "Move down", "aria-label": "Move cell down" });
   const removeBtn = el("button", { class: "btn small danger", type: "button", text: "Remove", "aria-label": "Remove cell" });
-  upBtn.disabled = index === 0;
-  downBtn.disabled = index === cells.length - 1;
   upBtn.addEventListener("click", () => {
+    const index = at();
+    if (index < 1) return;
     swap(cells, index, index - 1);
     ctx.rebuildCells();
   });
   downBtn.addEventListener("click", () => {
+    const index = at();
+    if (index < 0 || index >= cells.length - 1) return;
     swap(cells, index, index + 1);
     ctx.rebuildCells();
   });
   removeBtn.addEventListener("click", () => {
+    const index = at();
+    if (index < 0) return;
     cells.splice(index, 1);
     if (!cells.length) cells.push(markdownCellModel(""));
     ctx.rebuildCells();
   });
-  return el("div", { class: "cell-editor-head" }, [
-    el("span", { class: "cell-editor-title", text: "Cell " + (index + 1) }),
+  const head = el("div", { class: "cell-editor-head" }, [
+    title,
     el("span", { class: "cell-kind-tag", text: kindLabel }),
     el("div", { class: "spacer" }),
     upBtn,
     downBtn,
     removeBtn,
   ]);
+  const place = (index, count) => {
+    title.textContent = "Cell " + (index + 1);
+    upBtn.disabled = index === 0;
+    downBtn.disabled = index === count - 1;
+  };
+  return { head, place };
 }
 
 /* A markdown cell: a textarea beside a live renderMarkdown preview (two columns, collapsing to stacked on narrow
    screens). Typing re-renders the preview locally (no full cell rebuild, so the textarea keeps focus + caret). */
-function buildMarkdownCellEditor(cell, index, ctx) {
+function buildMarkdownCellEditor(cell, ctx) {
   const previewBox = el("div", { class: "md-preview markdown-body" });
   function renderPreview() {
     mount(previewBox, cell.text && cell.text.trim() ? renderMarkdown(cell.text) : el("div", { class: "muted", text: "Nothing to preview yet." }));
@@ -419,7 +467,6 @@ function buildMarkdownCellEditor(cell, index, ctx) {
     class: "md-textarea",
     rows: "8",
     placeholder: "Write markdown…  # heading, **bold**, *italic*, `code`, - list, 1. list, [text](url)",
-    "aria-label": "Markdown for cell " + (index + 1),
   });
   textarea.value = cell.text || "";
   textarea.addEventListener("input", () => {
@@ -434,13 +481,19 @@ function buildMarkdownCellEditor(cell, index, ctx) {
     el("div", { class: "md-preview-col" }, [el("div", { class: "block-label", text: "Preview" }), previewBox]),
   ]);
 
-  return el("div", { class: "notebook-cell md-cell card" }, [cellHead(index, ctx, "Markdown"), body]);
+  const { head, place } = cellHead(cell, ctx, "Markdown");
+  const node = el("div", { class: "notebook-cell md-cell card" }, [head, body]);
+  cellPlacers.set(node, (index, count) => {
+    place(index, count);
+    textarea.setAttribute("aria-label", "Markdown for cell " + (index + 1));
+  });
+  return node;
 }
 
 /* A panel cell: the SHARED composer body (metric / shape / group / filters / chart / advanced / identity + live
    preview) with the Width control hidden (a notebook cell is always full width). onChange just re-checks save
    state; the body owns its own config rebuild + debounced preview. */
-function buildPanelCellEditor(cell, index, ctx) {
+function buildPanelCellEditor(cell, ctx) {
   const body = buildComposedPanelBody(cell.panel, {
     catalog: ctx.catalog,
     getVariables: () => ctx.model.variables,
@@ -451,7 +504,10 @@ function buildPanelCellEditor(cell, index, ctx) {
     /* #3285: a scalar panel cell can seed a new alert rule from its metric (a copy, not a live binding). */
     panelExtraAction: (pm) => buildCreateAlertAction(pm, composedPanelToDesc),
   });
-  return el("div", { class: "notebook-cell panel-cell card" }, [cellHead(index, ctx, "Panel"), pinnedWindowStrip(cell, ctx), body]);
+  const { head, place } = cellHead(cell, ctx, "Panel");
+  const node = el("div", { class: "notebook-cell panel-cell card" }, [head, pinnedWindowStrip(cell, ctx), body]);
+  cellPlacers.set(node, place);
+  return node;
 }
 
 /* The per-cell window pin (#2735) in the EDITOR. The composer has no authoring UI for a pin yet (pins are
@@ -465,7 +521,7 @@ function pinnedWindowStrip(cell, ctx) {
   const unpin = el("button", { class: "btn small", type: "button", text: "Unpin", "aria-label": "Remove this cell's pinned time window" });
   unpin.addEventListener("click", () => {
     delete cell.range;
-    ctx.rebuildCells();
+    ctx.rebuildCell(cell);
   });
   return el("div", { class: "cell-pin-strip" }, [
     el("span", { class: "pin-badge", text: "Pinned: " + pinRangeLabel(range) }),
