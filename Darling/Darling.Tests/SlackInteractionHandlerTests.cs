@@ -26,8 +26,9 @@ namespace Darling.Tests;
 /// <summary>
 /// #7658: the press handler over fake payloads, a fake card store, recorded commands and a recording card API, with a fixed clock. Every
 /// answer goes to the payload's <c>response_url</c> and nothing is posted in the thread by the handler; a decision edits the card and marks
-/// it; every press journals the person (or the unmapped identity) and the identity used; a press from another workspace, on a message that
-/// is not a stored card, by a person nobody mapped, or on a record that is no longer pending changes nothing and says so.
+/// it; a press on a stored card journals the person (or the unmapped identity) and the identity used, while a press refused before its card
+/// is found leaves no journal row; a press from another workspace, on a message that is not a stored card, by a person nobody mapped, on a
+/// card already decided, or on a record that is no longer pending changes nothing and says so.
 /// </summary>
 public sealed class SlackInteractionHandlerTests
 {
