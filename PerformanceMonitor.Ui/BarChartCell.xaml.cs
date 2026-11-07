@@ -28,6 +28,10 @@ namespace PerformanceMonitor.Ui
         public BarChartCell()
         {
             InitializeComponent();
+            /* The active-sort bar is the theme's accent, read as a resource reference so a theme switch and a per-user override
+               (#3577) repaint it. A host that sets AccentBrush in XAML replaces the reference; an app with no AccentBrush resource
+               keeps the property's default. */
+            SetResourceReference(AccentBrushProperty, "AccentBrush");
         }
 
         /// <summary>The numeric value this cell represents (drives the bar length and, by default, the text).</summary>
