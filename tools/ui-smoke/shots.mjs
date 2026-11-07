@@ -157,8 +157,9 @@ export async function runShots({ config, baseUrl, outDir, only, settle }) {
   /* The service marks a server it cannot reach "collection stale" some minutes after it started, on its own clock: a page shot before
      that shows "Online", one shot after shows "Warning" (the red-proof run caught this, #5744). Wait until /api/fleet says every
      card is stale, so every run photographs the same state. The decision on each answer is judgeFleetStale (fleet-stale.mjs), which
-     names each way the wait can fail. The anchor is a minute old when this starts and the band opens at 2 minutes, so a real run is
-     stale within a minute or two; the deadline is a few minutes, well inside the job's timeout-minutes. */
+     leaves the servers pages.json names under expectedOffline (seeded as unreachable, Offline from the first poll) out of the count
+     and names each way the wait can fail. The anchor is a minute old when this starts and the band opens at 2 minutes, so a real run
+     is stale within a minute or two; the deadline is a few minutes, well inside the job's timeout-minutes. */
   const staleStarted = Date.now();
   const staleDeadline = staleStarted + STALE_WAIT_MS;
   let seen = "no answer from /api/fleet";
@@ -167,7 +168,7 @@ export async function runShots({ config, baseUrl, outDir, only, settle }) {
       /* The signed-in session, like the browser pages: a bare fetch is refused with 401 now that the dashboard asks for its token. */
       const cookie = process.env.UI_SMOKE_SESSION_COOKIE ? { Cookie: "darling_web_session=" + process.env.UI_SMOKE_SESSION_COOKIE } : {};
       const fleet = await (await fetch(baseUrl + "/api/fleet", { headers: cookie })).json();
-      const judged = judgeFleetStale(fleet.cards || []);
+      const judged = judgeFleetStale(fleet.cards || [], config.expectedOffline || []);
       seen = judged.seen;
       if (judged.verdict === "ready") {
         console.log(`ok   fleet is collection stale after ${((Date.now() - staleStarted) / 1000).toFixed(0)}s of waiting (${seen})`);
