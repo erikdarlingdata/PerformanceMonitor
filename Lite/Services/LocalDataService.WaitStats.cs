@@ -483,16 +483,21 @@ WITH per_collection AS
 (
     SELECT
         collection_time,
+        /* #8078: sample_interval_seconds is a per-row figure, the seconds since that wait type's own previous
+           sighting. A type that returns after missing some passes stores several cadences while its siblings
+           store one, and its delta is the whole of that type's wait since it was last seen. The collection
+           credits every rated row's delta whole, over the collection's cadence, the shortest interval any of
+           its rows measured, so no wait is lost and the bucket's total equals the sum of the per-type trends
+           over the same rows; the returning type's wait lands on the collection that stored it. A row whose
+           interval is 0 (a first sighting or a counter reset: no delta knowable) adds nothing, and a collection
+           whose EVERY row is 0 (a restart) has no cadence, so the point is dropped rather than rendered as 0.00.
+           A pre-v60 collection stored no interval on any row: its summed delta is rated over the LAG this read
+           always used for those rows. */
+        SUM(delta_wait_time_ms) FILTER (WHERE sample_interval_seconds > 0) AS rated_total_ms,
+        MIN(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0) AS cadence_seconds,
+        MAX(sample_interval_seconds) IS NULL AS unstored,
         SUM(delta_wait_time_ms) AS total_delta_ms,
-        /* #3540: the collection's STORED interval — MAX over its rows, because a wait type first seen in
-           an otherwise steady pass carries 0 beside its siblings' real interval and contributes 0 to the
-           sum; MAX is 0 only when EVERY row was unknowable (a restart), and that 0 becomes NULL through
-           NULLIF so the point is dropped rather than rendered as 0.00. NULL (pre-v60 rows) falls back to
-           the LAG this read always used. */
-        CASE WHEN MAX(sample_interval_seconds) IS NULL
-             THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-             ELSE NULLIF(MAX(sample_interval_seconds), 0)
-        END AS interval_seconds
+        extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS lag_seconds
     FROM v_wait_stats
     WHERE server_id = $1
     AND   collection_time >= $2
@@ -504,8 +509,10 @@ rated AS
 (
     SELECT
         collection_time,
-        CASE WHEN interval_seconds > 0 THEN CAST(total_delta_ms AS DOUBLE PRECISION) END AS rated_ms,
-        CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds
+        CASE WHEN unstored THEN CASE WHEN lag_seconds > 0 THEN CAST(total_delta_ms AS DOUBLE PRECISION) END
+             ELSE CAST(rated_total_ms AS DOUBLE PRECISION) END AS rated_ms,
+        CASE WHEN unstored THEN CASE WHEN lag_seconds > 0 THEN lag_seconds END
+             ELSE cadence_seconds END AS rated_seconds
     FROM per_collection
 )
 SELECT

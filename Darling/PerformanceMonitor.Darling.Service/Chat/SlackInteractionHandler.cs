@@ -83,8 +83,12 @@ public interface ISlackPressCommands
 /// kind and record match the button. The presser is <c>user.id</c> in <c>user.team_id</c>, mapped to a person through the people directory; a
 /// person nobody mapped, or a disabled one, is refused. Every press is answered where only the presser sees it, through the payload's
 /// <c>response_url</c>: the facts and a Confirm button on a first press, the outcome on a confirming press, and every refusal. A decision
-/// edits the card in place: the buttons go, and the card says how it ended and who decided. Every press writes a journal row with the person
-/// (or the unmapped identity) and the identity used. A press whose record is no longer pending changes nothing and says so.
+/// edits the card in place: the buttons go, and the card says how it ended and who decided; the card row is marked decided whether or not
+/// the edit succeeded, and a later press on a decided card is refused with who decided it and when. A press on a stored card writes a
+/// journal row with the person (or the unmapped identity) and the identity used, a press on a decided card included; a press refused before
+/// its card is found (another workspace, a Confirm value that cannot be read, a message this store did not post) is answered and leaves no
+/// journal row. A press whose record is no longer pending changes nothing and says so. A command that throws is answered in fixed words,
+/// never with the exception's text, and the log carries the exception with the request and the card.
 /// </summary>
 public sealed class SlackInteractionHandler : ISlackEventHandlers
 {
@@ -120,6 +124,17 @@ public sealed class SlackInteractionHandler : ISlackEventHandlers
     /// <summary>The refusal a disabled person gets.</summary>
     public const string Disabled = "Your person is disabled in this store, so nothing was done.";
 
+    /// <summary>The answer when a command throws: fixed words, never the exception's text, which goes to the service log with the request and the card.</summary>
+    public const string PressFailed = "The press could not be completed. The service log has the detail.";
+
+    /// <summary>The refusal a press on a decided card gets: who decided it and when. A decided card keeps its buttons only when its edit failed.</summary>
+    public static string AlreadyDecided(SlackCard card, SlackPerson presser)
+    {
+        var who = string.IsNullOrEmpty(card.DecidedBy) ? "someone" : string.Equals(card.DecidedBy, PersonActor(presser), StringComparison.Ordinal) ? "you" : card.DecidedBy;
+        var when = card.DecidedAtUtc is { } at ? at.ToString("yyyy-MM-dd HH:mm 'UTC'", CultureInfo.InvariantCulture) : "an earlier press";
+        return $"This card was already decided by {who} at {when}, so nothing was done.";
+    }
+
     /// <summary>Mentions are not this handler's: the chat requests (#7659) take events.</summary>
     public Task HandleEventAsync(SlackInboundEvent inbound, CancellationToken cancellationToken) => Task.CompletedTask;
 
@@ -147,6 +162,7 @@ public sealed class SlackInteractionHandler : ISlackEventHandlers
         {
             if (SlackConfirmValue.Parse(press.Value) is not { } confirm)
             {
+                _logger.LogInformation("Slack press on {Action} refused: its confirmation value could not be read", press.ActionId);
                 await RespondAsync(press, "This confirmation could not be read. Press the card's button again.", cancellationToken);
                 return;
             }
@@ -171,6 +187,14 @@ public sealed class SlackInteractionHandler : ISlackEventHandlers
             return;
         }
 
+        /* A decided card: a press ended it, and its buttons stayed only because the card's edit failed. Nothing runs, and the answer says who decided it and when. */
+        if (string.Equals(card.State, SlackCardStates.Decided, StringComparison.Ordinal))
+        {
+            await JournalAsync(card, PersonActor(person), identity, press, SlackCardStates.Decided, null, cancellationToken);
+            await RespondAsync(press, AlreadyDecided(card, person), cancellationToken);
+            return;
+        }
+
         var context = new PressContext(inbound, press, card, person, identity);
         try
         {
@@ -192,8 +216,9 @@ public sealed class SlackInteractionHandler : ISlackEventHandlers
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogWarning(ex, "Slack press {Action} on {Kind} {Record} failed", press.ActionId, kind, recordId);
-            await RespondAsync(press, "The press could not be completed: " + ex.Message + " " + SlackCards.PressAgain, cancellationToken);
+            _logger.LogWarning(ex, "Slack press {Action} by {Actor} on {Kind} {Record} of request {RequestId} (server {ServerId}, card {Channel}/{Ts}) failed",
+                press.ActionId, context.Actor, card.Kind, card.RecordId, card.RequestId, card.ServerId, card.ChannelId, card.MessageTs);
+            await RespondAsync(press, PressFailed + " " + SlackCards.PressAgain, cancellationToken);
         }
     }
 

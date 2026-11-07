@@ -20,6 +20,13 @@ using PerformanceMonitor.Darling.Storage;
 namespace PerformanceMonitor.Darling.Service.Chat;
 
 /// <summary>
+/// #7658: one step of a plan change's undo: the show (<paramref name="confirm"/> false: the statement the undo runs now, nothing written) or the
+/// write (<paramref name="confirm"/> true, with <paramref name="shownStatement"/> the statement the person was shown). The product's step is
+/// <see cref="DarlingMcpPlanForceTools.UndoPlanChangeAsync"/>, which reads the monitored server; a test stands its own server in.
+/// </summary>
+public delegate Task<PlanUndoAnswer> SlackPlanUndoStep(long calledId, string login, bool confirm, string? shownStatement, CancellationToken cancellationToken);
+
+/// <summary>
 /// #7658: the press commands on the store owner's connection. The proposal presses are <see cref="ActionProposalPress"/>, the same two presses the
 /// web and the Viewer run; a refusal is the store's <see cref="InvestigationRequestStore.RefuseProposalAsync"/>; an undo is the person's undo
 /// (<see cref="AgentChangeUndo"/>, or the plan undo for a plan change), a verdict the feedback store's record, and a note decision the store's
@@ -35,8 +42,9 @@ public sealed class StoreSlackPressCommands : ISlackPressCommands
     private readonly ApprovedActionHooks _hooks;
     private readonly ILogger _logger;
     private readonly Func<DateTime> _utcNow;
+    private readonly SlackPlanUndoStep _planUndo;
 
-    public StoreSlackPressCommands(NpgsqlDataSource owner, InvestigationRequestStore store, ILogger logger, Func<DateTime>? utcNow = null)
+    public StoreSlackPressCommands(NpgsqlDataSource owner, InvestigationRequestStore store, ILogger logger, Func<DateTime>? utcNow = null, SlackPlanUndoStep? planUndo = null)
     {
         _owner = owner ?? throw new ArgumentNullException(nameof(owner));
         _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -44,6 +52,8 @@ public sealed class StoreSlackPressCommands : ISlackPressCommands
         _utcNow = utcNow ?? (static () => DateTime.UtcNow);
         _press = new ActionProposalPress(owner, logger, utcNow);
         _changes = new AgentChangeUndo(owner, ServiceCommandDeadlines.SerialLoopSeconds, utcNow);
+        _planUndo = planUndo ?? ((calledId, login, confirm, shownStatement, token) =>
+            DarlingMcpPlanForceTools.UndoPlanChangeAsync(_changes, _owner, _logger, calledId, login, confirm, shownStatement, token));
         _feedback = new InvestigationFeedbackStore(owner, ServiceCommandDeadlines.SerialLoopSeconds);
         _hooks = new ApprovedActionHooks
         {
@@ -103,7 +113,7 @@ public sealed class StoreSlackPressCommands : ISlackPressCommands
         {
             /* The plan undo shows its statement first and writes only the statement it showed: the confirming press reads it again and runs it
                when its hash is the one the person's Confirm carried. */
-            var shown = await DarlingMcpPlanForceTools.UndoPlanChangeAsync(_changes, _owner, _logger, calledId, login, confirm: false, null, cancellationToken);
+            var shown = await _planUndo(calledId, login, confirm: false, null, cancellationToken);
             if (shown.Status != PlanUndoAnswer.Confirm || shown.Statement is null)
             {
                 return new SlackUndoStep(StatusWord(shown.Status), shown.Code, shown.Message, shown.Statement);
@@ -120,7 +130,7 @@ public sealed class StoreSlackPressCommands : ISlackPressCommands
                     "The undo statement is not the one you were shown, so nothing was run. Press Undo on the card again to see the current one.", shown.Statement);
             }
 
-            var done = await DarlingMcpPlanForceTools.UndoPlanChangeAsync(_changes, _owner, _logger, calledId, login, confirm: true, shown.Statement, cancellationToken);
+            var done = await _planUndo(calledId, login, confirm: true, shown.Statement, cancellationToken);
             return new SlackUndoStep(StatusWord(done.Status), done.Code, done.Message, done.Statement ?? shown.Statement);
         }
 

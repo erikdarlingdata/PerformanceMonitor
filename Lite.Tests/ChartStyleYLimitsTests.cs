@@ -60,4 +60,32 @@ public class ChartStyleYLimitsTests
         Assert.Equal(0.0, yMin);
         Assert.Equal(6.15, yMax, 6);    // dataYMax -> 6, + (1 * 0.15)
     }
+
+    [Fact]
+    public void AChartOfOnlyZeros_ShowsAFlatLineOnAYAxisThatStartsAtZero()
+    {
+        var plot = new ScottPlot.Plot();
+        var line = plot.Add.Scatter(new double[] { 1, 2, 3, 4 }, new double[] { 0, 0, 0, 0 });
+        line.LegendText = "Blocked";
+        plot.Axes.SetLimitsY(-1, 1); // what the flat line autoscales to
+
+        ChartStyle.FloorAllZeroYAxis(plot);
+
+        var limits = plot.Axes.GetLimits();
+        Assert.Equal(0.0, limits.Bottom);
+        Assert.True(limits.Top > 0);
+    }
+
+    [Fact]
+    public void AChartWithRealValues_KeepsItsYAxis()
+    {
+        var plot = new ScottPlot.Plot();
+        var line = plot.Add.Scatter(new double[] { 1, 2, 3 }, new double[] { -5, 0, 5 });
+        line.LegendText = "Delta";
+        plot.Axes.SetLimitsY(-6, 6);
+
+        ChartStyle.FloorAllZeroYAxis(plot);
+
+        Assert.Equal(-6.0, plot.Axes.GetLimits().Bottom);
+    }
 }

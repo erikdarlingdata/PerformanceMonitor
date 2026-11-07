@@ -1268,7 +1268,9 @@ SELECT
     /* No ELSE: the first placed interval of a row with no stored end has a NULL LAG and an unknowable rate, so
        the rate is NULL — never a fabricated 0 (#3541 A12). */
     CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds END AS duration_ms_per_second,
-    CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
+    CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second,
+    /* #8073: the interval's stored executions, a count the store holds whether or not the interval's length is knowable. */
+    CAST(total_executions AS BIGINT) AS execution_count
 FROM raw
 ORDER BY point_time";
 
@@ -1283,12 +1285,13 @@ ORDER BY point_time";
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            /* NULL stays NULL (#3541 A12) — see GetQueryDurationTrendAsync. */
+            /* NULL stays NULL (#3541 A12) — see GetQueryDurationTrendAsync. The count is the interval's own and is
+               there either way (#8073). */
             items.Add(new QueryTrendPoint
             {
                 CollectionTime = reader.GetDateTime(0),
                 Value = reader.IsDBNull(1) ? null : ToDouble(reader.GetValue(1)),
-                ExecutionCount = reader.IsDBNull(2) ? null : (long)ToDouble(reader.GetValue(2)),
+                ExecutionCount = reader.IsDBNull(3) ? null : ToInt64(reader.GetValue(3)),
                 ExecutionsPerSecond = reader.IsDBNull(2) ? null : ToDouble(reader.GetValue(2))
             });
         }

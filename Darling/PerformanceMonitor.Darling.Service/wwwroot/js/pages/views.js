@@ -423,7 +423,7 @@ function viewCard(v) {
   const href = storeHash((isNotebook ? "#/notebook/" : "#/view/") + encodeURIComponent(v.id));
   const card = el("a", { class: "view-card card", href }, [
     el("div", { class: "vc-name" }, [
-      el("span", { class: "vc-name-text", text: v.name }),
+      el("span", { class: "vc-name-text", text: v.name, title: v.name }),
       isNotebook ? el("span", { class: "notebook-badge", text: "Notebook" }) : null,
     ]),
     v.description ? el("div", { class: "vc-desc", text: v.description }) : null,

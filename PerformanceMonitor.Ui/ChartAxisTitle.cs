@@ -138,8 +138,12 @@ namespace PerformanceMonitor.Ui
         /// </summary>
         public const double MinPlotAreaHeight = 100;
 
-        /// <summary>The row height that leaves <see cref="MinPlotAreaHeight"/> for the plot when everything but the plot takes <paramref name="chromeHeight"/>.</summary>
-        public static double RowMinHeightFor(double chromeHeight) => Math.Max(MinPlotHeight, chromeHeight + MinPlotAreaHeight);
+        /// <summary>#8086: the smallest share of its chart the plot may take. Below it the tab scrolls instead of squeezing the plot.</summary>
+        public const double MinPlotShare = 0.55;
+
+        /// <summary>The row height that leaves <see cref="MinPlotAreaHeight"/> pixels, and <see cref="MinPlotShare"/> of the row, for the plot when everything but the plot takes <paramref name="chromeHeight"/>.</summary>
+        public static double RowMinHeightFor(double chromeHeight) =>
+            Math.Max(MinPlotHeight, Math.Max(chromeHeight + MinPlotAreaHeight, chromeHeight / (1 - MinPlotShare)));
 
         private sealed class Chrome
         {

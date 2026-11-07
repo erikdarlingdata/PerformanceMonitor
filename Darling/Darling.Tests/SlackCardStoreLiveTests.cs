@@ -7,14 +7,18 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Chat;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Notifications;
 using Xunit;
 
 namespace Darling.Tests;
@@ -22,8 +26,9 @@ namespace Darling.Tests;
 /// <summary>
 /// #7658 on a live store: the card table (V253 <c>config.investigation_slack_posts</c>) round-trips a delivered card by its channel and ts,
 /// keeps the first writer's row on both keys, marks a card decided once, and goes with its request; the Slack person lookup and the grant
-/// check read the people tables; a press journals as <c>slack_press</c>; a person's refusal moves a pending proposal once; and the thread
-/// pass's pending read returns a request-bound pending note as a card and leaves a fleet note out.
+/// check read the people tables; a press journals as <c>slack_press</c>; a person's refusal moves a pending proposal once; the thread
+/// pass's pending read returns a request-bound pending note as a card and leaves a fleet note out; and a request's opened row and the
+/// note written from it, read in one batch, post the parent first and the note card in its thread.
 /// </summary>
 /* #1776 own-store: each test mints its own scratch database through ScratchPostgres. */
 public sealed class SlackCardStoreLiveTests
@@ -170,9 +175,13 @@ public sealed class SlackCardStoreLiveTests
     private sealed class ScriptedPosts : ISlackBotPosts
     {
         public string NextTs { get; set; } = "1700000000.000001";
+        public readonly List<(string Channel, string Text, string? ThreadTs)> Posts = new();
 
-        public Task<SlackPostResult> PostAsync(string channel, string text, System.Collections.Generic.IReadOnlyList<object>? blocks, string? threadTs, CancellationToken cancellationToken) =>
-            Task.FromResult(new SlackPostResult(true, NextTs, channel, null));
+        public Task<SlackPostResult> PostAsync(string channel, string text, System.Collections.Generic.IReadOnlyList<object>? blocks, string? threadTs, CancellationToken cancellationToken)
+        {
+            Posts.Add((channel, text, threadTs));
+            return Task.FromResult(new SlackPostResult(true, NextTs, channel, null));
+        }
     }
 
     [Fact]
@@ -264,6 +273,62 @@ public sealed class SlackCardStoreLiveTests
     }
 
     [Fact]
+    public async Task AnUndoConfirm_RunsOnlyTheStatementThePersonWasShown_AndIsRefusedWhenTheServerWouldNowRunAnotherOne()
+    {
+        await WithStoreAsync(async (connection, source, store, ct) =>
+        {
+            /* A plan force the agent made, journaled as the tool journals it: a plan change, whose undo reads the server before it decides. */
+            var detail = new JsonObject
+            {
+                ["tool"] = "force_query_store_plan", ["kind"] = AgentChangeKinds.PlanForce,
+                ["target"] = new JsonObject { ["id"] = "5", ["server_id"] = 7, ["database"] = "Sales" },
+                ["before"] = new JsonObject { ["database"] = "Sales", ["query_id"] = 9, ["plan_id"] = 5, ["forced_plan"] = null },
+            };
+            var calledId = long.Parse((await ScalarAsync(connection,
+                $"INSERT INTO config.investigation_journal (event_time, request_id, server_id, event, actor, detail) VALUES (now(), '{s_request}', 7, 'action_called', 'agent:agent-a', '{detail.ToJsonString()}'::jsonb) RETURNING journal_id", ct))!,
+                CultureInfo.InvariantCulture);
+
+            /* The monitored server, stood in at the one seam that reads it: the statement the undo would run now, and every read and write asked of it. */
+            const string unforce = "EXEC [Sales].sys.sp_query_store_unforce_plan @query_id = 9, @plan_id = 5;";
+            const string reforce = "EXEC [Sales].sys.sp_query_store_force_plan @query_id = 9, @plan_id = 3;";
+            var statementNow = unforce;
+            var server = new List<(long CalledId, string Login, bool Confirm, string? Shown)>();
+            var commands = new StoreSlackPressCommands(source, store, NullLogger.Instance, null, (id, login, confirm, shown, _) =>
+            {
+                server.Add((id, login, confirm, shown));
+                return Task.FromResult(confirm
+                    ? new PlanUndoAnswer(PlanUndoAnswer.Undone, null, "Undone.", statementNow)
+                    : new PlanUndoAnswer(PlanUndoAnswer.Confirm, null, "This unforces the plan.", statementNow));
+            });
+
+            var shown = await commands.UndoAsync(calledId, "7", confirm: false, null, ct);
+            Assert.Equal((SlackUndoStep.Confirm, unforce), (shown.Status, shown.Statement));
+            Assert.Equal([false], server.Select(s => s.Confirm));
+            var hash = SlackConfirmValue.HashOf(unforce);
+
+            /* The server changed between the show and the Confirm, so the undo would run another statement: the press is refused and nothing runs. */
+            statementNow = reforce;
+            var stale = await commands.UndoAsync(calledId, "7", confirm: true, hash, ct);
+            Assert.Equal((SlackUndoStep.Refused, "statement_changed"), (stale.Status, stale.Code));
+            Assert.Equal(reforce, stale.Statement);
+            Assert.DoesNotContain(server, s => s.Confirm);
+
+            /* A Confirm that carries no hash is refused the same way. */
+            var bare = await commands.UndoAsync(calledId, "7", confirm: true, null, ct);
+            Assert.Equal((SlackUndoStep.Refused, "statement_changed"), (bare.Status, bare.Code));
+            Assert.DoesNotContain(server, s => s.Confirm);
+            Assert.Equal("0", await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'action_undone'", ct));
+
+            /* The server would run the statement the person saw: the write goes to the server with that statement and no other. */
+            statementNow = unforce;
+            var done = await commands.UndoAsync(calledId, "7", confirm: true, hash, ct);
+            Assert.Equal(SlackUndoStep.Undone, done.Status);
+            var write = Assert.Single(server, s => s.Confirm);
+            Assert.Equal((calledId, "7", unforce), (write.CalledId, write.Login, write.Shown));
+        });
+    }
+
+    [Fact]
     public async Task ThePendingRead_ReturnsARequestBoundPendingNoteAsACard_LeavesAFleetNoteOut_AndStopsOnceItIsMarked()
     {
         await WithStoreAsync(async (connection, _, store, ct) =>
@@ -292,6 +357,67 @@ public sealed class SlackCardStoreLiveTests
             Assert.True(await threads.MarkOnceAsync(s_request, 1, 7, note.PostKey, SlackThreadPosts.OnceKey(s_request, note.PostKey), ct));
             var after = await rows.PendingSlackThreadRowsAsync(SlackThreadPass.PostedEvents, now.AddDays(-7), now.AddMinutes(-10), 100, ct);
             Assert.DoesNotContain(after, r => r.Event == InvestigationRequestStore.NotePending);
+        });
+    }
+
+    /* A route with a bot channel, the request's opened row, and a pending note written from the request, so one batch reads both. The
+       journal's identity is moved ahead first, as it stands on any store that journaled before its first note, so the note's id is the
+       smaller of the two. */
+    private static async Task<(int RouteId, long OpenedId, long NoteId)> SeedOpenedRequestWithANoteAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var routeId = int.Parse((await ScalarAsync(connection, "INSERT INTO config.config_notification_routes (metric_match, slack_url, slack_bot_channel, enabled) VALUES ('cpu', 'sealed-cpu', 'C07658A1', true) RETURNING route_id", ct))!, CultureInfo.InvariantCulture);
+        await ExecAsync(connection, $"UPDATE config.investigation_requests SET route_id = {routeId} WHERE request_id = '{s_request}'", ct);
+        await ExecAsync(connection, "SELECT setval(pg_get_serial_sequence('config.investigation_journal', 'journal_id'), 1000)", ct);
+        var openedId = long.Parse((await ScalarAsync(connection,
+            $"INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, reason) VALUES (now() - interval '5 minutes', '{s_request}', {routeId}, 7, 'opened', 'service', 'cpu') RETURNING journal_id", ct))!, CultureInfo.InvariantCulture);
+        var noteId = long.Parse((await ScalarAsync(connection,
+            $"INSERT INTO config.investigation_notes (server_id, metric_name, note_text, author, state, source_request_id, expires_at) VALUES (7, 'cpu', 'Index ix_a is unused', 'agent:a', 'pending', '{s_request}', now() + interval '30 days') RETURNING note_id", ct))!, CultureInfo.InvariantCulture);
+        Assert.True(noteId < openedId, $"the note's id ({noteId}) should be the smaller; the opened row's is {openedId}");
+        return (routeId, openedId, noteId);
+    }
+
+    [Fact]
+    public async Task ThePendingRead_PutsARequestsOpenedRowBeforeThePendingNoteWrittenFromIt_WhateverTheirIds()
+    {
+        await WithStoreAsync(async (connection, _, store, ct) =>
+        {
+            var (_, openedId, noteId) = await SeedOpenedRequestWithANoteAsync(connection, ct);
+            ISlackThreadRowSource rows = store;
+            var now = DateTime.UtcNow;
+            var pending = await rows.PendingSlackThreadRowsAsync(SlackThreadPass.PostedEvents, now.AddDays(-7), now.AddMinutes(-10), 100, ct);
+            Assert.Equal([("opened", openedId), (InvestigationRequestStore.NotePending, noteId)], pending.Select(r => (r.Event, r.JournalId)));
+        });
+    }
+
+    [Fact]
+    public async Task ThePass_PostsTheParentFirst_AndTheNoteCardFollowsInItsThread_WhenBothAreReadInOneBatch()
+    {
+        await WithStoreAsync(async (connection, _, store, ct) =>
+        {
+            var (routeId, _, noteId) = await SeedOpenedRequestWithANoteAsync(connection, ct);
+            var posts = new ScriptedPosts { NextTs = "1700000000.000500" };
+            var poster = new SlackThreadPoster(store, posts, NullLogger<SlackThreadPoster>.Instance, cards: store);
+            var routes = new List<NotificationRoute> { new(routeId, "cpu", "", "", "", "", "", Enabled: true) { SlackBotChannel = "C07658A1" } };
+            var pass = new SlackThreadPass(store, store, poster, poster.Throttle, () => routes, NullLogger.Instance, PerformanceMonitor.Common.McpDataDetail.Full, () => "https://pm.example");
+
+            /* The parent and the card land in the same pass; the next pass is the most the card may take. */
+            await pass.RunOnceAsync(ct);
+            if (posts.Posts.Count < 2)
+            {
+                await pass.RunOnceAsync(ct);
+            }
+
+            Assert.Equal(2, posts.Posts.Count);
+            Assert.Null(posts.Posts[0].ThreadTs);
+            Assert.Contains("Investigation request", posts.Posts[0].Text);
+            Assert.Equal("1700000000.000500", posts.Posts[1].ThreadTs);
+            Assert.StartsWith("Note proposed by agent:a", posts.Posts[1].Text, StringComparison.Ordinal);
+            ISlackCardStore cards = store;
+            var card = await cards.FindCardAsync("C07658A1", "1700000000.000500", ct);
+            Assert.NotNull(card);
+            Assert.Equal((SlackCardKinds.Note, noteId.ToString(CultureInfo.InvariantCulture)), (card.Kind, card.RecordId));
+            Assert.Equal(0, await pass.RunOnceAsync(ct));
+            Assert.Equal(2, posts.Posts.Count);
         });
     }
 }

@@ -219,27 +219,28 @@ VALUES ($1, 702, 'S702', $2, 1, 1, TRUE, 'tray')";
     [Fact]
     public void JobHistoryZone_IsTheZoneTheGridWordsItsRowsIn_SoYesterdayMeansTheGridsYesterday()
     {
-        /* #5562 M1: all servers are worded in UTC, one server in its own clock (its last read's, else its open tab's, else the machine's). */
+        /* #5562 M1: all servers are worded on the one clock a mixed list reads on (UTC in UTC mode), one server in Server time in its
+           own clock (its last read's, else its open tab's, else the machine's). */
         var eastern = ServerClock.Resolve("Eastern Standard Time", -300);
         var now = new DateTime(2026, 10, 8, 2, 0, 0, DateTimeKind.Unspecified);
         var yesterday = TimeRangeSpec.ForPeriod(CalendarPeriod.Yesterday);
 
-        var allServers = JobHistoryTab.JobHistoryZone(null, new Dictionary<int, ServerClock> { [7] = eastern }, null);
+        var allServers = JobHistoryTab.JobHistoryZone(null, TimeDisplayMode.UTC, new Dictionary<int, ServerClock> { [7] = eastern }, null);
         Assert.Equal(TimeZoneInfo.Utc, allServers);
         Assert.True(yesterday.TryResolve(now, allServers, out var inUtc, out _));
         Assert.Equal(new DateTime(2026, 10, 7, 0, 0, 0), inUtc!.StartUtc);
         Assert.Equal(new DateTime(2026, 10, 8, 0, 0, 0), inUtc.EndUtc);
 
-        var oneServer = JobHistoryTab.JobHistoryZone(7, new Dictionary<int, ServerClock> { [7] = eastern }, null);
+        var oneServer = JobHistoryTab.JobHistoryZone(7, TimeDisplayMode.ServerTime, new Dictionary<int, ServerClock> { [7] = eastern }, null);
         Assert.True(yesterday.TryResolve(now, oneServer, out var inEastern, out _));
         Assert.Equal(new DateTime(2026, 10, 6, 4, 0, 0), inEastern!.StartUtc);
         Assert.Equal(new DateTime(2026, 10, 7, 4, 0, 0), inEastern.EndUtc);
 
         /* No read yet for this server: its open tab's clock, then the machine's. */
-        var viaTab = JobHistoryTab.JobHistoryZone(7, new Dictionary<int, ServerClock>(), new Dictionary<int, ServerClock> { [7] = eastern });
+        var viaTab = JobHistoryTab.JobHistoryZone(7, TimeDisplayMode.ServerTime, new Dictionary<int, ServerClock>(), new Dictionary<int, ServerClock> { [7] = eastern });
         Assert.True(yesterday.TryResolve(now, viaTab, out var viaTabRange, out _));
         Assert.Equal(inEastern.StartUtc, viaTabRange!.StartUtc);
-        Assert.Equal(TimeZoneInfo.Local, JobHistoryTab.JobHistoryZone(7, null, null));
+        Assert.Equal(TimeZoneInfo.Local, JobHistoryTab.JobHistoryZone(7, TimeDisplayMode.ServerTime, null, null));
     }
 
     [Fact]

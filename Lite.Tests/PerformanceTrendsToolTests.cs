@@ -213,11 +213,12 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
         var second = trend[1];
         Assert.True(second.GetProperty("value").GetDouble() > 0, "elapsed ms/sec must be a real rate");
 
-        /* The shipped integer field rounds this to an idle server. The double is why it is here. */
-        Assert.Equal(0, second.GetProperty("execution_count").GetInt64());
+        /* #8073: execution_count is the executions the point's rate was built from, the 2 seeded here, and the rate
+           below one per second keeps its own key instead of being truncated into the count. */
+        Assert.Equal(2, second.GetProperty("execution_count").GetInt64());
         Assert.True(
             second.GetProperty("executions_per_second").GetDouble() > 0,
-            "executions_per_second must survive a rate below 1/sec that execution_count truncates to zero");
+            "executions_per_second must survive a rate below 1/sec");
 
         /* #3541 A2: the unit is in the field name now — same quantity as `value`, kept beside it on the
            execution_count precedent above. */

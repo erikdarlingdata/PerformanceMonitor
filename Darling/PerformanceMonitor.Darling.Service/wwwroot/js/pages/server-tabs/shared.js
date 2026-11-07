@@ -1396,9 +1396,12 @@ export const COLLECTION_LOG_COLUMNS = [
   { key: "sql_store_ms", label: "Store (in SQL)", format: "ms" },
   { key: "store_duration_ms", label: "On Store", format: "ms" },
   { key: "rows_collected", label: "Rows", format: "int" },
-  { key: "error_message", label: "Error", wrap: true, localizeText: true, plain: "counts" },
+  /* #8096: the two long-text columns are one-line clamps that open on a click, the shape the Collectors grid uses for its notes: a wrapping
+     column grows a long error or run note's row to eight or nine lines at laptop widths while the column itself sits past the grid's visible
+     edge, so the reader sees a tall blank row with no visible cause until the grid is scrolled sideways. */
+  { key: "error_message", label: "Error", clamp: true, localizeText: true, plain: "counts" },
   /* #7416: what a successful run left ("shred gated: 1"). The read keeps it out of error_message, so a note is never read as an error. */
-  { key: "run_note", label: "Run note", wrap: true, localizeText: true, plain: "counts", hideWhenEmpty: true },
+  { key: "run_note", label: "Run note", clamp: true, localizeText: true, plain: "counts", hideWhenEmpty: true },
 ];
 
 export function selectionInside(node) {
