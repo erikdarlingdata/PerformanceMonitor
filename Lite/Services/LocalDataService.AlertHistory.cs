@@ -225,7 +225,8 @@ LIMIT $3";
 
         var servers = firing.Select(r => r.ServerId).Distinct().ToList();
         var metrics = firing.Select(r => r.MetricName).Distinct(StringComparer.Ordinal).ToList();
-        var since = firing.Min(r => r.AlertTime).AddDays(-InvestigationAlertRecurrence.Days);
+        /* One day more than the look-back, so a fire a DST change moved an hour past it is read; DaysAgo applies the exact bound. */
+        var since = firing.Min(r => r.AlertTime).AddDays(-(InvestigationAlertRecurrence.Days + 1));
         var until = firing.Max(r => r.AlertTime);
 
         using var connection = await OpenConnectionAsync();

@@ -235,7 +235,8 @@ AND   a.alert_time <= $4";
         if (firing.Count == 0) return streaks;
 
         var pairs = firing.Select(r => (r.ServerId, r.MetricName)).Distinct().ToList();
-        var since = firing.Min(r => r.AlertTime).AddDays(-InvestigationAlertRecurrence.Days);
+        /* One day more than the look-back, so a fire a DST change moved an hour past it is read; DaysAgo applies the exact bound. */
+        var since = firing.Min(r => r.AlertTime).AddDays(-(InvestigationAlertRecurrence.Days + 1));
         var until = firing.Max(r => r.AlertTime);
 
         var fires = new Dictionary<(int, string), List<DateTime>>();

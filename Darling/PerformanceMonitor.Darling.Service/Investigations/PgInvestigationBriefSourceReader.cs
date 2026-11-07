@@ -292,9 +292,10 @@ LIMIT $5";
        earlier fires of the same rise sit just before the anchor); a fire about 24 hours earlier still counts. One index seek per
        metric (idx_config_alert_log_time on server_id, metric_name, alert_time); the clock test filters inside the Days days. A
        metric with no rows still comes back (day NULL), so the brief says zero.
-       The SQL bounds the rows; the clock test (which fire counts, and toward which whole day) is InvestigationAlertRecurrence.FromFires
-       over InvestigationAlertStreak.DaysAgo in the server's zone, the one rule Lite's reader and get_alert_history share, so a DST
-       change the SQL cannot see still reaches it.
+       The SQL bounds the rows (one day more than Days, so a fire a DST change moved an hour past the look-back is read); the clock
+       test (which fire counts, and toward which whole day) is InvestigationAlertRecurrence.FromFires over
+       InvestigationAlertStreak.DaysAgo in the server's zone, the one rule Lite's reader and get_alert_history share, so a DST change
+       the SQL cannot see still reaches it.
        Types: config.investigation_request_alerts.alert_time is timestamptz and config_alert_log.alert_time is naive UTC, so the
        anchor is taken AT TIME ZONE 'UTC' (as AlertsSql does for the same pair): every comparison and the ::date are then naive
        UTC and none rides the session TimeZone. Past rows do not change, so this is read at compose time. $1 request, $2 server. */
@@ -312,7 +313,7 @@ LEFT JOIN LATERAL (
     FROM config_alert_log AS cal
     WHERE cal.server_id = $2
       AND cal.metric_name = m.metric_name
-      AND cal.alert_time >= a.t - interval '" + InvestigationAlertRecurrence.Days + @" days'
+      AND cal.alert_time >= a.t - interval '" + (InvestigationAlertRecurrence.Days + 1) + @" days'
       AND cal.alert_time < a.t - interval '" + InvestigationAlertRecurrence.WindowMinutes + @" minutes'
 ) AS f ON true
 ORDER BY m.metric_name, f.alert_time DESC";

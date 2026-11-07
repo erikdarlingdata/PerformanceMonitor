@@ -38,10 +38,11 @@ public static class InvestigationAlertStreak
     {
         var span = anchorUtc - fireUtc;
         var window = TimeSpan.FromMinutes(InvestigationAlertRecurrence.WindowMinutes);
-        if (span <= window || span > TimeSpan.FromDays(InvestigationAlertRecurrence.Days))
+        var lookBack = TimeSpan.FromDays(InvestigationAlertRecurrence.Days);
+        if (span <= window)
             return null;
 
-        if (OnTheClock(span.Ticks, window.Ticks))
+        if (span <= lookBack && OnTheClock(span.Ticks, window.Ticks))
             return WholeDays(span.Ticks);
 
         if (zone is null || !zone.SupportsDaylightSavingTime)
@@ -54,9 +55,10 @@ public static class InvestigationAlertStreak
         if (shift == TimeSpan.Zero)
             return null;
 
-        /* The same local clock time on the two sides of the change is span = k days + (fire offset - anchor offset). */
+        /* The same local clock time on the two sides of the change is span = k days + (fire offset - anchor offset). The rise
+           and the look-back are judged on the moved span, so a fire the change pushed an hour past Days days back still counts. */
         var moved = span.Ticks - shift.Ticks;
-        if (moved <= window.Ticks || !OnTheClock(moved, window.Ticks))
+        if (moved <= window.Ticks || moved > lookBack.Ticks || !OnTheClock(moved, window.Ticks))
             return null;
 
         return WholeDays(moved);

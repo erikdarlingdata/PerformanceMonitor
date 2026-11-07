@@ -211,9 +211,10 @@ LIMIT $4";
        brief states another. What is not history: the first alert's own row and anything at or after it, and any fire in the
        WindowMinutes minutes before it (this incident's own rise); a fire about 24 hours earlier still counts. A metric with no
        rows still comes back (day NULL), so the brief says zero.
-       The SQL bounds the rows; the clock test (which fire counts, and toward which whole day) is InvestigationAlertRecurrence.FromFires
-       over InvestigationAlertStreak.DaysAgo in the server's zone, the one rule Darling's reader and get_alert_history share, so a
-       DST change the SQL cannot see still reaches it.
+       The SQL bounds the rows (one day more than Days, so a fire a DST change moved an hour past the look-back is read); the clock
+       test (which fire counts, and toward which whole day) is InvestigationAlertRecurrence.FromFires over
+       InvestigationAlertStreak.DaysAgo in the server's zone, the one rule Darling's reader and get_alert_history share, so a DST
+       change the SQL cannot see still reaches it.
        Both investigation_request_alerts.alert_time and config_alert_log.alert_time are naive UTC, so the clock arithmetic rides
        no session time zone. The history is read through v_config_alert_log: ordinary archival moves rows older than
        ArchiveService.HotDataDays (7) days, the edge of this window, to Parquet. A resolution row (#6057) is written to the same
@@ -232,7 +233,7 @@ LEFT JOIN LATERAL (
     FROM v_config_alert_log AS cal
     WHERE cal.server_id = $2
       AND cal.metric_name = m.metric_name
-      AND cal.alert_time >= a.t - INTERVAL " + InvestigationAlertRecurrence.Days + @" DAY
+      AND cal.alert_time >= a.t - INTERVAL " + (InvestigationAlertRecurrence.Days + 1) + @" DAY
       AND cal.alert_time < a.t - INTERVAL " + InvestigationAlertRecurrence.WindowMinutes + @" MINUTE
 ) AS f ON true
 ORDER BY m.metric_name, f.alert_time DESC";
