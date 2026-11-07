@@ -211,7 +211,8 @@ public partial class JobHistoryTab : UserControl
             var categoriesTask = _choicesFreshness.NeedsRead(choicesKey, DateTime.UtcNow)
                 ? ReadKnownCategoriesAsync(startUtc, rangeEndUtc, serverId, choicesKey)
                 : null;
-            var readTask = System.Threading.Tasks.Task.Run(() => _dataService.GetJobHistoryWithClocksAsync(startUtc, RowCap, serverId, openTabClocks, rangeEndUtc, statusFilter, categoryFilter));
+            /* #8133: at All Servers the cap is shared out per server, so one busy server cannot fill the page alone. */
+            var readTask = System.Threading.Tasks.Task.Run(() => _dataService.GetJobHistoryWithClocksAsync(startUtc, RowCap, serverId, openTabClocks, rangeEndUtc, statusFilter, categoryFilter, shareCapPerServer: true));
 
             var (all, readClocks) = await readTask;
 
@@ -232,11 +233,7 @@ public partial class JobHistoryTab : UserControl
 
             /* The cap applies to the read (all.Count), not the column-filtered display count: a column filter narrowing the
                grid must not make the "newest 2,000" label disappear when the underlying read still hit the cap. */
-            /* #8133: at All Servers the read took a share of the cap from each server (the clocks are keyed by the servers it read), so
-               the count names the servers at their share rather than the fleet cap. */
-            JobCountIndicator.Text = serverId is null
-                ? JobHistoryCap.FleetCountText(displayCount, all.GroupBy(r => r.ServerId).Select(g => g.Count()).ToList(), JobHistoryCap.PerServerShare(RowCap, readClocks.Count))
-                : JobHistoryCap.CountText(displayCount, all.Count, RowCap);
+            JobCountIndicator.Text = JobHistoryCap.CountText(displayCount, all.Count, RowCap);
             AppLogger.Debug("JobHistory", $"Loaded {displayCount} job run(s) (query returned {all.Count}, since={startUtc:O}, until={(rangeEndUtc.HasValue ? rangeEndUtc.Value.ToString("O") : "now")}, serverId={serverId?.ToString() ?? "all"})");
 
             _lastRefreshed = DateTime.UtcNow;

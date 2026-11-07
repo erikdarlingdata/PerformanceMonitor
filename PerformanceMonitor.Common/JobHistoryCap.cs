@@ -7,8 +7,6 @@
  */
 
 using System;
-using System.Collections.Generic;
-using System.Linq;
 
 namespace PerformanceMonitor.Common;
 
@@ -62,21 +60,4 @@ public static class JobHistoryCap
     /// </summary>
     public static int PerServerShare(int cap, int serverCount) =>
         serverCount <= 0 ? cap : Math.Max(1, (cap + serverCount - 1) / serverCount);
-
-    /// <summary>
-    /// The count text of an All Servers read cut at a per-server share: "N run(s)", and when any server's rows reached its
-    /// share, how many of them did, so a reader knows which part of the page is the newest of more. <paramref name="rowsPerServer"/>
-    /// is the read's row count by server, before the column filters; <paramref name="shownCount"/> is what the grid shows now.
-    /// </summary>
-    public static string FleetCountText(int shownCount, IReadOnlyCollection<int> rowsPerServer, int share)
-    {
-        if (shownCount <= 0)
-        {
-            return "";
-        }
-        var atShare = rowsPerServer.Count(rows => rows >= share);
-        return atShare > 0
-            ? $"{shownCount} run(s) (showing the newest {share:N0} per server; {atShare} of {rowsPerServer.Count} server(s) at that cap)"
-            : $"{shownCount} run(s)";
-    }
 }

@@ -42,10 +42,6 @@ public partial class JobHistoryTab : UserControl
     /// cut at <see cref="RowCap"/>.</summary>
     private int _lastReadRowCount;
 
-    /// <summary>#8133: the per-server share the last All Servers read was cut at (null for one server), and its rows by server.</summary>
-    private int? _lastReadShare;
-    private List<int> _lastReadRowsPerServer = new();
-
     /// <summary>Raised with a short status message on load outcomes so the shell can show it.</summary>
     public event Action<string>? StatusChanged;
 
@@ -180,11 +176,7 @@ public partial class JobHistoryTab : UserControl
                 ? ReadHalfAsync("categories", "category", () => service.GetJobHistoryCategoriesAsync(windowStartUtc, windowIsLive ? null : windowEndUtc, serverId: serverId), choicesKey)
                 : null;
             var choicesTask = serversTask is null || categoriesTask is null ? null : JoinChoicesAsync(serversTask, categoriesTask);
-            /* #8133: at All Servers the cap is shared out per server (the drop-down's registered servers are the read's servers), so a
-               server that runs a job every minute keeps its newest share and the quieter servers keep their day. One server reads
-               its whole cap, as before. */
-            int? perServerLimit = serverId is null ? JobHistoryCap.PerServerShare(RowCap, ServerFilterComboBox.Items.Count - 1) : null;
-            var readTask = _dataService.GetJobHistoryAsync(sinceUtc, serverId, RowCap, untilUtc: windowIsLive ? null : windowEndUtc, runStatus: statusFilter, category: categoryFilter, perServerLimit: perServerLimit);
+            var readTask = _dataService.GetJobHistoryAsync(sinceUtc, serverId, RowCap, untilUtc: windowIsLive ? null : windowEndUtc, runStatus: statusFilter, category: categoryFilter);
             await ViewerServerTab.AwaitReadWatchingProbeAsync(readTask, dataStartTask, "Job History");
             var all = await readTask;
             readFanOut.Release();
@@ -210,9 +202,7 @@ public partial class JobHistoryTab : UserControl
                The Status and Category filters are in the read itself (#5703), so the count is of the runs they matched. The
                column-filter handler builds the same text from the same row count (#4966). */
             _lastReadRowCount = all.Count;
-            _lastReadShare = perServerLimit;
-            _lastReadRowsPerServer = all.GroupBy(r => r.ServerId).Select(g => g.Count()).ToList();
-            JobCountIndicator.Text = CountText(displayCount);
+            JobCountIndicator.Text = JobHistoryCap.CountText(displayCount, _lastReadRowCount, RowCap);
 
             _lastRefreshed = DateTime.UtcNow;
             UpdateStaleDataIndicator();
@@ -584,13 +574,8 @@ public partial class JobHistoryTab : UserControl
 
         /* The count follows the column filter, and keeps the cap label whenever the read hit the cap (#4966): this used
            to rewrite it as a bare "N run(s)", which took the label off a count whose read was still cut. */
-        JobCountIndicator.Text = CountText(JobHistoryDataGrid.Items.Count);
+        JobCountIndicator.Text = JobHistoryCap.CountText(JobHistoryDataGrid.Items.Count, _lastReadRowCount, RowCap);
     }
-
-    /// <summary>The count beside the grid: at All Servers the per-server share's text (#8133), else the row cap's (#4966).</summary>
-    private string CountText(int displayCount) => _lastReadShare is int share
-        ? JobHistoryCap.FleetCountText(displayCount, _lastReadRowsPerServer, share)
-        : JobHistoryCap.CountText(displayCount, _lastReadRowCount, RowCap);
 
     private void FilterPopup_FilterCleared(object? sender, EventArgs e)
     {

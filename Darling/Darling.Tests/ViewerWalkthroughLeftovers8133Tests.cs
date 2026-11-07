@@ -70,17 +70,6 @@ public sealed class ViewerWalkthroughLeftovers8133Tests
         Assert.Equal(expected, (int)method.Invoke(null, new object[] { cap, servers })!);
     }
 
-    [Theory]
-    [InlineData(350, new[] { 200, 150 }, 200, "350 run(s) (showing the newest 200 per server; 1 of 2 server(s) at that cap)")]
-    [InlineData(400, new[] { 200, 200 }, 200, "400 run(s) (showing the newest 200 per server; 2 of 2 server(s) at that cap)")]
-    [InlineData(270, new[] { 120, 150 }, 200, "270 run(s)")]
-    [InlineData(0, new[] { 200, 200 }, 200, "")]
-    public void JobHistoryFleetCountText_NamesTheServersAtTheirShare(int shown, int[] rowsPerServer, int share, string expected)
-    {
-        var method = Method(typeof(JobHistoryCap), "FleetCountText", typeof(int), typeof(IReadOnlyCollection<int>), typeof(int));
-        Assert.Equal(expected, (string)method.Invoke(null, new object[] { shown, rowsPerServer, share })!);
-    }
-
     // ── S2: a watch row's hits are the current run; the first-seen column is the first ever sighting ──
 
     [Theory]

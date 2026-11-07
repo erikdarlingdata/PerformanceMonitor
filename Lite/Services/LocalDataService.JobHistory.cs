@@ -76,15 +76,16 @@ public partial class LocalDataService
     /// </summary>
     internal async Task<(List<JobHistoryRow> Rows, IReadOnlyDictionary<int, ServerClock> Clocks)> GetJobHistoryWithClocksAsync(
         DateTime windowStartUtc, int limit, int? serverId, IReadOnlyDictionary<int, ServerClock>? openTabClocks = null,
-        DateTime? windowEndUtc = null, int? runStatus = null, string? category = null)
+        DateTime? windowEndUtc = null, int? runStatus = null, string? category = null, bool shareCapPerServer = false)
     {
         var serverIds = serverId.HasValue
             ? new List<int> { serverId.Value }
             : await ReadJobHistoryServerIdsAsync(windowStartUtc);
 
-        /* #8133: at All Servers each server reads a share of the cap (JobHistoryCap.PerServerShare), so one server that runs a
-           job every minute cannot fill the page alone and the quieter servers keep their day. One server reads the whole cap. */
-        var perServerLimit = serverId.HasValue ? limit : JobHistoryCap.PerServerShare(limit, serverIds.Count);
+        /* #8133: the tab's All Servers read shares the cap out per server (JobHistoryCap.PerServerShare), so one server that runs a
+           job every minute cannot fill the page alone and the quieter servers keep their day. Without shareCapPerServer the read
+           is the newest runs of the whole fleet, each server read to the cap, and one server always reads the whole cap. */
+        var perServerLimit = serverId.HasValue || !shareCapPerServer ? limit : JobHistoryCap.PerServerShare(limit, serverIds.Count);
 
         var rows = new List<JobHistoryRow>();
         var clocks = new Dictionary<int, ServerClock>();

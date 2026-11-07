@@ -188,8 +188,14 @@ public sealed partial class ViewerDataService
            saw an older failure on a quieter server: the All Servers grid lost runs the single-server grid showed. The reader's
            filters run inside the per-server top-N, so the cap counts only matching runs. They do not touch the job stats (the long-running
            flag and the last success come from the job's successful outcomes, whatever status the grid is filtered to).
-           #8133: the All Servers read passes a per-server share of its cap (JobHistoryCap.PerServerShare), so the per-server top-N
-           keeps that many of every server's newest runs and one server that runs a job every minute cannot fill the page alone. */
+           #8133: an All Servers read takes a per-server share of its cap (JobHistoryCap.PerServerShare over the registered servers the
+           tab's Server drop-down offers, or the caller's own perServerLimit), so the per-server top-N keeps that many of every
+           server's newest runs and one server that runs a job every minute cannot fill the page alone. One server reads its whole cap. */
+        if (serverId is null && perServerLimit is null)
+        {
+            perServerLimit = JobHistoryCap.PerServerShare(limit, (await GetJobHistoryServersAsync(cancellationToken)).Choices.Count);
+        }
+
         var filter = untilUtc is null && runStatus is null && string.IsNullOrWhiteSpace(category) && perServerLimit is null
             ? null
             : new JobHistoryFilter(
