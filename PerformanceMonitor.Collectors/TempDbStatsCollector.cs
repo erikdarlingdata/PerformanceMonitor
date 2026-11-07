@@ -157,12 +157,17 @@ SELECT /* PerformanceMonitorLite */
 FROM tempdb.sys.dm_db_file_space_usage AS dsu
 OPTION(RECOMPILE);
 
+/* #8080: sys.dm_db_session_space_usage counts for the life of the session. The *_alloc_page_count columns are every
+   page it has allocated since it connected and the *_dealloc_page_count columns every page it has released, so the
+   pages it holds now are the difference. The figure, the ranking and the sessions-using-tempdb count all take that
+   difference, so a long-lived session that churns temp tables is measured by its hold, not by everything it has
+   ever allocated. */
 SELECT /* PerformanceMonitorLite */ TOP (1)
     session_id = ssu.session_id,
-    tempdb_mb = CONVERT(decimal(18,2), (ssu.user_objects_alloc_page_count + ssu.internal_objects_alloc_page_count) * 8 / 1024.0),
-    total_sessions = (SELECT COUNT_BIG(*) FROM sys.dm_db_session_space_usage WHERE user_objects_alloc_page_count + internal_objects_alloc_page_count > 0)
+    tempdb_mb = CONVERT(decimal(18,2), ((ssu.user_objects_alloc_page_count - ssu.user_objects_dealloc_page_count) + (ssu.internal_objects_alloc_page_count - ssu.internal_objects_dealloc_page_count)) * 8 / 1024.0),
+    total_sessions = (SELECT COUNT_BIG(*) FROM sys.dm_db_session_space_usage WHERE (user_objects_alloc_page_count - user_objects_dealloc_page_count) + (internal_objects_alloc_page_count - internal_objects_dealloc_page_count) > 0)
 FROM sys.dm_db_session_space_usage AS ssu
-ORDER BY (ssu.user_objects_alloc_page_count + ssu.internal_objects_alloc_page_count) DESC
+ORDER BY ((ssu.user_objects_alloc_page_count - ssu.user_objects_dealloc_page_count) + (ssu.internal_objects_alloc_page_count - ssu.internal_objects_dealloc_page_count)) DESC
 OPTION(RECOMPILE);";
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
