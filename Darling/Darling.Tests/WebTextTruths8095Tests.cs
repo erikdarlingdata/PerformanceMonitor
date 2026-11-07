@@ -88,7 +88,7 @@ public sealed class WebTextTruths8095Tests
 
         var title = r.GetProperty("title").GetString()!;
         Assert.Contains("warning tile", title, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("Critical, Warning or Offline", title, StringComparison.Ordinal);
+        Assert.Contains("any band other than Healthy", title, StringComparison.Ordinal);
         Assert.Equal(3, r.GetProperty("shown").GetInt32());
         var notice = Assert.Single(Strings(r.GetProperty("notice")));
         Assert.Equal("Needs attention only — showing 3 of 4 (2 healthy with advisories).", notice);

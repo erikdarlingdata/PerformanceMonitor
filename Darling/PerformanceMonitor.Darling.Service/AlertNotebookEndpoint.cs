@@ -1218,6 +1218,22 @@ internal static partial class AlertNotebookEndpoint
         }
 
         var trimmedMetric = metric.Trim();
+
+        /* #8095: a row that is itself a resolution has no resolution of its own to find, and a later row of its own name is another
+           clearing, not a re-fire. The one row its status needs is the firing it closed: the newest firing of the resolved metric at or
+           before the anchor, which StatusFromHistory names. */
+        var resolvedMetric = ResolvedMetricOf(trimmedMetric);
+        if (resolvedMetric is not null)
+        {
+            var firing = await DarlingAlertReader.GetNewestFiringAtOrBeforeAsync(postgres, anchor, serverId, resolvedMetric, cancellationToken);
+            if (firing is not null)
+            {
+                rows.Add(firing);
+            }
+
+            return rows;
+        }
+
         var resolution = await DarlingAlertReader.GetFirstResolutionAfterAsync(
             postgres, anchor, now, serverId, ResolutionRowNames(trimmedMetric), cancellationToken);
         if (resolution is not null)
@@ -1241,19 +1257,9 @@ internal static partial class AlertNotebookEndpoint
         return rows;
     }
 
-    /// <summary>Status arms 1 and 2 (#4222), extracted as a pure seam (#4366 review F4) over whatever rows the
-    /// caller has already gathered — the caller is responsible for the window. The endpoint passes the rows
-    /// <see cref="ReadStatusRowsAsync"/> returns: the first resolution row and the first later firing, read
-    /// straight from the store with no window (#4755). Returns null when neither arm fires, meaning the caller
-    /// should fall through to the collector-freshness arms.
-    ///
-    /// <para><b>F2 fix.</b> When the caller has no resolved server id and the alert is not a fleet-level
-    /// metric, this returns Unknown immediately rather than scanning fleet-wide rows — an unresolved
-    /// <c>server=</c> query used to let another host's resolution or re-fire answer for a server the caller
-    /// never actually reached. When a server id IS known, rows are filtered to that server before either arm
-    /// runs, for the same reason.</para></summary>
-    /// <summary>#8095: the metric a resolution row closes: the canonical name behind a <see cref="DarlingTriageEndpoint.ResolutionAliases"/>
-    /// alias, or the name before a " Cleared" or " Resolved" suffix the alert engine writes directly; <c>null</c> for a firing metric.</summary>
+    /// <summary>#8095: the metric a resolution row closes, the inverse of <see cref="ResolutionRowNames"/> over the same two tables: the
+    /// canonical name behind a <see cref="DarlingTriageEndpoint.ResolutionAliases"/> alias, the firing of a <see cref="NotebookRecoveryEdges"/>
+    /// recovery, or the name before a " Cleared" or " Resolved" suffix the alert engine writes directly; <c>null</c> for a firing metric.</summary>
     internal static string? ResolvedMetricOf(string metric)
     {
         foreach (var (alias, canonical) in DarlingTriageEndpoint.ResolutionAliases)
@@ -1261,6 +1267,14 @@ internal static partial class AlertNotebookEndpoint
             if (string.Equals(alias, metric, StringComparison.OrdinalIgnoreCase))
             {
                 return canonical;
+            }
+        }
+
+        foreach (var (firing, recovery) in NotebookRecoveryEdges)
+        {
+            if (string.Equals(recovery, metric, StringComparison.OrdinalIgnoreCase))
+            {
+                return firing;
             }
         }
 
@@ -1275,6 +1289,17 @@ internal static partial class AlertNotebookEndpoint
         return null;
     }
 
+    /// <summary>Status arms 1 and 2 (#4222), extracted as a pure seam (#4366 review F4) over whatever rows the
+    /// caller has already gathered — the caller is responsible for the window. The endpoint passes the rows
+    /// <see cref="ReadStatusRowsAsync"/> returns: the first resolution row and the first later firing, read
+    /// straight from the store with no window (#4755), or for a row that is itself a resolution the newest firing it closed (#8095).
+    /// Returns null when neither arm fires, meaning the caller should fall through to the collector-freshness arms.
+    ///
+    /// <para><b>F2 fix.</b> When the caller has no resolved server id and the alert is not a fleet-level
+    /// metric, this returns Unknown immediately rather than scanning fleet-wide rows — an unresolved
+    /// <c>server=</c> query used to let another host's resolution or re-fire answer for a server the caller
+    /// never actually reached. When a server id IS known, rows are filtered to that server before either arm
+    /// runs, for the same reason.</para></summary>
     internal static string? StatusFromHistory(
         IReadOnlyList<DarlingAlertReader.AlertHistoryReadRow> rows, string metric, DateTime anchor,
         DarlingAlertReader.AlertHistoryReadRow? matchedRow, int? serverId, bool fleetLevelStore)

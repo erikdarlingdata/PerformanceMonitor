@@ -664,7 +664,7 @@ function attentionControl() {
   attentionToggle = cb;
   return el("label", {
     class: "attention-control",
-    title: "Show only the servers that need attention: a Critical, Warning or Offline band, or a Healthy band with a warning tile. Uncheck to show the whole fleet again.",
+    title: "Show only the servers that need attention: any band other than Healthy, or a Healthy band with a warning tile. Uncheck to show the whole fleet again.",
   }, [cb, el("span", { text: "Needs attention only" })]);
 }
 

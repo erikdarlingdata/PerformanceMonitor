@@ -64,6 +64,18 @@ public sealed class AlertNotebookResolutionRowStatusTests
     }
 
     [Fact]
+    public void ARecoveryRow_ReadsAsTheResolutionOfTheFiringBeforeIt()
+    {
+        var fired = new DateTime(2026, 1, 1, 10, 0, 0, DateTimeKind.Utc);
+        var restored = fired + TimeSpan.FromMinutes(10);
+        var rows = new List<DarlingAlertReader.AlertHistoryReadRow> { Row(restored, "Server Restored"), Row(fired, "Server Unreachable") };
+
+        var status = AlertNotebookEndpoint.StatusFromHistory(rows, "Server Restored", restored, matchedRow: rows[0], serverId: 7, fleetLevelStore: false);
+
+        Assert.Equal("Resolution of the Server Unreachable alert that fired at " + Stamp(fired), status);
+    }
+
+    [Fact]
     public void AFiringRow_KeepsTheResolvedArm()
     {
         var fired = new DateTime(2026, 1, 1, 10, 0, 0, DateTimeKind.Utc);
