@@ -426,7 +426,7 @@ public sealed class ThemeLeftoversRenderTests
     // ── The real server tab: selected main tabs after a run-time switch ────────────────────────
 
     [Fact]
-    public void TheSelectedServerTabs_TakeTheCurrentThemesFillAndInk_AfterRunTimeSwitchesDarkLightCoolBreeze()
+    public void TheSelectedServerTabs_TakeTheCurrentThemesInkAndUnderline_AfterRunTimeSwitchesDarkLightCoolBreeze()
     {
         var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "ThemeLeftovers_" + Guid.NewGuid().ToString("N")[..8]);
         System.IO.Directory.CreateDirectory(dir);
@@ -443,7 +443,7 @@ public sealed class ThemeLeftoversRenderTests
                 try
                 {
                     var main = (TabControl)tab.FindName("MainTabControl");
-                    var found = new List<(string Theme, string Tab, Color Fill, Color WantFill, Color Ink, Color WantInk, Color Underline, Color WantUnderline)>();
+                    var found = new List<(string Theme, string Tab, Color Ink, Color WantInk, Color Underline, Color WantUnderline)>();
                     foreach (var theme in new[] { "Dark", "Light", "CoolBreeze" })
                     {
                         ThemeManager.Apply(theme);
@@ -453,7 +453,7 @@ public sealed class ThemeLeftoversRenderTests
                             main.SelectedItem = item;
                             Settle(window);
                             var chrome = (Border)item.Template.FindName("border", item);
-                            found.Add((theme, header, ColorOf(chrome.Background), Resource(app, "BackgroundLighterBrush"), ColorOf(item.Foreground), Resource(app, "ForegroundBrush"),
+                            found.Add((theme, header, ColorOf(item.Foreground), Resource(app, "ForegroundBrush"),
                                 ColorOf(chrome.BorderBrush), Resource(app, "AccentBrush")));
                         }
                     }
@@ -466,10 +466,10 @@ public sealed class ThemeLeftoversRenderTests
                 }
             });
 
+            // The fill is not read: the hover state paints it, so it follows where the mouse happens to be. The ink and underline are the selected state's own.
             Assert.Equal(6, seen.Count);
             foreach (var r in seen)
             {
-                Assert.True(r.Fill == r.WantFill, $"{r.Theme} {r.Tab}: the selected tab is filled {r.Fill}, the theme says {r.WantFill}");
                 Assert.True(r.Ink == r.WantInk, $"{r.Theme} {r.Tab}: the selected tab's text is {r.Ink}, the theme says {r.WantInk}");
                 Assert.True(r.Underline == r.WantUnderline, $"{r.Theme} {r.Tab}: the selected tab's underline is {r.Underline}, the theme says {r.WantUnderline}");
             }
