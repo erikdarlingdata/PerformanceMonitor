@@ -596,8 +596,9 @@ public sealed partial class DarlingCollectorRunner
 
         var capturePlanXml = ShouldCapturePlanXmlFor(definition.Name, server.ServerId, server.CapturePlans);
         var planFetchFlags = StampPlanFetchFlags(definition.Name, capturePlanXml, server.Target, server.CapturePlans);
-        /* #8146: the deadlocks collector skips ring-buffer loss accounting for a logical-server registration. */
+        /* #8146: only the deadlocks collector reads this flag (it skips ring-buffer loss accounting for a logical-server registration). */
         var registeredAsLogicalServer = server.Target.IsAzureSqlDb
+            && string.Equals(definition.Name, DeadlocksCollector.Instance.Name, StringComparison.Ordinal)
             && AzureSweepScope.IsLogicalServerRegistration(
                 server.Target, new SqlConnectionStringBuilder(server.ConnectionString).InitialCatalog);
 
