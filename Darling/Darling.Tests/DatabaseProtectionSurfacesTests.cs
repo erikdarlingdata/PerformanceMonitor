@@ -64,6 +64,20 @@ public sealed class ViewerDatabaseProtectionTextTests : IDisposable
         Assert.EndsWith("Captured: " + Worded(Captured, mode), ViewerDatabaseProtectionText.StatusLine(read, s_india), StringComparison.Ordinal);
     }
 
+    /// <summary>The capture time is stamped to the second and names its zone, as every other grid's time does, so a reader never has to
+    /// guess which clock a culture short date was in.</summary>
+    [Fact]
+    public void TheStatusLineCaptureTime_IsStampedToTheSecond_AndNamesItsZone()
+    {
+        var read = Read(Fact("a", fullAgo: Day, logAgo: TimeSpan.FromMinutes(5), checkDbAgo: Day));
+
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+        Assert.EndsWith("Captured: 2026-10-28 12:00:00 UTC", ViewerDatabaseProtectionText.StatusLine(read, s_india), StringComparison.Ordinal);
+
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        Assert.EndsWith("Captured: 2026-10-28 17:30:00 UTC+05:30", ViewerDatabaseProtectionText.StatusLine(read, s_india), StringComparison.Ordinal);
+    }
+
 
     private static readonly DateTime Captured = new(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc);
     private static readonly TimeSpan Day = TimeSpan.FromDays(1);
