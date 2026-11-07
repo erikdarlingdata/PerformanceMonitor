@@ -1,0 +1,71 @@
+name: PR CI fork result
+
+# #8188: a pull request from a fork runs PR CI with a read-only token, so its CI verdict job cannot write `CI result`, the commit
+# status the dev branch rule requires, and the pull request stays blocked however green its run is. This workflow runs in this
+# repository's context when a PR CI run completes, reads that run's `CI verdict` job conclusion from the API, and writes `CI result`
+# on the run's head commit.
+#
+# What keeps a fork's code away from the write token:
+# - the only checkout is this repository's default branch at github.sha (the commit GitHub started this workflow from), never the
+#   pull request's head; nothing of the run is downloaded, built or executed;
+# - every fact comes from the GitHub API (fork-ci-result.py): the finished run's jobs, the open pull requests at its head commit,
+#   their changed files, and the newer runs. Nothing the run wrote (logs, artifacts, outputs) is read;
+# - the status is written only for a pull_request run from a fork whose head commit is still the pull request's head, that changes
+#   no file under .github/workflows/ (a run executes the pull request's own copy of PR CI, so such a verdict is not vouched for),
+#   and that no newer PR CI run has replaced. success only on a successful `CI verdict`, failure for any other conclusion;
+# - untrusted fields (the branch name, the head repository) reach no `run:` line: the script reads them from the event payload
+#   and passes them to gh as arguments, and the write step takes the sha and the state from the script's outputs, not the event.
+#
+# GitHub starts a workflow_run workflow from the default branch's copy of this file, so the relay works once main carries it.
+
+on:
+  workflow_run:
+    workflows: [PR CI]
+    types: [completed]
+
+permissions:
+  contents: read # the checkout of this repository's default branch, for the decision script
+  statuses: write # the one write: `CI result` on the head commit
+  pull-requests: read # the open pull requests at the run's head commit, and their changed files
+  actions: read # the finished run's jobs, and whether a newer run exists
+
+jobs:
+  relay:
+    name: Relay the fork's CI result
+    # A run from this repository writes its own CI result; the script repeats this check and the rest of the decision.
+    if: github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_repository.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # No ref: on workflow_run, github.sha is the default branch's commit, so this is this repository's code, never the fork's.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+
+      - name: Decide from the finished run's facts
+        id: decide
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python -I .github/scripts/fork-ci-result.py --event "${GITHUB_EVENT_PATH}" --github-output "${GITHUB_OUTPUT}"
+
+      - name: Set CI result on the head commit
+        if: steps.decide.outputs.write == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.decide.outputs.sha }}
+          STATE: ${{ steps.decide.outputs.state }}
+          DESCRIPTION: ${{ steps.decide.outputs.description }}
+          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          [[ "${SHA}" =~ ^[0-9a-fA-F]{40}$ ]] || { echo "::error title=CI result not set::The decision named no commit sha."; exit 1; }
+          [[ "${STATE}" =~ ^(success|failure)$ ]] || { echo "::error title=CI result not set::The decision named no state."; exit 1; }
+          gh api "repos/${GITHUB_REPOSITORY}/statuses/${SHA}" -f state="${STATE}" -f context='CI result' \
+            -f description="${DESCRIPTION:0:140}" -f target_url="${TARGET_URL}" > /dev/null
+          echo "CI result set to ${STATE} on ${SHA}."
