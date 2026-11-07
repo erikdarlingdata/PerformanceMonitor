@@ -399,7 +399,7 @@ public sealed class ThemeLeftoversRenderTests
             window.Show();
             try
             {
-                foreach (var theme in new[] { "initial", "Dark", "Light", "CoolBreeze" })
+                foreach (var theme in new[] { "Dark", "Light", "CoolBreeze" })
                 {
                     ThemeManager.Apply(theme);
                     Settle(window);

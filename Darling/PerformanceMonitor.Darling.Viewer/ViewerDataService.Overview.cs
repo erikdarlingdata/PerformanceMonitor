@@ -1595,7 +1595,7 @@ public sealed class ServerSummaryItem
     /// <summary>
     /// The card border reflects the worst signal: offline (red) &gt; a Critical metric (red) &gt; a Warning
     /// metric (amber-orange) &gt; a stale collection, a never-collected server, or a card on which NOTHING
-    /// was measured (amber) &gt; calm (dark). Enriches Lite's border (which only knew CPU / blocking /
+    /// was measured (amber) &gt; calm (the theme's neutral card border). Enriches Lite's border (which only knew CPU / blocking /
     /// deadlock) with the added Threads / Memory / Collectors bands via <see cref="OverallMetricSeverity"/>.
     ///
     /// <para>The nothing-measured arm (#3539 A6) paints the Warning brush, because that is the band it is:
@@ -1616,9 +1616,24 @@ public sealed class ServerSummaryItem
                 HealthSeverity.Critical => s_criticalBrush,
                 HealthSeverity.Warning => s_warningBrush,
                 HealthSeverity.Unknown => s_warningBrush,
-                _ => CollectionStale || AwaitingFirstCollection ? MakeBrush("#FFD54F") : MakeBrush("#2a2d35"),
+                _ => CollectionStale || AwaitingFirstCollection ? MakeBrush("#FFD54F") : ThemeNeutralBorderBrush(),
             };
         }
+    }
+
+    /// <summary>#8221: the current theme's card border (the <c>CardBorderBrush</c> resource), as a frozen copy, for a calm card. The old
+    /// fixed <c>#2a2d35</c> was a Dark hex shown in every theme: near-black on Light and Cool Breeze. The Dark value when there is no
+    /// running application to ask, as in a unit test. The Overview binds its cards again on a theme change.</summary>
+    private static SolidColorBrush ThemeNeutralBorderBrush()
+    {
+        if (System.Windows.Application.Current?.TryFindResource("CardBorderBrush") is SolidColorBrush themed)
+        {
+            var copy = new SolidColorBrush(themed.Color);
+            copy.Freeze();
+            return copy;
+        }
+
+        return MakeBrush("#3A3D45");
     }
 
     /// <summary>

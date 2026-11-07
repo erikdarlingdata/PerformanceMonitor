@@ -766,7 +766,11 @@ public class ServerSummaryItem
     /* The border ranks the same states the status word names, so it reads the SAME discriminant rather than
        the flags behind it — see ServerCardStatus for the pair the raw reads disagreed on. The precedence is
        unchanged: a dark server first, then the metric rows worst-first, then failing collectors. */
-    public SolidColorBrush CardBorderBrush => MakeBrush(
+    public SolidColorBrush CardBorderBrush
+    {
+        get
+        {
+            var band =
         CardStatus == ServerCardStatus.Offline ? "#E57373" :
         DeadlocksAreElevated ? "#E57373" :
         BlockingIsElevated ? "#FFB74D" :
@@ -783,10 +787,27 @@ public class ServerSummaryItem
            contradiction on the card; the row underneath carries the severity in its own colour and its own
            word. */
         CollectionIsNotFresh ? "#FFD54F" :
-        /* #8221: a healthy card's border is its band colour (green), not a near-black "neutral" that was invisible on Dark and
-           heavy on Light. A card with no verdict yet (Unknown) keeps the unknown grey. */
-        CardStatus == ServerCardStatus.Online ? "#81C784" :
-        "#888888");
+        null;
+
+            /* #8221: a healthy card (and one with no verdict yet) gets the current theme's quiet card border, not a colour. The old
+               fixed #2a2d35 was a Dark hex shown in every theme: near-black on Light and Cool Breeze. Colour stays for the bands above. */
+            return band is null ? ThemeNeutralBorderBrush() : MakeBrush(band);
+        }
+    }
+
+    /// <summary>The current theme's card border (the CardBorderBrush resource), as a frozen copy. The Dark value when there is no
+    /// running application to ask, as in a unit test.</summary>
+    private static SolidColorBrush ThemeNeutralBorderBrush()
+    {
+        if (System.Windows.Application.Current?.TryFindResource("CardBorderBrush") is SolidColorBrush themed)
+        {
+            var copy = new SolidColorBrush(themed.Color);
+            copy.Freeze();
+            return copy;
+        }
+
+        return MakeBrush("#3A3D45");
+    }
 
     /* ── The card explains itself (#2437 / #2422) ────────────────────────────────────────────────────
        Reported against the Darling viewer and fixed there in #2429; Lite's card had the identical bare
