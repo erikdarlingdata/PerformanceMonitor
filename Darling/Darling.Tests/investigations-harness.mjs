@@ -88,6 +88,16 @@ const closes = [];
 let closeGate = null;
 /* When set, the service's answer to the next close writes: a refusal such as a 409 with its sentence (#7987). */
 let closeAnswer = null;
+/* #8007: a gate that holds the detail reads (get_investigation_reports) open, and the signal of each read sent while it is set, so a scenario
+   can drop the picked request while its detail read is still out and see whether the read was aborted. A held read whose signal is
+   aborted rejects with an AbortError once the gate opens, as a real fetch does. */
+let detailGate = null;
+const detailSignals = [];
+/* #8007: how many detail reads the stand-in has answered, so a scenario can tell that a read had answered before the request was dropped. */
+let detailAnswers = 0;
+/* #8007: a gate that holds the session read (/api/session) open, so a scenario can have a detail read answer while the session read it is
+   paired with is still out. */
+let sessionGate = null;
 globalThis.fetch = async (url, init) => {
   const u = String(url);
   fetches.push(u);
@@ -98,7 +108,10 @@ globalThis.fetch = async (url, init) => {
     return { status: 200, ok: true, text: async () => JSON.stringify({ status: "closed" }) };
   }
   /* The seat the page learns from /api/session: can edit, but not signed in as an admin (#6265). */
-  if (u.split("?")[0].endsWith("/api/session")) return { status: 200, ok: true, text: async () => JSON.stringify(bodies.session) };
+  if (u.split("?")[0].endsWith("/api/session")) {
+    if (sessionGate) await sessionGate;
+    return { status: 200, ok: true, text: async () => JSON.stringify(bodies.session) };
+  }
   if (u.split("?")[0] === "/api/agent-changes") {
     /* The service filters by ?request=<id> in SQL (#6979), so the stand-in returns only that request's rows and the page does no filtering. */
     const wanted = new URLSearchParams(u.split("?")[1] || "").get("request");
@@ -107,6 +120,13 @@ globalThis.fetch = async (url, init) => {
     return { status: 200, ok: true, text: async () => JSON.stringify(body) };
   }
   const tool = u.split("/api/read/")[1].split("?")[0];
+  if (tool === "get_investigation_reports" && detailGate) {
+    const signal = init && init.signal ? init.signal : null;
+    detailSignals.push(signal);
+    await detailGate;
+    if (signal && signal.aborted) throw Object.assign(new Error("The operation was aborted."), { name: "AbortError" });
+  }
+  if (tool === "get_investigation_reports") detailAnswers++;
   const b = bodies[tool];
   if (b && b.fail) return { status: 500, ok: false, text: async () => JSON.stringify({ error: "the store is down" }) };
   return { status: 200, ok: true, text: async () => JSON.stringify(b) };
@@ -183,12 +203,40 @@ try {
     selects: { State: byLabel(main, "State").value, Family: byLabel(main, "Family").value },
     stateChoices: byLabel(main, "State").children.map((o) => o.attrs.value),
   };
+  const slotText = () => all(main, "div").filter((d) => d.className === "jh-detail").map((d) => d.textContent).join("");
+
+  /* #8007: the first pick, with the page's first session read held. The detail read answers at once, so its fetch is past aborting, and the
+     pair the pane waits on (the detail read and the session read) is still out when a State pick drops the request. Only the detail ticket
+     can stop that answer: once the session read answers, the pane must still be empty. The State pick is then undone, so the list is as before. */
+  let openSession;
+  sessionGate = new Promise((r) => (openSession = r));
+  detailAnswers = 0;
+  rowsOf(main)[0].handlers.click({ type: "click" });
+  await settle();
+  const answeredBeforeDrop = detailAnswers;
+  const paneWhileSessionOut = slotText();
+  byLabel(main, "State").value = "claimed";
+  byLabel(main, "State").handlers.change();
+  await settle();
+  const paneAfterDrop = slotText();
+  openSession();
+  sessionGate = null;
+  await settle();
+  out.droppedWhileSessionOut = {
+    detailReads: calls("get_investigation_reports").length,
+    answeredBeforeDrop,
+    paneWhileSessionOut,
+    paneAfterDrop,
+    pane: slotText(),
+  };
+  byLabel(main, "State").value = "";
+  byLabel(main, "State").handlers.change();
+  await settle();
 
   // Picking a row reads that one request and draws its report, brief and journal.
   fetches.length = 0;
   rowsOf(main)[0].handlers.click({ type: "click" });
   await settle();
-  const slotText = () => all(main, "div").filter((d) => d.className === "jh-detail").map((d) => d.textContent).join("");
   out.picked = {
     reportCalls: calls("get_investigation_reports"),
     text: slotText(),
@@ -384,6 +432,46 @@ try {
   out.closedUnderFilter = await closeUnderFilter(openList(rowB, rowC), openList(rowC));
   out.closedLastUnderFilter = await closeUnderFilter(openList(rowB), { status: "empty", message: "No investigation request matches these filters." });
   out.closedNoRowsUnderFilter = await closeUnderFilter(openList(rowB), openList());
+  session.signed_in_admin = false;
+  bodies.list_investigation_requests = list(false);
+
+  /* #8007: request A's detail read is still out when A is dropped: by a State pick (the filter change) and by a list re-read that no longer
+     holds it (the poll's rebuild with A gone from the list). The read then answers. The pane must stay empty with no Close form for A, and
+     the read's fetch must have been aborted when A was dropped. */
+  session.signed_in_admin = true;
+  const droppedDetail = async (drop) => {
+    bodies.list_investigation_requests = list(false);
+    bodies.get_investigation_reports = reportsA;
+    renderInvestigations(main);
+    await settle();
+    let open;
+    detailGate = new Promise((r) => (open = r));
+    detailSignals.length = 0;
+    rowsOf(main)[0].handlers.click({ type: "click" });
+    await settle();
+    const paneWhileOut = slotText();
+    drop();
+    await settle();
+    const abortedBeforeAnswer = detailSignals.map((s) => (s ? s.aborted : false));
+    open();
+    detailGate = null;
+    await settle();
+    return {
+      detailReads: detailSignals.length,
+      paneWhileOut,
+      abortedBeforeAnswer,
+      pane: slotText(),
+      closeButtons: all(main, "button").filter((b) => b.attrs["data-close-request"] != null).length,
+    };
+  };
+  out.droppedByFilter = await droppedDetail(() => {
+    byLabel(main, "State").value = "claimed";
+    byLabel(main, "State").handlers.change();
+  });
+  out.droppedByReRead = await droppedDetail(() => {
+    bodies.list_investigation_requests = openList(rowB, rowC);
+    renderInvestigations(main);
+  });
   session.signed_in_admin = false;
   bodies.list_investigation_requests = list(false);
 
