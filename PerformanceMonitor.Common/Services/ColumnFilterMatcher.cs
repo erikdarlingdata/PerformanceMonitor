@@ -103,15 +103,14 @@ public static class ColumnFilterMatcher
         if (rawValue == null)
             return comparison(0, 1); // null is "less than" any value
 
-        var stringValue = rawValue.ToString() ?? string.Empty;
-
         // Try numeric comparison first
-        if (TryParseNumeric(stringValue, out var numericValue) && TryParseNumeric(filterValue, out var filterNumeric))
+        if (TryGetNumeric(rawValue, out var numericValue) && TryParseNumeric(filterValue, out var filterNumeric))
         {
             return comparison(numericValue.CompareTo(filterNumeric), 0);
         }
 
         // Fall back to string comparison
+        var stringValue = rawValue.ToString() ?? string.Empty;
         return comparison(string.Compare(stringValue, filterValue, StringComparison.OrdinalIgnoreCase), 0);
     }
 
@@ -120,18 +119,57 @@ public static class ColumnFilterMatcher
         if (rawValue == null)
             return false;
 
-        var stringValue = rawValue.ToString() ?? string.Empty;
-
-        // Try to parse both values as decimals
-        if (TryParseNumeric(stringValue, out var numericValue) && TryParseNumeric(filterValue, out var filterNumeric))
+        // Compare both values as decimals
+        if (TryGetNumeric(rawValue, out var numericValue) && TryParseNumeric(filterValue, out var filterNumeric))
         {
             return comparison(numericValue, filterNumeric);
         }
 
-        // If we can't parse both as numbers, the filter doesn't match
+        // If we can't read both as numbers, the filter doesn't match
         return false;
     }
 
+    /// <summary>
+    /// The number a cell holds. A numeric cell is read as its value, with no round trip through text: a text rendering
+    /// follows the thread culture, and a comma-decimal culture would turn 1.5 into "1,5" and then into 15. A cell of any
+    /// other type is read as its text, the same way the typed value is.
+    /// </summary>
+    private static bool TryGetNumeric(object rawValue, out decimal result)
+    {
+        switch (rawValue)
+        {
+            case decimal d:
+                result = d;
+                return true;
+            case double d:
+                return TryFromDouble(d, out result);
+            case float f:
+                return TryFromDouble(f, out result);
+            case byte or sbyte or short or ushort or int or uint or long or ulong:
+                result = Convert.ToDecimal(rawValue, CultureInfo.InvariantCulture);
+                return true;
+            default:
+                return TryParseNumeric(rawValue.ToString() ?? string.Empty, out result);
+        }
+    }
+
+    private static bool TryFromDouble(double value, out decimal result)
+    {
+        if (double.IsFinite(value) && Math.Abs(value) < (double)decimal.MaxValue)
+        {
+            result = (decimal)value;
+            return true;
+        }
+
+        result = 0;
+        return false;
+    }
+
+    /// <summary>
+    /// The number a typed value (or a text cell) means: read in the thread culture, with that culture's own group separator
+    /// dropped, so a de-DE user's "1,5" is one and a half and "1.234,5" is 1234.5, and an en-US user's "1,234.5" is 1234.5.
+    /// A value the culture cannot read is tried as invariant.
+    /// </summary>
     private static bool TryParseNumeric(string value, out decimal result)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -140,13 +178,23 @@ public static class ColumnFilterMatcher
             return false;
         }
 
-        // Remove common formatting characters (commas, percent signs, currency symbols)
-        var cleanValue = value.Trim()
-            .Replace(",", "")
+        return TryParseNumeric(value, CultureInfo.CurrentCulture, out result)
+            || TryParseNumeric(value, CultureInfo.InvariantCulture, out result);
+    }
+
+    private static bool TryParseNumeric(string value, CultureInfo culture, out decimal result)
+    {
+        var groupSeparator = culture.NumberFormat.NumberGroupSeparator;
+
+        // Remove common formatting characters (the culture's group separator, percent signs, currency symbols)
+        var cleanValue = value.Trim();
+        if (groupSeparator.Length > 0)
+            cleanValue = cleanValue.Replace(groupSeparator, "");
+        cleanValue = cleanValue
             .Replace("%", "")
             .Replace("$", "")
             .Replace(" ", "");
 
-        return decimal.TryParse(cleanValue, NumberStyles.Any, CultureInfo.InvariantCulture, out result);
+        return decimal.TryParse(cleanValue, NumberStyles.Any, culture, out result);
     }
 }
