@@ -32,8 +32,10 @@ The decision, in order; the first rule that answers wins:
   8. a user with write, maintain or admin permission on this repository has an APPROVED review on that exact head commit, and
      that is the user's latest non-comment review of the commit: success. Otherwise pending, with a description that says a
      maintainer's approval of this commit is needed; after approving, a maintainer dispatches fork-ci-result.yml with the run id.
+     A reviewer whose permission read answers 404 or 403 (a bot, or a login the token may not ask about) is no maintainer.
 
-A read that fails raises FetchError: main() reports it and exits 1 with write=false, so nothing is written on a guess.
+A read that fails raises FetchError: main() reports it and exits 1 with write=false, so nothing is written on a guess. The one
+exception is the permission read's 404 or 403 above, which counts that review as no approval and lets the decision go on.
 
 Usage: python -I .github/scripts/fork-ci-result.py --event "$GITHUB_EVENT_PATH" --github-output "$GITHUB_OUTPUT"
 Checks: python -I .github/scripts/tests/fork-ci-result-test.py
@@ -82,8 +84,24 @@ NOT_RELAYED_EXTENSIONS = (
 )
 
 
+HTTP_STATUS_RE = re.compile(r"\(HTTP (\d{3})\)")
+# The permission read alone treats these as "not a collaborator": a bot's login is no collaborator (404), and a login the token
+# may not ask about answers 403. Such a review counts for nothing; every other error on any read fails closed.
+NOT_A_COLLABORATOR_STATUSES = frozenset({403, 404})
+
+
 class FetchError(Exception):
-    """A GitHub API read that did not answer."""
+    """A GitHub API read that did not answer. status is the HTTP status when gh's message named one, else None."""
+
+    def __init__(self, message: str, status: "int | None" = None):
+        super().__init__(message)
+        self.status = status
+
+
+def http_status_of(stderr: str) -> "int | None":
+    """The HTTP status in a gh error message such as `gh: Not Found (HTTP 404)`, or None when it names none."""
+    found = HTTP_STATUS_RE.search(stderr or "")
+    return int(found.group(1)) if found else None
 
 
 @dataclass(frozen=True)
@@ -118,7 +136,7 @@ def gh_fetch(path: str, params: "dict[str, str] | None" = None, paginate: bool =
     except OSError as exc:
         raise FetchError(f"{path}: gh could not be started ({exc})") from exc
     if done.returncode != 0:
-        raise FetchError(f"{path}: gh api exited {done.returncode}: {done.stderr.strip()[:300]}")
+        raise FetchError(f"{path}: gh api exited {done.returncode}: {done.stderr.strip()[:300]}", status=http_status_of(done.stderr))
     try:
         data = json.loads(done.stdout)
     except ValueError as exc:
@@ -185,7 +203,9 @@ def _newer_run(repo: str, branch: str, head_repo: str, sha: str, run_id, fetch) 
 def _maintainer_approved(repo: str, number, sha: str, fetch) -> "str | None":
     """The login of a maintainer whose latest non-comment review of this exact commit is APPROVED, or None. A COMMENTED or
     PENDING review changes nothing; CHANGES_REQUESTED or DISMISSED after an approval withdraws it. Reviews of other commits do
-    not count either way: a push after an approval needs a new approval. The permission is read only for approving reviewers."""
+    not count either way: a push after an approval needs a new approval. The permission is read only for approving reviewers; a
+    reviewer the read answers 404 or 403 for (a bot, or a login the token may not ask about) is no maintainer and the decision
+    goes on, while any other error fails closed as every read does."""
     reviews = fetch(f"repos/{repo}/pulls/{number}/reviews", {"per_page": "100"}, paginate=True) or []
     latest: "dict[str, tuple[str, str]]" = {}
     for review in reviews:
@@ -203,7 +223,12 @@ def _maintainer_approved(repo: str, number, sha: str, fetch) -> "str | None":
     for login, (_, state) in latest.items():
         if state != "APPROVED":
             continue
-        permission = fetch(f"repos/{repo}/collaborators/{login}/permission") or {}
+        try:
+            permission = fetch(f"repos/{repo}/collaborators/{login}/permission") or {}
+        except FetchError as exc:
+            if exc.status in NOT_A_COLLABORATOR_STATUSES:
+                continue
+            raise
         if (permission.get("permission") or "") in MAINTAINER_PERMISSIONS or (permission.get("role_name") or "") in MAINTAINER_ROLES:
             return login
     return None
