@@ -61,4 +61,26 @@ public sealed class ComposeSampleServerNameTests
         Assert.Contains($"'{path}'", warning, StringComparison.Ordinal);
         Assert.DoesNotContain("prod-sql-01", warning, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void AServersEntryWithCommentKeysAndEveryDeclaredKey_GivesNoWarning()
+    {
+        /* The declared keys in a different case on purpose, as the loader binds them, beside two "// "-prefixed notes
+           of the kind the sample files carry. */
+        var warnings = WarningsFor("""
+            { "servers": [ {
+                "// host": "the host, with a port after a comma",
+                "Name": "s1", "ENGINE": "sqlserver", "host": "sql01", "port": 1433, "database": null, "auth": "sql",
+                "username": "u", "encryptedPassword": null, "password": "placeholder-not-a-secret", "readOnlyIntent": false,
+                "trustServerCertificate": true, "encryptMode": "Mandatory", "multiSubnetFailover": false,
+                "queryStoreReplica": null, "excludedDatabases": [], "xeSessionDatabases": [], "monthlyCostUsd": 0,
+                "alertDeliveryModeOverride": null, "remediationUsername": null, "remediationEncryptedPassword": null,
+                "hypotheticalIndexUsername": null, "hypotheticalIndexEncryptedPassword": null,
+                "awsRoleArn": null, "awsExternalId": null,
+                "// trustServerCertificate": "true accepts any certificate"
+            } ] }
+            """);
+
+        Assert.Empty(warnings);
+    }
 }
