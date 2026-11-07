@@ -197,7 +197,9 @@ public sealed class ServerTabStripTests
 
             var main = Strip(null, null);
             NoAccentFill(main, "main tabs");
-            Assert.Equal(new Thickness(0), Chrome((TabItem)main.Items[0]).BorderThickness);
+            /* #8222: the selected main tab carries the same underline as the sub-tabs, the others none. */
+            Assert.Equal(2, Chrome((TabItem)main.Items[0]).BorderThickness.Bottom);
+            Assert.Equal(0, Chrome((TabItem)main.Items[1]).BorderThickness.Bottom);
 
             var sub = Strip((Style)dict["SubTabItemStyle"], null);
             NoAccentFill(sub, "sub-tabs");

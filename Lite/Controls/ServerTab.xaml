@@ -1517,7 +1517,7 @@
 
             <!-- CPU Tab -->
             <TabItem Header="CPU">
-                <TabControl x:Name="CpuSubTabControl" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
+                <TabControl x:Name="CpuSubTabControl" Background="Transparent" BorderThickness="0" ui:TabStripOverflow.HeaderMargin="8,0,0,0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                     <TabItem Header="CPU Utilization">
                         <Grid Margin="8">
                             <ui:ChartPanel Title="CPU">
@@ -1571,7 +1571,7 @@
 
             <!-- Memory Tab -->
             <TabItem Header="Memory">
-                <TabControl x:Name="MemorySubTabControl" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
+                <TabControl x:Name="MemorySubTabControl" Background="Transparent" BorderThickness="0" ui:TabStripOverflow.HeaderMargin="8,0,0,0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                     <!-- Memory Overview Sub-Tab -->
                     <TabItem Header="Overview">
                         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8"><!-- #8098: scrolls when the chart cannot keep its minimum height under the summary panel -->
@@ -2943,7 +2943,7 @@
                  Default Trace lane. Appended as the LAST top-level tab (index 18); loads via
                  RefreshVisibleTabAsync case 18, sub-tab switches reload via MainTabControl_SelectionChanged. -->
             <TabItem Header="System Events">
-                <TabControl x:Name="SystemEventsSubTabControl" Background="Transparent" BorderThickness="0"
+                <TabControl x:Name="SystemEventsSubTabControl" Background="Transparent" BorderThickness="0" ui:TabStripOverflow.HeaderMargin="8,0,0,0"
                             ItemContainerStyle="{DynamicResource SubTabItemStyle}">
 
                     <!-- Corruption Events Sub-Tab (sp_server_diagnostics SYSTEM component counter charts) -->
@@ -3313,7 +3313,7 @@
                  KEPT (derivable: is_dynamic = 0 AND configured != in-use). Config is captured on connect/restart,
                  so a change appears only when at least two captures bracket it in the window. -->
             <TabItem Header="Configuration Changes">
-                <TabControl x:Name="ConfigChangesSubTabControl" Background="Transparent" BorderThickness="0"
+                <TabControl x:Name="ConfigChangesSubTabControl" Background="Transparent" BorderThickness="0" ui:TabStripOverflow.HeaderMargin="8,0,0,0"
                             ItemContainerStyle="{DynamicResource SubTabItemStyle}">
 
                     <!-- Server Config Changes Sub-Tab (sys.configurations snapshot diff) -->
