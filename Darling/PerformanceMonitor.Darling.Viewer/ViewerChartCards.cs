@@ -48,7 +48,9 @@ internal static class ViewerChartCards
         }
     }
 
-    private static void AttachChart(WpfPlot chart)
+    /// <summary>Hooks the chart's CURRENT plot. <c>ChartRenderHelper.ClearChart</c> calls <c>WpfPlot.Reset()</c>, which swaps in a new plot and drops the hook, so every clear calls this again:
+    /// without it a chart that was cleared and refilled never showed the mark, and one that went from zeros to no rows kept it above the "No ... data" sentence.</summary>
+    internal static void AttachChart(WpfPlot chart)
     {
         var plot = chart.Plot;
         if (CardOf(chart) is null || s_attached.TryGetValue(plot, out _)) return;

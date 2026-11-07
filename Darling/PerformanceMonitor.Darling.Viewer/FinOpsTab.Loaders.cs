@@ -474,6 +474,7 @@ public partial class FinOpsTab
 
         FinOpsPvsTrendChart.Visibility = Visibility.Visible;
         _chartHelper.ClearChart(FinOpsPvsTrendChart); // #8086: a reset also removes the last refresh's legend panel
+        ViewerChartCards.AttachChart(FinOpsPvsTrendChart); // #8151: the reset swapped in a new plot
         ChartStyle.ApplyThemeToChart(FinOpsPvsTrendChart);
 
         var seriesIndex = 0;

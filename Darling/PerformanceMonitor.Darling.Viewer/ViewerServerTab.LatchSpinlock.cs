@@ -104,7 +104,7 @@ public partial class ViewerServerTab
         var (startUtc, endUtc) = GetWindowUtc();
         LatchSpinlockRenderer.Render(SpinlockStatsChart, _spinlockStatsHover, data,
             d => d.CollectionTime, d => d.SpinlockName, d => d.CollisionsPerSecond,
-            "Spinlock Collisions", "collisions/sec",
+            "Spinlock Collisions", "collisions/s",
             ChartXStart(startUtc, endUtc), endUtc.ToOADate());
         KeepPlottedInView(SpinlockStatsChart, startUtc, endUtc);
     }

@@ -173,32 +173,36 @@ public sealed class ViewerChartCardsTests
         });
 
     [Fact]
-    public void ACardShowingZeroThroughout_LosesTheMark_WhenTheNextRefreshClearsAndFindsNoRows() =>
+    public void ACardShowingZeroThroughout_LosesTheMark_WhenTheNextRefreshFindsNoRows() =>
         StaTestThread.Run(() =>
         {
             WithTheme(() =>
             {
-                // The tabs reload a chart the way ChartRenderHelper does: ClearChart (which resets the plot), draw, then RefreshEmptyChart when there are no rows.
-                var helper = new ChartRenderHelper();
-                var chart = new WpfPlot();
-                var card = new ChartPanel { Title = "Zeros", Content = chart };
-                var host = new System.Windows.Controls.Grid();
-                host.Children.Add(card);
-                ViewerChartCards.Attach(host);
-                var window = new Window { Content = host, Width = 600, Height = 400, Left = 0, Top = 0 };
+                // The real Query Duration card: a refresh clears the chart (which swaps in a new plot), draws, and with no rows shows the "No ... data" sentence.
+                var tab = new ViewerServerTab(
+                    new ViewerDataService("Host=127.0.0.1;Port=1;Database=darling;Username=darling"),
+                    new DarlingServer(1, "chart-cards-test", "chart-cards-test", true, null));
+                typeof(ViewerServerTab).GetField("_refreshInFlight", Instance)!.SetValue(tab, true);
+                var window = new Window { Content = tab, Width = 1280, Height = 800, Left = 0, Top = 0 };
                 window.Show();
                 try
                 {
+                    var t0 = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+                    var update = typeof(ViewerServerTab).GetMethod("UpdateQueryDurationTrendChart", Instance)!;
+                    var none = Array.Empty<PerformanceMonitor.Collectors.BaselineDiscontinuity>();
+                    QueryTrendSeries Series(params double[] values) => new(
+                        values.Select((v, i) => new QueryTrendPoint { CollectionTime = t0.AddMinutes(i), Value = v, ExecutionCount = 1 }).ToList(),
+                        PerformanceMonitor.Darling.Storage.RetentionTier.Raw, t0, false);
+                    var chart = tab.QueryDurationTrendChart;
+                    var card = ViewerChartCards.CardOf(chart)!;
+                    ChartLayoutProbe.Reveal(ChartLayoutProbe.TabPath(chart));
                     ChartLayoutProbe.Layout(window);
 
-                    helper.ClearChart(chart);
-                    chart.Plot.Add.Scatter(new[] { 1.0, 2.0, 3.0 }, new[] { 0.0, 0.0, 0.0 }).LegendText = "none";
+                    update.Invoke(tab, new object[] { Series(0, 0, 0), t0, t0.AddMinutes(10), none });
                     ChartLayoutProbe.Render(chart);
-                    var mark = Assert.IsType<System.Windows.Controls.TextBlock>(card.HeaderContent);
-                    Assert.Equal("0 throughout", mark.Text);
+                    Assert.Equal("0 throughout", Assert.IsType<System.Windows.Controls.TextBlock>(card.HeaderContent).Text);
 
-                    helper.ClearChart(chart);
-                    helper.RefreshEmptyChart(chart, "Zeros", "ms");
+                    update.Invoke(tab, new object[] { Series(), t0, t0.AddMinutes(10), none });
                     ChartLayoutProbe.Render(chart);
                     Assert.Null(card.HeaderContent);
                 }
