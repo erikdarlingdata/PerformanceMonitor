@@ -175,7 +175,8 @@ END;";
     @ring_created = xes.create_time,
     @ring_dropped = xes.dropped_event_count
 FROM sys.dm_xe_sessions AS xes
-WHERE xes.name = @ring_position_session;
+WHERE xes.name = @ring_position_session
+OPTION(RECOMPILE);
 
 SET @ring_limit = 1000;
 
@@ -189,7 +190,8 @@ JOIN sys.server_event_session_fields AS sesf
   AND sesf.object_id = sest.target_id
 WHERE ses.name = @ring_position_session
 AND   sest.name = N'ring_buffer'
-AND   sesf.name = N'max_events_limit';";
+AND   sesf.name = N'max_events_limit'
+OPTION(RECOMPILE);";
 
     /// <summary>
     /// #8146. <see cref="SessionPositionServerSql"/> for a database-scoped session (Azure SQL Database), from the
@@ -199,7 +201,8 @@ AND   sesf.name = N'max_events_limit';";
     @ring_created = xes.create_time,
     @ring_dropped = xes.dropped_event_count
 FROM sys.dm_xe_database_sessions AS xes
-WHERE xes.name = @ring_position_session;
+WHERE xes.name = @ring_position_session
+OPTION(RECOMPILE);
 
 SET @ring_limit = 1000;
 
@@ -213,7 +216,8 @@ JOIN sys.database_event_session_fields AS sesf
   AND sesf.object_id = sest.target_id
 WHERE ses.name = @ring_position_session
 AND   sest.name = N'ring_buffer'
-AND   sesf.name = N'max_events_limit';";
+AND   sesf.name = N'max_events_limit'
+OPTION(RECOMPILE);";
 
     /// <summary>
     /// The six columns <see cref="RingBufferObservation.Read"/> reads, as a select-list fragment (no leading comma): total, held,
@@ -257,15 +261,5 @@ AND   sesf.name = N'max_events_limit';";
         context.Measure(
             NewestVisibleAgeMeasurement,
             reader.IsDBNull(firstOrdinal + 2) ? 0 : System.Math.Max(0, reader.GetInt64(firstOrdinal + 2)));
-    }
-
-    /// <summary>Moves to the trailing <see cref="TruncationSelectSql"/> result and records it. No such result: nothing recorded.</summary>
-    public static async System.Threading.Tasks.ValueTask MeasureTrailingTruncationAsync(
-        System.Data.Common.DbDataReader reader, CollectorContext context, System.Threading.CancellationToken cancellationToken)
-    {
-        if (await reader.NextResultAsync(cancellationToken) && await reader.ReadAsync(cancellationToken))
-        {
-            MeasureTruncation(reader, 0, context);
-        }
     }
 }

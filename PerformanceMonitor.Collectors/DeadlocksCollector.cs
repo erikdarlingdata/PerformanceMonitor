@@ -146,7 +146,14 @@ BEGIN
     WHERE @ring_xml IS NOT NULL;
 END;
 
-{RingBufferXml.SessionPositionDatabaseSql}
+/* #8146: not in master. The master item belongs to a logical-server registration, which keeps no loss accounting (its
+   telemetry-blob arm below already holds every deadlock a ring can evict), so this read's output would go unused there,
+   and the sys.database_event_session* catalog views it joins have never been run in a logical master: a failure there
+   must not cost the telemetry arm. The position columns then read NULL, which the accounting takes as no session. */
+IF DB_NAME() <> N'master'
+BEGIN
+    {RingBufferXml.SessionPositionDatabaseSql}
+END;
 
 SELECT
     deadlock_time = evt.value('(@timestamp)[1]', 'datetime2'),
@@ -754,8 +761,8 @@ OUTER APPLY
 
             /* #8146: what the ring buffer evicted and the session dropped since the last run. Runs on a gated run too
                (the header columns are NULL then, the session's dropped count is not). An Azure SQL Database logical-server
-               registration reads the telemetry blob and one database-scoped session per database, so no one ring buffer's
-               position says what the registration lost: no accounting there. */
+               registration reads the file-backed telemetry blob on its master item, which holds every deadlock a ring buffer
+               can evict (#2641), so an eviction there loses no deadlock: no accounting there. */
             if (!(context.Target.IsAzureSqlDb && context.AzureRegistrationIsLogicalServer))
             {
                 var truncated = reader.FieldCount > 2 && !reader.IsDBNull(2) && reader.GetBoolean(2);

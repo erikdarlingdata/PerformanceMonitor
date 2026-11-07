@@ -369,4 +369,34 @@ public sealed class DeadlocksCollectorDefinitionTests
     {
         Assert.Contains(RingBufferLossAccounting.StateKey, DeadlocksCollector.Instance.StateKeys);
     }
+
+    /* #8146 (I5): the Azure batch reads the session row only outside master, but it still reads it and still ends with the gate
+       row and its position columns, whatever database runs it. The fragments are compared by their shared constants, not by text. */
+    [Fact]
+    public void BuildQuery_Azure_StillReadsTheSessionRow_AndEndsWithTheGateRowsPositionColumns()
+    {
+        var text = DeadlocksCollector.Instance.BuildQuery(MakeContext(isAzureSqlDb: true)).Text;
+
+        Assert.Contains(RingBufferXml.SessionPositionDatabaseSql, text, StringComparison.Ordinal);
+        Assert.EndsWith(RingBufferXml.PositionColumnsSql + ";", text.TrimEnd(), StringComparison.Ordinal);
+        Assert.True(
+            text.IndexOf(RingBufferXml.SessionPositionDatabaseSql, StringComparison.Ordinal)
+                < text.LastIndexOf(RingBufferXml.PositionColumnsSql, StringComparison.Ordinal),
+            "the session row must be read before the gate row projects it");
+    }
+
+    /* What the master item's gate row carries now: a header but no session row (NULL created, dropped and limit). The accounting
+       reads that as no session, so it measures nothing, rather than a restart or a loss. */
+    [Fact]
+    public async Task ReadAsync_Azure_GateRowWithoutTheSessionRow_MeasuresNoLoss()
+    {
+        var context = RingContext(azure: true, logicalServer: false);
+        var row = new object[] { 5L, false, false, 0L, DBNull.Value, 59L, 10L, DBNull.Value, DBNull.Value, DBNull.Value, s_ringReadAt };
+        using var reader = FakeCollectorDataReader.WithResultSets(Array.Empty<object[]>(), new[] { row });
+
+        await DeadlocksCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Null(Measured(context, "ring_buffer_evicted"));
+        Assert.Null(Measured(context, "ring_buffer_loss_unknown"));
+    }
 }
