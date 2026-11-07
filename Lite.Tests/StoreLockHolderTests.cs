@@ -180,8 +180,10 @@ public sealed class StoreLockHolderTests
             "s_dbLock.EnterReadLock();",
             "while (!s_dbLock.TryEnterReadLock(ReadLockPollInterval))",
             "if (!s_dbLock.TryEnterReadLock(timeout))",
-            "if (!s_dbLock.TryEnterWriteLock(timeout.Value))",
             "s_dbLock.EnterWriteLock();",
+            /* #7256: a budgeted writer's two acquisitions, the poll and the park tail, each registering as it takes the lock. */
+            "if (s_dbLock.TryEnterWriteLock(0))",
+            "if (!s_dbLock.TryEnterWriteLock(remaining))",
             "if (!s_dbLock.TryEnterReadLock(0))",
             "if (!s_dbLock.TryEnterWriteLock(0))",
         };
