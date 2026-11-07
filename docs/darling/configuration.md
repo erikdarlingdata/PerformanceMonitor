@@ -193,7 +193,24 @@ On any of them, a login that is not a superuser cannot end a superuser's session
 
 | Key | Default | Notes |
 |---|---|---|
-| `xeRingBufferMaxEvents` | `1000` | The `max_events_limit` the service writes into the ring buffer of the deadlock, blocked-process and long-query Extended Events sessions it creates. SQL Server's own default is 1000, and a session at its limit silently evicts its oldest events; a larger value holds more events between collections, at the cost of a larger ring buffer in the server's memory (`max_memory` stays 4096 KB and can cap it first). Clamped to `[1000,10000]`, with one log line at start naming the value given and the value used. A session keeps the limit it was created with, so a changed value applies to sessions created afterwards; the collection note says when a live session's limit is below the setting. A file-only knob (not stored in the control plane): edit and restart. |
+| `xeRingBufferMaxEvents` | `1000` | The `max_events_limit` of the ring buffer in the deadlock, blocked-process and long-query Extended Events sessions the service creates. A ring buffer holds at most this many events or 4 MB (`max_memory`, fixed at 4096 KB), whichever fills first. SQL Server's own default is 1000, and a session at its limit evicts its oldest events before a collection reads them. A larger value holds more events between collections. Clamped to `[1000,10000]`: a value outside that range is replaced by the nearest bound, and the service logs one warning at start naming the key, the value given and the value used. A file-only knob (not stored in the control plane): edit and restart. |
+
+**It applies when a session is created.** A session keeps the limit it was created with, so a changed value reaches only sessions created afterwards. To apply a new value to an existing session, recreate it:
+
+- Deadlock and blocked-process: run [`--drop-xe-sessions <server-name>`](collector-settings.md#drop-the-extended-events-sessions-a-removed-server-left-behind---drop-xe-sessions). The service creates a missing session when it next checks the server, which is within the hour or at its next restart.
+- Long query: disable the `long_query_completions` collector and enable it again. Disabling drops this install's session and enabling creates it with the current value.
+
+**The deadlock and blocked-process sessions are shared by name across installs, so when two installs with different settings watch one server, whichever created the session wins. The loss note shows the session's actual limit.**
+
+**Where a loss shows.** When a collection finds that events were evicted from a ring buffer before the read, or that the session dropped events before they reached its targets, collection health shows a WARNING with a note that says how many, over what window, and what to do about it. The same note reaches the `ring_buffer_loss` key of the MCP tools `get_deadlocks`, `get_deadlock_trend`, `get_blocking`, `get_blocking_trend`, `get_blocking_stats` and `get_long_query_completions` when the window they cover lost events (an empty answer carries it inside `hints`). Read it like this:
+
+- **Evicted** is the number of events that arrived and were pushed out of a full buffer before a collection read them. **Dropped** is a per-session number: events the session discarded from its own full buffers before they reached any target. For you they are the same loss. A larger event limit helps only with evicted events.
+- "At least N" means the previous read was truncated, so some events it held were never counted.
+- After a session restart the note says the loss cannot be counted, and it gives no number. A restart is routine, so this alone does not raise the WARNING.
+- The note advises raising `xeRingBufferMaxEvents` only when the event limit was the cap and the read was not truncated. When the buffer was full at its 4 MB memory cap, or the read was already truncated, a higher limit would not help: collect more often instead.
+- When the setting is above the session's actual limit, the note says so: the session was created before the setting changed, or by another install.
+- A value that makes collection health report a truncated ring buffer is too high. SQL Server cuts a ring buffer's XML at about 4 MB when it is read, so events held past that cut are not read.
+- Azure SQL Database registrations of the logical server (no database, or `master`) read deadlocks from a telemetry file and report no ring-buffer loss for them.
 
 ## queryStatsDeferredPlanFetch (boolean, optional)
 
