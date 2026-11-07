@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -146,8 +147,9 @@ public sealed class WaitTrendMissStatusTests : IClassFixture<SharedDuckDbFixture
             (collection_id, collection_time, server_id, server_name, wait_type,
              waiting_tasks_count, wait_time_ms, signal_wait_time_ms,
              delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms)
-            VALUES (-1, $1, $2, 'TestServer', $3, 0, 0, 0, 50, 1000, 0)";
+            VALUES ($1, $2, $3, 'TestServer', $4, 0, 0, 0, 50, 1000, 0)";
         void P(object v) => cmd.Parameters.Add(new DuckDBParameter { Value = v });
+        P(CollectionIdGenerator.Next());
         P(at);
         P(_serverId);
         P(waitType);

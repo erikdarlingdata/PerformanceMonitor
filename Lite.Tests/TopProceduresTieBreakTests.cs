@@ -38,6 +38,7 @@ public sealed class TopProceduresTieBreakTests : IDisposable
         Directory.CreateDirectory(_tempDir);
         _dbPath = Path.Combine(_tempDir, "test.duckdb");
         _duckDb = new DuckDbInitializer(_dbPath);
+        _duckDb.InitializeAsync().GetAwaiter().GetResult();
     }
 
     public void Dispose()
