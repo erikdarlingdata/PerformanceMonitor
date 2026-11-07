@@ -401,7 +401,7 @@ public sealed class ForcePlanBotPolicyTests
 
         var only = Assert.Single(blockers);
         Assert.Equal(ForcePlanBotPolicy.ReasonStateUnavailable, only.Name);
-        Assert.StartsWith("the read failed (NpgsqlException: timeout): an unattended force cannot proceed", only.Evidence, StringComparison.Ordinal);
+        Assert.StartsWith("the read failed (NpgsqlException: timeout) — an unattended force cannot proceed", only.Evidence, StringComparison.Ordinal);
     }
 
     [Fact]

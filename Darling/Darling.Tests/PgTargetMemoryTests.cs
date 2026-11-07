@@ -496,7 +496,7 @@ public sealed class PgTargetMemoryTests
         var lookup = facts.ToFactLookup();
 
         var sum = PgTargetAdvice.Compose(PgTargetFactKeys.ConfigMemoryOvercommit, lookup)!;
-        Assert.StartsWith("The configured memory worst case is 96 GB — 1.5× the host's 64 GB", sum.Headline, StringComparison.Ordinal);
+        Assert.StartsWith("The configured memory worst case is 96 GB: 1.5× the host's 64 GB", sum.Headline, StringComparison.Ordinal);
         foreach (var expected in new[] { "shared_buffers 4 GB", "max_connections 500 × work_mem 64 MB × (1 + max_parallel_workers_per_gather 2) = 93.8 GB", "autovacuum_max_workers 3 × maintenance_work_mem 64 MB", "wal_buffers 16 MB", "1.5× of the host's memory_total_bytes, 64 GB", "CEILING", "advisory (0.4)", "engine-defined" })
             Assert.Contains(expected, sum.Investigation, StringComparison.Ordinal);
         Assert.Contains("effective_cache_size is 12 GB, within the host's 64 GB", sum.Investigation, StringComparison.Ordinal);
@@ -566,7 +566,7 @@ public sealed class PgTargetMemoryTests
 
         /* Basis 1, never approached: the headline is the graded peak figure, within the box; the permission is stated. */
         var quiet = Compose(50, 1440);
-        Assert.Equal("The worst-case memory at the window's peak of 50 backends is 4.8 GB — 0.3× the host's 16 GB, within the box", quiet.Headline);
+        Assert.Equal("The worst-case memory at the window's peak of 50 backends is 4.8 GB: 0.3× the host's 16 GB, within the box", quiet.Headline);
         foreach (var expected in new[]
                  {
                      "At the window's peak of 50 backends", "over 1440 sampled instants", "the same peak PG_SESSION_SATURATION divides by",

@@ -406,8 +406,8 @@ public sealed class PgTargetBlockingTests
         new FactScorer().ScoreAll([idleHead, parked, events]);
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.BlockingChain, Lookup(idleHead, parked, events))!;
 
-        Assert.Equal("billing-worker as billing headed a blocking chain while idle in transaction — 720 sessions queued behind it, the longest blocked for 6 min 40 s", block.Headline);
-        Assert.Contains("pid 9000, idle in transaction — had 720 blocked sessions behind it summed over the 240 captures it headed", block.Investigation, StringComparison.Ordinal);
+        Assert.Equal("billing-worker as billing headed a blocking chain while idle in transaction: 720 sessions queued behind it, the longest blocked for 6 min 40 s", block.Headline);
+        Assert.Contains("pid 9000, idle in transaction, had 720 blocked sessions behind it summed over the 240 captures it headed", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("The longest any blocked statement had been waiting when sampled was 6 min 40 s (its transaction 6 min 50 s old)", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("read from the blocked session's own clock, never from captures × cadence", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("Blocking was caught in 240 of the 240 pg_blocking captures in the window", block.Investigation, StringComparison.Ordinal);
@@ -460,7 +460,7 @@ public sealed class PgTargetBlockingTests
         var chain = Chain(400_000, headIdle: true);
         new FactScorer().ScoreAll([graded, chain]);
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.LockWaitEvents, Lookup(graded, chain))!;
-        Assert.Equal("The engine logged 6 lock waits past deadlock_timeout (most on orders) — the longest 1 min 5 s", block.Headline);
+        Assert.Equal("The engine logged 6 lock waits past deadlock_timeout (most on orders): the longest 1 min 5 s", block.Headline);
         Assert.Contains("The engine logged 6 lock waits that outlived deadlock_timeout (1 s) in the window: 1.5 per observed hour, and 6 of them were later acquired, for 6 min 30 s of waiting the engine wrote down", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("The relation most waited on was orders (6 waits, from the lines' CONTEXT)", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("PG_BLOCKING_CHAIN fired in the same window and names the head: billing-worker as billing, idle in transaction", block.Investigation, StringComparison.Ordinal);
@@ -535,7 +535,7 @@ public sealed class PgTargetBlockingTests
     {
         var trusted = Anomaly(sigma: 6.2, peak: 3, lowQuality: false);
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyBlocking, Lookup(trusted))!;
-        Assert.Equal("Blocked sessions per capture spiked to 3 sessions — 6.2 times its usual variation above its normal level for this time of week", block.Headline);
+        Assert.Equal("Blocked sessions per capture spiked to 3 sessions: 6.2 times its usual variation above its normal level for this time of week", block.Headline);
         Assert.Contains("normal level for this hour-of-week", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("Anomalous spike", block.Headline, StringComparison.Ordinal);
 
@@ -832,7 +832,7 @@ public sealed class PgTargetBlockingTests
                 Assert.Equal(PgTargetFactKeys.IdleInTransaction, card.GetProperty("leaf_fact").GetProperty("key").GetString());
                 Assert.Equal(2, card.GetProperty("fact_count").GetInt32());
                 var advice = card.GetProperty("advice");
-                Assert.Equal("billing-worker as billing headed a blocking chain while idle in transaction — 720 sessions queued behind it, the longest blocked for 6 min 40 s", advice.GetProperty("headline").GetString());
+                Assert.Equal("billing-worker as billing headed a blocking chain while idle in transaction: 720 sessions queued behind it, the longest blocked for 6 min 40 s", advice.GetProperty("headline").GetString());
                 var investigation = advice.GetProperty("investigation").GetString()!;
                 Assert.Contains("Blocking was caught in 240 of the 240 pg_blocking captures in the window", investigation, StringComparison.Ordinal);
                 Assert.Contains("PG_IDLE_IN_TRANSACTION fired in the same window (billing-worker as billing, 15 min)", investigation, StringComparison.Ordinal);
@@ -850,7 +850,7 @@ public sealed class PgTargetBlockingTests
                 var eventsCard = Assert.Single(findings, f => RootKey(f) == PgTargetFactKeys.LockWaitEvents);
                 /* analyze_server rounds severity to two places: (0.5 + 0.5 × 35,000.5 / 270,000) × 1.2 = 0.6778 → 0.68. */
                 Assert.Equal(Math.Round((0.5 + 0.5 * 35_000.5 / 270_000.0) * 1.2, 2), eventsCard.GetProperty("severity").GetDouble(), precision: 9);
-                Assert.Equal("The engine logged 6 lock waits past deadlock_timeout (most on orders) — the longest 1 min 5 s", eventsCard.GetProperty("advice").GetProperty("headline").GetString());
+                Assert.Equal("The engine logged 6 lock waits past deadlock_timeout (most on orders): the longest 1 min 5 s", eventsCard.GetProperty("advice").GetProperty("headline").GetString());
                 Assert.Contains("PG_BLOCKING_CHAIN fired in the same window and names the head: billing-worker as billing, idle in transaction", eventsCard.GetProperty("advice").GetProperty("investigation").GetString(), StringComparison.Ordinal);
 
                 /* The 40-minute report: WARNING band (0.8 × 1.2 persistence), its own card, not the chain's head. */

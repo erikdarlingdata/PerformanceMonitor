@@ -290,7 +290,7 @@ public sealed class PgTargetTempTests
     {
         var lookup = new Dictionary<string, Fact>(StringComparer.Ordinal) { [PgTargetFactKeys.ConfigWorkMem] = Config(PgTargetFactKeys.ConfigWorkMem, 4) };
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.ConfigWorkMem, lookup)!;
-        Assert.Equal("work_mem is 4 MBa value alone is not a finding", block.Headline);
+        Assert.Equal("work_mem is 4 MB: a value alone is not a finding", block.Headline);
         Assert.Contains("evidence-gated (D5)", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("On this host it is 4 MB, the shipped default.", block.Investigation, StringComparison.Ordinal);
         Assert.StartsWith("Nothing to change on this value alone.", block.Remediation, StringComparison.Ordinal);

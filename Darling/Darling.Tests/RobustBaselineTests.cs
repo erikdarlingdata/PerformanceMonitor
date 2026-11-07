@@ -1150,7 +1150,7 @@ public sealed class RobustBaselineTests
             },
         };
         var trustedBlock = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyBlocking, new Dictionary<string, Fact> { [PgTargetFactKeys.AnomalyBlocking] = trusted })!;
-        Assert.Equal("Blocked sessions per capture spiked to 12 sessions — 6.2 times its usual variation above its normal level for this time of week", trustedBlock.Headline);
+        Assert.Equal("Blocked sessions per capture spiked to 12 sessions: 6.2 times its usual variation above its normal level for this time of week", trustedBlock.Headline);
 
         var unstamped = new Fact { Source = trusted.Source, Key = trusted.Key, Value = trusted.Value, Metadata = new Dictionary<string, double>(trusted.Metadata) };
         unstamped.Metadata.Remove("baseline_zero_history");

@@ -185,14 +185,14 @@ public class StoryNamedHopsTests
         var jobHeadline = FactAdvice.Compose("RUNNING_JOBS", byKey)!.Headline;
         var chainHeadline = FactAdvice.Compose("BLOCKING_CHAIN", byKey)!.Headline;
         Assert.Equal(
-            $" {FactIdentity.SentenceMarker} `RUNNING_JOBS` (severity 0.80) — Agent job `Nightly Index Maintenance`: {jobHeadline}." +
-            $" {FactIdentity.SentenceMarker} `BLOCKING_CHAIN` (severity 0.70) — lead-blocker session 57, sleeping: {chainHeadline}.",
+            $" {FactIdentity.SentenceMarker} `RUNNING_JOBS` (severity 0.80): Agent job `Nightly Index Maintenance`: {jobHeadline}." +
+            $" {FactIdentity.SentenceMarker} `BLOCKING_CHAIN` (severity 0.70): lead-blocker session 57, sleeping: {chainHeadline}.",
             appended);
 
         /* A hop with no composable advice gets the identity alone; a headline that already ends a sentence is not
            given a second full stop. */
-        Assert.Equal(" Behind it: `RUNNING_JOBS` (severity 0.80) — Agent job `X`.", FactIdentity.Sentence(new NamedHop("RUNNING_JOBS", "Agent job `X`", 0.8), null));
-        Assert.Equal(" Behind it: `RUNNING_JOBS` (severity 0.80) — Agent job `X`: Stuck?", FactIdentity.Sentence(new NamedHop("RUNNING_JOBS", "Agent job `X`", 0.8), " Stuck? "));
+        Assert.Equal(" Behind it: `RUNNING_JOBS` (severity 0.80): Agent job `X`.", FactIdentity.Sentence(new NamedHop("RUNNING_JOBS", "Agent job `X`", 0.8), null));
+        Assert.Equal(" Behind it: `RUNNING_JOBS` (severity 0.80): Agent job `X`: Stuck?", FactIdentity.Sentence(new NamedHop("RUNNING_JOBS", "Agent job `X`", 0.8), " Stuck? "));
     }
 
     [Fact]
@@ -237,7 +237,7 @@ public class StoryNamedHopsTests
 
         FactAdvice.PopulateStoryText([story], facts);
 
-        Assert.Contains($" {FactIdentity.SentenceMarker} `QUERY_SPILLS` (severity 0.40) — most spilled query `Sales/0xAB`: ", Investigation(story), StringComparison.Ordinal);
+        Assert.Contains($" {FactIdentity.SentenceMarker} `QUERY_SPILLS` (severity 0.40): most spilled query `Sales/0xAB`: ", Investigation(story), StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -272,7 +272,7 @@ public class StoryNamedHopsTests
 
         FactAdvice.PopulateStoryText([story], facts);
         var investigation = Investigation(story);
-        Assert.Contains($" {FactIdentity.SentenceMarker} `BLOCKING_CHAIN` (severity 0.70) — lead-blocker session 57, sleeping: ", investigation, StringComparison.Ordinal);
+        Assert.Contains($" {FactIdentity.SentenceMarker} `BLOCKING_CHAIN` (severity 0.70): lead-blocker session 57, sleeping: ", investigation, StringComparison.Ordinal);
         Assert.Contains("57", investigation, StringComparison.Ordinal);
         Assert.Equal(1, investigation.Split(FactIdentity.SentenceMarker).Length - 1);
     }

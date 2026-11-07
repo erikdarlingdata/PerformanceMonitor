@@ -178,7 +178,7 @@ public sealed class CountFamilyZeroHistoryTests
 
         Assert.Equal("deadlock rate spiked to 3× its baseline for this time of week", block.Headline);
         Assert.Equal(
-            "24 deadlocks this window — about 3× the normal rate for this hour-of-week (baseline 2). " +
+            "24 deadlocks this window, about 3× the normal rate for this hour-of-week (baseline 2). " +
             "This is a spike against the time-of-week baseline, not necessarily a sustained problem: check whether it coincides with a workload change or a one-off event.",
             block.Investigation);
         Assert.Equal(

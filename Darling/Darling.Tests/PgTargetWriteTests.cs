@@ -432,7 +432,7 @@ public sealed class PgTargetWriteTests
         anomaly.Metadata["baseline_ratio"] = 9.2 / 1.05;   /* peak over the robust centre (the median), as the detector stamps it */
 
         var leading = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyWalVolume, Lookup(anomaly, Pressure(0.1, 48)))!;
-        Assert.Equal("WAL volume spiked to 9.2 MB/s — 7 times its usual variation above its normal level for this time of week", leading.Headline);
+        Assert.Equal("WAL volume spiked to 9.2 MB/s: 7 times its usual variation above its normal level for this time of week", leading.Headline);
         Assert.Contains("7 times its usual variation above its 1.1 MB/s normal level", leading.Investigation, StringComparison.Ordinal);
         Assert.Contains("8.76× the 1.1 MB/s this server routinely writes", leading.Investigation, StringComparison.Ordinal);
         Assert.Contains("leading edge", leading.Investigation, StringComparison.Ordinal);

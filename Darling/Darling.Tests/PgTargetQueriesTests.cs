@@ -581,7 +581,7 @@ public sealed class PgTargetQueriesTests
         /* Named by the anomaly: the routine and the sigma are the sentence that says what decided. */
         var named = Detect(HeavyQueryId, 0.6002, mean: 0.22, stddev: 0.04, (MediumQueryId, 1), (LightQueryId, 0)).Anomaly!;
         var beyond = PgTargetAdvice.Compose(key, Lookup(fact, named))!;
-        Assert.Equal("One statement shape held 60% of the window's execution time and its peak share of a single collection ran 9.5 times its usual variation above its own normal for this hour", beyond.Headline);
+        Assert.Equal("One statement shape held 60% of the window's execution time, and its peak share of a single collection ran 9.5 times its usual variation above its own normal for this hour", beyond.Headline);
         Assert.Contains("This is 9.5 times its usual variation above the statement's OWN hour-of-week normal (its own routine of 22% ± 4% for this hour-of-week), which is the grade (ANOMALY_PG_BAD_ACTOR_SHARE, walked into this card)", beyond.Investigation, StringComparison.Ordinal);
 
         /* Within its own normal (the anomaly names another statement, this one's verdict is 1): context, said so. */

@@ -199,7 +199,7 @@ public sealed class PgConfigAuditTextTests
 
     [Theory]
     [InlineData("max_wal_size is 1 GB: the shipped default", "max_wal_size is 1 GB. No measured WAL rate.", "No measured WAL rate.")]
-    [InlineData("shared_buffers is at the initdb default of 128 MB", "shared_buffers is 128 MB (assumed, no config snapshot). Raise it.", "Raise it.")]
+    [InlineData("shared_buffers is at the initdb default of 128 MB", "shared_buffers is 128 MB (assumed: no config snapshot). Raise it.", "Raise it.")]
     [InlineData("shared_buffers is 1 GB", "shared_buffers is 1 GB, already sized above the default. Look first.", "Already sized above the default. Look first.")]
     [InlineData("shared_buffers is 4 GB", "shared_buffers is 4 GB, already sized above the default, and the cache is still short. Look first.", "Already sized above the default, and the cache is still short. Look first.")]
     [InlineData("shared_buffers is 1 GB", "shared_buffers is 1 GB; keep it. Look first.", "shared_buffers is 1 GB; keep it. Look first.")]

@@ -1045,7 +1045,7 @@ public sealed class PgTargetAnomalyTests
         fact.Metadata[PgTargetScorer.CpuSampleCountKey] = 48;
         new FactScorer().ScoreAll([fact]);
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.CpuPercent, Lookup(fact))!;
-        Assert.Contains("peaked at 90% of its configured capacity ceiling, 10.8 of 12 configured ACUs at the peak", block.Headline, StringComparison.Ordinal);
+        Assert.Contains("peaked at 90% of its configured capacity ceiling: 10.8 of 12 configured ACUs at the peak", block.Headline, StringComparison.Ordinal);
         Assert.Contains("averaged 62.5% across 48 five-minute samples", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("The raw cpu_percent peaked at 100% of the capacity currently allocated (a core was pinned), which is reported, not graded.", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("about the 99.8th and 99.9th percentile of the measured fleet's five-minute samples (threshold_lineage = 1)", block.Investigation, StringComparison.Ordinal);

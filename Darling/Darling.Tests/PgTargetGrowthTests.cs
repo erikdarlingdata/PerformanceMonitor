@@ -285,7 +285,7 @@ public sealed class PgTargetGrowthTests
         new FactScorer().ScoreAll([growth]);
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.DatabaseGrowth, Lookup(growth))!;
 
-        Assert.Equal("appdb grew 38 GB (38%) in 14 days — 2.7 GB/day; at that slope it doubles in ~51 days", block.Headline);
+        Assert.Equal("appdb grew 38 GB (38%) in 14 days: 2.7 GB/day; at that slope it doubles in ~51 days", block.Headline);
         Assert.Contains("appdb measured 100 GB at its earliest sample", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("and 138 GB at its latest (336 hourly samples, 14 days apart at the ends)", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("a straight-line extrapolation of the lookback's slope, not a forecast", block.Investigation, StringComparison.Ordinal);
@@ -357,7 +357,7 @@ public sealed class PgTargetGrowthTests
         var growth = Growth(("appdb", 10 * GiB, 15 * GiB), total: null);
         new FactScorer().ScoreAll([growth, anomaly]);
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyDatabaseGrowth, Lookup(anomaly, growth))!;
-        Assert.Equal("Instance growth spiked to 3 GB a day — 6 times its usual variation above its normal level for this time of week", block.Headline);
+        Assert.Equal("Instance growth spiked to 3 GB a day: 6 times its usual variation above its normal level for this time of week", block.Headline);
         Assert.Contains("The window's mean rate was 2.5 GB a day, over 3 hourly samples.", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("this baseline is thin by construction (about four samples per hour-of-week bucket over 30 days) and will lean on its magnitude floor of 256 MB a day for months: it graded at tier 1 (0 = full hour-of-week, 1 = hour only, 2 = flat).", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("PG_DATABASE_GROWTH names appdb at 5 GB over the fortnight, over the line, so this rate is a trend accelerating.", block.Investigation, StringComparison.Ordinal);

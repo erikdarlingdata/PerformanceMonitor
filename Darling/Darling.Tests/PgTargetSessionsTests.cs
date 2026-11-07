@@ -394,7 +394,7 @@ public sealed class PgTargetSessionsTests
 
         /* THE EXIT CRITERION: sessions / (max − reserved) stated as arithmetic the reader can redo. */
         Assert.Contains("90 / (100 − 3) = 93%", block.Investigation, StringComparison.Ordinal);
-        Assert.Contains("90 sessions were connected against 97 usable connections — max_connections 100 minus superuser_reserved_connections 3", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("90 sessions were connected against 97 usable connections: max_connections 100 minus superuser_reserved_connections 3", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("2 h before the window's end", block.Investigation, StringComparison.Ordinal);
         /* The state breakdown of the PEAK capture, so the operator sees which population fills the pool. */
         Assert.Contains("40 active, 30 idle in transaction, 20 other", block.Investigation, StringComparison.Ordinal);
@@ -726,7 +726,7 @@ public sealed class PgTargetSessionsTests
         var none = WithLevel(Saturation(90), peakNumbackends: 0, numbackendsSamples: 0);
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(none))!;
         Assert.Equal("Connections peaked at 93% of the usable ceiling (90 of 97): PostgreSQL refuses the next one, it does not queue it", block.Headline);
-        Assert.Contains("90 sessions were connected against 97 usable connections — max_connections 100 minus superuser_reserved_connections 3 — that is 90 / (100 − 3) = 93%.", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("90 sessions were connected against 97 usable connections: max_connections 100 minus superuser_reserved_connections 3, that is 90 / (100 − 3) = 93%.", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("State breakdown at the peak: 40 active, 30 idle in transaction, 20 other", block.Investigation, StringComparison.Ordinal);
         Assert.Contains(" The numerator is the peak of the session captures (exception-driven; numbackends not yet collected on this store).", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("client backends", block.Investigation, StringComparison.Ordinal);
@@ -742,7 +742,7 @@ public sealed class PgTargetSessionsTests
         var partial = WithLevel(Saturation(90), peakNumbackends: 93, numbackendsSamples: 101);
         block = PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(partial))!;
         Assert.Equal("Connections peaked at 93% of the usable ceiling (90 of 97): PostgreSQL refuses the next one, it does not queue it", block.Headline);
-        Assert.Contains(" The numerator is the peak of the session captures (exception-driven): pg_stat_database.numbackends is present on only 101 of the window's 241 pg_database_stats samples — a store mid-migration — so the level is not used until at least half of them carry it; over the samples that do, it peaked at 93.", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains(" The numerator is the peak of the session captures (exception-driven): pg_stat_database.numbackends is present on only 101 of the window's 241 pg_database_stats samples (a store mid-migration), so the level is not used until at least half of them carry it; over the samples that do, it peaked at 93.", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("numbackends not yet collected", block.Investigation, StringComparison.Ordinal);
 
         /* The static block names both instruments and the rule between them, and still claims no figure. */
@@ -1295,7 +1295,7 @@ public sealed class PgTargetSessionsTests
         var uncentred = Saturation(90);
         uncentred.Metadata[PgTargetScorer.OfferedVsDeliveredKey] = 1;
         uncentred.Metadata[PgTargetScorer.SessionSpikeRatioKey] = 0;
-        Assert.Contains("Connections rose to a level above this hour of the week's norm while throughput stayed at its norm —", PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(uncentred))!.Investigation, StringComparison.Ordinal);
+        Assert.Contains("Connections rose to a level above this hour of the week's norm while throughput stayed at its norm, arrivals are queueing", PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(uncentred))!.Investigation, StringComparison.Ordinal);
     }
 
     [Fact]
