@@ -379,7 +379,7 @@ public sealed class ChartGroupLayoutTests
         }
 
         var panel = plot.ShowLegend(Edge.Right);
-        plot.Legend.Orientation = Orientation.Vertical;
+        plot.Legend.Orientation = ScottPlot.Orientation.Vertical;
         plot.Layout.LayoutEngine = new WrappedLegendLayout(panel);
         using (plot.GetImage(1200, 300)) { }
 
