@@ -215,9 +215,13 @@ function drawList(state) {
   const head = ["Status", "Scope", "Note", "Expires", "Added by", state.canEdit ? "" : null]
     .filter((h) => h !== null)
     .map((h) => el("th", { text: h }));
-  mount(state.listBox, el("table", { class: "data known-patterns" }, [
-    el("thead", {}, [el("tr", {}, head)]),
-    el("tbody", {}, state.entries.map((e) => entryRow(e, state.canEdit))),
+  /* #8082: #main clips sideways and the page never scrolls, so a bare table with a long Scope or Note cell runs past the right edge with Expires, Added by
+     and the action cell out of reach. In a .table-wrap it scrolls inside its own box, as every other grid does. */
+  mount(state.listBox, el("div", { class: "table-wrap" }, [
+    el("table", { class: "data known-patterns" }, [
+      el("thead", {}, [el("tr", {}, head)]),
+      el("tbody", {}, state.entries.map((e) => entryRow(e, state.canEdit))),
+    ]),
   ]));
 }
 

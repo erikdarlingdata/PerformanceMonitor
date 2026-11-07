@@ -671,4 +671,72 @@ public class CustomAlertRuleDefinitionTests
         Assert.Single(parsed);
         Assert.Empty(broken);
     }
+    // ─────────────────────────── scope: every key must fit the mode (#8077) ───────────────────────────
+
+    [Fact]
+    public void ServersListWithoutMode_IsError_NamingScopeMode()
+    {
+        // A servers list the author wrote is never accepted and then dropped: without 'mode' the parser does
+        // not guess whether the list limits the rule, it refuses and says which key is missing.
+        var (def, error) = CustomAlertRuleDefinition.TryParse(
+            "{" + Metric + ",\"predicate\":{\"op\":\"ge\",\"warnThreshold\":1},\"scope\":{\"servers\":[\"alpha\",\"beta\"]}}");
+
+        Assert.Null(def);
+        Assert.NotNull(error);
+        Assert.Contains("'scope.mode'", error);
+        Assert.Contains("'scope.servers'", error);
+    }
+
+    [Fact]
+    public void TagIdWithoutMode_IsError_NamingScopeMode()
+    {
+        var (def, error) = CustomAlertRuleDefinition.TryParse(
+            "{" + Metric + ",\"predicate\":{\"op\":\"ge\",\"warnThreshold\":1},\"scope\":{\"tagId\":7}}");
+
+        Assert.Null(def);
+        Assert.NotNull(error);
+        Assert.Contains("'scope.mode'", error);
+        Assert.Contains("'scope.tagId'", error);
+    }
+
+    [Theory]
+    [InlineData("all", "\"servers\":[\"alpha\"]", "'scope.servers'")]
+    [InlineData("all", "\"tagId\":7", "'scope.tagId'")]
+    [InlineData("servers", "\"servers\":[\"alpha\"],\"tagId\":7", "'scope.tagId'")]
+    [InlineData("tag", "\"tagId\":7,\"servers\":[\"alpha\"]", "'scope.servers'")]
+    public void ScopeKeyFromAnotherMode_IsError_NamingTheStrayKeyAndTheMode(string mode, string extraKeys, string strayKey)
+    {
+        var (def, error) = CustomAlertRuleDefinition.TryParse(
+            "{" + Metric + ",\"predicate\":{\"op\":\"ge\",\"warnThreshold\":1},\"scope\":{\"mode\":\"" + mode + "\"," + extraKeys + "}}");
+
+        Assert.Null(def);
+        Assert.NotNull(error);
+        Assert.Contains(strayKey, error);
+        Assert.Contains("'" + mode + "'", error);
+    }
+
+    [Fact]
+    public void UnknownScopeKey_IsError_NamingTheKey()
+    {
+        // 'server' (singular) is the typo that would otherwise be ignored and leave the rule fleet-wide.
+        var (def, error) = CustomAlertRuleDefinition.TryParse(
+            "{" + Metric + ",\"predicate\":{\"op\":\"ge\",\"warnThreshold\":1},\"scope\":{\"mode\":\"servers\",\"server\":[\"alpha\"]}}");
+
+        Assert.Null(def);
+        Assert.NotNull(error);
+        Assert.Contains("'server'", error);
+    }
+
+    [Fact]
+    public void EmptyScopeObject_IsEveryServer()
+    {
+        // An empty scope carries nothing to misread, so it means every server, the same as no scope at all.
+        var (def, error) = CustomAlertRuleDefinition.TryParse(
+            "{" + Metric + ",\"predicate\":{\"op\":\"ge\",\"warnThreshold\":1},\"scope\":{}}");
+
+        Assert.Null(error);
+        Assert.NotNull(def);
+        Assert.Equal(CustomAlertScopeMode.All, def!.ScopeMode);
+    }
+
 }
