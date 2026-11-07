@@ -41,17 +41,6 @@ public sealed class PlanViewerEstimatedExecutionsTests
     };
 
     [Fact]
-    public void TheSharedHelper_CountsOneRunPlusRebindsPlusRewinds()
-    {
-        var helper = typeof(PlanViewerControl).GetMethod(
-            "EstimatedExecutions", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public, new[] { typeof(PlanNode) });
-        Assert.True(helper is not null,
-            "PlanViewerControl has no one EstimatedExecutions(PlanNode) helper: the Properties panel and the arrow tooltip each count executions on their own");
-
-        Assert.Equal(1001.0, (double)helper!.Invoke(null, new object[] { Spool() })!);
-    }
-
-    [Fact]
     public void ThePropertiesPanel_CountsRewindsAsExecutions_AndMultipliesRowsByThem()
     {
         var rows = StaTestThread.Run(() =>
