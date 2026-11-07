@@ -421,7 +421,7 @@ public sealed class FinOpsUtilizationNoCpuTests
         row.MaxCpuPct = 77;
 
         Assert.Equal($"{12.5m:N1}%", row.AvgCpuText);
-        Assert.Equal($"{40m:N2}%", row.P95CpuText);
+        Assert.Equal($"{40m:N1}%", row.P95CpuText);
         Assert.Equal("77.0%", row.MaxCpuText);
 
         var idle = Row("OVER_PROVISIONED");

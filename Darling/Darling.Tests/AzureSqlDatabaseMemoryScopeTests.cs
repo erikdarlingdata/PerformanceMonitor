@@ -274,7 +274,7 @@ public sealed class AzureSqlDatabaseMemoryScopeTests
     {
         var tab = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "FinOpsTab.Loaders.cs");
 
-        Assert.Contains("FinOpsMemoryRatioText.Text = $\"{bpPct:N0}%\";", tab, StringComparison.Ordinal);
+        Assert.Contains("FinOpsMemoryRatioText.Text = $\"{bpPct:N1}%\";", tab, StringComparison.Ordinal);
         Assert.Contains("SetBar(FinOpsMemoryRatioBar, FinOpsMemRatioFilled, FinOpsMemRatioEmpty, bpPct);", tab, StringComparison.Ordinal);
         Assert.Contains("FinOpsPhysicalMemoryText.Text = $\"{data.PhysicalMemoryMb:N0} MB\";", tab, StringComparison.Ordinal);
         Assert.DoesNotContain("ServerHardwareScope.NotApplicable", tab, StringComparison.Ordinal);
