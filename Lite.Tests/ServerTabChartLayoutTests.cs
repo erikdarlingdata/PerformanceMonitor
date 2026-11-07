@@ -51,6 +51,9 @@ public sealed class ServerTabChartLayoutTests
     /// <summary>#8220: the sizes the app's minimum window and a common laptop screen give, in DIPs.</summary>
     public static TheoryData<int, int> AppWindows => new() { { 900, 600 }, { 1280, 800 } };
 
+    /// <summary>#8220: windows where the old row minimum and legend placement never settled in Lite (every width from 1280 up at 650 and 768 DIPs tall): the side legend fit at one row height, the row then shrank to its smaller minimum, the column no longer fit, the legend moved under the plot, and that raised the minimum again, on every layout pass.</summary>
+    public static TheoryData<int, int> LoopWindows => new() { { 1280, 768 }, { 1920, 650 } };
+
     /// <summary>#8220: the legend rule on the server tab hosted the way the main window hosts it, every keyed chart fed twelve series (the most
     /// any chart lists). At the minimum window each plot keeps 120 DIPs, a side legend leaves the plot 60% of the width, and no legend leaves
     /// more than 15% of the width empty. The 120 DIPs are the issue's floor: the old minimum was 100 and only a single-legend chart was held to it.</summary>
@@ -77,6 +80,7 @@ public sealed class ServerTabChartLayoutTests
     /// plot 60% of the width and no more than 15% of the width stays empty. The numbers are the issue's.</summary>
     [Theory]
     [MemberData(nameof(AppWindows))]
+    [MemberData(nameof(LoopWindows))]
     public void TheLongLegendCharts_FollowTheRule_AtTheAppWindow(int width, int height)
     {
         var dir = Path.Combine(Path.GetTempPath(), "ServerTabHeavyLegend_" + Guid.NewGuid().ToString("N")[..8]);
