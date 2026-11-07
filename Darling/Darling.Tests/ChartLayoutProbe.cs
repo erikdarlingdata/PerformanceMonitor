@@ -354,6 +354,26 @@ internal static class ChartLayoutProbe
         chart.Refresh();
     }
 
+    /// <summary>True for a chart <paramref name="heavy"/> names. The Overview's stacked lanes reuse chart names (its own WaitStatsChart) but
+    /// never show a legend, so a chart inside a lanes control is not the chart the issue means.</summary>
+    private static bool IsHeavy(WpfPlot chart, IReadOnlyDictionary<string, int> heavy)
+    {
+        if (!heavy.ContainsKey(chart.Name))
+        {
+            return false;
+        }
+
+        for (var at = LogicalTreeHelper.GetParent(chart); at is not null; at = LogicalTreeHelper.GetParent(at))
+        {
+            if (at.GetType().Name.Contains("CorrelatedTimelineLanes", StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     /// <summary>The legend rule (#8220) for the charts <paramref name="heavy"/> names (x:Name to series count), each filled by
     /// <see cref="FillLegendChart"/> and measured at its real place in the tab.</summary>
     public static (List<string> Failures, List<string> Readings) MeasureHeavyLegends(
@@ -368,14 +388,14 @@ internal static class ChartLayoutProbe
             Reveal(TabPath(page.First()));
             Layout(window);
             var shown = page.Where(IsShown).ToList();
-            foreach (var chart in shown.Where(c => heavy.ContainsKey(c.Name)))
+            foreach (var chart in shown.Where(c => IsHeavy(c, heavy)))
             {
                 FillLegendChart(chart, heavy[chart.Name]);
                 seen.Add(chart.Name);
             }
 
             Settle(window, shown);
-            foreach (var chart in shown.Where(c => heavy.ContainsKey(c.Name)))
+            foreach (var chart in shown.Where(c => IsHeavy(c, heavy)))
             {
                 if (ReadLegend(chart) is { } reading)
                 {
@@ -392,7 +412,7 @@ internal static class ChartLayoutProbe
                 }
             }
 
-            MaybeSave(product, windowName, shown.Where(c => heavy.ContainsKey(c.Name)));
+            MaybeSave(product, windowName, shown.Where(c => IsHeavy(c, heavy)));
         }
 
         foreach (var name in heavy.Keys.Where(n => !seen.Contains(n)))

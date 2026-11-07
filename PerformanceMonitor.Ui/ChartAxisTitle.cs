@@ -136,7 +136,7 @@ namespace PerformanceMonitor.Ui
         /// with a one-line legend. A ten-entry legend is three lines and a restart marker adds an entry, so the row grows by what the
         /// legend, the bottom ticks and the padding take, and the tab scrolls instead (<see cref="Attach"/>).
         /// </summary>
-        public const double MinPlotAreaHeight = 100;
+        public const double MinPlotAreaHeight = 120; // #8220: 120, up from 100, the same floor the legend rule keeps (WrappedLegendLayout.MinPlotHeight)
 
         /// <summary>#8086: the smallest share of its chart the plot may take. Below it the tab scrolls instead of squeezing the plot.</summary>
         public const double MinPlotShare = 0.55;
