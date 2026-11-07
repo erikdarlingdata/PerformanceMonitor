@@ -135,14 +135,14 @@ public sealed class StoreMaintenanceTickLaunchTests
     {
         var (worker, _) = MakeWorker();
         var gate = new TaskCompletionSource();
-        Assert.True(worker.TryStartStoreMetricsTick(Now, () => null, async (_, _) => { await gate.Task; await Task.Delay(60); }, CancellationToken.None)); /* The body settles 60 ms after its gate: the stall a loaded runner puts between the gate and the tracked task's completion. */
+        Assert.True(worker.TryStartStoreMetricsTick(Now, () => null, (_, _) => gate.Task, CancellationToken.None));
         gate.SetResult();
-        await Task.Delay(TimeSpan.FromMilliseconds(50));
+        await worker.StoreMetricsTickForTests!;
 
         var secondRan = false;
         Assert.True(worker.TryStartStoreMetricsTick(
             Now.AddHours(1), () => null, (_, _) => { secondRan = true; return Task.CompletedTask; }, CancellationToken.None));
-        await Task.Delay(TimeSpan.FromMilliseconds(50));
+        await worker.StoreMetricsTickForTests!;
         Assert.True(secondRan);
     }
 
@@ -162,18 +162,11 @@ public sealed class StoreMaintenanceTickLaunchTests
         Assert.False(secondRan);
 
         gate.SetResult();
+        await worker.ComposeStampTickForTests!;
         var third = new TaskCompletionSource();
-        var started = false;
-        for (var i = 0; i < 100 && !started; i++)
-        {
-            started = worker.TryStartComposeStampTick(_ => { third.SetResult(); return Task.CompletedTask; }, CancellationToken.None);
-            if (!started)
-            {
-                await Task.Delay(TimeSpan.FromMilliseconds(50));
-            }
-        }
-
-        Assert.True(started, "the launcher never accepted a tick after the first completed");
+        Assert.True(
+            worker.TryStartComposeStampTick(_ => { third.SetResult(); return Task.CompletedTask; }, CancellationToken.None),
+            "the launcher refused a tick after the first completed");
         await third.Task.WaitAsync(TimeSpan.FromSeconds(10));
     }
 
@@ -183,7 +176,7 @@ public sealed class StoreMaintenanceTickLaunchTests
         var (worker, logger) = MakeWorker();
         Assert.True(worker.TryStartStoreMetricsTick(
             Now, () => null, (_, _) => throw new InvalidOperationException("boom"), CancellationToken.None));
-        await Task.Delay(TimeSpan.FromMilliseconds(50));
+        await worker.StoreMetricsTickForTests!;
 
         Assert.Contains(logger.Entries, e => e.Level == LogLevel.Error && e.Exception is InvalidOperationException);
         Assert.True(worker.TryStartStoreMetricsTick(Now.AddHours(1), () => null, (_, _) => Task.CompletedTask, CancellationToken.None));
@@ -251,9 +244,9 @@ public sealed class StoreMaintenanceTickLaunchTests
     {
         var (worker, _) = MakeWorker();
         var gate = new TaskCompletionSource();
-        Assert.True(worker.TryStartStoreMaintenanceTick(async _ => { await gate.Task; await Task.Delay(60); }, CancellationToken.None)); /* The body settles 60 ms after its gate: the stall a loaded runner puts between the gate and the tracked task's completion. */
+        Assert.True(worker.TryStartStoreMaintenanceTick(_ => gate.Task, CancellationToken.None));
         gate.SetResult();
-        await Task.Delay(TimeSpan.FromMilliseconds(50));
+        await worker.StoreMaintenanceTickForTests!;
 
         var secondRan = false;
         Assert.True(worker.TryStartStoreMaintenanceTick(
@@ -263,7 +256,7 @@ public sealed class StoreMaintenanceTickLaunchTests
                 return Task.CompletedTask;
             },
             CancellationToken.None));
-        await Task.Delay(TimeSpan.FromMilliseconds(50));
+        await worker.StoreMaintenanceTickForTests!;
         Assert.True(secondRan);
     }
 
@@ -273,7 +266,7 @@ public sealed class StoreMaintenanceTickLaunchTests
         var (worker, logger) = MakeWorker();
         Assert.True(worker.TryStartStoreMaintenanceTick(
             _ => throw new InvalidOperationException("boom"), CancellationToken.None));
-        await Task.Delay(TimeSpan.FromMilliseconds(50));
+        await worker.StoreMaintenanceTickForTests!;
 
         Assert.Contains(logger.Entries, e => e.Level == LogLevel.Error && e.Exception is InvalidOperationException);
         Assert.True(worker.TryStartStoreMaintenanceTick(_ => Task.CompletedTask, CancellationToken.None));
