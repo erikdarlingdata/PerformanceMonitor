@@ -111,6 +111,10 @@ public class PlanStatement
     // QueryPlan sub-elements
     public OptimizerHardwareInfo? HardwareProperties { get; set; }
     public List<OptimizerStatsUsageItem> StatsUsage { get; set; } = new();
+    /// <summary>#8147: the statement carried a QueryPlan element. False for DECLARE/ASSIGN shells and MULTIPLE PLAN statements whose plan was never captured.</summary>
+    public bool HasQueryPlan { get; set; }
+    /// <summary>#8147: the QueryPlan carried an OptimizerStatsUsage element (even an empty one). False means the plan does not record which statistics it loaded, which is not the same as loading none.</summary>
+    public bool HasStatsUsage { get; set; }
     public ThreadStatInfo? ThreadStats { get; set; }
     public SetOptionsInfo? SetOptions { get; set; }
     public List<PlanParameter> Parameters { get; set; } = new();
@@ -271,6 +275,7 @@ public class PlanNode
     public string? PartitionColumns { get; set; }
     public string? DefinedValues { get; set; }
     public double TableCardinality { get; set; }
+    public bool HasTableCardinality { get; set; }
     public double EstimatedRowsRead { get; set; }
     public string? TopExpression { get; set; }
     public bool IsPercent { get; set; }

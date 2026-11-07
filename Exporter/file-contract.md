@@ -49,7 +49,7 @@ A manifest is one JSON object.
 | `straggler_warning` | always | The last count of open writing transactions that started before the window's cutoff. 0 means none. The exporter only records it. It never fails a run. |
 | `straggler_wait_seconds` | always | Seconds the straggler guard waited. |
 | `tables` | always | One entry per table. See below. |
-| `skipped_optional` | optional manifests | Optional tables that were asked for and skipped. Each has `table` and `reason`. The reason is `unknown` or `absent`. |
+| `skipped_optional` | optional manifests | Optional tables that were asked for and skipped, whatever their grain. Each has `table` and `reason`. The reason is `unknown`, `absent`, `denied`, or a sentence saying why the table did not run, such as its schema gate or a window that is not its own. |
 | `failed_optional` | optional manifests | Optional tables that were attempted and failed. Each has `table` and `error`. |
 
 Each entry in `tables` has these fields.
@@ -73,13 +73,15 @@ Each entry in `tables` has these fields.
 | `query_store_source_mode`, `query_store_source` and related fields | `query_store_stats` | Present when the read used the wide or compare source. |
 | `policy_version` | optional tables with a column policy | The version of the column policy that was applied. |
 | `grain`, `source_table`, `rollup_version` | hourly and daily optional tables | The grain, the source table and the rollup version. |
-| `read_from`, `read_to` | tables with their own read window | The range actually read. |
+| `read_from`, `read_to` | tables with their own read window | The range actually read. A daily table's lookback range, or an hourly rollup's window plus the counter bridge lookback before it. |
 | `daily_missing_servers` | daily grain | Servers missing from the expected set. |
 | `change_key_columns`, `change_baseline`, `change_rows_suppressed` | change grain | The change key, whether this is a full baseline and the rows suppressed as unchanged. |
 | `schema_fingerprint` | when computed | A fingerprint of the source schema, to detect drift. |
 | `store_read_ms`, `store_connect_ms`, `window_cache_build_ms`, `pace_sleep_ms`, `parse_ms`, `content_fetch_calls`, `content_rows_fetched`, `content_bytes_fetched` | when measured | A split of the store time. A field that is not measured is left out. |
 
 A field that does not apply to a table is left out or null. New fields can appear in any manifest without a version bump.
+
+`columns` is read back from the written file, in the core manifest and in the optional manifest alike, so it matches what `DESCRIBE` of the file returns.
 
 ## 4. Rows can arrive twice
 
@@ -213,7 +215,7 @@ Optional tables are off unless the config or the command line names them.
 
 A table with grain `hourly` writes its rollup to `<table>_hourly` and no raw rows. The tables that do this are: `ag_database_replica_states`, `cpu_scheduler_stats`, `memory_grant_stats`, `pg_cpu_utilization`, `pg_database_stats`, `pg_io_stats`, `pg_replication_slot_stats`, `pg_replication_stats`, `pg_statement_stats`, `pg_wait_stats`, `pg_write_stats`, `pg_xmin_horizon`, `session_summary_stats`.
 
-A table with grain `daily` writes the last complete collection cycle per server before 00:00 UTC. It is written only in the run whose window starts at 00:00 UTC.
+A table with grain `daily` writes the last complete collection cycle per server before 00:00 UTC. It is written in the run whose window starts at 00:00 UTC. If that run did not produce it, the first later run of the same UTC day produces it instead, with the same read range (`read_from`, `read_to`) and the same `snapshot_time`, and its manifest is that later window's. A `snapshot` table (`servers`) follows the same rule, stamped with the day's 00:00 UTC.
 
 A table with grain `change` writes a row only when the tracked columns changed since the last exported row. The first export is a full baseline and its manifest entry has `change_baseline` set to true. The change keys are:
 
@@ -266,7 +268,12 @@ These are the units the store uses. The files keep them.
 | `pg_session_states` | `state_duration_ms`, `xact_duration_ms`, `query_duration_ms` | milliseconds |
 | `pg_cpu_utilization` | `cpu_percent`, `acu_utilization_percent` | percent |
 
-Counter columns in cumulative tables grow until the source restarts. Rows in a `*_hourly` rollup have `_first`, `_last` and `_delta_in_hour` columns for a counter. A drop in a counter counts as a reset, and the delta then uses the value after the reset.
+Counter columns in cumulative tables grow until the source restarts. Rows in a `*_hourly` rollup have `_first`, `_last`, `_delta_in_hour` and `_delta_hour_bridged` columns for a counter. A drop in a counter counts as a reset, and the delta then uses the value after the reset.
+
+- `_delta_in_hour` sums the steps between the hour's own samples. The step from the previous hour's last sample into this hour belongs to no hour, so a day's sum of `_delta_in_hour` is a lower bound on the counter's growth.
+- `_delta_hour_bridged` adds that step. The exporter reads each key's last sample before the window (`read_from` on the entry is the window start minus that lookback) and counts the step from it to the hour's first sample. A day's sum of `_delta_hour_bridged` is the counter's growth over the day. When no sample exists in the lookback, the two columns are equal.
+
+The tables with counter columns are `pg_statement_stats_hourly`, `pg_database_stats_hourly`, `pg_io_stats_hourly` and `pg_write_stats_hourly`.
 
 The Parquet types follow the store types. Exact numerics with a precision and scale stay `DECIMAL(p,s)`. Unconstrained numerics become `DOUBLE`. The manifest lists the DuckDB type of every column.
 
@@ -275,7 +282,7 @@ The Parquet types follow the store types. Exact numerics with a precision and sc
 Kinds:
 
 - **window**: rows with a time column, filtered to `[from, to)`.
-- **snapshot**: a table with no time column of its own. The exporter stamps `snapshot_time` on each row. It is written once a day, in the window that starts at 00:00 UTC.
+- **snapshot**: a table with no time column of its own. The exporter stamps `snapshot_time` on each row with the day's 00:00 UTC. It is written once a day, in the window that starts at 00:00 UTC, or in the first later window of the day when that one did not produce it.
 - **dimension**: a table that holds content or keys, such as `plan_shape` and `query_text`. The exporter writes a key once. It remembers the keys it already wrote in its local state, so a later run does not write them again. The `--ignore-state` flag writes them again.
 
 Grains:

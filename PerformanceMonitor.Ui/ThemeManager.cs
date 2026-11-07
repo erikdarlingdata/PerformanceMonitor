@@ -391,8 +391,12 @@ namespace PerformanceMonitor.Ui
         /// <summary>
         /// #8144: the text styles both apps share (page title, panel title, panel subtitle, KPI value, empty hint). It lives in this
         /// assembly, so one URI serves Lite and the Viewer. <see cref="Apply"/> merges it after the color theme.
+        /// <para>Built on each read, like <see cref="ThemeUri"/>, and not in a static field initializer: a <c>pack://</c> URI parses only
+        /// after WPF has registered the pack scheme, which an <c>Application</c> does when it is built. This type's initializer can run
+        /// before that, in a process whose first touch of the type is a plain member such as <see cref="OverridesFilePath"/>, and a
+        /// pack URI built there throws <see cref="UriFormatException"/> and fails the type for the rest of the process (#8170).</para>
         /// </summary>
-        public static readonly Uri SharedStylesUri = new("pack://application:,,,/PerformanceMonitor.Ui;component/Themes/SharedStyles.xaml");
+        public static Uri SharedStylesUri => new("pack://application:,,,/PerformanceMonitor.Ui;component/Themes/SharedStyles.xaml");
 
         /// <summary>
         /// Where a theme's compiled dictionary is loaded from. The running app's own <c>Themes/</c> folder, which a test host does not
