@@ -1132,6 +1132,33 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
     /// pre-#3741 caller) leaves the v60 column NULL so the reads take their LAG fallback; a value is the
     /// collection's STORED interval, which both the WaitMsPerSec baseline and the detector's window read divide
     /// by directly — so (deltaWaitMs, sampleIntervalSeconds) IS the collection's ms/sec.</summary>
+    /// <summary>#8106: <c>sample_interval_seconds</c> is a per-row figure, the seconds since that wait type's own previous sighting. A
+    /// type that returns after missing some passes stores several cadences while its siblings in the same collection store one, and a
+    /// baseline that divided the collection's summed wait by its longest row interval read every such collection at a fraction. The
+    /// WaitMsPerSec baseline rates each row over its own interval and sums the rates: two steady types at 500 and 100 ms/s and a third
+    /// seen every fifth minute (600 ms over its own 300 s) read 600 or 602 on every collection, so the hour's mean is 600.4 rather than
+    /// the 504.4 of twelve collections read at 122.</summary>
+    [Fact]
+    public async Task WaitMsPerSecBaseline_RatesEachRowOverItsOwnInterval_SoAReturningWaitTypeDoesNotDeflateTheCollection()
+    {
+        var hour = _analysisStart.AddDays(-7);
+        for (int m = 0; m < 60; m++)
+        {
+            var at = hour.AddMinutes(m);
+            await SeedWaitStatAsync(at, "SOS_SCHEDULER_YIELD", 30000, sampleIntervalSeconds: 60);
+            await SeedWaitStatAsync(at, "PAGEIOLATCH_SH", 6000, sampleIntervalSeconds: 60);
+            if (m % 5 == 4)
+            {
+                await SeedWaitStatAsync(at, "CXCONSUMER", 600, sampleIntervalSeconds: 300);
+            }
+        }
+
+        var baseline = await _baselineProvider.GetBaselineAsync(ServerId, MetricNames.WaitMsPerSec, _analysisStart);
+
+        Assert.Equal(60, baseline.SampleCount);
+        Assert.Equal(600.4, baseline.Mean, precision: 2);
+    }
+
     private async Task SeedWaitStatAsync(DateTime time, string waitType, long deltaWaitMs, int? sampleIntervalSeconds = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
