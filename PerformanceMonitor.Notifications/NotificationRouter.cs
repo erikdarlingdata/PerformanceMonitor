@@ -38,6 +38,10 @@ public enum RouteSource
     /// <summary>A route whose <c>metric_match</c> is <c>Analysis: {category}</c> (#5632, ruling R5): every analysis
     /// finding of that category. Between the exact level and the family level; added last because the names persist.</summary>
     Category,
+
+    /// <summary>A route whose <c>metric_match</c> is <c>Analysis: *</c> (#7999): every analysis finding, whatever its category.
+    /// Between the category level and the family level; appended last because the names persist.</summary>
+    AnalysisAll,
 }
 
 /// <summary>
@@ -168,7 +172,7 @@ public sealed record NotificationRouteDecision(
 /// <para><b>Resolution order, per channel (#5750 adds the scope tiers):</b> routes are tried by SCOPE TIER first -
 /// server-scoped, then tag-scoped, then fleet-wide - and inside a tier by METRIC LEVEL: a route matching the metric
 /// EXACTLY (its delivered name first, then the firing a recovery pairs with), then an analysis finding's CATEGORY
-/// (<c>Analysis: {category}</c>, #5632), then its FAMILY, then <c>*</c>.
+/// (<c>Analysis: {category}</c>, #5632), then EVERY analysis finding (<c>Analysis: *</c>, #7999), then its FAMILY, then <c>*</c>.
 /// Inside the tag tier at one metric level the DEEPER tag (more ancestors) wins, then the lowest <c>route_id</c>;
 /// elsewhere the lowest <c>route_id</c> wins. After every route comes the parent row's default. A scoped route
 /// matches only when the firing's server id is in its expanded set, so a firing with no server id can only be
@@ -294,7 +298,7 @@ public static class NotificationRouter
     /// 1 the firing a recovery pairs with (both <see cref="RouteSource.Exact"/>, so "Server Restored" lands where
     /// "Server Unreachable" did unless the operator named the recovery); 2 the analysis finding's category,
     /// <c>Analysis: {category}</c> (#5632, ruling R5: after the finding's own name with its hash, before the family);
-    /// 3 the family; 4 <c>*</c>.</para>
+    /// 3 every analysis finding, <c>Analysis: *</c> (#7999: after its category, before the family); 4 the family; 5 <c>*</c>.</para>
     /// </summary>
     private static List<(NotificationRoute Route, RouteScopeTier Tier, int Level, RouteSource Source)> OrderedCandidates(
         string metricName,
@@ -324,13 +328,17 @@ public static class NotificationRouter
                 {
                     candidates.Add((route, route.ScopeTier, 2, RouteSource.Category));
                 }
+                else if (route.MatchesAnalysisAll(metricName))
+                {
+                    candidates.Add((route, route.ScopeTier, 3, RouteSource.AnalysisAll));
+                }
                 else if (route.MatchesFamily(metricName))
                 {
-                    candidates.Add((route, route.ScopeTier, 3, RouteSource.Family));
+                    candidates.Add((route, route.ScopeTier, 4, RouteSource.Family));
                 }
                 else if (route.IsWildcard)
                 {
-                    candidates.Add((route, route.ScopeTier, 4, RouteSource.Wildcard));
+                    candidates.Add((route, route.ScopeTier, 5, RouteSource.Wildcard));
                 }
             }
         }

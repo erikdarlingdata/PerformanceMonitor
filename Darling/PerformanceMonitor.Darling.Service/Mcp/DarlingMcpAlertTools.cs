@@ -746,7 +746,8 @@ public sealed partial class DarlingMcpAlertTools
         "stays, is orphaned = true, and matches nothing. Resolution order per channel: scope first (a route for the " +
         "alert's server, then one for a tag it is under, the deeper tag first, then a fleet-wide route), and inside a " +
         "scope an enabled route matching the metric EXACTLY, then an analysis finding's CATEGORY (metric_match " +
-        "'Analysis: <category>', match_kind analysis_category: every finding of that category, whatever its hash), then its " +
+        "'Analysis: <category>', match_kind analysis_category: every finding of that category, whatever its hash), then " +
+        "EVERY analysis finding (metric_match 'Analysis: *', match_kind analysis_all: a finding of any category; allowed at any scope), then its " +
         "FAMILY, then * (scoped routes only), then the parent; " +
         "within a level the lowest route_id with a non-empty column wins. A recovery routes as its firing (Server Restored as Server " +
         "Unreachable), so a channel that saw the fire sees the clear. Routing sits AFTER the cooldown: it changes " +
