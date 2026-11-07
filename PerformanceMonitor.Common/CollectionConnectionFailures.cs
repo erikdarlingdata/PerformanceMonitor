@@ -127,6 +127,9 @@ public static class CollectionConnectionFailures
     /// The header sentence for <paramref name="rows"/>, or null when no connection failure reached two or more collectors.
     /// Names the newest event's time (<paramref name="formatTime"/> words a UTC instant in the tab's zone), how many
     /// collectors it reached, whether each of them missed that one run alone, and how many earlier events the window holds.
+    /// "Nothing to do unless it repeats" is said only when the window holds one event and none of its collectors has another
+    /// error: <see cref="Group"/> reads each collector's newest error alone, so a later drop over the same collectors hides
+    /// the earlier one from the event count, and their other errors are the only sign that it has repeated.
     /// </summary>
     public static string? SummaryLine(IEnumerable<CollectorErrorSample> rows, Func<DateTime, string> formatTime)
     {
@@ -146,7 +149,8 @@ public static class CollectionConnectionFailures
             : $"{newest.CollectorsWithOtherErrors} of them have other errors in the window as well";
         var earlier = events.Count switch
         {
-            1 => "Nothing to do unless it repeats.",
+            1 when newest.CollectorsWithOtherErrors == 0 => "Nothing to do unless it repeats.",
+            1 => "It has repeated, or those collectors fail for other reasons too: their Collection Log rows say which.",
             2 => "One earlier connection failure is in the window too.",
             _ => $"{events.Count - 1} earlier connection failures are in the window too.",
         };

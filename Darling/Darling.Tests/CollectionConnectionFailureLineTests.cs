@@ -60,6 +60,27 @@ public sealed class CollectionConnectionFailureLineTests
         Assert.Contains("reached 3 collectors", line);
         Assert.Contains("1 of them have other errors in the window as well", line);
         Assert.DoesNotContain("each missed that one run", line);
+        Assert.DoesNotContain("Nothing to do", line);
+    }
+
+    /// <summary>
+    /// A later drop over the same collectors is every row's newest error, so the earlier drop is not an event of its own; the rows'
+    /// other errors are the only sign it repeated, and the line must not say there is nothing to do.
+    /// </summary>
+    [Fact]
+    public void TwoDropsReachingTheSameCollectors_AreNotToldThereIsNothingToDo()
+    {
+        var rows = Enumerable.Range(0, 15)
+            .Select(i => ($"collector_{i:00}", (DateTime?)Cycle.AddSeconds(i * 3), (string?)PreLoginHandshake, 2L))
+            .ToList();
+
+        var line = SummaryLine(rows);
+
+        Assert.NotNull(line);
+        Assert.Contains("reached 15 collectors", line);
+        Assert.Contains("15 of them have other errors in the window as well", line);
+        Assert.Contains("It has repeated, or those collectors fail for other reasons too", line);
+        Assert.DoesNotContain("Nothing to do", line);
     }
 
     [Fact]
