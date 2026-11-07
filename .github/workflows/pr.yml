@@ -768,7 +768,7 @@ jobs:
           # completes, from this job's conclusion as the API reports it, so the step exits by the state: a failure fails this job.
           # (A failure that a newer run replaced exited 0 above; the relay makes the same newer-run check before it writes.)
           if [ "${IS_FORK}" = "true" ]; then
-            echo "::notice title=CI result is relayed for a fork pull request::A fork's token is read-only, so this run cannot set the CI result status. The PR CI fork result workflow sets it to '${state}' from this job's conclusion once the run completes."
+            echo "::notice title=CI result is relayed for a fork pull request::A fork's token is read-only, so this run cannot set the CI result status. The PR CI fork result workflow sets it from this job's conclusion ('${state}') once the run completes; success also needs a maintainer's approval of this commit."
             [ "${state}" = "success" ] && exit 0
             exit 1
           fi
