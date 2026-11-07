@@ -260,8 +260,9 @@ public sealed class DarlingMcpPgWaitSamplingTools
                 PgWaitInstrument.ServiceSampled => PgWaitInstrument.ServiceSampledCaveat,
                 _ => "No collection cycle has recorded which arm fed these rows (a store written before the "
                      + "service sampler existed, or a collector that has not completed a cycle since). Read "
-                     + "profile_period_ms per row with that in mind: 10 is the extension's default, 1000 is "
-                     + "the service sampler's.",
+                     + "estimated_wait_ms with that in mind: it is samples multiplied by the period the collector "
+                     + "recorded for each row (10 ms under the extension's default, 1000 ms under the service "
+                     + "sampler), and the rows do not carry the period itself.",
             },
             /* The WINDOW's samples, across every series — the denominator of every pct_of_samples above.
                NOT the sum of the rows; that is returned_samples. */
