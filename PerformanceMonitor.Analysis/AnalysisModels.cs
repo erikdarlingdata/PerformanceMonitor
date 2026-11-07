@@ -251,6 +251,16 @@ public class AnalysisStory
 }
 
 /// <summary>
+/// One distinct story path a server has stored under one root fact key, across the findings retention (#8012): the
+/// rendered path, its hash (the page row's identity), the category the page row's metric name carries, and the
+/// number of facts on the chain, which says whether the rendered path is a plain join of fact keys (the pileup's
+/// path carries a statement hash beside its one fact). What the analysis page hold reads to find a wider path of a
+/// story whose path got shorter; nothing else on the row is read, so the drill-down and remediation columns stay
+/// on disk.
+/// </summary>
+public sealed record StoredStoryPath(string StoryPathHash, string StoryPath, string Category, int FactCount);
+
+/// <summary>
 /// A persisted finding from a previous analysis run.
 /// Maps to the analysis_findings table.
 /// </summary>
