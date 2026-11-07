@@ -435,6 +435,68 @@ public sealed class SlackChatStoreLiveTests
         });
     }
 
+    private static ServerActionCall Call(Guid request, Guid claim, string action) =>
+        new(action, action, new AgentAction(request, claim, "agent-a", "the person asked for it",
+            "[{\"tool\":\"get_blocking_stats\",\"arguments\":{},\"key_numbers\":\"12\"}]"), new AgentActionTarget(ServerId, "srv-7", null, null));
+
+    /// <summary>The gate's asker kind check (#7659): a Level 3 action on a chat request runs only when every asker holds <c>request_level_3</c> with that
+    /// kind for the server; otherwise it is refused as <c>asker_grant</c>, and nothing is opened, joined or proposed.</summary>
+    [Fact]
+    public async Task ALevel3ActionOnAChatRequest_IsRefusedAsAskerGrant_UnlessEveryAskerHoldsTheKind()
+    {
+        await WithStoreAsync(async (connection, source, store, seed, ct) =>
+        {
+            await ExecAsync(connection, "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
+            /* Dana asks; she holds request_level_3 with force_plan alone, so the chat request is stamped 3 and her request may propose a plan force. */
+            var message = Message("1700000000.000701", seed.Dana, "U0DANA", "kill the blocking session");
+            Assert.True(await store.SavePersonMessageAsync(message, ct));
+            var chat = (await store.OpenChatRequestAsync(Thread(seed.RouteId), s_parent, [new SlackAsker(seed.Dana, message.Identity, 3)], [message], 10, DateTime.UtcNow, RoutesAt(3), ct)).RequestId!.Value;
+            var claim = (await store.ClaimAsync(chat, "agent-a", ct)).ClaimId!.Value;
+            var requestsBefore = await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_requests", ct);
+            var hooks = new ServerActionHooks
+            {
+                LoadRoutes = RoutesAt(3),
+                ReadCredential = (_, _) => throw new InvalidOperationException("the credential is read after the asker check"),
+            };
+
+            /* A kill: Dana's grant does not name kill_session, so the gate refuses it as asker_grant before any server condition. */
+            var kill = await store.CheckServerActionAsync(Call(chat, claim, ServerActionNames.KillSession), hooks, ct);
+            Assert.Equal(AgentActionCodes.AskerGrant, kill?.Reason);
+            Assert.Equal("1", await ScalarAsync(connection, $"SELECT count(*) FROM config.investigation_journal WHERE request_id = '{chat}' AND event = 'refused' AND reason LIKE '%{AgentActionCodes.AskerGrant}%'", ct));
+
+            /* A plan force: every asker holds the kind, so the asker check passes and whatever answers next is another condition's. */
+            var force = await store.CheckServerActionAsync(Call(chat, claim, ServerActionNames.ForcePlan), hooks, ct);
+            Assert.NotEqual(AgentActionCodes.AskerGrant, force?.Reason);
+            Assert.NotEqual(AgentActionCodes.NotLevel3, force?.Reason);
+
+            /* Erik joins with request_level_3 for evict_plan alone: still Level 3, but not every asker holds force_plan, so the force is refused too. */
+            Assert.True((await PersonDirectory.AddGrantAsync(source, seed.Erik, ServerId, null, PersonCapabilities.RequestLevel3, [ServerActionNames.EvictPlan], Admin, ServerActionSurfaces.Viewer, ct)).Succeeded);
+            await ExecAsync(connection, $"UPDATE config.investigation_requests SET state = 'open', claim_id = NULL, claimed_by = NULL, lease_until = NULL WHERE request_id = '{chat}'", ct);
+            var second = Message("1700000000.000702", seed.Erik, "U0ERIK", "and evict the plan");
+            Assert.True(await store.SavePersonMessageAsync(second, ct));
+            Assert.True(await store.JoinChatRequestAsync(chat, new SlackAsker(seed.Erik, second.Identity, 3), second, ct));
+            claim = (await store.ClaimAsync(chat, "agent-a", ct)).ClaimId!.Value;
+            var forceAfter = await store.CheckServerActionAsync(Call(chat, claim, ServerActionNames.ForcePlan), hooks, ct);
+            Assert.Equal(AgentActionCodes.AskerGrant, forceAfter?.Reason);
+
+            /* Nothing opened, joined or proposed by the refusals: the same requests, two askers, no proposal. */
+            Assert.Equal(requestsBefore, await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_requests", ct));
+            Assert.Equal("2", await ScalarAsync(connection, $"SELECT count(*) FROM config.investigation_request_askers WHERE request_id = '{chat}'", ct));
+            Assert.Equal("0", await ScalarAsync(connection, $"SELECT count(*) FROM config.agent_action_proposals WHERE request_id = '{chat}'", ct));
+
+            /* The SQL itself: true for a kind every asker holds, false for one somebody lacks, true with no askers at all. */
+            await using var holds = new NpgsqlCommand(InvestigationRequestStore.AskersHoldKindSql, connection);
+            holds.Parameters.Add(new NpgsqlParameter<Guid> { TypedValue = chat });
+            holds.Parameters.Add(new NpgsqlParameter<string> { TypedValue = ServerActionNames.KillSession, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+            holds.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
+            Assert.Equal(false, await holds.ExecuteScalarAsync(ct));
+            holds.Parameters[1].Value = ServerActionNames.ForcePlan;
+            Assert.Equal(false, await holds.ExecuteScalarAsync(ct));
+            holds.Parameters[0].Value = s_parent;
+            Assert.Equal(true, await holds.ExecuteScalarAsync(ct));
+        });
+    }
+
     [Fact]
     public void TheMessageTool_IsAnInvestigationTool_ServedOnlyUnderTheInvestigationsArm()
     {
