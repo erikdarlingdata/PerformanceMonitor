@@ -325,7 +325,7 @@ public sealed class DarlingPgTopQueriesLiveTests
             var topQueriesRow = Assert.Single(root.GetProperty("queries").EnumerateArray());
 
             /* The same four-hour window the tool read, through the drill-down for a finding rooted at this statement. */
-            var end = DateTime.UtcNow;
+            var end = LiveClock.Now();
             var key = PgTargetFactKeys.BadActorKey(OutOfRangeQueryId);
             var context = new AnalysisContext
             {
@@ -392,7 +392,7 @@ public sealed class DarlingPgTopQueriesLiveTests
             },
             async (dataSource, ct) =>
             {
-                var end = DateTime.UtcNow;
+                var end = LiveClock.Now();
                 var start = end.AddHours(-4);
                 return (
                     await DarlingPgStatementReader.GetPgTopQueriesPageAsync(dataSource, ServerId, start, end, Limit, includeServiceStatements: true, ct),
@@ -446,7 +446,7 @@ public sealed class DarlingPgTopQueriesLiveTests
             },
             async (dataSource, ct) =>
             {
-                var end = DateTime.UtcNow;
+                var end = LiveClock.Now();
                 var start = end.AddHours(-4);
                 var page = await DarlingPgStatementReader.GetPgTopQueriesPageAsync(dataSource, ServerId, start, end, Limit, includeServiceStatements: true, ct);
                 var plan = await ExplainTopQueriesAsync(dataSource, start, end, Limit, ct);
@@ -481,7 +481,7 @@ public sealed class DarlingPgTopQueriesLiveTests
             },
             async (dataSource, ct) =>
             {
-                var end = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+                var end = LiveClock.Now();
                 var start = end.AddHours(-4);
                 var sql = PgTargetDrillDownCollector.PgTargetTempSpillStatementsSql;
                 var cap = PgTargetDrillDownCollector.TempSpillStatementCap;
@@ -666,8 +666,10 @@ public sealed class DarlingPgTopQueriesLiveTests
     private static async Task<string> DarlingMcpPgTopQueries(NpgsqlDataSource dataSource) =>
         await DarlingMcpPgStatementTools.GetPgTopQueries(dataSource, ServerName, 4);
 
-    private static DateTime MinutesAgo(int minutes) =>
-        DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow.AddMinutes(-minutes));
+    /// <summary>#5608: the one clock this class seeds and reads by. <c>LiveClock.Now()</c> rather than <c>AnchoredEnd()</c>: every
+    /// assert here is a sum over the window, a seed lookup bounded a day before it, or the row count a join in the plan emits, and
+    /// none of those changes with where a chunk boundary falls inside the window; only the scan nodes beneath the join do.</summary>
+    private static DateTime MinutesAgo(int minutes) => LiveClock.Now().AddMinutes(-minutes);
 
     private static async Task SetEngineKindAsync(NpgsqlConnection connection, CancellationToken ct, string kind) =>
         await DarlingMcpTestData.ExecAsync(connection, ct,
@@ -697,7 +699,7 @@ VALUES ($1, $2, $3, $4, $5, 16384, 10, TRUE,
 INSERT INTO pg_statement_text (server_id, queryid, query_text, first_seen, last_seen)
 VALUES ($1, $2, $3, $4, $4)
 ON CONFLICT (server_id, queryid) DO UPDATE SET query_text = EXCLUDED.query_text",
-            ServerId, queryId, text, DarlingMcpTestData.Naive(DateTime.UtcNow));
+            ServerId, queryId, text, DarlingMcpTestData.Naive(LiveClock.Now()));
 
     /// <summary>The service-own entry list the hourly text fetch stores for a queryid (#7567), as JSON text.</summary>
     private static async Task SeedOwnEntriesAsync(NpgsqlConnection connection, CancellationToken ct, long queryId, string ownEntriesJson) =>
@@ -743,7 +745,7 @@ SELECT $1, $2 + q.i,
        (SELECT string_agg(md5((q.i * 1000 + j)::text), '') FROM generate_series(1, 190) AS j),
        $3, $3
 FROM generate_series(1, $4) AS q(i)",
-            ServerId, OutOfRangeQueryId, DarlingMcpTestData.Naive(DateTime.UtcNow), statements);
+            ServerId, OutOfRangeQueryId, DarlingMcpTestData.Naive(LiveClock.Now()), statements);
 
     private static async Task DeleteStatsAsync(NpgsqlConnection connection, CancellationToken ct) =>
         await DarlingMcpTestData.ExecAsync(connection, ct,
