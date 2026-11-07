@@ -133,6 +133,8 @@ public partial class ViewerServerTab : UserControl
             }
         }
         InitializeComponent();
+        ApplyTheme(WaitStatsChart);
+        _chartHelper.RefreshEmptyChart(WaitStatsChart, "Wait Stats", ""); // #8086: not the default -10 to 10 axes before the first read
         // #6652: the stacked-chart tabs scroll at small sizes; the wheel over a chart stays that chart's zoom.
         PerformanceMonitor.Ui.ChartLayout.KeepWheelOnPlot(
             QueryDurationTrendChart, ProcDurationTrendChart, QueryStoreDurationTrendChart, ExecutionCountTrendChart,
