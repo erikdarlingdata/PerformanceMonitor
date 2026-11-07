@@ -127,7 +127,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_pg_top_queries` | `collect.pg_statement_stats`<br>`collect.pg_statement_text`<br>`collect.pg_server_config`<br>`collect.collection_log`<br>`collect.v_collection_log` |
 | `get_pg_wait_sampling` | `collect.pg_wait_sampling`<br>`collect.collector_state` |
 | `get_pg_wait_stats` | `collect.pg_wait_stats` |
-| `get_pg_wait_trend` | `collect.pg_wait_sampling` |
+| `get_pg_wait_trend` | `collect.pg_wait_sampling`<br>`collect.pg_wait_stats`<br>`collect.collector_state` |
 | `get_pg_wraparound_risk` | `collect.pg_wraparound_stats` |
 | `get_pg_write_stats` | `collect.pg_write_stats` |
 | `get_pg_xmin_horizon` | `collect.pg_xmin_horizon`<br>`collect.collection_log` |
