@@ -39,7 +39,23 @@ public partial class ViewerServerTab
     /// <summary>#6878: the Blocking Trends chart's left-axis title. It is drawn rotated along a plot only about 80 px long at 1366x768, so it stays short enough that
     /// <see cref="PerformanceMonitor.Ui.ChartAxisTitle.Fit"/> keeps all of it. The answering collector (blocked-process-report or DMV snapshot) is named in the legend entry instead,
     /// where there is a whole line of width for it.</summary>
-    internal const string BlockingTrendAxisTitle = PerformanceMonitor.Ui.BlockingTrendLabels.AxisShort;
+    internal const string BlockingTrendAxisTitle = "reports/min";
+
+    /// <summary>#8151: the same title when the DMV snapshot answered and the points are snapshot rows, not reports.</summary>
+    internal const string BlockingTrendSnapshotAxisTitle = "rows/min";
+
+    /// <summary>#8151: the collector that answered a severity chart (blocked-process-report or DMV snapshot), for the card subtitle now that the Y axis shows only the unit.
+    /// Empty when no row names one, so nothing answered and nothing is named.</summary>
+    internal static string BlockingSourceNote(IEnumerable<string?> sources)
+    {
+        foreach (var source in sources)
+        {
+            if (source is PerformanceMonitor.Ui.BlockingSourceLabel.BlockedProcessReport or PerformanceMonitor.Ui.BlockingSourceLabel.DmvSnapshot)
+                return source;
+        }
+
+        return string.Empty;
+    }
 
     private ChartHoverHelper? _lockWaitTrendHover;
     private ChartHoverHelper? _blockingTrendHover;
@@ -564,7 +580,7 @@ public partial class ViewerServerTab
             LockWaitTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             LockWaitTrendChart.Plot.Axes.SetLimitsX(ChartXStart(LockWaitTrendChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
             ReapplyAxisColors(LockWaitTrendChart);
-            LockWaitTrendChart.Plot.YLabel("Lock wait ms/s");
+            LockWaitTrendChart.Plot.YLabel("ms/s");
             SetChartYLimitsWithLegendPadding(LockWaitTrendChart, 0, 1);
             ShowChartLegend(LockWaitTrendChart);
             LockWaitTrendChart.Refresh();
@@ -592,7 +608,7 @@ public partial class ViewerServerTab
         LockWaitTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         LockWaitTrendChart.Plot.Axes.SetLimitsX(ChartXStart(LockWaitTrendChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
         ReapplyAxisColors(LockWaitTrendChart);
-        LockWaitTrendChart.Plot.YLabel("Lock wait ms/s");
+        LockWaitTrendChart.Plot.YLabel("ms/s");
         SetChartYLimitsWithLegendPadding(LockWaitTrendChart, 0, globalMax > 0 ? globalMax : 1);
         ShowChartLegend(LockWaitTrendChart);
         LockWaitTrendChart.Refresh();
@@ -667,7 +683,7 @@ public partial class ViewerServerTab
         BlockingTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         BlockingTrendChart.Plot.Axes.SetLimitsX(ChartXStart(BlockingTrendChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
         ReapplyAxisColors(BlockingTrendChart);
-        BlockingTrendChart.Plot.YLabel(PerformanceMonitor.Ui.BlockingTrendLabels.AxisTitleFor(sources));
+        BlockingTrendChart.Plot.YLabel(PerformanceMonitor.Ui.BlockingTrendLabels.AnsweredBySnapshot(sources) ? BlockingTrendSnapshotAxisTitle : BlockingTrendAxisTitle);
         PerformanceMonitor.Ui.ChartStyle.UseCountAxis(BlockingTrendChart); // #7606: a count, whole-number ticks
         SetChartYLimitsWithLegendPadding(BlockingTrendChart, 0, data.Max(d => d.Count));
         ShowChartLegend(BlockingTrendChart);
@@ -697,7 +713,7 @@ public partial class ViewerServerTab
             DeadlockTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             DeadlockTrendChart.Plot.Axes.SetLimitsX(ChartXStart(DeadlockTrendChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
             ReapplyAxisColors(DeadlockTrendChart);
-            DeadlockTrendChart.Plot.YLabel("Deadlocks");
+            DeadlockTrendChart.Plot.YLabel("count");
             PerformanceMonitor.Ui.ChartStyle.UseCountAxis(DeadlockTrendChart); // #7606: a count, whole-number ticks
             SetChartYLimitsWithLegendPadding(DeadlockTrendChart, 0, 1);
             ShowChartLegend(DeadlockTrendChart);
@@ -740,7 +756,7 @@ public partial class ViewerServerTab
         DeadlockTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         DeadlockTrendChart.Plot.Axes.SetLimitsX(ChartXStart(DeadlockTrendChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
         ReapplyAxisColors(DeadlockTrendChart);
-        DeadlockTrendChart.Plot.YLabel("Deadlocks");
+        DeadlockTrendChart.Plot.YLabel("count");
         PerformanceMonitor.Ui.ChartStyle.UseCountAxis(DeadlockTrendChart); // #7606: a count, whole-number ticks
         SetChartYLimitsWithLegendPadding(DeadlockTrendChart, 0, data.Max(d => d.Count));
         ShowChartLegend(DeadlockTrendChart);
@@ -756,6 +772,7 @@ public partial class ViewerServerTab
     internal void RenderBlockingDurationChart(List<BlockingDurationStatsPoint> data)
     {
         ClearChart(BlockingDurationChart);
+        ViewerChartCards.SetSubtitle(BlockingDurationChart, null); // #8151: nothing drawn, nothing named
         ApplyTheme(BlockingDurationChart);
 
         var (winStartUtc, winEndUtc) = GetWindowUtc();
@@ -774,7 +791,7 @@ public partial class ViewerServerTab
             BlockingDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             BlockingDurationChart.Plot.Axes.SetLimitsX(ChartXStart(BlockingDurationChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
             ReapplyAxisColors(BlockingDurationChart);
-            BlockingDurationChart.Plot.YLabel("Block Duration (ms)");
+            BlockingDurationChart.Plot.YLabel("ms");
             SetChartYLimitsWithLegendPadding(BlockingDurationChart, 0, 1);
             ShowChartLegend(BlockingDurationChart);
             BlockingDurationChart.Refresh();
@@ -803,7 +820,8 @@ public partial class ViewerServerTab
         BlockingDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         BlockingDurationChart.Plot.Axes.SetLimitsX(ChartXStart(BlockingDurationChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
         ReapplyAxisColors(BlockingDurationChart);
-        BlockingDurationChart.Plot.YLabel(PerformanceMonitor.Ui.BlockingSourceLabel.For("Block Duration (ms)", data.Select(d => d.Source)));
+        BlockingDurationChart.Plot.YLabel("ms");
+        ViewerChartCards.SetSubtitle(BlockingDurationChart, BlockingSourceNote(data.Select(d => d.Source)));
         SetChartYLimitsWithLegendPadding(BlockingDurationChart, 0, globalMax > 0 ? globalMax : 1);
         ShowChartLegend(BlockingDurationChart);
         BlockingDurationChart.Refresh();
@@ -818,6 +836,7 @@ public partial class ViewerServerTab
     private void RenderBlockingTotalDurationChart(List<BlockingDurationStatsPoint> data)
     {
         ClearChart(BlockingTotalDurationChart);
+        ViewerChartCards.SetSubtitle(BlockingTotalDurationChart, null); // #8151: nothing drawn, nothing named
         ApplyTheme(BlockingTotalDurationChart);
 
         var (winStartUtc, winEndUtc) = GetWindowUtc();
@@ -836,7 +855,7 @@ public partial class ViewerServerTab
             BlockingTotalDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             BlockingTotalDurationChart.Plot.Axes.SetLimitsX(ChartXStart(BlockingTotalDurationChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
             ReapplyAxisColors(BlockingTotalDurationChart);
-            BlockingTotalDurationChart.Plot.YLabel("Total Block Duration (ms)");
+            BlockingTotalDurationChart.Plot.YLabel("ms");
             SetChartYLimitsWithLegendPadding(BlockingTotalDurationChart, 0, 1);
             ShowChartLegend(BlockingTotalDurationChart);
             BlockingTotalDurationChart.Refresh();
@@ -858,7 +877,8 @@ public partial class ViewerServerTab
         BlockingTotalDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         BlockingTotalDurationChart.Plot.Axes.SetLimitsX(ChartXStart(BlockingTotalDurationChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
         ReapplyAxisColors(BlockingTotalDurationChart);
-        BlockingTotalDurationChart.Plot.YLabel(PerformanceMonitor.Ui.BlockingSourceLabel.For("Total Block Duration (ms)", data.Select(d => d.Source)));
+        BlockingTotalDurationChart.Plot.YLabel("ms");
+        ViewerChartCards.SetSubtitle(BlockingTotalDurationChart, BlockingSourceNote(data.Select(d => d.Source)));
         SetChartYLimitsWithLegendPadding(BlockingTotalDurationChart, 0, globalMax > 0 ? globalMax : 1);
         ShowChartLegend(BlockingTotalDurationChart);
         BlockingTotalDurationChart.Refresh();
@@ -892,7 +912,7 @@ public partial class ViewerServerTab
             DeadlockWaitChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             DeadlockWaitChart.Plot.Axes.SetLimitsX(ChartXStart(DeadlockWaitChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
             ReapplyAxisColors(DeadlockWaitChart);
-            DeadlockWaitChart.Plot.YLabel("Deadlock Wait (ms)");
+            DeadlockWaitChart.Plot.YLabel("ms");
             SetChartYLimitsWithLegendPadding(DeadlockWaitChart, 0, 1);
             ShowChartLegend(DeadlockWaitChart);
             DeadlockWaitChart.Refresh();
@@ -921,7 +941,7 @@ public partial class ViewerServerTab
         DeadlockWaitChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         DeadlockWaitChart.Plot.Axes.SetLimitsX(ChartXStart(DeadlockWaitChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
         ReapplyAxisColors(DeadlockWaitChart);
-        DeadlockWaitChart.Plot.YLabel("Deadlock Wait (ms)");
+        DeadlockWaitChart.Plot.YLabel("ms");
         SetChartYLimitsWithLegendPadding(DeadlockWaitChart, 0, globalMax > 0 ? globalMax : 1);
         ShowChartLegend(DeadlockWaitChart);
         DeadlockWaitChart.Refresh();
@@ -954,7 +974,7 @@ public partial class ViewerServerTab
             DeadlockTotalWaitChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             DeadlockTotalWaitChart.Plot.Axes.SetLimitsX(ChartXStart(DeadlockTotalWaitChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
             ReapplyAxisColors(DeadlockTotalWaitChart);
-            DeadlockTotalWaitChart.Plot.YLabel("Total Deadlock Wait (ms)");
+            DeadlockTotalWaitChart.Plot.YLabel("ms");
             SetChartYLimitsWithLegendPadding(DeadlockTotalWaitChart, 0, 1);
             ShowChartLegend(DeadlockTotalWaitChart);
             DeadlockTotalWaitChart.Refresh();
@@ -976,7 +996,7 @@ public partial class ViewerServerTab
         DeadlockTotalWaitChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         DeadlockTotalWaitChart.Plot.Axes.SetLimitsX(ChartXStart(DeadlockTotalWaitChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
         ReapplyAxisColors(DeadlockTotalWaitChart);
-        DeadlockTotalWaitChart.Plot.YLabel("Total Deadlock Wait (ms)");
+        DeadlockTotalWaitChart.Plot.YLabel("ms");
         SetChartYLimitsWithLegendPadding(DeadlockTotalWaitChart, 0, globalMax > 0 ? globalMax : 1);
         ShowChartLegend(DeadlockTotalWaitChart);
         DeadlockTotalWaitChart.Refresh();
@@ -1062,7 +1082,7 @@ public partial class ViewerServerTab
             CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             CurrentWaitsDurationChart.Plot.Axes.SetLimitsX(ChartXStart(CurrentWaitsDurationChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
             ReapplyAxisColors(CurrentWaitsDurationChart);
-            CurrentWaitsDurationChart.Plot.YLabel("Total Wait Duration (ms)");
+            CurrentWaitsDurationChart.Plot.YLabel("ms");
             SetChartYLimitsWithLegendPadding(CurrentWaitsDurationChart, 0, 1);
             ShowChartLegend(CurrentWaitsDurationChart);
             CurrentWaitsDurationChart.Refresh();
@@ -1075,7 +1095,7 @@ public partial class ViewerServerTab
         CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         CurrentWaitsDurationChart.Plot.Axes.SetLimitsX(ChartXStart(CurrentWaitsDurationChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
         ReapplyAxisColors(CurrentWaitsDurationChart);
-        CurrentWaitsDurationChart.Plot.YLabel("Total Wait Duration (ms)");
+        CurrentWaitsDurationChart.Plot.YLabel("ms");
         SetChartYLimitsWithLegendPadding(CurrentWaitsDurationChart, 0, globalMax > 0 ? globalMax : 1);
         ShowChartLegend(CurrentWaitsDurationChart);
         CurrentWaitsDurationChart.Refresh();
@@ -1102,7 +1122,7 @@ public partial class ViewerServerTab
             CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             CurrentWaitsBlockedChart.Plot.Axes.SetLimitsX(ChartXStart(CurrentWaitsBlockedChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
             ReapplyAxisColors(CurrentWaitsBlockedChart);
-            CurrentWaitsBlockedChart.Plot.YLabel("Blocked Sessions");
+            CurrentWaitsBlockedChart.Plot.YLabel("count");
             PerformanceMonitor.Ui.ChartStyle.UseCountAxis(CurrentWaitsBlockedChart); // #7606: a count, whole-number ticks
             SetChartYLimitsWithLegendPadding(CurrentWaitsBlockedChart, 0, 1);
             ShowChartLegend(CurrentWaitsBlockedChart);
@@ -1116,7 +1136,7 @@ public partial class ViewerServerTab
         CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         CurrentWaitsBlockedChart.Plot.Axes.SetLimitsX(ChartXStart(CurrentWaitsBlockedChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
         ReapplyAxisColors(CurrentWaitsBlockedChart);
-        CurrentWaitsBlockedChart.Plot.YLabel("Blocked Sessions");
+        CurrentWaitsBlockedChart.Plot.YLabel("count");
         PerformanceMonitor.Ui.ChartStyle.UseCountAxis(CurrentWaitsBlockedChart); // #7606: a count, whole-number ticks
         SetChartYLimitsWithLegendPadding(CurrentWaitsBlockedChart, 0, globalMax > 0 ? globalMax : 1);
         ShowChartLegend(CurrentWaitsBlockedChart);

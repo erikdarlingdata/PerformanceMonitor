@@ -685,7 +685,7 @@ public partial class ViewerServerTab
 
         CollectorDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         ReapplyAxisColors(CollectorDurationChart);
-        CollectorDurationChart.Plot.YLabel("Slowest run per bucket (ms)");
+        CollectorDurationChart.Plot.YLabel("ms");
         CollectorDurationChart.Plot.Axes.AutoScaleY();
         CollectorDurationChart.Plot.Axes.SetLimitsX(ChartXStart(CollectorDurationChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ShowChartLegend(CollectorDurationChart);

@@ -274,7 +274,7 @@ public partial class ViewerServerTab
         MemoryChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         MemoryChart.Plot.Axes.SetLimitsX(ChartXStart(MemoryChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(MemoryChart);
-        MemoryChart.Plot.YLabel("Memory (GB)");
+        MemoryChart.Plot.YLabel("GB");
 
         var maxVal = MemoryOverviewYMax(totalMem, targetMem, bufferPool, grantMb);
         SetChartYLimitsWithLegendPadding(MemoryChart, 0, maxVal);
@@ -375,7 +375,7 @@ public partial class ViewerServerTab
         MemoryGrantSizingChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         MemoryGrantSizingChart.Plot.Axes.SetLimitsX(ChartXStart(MemoryGrantSizingChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(MemoryGrantSizingChart);
-        MemoryGrantSizingChart.Plot.YLabel("Memory (MB)");
+        MemoryGrantSizingChart.Plot.YLabel("MB");
         SetChartYLimitsWithLegendPadding(MemoryGrantSizingChart, 0, sizingMax > 0 ? sizingMax : 100);
         ShowChartLegend(MemoryGrantSizingChart);
         MemoryGrantSizingChart.Refresh();
@@ -413,7 +413,7 @@ public partial class ViewerServerTab
         MemoryGrantActivityChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         MemoryGrantActivityChart.Plot.Axes.SetLimitsX(ChartXStart(MemoryGrantActivityChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(MemoryGrantActivityChart);
-        MemoryGrantActivityChart.Plot.YLabel("Count");
+        MemoryGrantActivityChart.Plot.YLabel("count");
         PerformanceMonitor.Ui.ChartStyle.UseCountAxis(MemoryGrantActivityChart); // #7606: a count, whole-number ticks
         SetChartYLimitsWithLegendPadding(MemoryGrantActivityChart, 0, activityMax > 0 ? activityMax : 10);
         ShowChartLegend(MemoryGrantActivityChart);
@@ -520,7 +520,7 @@ public partial class ViewerServerTab
         MemoryPressureEventsChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         MemoryPressureEventsChart.Plot.Axes.SetLimitsX(ChartXStart(MemoryPressureEventsChart.Plot, xMin, xMax), xMax);
         ReapplyAxisColors(MemoryPressureEventsChart);
-        MemoryPressureEventsChart.Plot.YLabel("Pressure Events per Hour");
+        MemoryPressureEventsChart.Plot.YLabel("events/hr");
         PerformanceMonitor.Ui.ChartStyle.UseCountAxis(MemoryPressureEventsChart); // #7606: a count, whole-number ticks
         SetChartYLimitsWithLegendPadding(MemoryPressureEventsChart, 0, Math.Max(maxBarCount, 5));
 
@@ -725,7 +725,7 @@ public partial class ViewerServerTab
             MemoryClerksChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             MemoryClerksChart.Plot.Axes.SetLimitsX(ChartXStart(MemoryClerksChart.Plot, xMin, xMax), xMax);
             ReapplyAxisColors(MemoryClerksChart);
-            MemoryClerksChart.Plot.YLabel("Memory (MB)");
+            MemoryClerksChart.Plot.YLabel("MB");
             SetChartYLimitsWithLegendPadding(MemoryClerksChart, 0, globalMax > 0 ? globalMax : 100);
             ShowChartLegend(MemoryClerksChart);
             MemoryClerksChart.Refresh();

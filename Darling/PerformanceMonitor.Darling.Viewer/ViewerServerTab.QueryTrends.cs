@@ -244,7 +244,7 @@ public partial class ViewerServerTab
         ClearChart(QueryDurationTrendChart);
         ApplyTheme(QueryDurationTrendChart);
 
-        if (data.Count == 0) { RefreshEmptyChart(QueryDurationTrendChart, "Query Duration", "Duration ms/s"); return; }
+        if (data.Count == 0) { RefreshEmptyChart(QueryDurationTrendChart, "Query Duration", "ms/s"); return; }
         ShowTrendCoverage(QueryDurationTrendChart, series);
 
         var rangeStart = startUtc.ToOADate();
@@ -263,7 +263,7 @@ public partial class ViewerServerTab
         QueryDurationTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         QueryDurationTrendChart.Plot.Axes.SetLimitsX(ChartXStart(QueryDurationTrendChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(QueryDurationTrendChart);
-        QueryDurationTrendChart.Plot.YLabel("Duration ms/s");
+        QueryDurationTrendChart.Plot.YLabel("ms/s");
         SetChartYLimitsWithLegendPadding(QueryDurationTrendChart, 0, values.Max());
         ShowChartLegend(QueryDurationTrendChart);
         QueryDurationTrendChart.Refresh();
@@ -275,7 +275,7 @@ public partial class ViewerServerTab
         ClearChart(ProcDurationTrendChart);
         ApplyTheme(ProcDurationTrendChart);
 
-        if (data.Count == 0) { RefreshEmptyChart(ProcDurationTrendChart, "Procedure Duration", "Duration ms/s"); return; }
+        if (data.Count == 0) { RefreshEmptyChart(ProcDurationTrendChart, "Procedure Duration", "ms/s"); return; }
         ShowTrendCoverage(ProcDurationTrendChart, series);
 
         var rangeStart = startUtc.ToOADate();
@@ -294,7 +294,7 @@ public partial class ViewerServerTab
         ProcDurationTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         ProcDurationTrendChart.Plot.Axes.SetLimitsX(ChartXStart(ProcDurationTrendChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(ProcDurationTrendChart);
-        ProcDurationTrendChart.Plot.YLabel("Duration ms/s");
+        ProcDurationTrendChart.Plot.YLabel("ms/s");
         SetChartYLimitsWithLegendPadding(ProcDurationTrendChart, 0, values.Max());
         ShowChartLegend(ProcDurationTrendChart);
         ProcDurationTrendChart.Refresh();
@@ -306,7 +306,7 @@ public partial class ViewerServerTab
         ClearChart(QueryStoreDurationTrendChart);
         ApplyTheme(QueryStoreDurationTrendChart);
 
-        if (data.Count == 0) { RefreshEmptyChart(QueryStoreDurationTrendChart, "Query Store Duration", "Duration ms/s"); return; }
+        if (data.Count == 0) { RefreshEmptyChart(QueryStoreDurationTrendChart, "Query Store Duration", "ms/s"); return; }
         ShowTrendCoverage(QueryStoreDurationTrendChart, series);
 
         var rangeStart = startUtc.ToOADate();
@@ -327,7 +327,7 @@ public partial class ViewerServerTab
         QueryStoreDurationTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         QueryStoreDurationTrendChart.Plot.Axes.SetLimitsX(ChartXStart(QueryStoreDurationTrendChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(QueryStoreDurationTrendChart);
-        QueryStoreDurationTrendChart.Plot.YLabel("Duration ms/s");
+        QueryStoreDurationTrendChart.Plot.YLabel("ms/s");
         SetChartYLimitsWithLegendPadding(QueryStoreDurationTrendChart, 0, values.Max());
         ShowChartLegend(QueryStoreDurationTrendChart);
         QueryStoreDurationTrendChart.Refresh();
@@ -339,7 +339,7 @@ public partial class ViewerServerTab
         ClearChart(ExecutionCountTrendChart);
         ApplyTheme(ExecutionCountTrendChart);
 
-        if (data.Count == 0) { RefreshEmptyChart(ExecutionCountTrendChart, "Executions", "Executions/sec"); return; }
+        if (data.Count == 0) { RefreshEmptyChart(ExecutionCountTrendChart, "Executions", "exec/s"); return; }
         ShowTrendCoverage(ExecutionCountTrendChart, series);
 
         var rangeStart = startUtc.ToOADate();
@@ -358,7 +358,7 @@ public partial class ViewerServerTab
         ExecutionCountTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         ExecutionCountTrendChart.Plot.Axes.SetLimitsX(ChartXStart(ExecutionCountTrendChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(ExecutionCountTrendChart);
-        ExecutionCountTrendChart.Plot.YLabel("Executions/sec");
+        ExecutionCountTrendChart.Plot.YLabel("exec/s");
         SetChartYLimitsWithLegendPadding(ExecutionCountTrendChart, 0, values.Max());
         ShowChartLegend(ExecutionCountTrendChart);
         ExecutionCountTrendChart.Refresh();

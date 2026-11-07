@@ -94,7 +94,7 @@ public partial class ViewerServerTab
         var (startUtc, endUtc) = GetWindowUtc();
         LatchSpinlockRenderer.Render(LatchStatsChart, _latchStatsHover, data,
             d => d.CollectionTime, d => d.LatchClass, d => d.WaitTimeMsPerSecond,
-            "Latch Waits", "Wait Time (ms/sec)",
+            "Latch Waits", "ms/s",
             ChartXStart(startUtc, endUtc), endUtc.ToOADate());
         KeepPlottedInView(LatchStatsChart, startUtc, endUtc);
     }
@@ -104,7 +104,7 @@ public partial class ViewerServerTab
         var (startUtc, endUtc) = GetWindowUtc();
         LatchSpinlockRenderer.Render(SpinlockStatsChart, _spinlockStatsHover, data,
             d => d.CollectionTime, d => d.SpinlockName, d => d.CollisionsPerSecond,
-            "Spinlock Collisions", "Collisions/sec",
+            "Spinlock Collisions", "collisions/s",
             ChartXStart(startUtc, endUtc), endUtc.ToOADate());
         KeepPlottedInView(SpinlockStatsChart, startUtc, endUtc);
     }

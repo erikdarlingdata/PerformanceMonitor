@@ -494,7 +494,7 @@ public partial class FinOpsTab
 
         FinOpsPvsTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         FinOpsPvsTrendChart.Plot.Axes.AutoScale();
-        FinOpsPvsTrendChart.Plot.YLabel("PVS Off-Row MB");
+        FinOpsPvsTrendChart.Plot.YLabel("MB");
         _chartHelper.ShowChartLegend(FinOpsPvsTrendChart); // #8086: beside or under the plot, never over it
         FinOpsPvsTrendChart.Refresh();
     }

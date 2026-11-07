@@ -42,6 +42,19 @@ public sealed class ViewerChartCardsTests
         return null;
     }
 
+    private static bool IsInCorrelatedLanes(WpfPlot chart)
+    {
+        for (DependencyObject? up = chart; up is not null; up = LogicalTreeHelper.GetParent(up))
+        {
+            if (up is CorrelatedTimelineLanesControl)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static string Name(WpfPlot chart) => string.IsNullOrEmpty(chart.Name) ? "(unnamed chart)" : chart.Name;
 
     [Fact]
@@ -59,7 +72,9 @@ public sealed class ViewerChartCardsTests
                 window.Show();
                 try
                 {
-                    var charts = ChartLayoutProbe.Logical<WpfPlot>(tab).ToList();
+                    // The overview's correlated lanes (CorrelatedTimelineLanesControl) are one stack of lane plots that share an axis, named by
+                    // their lane captions: they are one timeline, not separate chart cards.
+                    var charts = ChartLayoutProbe.Logical<WpfPlot>(tab).Where(c => !IsInCorrelatedLanes(c)).ToList();
                     Assert.NotEmpty(charts);
                     var window24 = (ValueTuple<DateTime, DateTime>)typeof(ViewerServerTab).GetMethod("GetWindowUtc", Instance)!.Invoke(tab, null)!;
                     var dataStart = window24.Item2.AddHours(-6);
@@ -122,8 +137,79 @@ public sealed class ViewerChartCardsTests
             Assert.True(failures.Count == 0, $"{failures.Count} chart card defects:{Environment.NewLine}" + string.Join(Environment.NewLine, failures));
         });
 
+    [Fact]
+    public void ACardWhoseChartPlotsOnlyZeros_ShowsZeroThroughoutInItsHeader_AndLosesItWhenDataArrives() =>
+        StaTestThread.Run(() =>
+        {
+            WithTheme(() =>
+            {
+                var chart = new WpfPlot();
+                var card = new ChartPanel { Title = "Zeros", Content = chart };
+                var host = new System.Windows.Controls.Grid();
+                host.Children.Add(card);
+                ViewerChartCards.Attach(host);
+                var window = new Window { Content = host, Width = 600, Height = 400, Left = 0, Top = 0 };
+                window.Show();
+                try
+                {
+                    ChartLayoutProbe.Layout(window);
+                    Assert.Null(card.HeaderContent);
+
+                    chart.Plot.Add.Scatter(new[] { 1.0, 2.0, 3.0 }, new[] { 0.0, 0.0, 0.0 }).LegendText = "none";
+                    ChartLayoutProbe.Render(chart);
+                    var mark = Assert.IsType<System.Windows.Controls.TextBlock>(card.HeaderContent);
+                    Assert.Equal("0 throughout", mark.Text);
+
+                    chart.Plot.Clear();
+                    chart.Plot.Add.Scatter(new[] { 1.0, 2.0, 3.0 }, new[] { 0.0, 4.0, 0.0 }).LegendText = "some";
+                    ChartLayoutProbe.Render(chart);
+                    Assert.Null(card.HeaderContent);
+                }
+                finally
+                {
+                    window.Close();
+                }
+            });
+        });
+
+    [Fact]
+    public void TheBlockingSeverityCards_NameTheAnsweringCollectorInTheSubtitle_OnlyWhenTheyDrawRows() =>
+        StaTestThread.Run(() =>
+        {
+            WithTheme(() =>
+            {
+                var tab = new ViewerServerTab(
+                    new ViewerDataService("Host=127.0.0.1;Port=1;Database=darling;Username=darling"),
+                    new DarlingServer(1, "chart-cards-test", "chart-cards-test", true, null));
+                typeof(ViewerServerTab).GetField("_refreshInFlight", Instance)!.SetValue(tab, true);
+                var window = new Window { Content = tab, Width = 1280, Height = 800, Left = 0, Top = 0 };
+                window.Show();
+                try
+                {
+                    var t0 = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+                    var rows = new List<BlockingDurationStatsPoint> { new(t0, 2, 500, 300, 250, "DMV snapshot"), new(t0.AddMinutes(1), 1, 100, 100, 100, "DMV snapshot") };
+                    var total = typeof(ViewerServerTab).GetMethod("RenderBlockingTotalDurationChart", Instance)!;
+
+                    tab.RenderBlockingDurationChart(rows);
+                    total.Invoke(tab, new object[] { rows });
+                    Assert.Equal("DMV snapshot", ViewerChartCards.CardOf(tab.BlockingDurationChart)!.Subtitle);
+                    Assert.Equal("DMV snapshot", ViewerChartCards.CardOf(tab.BlockingTotalDurationChart)!.Subtitle);
+                    Assert.Equal("ms", tab.BlockingDurationChart.Plot.Axes.Left.Label.Text);
+
+                    tab.RenderBlockingDurationChart(new List<BlockingDurationStatsPoint>());
+                    total.Invoke(tab, new object[] { new List<BlockingDurationStatsPoint>() });
+                    Assert.Equal(string.Empty, ViewerChartCards.CardOf(tab.BlockingDurationChart)!.Subtitle);
+                    Assert.Equal(string.Empty, ViewerChartCards.CardOf(tab.BlockingTotalDurationChart)!.Subtitle);
+                }
+                finally
+                {
+                    window.Close();
+                }
+            });
+        });
+
     /// <summary>
-    /// A unit is short and has no spaces ("ms", "MB", "GB", "%", "count", "ms/s", "MB/s"); a name or a name with its unit
+    /// A unit is short (twelve characters at most, the length ChartAxisTitle treats as a unit) and has no spaces ("ms", "MB", "GB", "%", "count", "ms/s", "reports/min"); a name or a name with its unit
     /// ("Lock wait ms/s", "Memory (GB)") has spaces or is long. The label is read from the plot's left axis after the render methods ran.
     /// </summary>
     private static List<string> Check(WpfPlot chart)
@@ -140,7 +226,7 @@ public sealed class ViewerChartCardsTests
         }
 
         var label = chart.Plot.Axes.Left.Label.Text ?? string.Empty;
-        if (label.Length > 8 || label.Contains(' ', StringComparison.Ordinal) || label.EndsWith('…') || label.EndsWith("...", StringComparison.Ordinal))
+        if (label.Length > 12 || label.Contains(' ', StringComparison.Ordinal) || label.EndsWith('…') || label.EndsWith("...", StringComparison.Ordinal))
         {
             found.Add($"{Name(chart)} Y axis title is '{label}', more than a unit");
         }
