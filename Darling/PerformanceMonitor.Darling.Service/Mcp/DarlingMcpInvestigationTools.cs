@@ -383,10 +383,10 @@ public sealed partial class DarlingMcpInvestigationTools
         [Description("Your claim_id, to renew. Omit to claim.")] string? claim_id = null,
         [Description("Omit, or 1.")] int? brief_format = null,
         DarlingMcpServedPolicy? served = null,
-        StoreOwnerSource? ownerSource = null,
+        DarlingAgentActionSeat? seat = null,
         CancellationToken cancellationToken = default) =>
         ClaimAsync(Store(postgres), composer, request_id, agent_id, claim_id, brief_format, cancellationToken, served?.Policy.AgentTokenName,
-            served?.NamedAgentNames, ownerSource?.Read() is { } owner ? Store(owner) : null);
+            served?.NamedAgentNames, seat?.Owner?.Read() is { } owner ? Store(owner) : null);
 
     /// <summary>The claim over a given store and composer, so a test can drive a composer that fails. <paramref name="tokenName"/> is
     /// the name of the named agent token the call came with (#6542), or null for the legacy token: with a name, the agent is that
