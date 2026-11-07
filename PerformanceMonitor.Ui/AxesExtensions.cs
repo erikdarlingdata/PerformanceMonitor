@@ -67,7 +67,8 @@ internal static class AxesExtensions
     /// <summary>
     /// Like <c>DateTimeTicksBottom()</c>, but prints the date line on only the first tick
     /// and on ticks where the date component changes. All other ticks show time-only.
-    /// Date and time formats follow the current culture, and the label converts through
+    /// The date line follows the current culture and the time is the 24-hour "HH:mm" the hover, the crosshair and the Viewer's
+    /// axis print (#8154), and the label converts through
     /// <see cref="UiTimeContext.ConvertForDisplay"/> so the axis honors the app's Local/Server/UTC
     /// display mode (#1831).
     /// </summary>
@@ -108,7 +109,8 @@ internal static class AxesExtensions
                     lastDate = null;
                 prevTick = dt;
 
-                var time = dt.ToString("t", culture);
+                /* "HH:mm": the hover and the crosshair print HH:mm:ss and the Viewer's DisplayZoneTickGenerator prints HH:mm, so one chart reads on one clock. */
+                var time = dt.ToString("HH:mm", CultureInfo.InvariantCulture);
                 if (lastDate is null || dt.Date != lastDate.Value)
                 {
                     lastDate = dt.Date;

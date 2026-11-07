@@ -67,7 +67,7 @@ A notification route sends some alerts to their own destinations. By default eve
 
 To add a route, open **Settings** and select **Manage Notification Routes**. Each route has these parts:
 
-- **Matches.** An exact metric name, a family such as `performance`, or `*` for every metric. The `*` match is offered only when the route has a server or tag scope.
+- **Matches.** An exact metric name, a family such as `performance`, `Analysis: <category>` for every analysis finding of one category, `Analysis: *` for every analysis finding, or `*` for every metric. The `*` match is offered only when the route has a server or tag scope. `Analysis: *` is offered at every scope.
 - **Applies to.** All servers, one server, or one tag. A tag covers every server assigned to it and to any of its sub-tags.
 - **Destinations.** A Teams URL, a Slack URL, a generic webhook URL, a PagerDuty routing key, and email recipients.
 
@@ -76,7 +76,7 @@ A route replaces the app-wide setting for each channel that it fills in. A chann
 When several routes match an alert, Lite picks one in this order:
 
 1. A server route, then a tag route, then an all-servers route.
-2. Within one of those, an exact metric, then a family, then `*`.
+2. Within one of those, an exact metric, then an analysis finding's category (`Analysis: <category>`), then every analysis finding (`Analysis: *`), then a family, then `*`.
 3. Among tag routes, the tag that is deeper in the tag tree. If the depth is the same, the route with the lowest number.
 
 Each channel is chosen on its own. A route with no Teams URL does not block a less specific route that has one.
