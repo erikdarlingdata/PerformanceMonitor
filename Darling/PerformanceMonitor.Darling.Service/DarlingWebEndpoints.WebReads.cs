@@ -372,7 +372,9 @@ public static partial class DarlingWebEndpoints
                 : MissingParam("query_hash"),
             ["get_query_trend"] = (c, pg, an) => RequireText(c, "query_hash", out var queryHash)
                 ? (RequireText(c, "database_name", out var db)
-                    ? DarlingMcpTrendTools.GetQueryTrend(pg, queryHash, db, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted)
+                    ? (OptionalInt(c, "bucket_minutes", out var queryTrendBucketMinutes)
+                        ? DarlingMcpTrendTools.GetQueryTrend(pg, queryHash, db, Server(c), Hours(c, 24), as_of: AsOf(c), bucket_minutes: queryTrendBucketMinutes, cancellationToken: c.RequestAborted)
+                        : UnparseableParam("bucket_minutes"))
                     : MissingParam("database_name"))
                 : MissingParam("query_hash"),
 

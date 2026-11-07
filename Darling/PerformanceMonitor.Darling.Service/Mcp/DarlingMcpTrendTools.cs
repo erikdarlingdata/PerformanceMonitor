@@ -422,7 +422,7 @@ public sealed class DarlingMcpTrendTools
         $"No read or write activity was recorded for {DatabaseFilter.ManyDatabasesDescription} on {serverName} in the last {hoursBack} hour(s). "
         + "Each name must match a collected database exactly (get_file_io_stats lists them); omit database_name for every database.";
 
-    [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time. One point per hour on the hourly tier, with executions, CPU and elapsed summed across handles. A raw point is one collection time, summed across the query's plans and handles. min_dop and max_dop are each plan's cached extremes across the plans that ran at that time (a time where nothing ran leaves both blank), plan_count says how many plans, and query_plan_hash is null when that is more than one or no hash was captured." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time. Points are time buckets (bucket, bucket_minutes, aggregate_note) sized to the window unless bucket_minutes names a width: each point sums the collections it holds across the query's plans and handles, collection_count says how many, and avg_cpu_ms and avg_elapsed_ms are weighted by executions. min_dop and max_dop are each plan's cached extremes across the plans that ran in the bucket (a bucket where nothing ran leaves both blank), plan_count says how many plans, and query_plan_hash is null when that is more than one or no hash was captured. Past the raw tier's four days the hourly rollup answers, in buckets of whole hours (bucket_minutes a multiple of 60): executions, CPU and elapsed are summed across handles, and the other fields are null, collection_count included." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryTrend(
         NpgsqlDataSource postgres,
         [Description("The query_hash value from get_top_queries_by_cpu or get_query_store_top.")] string query_hash,
@@ -430,6 +430,7 @@ public sealed class DarlingMcpTrendTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -438,9 +439,17 @@ public sealed class DarlingMcpTrendTools
         var validation = DarlingReadWindow.Validate(hours_back, as_of, WebReadReach.MaxHoursFor("get_query_trend"), out var windowEnd);
         if (validation != null) return validation;
 
+        /* #8063: the width is sized the way Lite's twin (#7907) and the duration siblings size theirs: the ladder's pick for the
+           shared auto target when the caller leaves it, the caller's own width when it fits the read's cap, a refusal naming the
+           width that fits when it does not. */
+        var budget = TrendBudget.Mcp(TrendBuckets.QueryTrendMaxPoints);
+        var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
+        if (bucketError != null) return bucketError;
+
         try
         {
             var now = windowEnd;
+            var startUtc = now.AddHours(-hours_back);
 
             /* #3541 A2: the store's measured shape rides along so the tier decision degrades to what exists
                and to what has materialized (see DarlingTrendReader.ResolveTier) — the age-only #2353 rule
@@ -448,16 +457,33 @@ public sealed class DarlingMcpTrendTools
                rollup while raw still held the rows on a never-backfilled one. Cached per data source and
                shared with the composer, so this is not a probe per call. */
             var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
+            var tierCoverage = coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView);
+
+            /* #8063: the tier is decided here, before the read, because the width depends on it: the hourly rollup's points
+               are whole hours, so a width it cannot serve is refused rather than quietly answered at another, and an automatic
+               width is never finer than the rollup's hour (TrendBuckets.OnHourlyTier), the rule the duration siblings apply.
+               The read resolves the same tier from the same clock, so the two cannot disagree. */
+            var tierClock = TierClock(as_of, now);
+            if (DarlingTrendReader.ResolveTier(startUtc, tierClock, rollups.QueryGrainHourly, tierCoverage) == RetentionTier.Hourly)
+            {
+                var hourlyError = TrendBuckets.RequireWholeHours(bucket_minutes, RawRetentionDays);
+                if (hourlyError != null) return hourlyError;
+
+                bucketMinutes = TrendBuckets.OnHourlyTier(bucket_minutes, bucketMinutes);
+            }
+
             var history = await DarlingTrendReader.GetQueryHistoryAsync(
-                postgres, resolved.ServerId, database_name, query_hash, now.AddHours(-hours_back), now,
+                postgres, resolved.ServerId, database_name, query_hash, startUtc, now,
+                nowUtc: tierClock,
                 hourlyAvailable: rollups.QueryGrainHourly,
-                coverage: coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView),
+                coverage: tierCoverage,
                 /* #3653 A6: the hourly FROM-clause item for THIS window (RollupCoverage.StitchedRelationSql) —
                    the legacy alone with no successor (byte-identical to "collect.<legacy> AS f", the SAME
                    text HourlyRelationFor plus the bare-name alias produced), or a stitch splicing in the
                    successor past its floor. The tier above is still decided over the legacy pair, the deeper
                    of the two. */
-                hourlyRelation: coverage.StitchedRelationSql(TimescaleSupport.QueryStatsHourlyView, "f", now.AddHours(-hours_back), RollupCoverage.StitchTier.Hourly),
+                hourlyRelation: coverage.StitchedRelationSql(TimescaleSupport.QueryStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly),
+                bucketMinutes: bucketMinutes,
                 cancellationToken: cancellationToken);
             var rows = history.Points;
             if (rows.Count == 0)
@@ -507,9 +533,11 @@ public sealed class DarlingMcpTrendTools
                 min_dop = aggregated ? (int?)null : r.MinDop,
                 max_dop = aggregated ? (int?)null : r.MaxDop,
                 query_plan_hash = aggregated ? null : r.QueryPlanHash,
-                plan_count = aggregated ? (int?)null : r.PlanCount
+                plan_count = aggregated ? (int?)null : r.PlanCount,
+                /* #8063: how many collections the bucket holds; the rollup does not count them, so null on the hourly tier. */
+                collection_count = aggregated ? (int?)null : r.CollectionCount
             });
-            var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
+            var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now, cancellationToken);
 
             return JsonSerializer.Serialize(new
             {
@@ -529,17 +557,14 @@ public sealed class DarlingMcpTrendTools
                 /* #7416 item 21: true only when the requested start is older than the tier that answered keeps. */
                 start_older_than_tier = history.StartOlderThanTier,
                 tier_keeps_days = history.TierKeepsDays,
-                bucket = history.Source == "raw" ? "per-collection" : "1 hour",
-                /* #3897: the width beside the word, as every trend carrying `bucket` now publishes it — null on
-                   the per-collection history, the rollup's hour otherwise. Lite's twin writes it through
-                   WriteDisclosure. */
-                bucket_minutes = history.Source == "raw" ? (int?)null : 60,
+                /* #3897, #8063: the grain as a word and the width in minutes beside it, as every bucketed trend publishes them;
+                   the raw tier's points are buckets of the resolved width, the hourly tier's whole hours. Lite's twin writes
+                   the same keys through WriteDisclosure. */
+                bucket = TrendBuckets.Word(bucketMinutes),
+                bucket_minutes = bucketMinutes,
                 aggregate_note = aggregated
-                    ? "Served from the hourly rollup because the requested window reaches past the raw tier's "
-                      + "4-day retention. Executions, CPU and elapsed time are summed per hour across every sql_handle of the query_hash, one point per hour; logical_reads, "
-                      + "logical_writes, physical_reads, rows, spills, min_dop, max_dop, query_plan_hash and plan_count are "
-                      + "null because the rollup does not carry them - null means not measured, not zero."
-                    : null,
+                    ? QueryTrendHourlyNote(bucketMinutes, bucket_minutes is not null)
+                    : TrendBuckets.QueryTrendNote(bucketMinutes, bucket_minutes is not null, budget.AutoPoints),
                 data_points = rows.Count,
                 trend = result,
                 discontinuities = BaselineDiscontinuities.ToPayload(discontinuities)
@@ -1028,6 +1053,18 @@ public sealed class DarlingMcpTrendTools
         + "clock by up to two hours (the current hour is never materialized and the previous one lands on the next refresh). "
         + "peak_elapsed_ms_per_second is the bucket's busiest HOUR on this tier: the rollup keeps hourly sums, not the collections inside them."
         + (bucket.Requested ? " The width is the bucket_minutes you passed." : string.Empty);
+
+    /// <summary>The prose get_query_trend's hourly tier owes its reader (#2353, #8063): why the rollup served, what one point is
+    /// at the served width (an hour, or the rollup's hours gathered into a wider bucket), and why the per-collection columns
+    /// are null. The raw tier says <see cref="TrendBuckets.QueryTrendNote"/>, the sentence Lite's twin writes.</summary>
+    private static string QueryTrendHourlyNote(int bucketMinutes, bool requested) =>
+        $"Served from the hourly rollup because the requested window reaches past the raw tier's {RawRetentionDays}-day retention. "
+        + (bucketMinutes == 60
+            ? "Executions, CPU and elapsed time are summed per hour across every sql_handle of the query_hash, one point per hour; "
+            : $"Each point gathers the rollup's hours in one {TrendBuckets.Adjective(bucketMinutes)} bucket, stamped at its start (the first point at the window's start), with executions, CPU and elapsed time summed across those hours and every sql_handle of the query_hash; ")
+        + "logical_reads, logical_writes, physical_reads, rows, spills, min_dop, max_dop, query_plan_hash, plan_count and collection_count are "
+        + "null because the rollup does not carry them - null means not measured, not zero."
+        + (requested ? " The width is the bucket_minutes you passed." : string.Empty);
 
     /// <summary>What one point of a routed trio answer is, on the tier that served it (#3897).</summary>
     private static string RoutedAggregateNote(DarlingTrendReader.DurationTrendRoute route, BucketChoice bucket) =>
