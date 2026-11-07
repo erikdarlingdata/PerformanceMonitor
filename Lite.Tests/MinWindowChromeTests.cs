@@ -592,8 +592,28 @@ public sealed class MinWindowChromeTests
         var host = new Window { Content = root, Width = 900, Height = 600, Left = 0, Top = 0, WindowStartupLocation = WindowStartupLocation.Manual, ShowInTaskbar = false };
         s_hosts.Add(w, host);
         host.Show();
+        /* Windows will not size a window past the screen (plus its borders), so a 1280 wide host is cut to 1044 on a 1024 wide screen
+           and the sidebar would rightly be the rail. The host lifts that limit, so a test gets the width it asks for on any screen. */
+        ((System.Windows.Interop.HwndSource)PresentationSource.FromVisual(host)).AddHook(AllowAnySize);
         ClippedTextProbe.Settle(host);
         return w;
+    }
+
+    private const int WM_GETMINMAXINFO = 0x0024;
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct MinMaxInfo { public int ReservedX, ReservedY, MaxSizeX, MaxSizeY, MaxPositionX, MaxPositionY, MinTrackX, MinTrackY, MaxTrackX, MaxTrackY; }
+
+    private static IntPtr AllowAnySize(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == WM_GETMINMAXINFO)
+        {
+            var info = System.Runtime.InteropServices.Marshal.PtrToStructure<MinMaxInfo>(lParam);
+            info.MaxTrackX = Math.Max(info.MaxTrackX, 4000);
+            info.MaxTrackY = Math.Max(info.MaxTrackY, 4000);
+            System.Runtime.InteropServices.Marshal.StructureToPtr(info, lParam, false);
+        }
+        return IntPtr.Zero;
     }
 
     private static ServerTab HostTab(MainWindow w, DuckDbInitializer duckDb)
