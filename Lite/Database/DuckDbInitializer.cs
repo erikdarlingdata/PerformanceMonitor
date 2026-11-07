@@ -321,7 +321,8 @@ public partial class DuckDbInitializer : IDisposable
         if (timeout.HasValue)
         {
             var waitStarted = Stopwatch.GetTimestamp();
-            if (!TryEnterWriteLockPollingFirst(timeout.Value, waitStarted))
+            var held = TryEnterWriteLockPollingFirst(timeout.Value, waitStarted, holderMember, holderFile);
+            if (held is null)
             {
                 /* #5650: say who holds the lock and for how long, from the registry every acquisition writes
                    to. The old text named "archival or maintenance" whatever the holder was. */
@@ -330,11 +331,11 @@ public partial class DuckDbInitializer : IDisposable
                     StoreLockHolders.Snapshot(),
                     StoreLockHolders.Name(holderMember, holderFile));
             }
+
+            return held;
         }
-        else
-        {
-            s_dbLock.EnterWriteLock();
-        }
+
+        s_dbLock.EnterWriteLock();
         return new LockReleaser(s_dbLock, write: true, StoreLockHolders.Register(holderMember, holderFile, write: true), WriteHoldWarnAfter);
     }
 
@@ -355,8 +356,12 @@ public partial class DuckDbInitializer : IDisposable
     /// and the writer keeps the whole budget it was given: the deadline is the same, and a budget no longer than the
     /// tail parks at once. A writer whose budget runs out still throws <see cref="StoreLockTimeoutException"/>, and
     /// every budgeted caller treats that as "skip this cycle".</para>
+    ///
+    /// <para>Returns the releaser for the hold, registered with the holder registry the moment the lock is taken
+    /// on either path, or null when the budget ran out. Disposing the releaser unregisters the holder and exits the
+    /// lock, as for every other acquisition.</para>
     /// </summary>
-    private bool TryEnterWriteLockPollingFirst(TimeSpan timeout, long waitStarted)
+    private LockReleaser? TryEnterWriteLockPollingFirst(TimeSpan timeout, long waitStarted, string? holderMember, string? holderFile)
     {
         var deadline = waitStarted + ToTimestampTicks(timeout);
         var parkAt = deadline - ToTimestampTicks(WriteLockParkTail < timeout ? WriteLockParkTail : timeout);
@@ -367,7 +372,7 @@ public partial class DuckDbInitializer : IDisposable
             {
                 if (s_dbLock.TryEnterWriteLock(0))
                 {
-                    return true;
+                    return new LockReleaser(s_dbLock, write: true, StoreLockHolders.Register(holderMember, holderFile, write: true), WriteHoldWarnAfter);
                 }
 
                 var now = Stopwatch.GetTimestamp();
@@ -386,7 +391,17 @@ public partial class DuckDbInitializer : IDisposable
         }
 
         var remaining = Stopwatch.GetElapsedTime(Stopwatch.GetTimestamp(), deadline);
-        return s_dbLock.TryEnterWriteLock(remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero);
+        if (remaining < TimeSpan.Zero)
+        {
+            remaining = TimeSpan.Zero;
+        }
+
+        if (!s_dbLock.TryEnterWriteLock(remaining))
+        {
+            return null;
+        }
+
+        return new LockReleaser(s_dbLock, write: true, StoreLockHolders.Register(holderMember, holderFile, write: true), WriteHoldWarnAfter);
     }
 
     private static long ToTimestampTicks(TimeSpan duration) => (long)(duration.TotalSeconds * Stopwatch.Frequency);
