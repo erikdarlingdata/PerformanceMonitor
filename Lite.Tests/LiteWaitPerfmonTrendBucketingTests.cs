@@ -295,6 +295,35 @@ public sealed class LiteTrendBucketingLiveTests : IClassFixture<SharedDuckDbFixt
         Assert.Equal(4.0, (double)point.DeltaValue!.Value / point.SampleIntervalSeconds!.Value, precision: 6);
     }
 
+    /// <summary>#8078: <c>sample_interval_seconds</c> is a per-row figure. A wait type that returns after missing some passes stores the
+    /// seconds since its own previous sighting, several cadences, while its siblings in the same collection store one cadence. The
+    /// Overview lane's total credits each collection's whole stored wait over the collection's cadence, so the returning type's longer
+    /// interval never re-rates its siblings and none of its wait is lost: two steady types at 500 and 100 ms/s read 600 on every point,
+    /// 610 where the third type's 600 ms lands, and the hour's points average the sum of the three per-type hour rates, 500 + 100 + 2.</summary>
+    [Fact]
+    public async Task TotalWaitTrend_CreditsEachCollectionsWholeWaitOverItsCadence_SoTheTotalEqualsTheSumOfItsTypes()
+    {
+        var end = new DateTime(2026, 3, 12, 10, 0, 0);
+        var start = end.AddHours(-1);
+        for (var m = 0; m < 60; m++)
+        {
+            var at = start.AddMinutes(m);
+            await SeedWaitAsync(at, "SOS_SCHEDULER_YIELD", 30000, 29000, 100, 60);
+            await SeedWaitAsync(at, "PAGEIOLATCH_SH", 6000, 10, 50, 60);
+            if (m % 5 == 4)
+            {
+                await SeedWaitAsync(at, "CXCONSUMER", 600, 0, 1, 300);
+            }
+        }
+
+        var points = await _dataService.GetTotalWaitTrendAsync(ServerId, fromDate: start, toDate: end);
+
+        Assert.Equal(60, points.Count);
+        Assert.All(points, p => Assert.True(Math.Abs(p.WaitTimeMsPerSecond - 600) < 0.01 || Math.Abs(p.WaitTimeMsPerSecond - 610) < 0.01, $"a one-minute point reads {p.WaitTimeMsPerSecond} ms/s"));
+        /* 500 + 100 + 2: the three types' own hour rates, the stored positive deltas over the hour's seconds. */
+        Assert.Equal(602.0, points.Average(p => p.WaitTimeMsPerSecond), 2);
+    }
+
     /// <summary>The ruling's picker test: a second call inside 15 minutes runs no DISTINCT (the store gains a
     /// second wait type, but a within-TTL call still answers with the cached one-type list), and a call past
     /// the TTL reruns it and picks up the change. Only the picker entry point takes <c>nowUtc</c> / caches at
