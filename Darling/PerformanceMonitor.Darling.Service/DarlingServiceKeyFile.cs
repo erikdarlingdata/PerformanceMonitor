@@ -137,6 +137,11 @@ internal static class DarlingServiceKeyFile
                 return RefuseDirectory<TKey>(path, directory, distrust, exists);
             }
 
+            if (!exists && UnreadableDirectoryReason(directory) is { } unreadable)
+            {
+                return Refuse<TKey>(path, unreadable, untrusted: true, discarded, exists: true);
+            }
+
             if (exists)
             {
                 var untrusted = DarlingManagedRoles.UntrustedComposeCredentialReason(new FileInfo(path));
@@ -209,6 +214,11 @@ internal static class DarlingServiceKeyFile
                 return RefuseDirectory<TKey>(path, directory, distrust, exists);
             }
 
+            if (!exists && UnreadableDirectoryReason(directory) is { } unreadable)
+            {
+                return Refuse<TKey>(path, unreadable, untrusted: true, discarded, exists: true);
+            }
+
             /* #5366: a directory that was there before this write is an operator's: an account that can write to it can
                swap the temporary file for another between its close and the move, or rename the key away. The service
                does not re-permission it; it says what to change. A directory the service just made was hardened as it
@@ -253,6 +263,23 @@ internal static class DarlingServiceKeyFile
         return owner.Links == 1
             ? null
             : $"it has {owner.Links.ToString(CultureInfo.InvariantCulture)} names, not one";
+    }
+
+    /// <summary>Why a key that looks absent is not known to be (#8141): the service's user cannot list
+    /// <paramref name="directory"/>, so a file in it would read as missing. Null when it can, when the directory is not
+    /// there, or when this platform has no Unix modes.</summary>
+    internal static string? UnreadableDirectoryReason(string directory)
+    {
+        if (ComposeCredentialDirectoryGuard.Current.UnixModes is not { } modes
+            || !Directory.Exists(directory)
+            || modes.CanList(directory))
+        {
+            return null;
+        }
+
+        var euid = modes.EffectiveUserId;
+        return $"it cannot be read (permission denied): user {euid.ToString(CultureInfo.InvariantCulture)}, which the service runs as, cannot list {directory}; "
+            + $"to give it to that user, run: {DarlingManagedRoles.CredentialOwnershipFix(euid, directory)}";
     }
 
     private static bool AnythingAtOrFalse(string path)

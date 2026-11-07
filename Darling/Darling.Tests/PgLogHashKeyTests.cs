@@ -65,6 +65,11 @@ internal sealed class StandInUnixModes : IUnixDirectoryModes
 
     public UnixFileOwner? OwnerOf(string path) => _owners.TryGetValue(Key(path), out var owner) ? owner : null;
 
+    /// <summary>Directories the stand-in reports as unlistable by the service's user (#8141).</summary>
+    public HashSet<string> Unlistable { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public bool CanList(string directory) => !Unlistable.Contains(Key(directory));
+
     /// <summary>A file someone else wrote that the file check trusts, which is the point: owner-only on Unix (a 0600
     /// file whose owner managed code cannot see), and the temp directory's inherited ACL on Windows.</summary>
     public static void WriteOwnerOnly(string path, string text)

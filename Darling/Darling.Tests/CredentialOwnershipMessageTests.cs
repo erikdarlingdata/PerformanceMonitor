@@ -6,7 +6,11 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+using System.IO;
+using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -77,6 +81,96 @@ public sealed class CredentialOwnershipMessageTests
         using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
         {
             Assert.Null(DarlingServiceKeyFile.UnexpectedOwnerReason(ComposeKey));
+        }
+    }
+
+    private static string NewDirectory()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "darling-8141-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    [Fact]
+    public void UnlistableDirectory_PasswordKey_IsRefusedAsUnreadable_NotMissing()
+    {
+        var dir = NewDirectory();
+        try
+        {
+            var modes = new StandInUnixModes { EffectiveUserId = 1654 };
+            modes.Report(dir, "700");
+            modes.Unlistable.Add(dir);
+
+            using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
+            {
+                var load = DarlingPasswordKeyFile.Load(dir, NullLogger.Instance);
+
+                Assert.True(load.Present);
+                Assert.True(load.Untrusted);
+                Assert.Contains("cannot be read (permission denied)", load.Refusal);
+                Assert.DoesNotContain("missing", load.Refusal);
+
+                var spki = PasswordPrivateKey.Generate().PublicKey.Spki;
+                var published = new PublishedKey(PasswordSeal.KeyIdFor(spki), spki);
+                var decision = DarlingPasswordKeyState.Decide(new PasswordKeyFacts(
+                    load.Present, load.Untrusted, load.Refusal, null, load.FoundAfterOpenDirectory, published, false));
+
+                Assert.Equal(PasswordKeyAction.Refused, decision.Action);
+                Assert.DoesNotContain("--reset-password-key", decision.Reason);
+            }
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void UnlistableDirectory_LogHashKey_IsRefused_NotGenerated()
+    {
+        var dir = NewDirectory();
+        try
+        {
+            var modes = new StandInUnixModes { EffectiveUserId = 1654 };
+            modes.Report(dir, "700");
+            modes.Unlistable.Add(dir);
+
+            using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
+            {
+                var load = DarlingLogHashKeyFile.Load(dir, NullLogger.Instance);
+
+                Assert.Null(load.Key);
+                Assert.False(load.Generated);
+                Assert.Contains("cannot be read (permission denied)", load.Refusal);
+                Assert.Empty(Directory.GetFileSystemEntries(dir));
+            }
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ListableDirectory_NoFile_StillAbsent()
+    {
+        var dir = NewDirectory();
+        try
+        {
+            var modes = new StandInUnixModes { EffectiveUserId = 1654 };
+            modes.Report(dir, "700");
+
+            using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
+            {
+                var load = DarlingPasswordKeyFile.Load(dir, NullLogger.Instance);
+
+                Assert.False(load.Present);
+                Assert.False(load.Untrusted);
+            }
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
         }
     }
 

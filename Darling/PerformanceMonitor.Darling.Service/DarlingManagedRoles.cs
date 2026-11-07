@@ -5990,6 +5990,11 @@ internal interface IUnixDirectoryModes
 
     /// <summary>The user id this process runs as, for comparing with <see cref="UnixFileOwner.UserId"/>.</summary>
     uint EffectiveUserId => 0;
+
+    /// <summary>Whether this process can list <paramref name="directory"/> (#8141). When it cannot, a file in it reads as
+    /// absent (<see cref="FileInfo.Exists"/> is false), which is not the same as missing. True where a stand-in does not
+    /// model it.</summary>
+    bool CanList(string directory) => true;
 }
 
 /// <summary>Who owns a file and how many names it has (#5366).</summary>
@@ -6008,4 +6013,17 @@ internal sealed class PlatformUnixDirectoryModes : IUnixDirectoryModes
     public UnixFileOwner? OwnerOf(string path) => FileIdentity.UnixOwnerOf(path);
 
     public uint EffectiveUserId => FileIdentity.EffectiveUserId();
+
+    public bool CanList(string directory)
+    {
+        try
+        {
+            _ = Directory.EnumerateFileSystemEntries(directory).Any();
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
 }
