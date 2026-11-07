@@ -156,6 +156,12 @@ public static class DarlingPgStatementReader
     /// three-row page sum to 100% of "total" time by construction; this column is the honest denominator,
     /// and it is one extra pass over a result the query has already grouped and is about to sort — no
     /// second statement, no way to drift from the rows. Identical on every row, read once off the first.</para>
+    /// <para>#8054: the statement text is joined AFTER the ranking and the cap, in a wrapper over the ranked page, so
+    /// only the page's rows look it up. The text store is keyed on (server_id, queryid) with that pair as its PRIMARY
+    /// KEY, so the join is one index lookup per returned row and cannot multiply a row, including when one queryid
+    /// ranks under two databases: both rows carry the same text. Under the aggregate the store is joined only for
+    /// <c>own_entries</c>, the small column the <c>$5</c> service-statement filter reads before the cap; the text
+    /// itself is never carried per sample.</para>
     /// <para>$1 server_id, $2/$3 window (naive UTC), $4 row cap — a PARAMETER, bound to the caller's limit by
     /// the page read and to <see cref="PgTopQueriesGridRowCap"/> by the unpaged one.</para>
     /// </summary>
@@ -271,7 +277,10 @@ public static class DarlingPgStatementReader
                 PARTITION BY queryid, database_id, user_id, toplevel
                 ORDER BY collection_time
             )
-        )
+        ),
+        /* #8054: the ranked page, every figure a caller reads except the text. The text is joined onto these rows
+           below, after the ORDER BY and the LIMIT, so the store is read once per returned row and never per sample. */
+        ranked AS (
         SELECT
             /* #2554: QUALIFIED, and both of these references need it. The LEFT JOIN below puts
                t.queryid in scope alongside differenced.queryid, which made a bare `queryid`
@@ -301,11 +310,6 @@ public static class DarlingPgStatementReader
                0 when it did and the window holds no interval. */
             {WalBytesWindowSql} AS wal_bytes,
             CAST(MAX(max_exec_peakmem_bytes) AS bigint) AS max_exec_peakmem_bytes,
-            /* #2219: the statement text, from the (server_id, queryid) store. MAX rather than a join column
-               because the grain here is (queryid, database_id) while text is keyed on queryid alone — one text
-               per group by construction, so MAX picks it without widening the GROUP BY. LEFT JOIN, so a
-               queryid whose text has not been captured yet still ranks; it simply reads as null. */
-            MAX(t.query_text) AS query_text,
             /* #3541 A7: the WINDOW's total, not the page's - see the remarks. Window aggregate over the
                grouped rows, so it is evaluated before LIMIT and is the same on every row. */
             CAST(SUM(SUM(delta_total_exec_time_ms)) OVER () AS bigint) AS window_total_exec_time_ms,
@@ -319,6 +323,8 @@ public static class DarlingPgStatementReader
             (array_agg(differenced.database_name ORDER BY differenced.collection_time DESC)
                 FILTER (WHERE differenced.database_name IS NOT NULL))[1] AS database_name
         FROM differenced
+        /* #8054: joined here for own_entries alone, the small column the $5 filter in HAVING reads before the cap. The text
+           column is not referenced under the aggregate, so a stored statement's text is never fetched per sample. */
         LEFT JOIN collect.pg_statement_text AS t
                ON  t.server_id = $1
                AND t.queryid = differenced.queryid
@@ -329,6 +335,35 @@ public static class DarlingPgStatementReader
         /* $5 = include the service's own statements. Change Watch passes false, so the sampler cannot take one of its top-N slots (#7567). */
         AND   ($5 OR NOT {IsServiceStatementSql})
         ORDER BY SUM(delta_total_exec_time_ms) DESC
+        LIMIT $4
+        )
+        SELECT
+            ranked.queryid,
+            ranked.database_id,
+            ranked.calls,
+            ranked.total_exec_time_ms,
+            ranked.rows_returned,
+            ranked.max_exec_time_ms,
+            ranked.shared_blks_hit,
+            ranked.shared_blks_read,
+            ranked.storage_blks_read,
+            ranked.orcache_blks_hit,
+            ranked.temp_blks_read,
+            ranked.temp_blks_written,
+            ranked.wal_bytes,
+            ranked.max_exec_peakmem_bytes,
+            /* #2219: the statement text, from the (server_id, queryid) store, one index lookup per returned row (#8054).
+               LEFT JOIN, so a queryid whose text has not been captured yet still ranks; it simply reads as null. The
+               store is keyed on queryid alone, so a queryid that ranks under two databases carries the same text twice. */
+            txt.query_text,
+            ranked.window_total_exec_time_ms,
+            ranked.is_service_statement,
+            ranked.database_name
+        FROM ranked
+        LEFT JOIN collect.pg_statement_text AS txt
+               ON  txt.server_id = $1
+               AND txt.queryid = ranked.queryid
+        ORDER BY ranked.total_exec_time_ms DESC
         LIMIT $4
         """;
 

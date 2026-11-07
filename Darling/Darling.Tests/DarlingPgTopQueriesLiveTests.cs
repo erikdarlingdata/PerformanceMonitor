@@ -7,9 +7,11 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -323,7 +325,7 @@ public sealed class DarlingPgTopQueriesLiveTests
             var topQueriesRow = Assert.Single(root.GetProperty("queries").EnumerateArray());
 
             /* The same four-hour window the tool read, through the drill-down for a finding rooted at this statement. */
-            var end = DateTime.UtcNow;
+            var end = LiveClock.Now();
             var key = PgTargetFactKeys.BadActorKey(OutOfRangeQueryId);
             var context = new AnalysisContext
             {
@@ -343,6 +345,277 @@ public sealed class DarlingPgTopQueriesLiveTests
             Assert.Equal(1_000, detail.GetProperty("wal_bytes").GetInt64());
 
             bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #8054: the page a caller reads, with the statement text looked up per returned row after the ranking and the cap.
+    /// Twelve statements with distinct totals, three samples each plus the series' row before the window, text stored for
+    /// the odd-numbered ones only, and one of them the service's own: the top eight come back heaviest first with their
+    /// differenced figures and their text, a statement with no stored text still ranks and reads null, the service's
+    /// statement is flagged, and when it is left out its slot goes to the ninth, with the window total counting every
+    /// statement the cap cut.
+    /// </summary>
+    [Fact]
+    public async Task TheTopPage_RanksEveryStatementWithItsFiguresAndItsText_AndTheServiceFilterStillRunsUnderTheCap()
+    {
+        const int Statements = 12;
+        const int ServiceStatement = 11;
+        const int Limit = 8;
+
+        var (withService, withoutService) = await ReadOverAsync(
+            async (connection, ct) =>
+            {
+                var t0 = MinutesAgo(30);
+                for (var i = 1; i <= Statements; i++)
+                {
+                    var queryId = OutOfRangeQueryId + i;
+                    await SeedStatsAsync(connection, ct, MinutesAgo(6 * 60), queryId, deltaCalls: 100, deltaTimeMs: 1_000, deltaRows: 10_000, walBytes: 1_000, calls: 100, sharedBlksRead: 1_000);
+                    for (var k = 1; k <= 3; k++)
+                    {
+                        await SeedStatsAsync(connection, ct, t0.AddSeconds(60 * (k - 1)), queryId, deltaCalls: 10, deltaTimeMs: 100 * i, deltaRows: 1_000,
+                            walBytes: 1_000 + 500 * k, calls: 100 + 10 * k, sharedBlksRead: 1_000 + 100 * k);
+                    }
+
+                    if (i % 2 == 1)
+                    {
+                        await SeedTextAsync(connection, ct, queryId, TextOf(i));
+                    }
+                }
+
+                await SeedOwnEntriesAsync(connection, ct, OutOfRangeQueryId + ServiceStatement, """[{"u": 10, "d": 16384}]""");
+            },
+            async (dataSource, ct) =>
+            {
+                var end = LiveClock.Now();
+                var start = end.AddHours(-4);
+                return (
+                    await DarlingPgStatementReader.GetPgTopQueriesPageAsync(dataSource, ServerId, start, end, Limit, includeServiceStatements: true, ct),
+                    await DarlingPgStatementReader.GetPgTopQueriesPageAsync(dataSource, ServerId, start, end, Limit, includeServiceStatements: false, ct));
+            });
+
+        /* Heaviest first, the cap honoured, and the window total over all twelve: 300 * (1 + ... + 12). */
+        Assert.Equal(new long[] { 12, 11, 10, 9, 8, 7, 6, 5 }, withService.Rows.Select(r => r.QueryId - OutOfRangeQueryId).ToArray());
+        Assert.Equal(23_400, withService.WindowTotalExecTimeMs);
+        foreach (var row in withService.Rows)
+        {
+            var i = row.QueryId - OutOfRangeQueryId;
+            Assert.Equal(16384, row.DatabaseId);
+            Assert.Equal(30, row.Calls);
+            Assert.Equal(300 * i, row.TotalExecTimeMs);
+            Assert.Equal(3_000, row.RowsReturned);
+            /* The seeded differencing: three measured intervals, the first against the row before the window. */
+            Assert.Equal(300, row.SharedBlocksRead);
+            Assert.Equal(1_500, row.WalBytes);
+            Assert.Equal(i % 2 == 1 ? TextOf((int)i) : null, row.QueryText);
+            Assert.Equal(i == ServiceStatement, row.IsServiceStatement);
+        }
+
+        /* The service's statement leaves before the cap, so the ninth takes its slot; the total drops by its 3,300 ms. */
+        Assert.Equal(new long[] { 12, 10, 9, 8, 7, 6, 5, 4 }, withoutService.Rows.Select(r => r.QueryId - OutOfRangeQueryId).ToArray());
+        Assert.Equal(20_100, withoutService.WindowTotalExecTimeMs);
+        Assert.All(withoutService.Rows, row => Assert.False(row.IsServiceStatement));
+        Assert.All(withoutService.Rows, row => Assert.Equal((row.QueryId - OutOfRangeQueryId) % 2 == 1 ? TextOf((int)(row.QueryId - OutOfRangeQueryId)) : null, row.QueryText));
+    }
+
+    /// <summary>
+    /// #8054: the statement text is read once per returned row, after the ranking and the cap, never once per sample. 120
+    /// statements sampled 24 times each inside the window, every one with 6 KB of stored text, and a page of 20: in the
+    /// executed plan, the join that brings <c>query_text</c> in emits as many rows as the page holds, not as many as the
+    /// window has samples. Read from the plan's shape (a join node that outputs <c>query_text</c> with the text store
+    /// beneath it), never from a buffer count or a timing, so it holds on any store and under any join strategy the
+    /// planner picks.
+    /// </summary>
+    [Fact]
+    public async Task TheTopPage_ReadsTheStatementTextOncePerReturnedRow_NotOncePerSample()
+    {
+        const int Statements = 120;
+        const int Samples = 24;
+        const int Limit = 20;
+
+        var (page, plan) = await ReadOverAsync(
+            async (connection, ct) =>
+            {
+                await SeedStatsSeriesAsync(connection, ct, MinutesAgo(30), Statements, Samples);
+                await SeedTextSeriesAsync(connection, ct, Statements);
+            },
+            async (dataSource, ct) =>
+            {
+                var end = LiveClock.Now();
+                var start = end.AddHours(-4);
+                var page = await DarlingPgStatementReader.GetPgTopQueriesPageAsync(dataSource, ServerId, start, end, Limit, includeServiceStatements: true, ct);
+                var plan = await ExplainTopQueriesAsync(dataSource, start, end, Limit, ct);
+                return (page, plan);
+            });
+
+        using (plan)
+        {
+            Assert.Equal(Limit, page.Rows.Count);
+            Assert.All(page.Rows, row => Assert.Equal(6_080, row.QueryText?.Length));
+            AssertTextJoinedOncePerReturnedRow(plan, page.Rows.Count, Statements * Samples);
+        }
+    }
+
+    /// <summary>
+    /// #8054: the PG temp-spill drill-down's offender list (<c>PgTargetDrillDownCollector.PgTargetTempSpillStatementsSql</c>)
+    /// reads the statement text once per returned offender, after its ranking and its cap, never once per sample. The same
+    /// 120 statements and 2,880 samples, every sample writing temp blocks so every statement is an offender, read with the
+    /// collector's own binding and cap: the join that brings <c>query_text</c> in emits as many rows as the list holds.
+    /// </summary>
+    [Fact]
+    public async Task TheTempSpillOffenderList_ReadsTheStatementTextOncePerReturnedRow_NotOncePerSample()
+    {
+        const int Statements = 120;
+        const int Samples = 24;
+
+        var (returned, plan) = await ReadOverAsync(
+            async (connection, ct) =>
+            {
+                await SeedStatsSeriesAsync(connection, ct, MinutesAgo(30), Statements, Samples);
+                await SeedTextSeriesAsync(connection, ct, Statements);
+            },
+            async (dataSource, ct) =>
+            {
+                var end = LiveClock.Now();
+                var start = end.AddHours(-4);
+                var sql = PgTargetDrillDownCollector.PgTargetTempSpillStatementsSql;
+                var cap = PgTargetDrillDownCollector.TempSpillStatementCap;
+                return (
+                    await CountRowsAsync(dataSource, sql, ct, ServerId, start, end, cap),
+                    await ExplainAsync(dataSource, sql, ct, ServerId, start, end, cap));
+            });
+
+        using (plan)
+        {
+            Assert.Equal(PgTargetDrillDownCollector.TempSpillStatementCap, returned);
+            AssertTextJoinedOncePerReturnedRow(plan, returned, Statements * Samples);
+        }
+    }
+
+    private static string TextOf(int i) => $"SELECT {i} FROM public.widget WHERE id = $1";
+
+    private static readonly Regex QueryTextColumn = new(@"\bquery_text\b", RegexOptions.Compiled);
+
+    private static bool IsJoin(JsonElement node) =>
+        node.GetProperty("Node Type").GetString() is "Nested Loop" or "Hash Join" or "Merge Join";
+
+    private static bool ReadsTextStore(JsonElement node) =>
+        (node.TryGetProperty("Relation Name", out var relation) && relation.GetString() == "pg_statement_text")
+        || (node.TryGetProperty("Plans", out var children) && children.EnumerateArray().Any(ReadsTextStore));
+
+    private static bool OutputsQueryText(JsonElement node) =>
+        node.TryGetProperty("Output", out var output) && output.EnumerateArray().Any(column => QueryTextColumn.IsMatch(column.GetString() ?? ""));
+
+    /// <summary>Every join node that outputs <c>query_text</c> and reads the text store somewhere beneath it: the place the text is attached.</summary>
+    private static void CollectTextJoins(JsonElement node, List<JsonElement> found)
+    {
+        if (IsJoin(node) && OutputsQueryText(node) && ReadsTextStore(node))
+        {
+            found.Add(node);
+        }
+
+        if (node.TryGetProperty("Plans", out var children))
+        {
+            foreach (var child in children.EnumerateArray())
+            {
+                CollectTextJoins(child, found);
+            }
+        }
+    }
+
+    /// <summary>The executed plan of the top-queries read the page came from, bound the way the reader binds it.</summary>
+    private static Task<JsonDocument> ExplainTopQueriesAsync(NpgsqlDataSource dataSource, DateTime startUtc, DateTime endUtc, int limit, CancellationToken ct) =>
+        ExplainAsync(dataSource, DarlingPgStatementReader.PgTopQueriesSql, ct,
+            ServerId, DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified), DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified), limit, true);
+
+    /// <summary>The executed plan of <paramref name="sql"/> with <paramref name="parameters"/> bound in order. One process, so each node's row
+    /// count is exact rather than a per-worker average; the setting is local to a transaction that is rolled back.</summary>
+    private static async Task<JsonDocument> ExplainAsync(NpgsqlDataSource dataSource, string sql, CancellationToken ct, params object[] parameters)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        await using (var settings = new NpgsqlCommand("SET LOCAL max_parallel_workers_per_gather = 0", connection, transaction))
+        {
+            await settings.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var command = new NpgsqlCommand("EXPLAIN (ANALYZE, VERBOSE, BUFFERS, FORMAT JSON) " + sql, connection, transaction);
+        foreach (var parameter in parameters)
+        {
+            command.Parameters.AddWithValue(parameter);
+        }
+
+        var json = (string)(await command.ExecuteScalarAsync(ct))!;
+        await transaction.RollbackAsync(ct);
+        return JsonDocument.Parse(json);
+    }
+
+    /// <summary>How many rows <paramref name="sql"/> returns with <paramref name="parameters"/> bound in order.</summary>
+    private static async Task<int> CountRowsAsync(NpgsqlDataSource dataSource, string sql, CancellationToken ct, params object[] parameters)
+    {
+        await using var command = dataSource.CreateCommand(sql);
+        foreach (var parameter in parameters)
+        {
+            command.Parameters.AddWithValue(parameter);
+        }
+
+        var rows = 0;
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows++;
+        }
+
+        return rows;
+    }
+
+    /// <summary>Every join in <paramref name="plan"/> that attaches the statement text must emit as many rows as the read returned.</summary>
+    private static void AssertTextJoinedOncePerReturnedRow(JsonDocument plan, int returnedRows, int samples)
+    {
+        var root = plan.RootElement[0].GetProperty("Plan");
+        var textJoins = new List<JsonElement>();
+        CollectTextJoins(root, textJoins);
+        Assert.True(textJoins.Count > 0, $"no join in the plan outputs query_text with the text store beneath it: {root}");
+
+        foreach (var join in textJoins)
+        {
+            var emitted = join.GetProperty("Actual Rows").GetDouble() * join.GetProperty("Actual Loops").GetDouble();
+            Assert.True(Math.Abs(emitted - returnedRows) < 0.5,
+                $"the {join.GetProperty("Node Type").GetString()} that joins the statement text emitted {emitted} rows for {returnedRows} returned rows over {samples} samples: {root}");
+        }
+    }
+
+    /// <summary>Seeds through <paramref name="seed"/> on a clean store and returns what <paramref name="read"/> reads off it.</summary>
+    private static async Task<T> ReadOverAsync<T>(Func<NpgsqlConnection, CancellationToken, Task> seed, Func<NpgsqlDataSource, CancellationToken, Task<T>> read)
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live get_pg_top_queries page test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            await SetEngineKindAsync(connection, ct, MonitoredEngineKind.Postgres);
+            await seed(connection, ct);
+
+            var result = await read(dataSource, ct);
+
+            bodySucceeded = true;
+            return result;
         }
         finally
         {
@@ -393,8 +666,10 @@ public sealed class DarlingPgTopQueriesLiveTests
     private static async Task<string> DarlingMcpPgTopQueries(NpgsqlDataSource dataSource) =>
         await DarlingMcpPgStatementTools.GetPgTopQueries(dataSource, ServerName, 4);
 
-    private static DateTime MinutesAgo(int minutes) =>
-        DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow.AddMinutes(-minutes));
+    /// <summary>#5608: the one clock this class seeds and reads by. <c>LiveClock.Now()</c> rather than <c>AnchoredEnd()</c>: every
+    /// assert here is a sum over the window, a seed lookup bounded a day before it, or the row count a join in the plan emits, and
+    /// none of those changes with where a chunk boundary falls inside the window; only the scan nodes beneath the join do.</summary>
+    private static DateTime MinutesAgo(int minutes) => LiveClock.Now().AddMinutes(-minutes);
 
     private static async Task SetEngineKindAsync(NpgsqlConnection connection, CancellationToken ct, string kind) =>
         await DarlingMcpTestData.ExecAsync(connection, ct,
@@ -424,7 +699,53 @@ VALUES ($1, $2, $3, $4, $5, 16384, 10, TRUE,
 INSERT INTO pg_statement_text (server_id, queryid, query_text, first_seen, last_seen)
 VALUES ($1, $2, $3, $4, $4)
 ON CONFLICT (server_id, queryid) DO UPDATE SET query_text = EXCLUDED.query_text",
-            ServerId, queryId, text, DarlingMcpTestData.Naive(DateTime.UtcNow));
+            ServerId, queryId, text, DarlingMcpTestData.Naive(LiveClock.Now()));
+
+    /// <summary>The service-own entry list the hourly text fetch stores for a queryid (#7567), as JSON text.</summary>
+    private static async Task SeedOwnEntriesAsync(NpgsqlConnection connection, CancellationToken ct, long queryId, string ownEntriesJson) =>
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            "UPDATE pg_statement_text SET own_entries = $3::jsonb WHERE server_id = $1 AND queryid = $2",
+            ServerId, queryId, ownEntriesJson);
+
+    /// <summary>One row per (statement, sample), in one statement: statement i is queryid <see cref="OutOfRangeQueryId"/> + i, its
+    /// samples a minute apart back from <paramref name="newestUtc"/>, each a measured ten-call interval of i ms, so the totals rank the
+    /// statements by i. The temp block counters grow by ten written and five read per sample, so every statement spills in every
+    /// interval. The collection ids are drawn from the shared generator so a later row cannot reuse one.</summary>
+    private static async Task SeedStatsSeriesAsync(NpgsqlConnection connection, CancellationToken ct, DateTime newestUtc, int statements, int samples)
+    {
+        long lastCollectionId = 0;
+        for (var n = 0; n < statements * samples; n++)
+        {
+            lastCollectionId = CollectionIdGenerator.Next();
+        }
+
+        await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO pg_statement_stats
+    (collection_id, collection_time, server_id, server_name, queryid, database_id, user_id, toplevel,
+     calls, total_exec_time_ms, max_exec_time_ms, rows_returned,
+     shared_blks_hit, shared_blks_read, storage_blks_read, orcache_blks_hit,
+     temp_blks_read, temp_blks_written, wal_bytes, max_exec_peakmem_bytes,
+     delta_calls, delta_total_exec_time_ms, delta_rows)
+SELECT $1 + (q.i - 1) * $7 + k.i, $2 - make_interval(mins => k.i), $3, $4, $5 + q.i, 16384, 10, TRUE,
+       100 + ($7 - k.i) * 10, 5000, 91.5, 250,
+       10, 1000 + ($7 - k.i) * 100, 3, 2,
+       ($7 - k.i) * 5, ($7 - k.i) * 10, 1000 + ($7 - k.i) * 500, 2097152,
+       10, q.i, 1000
+FROM generate_series(1, $6) AS q(i)
+CROSS JOIN generate_series(0, $7 - 1) AS k(i)",
+            lastCollectionId - statements * samples + 1, DarlingMcpTestData.Naive(newestUtc), ServerId, ServerName, OutOfRangeQueryId, statements, samples);
+    }
+
+    /// <summary>6,080 characters of text for each of the <paramref name="statements"/> (190 md5 blocks of a per-statement sequence, so
+    /// it does not compress): the size at which a stored statement is kept out of line.</summary>
+    private static async Task SeedTextSeriesAsync(NpgsqlConnection connection, CancellationToken ct, int statements) =>
+        await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO pg_statement_text (server_id, queryid, query_text, first_seen, last_seen)
+SELECT $1, $2 + q.i,
+       (SELECT string_agg(md5((q.i * 1000 + j)::text), '') FROM generate_series(1, 190) AS j),
+       $3, $3
+FROM generate_series(1, $4) AS q(i)",
+            ServerId, OutOfRangeQueryId, DarlingMcpTestData.Naive(LiveClock.Now()), statements);
 
     private static async Task DeleteStatsAsync(NpgsqlConnection connection, CancellationToken ct) =>
         await DarlingMcpTestData.ExecAsync(connection, ct,
