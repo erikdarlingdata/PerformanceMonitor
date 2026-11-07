@@ -58,7 +58,7 @@ docker compose up -d
 
 The script ends with the dashboard address. To read the web token, run `cat secrets/web_token.txt`. If the script does not start, because the archive lost its execute bit, run `sh setup.sh`.
 
-The service runs as user 1654, not root. A fresh install needs nothing; an install that ran as root needs a one-off `chown` of its credentials volume first, which [Container user](darling/security.md#container-user) gives with the Kubernetes example.
+The service runs as user 1654, not root. A fresh install needs nothing; an install that ran as root needs a one-off step before the new image starts; the steps, the rollback and a Kubernetes example are in [Container user](darling/security.md#container-user).
 
 MCP is off in the sample, so compose does not mount `mcp_token`. To turn MCP on, uncomment `mcp_token` in the two places in `docker-compose.yml`, and set `mcp.enabled` to `true` in `darling.json`. To make the secret files by hand instead of with `setup.sh`, follow the list in [`compose/secrets/README.md`](../Darling/compose/secrets/README.md).
 
@@ -72,7 +72,7 @@ Web dashboard on `http://<host>:5153` behind its token, MCP (if enabled) on `:51
 
 - **Nothing secret goes in darling.json.** Every secret slot — the whole `postgres.connectionString`, server `password`s, `smtp.password`, the tokens — takes an `env:NAME` or `file:/run/secrets/<name>` reference. The compose file mounts each secret from `secrets/`.
 - **Start with a fresh store volume per deployment.** The control plane is store-authoritative after the first seed, so a reused volume's enable toggles override darling.json — by design.
-- **File permissions are yours on Linux.** The Windows build locks config/credentials down with ACLs; here the container boundary is the isolation, and the `secrets/` directory should be `chmod 700` with `600` files (the systemd shape should do the same for `darling.json` itself).
+- **File permissions are yours on Linux.** The Windows build locks config/credentials down with ACLs; here the container boundary is the isolation. Keep `secrets/` at `chmod 700` with its files at `644`: the container reads them as user 1654 through compose's bind mounts, and the folder's 700 is what keeps other users on the host out. `darling.json` is `644` too, so every user on the host can read it: never put a secret inline in it. The systemd shape should keep `darling.json` readable by the service's user only.
 - **The store's preload list is the compose file's.** The store service passes `shared_preload_libraries` on its command line (TimescaleDB plus `pg_stat_statements`, for `get_store_query_stats`, #3899), and a command-line setting outranks both `postgresql.conf` and `ALTER SYSTEM`. To preload another library in the store, add it to that line in `docker-compose.yml`; an `ALTER SYSTEM` or conf edit of the list is ignored while the line is there.
 
 **Reaching the compose store from a Windows Viewer.** The `store` service publishes no port, so a Windows Viewer cannot connect to it as shipped. The supported seat for a compose deployment is the web dashboard. `--export-viewer-config` does not help here, because it is for the managed store on Windows. To connect a Viewer anyway, do these steps:

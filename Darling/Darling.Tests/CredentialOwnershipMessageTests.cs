@@ -183,7 +183,7 @@ public sealed class CredentialOwnershipMessageTests
     {
         Assert.Equal(
             "docker compose run --rm --no-deps --user 0 --entrypoint chown darling -R 1654:1654 /var/lib/darling "
-            + "(on Kubernetes, chown the volume mounted at /var/lib/darling to 1654:1654)",
+            + "(on Kubernetes, run the one-off root Job under Container user in docs/darling/security.md instead)",
             DarlingManagedRoles.CredentialOwnershipFix(1654, "/var/lib/darling"));
     }
 }

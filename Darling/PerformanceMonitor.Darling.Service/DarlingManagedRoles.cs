@@ -4907,7 +4907,7 @@ WHERE t.tgrelid = 'config.investigation_journal'::regclass
         var u = userId.ToString(CultureInfo.InvariantCulture);
         return path == ComposeCredentialVolumeRoot || path.StartsWith(ComposeCredentialVolumeRoot + "/", StringComparison.Ordinal)
             ? $"docker compose run --rm --no-deps --user 0 --entrypoint chown darling -R {u}:{u} {ComposeCredentialVolumeRoot} "
-                + $"(on Kubernetes, chown the volume mounted at {ComposeCredentialVolumeRoot} to {u}:{u})"
+                + "(on Kubernetes, run the one-off root Job under Container user in docs/darling/security.md instead)"
             : $"chown -R {u}:{u} '{path}'";
     }
 

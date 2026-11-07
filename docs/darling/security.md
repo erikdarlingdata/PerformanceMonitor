@@ -34,12 +34,14 @@ Table names are unchanged — only their schema moved — and the shared SQL kee
 
 The image runs as user 1654 (`$APP_UID` of the .NET base image), not as root. `/var/lib/darling` and the file log are owned by it, and the `darling-credentials` volume is seeded owned by it, mode 0700. `setup.sh` writes `darling.json` and `secrets/*` as 0644 inside a 0700 `secrets/`, so the service can read them. Never put a secret inline in `darling.json`.
 
-**Upgrading an install that ran as root.** Its credentials volume is owned by root. At start the service finds a credentials directory owned by another user (or one it cannot read) and stops collection: the container is unhealthy, nothing in the directory is read or changed, and the log line gives the command below. Run these once, then start the service again:
+**Upgrading an install that ran as root.** Its credentials volume is owned by root. Run these once in the compose folder, after `docker compose pull` and before `docker compose up -d` starts the new image:
 
 ```
-chmod 644 darling.json secrets/*
+chmod 700 secrets && chmod 644 darling.json secrets/*
 docker compose run --rm --no-deps --user 0 --entrypoint chown darling -R 1654:1654 /var/lib/darling
 ```
+
+The first line keeps `secrets/` closed to other users on the host while its files become readable by the container's user. If the new image started first, it finds a credentials directory owned by another user and stops collection: the container is unhealthy, the web dashboard and MCP stay down, nothing in the directory is read or changed, and the log line gives the `chown`. Run the two lines, then `docker compose restart darling`. `docker compose up -d` leaves a running container as it is, so collection would stay stopped.
 
 **Stopgap.** `user: "0:0"` on the `darling` service (a commented line in `docker-compose.yml`) keeps the old behaviour, but only **before** the `chown` step above has run. After it, a root service refuses the 1654-owned key file and names both users.
 
@@ -71,9 +73,16 @@ spec:
               mountPath: /var/lib/darling
 ```
 
-- Mount the parent, never `credentials/`. Kubelet's `OnRootMismatch` leaves the volume root alone only while it keeps gid 1654, group rwx and setgid, but the service holds `credentials/` at 0700.
-- So a mount at `credentials/`, or `fsGroupChangePolicy: Always`, re-opens it on every start, and the [#4004](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4004) rule discards the keys.
-- An install that ran as root chowns the volume root to 1654 first (a one-off Job, or an initContainer as root). `fsGroup` alone does not fix it.
+- **A new volume** needs nothing more. On the first mount kubelet gives the volume root group 1654, group rwx and setgid. The service makes `credentials/` itself, owned by 1654, mode 0700, and `OnRootMismatch` leaves the volume alone on every later mount, because its root already matches.
+- **An install that ran as root** needs a one-off Job (or an initContainer) that runs as root with the volume mounted at `/var/lib/darling`, before the new pod starts:
+
+  ```
+  chown -R 1654:1654 /var/lib/darling && chmod 2770 /var/lib/darling && chmod 700 /var/lib/darling/credentials && chmod 600 /var/lib/darling/credentials/*
+  ```
+
+  The `chmod 2770` gives the volume root what `OnRootMismatch` checks for (group 1654, group rwx, setgid), so kubelet skips its recursive walk and `credentials/` stays 0700. `fsGroup` alone does not fix such a volume: its root does not match, so the first mount walks it, `credentials/` stays owned by root, and the new image stops collection with the `chown` in its log. The Job still fixes it after that, and the keys are kept.
+- **A volume mounted at `credentials/`** (the compose shape) has two choices. Keep that mount and drop `fsGroup`, with a Job that mounts the volume there and runs `chown -R 1654:1654 /var/lib/darling/credentials && chmod 700 /var/lib/darling/credentials && chmod 600 /var/lib/darling/credentials/*`. Or move its files into a `credentials/` subdirectory in the Job above, mounted at `/var/lib/darling`, by running `cd /var/lib/darling && mkdir .moving && mv -- * .moving/ && mv .moving credentials` before the commands above, and then mount the volume at `/var/lib/darling`.
+- Never combine `fsGroup` with a mount at `credentials/`, and never set `fsGroupChangePolicy: Always`. Kubelet would open `credentials/` to the group on every start, and the [#4004](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4004) rule would discard the keys each time.
 
 **Credential file protection.** DPAPI LocalMachine scope is deliberate (the service writes the credential, a *different* interactive user's Viewer reads it), which means the machine-bound blob is decryptable by anything that can *read* the file. So the credential files are locked down with an NTFS ACL that strips the inherited world-read `%ProgramData%` would give them:
 

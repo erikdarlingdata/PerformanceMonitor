@@ -22,10 +22,12 @@
 #      on its own (inside a container that would mean unreachable).
 #
 # Secrets never land in darling.json: the config references them (env:NAME / file:/path — #1804 stage 1),
-# and compose delivers them as env vars or mounted secret files. Never put a secret inline in darling.json: the
-# service runs as user 1654, and setup.sh makes darling.json and secrets/* world-readable (0644) inside a 0700 secrets/. The web/MCP network blocks are honored
-# inside the container (the bind ladder's container gate, stage 2) — the port mappings below are the
-# exposure boundary, and both surfaces still REQUIRE their bearer token.
+# and compose delivers them as env vars or mounted secret files. Never put a secret inline in darling.json:
+# the service runs as user 1654, so setup.sh makes darling.json and the files in secrets/ readable by every
+# user (0644); only secrets/ itself (0700) keeps the secrets from other users on the host, and darling.json
+# sits outside it. The web/MCP network blocks are honored inside the container (the bind ladder's container
+# gate, stage 2) — the port mappings below are the exposure boundary, and both surfaces still REQUIRE their
+# bearer token.
 
 name: performancemonitor-darling
 
@@ -129,8 +131,8 @@ services:
         condition: service_healthy
     environment:
       # #4733: where the service leaves a marker file when a startup failure has stopped collection for good (a
-      # rejected config, a migration step that can never apply, a refused login). The healthcheck below tests
-      # for this same path, so change the two together.
+      # rejected config, a migration step that can never apply, a refused login, a credentials directory that
+      # belongs to another user, #8141). The healthcheck below tests for this same path, so change the two together.
       DARLING_STOPPED_MARKER: /tmp/darling-stopped
     volumes:
       - ./darling.json:/config/darling.json:ro
