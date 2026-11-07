@@ -131,6 +131,7 @@ SET alert_count = alert_count + 1,
     max_severity = $5
 WHERE request_id = $1";
 
+    /* A chat request (#7659) is counted apart, by ChatCountsSql, so a busy thread cannot block the route's alerts. */
     internal const string CountRouteSql = @"
 SELECT count(*) FILTER (WHERE opened_at > $2 - interval '1 hour'),
        count(*)
@@ -138,6 +139,7 @@ FROM config.investigation_requests
 WHERE route_id = $1
   AND practice_of IS NULL
   AND force_check_of IS NULL
+  AND trigger_kind <> 'chat'
   AND opened_at > $2 - interval '1 day'";
 
     internal static readonly string OpenSql = @"
@@ -284,12 +286,18 @@ SELECT follow_up_condition FROM config.investigation_requests WHERE request_id =
     internal const string OpenFollowUpSql = @"
 INSERT INTO config.investigation_requests
     (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
-     window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, max_severity, follow_up_of)
+     window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, max_severity, follow_up_of, trigger_kind, chat_thread_of)
 SELECT $1, r.route_id, r.server_id, r.server_name, r.family, r.first_metric, r.story_path_hash, r.first_alert_at, r.last_alert_at,
-       r.window_until, $3, $3 + (r.expires_at - r.opened_at), r.lease_minutes, r.autonomy_level, r.alert_count, r.max_severity, r.request_id
+       r.window_until, $3, $3 + (r.expires_at - r.opened_at), r.lease_minutes, r.autonomy_level, r.alert_count, r.max_severity, r.request_id,
+       " + ChatKindCopySql + @"
 FROM config.investigation_requests AS r
 WHERE r.request_id = $2
 RETURNING route_id, server_id";
+
+    /* #7659: a follow-up and a force check copy trigger_kind and the thread link only from a chat request; any other source opens an alert
+       request, as before. The askers are copied after the insert (CopyAskersSql), and an alert request has none. */
+    internal const string ChatKindCopySql = @"CASE WHEN r.trigger_kind = 'chat' THEN 'chat' ELSE 'alert' END,
+       CASE WHEN r.trigger_kind = 'chat' THEN r.chat_thread_of END";
 
     /* #6008: the source's alert rows, without the dedup key, so the brief's alerts section reads what the source's read. $1 new, $2 source. */
     internal const string CopyFollowUpAlertsSql = @"
@@ -410,6 +418,7 @@ WITH m AS (SELECT a.request_id, a.server_id, a.metric_name, max(a.alert_time) AS
                                   FROM config.investigation_requests AS r
                                   WHERE r.state IN ('open', 'claimed', 'reported')
                                     AND r.practice_of IS NULL
+                                    AND r.trigger_kind <> 'chat'
                                     AND r.opened_at > $1 - interval '2 days')
            GROUP BY a.request_id, a.server_id, a.metric_name)
 SELECT m.request_id, m.metric_name, h.context_json
@@ -1598,6 +1607,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
             }
 
             await ExecAsync(connection, transaction, CopyFollowUpAlertsSql, cancellationToken, P(followUpId), P(earlier));
+            await ExecAsync(connection, transaction, CopyAskersSql, cancellationToken, P(followUpId), P(earlier));
             if (deployed)
             {
                 await WriteDeployEvidenceAsync(connection, transaction, followUpId, earlier, changedTo!.Value, now, cancellationToken);
