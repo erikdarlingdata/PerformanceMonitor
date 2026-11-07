@@ -137,11 +137,12 @@ SELECT
             State = state,
         };
         RingBufferLossAccounting.Apply(context, observation, truncated);
+        context.LandStagedItemState();
         return context;
     }
 
     private static IReadOnlyDictionary<string, string> Staged(CollectorContext context) =>
-        new Dictionary<string, string>(context.StagedItemState);
+        new Dictionary<string, string>(context.PendingState);
 
     [Fact]
     public async Task ThirtyThenFiftyNineEvents_ReportsFifteenEvicted()
@@ -157,7 +158,7 @@ SELECT
             await FireAsync(connectionString!, 30, ct);
             var first = await ReadAndApplyAsync(connectionString!, CollectorContext.NoState, ct);
             Assert.Empty(first.Measurements);
-            Assert.Equal(30, RingBufferLoss.TryParseState(first.StagedItemState[RingBufferLossAccounting.StateKey])!.Value.Total);
+            Assert.Equal(30, RingBufferLoss.TryParseState(first.PendingState[RingBufferLossAccounting.StateKey])!.Value.Total);
 
             /* 4 more events since the first read: the 10-event buffer still holds all 4, so nothing was lost. */
             await FireAsync(connectionString!, 4, ct);

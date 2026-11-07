@@ -383,9 +383,10 @@ public sealed class BlockedProcessReportCollectorDefinitionTests
             Array.Empty<object[]>(), new[] { GateRow(false, 59L, 10L, 0L) });
 
         await BlockedProcessReportCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+        context.LandStagedItemState();
 
         Assert.Equal(15, Measured(context, "ring_buffer_evicted"));
-        Assert.True(context.StagedItemState.ContainsKey(RingBufferLossAccounting.StateKey));
+        Assert.True(context.PendingState.ContainsKey(RingBufferLossAccounting.StateKey));
     }
 
     [Fact]
@@ -396,6 +397,7 @@ public sealed class BlockedProcessReportCollectorDefinitionTests
             Array.Empty<object[]>(), new[] { GateRow(true, DBNull.Value, DBNull.Value, 5L) });
 
         await BlockedProcessReportCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+        context.LandStagedItemState();
 
         Assert.Equal(3, Measured(context, "xe_session_dropped"));
     }

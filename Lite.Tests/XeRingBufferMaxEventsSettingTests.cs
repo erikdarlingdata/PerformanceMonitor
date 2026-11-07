@@ -55,6 +55,11 @@ public sealed class XeRingBufferMaxEventsSettingTests
     [InlineData("4321", 4321)]
     [InlineData("50", 1000)]
     [InlineData("20000", 10000)]
+    /* #8146: a value too large for an int still lands on the nearest bound, as the guide says, instead of falling back. */
+    [InlineData("20000000000", 10000)]
+    [InlineData("-5", 1000)]
+    [InlineData("0", 1000)]
+    [InlineData("\"abc\"", 1000)]
     public void XeRingBufferMaxEvents_ReadsAndClamps(string written, int expected)
     {
         Assert.Equal(expected, LoadWith("{ \"xe_ring_buffer_max_events\": " + written + " }"));

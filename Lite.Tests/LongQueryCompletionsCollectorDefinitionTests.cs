@@ -722,9 +722,10 @@ public sealed class LongQueryCompletionsCollectorDefinitionTests
             new[] { new object[] { false, 0L, DBNull.Value }.Concat(PositionColumns(59L, 10L, 0L)).ToArray() });
 
         await LongQueryCompletionsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+        context.LandStagedItemState();
 
         Assert.Equal(15, Measured(context, "ring_buffer_evicted"));
-        Assert.True(context.StagedItemState.ContainsKey(RingBufferLossAccounting.StateKey));
+        Assert.True(context.PendingState.ContainsKey(RingBufferLossAccounting.StateKey));
     }
 
     [Fact]

@@ -17,7 +17,7 @@ If Lite cannot read `install-id.json` (another program holds it open, or the rea
 
 ## The ring buffer limit
 
-The ring buffer of the long-query, deadlock and blocked-process sessions is created with `max_events_limit` from `xe_ring_buffer_max_events` in `settings.json` (default 1000, clamped to 1000-10000), and `max_memory` of 4096 KB. A buffer holds at most that many events or 4 MB, whichever fills first. The `PerformanceMonitor_Attention` session is not affected. For the key, the loss note and how to read it, see [Extended Events ring buffer limit](lite-guide.md#extended-events-ring-buffer-limit).
+The ring buffer of the long-query, deadlock and blocked-process sessions is created with `max_events_limit` from `xe_ring_buffer_max_events` in `settings.json` (default 1000, clamped to 1000-10000), and `max_memory` of 4096 KB. A buffer holds at most that many events or 4 MB, whichever fills first. `max_memory` stays at 4096 KB whatever the setting, and a deadlock event carries its whole deadlock graph XML, so with large graphs the deadlock session's buffer fills by memory before it holds 1,000 events: the setting mostly helps the blocked-process and long-query sessions. When memory was the cap, the loss note says so. The `PerformanceMonitor_Attention` session is not affected. For the key, the loss note and how to read it, see [Extended Events ring buffer limit](lite-guide.md#extended-events-ring-buffer-limit).
 
 The limit applies when a session is created, so a session keeps the limit it was created with. The deadlock and blocked-process sessions are shared by name across installs, so when two installs with different settings watch one server, whichever created the session wins. The loss note shows the session's actual limit.
 

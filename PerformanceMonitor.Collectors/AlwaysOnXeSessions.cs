@@ -11,6 +11,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -1096,14 +1097,25 @@ public static class AlwaysOnXeAzureEnsure
                 await CreateOnceAsync(database, kind, sessionName, withoutUnverifiedActions: false, ringBufferMaxEvents, cancellationToken);
                 return false;
             }
-            catch (Exception ex) when (ex is not OperationCanceledException
+            catch (Exception refused) when (refused is not OperationCanceledException
                 && kind is AlwaysOnXeSessionKind.Deadlock or AlwaysOnXeSessionKind.BlockedProcess
-                && database.ErrorNumbers(ex).Any(RingBufferTarget.OptionRefusedErrorNumbers.Contains))
+                && database.ErrorNumbers(refused).Any(RingBufferTarget.OptionRefusedErrorNumbers.Contains))
             {
                 /* #8146: the engine refused max_events_limit (RingBufferTarget.OptionRefusedErrorNumbers); a session at the default limit
                    is better than none, and the loss note shows the session's actual limit. One retry without it; if that fails too, its
                    exception surfaces. Any other failure, "already there" included, surfaces as before #8146. */
-                await CreateOnceAsync(database, kind, sessionName, withoutUnverifiedActions: false, ringBufferMaxEvents: null, cancellationToken);
+                try
+                {
+                    await CreateOnceAsync(database, kind, sessionName, withoutUnverifiedActions: false, ringBufferMaxEvents: null, cancellationToken);
+                }
+                catch (Exception retry) when (retry is not OperationCanceledException && database.IsAlreadyPresent(retry))
+                {
+                    /* The create and the start can go as one batch, so the refused attempt may have left a session it never started.
+                       The callers take "already there" as a session that is up, so the refusal surfaces instead and a session that did
+                       not start is not hidden. */
+                    ExceptionDispatchInfo.Capture(refused).Throw();
+                }
+
                 return false;
             }
         }

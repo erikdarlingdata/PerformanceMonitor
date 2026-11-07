@@ -56,9 +56,10 @@ public sealed class RingBufferLossAccountingTests
 
         RingBufferLossAccounting.Apply(context, Obs(30, 30), truncated: false);
 
-        Assert.Empty(context.Measurements);
         var staged = RingBufferLoss.TryParseState(context.StagedItemState[RingBufferLossAccounting.StateKey]);
         Assert.Equal(30, staged!.Value.Total);
+        context.LandStagedItemState();
+        Assert.Empty(context.Measurements);
     }
 
     [Fact]
@@ -67,6 +68,7 @@ public sealed class RingBufferLossAccountingTests
         var context = MakeContext(StateWith(PriorState(30, 10, Now.AddSeconds(-60))));
 
         RingBufferLossAccounting.Apply(context, Obs(55, 10, limit: 10), truncated: false);
+        context.LandStagedItemState();
 
         Assert.Equal(15, Measured(context, "ring_buffer_evicted"));
         Assert.Equal(60, Measured(context, "ring_buffer_loss_window_s"));
@@ -79,6 +81,7 @@ public sealed class RingBufferLossAccountingTests
         var context = MakeContext(StateWith(PriorState(30, 30, Now.AddSeconds(-60), dropped: 2)));
 
         RingBufferLossAccounting.Apply(context, Obs(35, 35, dropped: 9), truncated: false);
+        context.LandStagedItemState();
 
         Assert.Equal(7, Measured(context, "xe_session_dropped"));
         Assert.Null(Measured(context, "ring_buffer_evicted"));
@@ -90,6 +93,7 @@ public sealed class RingBufferLossAccountingTests
         var context = MakeContext(StateWith(PriorState(500, 100, Now.AddSeconds(-60))));
 
         RingBufferLossAccounting.Apply(context, Obs(4, 4, created: Created.AddMinutes(30)), truncated: false);
+        context.LandStagedItemState();
 
         Assert.Equal(1, Measured(context, "ring_buffer_loss_unknown"));
         Assert.Null(Measured(context, "ring_buffer_evicted"));
@@ -102,10 +106,12 @@ public sealed class RingBufferLossAccountingTests
 
         var lossy = MakeContext(state, maxEvents: 5000);
         RingBufferLossAccounting.Apply(lossy, Obs(55, 10, limit: 1000), truncated: false);
+        lossy.LandStagedItemState();
         Assert.Equal(1, Measured(lossy, "ring_buffer_limit_below_setting"));
 
         var clean = MakeContext(state, maxEvents: 5000);
         RingBufferLossAccounting.Apply(clean, Obs(35, 35, limit: 1000), truncated: false);
+        clean.LandStagedItemState();
         Assert.Empty(clean.Measurements);
     }
 
@@ -115,6 +121,7 @@ public sealed class RingBufferLossAccountingTests
         var context = MakeContext(StateWith(PriorState(30, 10, Now.AddSeconds(-60))), maxEvents: 5000);
 
         RingBufferLossAccounting.Apply(context, Obs(55, 10, limit: 0), truncated: false);
+        context.LandStagedItemState();
 
         Assert.Equal(15, Measured(context, "ring_buffer_evicted"));
         Assert.Null(Measured(context, "ring_buffer_limit_below_setting"));
@@ -127,8 +134,9 @@ public sealed class RingBufferLossAccountingTests
 
         RingBufferLossAccounting.Apply(context, Obs(null, null), truncated: false);
 
-        Assert.Empty(context.Measurements);
         Assert.Empty(context.StagedItemState);
+        context.LandStagedItemState();
+        Assert.Empty(context.Measurements);
     }
 
     [Fact]
@@ -138,8 +146,9 @@ public sealed class RingBufferLossAccountingTests
 
         RingBufferLossAccounting.Apply(context, new RingBufferObservation(null, null, null, null, null, Now), truncated: false);
 
-        Assert.Empty(context.Measurements);
         Assert.Empty(context.StagedItemState);
+        context.LandStagedItemState();
+        Assert.Empty(context.Measurements);
     }
 
     [Fact]
@@ -152,15 +161,48 @@ public sealed class RingBufferLossAccountingTests
         };
         var context = MakeContext(state);
 
+        /* As the per-database loops drive it: staged state dropped before each item's read and landed after its write. */
+        context.DropStagedItemState();
         context.CurrentDatabaseName = "a";
         RingBufferLossAccounting.Apply(context, Obs(115, 10), truncated: false);
+        context.LandStagedItemState();
+        context.DropStagedItemState();
         context.CurrentDatabaseName = "b";
         RingBufferLossAccounting.Apply(context, Obs(117, 10), truncated: false);
+        context.LandStagedItemState();
 
         Assert.Equal(12, Measured(context, "ring_buffer_evicted"));
         Assert.Equal(300, Measured(context, "ring_buffer_loss_window_s"));
-        Assert.Contains("xe_ring_position:a", context.StagedItemState.Keys);
-        Assert.Contains("xe_ring_position:b", context.StagedItemState.Keys);
+        Assert.Contains("xe_ring_position:a", context.PendingState.Keys);
+        Assert.Contains("xe_ring_position:b", context.PendingState.Keys);
+    }
+
+    /* #8146: a database whose write fails keeps its prior (its staged state is dropped), so the next run counts its loss again.
+       Its measurements are dropped with it, or the same events would be counted on this run's note and again on the next. */
+    [Fact]
+    public void Apply_TwoDatabases_OneWriteFails_OnlyTheLandedDatabaseIsMeasured()
+    {
+        var state = new Dictionary<string, string>
+        {
+            [RingBufferLossAccounting.KeyFor("a")] = PriorState(100, 10, Now.AddSeconds(-60)),
+            [RingBufferLossAccounting.KeyFor("b")] = PriorState(100, 10, Now.AddSeconds(-300)),
+        };
+        var context = MakeContext(state);
+
+        context.DropStagedItemState();
+        context.CurrentDatabaseName = "a";
+        RingBufferLossAccounting.Apply(context, Obs(115, 10), truncated: false);
+        context.LandStagedItemState();
+
+        context.DropStagedItemState();
+        context.CurrentDatabaseName = "b";
+        RingBufferLossAccounting.Apply(context, Obs(117, 10), truncated: false);
+        context.DropStagedItemState();
+
+        Assert.Equal(5, Measured(context, "ring_buffer_evicted"));
+        Assert.Equal(60, Measured(context, "ring_buffer_loss_window_s"));
+        Assert.Contains("xe_ring_position:a", context.PendingState.Keys);
+        Assert.DoesNotContain("xe_ring_position:b", context.PendingState.Keys);
     }
 
     [Fact]

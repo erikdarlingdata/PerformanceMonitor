@@ -292,8 +292,18 @@ public sealed class CollectorContext
     /// </summary>
     public Dictionary<string, string> StagedItemState { get; } = new(StringComparer.Ordinal);
 
-    /// <summary>Moves everything staged for the current item into <see cref="PendingState"/>. Host-only: call
-    /// it once the item's read and write have both succeeded.</summary>
+    /// <summary>
+    /// #8146: measurements a definition records for the ITEM it is reading right now, held with
+    /// <see cref="StagedItemState"/> and under the same rule: they reach <see cref="Measurements"/> only when the
+    /// host lands the item, and are discarded when it drops it. For a count that describes the same span as a
+    /// staged position (the ring-buffer loss since the staged prior): a database whose write fails keeps its
+    /// prior, so the next run counts those events again, and they must not also stay on this run's note.
+    /// Every other measurement goes through <see cref="Measure"/> as before.
+    /// </summary>
+    public StagedMeasurements StagedItemMeasurements { get; } = new();
+
+    /// <summary>Moves everything staged for the current item into <see cref="PendingState"/> and
+    /// <see cref="Measurements"/>. Host-only: call it once the item's read and write have both succeeded.</summary>
     public void LandStagedItemState()
     {
         foreach (var (key, value) in StagedItemState)
@@ -302,11 +312,31 @@ public sealed class CollectorContext
         }
 
         StagedItemState.Clear();
+
+        /* Unqualified on purpose: the labels were checked when they were staged, and the measurement-label sweep
+           (CollectorMeasurementSeamTests) reads `.Measure(` call sites as const labels, which these are not. */
+        foreach (var staged in StagedItemMeasurements.Entries)
+        {
+            if (staged.KeepLargest)
+            {
+                MeasureMax(staged.Label, staged.Value);
+            }
+            else
+            {
+                Measure(staged.Label, staged.Value);
+            }
+        }
+
+        StagedItemMeasurements.Clear();
     }
 
     /// <summary>Discards everything staged for the current item. Host-only: call it before an item's read,
     /// and whenever the item's read or write did not complete.</summary>
-    public void DropStagedItemState() => StagedItemState.Clear();
+    public void DropStagedItemState()
+    {
+        StagedItemState.Clear();
+        StagedItemMeasurements.Clear();
+    }
 
     /// <summary>
     /// The labelled COUNTS this definition measured on the target during the round trip it had already
@@ -397,7 +427,7 @@ public sealed class CollectorContext
         _measurements.Add(new CollectorMeasurement(label, value));
     }
 
-    private static void ValidateMeasurementLabel(string label)
+    internal static void ValidateMeasurementLabel(string label)
     {
         if (!CollectorMeasurementNote.IsValidLabel(label))
         {

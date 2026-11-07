@@ -68,9 +68,10 @@ public static class RingBufferLossAccounting
 
     /// <summary>
     /// Compares <paramref name="observation"/> with the staged prior, measures what was lost and stages the next prior.
-    /// Writes no measurement for a run that lost nothing and whose limit is not worth a flag, so a clean run's note stays as
-    /// it was. Called once per database on the per-database path: counts sum across calls and the window and limit keep the
-    /// largest, so the run's note is the whole run's.
+    /// Stages its measurements with the item (<see cref="CollectorContext.StagedItemMeasurements"/>), so they reach the run only
+    /// when the host lands the item after its write. Stages no measurement for a run that lost nothing and whose limit is not
+    /// worth a flag, so a clean run's note stays as it was. Called once per database on the per-database path: counts sum
+    /// across the landed databases and the window and limit keep the largest, so the run's note is the whole run's.
     /// </summary>
     public static void Apply(CollectorContext context, RingBufferObservation observation, bool truncated)
     {
@@ -83,42 +84,46 @@ public static class RingBufferLossAccounting
             observation.Total, observation.Held, observation.Dropped, observation.Created, observation.ReadAtUtc, truncated, observation.Limit);
         var result = RingBufferLoss.Compute(prior, reading);
 
+        /* #8146: staged with the item, not measured on the run: an item whose write fails keeps its prior, so the next run counts
+           these events again, and they must not also stay on this run's note. */
+        var measurements = context.StagedItemMeasurements;
+
         if (result.Evicted > 0 || result.Dropped > 0 || result.Unknown)
         {
             if (result.Evicted > 0)
             {
-                context.Measure(EvictedMeasurement, result.Evicted);
+                measurements.Measure(EvictedMeasurement, result.Evicted);
             }
 
             if (result.Dropped > 0)
             {
-                context.Measure(DroppedMeasurement, result.Dropped);
+                measurements.Measure(DroppedMeasurement, result.Dropped);
             }
 
             if (result.Unknown)
             {
-                context.Measure(UnknownMeasurement, 1);
+                measurements.Measure(UnknownMeasurement, 1);
             }
 
             if (result.AtLeast)
             {
-                context.Measure(AtLeastMeasurement, 1);
+                measurements.Measure(AtLeastMeasurement, 1);
             }
 
             if (result.MemoryCapped)
             {
-                context.Measure(MemoryCappedMeasurement, 1);
+                measurements.Measure(MemoryCappedMeasurement, 1);
             }
 
             var limit = observation.Limit ?? RingBufferTarget.DefaultMaxEvents;
-            context.MeasureMax(WindowSecondsMeasurement, result.WindowSeconds);
-            context.MeasureMax(LimitMeasurement, limit);
+            measurements.MeasureMax(WindowSecondsMeasurement, result.WindowSeconds);
+            measurements.MeasureMax(LimitMeasurement, limit);
 
             /* A session keeps the limit it was created with, so a raised setting does not reach one that is already running.
                A limit of 0 is no count limit at all, never "below". Only a run that lost events says so. */
             if ((result.Evicted > 0 || result.Dropped > 0) && limit > 0 && limit < context.RingBufferMaxEvents)
             {
-                context.Measure(LimitBelowSettingMeasurement, 1);
+                measurements.Measure(LimitBelowSettingMeasurement, 1);
             }
         }
 

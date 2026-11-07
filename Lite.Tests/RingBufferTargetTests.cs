@@ -125,6 +125,26 @@ public sealed class RingBufferTargetTests
         Assert.Equal(1088, ex.Number);
     }
 
+    /* #8146: the create and the start go as one batch, so a refused first attempt may have left a session behind. When the retry
+       reports it as already there (25631) or already started (25705), the callers would swallow that as benign and the session
+       could stay stopped with nothing logged, so the first attempt's exception surfaces instead. */
+    [Theory]
+    [InlineData(25631)]
+    [InlineData(25705)]
+    public async Task AzureCreate_OptionRefused_RetryReportsAlreadyPresent_SurfacesTheFirstException(int alreadyPresent)
+    {
+        var sent = new List<int?>();
+
+        var ex = await Assert.ThrowsAsync<SqlException>(() => RingBufferTarget.CreateWithoutLimitOnRefusalAsync(5000, limit =>
+        {
+            sent.Add(limit);
+            return Task.FromException(SqlExceptionFactory.Create(limit is null ? alreadyPresent : 25629, errorClass: 16, message: "refused"));
+        }, Numbers));
+
+        Assert.Equal(25629, ex.Number);
+        Assert.Equal(new int?[] { 5000, null }, sent);
+    }
+
     [Fact]
     public void Sql_Null_HasNoLimit()
     {

@@ -1531,10 +1531,12 @@ public partial class App : Application
             }
 
             /* #8146: the ring-buffer limit of the deadlock, blocked-process and long-query sessions. Clamped to 1000-10000 and
-               logged, because a value that is not honoured otherwise looks like a ring buffer that loses events for no reason. */
+               logged, because a value that is not honoured otherwise looks like a ring buffer that loses events for no reason. Read
+               as a long, so a value too large for an int lands on the nearest bound as the guide says; not a number reads as the
+               default. */
             if (read.TryGetProperty("xe_ring_buffer_max_events", out v))
             {
-                var givenLimit = v.WholeNumber(XeRingBufferMaxEvents);
+                var givenLimit = v.BigWholeNumber(RingBufferTarget.DefaultMaxEvents, long.MinValue, long.MaxValue);
                 XeRingBufferMaxEvents = RingBufferTarget.Clamp(givenLimit);
                 if (givenLimit != XeRingBufferMaxEvents)
                 {

@@ -322,9 +322,10 @@ public sealed class DeadlocksCollectorDefinitionTests
             Array.Empty<object[]>(), new[] { GateRow(false, 59L, 10L, 0L) });
 
         await DeadlocksCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+        context.LandStagedItemState();
 
         Assert.Equal(15, Measured(context, "ring_buffer_evicted"));
-        Assert.True(context.StagedItemState.ContainsKey(RingBufferLossAccounting.StateKey));
+        Assert.True(context.PendingState.ContainsKey(RingBufferLossAccounting.StateKey));
     }
 
     [Fact]
@@ -335,6 +336,7 @@ public sealed class DeadlocksCollectorDefinitionTests
             Array.Empty<object[]>(), new[] { GateRow(true, DBNull.Value, DBNull.Value, 5L) });
 
         await DeadlocksCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+        context.LandStagedItemState();
 
         Assert.Equal(3, Measured(context, "xe_session_dropped"));
     }
@@ -347,9 +349,10 @@ public sealed class DeadlocksCollectorDefinitionTests
             Array.Empty<object[]>(), new[] { GateRow(false, 59L, 10L, 0L) });
 
         await DeadlocksCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+        context.LandStagedItemState();
 
         Assert.Null(Measured(context, "ring_buffer_evicted"));
-        Assert.DoesNotContain(context.StagedItemState.Keys, k => k.StartsWith(RingBufferLossAccounting.StateKey, StringComparison.Ordinal));
+        Assert.DoesNotContain(context.PendingState.Keys, k => k.StartsWith(RingBufferLossAccounting.StateKey, StringComparison.Ordinal));
     }
 
     [Fact]
@@ -360,6 +363,7 @@ public sealed class DeadlocksCollectorDefinitionTests
             Array.Empty<object[]>(), new[] { GateRow(false, 59L, 10L, 0L) });
 
         await DeadlocksCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+        context.LandStagedItemState();
 
         Assert.Equal(15, Measured(context, "ring_buffer_evicted"));
     }
@@ -395,6 +399,7 @@ public sealed class DeadlocksCollectorDefinitionTests
         using var reader = FakeCollectorDataReader.WithResultSets(Array.Empty<object[]>(), new[] { row });
 
         await DeadlocksCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+        context.LandStagedItemState();
 
         Assert.Null(Measured(context, "ring_buffer_evicted"));
         Assert.Null(Measured(context, "ring_buffer_loss_unknown"));

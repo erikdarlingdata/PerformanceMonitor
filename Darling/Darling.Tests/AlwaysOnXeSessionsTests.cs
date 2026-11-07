@@ -973,6 +973,23 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
         Assert.Equal(2, database.Statements.Count(s => s.Contains("CREATE EVENT SESSION", StringComparison.Ordinal)));
     }
 
+    /* #8146: when the create with the limit was refused and the retry without it reports the session as already there, the first
+       attempt may have left a session that never started. "Already there" is swallowed as benign further up, so the first
+       exception surfaces instead and the failure is not hidden. */
+    [Theory]
+    [InlineData(AlwaysOnXeSessionKind.Deadlock)]
+    [InlineData(AlwaysOnXeSessionKind.BlockedProcess)]
+    public async Task AzureCreate_LimitRefused_RetryReportsAlreadyPresent_SurfacesTheFirstException(AlwaysOnXeSessionKind kind)
+    {
+        var database = new ScriptedDatabase { RefuseLimit = true, RefuseLimitNumber = 25629, CreateWithoutLimitFailure = new AlreadyThere() };
+
+        var raised = await Assert.ThrowsAnyAsync<Exception>(
+            () => AlwaysOnXeAzureEnsure.RunAsync(database, kind, Own(kind), AlwaysOnXeChoice.Shared, CancellationToken.None, ringBufferMaxEvents: 3000));
+
+        Assert.Equal(25629, Assert.IsType<Microsoft.Data.SqlClient.SqlException>(raised).Number);
+        Assert.Equal(2, database.Statements.Count(s => s.Contains("CREATE EVENT SESSION", StringComparison.Ordinal)));
+    }
+
     /* #8146: a create that fails for a reason other than the limit (a read-only database, a permission error) is sent once and its
        exception surfaces as before; retrying it without the option would only repeat the failure. */
     [Theory]
