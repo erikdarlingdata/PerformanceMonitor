@@ -41,6 +41,13 @@ public sealed class FinOpsHighImpactBoundedReadLiveTests
     private const string TiedHashA = "0xBTIE1";
     private const string TiedHashB = "0xBTIE2";
 
+    /* #5608: the seed ends at LiveClock.AnchoredEnd(), so its chunk layout (and so every plan read) is the same at any hour. */
+    private static DateTime At => LiveClock.AnchoredEnd();
+
+    /* The window starts an hour before the first seeded row, and the hours the product reader looks back reach it from the real clock. */
+    private static DateTime Cutoff => At.AddHours(-1);
+    private static int HoursBack => (int)Math.Ceiling((DateTime.UtcNow - Cutoff).TotalHours);
+
     /// <summary>
     /// The window's per-hash aggregate as the seed wrote it, before any scoring: the rows the scorer saw when the
     /// statement shipped every hash. Hash i runs in Db(i % 4); every tenth hash also ran, later and for less CPU, in
@@ -126,7 +133,7 @@ public sealed class FinOpsHighImpactBoundedReadLiveTests
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
         await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
-        var at = DarlingMcpTestData.Naive(DateTime.UtcNow).AddHours(-2);
+        var at = DarlingMcpTestData.Naive(At);
         for (var i = 1; i <= HashCount; i++)
         {
             var f = Figures(i);
@@ -170,7 +177,7 @@ public sealed class FinOpsHighImpactBoundedReadLiveTests
         Assert.DoesNotContain(expected, r => r.QueryHash == Hash(5));
 
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
-        var actual = await DarlingFinOpsHighImpactReader.ReadAsync(dataSource, ServerId, 24, 60, ct, TopN);
+        var actual = await DarlingFinOpsHighImpactReader.ReadAsync(dataSource, ServerId, HoursBack, 60, ct, TopN);
 
         Assert.Equal(expected.Select(r => r.QueryHash).ToList(), actual.Select(r => r.QueryHash).ToList());
         for (var i = 0; i < expected.Count; i++)
@@ -215,7 +222,7 @@ public sealed class FinOpsHighImpactBoundedReadLiveTests
             "DarlingFinOpsHighImpactReader.ReadCandidatesAsync is missing: the aggregate statement has no per-measure cap, so every query_hash in the window is shipped to the scorer.");
 
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
-        var cutoff = DateTime.UtcNow.AddHours(-24);
+        var cutoff = Cutoff;
         var candidates = await (Task<List<HighImpactQuery>>)method!.Invoke(null, [dataSource, ServerId, cutoff, TopN, 60, ct])!;
 
         Assert.True(candidates.Count <= 6 * TopN, $"{candidates.Count} candidates shipped for topN {TopN}; at most {6 * TopN} can be kept");
