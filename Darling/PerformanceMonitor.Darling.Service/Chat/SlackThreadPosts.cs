@@ -22,7 +22,21 @@ public sealed record SlackRequestFacts(Guid RequestId, string ServerName, string
 
 /// <summary>#7656: one post as it goes to Slack: the plain <c>text</c> (what a notification and a search show) and the blocks. <see cref="Card"/>
 /// (#7658) names the record the post's buttons act on, so the poster saves the card once Slack gives it a ts; null for a post with no buttons.</summary>
-public sealed record SlackThreadPostContent(string Text, IReadOnlyList<object> Blocks, SlackCardFacts? Card = null);
+public sealed record SlackThreadPostContent(string Text, IReadOnlyList<object> Blocks, SlackCardFacts? Card = null)
+{
+    /// <summary>The post as a store that is not listening sends it (#7658): unchanged when <paramref name="buttons"/> is true; otherwise with
+    /// <paramref name="sentence"/> as a last context line pointing at the web page, and no record named.</summary>
+    public SlackThreadPostContent WebInstead(bool buttons, string sentence)
+    {
+        if (buttons)
+        {
+            return this;
+        }
+
+        var blocks = new List<object>(Blocks) { SlackCards.Context(sentence) };
+        return new SlackThreadPostContent(Text, blocks, null);
+    }
+}
 
 /// <summary>
 /// #7656: the posts of a request's thread, built from service data. Every collected value (a server name, a metric, an agent's text,
@@ -143,7 +157,11 @@ public static class SlackThreadPosts
 
     /// <summary>A pending note written from a request (#7658): the author, the server and metric, the note at the mode, and the Approve and Reject
     /// buttons carrying the note id. A fleet note is not posted; the web and the Viewer decide it.</summary>
-    public static SlackThreadPostContent NotePost(long noteId, string author, string noteText, string serverName, string? metric, McpDataDetail mode)
+    public static SlackThreadPostContent NotePost(long noteId, string author, string noteText, string serverName, string? metric, McpDataDetail mode) =>
+        NotePost(noteId, author, noteText, serverName, metric, mode, buttons: true);
+
+    /// <summary>The note card with or without its buttons (#7658): a store that is not listening posts the note alone.</summary>
+    public static SlackThreadPostContent NotePost(long noteId, string author, string noteText, string serverName, string? metric, McpDataDetail mode, bool buttons)
     {
         var id = noteId.ToString(CultureInfo.InvariantCulture);
         var lines = new List<string> { "*Note proposed*", "*By:* " + Bounded(author, TextLimit), "*Server:* " + Bounded(serverName, TextLimit) };
@@ -162,16 +180,18 @@ public static class SlackThreadPosts
             lines.Add("_The note's text is withheld at this store's data detail setting._");
         }
 
-        var blocks = new List<object>
+        var blocks = new List<object> { Section(string.Join("\n", lines)) };
+        var text = "Note proposed by " + Bounded(author, TextLimit) + " on " + Bounded(serverName, TextLimit);
+        if (!buttons)
         {
-            Section(string.Join("\n", lines)),
-            SlackCards.Actions("note:" + id,
-                SlackCards.Button(SlackCardActions.NoteApprove, "Approve note", id, "primary"),
-                SlackCards.Button(SlackCardActions.NoteReject, "Reject note", id, "danger")),
-            SlackCards.Context("An approved note goes into future briefs. " + SlackCards.PressAgain),
-        };
-        return new SlackThreadPostContent("Note proposed by " + Bounded(author, TextLimit) + " on " + Bounded(serverName, TextLimit), blocks,
-            new SlackCardFacts(SlackCardKinds.Note, id));
+            return new SlackThreadPostContent(text, blocks);
+        }
+
+        blocks.Add(SlackCards.Actions("note:" + id,
+            SlackCards.Button(SlackCardActions.NoteApprove, "Approve note", id, "primary"),
+            SlackCards.Button(SlackCardActions.NoteReject, "Reject note", id, "danger")));
+        blocks.Add(SlackCards.Context("An approved note goes into future briefs. " + SlackCards.PressAgain));
+        return new SlackThreadPostContent(text, blocks, new SlackCardFacts(SlackCardKinds.Note, id));
     }
 
     /// <summary>The answer a first press gets (#7658), shown to the presser alone: the message, the facts or the statement, and the Confirm button whose

@@ -34,7 +34,7 @@ Socket Mode hands each event to one of the app's open connections. Two stores li
 - Each store that listens (buttons and mentions) needs a Slack app of its own, with its own app-level token.
 - Posting receives no events, so several stores can share one app's bot token for the request threads. On a shared app, set the app-level token on one store only; the other stores post threads, with no buttons or mentions.
 - A store still acts only on events from channels set as a bot channel on its own routes, and stays silent in threads it does not own.
-- When events keep arriving for channels no route of this store owns, the service logs one warning every ten minutes naming the likely cause: another store set the app-level token on the same app.
+- When events keep arriving for channels no route of this store owns, the service logs one line at Information every ten minutes. This is expected when other stores share the app only to post: the bot is a member of their channels, and the app subscribes to messages there. But if another store also has this app's app-level token set, the two lose each other's button presses and mentions, and each listening store needs its own Slack app.
 
 Two stores on one store database work as well: a press changes state only while the record is pending, a message is unique by its channel and ts, and a post writes its once mark before it sends.
 
