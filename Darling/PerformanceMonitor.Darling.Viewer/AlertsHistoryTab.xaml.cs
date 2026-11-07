@@ -392,7 +392,7 @@ public partial class AlertsHistoryTab : UserControl
                     : $"Dismissed {affected} selected alert(s)");
             }
             await LoadAlertsAsync();
-            StatusChanged?.Invoke($"dismissed {affected} alert(s) — {DateTime.Now:HH:mm:ss}");
+            StatusChanged?.Invoke($"dismissed {affected} alert(s) — {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {
@@ -443,7 +443,7 @@ public partial class AlertsHistoryTab : UserControl
                 ViewerLogger.Info("AlertsHistory", $"Dismissed all {affected} visible alert(s) ({scope}, last {hoursBack}h)");
             }
             await LoadAlertsAsync();
-            StatusChanged?.Invoke($"dismissed {affected} alert(s) — {DateTime.Now:HH:mm:ss}");
+            StatusChanged?.Invoke($"dismissed {affected} alert(s) — {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {
@@ -612,7 +612,7 @@ public partial class AlertsHistoryTab : UserControl
                     $"Created mute rule (server={dialog.Rule.ServerName ?? "any"}, metric={dialog.Rule.MetricName ?? "any"}, expires={expiry})");
             }
             await LoadAlertsAsync();
-            StatusChanged?.Invoke($"mute rule created — {DateTime.Now:HH:mm:ss}");
+            StatusChanged?.Invoke($"mute rule created — {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {

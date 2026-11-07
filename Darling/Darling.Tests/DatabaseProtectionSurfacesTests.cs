@@ -46,13 +46,18 @@ public sealed class ViewerDatabaseProtectionTextTests : IDisposable
 
     public static TheoryData<TimeDisplayMode> Modes => new() { TimeDisplayMode.ServerTime, TimeDisplayMode.UTC, TimeDisplayMode.LocalTime };
 
-    /// <summary>The time of <paramref name="utc"/> as each display mode words it for the picked server: Server on its clock, UTC as is, Local on this machine.</summary>
+    /// <summary>The time of <paramref name="utc"/> as each display mode words it for the picked server, to the second with its zone: Server on
+    /// its clock with its offset, UTC as is, Local on this machine with this machine's zone name.</summary>
     private static string Worded(DateTime utc, TimeDisplayMode mode) => mode switch
     {
-        TimeDisplayMode.ServerTime => utc.AddMinutes(330).ToString("g", CultureInfo.CurrentCulture),
-        TimeDisplayMode.UTC => utc.ToString("g", CultureInfo.CurrentCulture),
-        _ => TimeZoneInfo.ConvertTimeFromUtc(utc, TimeZoneInfo.Local).ToString("g", CultureInfo.CurrentCulture),
+        TimeDisplayMode.ServerTime => utc.AddMinutes(330).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.CurrentCulture) + " UTC+05:30",
+        TimeDisplayMode.UTC => utc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.CurrentCulture) + " UTC",
+        _ => LocalWorded(utc),
     };
+
+    private static string LocalWorded(DateTime utc) =>
+        TimeZoneInfo.ConvertTimeFromUtc(utc, TimeZoneInfo.Local).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.CurrentCulture)
+        + " " + (TimeZoneInfo.Local.IsDaylightSavingTime(utc) ? TimeZoneInfo.Local.DaylightName : TimeZoneInfo.Local.StandardName);
 
     [Theory]
     [MemberData(nameof(Modes))]
@@ -179,7 +184,7 @@ public sealed class ViewerDatabaseProtectionTextTests : IDisposable
     public void TheStatusLine_NamesTheOverdueDatabases_AndTheCaptureTime()
     {
         var read = Read(Fact("zeta", fullAgo: 9 * Day, logAgo: TimeSpan.FromMinutes(5), checkDbAgo: Day));
-        var local = Captured.ToLocalTime().ToString("g", System.Globalization.CultureInfo.CurrentCulture);
+        var local = LocalWorded(Captured);
 
         Assert.Equal($"1 of 1 judged databases overdue. Full backup: zeta.   Captured: {local}", ViewerDatabaseProtectionText.StatusLine(read, ServerClock.Utc));
         Assert.StartsWith("No database is overdue (1 judged).", ViewerDatabaseProtectionText.StatusLine(Read(Fact("a", fullAgo: Day, logAgo: TimeSpan.FromMinutes(5), checkDbAgo: Day)), ServerClock.Utc), StringComparison.Ordinal);

@@ -65,4 +65,27 @@ public sealed class JobHistoryAllServersZoneTests : IDisposable
 
         Assert.Equal(Eastern.AsTimeZone().Id, JobHistoryTab.JobHistoryZone(7, Clocks(), null).Id);
     }
+
+    /// <summary>The pure overload names the mode: All Servers is the mixed-list zone (<see cref="MultiServerTime.MixedZone(TimeDisplayMode)"/>).</summary>
+    [Theory]
+    [InlineData(TimeDisplayMode.ServerTime, false)]
+    [InlineData(TimeDisplayMode.LocalTime, false)]
+    [InlineData(TimeDisplayMode.UTC, true)]
+    public void AllServers_FollowsTheMode_ThroughThePureOverload(TimeDisplayMode mode, bool utc)
+    {
+        Assert.Same(utc ? TimeZoneInfo.Utc : TimeZoneInfo.Local, JobHistoryTab.JobHistoryZone(null, mode, Clocks(), null));
+        Assert.Same(MultiServerTime.MixedZone(mode), JobHistoryTab.JobHistoryZone(null, mode, Clocks(), null));
+    }
+
+    /// <summary>One server reads its own clock in Server time, and the chosen zone otherwise; with no clock known, Server time is this machine's zone.</summary>
+    [Fact]
+    public void OneServer_FollowsTheMode_OnItsOwnClock()
+    {
+        Assert.Equal(Eastern.AsTimeZone().Id, JobHistoryTab.JobHistoryZone(7, TimeDisplayMode.ServerTime, Clocks(), null).Id);
+        Assert.Equal(Eastern.AsTimeZone().Id, JobHistoryTab.JobHistoryZone(7, TimeDisplayMode.ServerTime, new Dictionary<int, ServerClock>(), Clocks()).Id);
+        Assert.Same(TimeZoneInfo.Utc, JobHistoryTab.JobHistoryZone(7, TimeDisplayMode.UTC, Clocks(), null));
+        Assert.Same(TimeZoneInfo.Local, JobHistoryTab.JobHistoryZone(7, TimeDisplayMode.LocalTime, Clocks(), null));
+        Assert.Same(TimeZoneInfo.Local, JobHistoryTab.JobHistoryZone(7, TimeDisplayMode.ServerTime, null, null));
+        Assert.Same(TimeZoneInfo.Utc, JobHistoryTab.JobHistoryZone(7, TimeDisplayMode.UTC, null, null));
+    }
 }
