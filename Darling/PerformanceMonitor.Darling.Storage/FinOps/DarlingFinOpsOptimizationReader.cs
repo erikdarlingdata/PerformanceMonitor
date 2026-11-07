@@ -41,7 +41,24 @@ public sealed record ExpensiveQuery(
 /// </summary>
 public static class DarlingFinOpsOptimizationReader
 {
-    /// <summary>Databases with zero query executions over the last N days. $1 server_id, $2 cutoff.</summary>
+    /// <summary>The RAW <c>db_activity</c> CTE of <see cref="IdleDatabasesSql"/>, verbatim: the anchor <see cref="IdleDatabasesSqlFor"/>
+    /// replaces to route the activity sum through the hourly rollup.</summary>
+    private const string IdleActivityRawCte = $@"db_activity AS (
+    SELECT
+        database_name,
+        SUM(delta_execution_count) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS total_executions,
+        MAX(last_execution_time) AS last_execution
+    FROM v_query_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   delta_execution_count IS NOT NULL
+    GROUP BY database_name
+)";
+
+    /// <summary>Databases with zero query executions over the last N days, read from the raw tier alone. $1 server_id, $2 cutoff.
+    /// <see cref="GetIdleDatabasesAsync"/> runs this text only on a store with no materialized database-grain hourly rollup; otherwise it runs
+    /// <see cref="IdleDatabasesSqlFor"/>, because on a Timescale store the raw tier (<see cref="TimescaleSupport.RawRetentionSpan"/>) is shorter
+    /// than the 7-day window, and a sum over raw alone would judge idleness over the days raw still holds, not the 7 the claim names.</summary>
     public const string IdleDatabasesSql = $@"
 WITH db_sizes AS (
     SELECT
@@ -57,17 +74,7 @@ WITH db_sizes AS (
     )
     GROUP BY database_name
 ),
-db_activity AS (
-    SELECT
-        database_name,
-        SUM(delta_execution_count) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS total_executions,
-        MAX(last_execution_time) AS last_execution
-    FROM v_query_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   delta_execution_count IS NOT NULL
-    GROUP BY database_name
-)
+{IdleActivityRawCte}
 SELECT
     ds.database_name,
     ds.total_size_mb,
@@ -79,6 +86,77 @@ WHERE COALESCE(a.total_executions, 0) = 0
 AND   (a.last_execution IS NULL OR a.last_execution < $2)
 AND   ds.database_name NOT IN ('master', 'model', 'msdb', 'tempdb', 'PerformanceMonitor')
 ORDER BY ds.total_size_mb DESC";
+
+    /// <summary>
+    /// The routed <c>db_activity</c>: every WHOLE hour from <paramref name="relationSql"/> (the stitched database-grain hourly rollup) from
+    /// <paramref name="ceilingHourUtc"/>, UNION ALL the raw leading edge <c>[$2, ceilingHour)</c> the bucket grain cannot slice, UNION ALL the raw
+    /// trailing edge <c>[watermark, now)</c> the aggregate has not materialized yet. The rollup's <c>execution_count_sum</c> is the raw CTE's
+    /// interval-honest sum. Its <c>last_execution_time_max</c> covers the rows the relation itself holds: on the legacy hourly rollup every
+    /// sampled row with a delta, as the raw CTE's <c>MAX(last_execution_time)</c> does, and on the interval-honest successor the honest rows
+    /// only, because that aggregate's definition filters restart rows (<c>sample_interval_seconds = 0</c>) out of every column, the maximum
+    /// included. The interval-honest filter rides on the raw arms only. The outer statement reads the same two columns either way.
+    /// </summary>
+    private static string IdleActivityForCagg(string relationSql, DateTime ceilingHourUtc, DateTime watermarkUtc)
+    {
+        var ceiling = $"TIMESTAMP '{ceilingHourUtc:yyyy-MM-dd HH:mm:ss.ffffff}'";
+        var watermark = $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'";
+
+        return $@"db_activity AS (
+    SELECT
+        database_name,
+        SUM(executions) AS total_executions,
+        MAX(last_execution) AS last_execution
+    FROM (
+        SELECT f.database_name, f.execution_count_sum AS executions, f.last_execution_time_max AS last_execution
+        FROM {relationSql}
+        WHERE f.server_id = $1
+        AND   f.bucket >= {ceiling}
+
+        UNION ALL
+
+        SELECT database_name, CASE WHEN {TimescaleSupport.IntervalHonestSourceFilter} THEN delta_execution_count END, last_execution_time
+        FROM v_query_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time < {ceiling}
+        AND   delta_execution_count IS NOT NULL
+
+        UNION ALL
+
+        SELECT database_name, CASE WHEN {TimescaleSupport.IntervalHonestSourceFilter} THEN delta_execution_count END, last_execution_time
+        FROM v_query_stats
+        WHERE server_id = $1
+        AND   collection_time >= {watermark}
+        AND   delta_execution_count IS NOT NULL
+    ) AS parts
+    GROUP BY database_name
+)";
+    }
+
+    /// <summary>
+    /// <see cref="IdleDatabasesSql"/> with the activity sum routed through the stitched database-grain hourly rollup (<paramref name="coverage"/>)
+    /// for every whole hour from the ceiling hour of <paramref name="cutoffUtc"/>, raw for the partial leading hour and for everything at or after
+    /// <paramref name="watermarkUtc"/>. On a Timescale store the raw tier is shorter than the 7-day window, so this is the read that judges the
+    /// whole window; callers take it only once <see cref="RollupMaterializationWatermark.GetAsync"/> has answered a real watermark for the
+    /// database-grain hourly family, and run <see cref="IdleDatabasesSql"/> otherwise. The same shape as the Server Inventory's routed
+    /// <c>active_dbs</c>, so the grid, the recommendation row and the fleet count judge one window.
+    /// </summary>
+    public static string IdleDatabasesSqlFor(RollupCoverage coverage, DateTime cutoffUtc, DateTime watermarkUtc)
+    {
+        ArgumentNullException.ThrowIfNull(coverage);
+
+        var ceilingHour = CeilingHour(cutoffUtc);
+        var relationSql = coverage.StitchedRelationSql(
+            TimescaleSupport.QueryStatsDbHourlyView, "f", ceilingHour, RollupCoverage.StitchTier.Hourly);
+        return FinOpsRollupRouting.RouteOrThrow(
+            IdleDatabasesSql, IdleActivityRawCte, IdleActivityForCagg(relationSql, ceilingHour, watermarkUtc), "idle databases");
+    }
+
+    private static DateTime CeilingHour(DateTime instant)
+    {
+        var floor = TimescaleSupport.AlignDown(instant, TimescaleSupport.HourlyBucket);
+        return floor == instant ? floor : floor + TimescaleSupport.HourlyBucket;
+    }
 
     /// <summary>The number of COMPLETE UTC days (D-7 through D-1, today excluded) that must each hold a query-stats sample before a database is called idle for 7 days.</summary>
     public const int IdleCoverageDays = 7;
@@ -117,6 +195,9 @@ ORDER BY ds.total_size_mb DESC";
     /// server once and filter the days in the join (measured on a test store). The select-list form stays one parameterized index scan per day, with
     /// the chunks outside that day excluded at run time. The oldest sample is <c>ORDER BY collection_time LIMIT 1</c> rather than <c>MIN</c>, which
     /// through this view read every row of the server in the store's whole history (an ordered index scan that stops at its first row does not). $1 server_id, $2 D-7 00:00, $3 today 00:00 (naive UTC).
+    /// This is the raw-tier form; <see cref="HasIdleCoverageAtAsync(NpgsqlDataSource, int, DateTime, int, CancellationToken)"/> runs it only on a store with no
+    /// materialized database-grain hourly rollup, and <see cref="IdleCoverageSqlFor"/> otherwise: on a Timescale store the raw tier is shorter than 7 days,
+    /// so measured against raw alone the oldest sample is never 7 days old and no server is ever covered.
     /// </summary>
     public const string IdleCoverageSql = @"
 SELECT (SELECT collection_time FROM v_query_stats WHERE server_id = $1 ORDER BY collection_time LIMIT 1),
@@ -129,16 +210,84 @@ SELECT (SELECT collection_time FROM v_query_stats WHERE server_id = $1 ORDER BY 
               FROM generate_series(CAST($2 AS timestamp), CAST($3 AS timestamp) - INTERVAL '1 day', INTERVAL '1 day') AS d(day_start)) AS probes
         WHERE has_sample)";
 
+    /// <summary>
+    /// <see cref="IdleCoverageSql"/> over the stitched database-grain hourly rollup (<paramref name="coverage"/>), raw only at or after
+    /// <paramref name="watermarkUtc"/>: the same two columns, so <see cref="IdleCoverageHolds"/> reads both forms alike. The oldest sample is
+    /// the lesser of the first rollup bucket's END (a bucket at B holds a sample in [B, B + 1 hour), so B + 1 hour is the latest that sample
+    /// can be, and a claim of 7 days of history is never made on a bucket's start alone) and the oldest raw sample, each an ordered index scan that
+    /// stops at its first row. The complete days are the distinct UTC dates in [$2, $3) that hold a rollup bucket (a bucket exists only for an
+    /// hour that held a sample, and an hour-aligned bucket lies within one date) or a raw sample at or after the watermark. The relation is
+    /// stitched for a window starting at <paramref name="coverageStartUtc"/> (D-7 00:00), the earliest instant the days read.
+    /// $1 server_id, $2 D-7 00:00, $3 today 00:00 (naive UTC).
+    /// </summary>
+    public static string IdleCoverageSqlFor(RollupCoverage coverage, DateTime coverageStartUtc, DateTime watermarkUtc)
+    {
+        ArgumentNullException.ThrowIfNull(coverage);
+
+        var watermark = $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'";
+        var relationSql = coverage.StitchedRelationSql(
+            TimescaleSupport.QueryStatsDbHourlyView, "f", coverageStartUtc, RollupCoverage.StitchTier.Hourly);
+
+        return $@"
+SELECT (SELECT MIN(first_sample)
+        FROM ((SELECT f.bucket + INTERVAL '1 hour' AS first_sample FROM {relationSql} WHERE f.server_id = $1 ORDER BY f.bucket LIMIT 1)
+              UNION ALL
+              (SELECT collection_time FROM v_query_stats WHERE server_id = $1 ORDER BY collection_time LIMIT 1)) AS firsts),
+       (SELECT COUNT(DISTINCT sample_day)
+        FROM (SELECT CAST(f.bucket AS DATE) AS sample_day
+              FROM {relationSql}
+              WHERE f.server_id = $1
+              AND   f.bucket >= $2
+              AND   f.bucket <  $3
+
+              UNION ALL
+
+              SELECT CAST(collection_time AS DATE)
+              FROM v_query_stats
+              WHERE server_id = $1
+              AND   collection_time >= {watermark}
+              AND   collection_time >= $2
+              AND   collection_time <  $3) AS days)";
+    }
+
+    /// <summary>The hourly rollup route of the idle read: the store's stitched coverage and the live database-grain hourly relation's
+    /// materialization watermark. Null when the store has no such family or nothing has materialized yet, and raw answers everything.</summary>
+    private readonly record struct IdleRollupRoute(RollupCoverage Coverage, DateTime WatermarkUtc);
+
+    /// <summary>Resolves <see cref="IdleRollupRoute"/> from the cached availability probe (<see cref="ComposeStoreAvailability.GetRollupsAsync(NpgsqlDataSource, CancellationToken)"/>)
+    /// and the watermark of the live relation (the interval-honest successor when it exists, else the legacy), the Server Inventory's rule.</summary>
+    private static async Task<IdleRollupRoute?> ResolveIdleRouteAsync(
+        NpgsqlDataSource dataSource, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(dataSource, cancellationToken);
+        if (!rollups.DbGrainHourly)
+            return null;
+
+        var liveRelation = rollups.DbGrainIntervalHourly
+            ? TimescaleSupport.QueryStatsDbIntervalHourlyView
+            : TimescaleSupport.QueryStatsDbHourlyView;
+        var watermark = await RollupMaterializationWatermark.GetAsync(
+            dataSource, liveRelation, TimescaleSupport.HourlyBucket, commandTimeoutSeconds, cancellationToken);
+        return watermark is DateTime mark ? new IdleRollupRoute(coverage, mark) : null;
+    }
+
     /// <summary>True once <see cref="IdleCoverageHolds"/>: 7 days of query-stats history and a sample on each complete UTC day of them.</summary>
     public static Task<bool> HasIdleCoverageAsync(
         NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, CancellationToken cancellationToken = default) =>
         HasIdleCoverageAtAsync(dataSource, serverId, DateTime.UtcNow, commandTimeoutSeconds, cancellationToken);
 
-    /// <summary><see cref="HasIdleCoverageAsync"/> as of <paramref name="now"/> (UTC), so a test can ask just after 00:00.</summary>
+    /// <summary><see cref="HasIdleCoverageAsync"/> as of <paramref name="now"/> (UTC), so a test can ask just after 00:00. Reads the hourly
+    /// rollup where the store has one materialized (<see cref="IdleCoverageSqlFor"/>), the raw tier otherwise (<see cref="IdleCoverageSql"/>).</summary>
     public static async Task<bool> HasIdleCoverageAtAsync(
-        NpgsqlDataSource dataSource, int serverId, DateTime now, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+        NpgsqlDataSource dataSource, int serverId, DateTime now, int commandTimeoutSeconds, CancellationToken cancellationToken = default) =>
+        await HasIdleCoverageAtAsync(
+            dataSource, serverId, now, await ResolveIdleRouteAsync(dataSource, commandTimeoutSeconds, cancellationToken), commandTimeoutSeconds, cancellationToken);
+
+    private static async Task<bool> HasIdleCoverageAtAsync(
+        NpgsqlDataSource dataSource, int serverId, DateTime now, IdleRollupRoute? route, int commandTimeoutSeconds, CancellationToken cancellationToken)
     {
-        await using var command = dataSource.CreateCommand(IdleCoverageSql);
+        var sql = route is { } r ? IdleCoverageSqlFor(r.Coverage, IdleCoverageStartUtc(now), r.WatermarkUtc) : IdleCoverageSql;
+        await using var command = dataSource.CreateCommand(sql);
         command.CommandTimeout = commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(IdleCoverageStartUtc(now), DateTimeKind.Unspecified) });
@@ -150,19 +299,29 @@ SELECT (SELECT collection_time FROM v_query_stats WHERE server_id = $1 ORDER BY 
         return IdleCoverageHolds(reader.GetDateTime(0), days, now);
     }
 
-    /// <summary>The idle databases, only when the query stats cover each of the last 7 UTC days; otherwise an uncovered read with no rows.</summary>
+    /// <summary>The idle databases, only when the query stats cover each of the last 7 UTC days; otherwise an uncovered read with no rows.
+    /// The rollup route is resolved once and both reads take it, so the coverage and the activity are judged over the same tiers.</summary>
     public static async Task<IdleDatabaseRead> GetIdleDatabaseReadAsync(
         NpgsqlDataSource dataSource, int serverId, DateTime cutoffUtc, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
     {
-        if (!await HasIdleCoverageAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken))
+        var route = await ResolveIdleRouteAsync(dataSource, commandTimeoutSeconds, cancellationToken);
+        if (!await HasIdleCoverageAtAsync(dataSource, serverId, DateTime.UtcNow, route, commandTimeoutSeconds, cancellationToken))
             return new IdleDatabaseRead(false, new List<IdleDatabase>());
-        return new IdleDatabaseRead(true, await GetIdleDatabasesAsync(dataSource, serverId, cutoffUtc, commandTimeoutSeconds, cancellationToken));
+        return new IdleDatabaseRead(true, await GetIdleDatabasesAsync(dataSource, serverId, cutoffUtc, route, commandTimeoutSeconds, cancellationToken));
     }
 
+    /// <summary>The idle databases over <c>[cutoffUtc, now)</c>: through the hourly rollup where the store has one materialized
+    /// (<see cref="IdleDatabasesSqlFor"/>), the raw tier otherwise (<see cref="IdleDatabasesSql"/>).</summary>
     public static async Task<List<IdleDatabase>> GetIdleDatabasesAsync(
-        NpgsqlDataSource dataSource, int serverId, DateTime cutoffUtc, int commandTimeoutSeconds, CancellationToken cancellationToken)
+        NpgsqlDataSource dataSource, int serverId, DateTime cutoffUtc, int commandTimeoutSeconds, CancellationToken cancellationToken) =>
+        await GetIdleDatabasesAsync(
+            dataSource, serverId, cutoffUtc, await ResolveIdleRouteAsync(dataSource, commandTimeoutSeconds, cancellationToken), commandTimeoutSeconds, cancellationToken);
+
+    private static async Task<List<IdleDatabase>> GetIdleDatabasesAsync(
+        NpgsqlDataSource dataSource, int serverId, DateTime cutoffUtc, IdleRollupRoute? route, int commandTimeoutSeconds, CancellationToken cancellationToken)
     {
-        await using var command = dataSource.CreateCommand(IdleDatabasesSql);
+        var sql = route is { } r ? IdleDatabasesSqlFor(r.Coverage, cutoffUtc, r.WatermarkUtc) : IdleDatabasesSql;
+        await using var command = dataSource.CreateCommand(sql);
         command.CommandTimeout = commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoffUtc, DateTimeKind.Unspecified) });
