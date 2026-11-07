@@ -793,7 +793,7 @@ WHERE des.name = @session_name;", connection))
         try
         {
             using var createCmd = new SqlCommand(
-                LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds), connection);
+                LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds, App.XeRingBufferMaxEvents), connection);
             createCmd.CommandTimeout = CommandTimeoutSeconds;
             await ExecuteLongQueryAzureDdlAsync(createCmd, cancellationToken);
         }
@@ -890,7 +890,7 @@ WHERE ses.name = @session_name;" + LegacyLongQuerySessionServerProbeSql, connect
         }
 
         using var createCmd = new SqlCommand(
-            LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: false, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds)
+            LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: false, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds, App.XeRingBufferMaxEvents)
             + "\n\n" + LongQueryCompletionsCollector.BuildStartSessionSql(sessionName, databaseScoped: false), connection);
         createCmd.CommandTimeout = CommandTimeoutSeconds;
         await createCmd.ExecuteNonQueryAsync(cancellationToken);
@@ -941,7 +941,7 @@ END;", connection);
         }
 
         using var createCmd = new SqlCommand(
-            LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds)
+            LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds, App.XeRingBufferMaxEvents)
             + "\n\n" + LongQueryCompletionsCollector.BuildStartSessionSql(sessionName, databaseScoped: true), connection);
         createCmd.CommandTimeout = CommandTimeoutSeconds;
         await ExecuteLongQueryAzureDdlAsync(createCmd, cancellationToken);

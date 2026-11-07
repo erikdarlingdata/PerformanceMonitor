@@ -261,6 +261,25 @@ public sealed class LongQueryCompletionsCollectorDefinitionTests
         Assert.Equal("ringdb", Assert.Single(rows).DatabaseName);
     }
 
+    /* #8146 */
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void LongQuery_CreateSql_CarriesLimit(bool databaseScoped)
+    {
+        var sql = LongQueryCompletionsCollector.BuildCreateSessionSql(Session, databaseScoped, 2_000_000, 2500);
+
+        Assert.Contains("max_events_limit = 2500", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LongQuery_CreateSql_WritesTheDefaultLimitExplicitly()
+    {
+        var sql = LongQueryCompletionsCollector.BuildCreateSessionSql(Session, databaseScoped: false, 2_000_000);
+
+        Assert.Contains("max_events_limit = " + RingBufferTarget.DefaultMaxEvents, sql, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void BuildCreateSessionSql_ServerScoped_PredicateOnCompletedOnly_AttentionUnfiltered()
     {

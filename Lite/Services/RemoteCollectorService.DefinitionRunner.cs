@@ -253,6 +253,7 @@ public partial class RemoteCollectorService
         var context = new CollectorContext
         {
             AzureRegistrationIsLogicalServer = registeredAsLogicalServer,
+            RingBufferMaxEvents = App.XeRingBufferMaxEvents,
             ServerId = serverId,
             ServerName = GetServerNameForStorage(server),
             CollectionTime = collectionTime,

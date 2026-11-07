@@ -604,6 +604,7 @@ public sealed partial class DarlingCollectorRunner
         var context = new CollectorContext
         {
             AzureRegistrationIsLogicalServer = registeredAsLogicalServer,
+            RingBufferMaxEvents = RingBufferMaxEvents,
             ServerId = server.ServerId,
             ServerName = server.StorageName,
             CollectionTime = collectionTime,

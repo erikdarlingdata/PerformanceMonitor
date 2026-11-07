@@ -68,6 +68,9 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
         public List<string> Statements { get; } = new();
         public Exception? CreateFailure { get; set; }
 
+        /* #8146: a create whose text names max_events_limit is refused, as an engine that does not know the option would. */
+        public bool RefuseLimit { get; set; }
+
         /* #5640: a create whose text holds this is refused with error 25744, as Azure SQL Database refuses an action it lacks. */
         public string? RefuseActionText { get; set; }
 
@@ -92,6 +95,11 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
                 if (CreateFailure is not null)
                 {
                     throw CreateFailure;
+                }
+
+                if (RefuseLimit && statement.Contains("max_events_limit", StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException("The option max_events_limit is not supported.");
                 }
 
                 if (RefuseActionText is not null && statement.Contains(RefuseActionText, StringComparison.Ordinal))
@@ -904,6 +912,65 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
         Assert.Contains("sys.database_event_session_actions", azure, StringComparison.Ordinal);
         Assert.Contains(") = 4", azure, StringComparison.Ordinal);
         Assert.Contains("ELSE 1", azure, StringComparison.Ordinal);
+    }
+
+    /* #8146: the limit the host asks for reaches the create the ensure sends, for both ring-buffer captures. */
+    [Theory]
+    [InlineData(AlwaysOnXeSessionKind.Deadlock)]
+    [InlineData(AlwaysOnXeSessionKind.BlockedProcess)]
+    public async Task AzureCreate_CarriesConfiguredLimit(AlwaysOnXeSessionKind kind)
+    {
+        var database = new ScriptedDatabase();
+
+        await AlwaysOnXeAzureEnsure.RunAsync(database, kind, Own(kind), AlwaysOnXeChoice.Shared, CancellationToken.None, ringBufferMaxEvents: 3000);
+
+        var create = Assert.Single(database.Statements, s => s.Contains("CREATE EVENT SESSION", StringComparison.Ordinal));
+        Assert.Contains("max_events_limit = 3000", create, StringComparison.Ordinal);
+    }
+
+    /* #8146: max_events_limit is unverified on Azure SQL Database. A refusal costs one retry without it, and the session exists. */
+    [Theory]
+    [InlineData(AlwaysOnXeSessionKind.Deadlock)]
+    [InlineData(AlwaysOnXeSessionKind.BlockedProcess)]
+    public async Task AzureCreate_LimitRefused_RetriesWithoutLimit(AlwaysOnXeSessionKind kind)
+    {
+        var database = new ScriptedDatabase { RefuseLimit = true };
+
+        var result = await AlwaysOnXeAzureEnsure.RunAsync(database, kind, Own(kind), AlwaysOnXeChoice.Shared, CancellationToken.None, ringBufferMaxEvents: 3000);
+
+        Assert.Equal(AlwaysOnXeChoice.Shared, result.Choice);
+        Assert.True(database.Started[AlwaysOnXeSessions.SharedNameFor(kind)]);
+        var creates = database.Statements.Where(s => s.Contains("CREATE EVENT SESSION", StringComparison.Ordinal)).ToList();
+        Assert.Equal(2, creates.Count);
+        Assert.Contains("max_events_limit = 3000", creates[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("max_events_limit", creates[1], StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(AlwaysOnXeSessionKind.Deadlock)]
+    [InlineData(AlwaysOnXeSessionKind.BlockedProcess)]
+    public async Task AzureCreate_RetryAlsoFails_Throws(AlwaysOnXeSessionKind kind)
+    {
+        var database = new ScriptedDatabase { CreateFailure = new InvalidOperationException("The create was refused.") };
+
+        var raised = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => AlwaysOnXeAzureEnsure.RunAsync(database, kind, Own(kind), AlwaysOnXeChoice.Shared, CancellationToken.None, ringBufferMaxEvents: 3000));
+
+        Assert.Equal("The create was refused.", raised.Message);
+        Assert.Equal(2, database.Statements.Count(s => s.Contains("CREATE EVENT SESSION", StringComparison.Ordinal)));
+    }
+
+    /* #8146: the attention session has no ring-buffer limit to refuse, so its create is sent once and carries none. */
+    [Fact]
+    public async Task AzureCreate_Attention_CarriesNoLimit_AndIsNotRetriedWithoutOne()
+    {
+        var database = new ScriptedDatabase { CreateFailure = new InvalidOperationException("The create was refused.") };
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => AlwaysOnXeAzureEnsure.RunAsync(database, AlwaysOnXeSessionKind.Attention, Own(AlwaysOnXeSessionKind.Attention), AlwaysOnXeChoice.Shared, CancellationToken.None, ringBufferMaxEvents: 3000));
+
+        var create = Assert.Single(database.Statements, s => s.Contains("CREATE EVENT SESSION", StringComparison.Ordinal));
+        Assert.DoesNotContain("max_events_limit", create, StringComparison.Ordinal);
     }
 
     private static CollectorContext AzureContext(string? sessionName) => new()

@@ -58,6 +58,22 @@ public partial class RemoteCollectorService
             (connection, token) => EnsureDeadlockXeSessionOnPremAsync(connection, server, token), cancellationToken);
     }
 
+    /// <summary>The deadlock session's create and start (#8146): the ring_buffer clause carries <c>max_events_limit</c> through <see cref="RingBufferTarget.Sql"/>.</summary>
+    internal static string BuildDeadlockCreateSql(int ringBufferMaxEvents) => $@"
+CREATE EVENT SESSION [{DeadlockXeSessionName}]
+ON SERVER
+ADD EVENT sqlserver.xml_deadlock_report
+{RingBufferTarget.Sql(ringBufferMaxEvents)}
+WITH
+(
+    MAX_DISPATCH_LATENCY = 5 SECONDS,
+    EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS,
+    MEMORY_PARTITION_MODE = NONE,
+    STARTUP_STATE = ON
+);
+
+ALTER EVENT SESSION [{DeadlockXeSessionName}] ON SERVER STATE = START;";
+
     /// <summary>
     /// On-prem / Azure MI / AWS RDS: creates or ensures server-scoped XE session with ring_buffer target.
     /// </summary>
@@ -101,23 +117,7 @@ WHERE ses.name = @session_name;", connection))
         /* Create and start server-scoped session with ring_buffer
            Using MEMORY_PARTITION_MODE = NONE for AWS RDS compatibility */
         /* No catch here: a failure propagates to the ensure's catch, which logs it once at Warn or Error and then at Debug (#4964). */
-        using var createCmd = new SqlCommand($@"
-CREATE EVENT SESSION [{DeadlockXeSessionName}]
-ON SERVER
-ADD EVENT sqlserver.xml_deadlock_report
-ADD TARGET package0.ring_buffer
-(
-    SET max_memory = 4096
-)
-WITH
-(
-    MAX_DISPATCH_LATENCY = 5 SECONDS,
-    EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS,
-    MEMORY_PARTITION_MODE = NONE,
-    STARTUP_STATE = ON
-);
-
-ALTER EVENT SESSION [{DeadlockXeSessionName}] ON SERVER STATE = START;", connection);
+        using var createCmd = new SqlCommand(BuildDeadlockCreateSql(App.XeRingBufferMaxEvents), connection);
         createCmd.CommandTimeout = CommandTimeoutSeconds;
         await createCmd.ExecuteNonQueryAsync(cancellationToken);
         AppLogger.Info("XeSession", $"[{server.DisplayName}] Created and started deadlock XE session");

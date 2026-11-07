@@ -106,10 +106,10 @@ public sealed class CollectorContext
 
     /// <summary>
     /// The ring-buffer <c>max_events_limit</c> the host's setting asks for (#8146). The loss note flags a session whose
-    /// own limit is below it, because a session keeps the limit it was created with. The literal 1000 stands until
-    /// Task 4 replaces it with <c>RingBufferTarget.DefaultMaxEvents</c>.
+    /// own limit is below it, because a session keeps the limit it was created with. The host sets it from its
+    /// <c>xeRingBufferMaxEvents</c> / <c>xe_ring_buffer_max_events</c> setting; unset is <see cref="RingBufferTarget.DefaultMaxEvents"/>.
     /// </summary>
-    public long RingBufferMaxEvents { get; init; } = 1000;
+    public long RingBufferMaxEvents { get; init; } = RingBufferTarget.DefaultMaxEvents;
 
     /// <summary>
     /// True when this server's registration is an Azure SQL Database logical server, where the deadlock session is

@@ -110,7 +110,7 @@ public static class RingBufferLossAccounting
                 context.Measure(MemoryCappedMeasurement, 1);
             }
 
-            var limit = observation.Limit ?? 1000;
+            var limit = observation.Limit ?? RingBufferTarget.DefaultMaxEvents;
             context.MeasureMax(WindowSecondsMeasurement, result.WindowSeconds);
             context.MeasureMax(LimitMeasurement, limit);
 

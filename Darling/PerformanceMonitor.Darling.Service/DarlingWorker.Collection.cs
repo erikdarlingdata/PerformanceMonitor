@@ -736,7 +736,9 @@ public sealed partial class DarlingWorker
             /* #4961: this install's id, made at start before any worker runs. */
             installId: () => _installId,
             /* #6211: live provider like its siblings, so a store change to query_store_fetch_top_n takes effect on the next cycle, no restart. */
-            queryStoreFetchTopN: () => StoreConfigProvider.ClampQueryStoreFetchTopN(config.QueryStoreFetchTopN));
+            queryStoreFetchTopN: () => StoreConfigProvider.ClampQueryStoreFetchTopN(config.QueryStoreFetchTopN),
+            /* #8146: clamped and logged once here, because darling.json is read once at start. */
+            xeRingBufferMaxEvents: StoreConfigProvider.ClampXeRingBufferMaxEvents(config.XeRingBufferMaxEvents, _logger));
         /* #7067: one gate, one clock, for the worker's and the runner's repeated warnings. */
         runner.RepeatLog = RepeatLog;
         _runner = runner;
