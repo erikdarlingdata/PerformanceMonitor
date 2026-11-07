@@ -539,6 +539,32 @@ public sealed class DarlingPasswordKeySourceTests
     [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
     private static extern bool CreateHardLinkW(string lpFileName, string lpExistingFileName, IntPtr lpSecurityAttributes);
 
+    /// <summary>An empty or blank key file gets the sentence a <c>file:</c> secret always got from
+    /// <see cref="DarlingSecretSource.Resolve"/>, as the #8006 spec's table gives it, though the key no longer goes through
+    /// that resolver.</summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData(" \r\n")]
+    public void AnEmptyKeyFile_IsRefusedWithTheSecretFileSentence(string contents)
+    {
+        var dir = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var path = Path.Combine(dir, "empty");
+            File.WriteAllText(path, contents);
+
+            var load = DarlingPasswordKeySource.LoadFromSetting("file:" + path, null, NullLogger.Instance);
+
+            Assert.True(load.Untrusted);
+            Assert.Null(load.Pkcs8);
+            Assert.Equal($"passwordKey: secret file '{path}' is empty — the referenced secret cannot resolve.", load.Refusal);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData("directory")]
     [InlineData("empty file")]

@@ -29,9 +29,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// is in.</param>
 /// <param name="WritableByOrdinaryUsers">Windows: Users, Authenticated Users, Everyone or INTERACTIVE can write it.</param>
 /// <param name="ReadableByOrdinaryUsers">Windows: one of those groups can read it.</param>
+/// <param name="UntrustedWindowsOwner">Windows: its owner is not SYSTEM, Administrators or the service account.</param>
 internal readonly record struct PasswordKeyFileFacts(
     bool? RegularFile, long? Length, UnixFileMode? Mode, UnixFileOwner? Owner, uint EffectiveUserId,
-    IReadOnlyList<UnixFileMode> DirectoryModes, bool WritableByOrdinaryUsers, bool ReadableByOrdinaryUsers);
+    IReadOnlyList<UnixFileMode> DirectoryModes, bool WritableByOrdinaryUsers, bool ReadableByOrdinaryUsers,
+    bool UntrustedWindowsOwner = false);
 
 /// <summary>A check a <c>passwordKey</c> file failed that does not stop it loading: a log message template whose one
 /// placeholder is <c>{Path}</c>, and the path. Never any of the file's contents.</summary>
@@ -52,11 +54,15 @@ internal readonly record struct PasswordKeyFileRead(string? Text, string? Refusa
 /// Reads a <c>passwordKey</c> <c>file:</c> key (#8006 review, request 1) with the checks the default key file gets
 /// (<see cref="DarlingServiceKeyFile"/>), made to fit a secret the service did not write. What anyone could use to
 /// swap the key, or what is no key file at all, is refused: a target that is not a regular file (checked before it is
-/// opened, so a FIFO is never waited on), one larger than the key file's limit (refused before any of it is read, and
+/// opened, both where its links lead by their text and where the kernel's own links lead, so a FIFO or a pipe behind
+/// <c>/dev/stdin</c> is never waited on), one larger than the key file's limit (refused before any of it is read, and
 /// the read itself is never more than the limit plus one byte), and on Unix one its group or other users can write,
-/// on Windows one ordinary users can write. What a mounted Kubernetes secret is by design (owned by root, 0644 by
-/// default, reached through <c>..data</c>) only warns, naming the path and the check: another owner, a second name,
-/// read access for others, and a directory others can write to that has no sticky bit.
+/// on Windows one ordinary users can write. What a mounted Kubernetes secret can be by design (0644 by default, reached
+/// through <c>..data</c>) only warns, naming the path and the check: on Unix an owner that is neither root nor the
+/// service's user, a second name, read access for others, and a directory its group or others can write to that has no
+/// sticky bit; on Windows read access for ordinary users, and an owner that is not SYSTEM, Administrators or the service
+/// account. A root-owned file gives no owner warning: root can replace any file anyway, and every Kubernetes or Swarm
+/// secret is root-owned.
 /// </summary>
 internal static class DarlingPasswordKeyFileReader
 {
@@ -64,9 +70,14 @@ internal static class DarlingPasswordKeyFileReader
     internal const int MaxBytes = DarlingPasswordKeyFile.MaxKeyFileBytes;
 
     internal const string OwnerTemplate =
-        "passwordKey: file '{Path}' is owned by another user than the one the service runs as, so that user can replace " +
-        "the key. It is loaded anyway, as a mounted Kubernetes secret (owned by root) is; to clear this warning, give the " +
-        "file to the service's user.";
+        "passwordKey: file '{Path}' is owned by a user that is neither root nor the user the service runs as, so that " +
+        "user can replace the key. It is loaded anyway; to clear this warning, give the file to root or to the service's " +
+        "user.";
+
+    internal const string WindowsOwnerTemplate =
+        "passwordKey: file '{Path}' is owned by an account other than SYSTEM, Administrators or the service account, " +
+        "and a file's owner can change who may write it, so that account can replace the key. It is loaded anyway; to " +
+        "clear this warning, give the file to Administrators (icacls <file> /setowner *S-1-5-32-544).";
 
     internal const string LinksTemplate =
         "passwordKey: file '{Path}' has more than one name (a hard link), so the key can be changed through a path this " +
@@ -78,8 +89,9 @@ internal static class DarlingPasswordKeyFileReader
         "for a Kubernetes secret).";
 
     internal const string OpenDirectoryTemplate =
-        "passwordKey: file '{Path}' is in a directory that other users can write to and that has no sticky bit, so they " +
-        "can replace the key. It is loaded anyway; to clear this warning, remove their write access to the directory.";
+        "passwordKey: file '{Path}' is in a directory that its group or other users can write to and that has no sticky " +
+        "bit, so they can replace the key. It is loaded anyway; to clear this warning, remove their write access to the " +
+        "directory.";
 
     internal const string OrdinaryUsersReadTemplate =
         "passwordKey: file '{Path}' is readable by Users, Authenticated Users, Everyone or INTERACTIVE, so any local " +
@@ -123,7 +135,10 @@ internal static class DarlingPasswordKeyFileReader
         var warnings = new List<PasswordKeyFileWarning>();
         if (facts.Owner is { } owner)
         {
-            if (owner.UserId != facts.EffectiveUserId)
+            /* Root is trusted like the service's own user: it can replace any file whoever owns it, so a root-owned key
+               (every Kubernetes or Swarm secret) adds no account that could change it, and the warning's advice could
+               not be followed there. The default key file keeps its own stricter rule. */
+            if (owner.UserId != 0 && owner.UserId != facts.EffectiveUserId)
             {
                 warnings.Add(new PasswordKeyFileWarning(OwnerTemplate, path));
             }
@@ -139,9 +154,11 @@ internal static class DarlingPasswordKeyFileReader
             warnings.Add(new PasswordKeyFileWarning(OthersReadTemplate, path));
         }
 
+        /* A group that can write the directory can swap the key as surely as others can. Only a warning, not a refusal:
+           a disk emptyDir is 0777 with no sticky bit, so a key an init container copies there would be refused. */
         foreach (var directory in facts.DirectoryModes)
         {
-            if ((directory & UnixFileMode.OtherWrite) != 0 && (directory & UnixFileMode.StickyBit) == 0)
+            if ((directory & GroupOrOtherWrite) != 0 && (directory & UnixFileMode.StickyBit) == 0)
             {
                 warnings.Add(new PasswordKeyFileWarning(OpenDirectoryTemplate, path));
                 break;
@@ -151,6 +168,11 @@ internal static class DarlingPasswordKeyFileReader
         if (facts.ReadableByOrdinaryUsers)
         {
             warnings.Add(new PasswordKeyFileWarning(OrdinaryUsersReadTemplate, path));
+        }
+
+        if (facts.UntrustedWindowsOwner)
+        {
+            warnings.Add(new PasswordKeyFileWarning(WindowsOwnerTemplate, path));
         }
 
         return new PasswordKeyFileVerdict(null, warnings);
@@ -214,7 +236,7 @@ internal static class DarlingPasswordKeyFileReader
     /// <summary>
     /// The facts <see cref="Judge"/> decides on, for the file <paramref name="path"/> names, every link followed. On Unix
     /// (and under a test's stand-in) through <see cref="ComposeCredentialDirectoryGuard"/>'s mode calls, which the
-    /// default key file's owner check uses too; on Windows from the file's ACL. A target that is not there gives facts
+    /// default key file's owner check uses too; on Windows from the file's ACL and owner. A target that is not there gives facts
     /// that decide nothing, so the open reports it.
     /// </summary>
     private static PasswordKeyFileFacts Gather(string path)
@@ -224,6 +246,16 @@ internal static class DarlingPasswordKeyFileReader
         if (ComposeCredentialDirectoryGuard.Current.UnixModes is { } modes)
         {
             var regular = modes.IsRegularFile(real);
+
+            /* The real path follows links by their text. A /proc fd link (file:/dev/stdin, file:/proc/self/fd/0) reads as
+               "pipe:[N]", so the real path names nothing and its type cannot be told, while the open goes through the
+               kernel's own link to the pipe and waits for its writer. The path as written, every link followed by the
+               kernel, is asked too, and either answer of "not a regular file" refuses. */
+            if (modes.IsRegularFile(full) == false)
+            {
+                regular = false;
+            }
+
             if (regular == false || !File.Exists(real))
             {
                 return new PasswordKeyFileFacts(regular ?? (Directory.Exists(real) ? false : null), null, null, null, 0, [], false, false);
@@ -255,7 +287,10 @@ internal static class DarlingPasswordKeyFileReader
         return new PasswordKeyFileFacts(
             null, new FileInfo(real).Length, null, null, 0, [],
             OperatingSystem.IsWindows() && DarlingFileSecurity.IsWritableByOrdinaryUsers(real),
-            OperatingSystem.IsWindows() && DarlingFileSecurity.IsReadableByOrdinaryUsers(real));
+            OperatingSystem.IsWindows() && DarlingFileSecurity.IsReadableByOrdinaryUsers(real),
+            /* A Windows file's owner holds WRITE_DAC whatever the ACL says, so it can grant itself write; SYSTEM,
+               Administrators and the service account stand where root and the service's user do on Unix. */
+            OperatingSystem.IsWindows() && !DarlingFileSecurity.IsTrustedOwner(real));
     }
 
     private static string NotRegular(string target) =>

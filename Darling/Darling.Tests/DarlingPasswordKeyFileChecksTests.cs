@@ -24,9 +24,11 @@ namespace Darling.Tests;
 
 /// <summary>
 /// The checks a <c>passwordKey</c> <c>file:</c> key gets (#8006 review, request 1): a target that is not a regular
-/// file, is larger than the key-file limit, or that others could write to is refused; one owned by another user, with
-/// more than one name, readable by others, or in a directory others can write to without the sticky bit loads with a
-/// Warning naming the path and the check, so a Kubernetes secret mount (root-owned, 0644 or 0440) is never refused.
+/// file, is larger than the key-file limit, or that others could write to is refused; one owned by a user that is
+/// neither root nor the service's user, with more than one name, readable by others, or in a directory its group or
+/// others can write to without the sticky bit loads with a Warning naming the path and the check, so a Kubernetes secret
+/// mount (root-owned, 0644 or 0440) is never refused, and at 0440 gives no message at all. On Windows a file owned by an
+/// account other than SYSTEM, Administrators or the service account warns too.
 /// The Unix decisions are pinned here through <see cref="StandInUnixModes"/>; the real calls run in the Linux
 /// self-check (<c>--self-check-password-key</c>).
 /// </summary>
@@ -81,6 +83,9 @@ public sealed class DarlingPasswordKeyFileChecksTests
                      OwnFile(Octal("400")),
                      /* The Kubernetes default the docs advise: root-owned, 0440, read by a service that runs as root. */
                      OwnFile(Octal("440")) with { Owner = new UnixFileOwner(0, 1), EffectiveUserId = 0, DirectoryModes = [Octal("1777"), Octal("755")] },
+                     /* The same Secret read by a service that does not run as root, with the pod's fsGroup: root owns the
+                        file, and root can replace any file anyway, so its owner carries no warning. */
+                     OwnFile(Octal("440")) with { Owner = new UnixFileOwner(0, 1), EffectiveUserId = 1654, DirectoryModes = [Octal("3777"), Octal("755")] },
                      new PasswordKeyFileFacts(true, 2400, null, null, 0, [], false, false),
                  })
         {
@@ -92,11 +97,14 @@ public sealed class DarlingPasswordKeyFileChecksTests
 
     public static TheoryData<string, string> Warnings => new()
     {
-        { "owned by another user", "is owned by another user than the one the service runs as" },
+        { "owned by another user", "is owned by a user that is neither root nor the user the service runs as" },
+        { "owned by another user, service as root", "is owned by a user that is neither root nor the user the service runs as" },
         { "two names", "has more than one name" },
         { "readable by others", "is readable by other users" },
-        { "open directory", "is in a directory that other users can write to and that has no sticky bit" },
+        { "open directory", "is in a directory that its group or other users can write to and that has no sticky bit" },
+        { "directory its group can write", "is in a directory that its group or other users can write to and that has no sticky bit" },
         { "readable by ordinary users on Windows", "is readable by Users, Authenticated Users, Everyone or INTERACTIVE" },
+        { "owned by another account on Windows", "is owned by an account other than SYSTEM, Administrators or the service account" },
     };
 
     [Theory]
@@ -105,10 +113,14 @@ public sealed class DarlingPasswordKeyFileChecksTests
     {
         var facts = shape switch
         {
-            "owned by another user" => OwnFile(Octal("440")) with { Owner = new UnixFileOwner(0, 1) },
+            "owned by another user" => OwnFile(Octal("440")) with { Owner = new UnixFileOwner(1001, 1) },
+            "owned by another user, service as root" => OwnFile(Octal("440")) with { EffectiveUserId = 0 },
             "two names" => OwnFile(Octal("600")) with { Owner = new UnixFileOwner(1000, 2) },
             "readable by others" => OwnFile(Octal("604")),
             "open directory" => OwnFile(Octal("600")) with { DirectoryModes = [Octal("700"), Octal("777")] },
+            "directory its group can write" => OwnFile(Octal("600")) with { DirectoryModes = [Octal("770"), Octal("755")] },
+            "owned by another account on Windows" => new PasswordKeyFileFacts(
+                true, 2400, null, null, 0, [], WritableByOrdinaryUsers: false, ReadableByOrdinaryUsers: false, UntrustedWindowsOwner: true),
             _ => new PasswordKeyFileFacts(true, 2400, null, null, 0, [], WritableByOrdinaryUsers: false, ReadableByOrdinaryUsers: true),
         };
 
@@ -125,16 +137,15 @@ public sealed class DarlingPasswordKeyFileChecksTests
     }
 
     [Fact]
-    public void Judge_AKubernetesSecretAtItsDefault0644_ReadByAnotherUser_LoadsWithTwoWarnings()
+    public void Judge_AKubernetesSecretAtItsDefault0644_ReadByANonRootService_WarnsOnlyThatOthersCanReadIt()
     {
         var facts = OwnFile(Octal("644")) with { Owner = new UnixFileOwner(0, 1), DirectoryModes = [Octal("1777"), Octal("755")] };
 
         var verdict = DarlingPasswordKeyFileReader.Judge(KeyPath, facts);
 
         Assert.Null(verdict.Refusal);
-        Assert.Equal(2, verdict.Warnings.Count);
-        Assert.Contains("owned by another user", verdict.Warnings[0].Sentence, StringComparison.Ordinal);
-        Assert.Contains("readable by other users", verdict.Warnings[1].Sentence, StringComparison.Ordinal);
+        var warning = Assert.Single(verdict.Warnings);
+        Assert.Contains("readable by other users", warning.Sentence, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -149,7 +160,7 @@ public sealed class DarlingPasswordKeyFileChecksTests
             File.WriteAllText(path, secret);
             var modes = new StandInUnixModes { EffectiveUserId = 1000 };
             modes.Report(dir, "755");
-            modes.ReportOwner(path, userId: 0);
+            modes.ReportOwner(path, userId: 1001);
             modes.Report(path, "644");
 
             using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
@@ -167,7 +178,7 @@ public sealed class DarlingPasswordKeyFileChecksTests
                     var warnings = logger.Lines.Where(l => l.StartsWith("Warning:", StringComparison.Ordinal)).ToList();
                     Assert.All(warnings, w => Assert.Contains(path, w, StringComparison.Ordinal));
                     Assert.All(warnings, w => AssertNoKeyText(w, secret));
-                    Assert.Contains(warnings, w => w.Contains("owned by another user", StringComparison.Ordinal));
+                    Assert.Contains(warnings, w => w.Contains("is owned by a user that is neither root", StringComparison.Ordinal));
                     Assert.Contains(warnings, w => w.Contains("readable by other users", StringComparison.Ordinal));
                 }
 
@@ -216,6 +227,67 @@ public sealed class DarlingPasswordKeyFileChecksTests
 
         AssertRefused(load, "file:NUL", "unused-key-text-0000", "is not a regular file");
         Assert.Contains("'NUL'", load.Refusal, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A path whose links, read as text, lead somewhere other than where the kernel takes the open: <c>/dev/stdin</c> or
+    /// <c>/proc/self/fd/0</c>, whose link text is <c>pipe:[N]</c>, so the real path is a name that does not exist and its
+    /// type cannot be told. The type of the path as written, every link followed by the kernel, is asked too, and a pipe
+    /// there is refused before the open rather than read until its writer closes. Stood in here with a junction, whose
+    /// real path differs from the path written, and a stand-in that reports only the path written as not a regular file;
+    /// the real pipe is in the Linux self-check.
+    /// </summary>
+    [Fact]
+    public void APathWrittenThroughALink_WhoseFinalTargetIsNoRegularFile_IsRefusedBeforeItIsOpened()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "A junction stands in for a Linux magic link on Windows only; Linux runs the real pipe.");
+
+        var (pkcs8, _) = NewKey();
+        var dir = Directory.CreateTempSubdirectory("password-key-checks-").FullName;
+        var secret = Convert.ToBase64String(pkcs8);
+        try
+        {
+            var target = Path.Combine(dir, "target");
+            Directory.CreateDirectory(target);
+            File.WriteAllText(Path.Combine(target, "password-key"), secret);
+            var junction = Path.Combine(dir, "junction");
+            var mklink = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+                "cmd.exe", ["/c", "mklink", "/J", junction, target]) { RedirectStandardOutput = true, UseShellExecute = false })!;
+            mklink.WaitForExit();
+            Assert.SkipUnless(mklink.ExitCode == 0 && Directory.Exists(junction), "A junction could not be made here.");
+
+            var written = Path.Combine(junction, "password-key");
+            var modes = new StandInUnixModes { EffectiveUserId = 1000 };
+            modes.Report(junction, "700");
+            modes.Report(target, "700");
+            modes.Report(Path.Combine(target, "password-key"), "600");
+            modes.ReportRegularFile(written, false);
+
+            PasswordKeyFileLoad load;
+            using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
+            {
+                load = DarlingPasswordKeySource.LoadFromSetting("file:" + written, null, NullLogger.Instance);
+            }
+
+            if (load.Pkcs8 is not null)
+            {
+                CryptographicOperations.ZeroMemory(load.Pkcs8);
+            }
+
+            AssertRefused(load, "file:" + written, secret, "is not a regular file");
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(pkcs8);
+            /* The junction first, on its own: a recursive delete does not remove one. */
+            var junction = Path.Combine(dir, "junction");
+            if (Directory.Exists(junction))
+            {
+                Directory.Delete(junction);
+            }
+
+            Directory.Delete(dir, recursive: true);
+        }
     }
 
     [Fact]
@@ -269,7 +341,7 @@ public sealed class DarlingPasswordKeyFileChecksTests
             File.WriteAllText(path, secret);
             var modes = new StandInUnixModes { EffectiveUserId = 1000 };
             modes.Report(dir, "777");
-            modes.ReportOwner(path, userId: 0);
+            modes.ReportOwner(path, userId: 1001);
             modes.Report(path, "644");
             var config = DarlingConfig.Parse(
                 "{\"postgres\":{\"connectionString\":\"Host=h\"},\"passwordKey\":" + JsonSerializer.Serialize("file:" + path) + "}");
@@ -287,7 +359,7 @@ public sealed class DarlingPasswordKeyFileChecksTests
                 Assert.DoesNotContain("{Path}", lines[i], StringComparison.Ordinal);
             }
 
-            Assert.Contains("owned by another user", lines[0], StringComparison.Ordinal);
+            Assert.Contains("is owned by a user that is neither root", lines[0], StringComparison.Ordinal);
             Assert.Contains("readable by other users", lines[1], StringComparison.Ordinal);
             Assert.Contains("no sticky bit", lines[2], StringComparison.Ordinal);
             Assert.Equal("passwordKey: password key " + PasswordSeal.DisplayKeyId(keyId), lines[3]);

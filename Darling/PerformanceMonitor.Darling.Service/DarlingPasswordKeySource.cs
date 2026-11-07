@@ -282,6 +282,12 @@ public static class DarlingPasswordKeySource
                     return Refused(path, read.Refusal ?? $"{SettingName}: {target} could not be read.");
                 }
 
+                /* The sentence an empty file: secret always got from DarlingSecretSource.Resolve, and the spec's table. */
+                if (string.IsNullOrWhiteSpace(read.Text))
+                {
+                    return Refused(path, $"{SettingName}: secret file '{named}' is empty — the referenced secret cannot resolve.");
+                }
+
                 text = read.Text;
             }
             else if (Captured(named) is { } captured)

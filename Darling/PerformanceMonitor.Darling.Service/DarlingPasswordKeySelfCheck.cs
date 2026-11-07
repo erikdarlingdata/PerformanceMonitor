@@ -26,8 +26,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para>Four groups of checks. The key file: generate it, read the mode, owner and link count back, reload it to the
 /// same key id, and see a wider mode and a second name each refused. The external key (#8006): the <c>passwordKey</c>
 /// loader reads one key to the same key id from a base64 file, a PEM file, a Kubernetes-style <c>..data</c> link chain
-/// and an environment variable, warns for a 0644 file and one another user owns, and refuses a 0664 file,
-/// <c>/dev/zero</c>, a FIFO, a PKCS#1 PEM, a 2048-bit key, a link into a credentials directory and a literal. The file
+/// and an environment variable, warns for a 0644 file and one another user (not root) owns, and refuses a 0664 file,
+/// <c>/dev/zero</c>, a FIFO, a pipe behind a <c>/proc/self/fd</c> link, a PKCS#1 PEM, a 2048-bit key, a link into a credentials directory and a literal. The file
 /// identity: a file and its hard link give
 /// one identity and two files give two. The vector: a sealed value made on another platform opens here to the expected
 /// text, and stops opening when a bound field changes. A check that cannot be made counts as a failure, never as a
@@ -286,7 +286,8 @@ internal static class DarlingPasswordKeySelfCheck
     /// a base64 file, a PEM file, a Kubernetes-style secret mount (a link to <c>..data/password-key</c>, where
     /// <c>..data</c> links to a timestamped directory holding the file at mode 440) and an environment variable with
     /// whitespace around the base64; the file checks hold (<see cref="CheckFileChecks"/>: a 0644 file warns, a 0664 file,
-    /// <c>/dev/zero</c> and a FIFO are refused, a file another user owns warns); a PKCS#1 PEM, a 2048-bit key, a symbolic
+    /// <c>/dev/zero</c>, a FIFO and a pipe behind a <c>/proc/self/fd</c> link are refused, a file another user (not root)
+    /// owns warns and a root-owned one does not); a PKCS#1 PEM, a 2048-bit key, a symbolic
     /// link from outside a credentials directory to the key file inside it, and a literal are each refused. Returns null
     /// when all of it held, otherwise the first thing that did not.</summary>
     [UnsupportedOSPlatform("windows")]
@@ -401,9 +402,10 @@ internal static class DarlingPasswordKeySelfCheck
     }
 
     /// <summary>The <c>file:</c> checks (#8006 review, request 1) through the real Unix calls: a 0644 file loads with the
-    /// warning that others can read it; a 0664 file is refused; <c>/dev/zero</c> and a FIFO are refused as not regular
-    /// files, at once, without being opened; and, when this runs as root (as the workflow does), a file given to another
-    /// user loads with the owner warning. Run as another user, which cannot give a file away, that one case is skipped.
+    /// warning that others can read it; a 0664 file is refused; <c>/dev/zero</c>, a FIFO and a pipe behind a
+    /// <c>/proc/self/fd</c> link are refused as not regular files, at once, without being opened; and, when this runs as
+    /// root (as the workflow does), a file given to another user (not root) loads with the owner warning, and the same
+    /// file given to root loads without it. Run as another user, which cannot give a file away, those cases are skipped.
     /// Returns null when all of it held.</summary>
     [UnsupportedOSPlatform("windows")]
     private static string? CheckFileChecks(char[] base64, string keyId, string directory, Microsoft.Extensions.Logging.ILogger logger)
@@ -453,6 +455,12 @@ internal static class DarlingPasswordKeySelfCheck
             return failure;
         }
 
+        failure = CheckPipeBehindAnFdLinkRefused(logger);
+        if (failure is not null)
+        {
+            return failure;
+        }
+
         if (FileIdentity.EffectiveUserId() != 0)
         {
             /* Only root can give a file to another user; the workflow runs the image as root, so there it always runs. */
@@ -467,7 +475,51 @@ internal static class DarlingPasswordKeySelfCheck
             return "the key file could not be given to another user, so the owner check could not run";
         }
 
-        return ExternalMustLoadWithWarning(foreign, keyId, logger, "a file another user owns", DarlingPasswordKeyFileReader.OwnerTemplate);
+        failure = ExternalMustLoadWithWarning(foreign, keyId, logger, "a file another user owns", DarlingPasswordKeyFileReader.OwnerTemplate);
+        if (failure is not null)
+        {
+            return failure;
+        }
+
+        /* The same file given to root gives no owner warning: root can replace any file anyway. Running as root, this is
+           also the service's own user; a non-root service reading a root-owned secret is pinned by the Judge cases in
+           Darling.Tests. */
+        if (ChangeOwner(foreign, 0, 0) != 0)
+        {
+            return "the key file could not be given back to root, so the root-owner case could not run";
+        }
+
+        var rootOwned = new List<PasswordKeyFileWarning>();
+        var load = DarlingPasswordKeySource.Load("file:" + foreign, credentialsDirectory: null, logger, rootOwned);
+        if (load.Pkcs8 is null)
+        {
+            return "passwordKey did not read the key from a root-owned file: " + (load.Refusal ?? "no key came back");
+        }
+
+        CryptographicOperations.ZeroMemory(load.Pkcs8);
+        return rootOwned.Contains(new PasswordKeyFileWarning(DarlingPasswordKeyFileReader.OwnerTemplate, foreign))
+            ? "passwordKey warned about the owner of a root-owned file"
+            : null;
+    }
+
+    /// <summary>A pipe reached through a <c>/proc/self/fd</c> link, as <c>file:/dev/stdin</c> reaches one under
+    /// <c>docker run -i</c>: the link's text is <c>pipe:[N]</c>, so only the kernel's own resolution shows a pipe. Its
+    /// write end stays open, so a read would wait for ever; the refusal must come before the open, within five seconds.
+    /// If it does not, the write end is closed, which ends the read, and the check fails.</summary>
+    [UnsupportedOSPlatform("windows")]
+    private static string? CheckPipeBehindAnFdLinkRefused(Microsoft.Extensions.Logging.ILogger logger)
+    {
+        using var writer = new System.IO.Pipes.AnonymousPipeServerStream(System.IO.Pipes.PipeDirection.Out, HandleInheritability.None);
+        var reference = "file:/proc/self/fd/" + writer.GetClientHandleAsString();
+        var refusal = System.Threading.Tasks.Task.Run(() => ExternalMustBeRefusedFor(reference, logger, "a pipe behind a /proc/self/fd link", "is not a regular file"));
+        if (!refusal.Wait(TimeSpan.FromSeconds(5)))
+        {
+            writer.Dispose();
+            refusal.Wait(TimeSpan.FromSeconds(5));
+            return "passwordKey opened a pipe behind a /proc/self/fd link and waited for its writer, instead of refusing it";
+        }
+
+        return refusal.Result;
     }
 
     private static string? ExternalMustLoadWithWarning(string path, string keyId, Microsoft.Extensions.Logging.ILogger logger, string from, string template)
