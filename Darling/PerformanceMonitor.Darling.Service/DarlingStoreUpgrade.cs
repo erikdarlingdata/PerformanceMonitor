@@ -3965,6 +3965,11 @@ internal sealed class DarlingStoreUpgrade
                 try
                 {
                     File.WriteAllText(marker, trialPort.ToString(CultureInfo.InvariantCulture));
+                    if (BeforeTrialStartForTests is { } beforeTrialStart)
+                    {
+                        await beforeTrialStart(cancellationToken);
+                    }
+
                     /* QuiescedStartWaitSeconds (900s), not the default 120s (item 3, round-2 review Medium 2):
                        this can be the retry below, on a cluster whose first start already used up part of any
                        generous wait, and a short timeout here would misreport an unrelated slow start as a
