@@ -174,6 +174,47 @@ public sealed class QueryTrendBucketingToolTests : IClassFixture<SharedDuckDbFix
         Assert.Contains("bucket_minutes", refused.GetProperty("message").GetString()!, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The buckets are cut on the shared grid from <see cref="PerformanceMonitor.Common.TrendBuckets.OriginSql"/>, and
+    /// only the first point is moved: an <c>as_of</c> off a boundary puts the window's start inside a grid bucket, and
+    /// that bucket is stamped at the window's start, as every bucketed trend stamps its first point, while the rest
+    /// stay on the grid. Without the clamp the first point would be stamped before the window it answers for.
+    /// </summary>
+    [Fact]
+    public async Task AnAsOfOffTheGrid_StampsTheFirstPointAtTheWindowStart_AndTheRestOnTheGrid()
+    {
+        var service = new LocalDataService(_duckDb);
+        /* 12:17, so a 4-hour window starts at 08:17: inside the 08:00 hourly bucket, 43 minutes before 09:00. */
+        var asOf = new DateTime(2026, 11, 5, 12, 17, 0, DateTimeKind.Utc);
+        var windowStart = asOf.AddHours(-4);
+        var first = windowStart.AddSeconds(30);
+        for (var i = 0; i < 240; i++)
+        {
+            await SeedQueryAsync(first.AddMinutes(i), executions: 3, cpuUs: 3_000);
+        }
+
+        var root = JsonDocument.Parse(await McpQueryTools.GetQueryTrend(
+            service, _serverManager, Hash, Database, ServerName, 4, asOf.ToString("o"), bucket_minutes: 60)).RootElement;
+
+        Assert.False(root.TryGetProperty("status", out _), root.GetRawText());
+        Assert.Equal(60, root.GetProperty("bucket_minutes").GetInt32());
+        var points = root.GetProperty("trend").EnumerateArray().ToList();
+        var stamps = points.Select(p => DateTime.Parse(p.GetProperty("collection_time").GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind)).ToList();
+
+        /* 08:17 (clamped from the 08:00 grid line), then 09:00, 10:00, 11:00 and 12:00 on the grid. */
+        Assert.Equal(DateTime.SpecifyKind(windowStart, DateTimeKind.Unspecified), stamps[0]);
+        Assert.Equal(new DateTime(2026, 11, 5, 9, 0, 0), stamps[1]);
+        Assert.Equal(new DateTime(2026, 11, 5, 12, 0, 0), stamps[^1]);
+        Assert.Equal(5, points.Count);
+        Assert.All(stamps, s => Assert.True(s >= DateTime.SpecifyKind(windowStart, DateTimeKind.Unspecified), $"{s:o} is stamped before the window's start"));
+
+        /* The cut is on the grid: the clamped first bucket holds the 43 collections from 08:17 to 08:59, the second a full hour. */
+        Assert.Equal(43, points[0].GetProperty("collection_count").GetInt64());
+        Assert.Equal(60, points[1].GetProperty("collection_count").GetInt64());
+        Assert.Equal(17, points[^1].GetProperty("collection_count").GetInt64());
+        Assert.Equal(DateTime.SpecifyKind(first, DateTimeKind.Unspecified).ToString("o"), root.GetProperty("effective_start").GetString());
+    }
+
     private async Task<string> Invoke(MethodInfo method, LocalDataService service, int hoursBack, DateTime asOf, int bucketMinutes)
     {
         var args = method.GetParameters().Select(p => p.Name switch

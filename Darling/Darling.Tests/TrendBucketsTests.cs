@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Text.Json;
 using PerformanceMonitor.Common;
 using Xunit;
@@ -253,6 +254,34 @@ public sealed class TrendBucketsTests
     {
         Assert.Equal(charted, TrendPayloads.ChartedFor(active));
         Assert.Equal(lines, TrendPayloads.LinesFor(active));
+    }
+
+    /// <summary>
+    /// #7907: the bucket a fetched row falls in, computed as the SQL statements compute it. The grid runs from
+    /// <see cref="TrendBuckets.OriginSql"/>, so a stamp off a grid line floors to the line before it whatever the
+    /// width, a seven-minute one included; and the first bucket is clamped to the window's start, so a window that
+    /// begins inside a bucket stamps its first point where the window begins, never before it.
+    /// </summary>
+    [Theory]
+    [InlineData("2026-11-05T08:17:30", 60, "2026-11-05T08:17:00", "2026-11-05T08:17:00")]   // inside the 08:00 bucket: clamped to the window's start
+    [InlineData("2026-11-05T09:30:00", 60, "2026-11-05T08:17:00", "2026-11-05T09:00:00")]   // a later bucket stays on the grid
+    [InlineData("2026-11-05T08:17:30", 7, "2026-11-05T08:17:00", "2026-11-05T08:17:00")]    // the seven-minute line before it is 08:13: clamped
+    [InlineData("2026-11-05T08:25:00", 7, "2026-11-05T08:17:00", "2026-11-05T08:20:00")]    // the next seven-minute line past the window's start
+    [InlineData("2026-11-05T00:00:00", 1440, "2026-11-05T00:00:00", "2026-11-05T00:00:00")] // on the grid and on the window's start
+    public void BucketStart_FloorsToTheGridFromTheOrigin_AndClampsTheFirstBucketToTheWindowStart(string at, int width, string windowStart, string expected)
+    {
+        Assert.Equal(
+            DateTime.Parse(expected, CultureInfo.InvariantCulture),
+            TrendBuckets.BucketStart(DateTime.Parse(at, CultureInfo.InvariantCulture), width, DateTime.Parse(windowStart, CultureInfo.InvariantCulture)));
+    }
+
+    /// <summary>The origin as a value is the instant the SQL literal names, so a read that buckets in C# bins as the statements do.</summary>
+    [Fact]
+    public void Origin_IsTheInstantOriginSqlNames()
+    {
+        Assert.Equal(new DateTime(2000, 1, 1, 0, 0, 0), TrendBuckets.Origin);
+        Assert.Equal(DateTimeKind.Unspecified, TrendBuckets.Origin.Kind);
+        Assert.Equal(TrendBuckets.OriginSql, $"TIMESTAMP '{TrendBuckets.Origin.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)}'");
     }
 
     private static string? Parameter(string refusal) =>
