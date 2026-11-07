@@ -59,14 +59,21 @@ public sealed class TopTextLookupFillTests
         Assert.DoesNotContain("LATERAL", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("LIMIT 1", sql, StringComparison.Ordinal);   /* the per-row text lookup's shape */
         Assert.DoesNotMatch(@"(FROM|JOIN) v_query_stats", sql);
-        /* Each text lookup picks the newest row per key in one pass: DISTINCT ON over (key, collection_time DESC). */
-        Assert.Matches(@"SELECT DISTINCT ON \(q\.database_name, q\.(query_hash|host_object_name)", sql);
-        Assert.Matches(@"ORDER BY q\.database_name, q\.(query_hash|host_object_name)[^\r\n]*q\.collection_time DESC", sql);
+        if (name != "TopQueriesByHostObjectSql")
+        {
+            /* #8136: the per-hash statements pick each group's newest text-bearing row inside the ranking pass, so the lookup
+               has no pass of its own over the window; TopQueriesTextOneScanLiveTests pins that from the plan and the rows. */
+            return;
+        }
+
+        /* The text lookup picks the newest row per key in one pass: DISTINCT ON over (key, collection_time DESC). */
+        Assert.Matches(@"SELECT DISTINCT ON \(q\.database_name, q\.host_object_name", sql);
+        Assert.Matches(@"ORDER BY q\.database_name, q\.host_object_name[^\r\n]*q\.collection_time DESC", sql);
         /* The newest row's text resolves through the dimension for that one row, as v_query_stats' COALESCE does. */
         Assert.Contains("COALESCE(l.query_text, d.query_text) AS query_text", sql, StringComparison.Ordinal);
         Assert.Contains("LEFT JOIN query_text_dim AS d ON d.digest = l.query_text_digest", sql, StringComparison.Ordinal);
-        /* The lookup joins the winners (or ranked) CTE, which is read, not repeated. */
-        Assert.Matches(@"JOIN (winners|ranked) AS (w|rk)\b[\s\S]*COALESCE\(q\.", sql);
+        /* The lookup joins the winners CTE, which is read, not repeated. */
+        Assert.Matches(@"JOIN winners AS w\b[\s\S]*COALESCE\(q\.", sql);
     }
 
     [Theory]
@@ -74,17 +81,23 @@ public sealed class TopTextLookupFillTests
     public void TheLookupMatchesTheKeyNullSafely_AndOnlyTheOuterJoinReadsTheResult(string name)
     {
         var sql = Sql(name);
-        Assert.Contains("q.database_name IS NOT DISTINCT FROM", sql, StringComparison.Ordinal);
+        if (name is not ("TopQueriesSql" or "ViewerTopQueriesSql"))
+        {
+            /* #8136: the per-hash statements have no key match in the lookup (the text is picked inside the group's own
+               aggregate); TopQueriesTextOneScanLiveTests pins that a NULL-database group keeps its text through both readers. */
+            Assert.Contains("q.database_name IS NOT DISTINCT FROM", sql, StringComparison.Ordinal);
+        }
+
         /* The one join to the ranked rows is NULL-safe on every key column; no plain "t.x = r.x" equality that would
            drop a NULL-keyed group's text. */
         Assert.DoesNotMatch(@"\bt\.\w+\s*=\s*r\.", sql);
         Assert.Single(Regex.Matches(sql, @"LEFT JOIN latest_text AS t|LEFT JOIN latest_in_window AS w"));
     }
 
+    /* #8136: TopQueriesSql and the Viewer's statement no longer read the window in their lookup, so they are not listed here;
+       TopQueriesTextOneScanLiveTests pins from the plan that their lookup reads the ranked rows and the dimension only. */
     [Theory]
-    [InlineData("TopQueriesSql")]
     [InlineData("TopQueriesByHostObjectSql")]
-    [InlineData("ViewerTopQueriesSql")]
     public void TheRawLookupIsBoundedToTheWindow(string name)
     {
         var sql = Sql(name);
@@ -153,13 +166,11 @@ public sealed class TopTextLookupFillTests
            run, because the text also decides the WAITFOR trim. collection_id is unique per row, so it is a total tie-break. */
         foreach (var (name, sql) in new[]
         {
-            ("TopQueriesSql", DarlingDataReader.TopQueriesSql),
             ("TopQueriesByHostObjectSql", DarlingDataReader.TopQueriesByHostObjectSql),
             ("TopQueriesHourlySql", DarlingDataReader.TopQueriesHourlySql),
             ("QueryStoreTopSql", DarlingDataReader.QueryStoreTopSql),
             ("QueryStoreTopTableSql", DarlingDataReader.QueryStoreTopTableSql),
             ("QueryStoreTopDailyTableSql", DarlingDataReader.QueryStoreTopDailyTableSql),
-            ("ViewerTopQueriesSql", ViewerDataService.TopQueriesSql),
             ("ViewerQueryStoreTopSql", ViewerDataService.QueryStoreTopSql),
         })
         {
@@ -168,6 +179,9 @@ public sealed class TopTextLookupFillTests
             Assert.All(picks, pick => Assert.True(pick.Contains("collection_id DESC", StringComparison.Ordinal),
                 $"{name}: the newest-text pick '{pick.Trim()}' has no tie-break after collection_time"));
         }
+
+        /* #8136: TopQueriesSql and the Viewer's statement pick the newest text inside the ranking pass, so they are not in the
+           list above; their tie on the time is pinned by the rows TopQueriesTextOneScanLiveTests and TopTextTieBreakLiveTests read. */
     }
 
     [Fact]
