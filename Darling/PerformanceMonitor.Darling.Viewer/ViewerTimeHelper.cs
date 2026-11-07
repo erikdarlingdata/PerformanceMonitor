@@ -143,6 +143,17 @@ public static class ViewerTimeHelper
     }
 
     /// <summary>
+    /// The time of a refresh as the status bar and a tab's "Last refreshed" strip stamp it: now as a fleet-wide time with its zone
+    /// (<see cref="FormatFleetWide(DateTime, string)"/>), "21:36:20 UTC", or this machine's clock with its zone name in Local mode.
+    /// The window has one status bar under every tab, so it stamps on the fleet-wide clock and names it, the same text the strips
+    /// above it show; a stamp of this machine's clock with no zone read as a fourth clock beside the grids.
+    /// </summary>
+    public static string RefreshedStamp() => RefreshedStamp(DateTime.UtcNow, CurrentDisplayMode);
+
+    /// <summary><see cref="RefreshedStamp()"/> for an explicit instant and display mode, so a test names both.</summary>
+    public static string RefreshedStamp(DateTime utcNow, TimeDisplayMode mode) => FormatFleetWide(utcNow, "HH:mm:ss", mode);
+
+    /// <summary>
     /// Pure (static-free) naive-UTC → display conversion for an explicit mode + fixed offset: the same as
     /// the <see cref="ServerClock"/> overload with a clock that never changes offset.
     /// </summary>

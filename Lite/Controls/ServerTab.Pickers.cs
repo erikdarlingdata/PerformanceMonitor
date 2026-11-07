@@ -169,7 +169,7 @@ public partial class ServerTab : UserControl
             ApplyTheme(WaitStatsChart);
             _waitStatsHover?.Clear();
 
-            if (selected.Count == 0) { WaitStatsChart.Refresh(); return; }
+            if (selected.Count == 0) { RefreshEmptyChart(WaitStatsChart, "Wait Stats", ""); return; }
 
             bool useAvgPerWait = WaitStatsMetricCombo?.SelectedIndex == 1;
             if (_waitStatsHover != null) _waitStatsHover.Unit = useAvgPerWait ? "ms/wait" : "ms/sec";

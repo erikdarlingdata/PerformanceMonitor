@@ -516,8 +516,10 @@ public sealed class SlackSocketModeListener
         _logger.LogDebug("Slack listener dropped a payload on connection {Index} by the {Filter} filter", connection, name);
     }
 
-    /// <summary>One warning per <see cref="UnownedChannelWarningWindow"/> when events arrive for channels no route of this store owns,
-    /// with the count since the last line. The window is measured on the injected clock, so a test pins it.</summary>
+    /// <summary>One Information line per <see cref="UnownedChannelWarningWindow"/> when events arrive for channels no route of this store owns,
+    /// with the count since the last line. Expected in the shared setup: the bot is a member of every posting store's channel and the app
+    /// subscribes to messages, so people's replies there reach this listener and are dropped. The line also names the one case that is a
+    /// problem, another store with this app's app-level token set. The window is measured on the injected clock, so a test pins it.</summary>
     private void NoteUnownedChannel()
     {
         long count;
@@ -535,8 +537,8 @@ public sealed class SlackSocketModeListener
             _lastUnownedWarningUtc = now;
         }
 
-        _logger.LogWarning(
-            "Slack listener dropped {Count} event(s) from channels no route of this store owns. The likely cause is another store sharing this Slack app with its app-level token set: Socket Mode hands each event to one connection, so both stores acknowledge and lose each other's events. Set the app-level token on one store per app. The next line of this kind comes after {Window}",
+        _logger.LogInformation(
+            "Slack listener dropped {Count} event(s) from channels no route of this store owns. This is expected when other stores share the app only to post: the bot is in their channels and the app subscribes to messages there. But if another store also has this app's app-level token set, the two lose each other's button presses and mentions, and each listening store needs its own Slack app. The next line of this kind comes after {Window}",
             count, UnownedChannelWarningWindow);
     }
 

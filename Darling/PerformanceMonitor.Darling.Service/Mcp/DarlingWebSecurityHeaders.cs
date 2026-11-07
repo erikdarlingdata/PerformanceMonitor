@@ -13,6 +13,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -102,8 +103,10 @@ internal sealed class DarlingWebSecurityHeaders
             /* An HTML page (the app shell, the sign-in page, the signed-in landing page and the re-navigation page)
                opens in its own browsing context group, so a page on another site that opened it keeps no window
                reference to it (#6286). Nothing here opens a popup or reads window.opener: sign-in is a full-page
-               redirect. */
-            if (headers.ContentType.ToString().StartsWith("text/html", StringComparison.OrdinalIgnoreCase))
+               redirect. #8096: sent only where a browser honours it (IsTrustworthyOrigin): over plain http on a LAN
+               address the browser ignores the header and logs an error on every navigation, in front of any real one. */
+            if (headers.ContentType.ToString().StartsWith("text/html", StringComparison.OrdinalIgnoreCase)
+                && IsTrustworthyOrigin(((HttpContext)state).Request))
             {
                 headers["Cross-Origin-Opener-Policy"] = "same-origin";
             }
@@ -116,6 +119,24 @@ internal sealed class DarlingWebSecurityHeaders
         }, context);
 
         return _next(context);
+    }
+
+    /// <summary>
+    /// Whether a browser treats the request's origin as trustworthy (a "potentially trustworthy origin" in the Secure
+    /// Contexts specification), which is the only place it honours <c>Cross-Origin-Opener-Policy</c>: https (the
+    /// connection's own scheme, or a configured proxy's forwarded scheme), or a loopback host (<c>localhost</c>,
+    /// <c>127.0.0.1</c>, <c>::1</c>), which a browser treats as secure over plain http. The loopback listeners are
+    /// plain http by design, so the policy still reaches the default dashboard address.
+    /// </summary>
+    internal static bool IsTrustworthyOrigin(HttpRequest request)
+    {
+        if (request.IsHttps)
+        {
+            return true;
+        }
+
+        var host = request.Host.Host;
+        return !string.IsNullOrEmpty(host) && HostHeaderGuard.IsAllowedHost(host, networkListenIp: null);
     }
 
     /// <summary>
