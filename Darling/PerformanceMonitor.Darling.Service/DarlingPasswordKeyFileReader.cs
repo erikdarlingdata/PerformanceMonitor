@@ -12,6 +12,7 @@ using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
@@ -32,18 +33,21 @@ namespace PerformanceMonitor.Darling.Service;
 /// <param name="ReadableByOrdinaryUsers">Windows: one of those groups can read it.</param>
 /// <param name="UntrustedWindowsOwner">Windows: its owner is not SYSTEM, Administrators or the service account.</param>
 /// <param name="UntrustedWindowsFolder">Windows: the folder the path is written in, or the one the file really is in,
-/// that accounts beyond SYSTEM, Administrators and the service account can change, and who they are; null when neither
-/// is.</param>
+/// that fails the default key file's folder check; null when neither does.</param>
+/// <param name="UnresolvedWindowsPath">Windows: the file opens through links that cannot all be followed to it, so the
+/// folder it really is in is not known.</param>
 internal readonly record struct PasswordKeyFileFacts(
     bool? RegularFile, long? Length, UnixFileMode? Mode, UnixFileOwner? Owner, uint EffectiveUserId,
     IReadOnlyList<UnixFileMode> DirectoryModes, bool WritableByOrdinaryUsers, bool ReadableByOrdinaryUsers,
-    bool UntrustedWindowsOwner = false, PasswordKeyFolderWriters? UntrustedWindowsFolder = null);
+    bool UntrustedWindowsOwner = false, PasswordKeyFolderProblem? UntrustedWindowsFolder = null,
+    bool UnresolvedWindowsPath = false);
 
-/// <summary>A folder a Windows <c>passwordKey</c> file is in, and the accounts beyond SYSTEM, Administrators and the
-/// service account that can write to it, delete from it or change who may, as
-/// <see cref="DarlingFileSecurity.WriteAccessBeyondTrusted(string)"/> names them (an owner among them marked
-/// "(the owner)").</summary>
-internal readonly record struct PasswordKeyFolderWriters(string Folder, string Writers);
+/// <summary>A folder a Windows <c>passwordKey</c> file is in that fails the default key file's folder check
+/// (<see cref="DarlingFileSecurity.WriteAccessBeyondTrusted(string)"/>): <paramref name="Writers"/> are the accounts
+/// beyond SYSTEM, Administrators and the service account that can write to it, delete from it or change who may, as that
+/// check names them (an owner among them marked "(the owner)"); or, when its ACL cannot be read,
+/// <paramref name="Unreadable"/> says why. One of the two is set.</summary>
+internal readonly record struct PasswordKeyFolderProblem(string Folder, string? Writers, string? Unreadable);
 
 /// <summary>A check a <c>passwordKey</c> file failed that does not stop it loading: a log message template whose one
 /// placeholder is <c>{Path}</c>, and the path. Never any of the file's contents.</summary>
@@ -69,7 +73,8 @@ internal readonly record struct PasswordKeyFileRead(string? Text, string? Refusa
 /// the read itself is never more than the limit plus one byte), and on Unix one its group or other users can write,
 /// on Windows one ordinary users can write, or one in a folder that accounts beyond SYSTEM, Administrators and the
 /// service account can change: the default key file's folder rule, held to both the folder the path is written in and
-/// the folder the file really is in. What a mounted Kubernetes secret can be by design (0644 by default, reached
+/// the folder the file really is in (and a file whose real path cannot be followed is refused, as that folder is then
+/// unknown). What a mounted Kubernetes secret can be by design (0644 by default, reached
 /// through <c>..data</c>) only warns, naming the path and the check: on Unix an owner that is neither root nor the
 /// service's user, a second name, read access for others, and a directory its group or others can write to that has no
 /// sticky bit; on Windows read access for ordinary users, and an owner that is not SYSTEM, Administrators or the service
@@ -137,16 +142,22 @@ internal static class DarlingPasswordKeyFileReader
                 "key. Remove those write bits (chmod go-w) and restart.");
         }
 
+        /* Windows follows more links than the real path does: a file reached through more of them would leave the
+           folder it really is in unjudged, so it is refused rather than judged by the folder as written alone. */
+        if (facts.UnresolvedWindowsPath)
+        {
+            return Refuse(
+                $"{target} is not read, because the links on its path could not all be followed to the file (more than 40 " +
+                "of them, or one whose target could not be read), so the folder it really is in cannot be checked. Point " +
+                $"{DarlingPasswordKeySource.SettingName} at the key file itself and restart.");
+        }
+
         /* #8006 review: the default key file's folder rule, and as strict: on Windows no secret mount makes a folder look
            open by design, as a Kubernetes one does on Linux. Before the file's own ACL, because locking the folder down
            also fixes a file that inherits from it. */
         if (facts.UntrustedWindowsFolder is { } folder)
         {
-            return Refuse(
-                $"{target} is not read, because its folder {folder.Folder} is not trusted (accounts beyond SYSTEM, " +
-                $"Administrators and the service account can write to it or change what is in it: {folder.Writers}). " +
-                "Remove their access, give the folder to Administrators if one of them owns it (icacls " +
-                $"\"{folder.Folder}\" /setowner *S-1-5-32-544), and restart.");
+            return Refuse($"{target} is not read, because {FolderProblem(folder)} {FolderRemedy(folder)}");
         }
 
         if (facts.WritableByOrdinaryUsers)
@@ -267,7 +278,8 @@ internal static class DarlingPasswordKeyFileReader
     private static PasswordKeyFileFacts Gather(string path)
     {
         var full = Path.GetFullPath(path);
-        var real = DarlingOwnedSecrets.RealPath(full) ?? full;
+        var resolved = DarlingOwnedSecrets.RealPath(full);
+        var real = resolved ?? full;
         if (ComposeCredentialDirectoryGuard.Current.UnixModes is { } modes)
         {
             var regular = modes.IsRegularFile(real);
@@ -304,9 +316,14 @@ internal static class DarlingPasswordKeyFileReader
             return new PasswordKeyFileFacts(false, null, null, null, 0, [], false, false);
         }
 
-        if (!File.Exists(real))
+        /* Windows follows up to 63 links on a path, and the real path stops after 40 or at a link it cannot read. A file
+           that still opens by the path as written is then in a folder no check can name. With nothing there either, the
+           open reports what is missing. */
+        if (resolved is null || !File.Exists(real))
         {
-            return new PasswordKeyFileFacts(null, null, null, null, 0, [], false, false);
+            return File.Exists(full)
+                ? new PasswordKeyFileFacts(null, null, null, null, 0, [], false, false, UnresolvedWindowsPath: true)
+                : new PasswordKeyFileFacts(null, null, null, null, 0, [], false, false);
         }
 
         return new PasswordKeyFileFacts(
@@ -321,15 +338,14 @@ internal static class DarlingPasswordKeyFileReader
 
     /// <summary>
     /// Windows (#8006 review): the first of the folder <paramref name="full"/> is written in and the folder
-    /// <paramref name="real"/> is in that accounts beyond SYSTEM, Administrators and the service account can write to,
-    /// delete from or change who may, by <see cref="DarlingFileSecurity.WriteAccessBeyondTrusted(string)"/>, the check
-    /// the default key file's folder gets; null when neither is. Whoever can change the folder the file is in can put
-    /// another file in its place. The folder as written is judged by the ACL read at its own name, which for a junction
-    /// is the junction's own: whoever can change that can point the path at another folder. A folder whose ACL cannot be
-    /// read is reported, as that check reports it.
+    /// <paramref name="real"/> is in that fails <see cref="DarlingFileSecurity.WriteAccessBeyondTrusted(string)"/>, the
+    /// check the default key file's folder gets: accounts beyond SYSTEM, Administrators and the service account can write
+    /// to it, delete from it or change who may, or its ACL cannot be read. Null when neither fails. Whoever can change the
+    /// folder the file is in can put another file in its place. The folder as written is judged by the ACL read at its own
+    /// name, which for a junction is the junction's own: whoever can change that can point the path at another folder.
     /// </summary>
     [SupportedOSPlatform("windows")]
-    private static PasswordKeyFolderWriters? UntrustedFolder(string full, string real)
+    private static PasswordKeyFolderProblem? UntrustedFolder(string full, string real)
     {
         string? judged = null;
         foreach (var folder in new[] { Path.GetDirectoryName(full), Path.GetDirectoryName(real) })
@@ -340,9 +356,22 @@ internal static class DarlingPasswordKeyFileReader
             }
 
             judged = folder;
-            if (DarlingFileSecurity.WriteAccessBeyondTrusted(folder) is { } writers)
+
+            /* That check's own two steps, the read and the judging, taken apart so that an ACL the service cannot read
+               gets a sentence of its own instead of standing where the accounts would. */
+            DirectorySecurity security;
+            try
             {
-                return new PasswordKeyFolderWriters(folder, writers);
+                security = new DirectoryInfo(folder).GetAccessControl();
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException)
+            {
+                return new PasswordKeyFolderProblem(folder, null, ex.Message);
+            }
+
+            if (DarlingFileSecurity.WriteAccessBeyondTrusted(security) is { } writers)
+            {
+                return new PasswordKeyFolderProblem(folder, writers, null);
             }
         }
 
@@ -352,6 +381,24 @@ internal static class DarlingPasswordKeyFileReader
     private static string NotRegular(string target) =>
         $"{target} is not a regular file (it is a directory, a device, a FIFO or a socket), so it is not read. Point " +
         $"{DarlingPasswordKeySource.SettingName} at the key file itself.";
+
+    private static string FolderProblem(PasswordKeyFolderProblem folder) =>
+        folder.Writers is { } writers
+            ? $"its folder {folder.Folder} is not trusted. Accounts beyond SYSTEM, Administrators and the service account " +
+              $"can write to it or change what is in it: {writers}."
+            : $"its folder {folder.Folder} cannot be checked: the service cannot read its permissions ({folder.Unreadable}), " +
+              "so it cannot tell who could replace the key.";
+
+    /* #7363's rule for the store folder holds here too: a drive root is never re-owned or re-permissioned, since that would
+       change every file and folder on the drive. */
+    private static string FolderRemedy(PasswordKeyFolderProblem folder) =>
+        DarlingManagedPostgres.IsDriveRoot(folder.Folder)
+            ? "A drive root is not locked down for a key, because that would change the permissions of every file and folder " +
+              "on the drive: move the key into a folder of its own, lock that folder down, and restart."
+            : folder.Writers is not null
+                ? "Remove their access, give the folder to Administrators if one of them owns it (icacls " +
+                  $"\"{folder.Folder}\" /setowner *S-1-5-32-544), and restart."
+                : "Give the service's account read on the folder (RX, inherited by what is in it) and restart.";
 
     private static string TooLarge(string target) =>
         $"{target} is larger than {MaxBytes.ToString(CultureInfo.InvariantCulture)} bytes, which no password key is, so it " +

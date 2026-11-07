@@ -56,8 +56,18 @@ public sealed class DarlingPasswordKeyFileChecksTests
         { "writable by ordinary users on Windows", "can be written by Users, Authenticated Users, Everyone or INTERACTIVE" },
         {
             "in a folder others can change on Windows",
-            @"is not read, because its folder C:\keys is not trusted (accounts beyond SYSTEM, Administrators and the service " +
-            @"account can write to it or change what is in it: NT AUTHORITY\Authenticated Users)"
+            @"is not read, because its folder C:\keys is not trusted. Accounts beyond SYSTEM, Administrators and the service " +
+            @"account can write to it or change what is in it: NT AUTHORITY\Authenticated Users. Remove their access"
+        },
+        {
+            "in a folder whose ACL cannot be read on Windows",
+            @"is not read, because its folder C:\keys cannot be checked: the service cannot read its permissions (Attempted " +
+            "to perform an unauthorized operation.), so it cannot tell who could replace the key. Give the service's account " +
+            "read on the folder"
+        },
+        {
+            "reached through links that cannot all be followed on Windows",
+            "is not read, because the links on its path could not all be followed to the file"
         },
     };
 
@@ -73,7 +83,12 @@ public sealed class DarlingPasswordKeyFileChecksTests
             "writable by others" => OwnFile(Octal("602")),
             "in a folder others can change on Windows" => new PasswordKeyFileFacts(
                 true, 2400, null, null, 0, [], WritableByOrdinaryUsers: false, ReadableByOrdinaryUsers: false,
-                UntrustedWindowsFolder: new PasswordKeyFolderWriters(@"C:\keys", @"NT AUTHORITY\Authenticated Users")),
+                UntrustedWindowsFolder: new PasswordKeyFolderProblem(@"C:\keys", @"NT AUTHORITY\Authenticated Users", null)),
+            "in a folder whose ACL cannot be read on Windows" => new PasswordKeyFileFacts(
+                true, 2400, null, null, 0, [], WritableByOrdinaryUsers: false, ReadableByOrdinaryUsers: false,
+                UntrustedWindowsFolder: new PasswordKeyFolderProblem(@"C:\keys", null, "Attempted to perform an unauthorized operation.")),
+            "reached through links that cannot all be followed on Windows" => new PasswordKeyFileFacts(
+                null, null, null, null, 0, [], WritableByOrdinaryUsers: false, ReadableByOrdinaryUsers: false, UnresolvedWindowsPath: true),
             _ => new PasswordKeyFileFacts(true, 2400, null, null, 0, [], WritableByOrdinaryUsers: true, ReadableByOrdinaryUsers: true),
         };
 
@@ -82,6 +97,29 @@ public sealed class DarlingPasswordKeyFileChecksTests
         Assert.NotNull(verdict.Refusal);
         Assert.StartsWith("passwordKey: file '" + KeyPath + "' ", verdict.Refusal, StringComparison.Ordinal);
         Assert.Contains(expected, verdict.Refusal, StringComparison.Ordinal);
+        Assert.Empty(verdict.Warnings);
+    }
+
+    /// <summary>
+    /// #8006 review: a key directly in a drive root is refused like any key in a folder others can change, but the fix
+    /// offered is to move it into a folder of its own, never to re-own or re-permission the root, which would change every
+    /// file and folder on the drive (the store folder's rule, #7363). So the sentence offers no icacls.
+    /// </summary>
+    [Fact]
+    public void Judge_AKeyInADriveRoot_IsRefused_WithoutOfferingToChangeTheRoot()
+    {
+        var facts = new PasswordKeyFileFacts(
+            true, 2400, null, null, 0, [], WritableByOrdinaryUsers: false, ReadableByOrdinaryUsers: false,
+            UntrustedWindowsFolder: new PasswordKeyFolderProblem(
+                @"C:\", @"NT SERVICE\TrustedInstaller (the owner), NT AUTHORITY\Authenticated Users", null));
+
+        var verdict = DarlingPasswordKeyFileReader.Judge(@"C:\password-key", facts);
+
+        Assert.NotNull(verdict.Refusal);
+        Assert.StartsWith(@"passwordKey: file 'C:\password-key' is not read, because its folder C:\ is not trusted.", verdict.Refusal, StringComparison.Ordinal);
+        Assert.Contains("move the key into a folder of its own", verdict.Refusal, StringComparison.Ordinal);
+        Assert.DoesNotContain("icacls", verdict.Refusal, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("takeown", verdict.Refusal, StringComparison.OrdinalIgnoreCase);
         Assert.Empty(verdict.Warnings);
     }
 
@@ -475,6 +513,57 @@ public sealed class DarlingPasswordKeyFileChecksTests
             }
 
             RemoveTree(root);
+        }
+    }
+
+    /// <summary>
+    /// #8006 review: Windows follows up to 63 links on a path and the real path stops after 40, so a key reached through
+    /// more links than that would be judged by the folder its path names alone, and whoever can swap a folder further down
+    /// could chain in a folder of their own. Such a key is refused, because the folder it really is in cannot be checked.
+    /// A chain of 41 junctions, which need no privilege, leads to the folder that holds the key; named directly, it loads.
+    /// </summary>
+    [Fact]
+    public void OnWindows_AKeyReachedThroughMoreLinksThanTheRealPathFollows_IsRefused()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Junctions are Windows-only; Linux itself stops a path after 40 links.");
+
+        var (pkcs8, keyId) = NewKey();
+        var secret = Convert.ToBase64String(pkcs8);
+        var root = Directory.CreateTempSubdirectory("password-key-checks-").FullName;
+        var junctions = new List<string>();
+        try
+        {
+            var target = Directory.CreateDirectory(Path.Combine(root, "target")).FullName;
+            File.WriteAllText(Path.Combine(target, "password-key"), secret);
+            var next = target;
+            for (var i = 41; i >= 1; i--)
+            {
+                var junction = Path.Combine(root, "link-" + i.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                MakeJunctionOrSkip(junction, next);
+                junctions.Add(junction);
+                next = junction;
+            }
+
+            var direct = DarlingPasswordKeySource.LoadFromSetting("file:" + Path.Combine(target, "password-key"), null, NullLogger.Instance);
+            Assert.Null(direct.Refusal);
+            Assert.NotNull(direct.Pkcs8);
+            Assert.Equal(keyId, KeyIdOf(direct.Pkcs8));
+            CryptographicOperations.ZeroMemory(direct.Pkcs8);
+
+            var throughTheChain = Path.Combine(next, "password-key");
+            Assert.True(File.Exists(throughTheChain), "Windows did not follow the chain, so this test proves nothing here.");
+            var load = DarlingPasswordKeySource.LoadFromSetting("file:" + throughTheChain, null, NullLogger.Instance);
+            AssertRefused(load, "file:" + throughTheChain, secret, "the links on its path could not all be followed to the file");
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(pkcs8);
+            foreach (var junction in junctions)
+            {
+                Directory.Delete(junction, recursive: false);
+            }
+
+            Directory.Delete(root, recursive: true);
         }
     }
 

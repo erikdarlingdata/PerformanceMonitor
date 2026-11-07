@@ -154,7 +154,7 @@ public sealed class DarlingPasswordKeyFileOwnerTests
             Assert.True(refused.Untrusted);
             Assert.Null(refused.Pkcs8);
             Assert.StartsWith("passwordKey: file '" + path + "' is not read, because its folder " + dir + " is not trusted", refused.Refusal, StringComparison.Ordinal);
-            Assert.Contains(CurrentUser.Translate(typeof(NTAccount)).Value + " (the owner))", refused.Refusal, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(": " + CurrentUser.Translate(typeof(NTAccount)).Value + " (the owner).", refused.Refusal, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("/setowner *S-1-5-32-544", refused.Refusal, StringComparison.Ordinal);
             Assert.DoesNotContain(Convert.ToBase64String(pkcs8)[..16], refused.Refusal, StringComparison.Ordinal);
 
