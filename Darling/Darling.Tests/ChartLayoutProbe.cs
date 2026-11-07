@@ -205,7 +205,11 @@ internal static class ChartLayoutProbe
         if (legend is not null && plot.PlottableList.Any(p => p.LegendItems.Any()) && last.Layout.PanelSizes.TryGetValue(legend, out var legendSize))
         {
             using var paint = ScottPlot.Paint.NewDisposablePaint();
-            var needed = plot.Legend.GetLayout(new PixelSize(data.Width, float.PositiveInfinity), paint).LegendRect.Height + legend.Padding.Vertical;
+            // #8220: a legend beside the plot is as WIDE as its panel; one under the plot is as TALL as its panel.
+            var beside = legend.Edge == ScottPlot.Edge.Right;
+            var needed = beside
+                ? plot.Legend.GetLayout(new PixelSize(float.PositiveInfinity, data.Height), paint).LegendRect.Width + legend.Padding.Horizontal
+                : plot.Legend.GetLayout(new PixelSize(data.Width, float.PositiveInfinity), paint).LegendRect.Height + legend.Padding.Vertical;
             if (legendSize < needed - 0.5f)
             {
                 problems.Add($"legend is cut off: its panel is {legendSize:0.#} px, the wrapped legend needs {needed:0.#} px");

@@ -86,6 +86,12 @@ internal sealed class WrappedLegendLayout : ILayoutEngine
     /// </summary>
     internal bool ForceBottom { get; set; }
 
+    /// <summary>
+    /// #8220: the height of the legend column (padding included) of the last layout that put the legend beside the plot. A row that holds a side
+    /// legend never shrinks below the chrome plus this, or the column would no longer fit and the next layout would move the legend (<see cref="ChartLayout.RowMinHeightFor(double, double)"/>).
+    /// </summary>
+    internal float SideColumnHeight { get; private set; }
+
     public Layout GetLayout(PixelRect figureRect, Plot plot, Paint paint)
     {
         if (!_compact) _all = plot.Legend.GetItems();
@@ -221,6 +227,7 @@ internal sealed class WrappedLegendLayout : ILayoutEngine
             var rect = _panel.Legend.GetLayout(new PixelSize(float.PositiveInfinity, layout.DataRect.Height), paint).LegendRect;
             need = rect.Width + _panel.Padding.Horizontal + spare;
             legendHeight = rect.Height + _panel.Padding.Vertical;
+            SideColumnHeight = legendHeight;
         }
         else
         {

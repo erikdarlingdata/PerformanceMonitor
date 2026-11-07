@@ -141,13 +141,30 @@ namespace PerformanceMonitor.Ui
         /// <summary>#8086: the smallest share of its chart the plot may take. Below it the tab scrolls instead of squeezing the plot.</summary>
         public const double MinPlotShare = 0.55;
 
-        /// <summary>The row height that leaves <see cref="MinPlotAreaHeight"/> pixels, and <see cref="MinPlotShare"/> of the row, for the plot when everything but the plot takes <paramref name="chromeHeight"/>.</summary>
-        public static double RowMinHeightFor(double chromeHeight) =>
-            Math.Max(MinPlotHeight, Math.Max(chromeHeight + MinPlotAreaHeight, chromeHeight / (1 - MinPlotShare)));
+        /// <summary>
+        /// The row height that leaves <see cref="MinPlotAreaHeight"/> pixels, and <see cref="MinPlotShare"/> of the row, for the plot when everything but the plot takes <paramref name="chromeHeight"/>.
+        /// #8220: a legend beside the plot is chosen only while its whole column fits the plot's height (<see cref="WrappedLegendLayout"/>), so when the
+        /// legend is beside the plot (<paramref name="sideLegendHeight"/> is its column, padding included, 0 for a legend under the plot) the row also
+        /// stops at the chrome plus that column. Without it the minimum came from the side layout's small chrome, the row shrank until the column no
+        /// longer fit, the legend moved under the plot, that chrome raised the minimum, the row grew, and the legend moved back, on every layout pass
+        /// for ever (the Viewer's Latch and Spinlock charts at 1280x800 froze the window).
+        /// </summary>
+        public static double RowMinHeightFor(double chromeHeight, double sideLegendHeight = 0) =>
+            Math.Max(
+                Math.Max(MinPlotHeight, Math.Max(chromeHeight + MinPlotAreaHeight, chromeHeight / (1 - MinPlotShare))),
+                sideLegendHeight > 0 ? chromeHeight + sideLegendHeight + SideLegendSlack : 0);
+
+        /// <summary>Room beyond the column's height, so a figure rounded to whole pixels still passes the legend rule's "the column fits" test.</summary>
+        private const double SideLegendSlack = 0.5;
+
+        /// <summary>The minimum height of the chart's row (<see cref="RowMinHeightFor(double, double)"/>) for the chrome and legend placement of the plot's last render; null before the first.</summary>
+        public static double? RowMinHeightFor(ScottPlot.Plot plot) =>
+            s_chrome.TryGetValue(plot, out var c) && !double.IsNaN(c.Height) ? RowMinHeightFor(c.Height, c.SideLegend) : null;
 
         private sealed class Chrome
         {
             public double Height = double.NaN;
+            public double SideLegend; // #8220: the height of a legend column beside the plot, 0 when the legend is under it
             public float FigureHeight;
             public bool FitPending;
         }
@@ -162,7 +179,7 @@ namespace PerformanceMonitor.Ui
 
         /// <summary>
         /// Measures every render of the chart and, when the chart sits in a star row of a Grid whose XAML minimum is
-        /// <see cref="MinPlotHeight"/> or more, raises that row's minimum to <see cref="RowMinHeightFor"/> and the Grid's own minimum
+        /// <see cref="MinPlotHeight"/> or more, raises that row's minimum to <see cref="RowMinHeightFor(double, double)"/> and the Grid's own minimum
         /// to the rows' total, so the tab's scroll viewer scrolls instead of clipping the chart. A chart anywhere else is only measured.
         /// Safe to call more than once per plot. Rendering happens on the UI thread; the row is adjusted after it, at background priority.
         /// </summary>
@@ -177,8 +194,10 @@ namespace PerformanceMonitor.Ui
             {
                 var measured = chrome.FigureHeight - rp.DataRect.Height;
                 if (!(measured > 0) || double.IsInfinity(measured)) return;
-                var changed = double.IsNaN(chrome.Height) || Math.Abs(chrome.Height - measured) > 0.5;
+                var side = plot.Layout.LayoutEngine is WrappedLegendLayout { Panel.Edge: ScottPlot.Edge.Right } legend ? legend.SideColumnHeight : 0;
+                var changed = double.IsNaN(chrome.Height) || Math.Abs(chrome.Height - measured) > 0.5 || Math.Abs(chrome.SideLegend - side) > 0.5;
                 chrome.Height = measured;
+                chrome.SideLegend = side;
                 if (!changed || chrome.FitPending) return;
                 chrome.FitPending = true;
                 chart.Dispatcher.BeginInvoke(() =>
@@ -226,7 +245,7 @@ namespace PerformanceMonitor.Ui
                 var plot = ((card?.Content ?? inner) as WpfPlot)?.Plot;
                 // The Border around the chart has a margin between charts, and that is part of the row, not of the chart. So is a card's own chrome.
                 var margin = (sibling is System.Windows.FrameworkElement fe ? fe.Margin.Top + fe.Margin.Bottom : 0) + (card?.ChromeHeight ?? 0);
-                if (plot is not null && ChromeHeight(plot) is { } h) need = Math.Max(need, Math.Ceiling(RowMinHeightFor(h) + margin) + (card is null ? 0 : 1)); // whole pixels; a card's fractional chrome rounds the chart down by up to one more: the chart renders at its pixel size, truncated
+                if (plot is not null && RowMinHeightFor(plot) is { } h) need = Math.Max(need, Math.Ceiling(h + margin) + (card is null ? 0 : 1)); // whole pixels; a card's fractional chrome rounds the chart down by up to one more: the chart renders at its pixel size, truncated
             }
             if (Math.Abs(definition.MinHeight - need) > 0.5) definition.MinHeight = need;
 

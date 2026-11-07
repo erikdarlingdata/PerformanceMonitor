@@ -602,10 +602,11 @@
                     </Grid>
                 </Border>
 
-                <Grid Grid.Column="1">
+                <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #8220: scrolls when the chart cannot keep its minimum height (20 wait types make a two-row legend) -->
+                <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="300">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                     </Grid.RowDefinitions>
                     <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="8,4,0,0">
                         <TextBlock Text="Metric:" VerticalAlignment="Center" Margin="0,0,6,0" FontSize="11"/>
@@ -618,6 +619,7 @@
                         <scottplot:WpfPlot x:Name="WaitStatsChart"/>
                     </ui:ChartPanel>
                 </Grid>
+                </ScrollViewer>
             </Grid>
         </TabItem>
 
@@ -2381,9 +2383,10 @@
                         </Border>
 
                         <!-- Chart + Summary -->
-                        <Grid Grid.Column="1">
+                        <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #8220: scrolls when the chart cannot keep its minimum height -->
+                        <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="300">
                             <Grid.RowDefinitions>
-                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                                 <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
                             <ui:ChartPanel Title="Memory clerks" Grid.Row="0">
@@ -2398,6 +2401,7 @@
                                 </StackPanel>
                             </Border>
                         </Grid>
+                        </ScrollViewer>
                     </Grid>
                 </TabItem>
 
@@ -2531,10 +2535,11 @@
 
                 <!-- Memory Pressure Events Sub-Tab -->
                 <TabItem Header="Memory Pressure Events">
-                    <Grid Margin="8">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8"><!-- #8220: scrolls when the chart cannot keep its minimum height -->
+                    <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="300">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                         </Grid.RowDefinitions>
                         <!-- "Showing since <start>" when this server's pressure events start after the range does: the earlier of the
                              collector's coverage (DataWindowFloor) and the first event drawn. The chart draws bars only where pressure was
@@ -2549,6 +2554,7 @@
                         <!-- Shown only where the memory_pressure_events collector does not run (Azure SQL Database) or has never run for this server. -->
                         <TextBlock Grid.Row="1" x:Name="MemoryPressureEventsNoDataMessage" Style="{StaticResource EmptyHint}"/>
                     </Grid>
+                    </ScrollViewer>
                 </TabItem>
 
             </TabControl>
