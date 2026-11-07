@@ -65,7 +65,7 @@ public sealed class DarlingMcpFleetSweepTools
         "verdicts with band transitions pre-computed, plus its would-have-paged ledger when one was taken), and " +
         "the watch-item worklist with its hysteresis position; pass sweep_id (as a STRING - the ids are too large " +
         "for a JSON number to round-trip) to fetch one sweep in full instead. SIZE: the reply fits the shared " +
-        "32 KB response budget. The timeline is cut newest first when its headers do not all fit - truncated is " +
+        "32 KB response budget unless the newest sweep's document alone exceeds it (latest is never cut). The timeline is cut newest first when its headers do not all fit - truncated is " +
         "true, sweeps_returned says how many of count ride, and budget_note says so; narrow hours_back or move " +
         "as_of to see the older sweeps. latest and the sweep_id read are never cut. Every sweep id the payload carries (sweep_id, previous_sweep_id, the watch items' " +
         "*_sweep_id anchors) is spelled as a JSON string for the same reason - pass one back verbatim. " +
