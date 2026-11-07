@@ -78,8 +78,11 @@ const HOURLY_NOTE = "the hourly rollup is materialized only to 2026-10-26T21:00:
 /* #6800: what the fleet Query Store section carries when the hourly table served it: the start moved up to the hour. */
 const QS_NOTE = "hourly buckets start on the hour: no bucket before 2026-10-26T23:00:00.0000000Z: the data from 2026-10-26T22:17:00.0000000Z to 2026-10-26T23:00:00.0000000Z is not included";
 const asks = [];
+/* #8083: when set, list_query_tags answers as the service does on a store with no tag (the empty envelope). */
+let noTags = false;
 const answerFor = (name, q) => {
   if (name === "list_servers") return { servers: [{ server_name: "a", display_name: "Server A", engine_kind: "sqlserver" }, { server_name: "b" }] };
+  if (name === "list_query_tags" && noTags) return { status: "empty", message: "No query tags exist. create_query_tag adds one.", tags: [] };
   if (name === "list_query_tags") return { status: "ok", tags: [{ tag_id: 3, name: "Prod", path: "Prod", colour: "#4E79A7" }, { tag_id: 7, name: "Web", path: "Prod / Web", colour: "#59A14F" }, { tag_id: 8, name: "Batch", path: "Batch", colour: null }] };
   if (name === "get_resource_use_by_tag") {
     const tagOnly = !!q.get("tag");
@@ -238,6 +241,47 @@ for (const [label, refusals] of [["busyOnce", 1], ["busyTwice", 2]]) {
   seen.planCardAfter = all(main).some((n) => n.attrs["data-section"] === "plan_cache");
   busyReads = 0;
   out[label] = seen;
+}
+
+/* #8083: a store with no query tag. The page asks list_query_tags, draws one line that links to Manage Query Tags, and never sends the by-tag read:
+   no section panel, no table, no per-server heading. */
+{
+  const main = new FakeNode("main");
+  main.isRoot = true;
+  asks.length = 0;
+  noTags = true;
+  modules.page.renderQueryTagUsage(main);
+  await flush();
+  noTags = false;
+  const nodes = all(main);
+  out.noTags = {
+    tagListReads: readsOf("list_query_tags").length,
+    byTagReads: readsOf("get_resource_use_by_tag").length,
+    strips: nodes.filter((n) => /\bstrip\b/.test(n.className || "")).map((n) => ({ cls: n.className, text: n.textContent })),
+    links: nodes.filter((n) => n.tag === "a").map((n) => ({ href: n.attrs.href, text: n.textContent })),
+    panels: nodes.filter((n) => n.attrs["data-section"]).length,
+    tables: nodes.filter((n) => n.tag === "table").length,
+    headings: nodes.filter((n) => n.tag === "h4").length,
+  };
+}
+
+/* #8083: with tags defined, a block whose read sent no tag row (only untagged and the total) is one line with the untagged figures, not a two-row
+   table that says them twice. A block with a tag row keeps its table, and so does an untagged-only block under a tag filter (no untagged row there). */
+{
+  const plan = { name: "plan_cache", title: "Plan cache" };
+  const shape = (card) => ({
+    tables: all(card).filter((n) => n.tag === "table").length,
+    lines: all(card).filter((n) => /\buntagged-only\b/.test(n.className || "")).map((n) => n.textContent),
+    headings: all(card).filter((n) => n.tag === "h4").map((n) => n.textContent),
+  });
+  const allUntagged = (server) => ({ server, section: "plan_cache", status: "ok", tag_rows: [], untagged: fig(4, 2), total: fig(4, 2) });
+  out.untaggedOnlyFleet = shape(modules.page.sectionCard(plan, {
+    section: "plan_cache", status: "ok", source: "collect.query_stats",
+    servers: [allUntagged("a"), planCache("b", false)], fleet_total: fig(13, 6),
+  }, () => {}, "the last 24 hours", [{ server_name: "a", display_name: "Server A" }, { server_name: "b" }]));
+  out.untaggedOnlyServer = shape(modules.page.sectionCard(plan, allUntagged(null), () => {}));
+  out.taggedServer = shape(modules.page.sectionCard(plan, planCache(null, false), () => {}));
+  out.untaggedOnlyUnderTag = shape(modules.page.sectionCard(plan, { section: "plan_cache", status: "ok", tag_rows: [], total_scope: "tag_subtree", total: fig(0, 0) }, () => {}));
 }
 
 /* #6157: the Availability Groups card names the reporting server by its display name, and falls back to the key. */
