@@ -21,12 +21,15 @@ namespace Darling.Tests;
 /// #8080: tempdb_stats' top session is the session holding the most tempdb pages now, and its figure is what it holds.
 /// <c>sys.dm_db_session_space_usage</c> counts for the life of the session: the <c>*_alloc_page_count</c> columns every
 /// page it has allocated since it connected, the <c>*_dealloc_page_count</c> columns every page it has released, so the
-/// pages it holds are the difference. Two sessions are staged on a live SQL Server: one that fills a 16 MB temp table and
-/// keeps it, and one that fills and drops a 7.5 MB temp table twenty-four times over, so its lifetime allocation is many
-/// times the other's hold while it holds nothing. The collector's own <see cref="TempDbStatsCollector.BuildQuery"/> and
-/// <see cref="TempDbStatsCollector.ReadAsync"/> then run on a third connection: the top session must be the one keeping
-/// its table, its figure that table's size, and <c>total_sessions_using_tempdb</c> the sessions holding pages now, which
-/// leaves the churning session out.
+/// pages it holds are the difference. Two sessions are staged on a live SQL Server, in order. First a session fills and
+/// drops a 7.5 MB temp table twenty-four times over, so its lifetime allocation is large while it holds nothing, and the
+/// collector runs with only that staged: the stored top session is a session holding pages at a figure above zero, or
+/// nothing at all (session 0, 0.00 MB, 0 sessions) when no session on the server holds pages, never a session at
+/// 0.00 MB. Then a second session fills a 16 MB temp table and keeps it, and the collector runs again: the top session
+/// must be the one keeping its table, its figure that table's size, and <c>total_sessions_using_tempdb</c> the sessions
+/// holding pages now, which leaves the churning session out. The collector's own
+/// <see cref="TempDbStatsCollector.BuildQuery"/> and <see cref="TempDbStatsCollector.ReadAsync"/> run on a third
+/// connection both times.
 ///
 /// <para>Gated on <c>DARLING_TEST_SQL</c> (the SQL Server host; optional <c>DARLING_TEST_SQL_USER</c> and
 /// <c>DARLING_TEST_SQL_PASSWORD</c> for SQL auth), so it skips where the runner has no SQL Server. It creates only
@@ -116,25 +119,19 @@ WHERE (user_objects_alloc_page_count - user_objects_dealloc_page_count) + (inter
         };
 
     [Fact]
-    public async Task TopSession_IsTheOneHoldingPages_AtItsHold_AndAChurningSessionIsNeitherTopNorCounted()
+    public async Task TopSession_IsNoneWhileNothingIsHeld_ThenTheSessionHoldingPages_AtItsHold_AndTheChurnerIsNeitherTopNorCounted()
     {
         Assert.SkipWhen(ConnectionString("probe") is null, "Set DARLING_TEST_SQL (and, for SQL auth, DARLING_TEST_SQL_USER / DARLING_TEST_SQL_PASSWORD) to run the live tempdb top session test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var holder = new SqlConnection(ConnectionString("pm-8080-tempdb-holder"));
         await using var churner = new SqlConnection(ConnectionString("pm-8080-tempdb-churner"));
+        await using var holder = new SqlConnection(ConnectionString("pm-8080-tempdb-holder"));
         await using var collector = new SqlConnection(ConnectionString("pm-8080-tempdb-collector"));
-        await holder.OpenAsync(ct);
         await churner.OpenAsync(ct);
+        await holder.OpenAsync(ct);
         await collector.OpenAsync(ct);
 
-        int holderSpid;
-        await using (var fill = new SqlCommand(FillAndKeepSql, holder) { CommandTimeout = 120 })
-        {
-            fill.Parameters.AddWithValue("@pages", HoldPages);
-            holderSpid = Convert.ToInt32(await fill.ExecuteScalarAsync(ct));
-        }
-
+        /* Phase 1: only the churner is staged. It allocated a lot and released all of it. */
         int churnerSpid;
         await using (var churn = new SqlCommand(FillAndDropRepeatedlySql, churner) { CommandTimeout = 300 })
         {
@@ -143,17 +140,37 @@ WHERE (user_objects_alloc_page_count - user_objects_dealloc_page_count) + (inter
             churnerSpid = Convert.ToInt32(await churn.ExecuteScalarAsync(ct));
         }
 
-        var context = MakeContext();
-        var query = TempDbStatsCollector.Instance.BuildQuery(context);
-        TempDbStatsCollector.Row row;
-        await using (var command = SqlServerTargetProvider.Instance.CreateCommand(query, collector, 60))
-        await using (var reader = await command.ExecuteReaderAsync(ct))
+        var idle = await RunCollectorAsync(collector, ct);
+        var (churnerHeldMb, churnerLifetimeMb) = await ReadSessionFiguresAsync(collector, churnerSpid, ct);
+        var holdingWhileIdle = await ReadSessionsHoldingPagesAsync(collector, ct);
+
+        Assert.True(churnerLifetimeMb >= ChurnFills * ChurnPages * 8m / 1024m * 0.9m, $"the churner allocated {churnerLifetimeMb} MB over its life; the fills did not land");
+        Assert.True(churnerHeldMb < 1m, $"the churner still holds {churnerHeldMb} MB; its drops did not release the pages");
+
+        Assert.True(
+            idle.TopSessionId == 0 || idle.TopSessionMb > 0m,
+            $"session {idle.TopSessionId} is stored as the top consumer at {idle.TopSessionMb} MB; a stored top session holds pages, and a server where none does stores no top session");
+        Assert.True(
+            idle.TotalSessions == holdingWhileIdle,
+            $"total_sessions_using_tempdb is {idle.TotalSessions}; {holdingWhileIdle} sessions hold tempdb pages now");
+        if (holdingWhileIdle == 0)
         {
-            row = Assert.Single(await TempDbStatsCollector.Instance.ReadAsync(reader, context, ct));
+            Assert.True(
+                idle.TopSessionId == 0 && idle.TopSessionMb == 0m,
+                $"no session holds tempdb pages, yet session {idle.TopSessionId} is stored as the top consumer at {idle.TopSessionMb} MB (the churner is {churnerSpid}, lifetime {churnerLifetimeMb} MB, holding {churnerHeldMb} MB)");
         }
 
+        /* Phase 2: the holder fills a table and keeps it. */
+        int holderSpid;
+        await using (var fill = new SqlCommand(FillAndKeepSql, holder) { CommandTimeout = 120 })
+        {
+            fill.Parameters.AddWithValue("@pages", HoldPages);
+            holderSpid = Convert.ToInt32(await fill.ExecuteScalarAsync(ct));
+        }
+
+        var row = await RunCollectorAsync(collector, ct);
         var (holderHeldMb, holderLifetimeMb) = await ReadSessionFiguresAsync(collector, holderSpid, ct);
-        var (churnerHeldMb, churnerLifetimeMb) = await ReadSessionFiguresAsync(collector, churnerSpid, ct);
+        (churnerHeldMb, churnerLifetimeMb) = await ReadSessionFiguresAsync(collector, churnerSpid, ct);
         var sessionsHoldingPages = await ReadSessionsHoldingPagesAsync(collector, ct);
 
         /* The stage is set as intended: the churner allocated far more over its life than the holder keeps, and keeps
@@ -171,6 +188,15 @@ WHERE (user_objects_alloc_page_count - user_objects_dealloc_page_count) + (inter
         Assert.True(
             row.TotalSessions == sessionsHoldingPages,
             $"total_sessions_using_tempdb is {row.TotalSessions}; {sessionsHoldingPages} sessions hold tempdb pages now, and the churner (lifetime {churnerLifetimeMb} MB, holding {churnerHeldMb} MB) is not one of them");
+    }
+
+    private static async Task<TempDbStatsCollector.Row> RunCollectorAsync(SqlConnection connection, CancellationToken ct)
+    {
+        var context = MakeContext();
+        var query = TempDbStatsCollector.Instance.BuildQuery(context);
+        await using var command = SqlServerTargetProvider.Instance.CreateCommand(query, connection, 60);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        return Assert.Single(await TempDbStatsCollector.Instance.ReadAsync(reader, context, ct));
     }
 
     private static async Task<(decimal HeldMb, decimal LifetimeMb)> ReadSessionFiguresAsync(SqlConnection connection, int sessionId, CancellationToken ct)
