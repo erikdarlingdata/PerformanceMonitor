@@ -7,7 +7,11 @@
  */
 
 using System;
+using System.ComponentModel;
+using System.Linq;
+using System.Reflection;
 using System.Text.Json;
+using ModelContextProtocol.Server;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -16,9 +20,96 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #4677: the eviction caveat is worded in one place and every surface reads it. Null passes means unknown, never 0.
+/// #8075: on Aurora the collector reads aurora_stat_statements(), which needs no extension, so the counter is unknown
+/// because pg_stat_statements is not created in the collector's database, not because the major or the extension is old.
 /// </summary>
 public sealed class PgStatementEvictionNoteTests
 {
+    /// <summary>
+    /// #8075: the eviction inputs for an Aurora target whose collector database has no pg_stat_statements row, built by
+    /// name so the failure names the member the record needs rather than refusing to compile.
+    /// </summary>
+    internal static DarlingPgStatementReader.PgEvictionInfo AuroraWithoutExtension(long? maxEntries = 5000)
+    {
+        var ctor = typeof(DarlingPgStatementReader.PgEvictionInfo).GetConstructors()
+            .FirstOrDefault(c => c.GetParameters().Any(p => p.Name == "AuroraWithoutExtension"));
+        Assert.True(ctor is not null,
+            "PgEvictionInfo has no AuroraWithoutExtension parameter, so the note cannot tell an Aurora target without "
+            + "the extension from one on an old major or an old extension version.");
+
+        var args = ctor!.GetParameters().Select(p => p.Name switch
+        {
+            "Known" => (object?)false,
+            "EvictionPasses" => null,
+            "MaxEntries" => maxEntries,
+            "AuroraWithoutExtension" => true,
+            _ => p.HasDefaultValue ? p.DefaultValue : null,
+        }).ToArray();
+        return (DarlingPgStatementReader.PgEvictionInfo)ctor.Invoke(args);
+    }
+
+    [Fact]
+    public void Unknown_OnAuroraWithoutTheExtension_NamesTheMissingExtension_NotTheOldMajorOrVersion()
+    {
+        var note = PgStatementEvictionNote.Build(AuroraWithoutExtension());
+
+        Assert.NotNull(note);
+        Assert.Contains("unknown", note, StringComparison.Ordinal);
+        Assert.Contains("CREATE EXTENSION pg_stat_statements", note, StringComparison.Ordinal);
+        Assert.Contains("aurora_stat_statements()", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("before 14", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("below 1.9", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("ALTER EXTENSION", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("time(s)", note, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Unknown_Elsewhere_KeepsTheOldMajorAndOldVersionCauses()
+    {
+        var note = PgStatementEvictionNote.Build(new DarlingPgStatementReader.PgEvictionInfo(false, null, 5000));
+
+        Assert.NotNull(note);
+        Assert.Contains("before 14", note, StringComparison.Ordinal);
+        Assert.Contains("below 1.9", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("CREATE EXTENSION", note, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void McpEvictions_OnAuroraWithoutTheExtension_FlagIt_AndCarryTheSharedNote()
+    {
+        var info = AuroraWithoutExtension();
+        var json = JsonSerializer.SerializeToElement(DarlingMcpPgStatementTools.BuildEvictions(info));
+
+        Assert.False(json.GetProperty("known").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, json.GetProperty("eviction_passes_in_window").ValueKind);
+        Assert.True(json.TryGetProperty("aurora_without_extension", out var flag) && flag.ValueKind == JsonValueKind.True,
+            "evictions carries no aurora_without_extension flag, so the web's short sentence has nothing to branch on");
+        Assert.Equal(PgStatementEvictionNote.Build(info), json.GetProperty("note").GetString());
+    }
+
+    [Theory]
+    [InlineData(false, null)]
+    [InlineData(true, 0L)]
+    [InlineData(true, 7L)]
+    public void McpEvictions_Elsewhere_SayTheTargetIsNotAuroraWithoutTheExtension(bool known, long? passes)
+    {
+        var json = JsonSerializer.SerializeToElement(DarlingMcpPgStatementTools.BuildEvictions(new DarlingPgStatementReader.PgEvictionInfo(known, passes, 5000)));
+
+        Assert.True(json.TryGetProperty("aurora_without_extension", out var flag), "evictions carries no aurora_without_extension flag");
+        Assert.Equal(JsonValueKind.False, flag.ValueKind);
+    }
+
+    [Fact]
+    public void TheExtensionsGuide_CarvesOutAuroraForTheStatementsRead()
+    {
+        var method = typeof(DarlingMcpPgServerStateTools).GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == "get_pg_extensions");
+        var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
+
+        Assert.Contains("aurora_stat_statements()", description, StringComparison.Ordinal);
+        Assert.Contains("get_pg_top_queries", description, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Known_WithPasses_NamesThePassesAndTheMax()
     {
