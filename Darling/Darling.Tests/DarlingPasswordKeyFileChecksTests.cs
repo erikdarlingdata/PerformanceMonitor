@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Security.AccessControl;
@@ -28,7 +29,8 @@ namespace Darling.Tests;
 /// neither root nor the service's user, with more than one name, readable by others, or in a directory its group or
 /// others can write to without the sticky bit loads with a Warning naming the path and the check, so a Kubernetes secret
 /// mount (root-owned, 0644 or 0440) is never refused, and at 0440 gives no message at all. On Windows a file owned by an
-/// account other than SYSTEM, Administrators or the service account warns too.
+/// account other than SYSTEM, Administrators or the service account warns too, and one in a folder that accounts beyond
+/// those can change is refused, as the default key file's folder is.
 /// The Unix decisions are pinned here through <see cref="StandInUnixModes"/>; the real calls run in the Linux
 /// self-check (<c>--self-check-password-key</c>).
 /// </summary>
@@ -37,6 +39,7 @@ public sealed class DarlingPasswordKeyFileChecksTests
 {
     private const string KeyPath = "/run/secrets/password-key";
     private static readonly SecurityIdentifier s_builtinUsers = new(WellKnownSidType.BuiltinUsersSid, null);
+    private static readonly SecurityIdentifier s_authenticatedUsers = new(WellKnownSidType.AuthenticatedUserSid, null);
 
     private static PasswordKeyFileFacts OwnFile(UnixFileMode mode) => new(
         RegularFile: true, Length: 2400, Mode: mode, Owner: new UnixFileOwner(1000, 1), EffectiveUserId: 1000,
@@ -51,6 +54,11 @@ public sealed class DarlingPasswordKeyFileChecksTests
         { "group-writable", "can be written by its group or by other users (mode 664)" },
         { "writable by others", "can be written by its group or by other users (mode 602)" },
         { "writable by ordinary users on Windows", "can be written by Users, Authenticated Users, Everyone or INTERACTIVE" },
+        {
+            "in a folder others can change on Windows",
+            @"is not read, because its folder C:\keys is not trusted (accounts beyond SYSTEM, Administrators and the service " +
+            @"account can write to it or change what is in it: NT AUTHORITY\Authenticated Users)"
+        },
     };
 
     [Theory]
@@ -63,6 +71,9 @@ public sealed class DarlingPasswordKeyFileChecksTests
             "larger than the limit" => OwnFile(Octal("600")) with { Length = 8193 },
             "group-writable" => OwnFile(Octal("664")),
             "writable by others" => OwnFile(Octal("602")),
+            "in a folder others can change on Windows" => new PasswordKeyFileFacts(
+                true, 2400, null, null, 0, [], WritableByOrdinaryUsers: false, ReadableByOrdinaryUsers: false,
+                UntrustedWindowsFolder: new PasswordKeyFolderWriters(@"C:\keys", @"NT AUTHORITY\Authenticated Users")),
             _ => new PasswordKeyFileFacts(true, 2400, null, null, 0, [], WritableByOrdinaryUsers: true, ReadableByOrdinaryUsers: true),
         };
 
@@ -329,6 +340,102 @@ public sealed class DarlingPasswordKeyFileChecksTests
         }
     }
 
+    /// <summary>
+    /// #8006 review: a Windows key in a folder that ordinary users can write to is refused, as the default key file's
+    /// folder is, though the file itself passes every check. The layout is the review's: a folder made under a drive root,
+    /// which lets Authenticated Users modify what is made below it, and a key file locked down with the file step alone
+    /// (no inherited access, read for SYSTEM, Administrators and the service account). Any local user could replace the
+    /// folder, and the key with it.
+    /// </summary>
+    [Fact]
+    public void OnWindows_AKeyInAFolderOrdinaryUsersCanWriteTo_IsRefused_ThoughTheFileIsLockedDown()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Folder ACLs are Windows-only; on Linux an open directory only warns.");
+
+        var (pkcs8, _) = NewKey();
+        var secret = Convert.ToBase64String(pkcs8);
+        var root = UnderADriveRootsGrant();
+        try
+        {
+            var (keys, path) = AKeyLockedDownByTheFileStepAlone(root, secret);
+
+            var logger = new CapturingTestLogger();
+            var load = DarlingPasswordKeySource.LoadFromSetting("file:" + path, null, logger);
+
+            AssertRefused(load, "file:" + path, secret, $"is not read, because its folder {keys} is not trusted");
+            Assert.Contains(AccountName(s_authenticatedUsers), load.Refusal, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(pkcs8);
+            RemoveTree(root);
+        }
+    }
+
+    /// <summary>
+    /// #8006 review: on Windows the folder the path is written in and the folder the file really is in must each pass the
+    /// folder check, and each refuses on its own. Junctions stand in for links, as they need no privilege. One sits in an
+    /// open folder and leads to the locked folder that holds the key: the path's own folder is the junction, which takes
+    /// its ACL from the open folder, and whoever can change it can point the path at another folder. The other sits in the
+    /// locked folder and leads to an open folder holding a locked-down key: anyone can replace the file where it really
+    /// is. The key in the locked folder, named directly, loads.
+    /// </summary>
+    [Fact]
+    public void OnWindows_TheFolderThePathNames_AndTheFolderTheFileIsIn_AreEachChecked()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Junctions and folder ACLs are Windows-only.");
+
+        var (pkcs8, keyId) = NewKey();
+        var secret = Convert.ToBase64String(pkcs8);
+        var root = Directory.CreateTempSubdirectory("password-key-checks-").FullName;
+        var locked = Path.Combine(root, "locked");
+        var open = Path.Combine(root, "open");
+        var intoLocked = Path.Combine(open, "into-locked");
+        var intoOpen = Path.Combine(locked, "into-open");
+        try
+        {
+            Directory.CreateDirectory(locked);
+            Assert.Equal(0, Icacls(locked, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", $"*{CurrentUserSid}:(OI)(CI)F"));
+            Directory.CreateDirectory(open);
+            Assert.Equal(0, Icacls(open, "/grant", "*S-1-5-11:(OI)(CI)M"));
+            File.WriteAllText(Path.Combine(locked, "password-key"), secret);
+            File.WriteAllText(Path.Combine(open, "password-key"), secret);
+            Assert.Equal(0, Icacls(Path.Combine(open, "password-key"), "/inheritance:r", "/grant:r", "*S-1-5-18:F", "*S-1-5-32-544:F", $"*{CurrentUserSid}:F"));
+            MakeJunctionOrSkip(intoLocked, locked);
+            MakeJunctionOrSkip(intoOpen, open);
+
+            var direct = DarlingPasswordKeySource.LoadFromSetting("file:" + Path.Combine(locked, "password-key"), null, NullLogger.Instance);
+            Assert.Null(direct.Refusal);
+            Assert.NotNull(direct.Pkcs8);
+            Assert.Equal(keyId, KeyIdOf(direct.Pkcs8));
+            CryptographicOperations.ZeroMemory(direct.Pkcs8);
+
+            var throughAnOpenJunction = Path.Combine(intoLocked, "password-key");
+            var asWritten = DarlingPasswordKeySource.LoadFromSetting("file:" + throughAnOpenJunction, null, NullLogger.Instance);
+            AssertRefused(asWritten, "file:" + throughAnOpenJunction, secret, $"because its folder {intoLocked} is not trusted");
+
+            var intoAnOpenFolder = Path.Combine(intoOpen, "password-key");
+            var real = DarlingPasswordKeySource.LoadFromSetting("file:" + intoAnOpenFolder, null, NullLogger.Instance);
+            AssertRefused(real, "file:" + intoAnOpenFolder, secret, $"{Path.DirectorySeparatorChar}open is not trusted");
+            Assert.DoesNotContain("into-open is not trusted", real.Refusal, StringComparison.Ordinal);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(pkcs8);
+            /* The junctions go first, themselves and never what they lead to, so nothing below walks through them. */
+            foreach (var junction in new[] { intoLocked, intoOpen })
+            {
+                if (Directory.Exists(junction))
+                {
+                    Directory.Delete(junction, recursive: false);
+                }
+            }
+
+            RemoveTree(root);
+        }
+    }
+
     [Fact]
     public void DescribeForValidation_PrintsEachWarningAsItsOwnLine_BeforeTheFingerprint()
     {
@@ -378,6 +485,81 @@ public sealed class DarlingPasswordKeyFileChecksTests
         var security = info.GetAccessControl();
         security.AddAccessRule(new FileSystemAccessRule(s_builtinUsers, rights, AccessControlType.Allow));
         info.SetAccessControl(security);
+    }
+
+    private static string CurrentUserSid => WindowsIdentity.GetCurrent().User!.Value;
+
+    private static string AccountName(SecurityIdentifier sid) => sid.Translate(typeof(NTAccount)).Value;
+
+    /// <summary>A new temporary folder that hands what is made in it the grant a drive root such as C:\ gives:
+    /// Authenticated Users may modify every folder and file below it (an inherit-only entry).</summary>
+    private static string UnderADriveRootsGrant()
+    {
+        var root = Directory.CreateTempSubdirectory("password-key-checks-");
+        var security = root.GetAccessControl();
+        security.AddAccessRule(new FileSystemAccessRule(
+            s_authenticatedUsers, FileSystemRights.Modify, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+            PropagationFlags.InheritOnly, AccessControlType.Allow));
+        root.SetAccessControl(security);
+        return root.FullName;
+    }
+
+    /// <summary>A <c>keys</c> folder under <paramref name="root"/> holding a key file locked down by the file step alone:
+    /// no inherited access, and read for SYSTEM, Administrators and the test's account, the service's here. The folder
+    /// keeps what it inherits.</summary>
+    private static (string Folder, string Path) AKeyLockedDownByTheFileStepAlone(string root, string secret)
+    {
+        var keys = Directory.CreateDirectory(Path.Combine(root, "keys")).FullName;
+        var path = Path.Combine(keys, "password-key");
+        File.WriteAllText(path, secret);
+        Assert.Equal(0, Icacls(path, "/inheritance:r", "/grant:r", "*S-1-5-18:R", "*S-1-5-32-544:R", $"*{CurrentUserSid}:R"));
+        Assert.False(DarlingFileSecurity.IsWritableByOrdinaryUsers(path));
+        Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(path));
+        return (keys, path);
+    }
+
+    private static int Icacls(params string[] arguments)
+    {
+        var startInfo = new ProcessStartInfo("icacls.exe") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        foreach (var argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        using var process = Process.Start(startInfo)!;
+        _ = process.StandardOutput.ReadToEnd();
+        _ = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        return process.ExitCode;
+    }
+
+    private static void MakeJunctionOrSkip(string junction, string target)
+    {
+        using var mklink = Process.Start(new ProcessStartInfo("cmd.exe", ["/c", "mklink", "/J", junction, target])
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        })!;
+        _ = mklink.StandardOutput.ReadToEnd();
+        _ = mklink.StandardError.ReadToEnd();
+        mklink.WaitForExit();
+        Assert.SkipUnless(mklink.ExitCode == 0 && Directory.Exists(junction), "A junction could not be made here.");
+    }
+
+    /// <summary>Removes a tree whose folders and files a test locked down. The test's account owns them, or holds the
+    /// Administrators group, so it can always grant itself full control first. The grant's own result is not judged: a
+    /// failure there shows as the delete's.</summary>
+    private static void RemoveTree(string root)
+    {
+        if (!Directory.Exists(root))
+        {
+            return;
+        }
+
+        _ = Icacls(root, "/grant", $"*{CurrentUserSid}:(OI)(CI)F", "/T", "/C", "/Q");
+        Directory.Delete(root, recursive: true);
     }
 
     private static (byte[] Pkcs8, string KeyId) NewKey()

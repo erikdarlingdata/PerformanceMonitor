@@ -214,7 +214,8 @@ public static class DarlingPasswordKeySource
     /// is <see cref="SettingName"/>: the literal would be the key.</para>
     ///
     /// <para>A <c>file:</c> key is read through <see cref="DarlingPasswordKeyFileReader"/>: one that is not a regular
-    /// file, is larger than the key file's limit or that others could write is refused, and each check that only warns
+    /// file, is larger than the key file's limit or that others could write is refused (on Windows, so is one in a folder
+    /// accounts beyond SYSTEM, Administrators and the service account can change), and each check that only warns
     /// (another owner, a second name, read access for others, an open directory) is logged at Warning, naming the path
     /// and the check.</para>
     /// </summary>
