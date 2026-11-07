@@ -8,7 +8,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -49,6 +51,7 @@ public sealed record SchemaWriteCounts(int VersionsWritten, int Dropped);
 public static class SchemaVersionStore
 {
     private const string ModuleEnd = "module_end";
+    private const int MaxParametersPerInsert = 30_000;
 
     public static async Task<IReadOnlyDictionary<int, StoredSchemaObject>> LoadCurrentAsync(
         NpgsqlConnection c, SchemaHistoryKey key, string databaseName, CancellationToken ct)
@@ -60,12 +63,23 @@ public static class SchemaVersionStore
         NpgsqlConnection c, NpgsqlTransaction? tx, SchemaHistoryKey key, string databaseName, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(c);
-        await using var cmd = new NpgsqlCommand(@"
+        /* The key as SchemaHistoryReader names it (never IS NOT DISTINCT FROM, which no index serves): this runs inside the history lock. */
+        var keyPredicate = key.AgGroupId is not null
+            ? "server_id IS NULL AND ag_group_id = $1"
+            : "server_id = $1 AND ag_group_id IS NULL";
+        await using var cmd = new NpgsqlCommand($@"
 SELECT version_id, object_id, schema_name, object_name, definition_hash
 FROM collect.schema_objects
-WHERE server_id IS NOT DISTINCT FROM $1 AND ag_group_id IS NOT DISTINCT FROM $2 AND database_name = $3 AND valid_to IS NULL", c, tx);
-        Param(cmd, NpgsqlDbType.Integer, key.ServerId);
-        Param(cmd, NpgsqlDbType.Uuid, key.AgGroupId);
+WHERE {keyPredicate} AND database_name = $2 AND valid_to IS NULL", c, tx);
+        if (key.AgGroupId is { } group)
+        {
+            Param(cmd, NpgsqlDbType.Uuid, group);
+        }
+        else
+        {
+            Param(cmd, NpgsqlDbType.Integer, key.ServerId);
+        }
+
         Param(cmd, NpgsqlDbType.Text, databaseName);
 
         var result = new Dictionary<int, StoredSchemaObject>();
@@ -202,12 +216,12 @@ WHERE server_id IS NOT DISTINCT FROM $1 AND ag_group_id IS NOT DISTINCT FROM $2 
 
     private static SchemaEvent? RenameEvent(SchemaDatabaseWrite w)
     {
-        return Newest(w.Attribution.Where(e => string.Equals(e.EventName, ModuleEnd, StringComparison.Ordinal) && InDatabase(e, w)));
+        return Newest(w.Attribution.Where(e => string.Equals(e.EventName, ModuleEnd, StringComparison.Ordinal) && !SchemaWorkPlanner.IsRefresh(e) && InDatabase(e, w)));
     }
 
     private static bool InDatabase(SchemaEvent e, SchemaDatabaseWrite w)
     {
-        return string.IsNullOrEmpty(e.DatabaseName) || string.Equals(e.DatabaseName, w.DatabaseName, StringComparison.OrdinalIgnoreCase);
+        return string.IsNullOrEmpty(e.DatabaseName) || string.Equals(e.DatabaseName, w.DatabaseName, StringComparison.Ordinal);
     }
 
     private static SchemaEvent? Newest(IEnumerable<SchemaEvent> events)
@@ -276,10 +290,10 @@ RETURNING version_id", c, tx))
             versionId = (long)(await cmd.ExecuteScalarAsync(ct))!;
         }
 
-        await InsertColumnsAsync(c, versionId, d, ct);
-        await InsertIndexesAsync(c, versionId, d, ct);
-        await InsertConstraintsAsync(c, versionId, d, ct);
-        await InsertTriggersAsync(c, versionId, d, ct);
+        await InsertColumnsAsync(c, tx, versionId, d, ct);
+        await InsertIndexesAsync(c, tx, versionId, d, ct);
+        await InsertConstraintsAsync(c, tx, versionId, d, ct);
+        await InsertTriggersAsync(c, tx, versionId, d, ct);
     }
 
     /* A dropped version repeats the last definition's object properties and hash, has no children, and is open and closed at the
@@ -308,126 +322,125 @@ FROM collect.schema_objects WHERE version_id = $1", c, tx);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task InsertColumnsAsync(NpgsqlConnection c, long versionId, SchemaObjectDefinition d, CancellationToken ct)
+    private static Task InsertColumnsAsync(NpgsqlConnection c, NpgsqlTransaction tx, long versionId, SchemaObjectDefinition d, CancellationToken ct) =>
+        InsertChildRowsAsync(
+            c, tx,
+            "schema_columns (version_id, is_current, ordinal, name, type_name, max_length, precision, scale, is_nullable, identity_seed, "
+            + "identity_increment, computed_definition, is_persisted, default_name, default_definition, collation_name, is_sparse, is_rowguidcol)",
+            d.Columns.Select(k => new (NpgsqlDbType, object?)[]
+            {
+                (NpgsqlDbType.Bigint, versionId),
+                (NpgsqlDbType.Boolean, true),
+                (NpgsqlDbType.Integer, k.Ordinal),
+                (NpgsqlDbType.Text, k.Name),
+                (NpgsqlDbType.Text, k.TypeName),
+                (NpgsqlDbType.Integer, k.MaxLength),
+                (NpgsqlDbType.Integer, k.Precision),
+                (NpgsqlDbType.Integer, k.Scale),
+                (NpgsqlDbType.Boolean, k.IsNullable),
+                (NpgsqlDbType.Numeric, k.IdentitySeed),
+                (NpgsqlDbType.Numeric, k.IdentityIncrement),
+                (NpgsqlDbType.Text, k.ComputedDefinition),
+                (NpgsqlDbType.Boolean, k.IsPersisted),
+                (NpgsqlDbType.Text, k.DefaultName),
+                (NpgsqlDbType.Text, k.DefaultDefinition),
+                (NpgsqlDbType.Text, k.CollationName),
+                (NpgsqlDbType.Boolean, k.IsSparse),
+                (NpgsqlDbType.Boolean, k.IsRowGuidCol),
+            }).ToList(),
+            ct);
+
+    private static Task InsertIndexesAsync(NpgsqlConnection c, NpgsqlTransaction tx, long versionId, SchemaObjectDefinition d, CancellationToken ct) =>
+        InsertChildRowsAsync(
+            c, tx,
+            "schema_indexes (version_id, is_current, index_id, name, type_desc, is_unique, is_primary_key, is_unique_constraint, "
+            + "key_columns, included_columns, filter_definition, data_compression, is_disabled)",
+            d.Indexes.Select(i => new (NpgsqlDbType, object?)[]
+            {
+                (NpgsqlDbType.Bigint, versionId),
+                (NpgsqlDbType.Boolean, true),
+                (NpgsqlDbType.Integer, i.IndexId),
+                (NpgsqlDbType.Text, i.Name),
+                (NpgsqlDbType.Text, i.TypeDesc),
+                (NpgsqlDbType.Boolean, i.IsUnique),
+                (NpgsqlDbType.Boolean, i.IsPrimaryKey),
+                (NpgsqlDbType.Boolean, i.IsUniqueConstraint),
+                (NpgsqlDbType.Text, SchemaCatalogReader.JoinList(i.KeyColumns)),
+                (NpgsqlDbType.Text, SchemaCatalogReader.JoinList(i.IncludedColumns)),
+                (NpgsqlDbType.Text, i.FilterDefinition),
+                (NpgsqlDbType.Text, i.DataCompression),
+                (NpgsqlDbType.Boolean, i.IsDisabled),
+            }).ToList(),
+            ct);
+
+    private static Task InsertConstraintsAsync(NpgsqlConnection c, NpgsqlTransaction tx, long versionId, SchemaObjectDefinition d, CancellationToken ct) =>
+        InsertChildRowsAsync(
+            c, tx,
+            "schema_constraints (version_id, is_current, kind, name, definition, fk_columns, referenced_schema, referenced_table, "
+            + "referenced_columns, delete_action, update_action, is_disabled, is_not_trusted, is_system_named)",
+            d.Constraints.Select(k => new (NpgsqlDbType, object?)[]
+            {
+                (NpgsqlDbType.Bigint, versionId),
+                (NpgsqlDbType.Boolean, true),
+                (NpgsqlDbType.Char, k.Kind.ToString()),
+                (NpgsqlDbType.Text, k.Name),
+                (NpgsqlDbType.Text, k.Definition),
+                (NpgsqlDbType.Text, SchemaCatalogReader.JoinList(k.FkColumns)),
+                (NpgsqlDbType.Text, k.ReferencedSchema),
+                (NpgsqlDbType.Text, k.ReferencedTable),
+                (NpgsqlDbType.Text, SchemaCatalogReader.JoinList(k.ReferencedColumns)),
+                (NpgsqlDbType.Text, k.DeleteAction),
+                (NpgsqlDbType.Text, k.UpdateAction),
+                (NpgsqlDbType.Boolean, k.IsDisabled),
+                (NpgsqlDbType.Boolean, k.IsNotTrusted),
+                (NpgsqlDbType.Boolean, k.IsSystemNamed),
+            }).ToList(),
+            ct);
+
+    private static Task InsertTriggersAsync(NpgsqlConnection c, NpgsqlTransaction tx, long versionId, SchemaObjectDefinition d, CancellationToken ct) =>
+        InsertChildRowsAsync(
+            c, tx,
+            "schema_triggers (version_id, is_current, name, is_instead_of, events)",
+            d.Triggers.Select(g => new (NpgsqlDbType, object?)[]
+            {
+                (NpgsqlDbType.Bigint, versionId),
+                (NpgsqlDbType.Boolean, true),
+                (NpgsqlDbType.Text, g.Name),
+                (NpgsqlDbType.Boolean, g.IsInsteadOf),
+                (NpgsqlDbType.Text, g.Events),
+            }).ToList(),
+            ct);
+
+    /* The child rows of one version, as multi-row INSERTs of at most MaxParametersPerInsert parameters each (PostgreSQL takes 65,535):
+       a table's columns, indexes, constraints and triggers number in the hundreds at most, so this is one statement per child table. */
+    private static async Task InsertChildRowsAsync(
+        NpgsqlConnection c, NpgsqlTransaction tx, string tableAndColumns, List<(NpgsqlDbType Type, object? Value)[]> rows, CancellationToken ct)
     {
-        if (d.Columns.Count == 0)
+        if (rows.Count == 0)
         {
             return;
         }
 
-        await using var import = await c.BeginBinaryImportAsync(
-            "COPY collect.schema_columns (version_id, is_current, ordinal, name, type_name, max_length, precision, scale, is_nullable, "
-            + "identity_seed, identity_increment, computed_definition, is_persisted, default_name, default_definition, collation_name, "
-            + "is_sparse, is_rowguidcol) FROM STDIN (FORMAT BINARY)", ct);
-        foreach (var k in d.Columns)
+        var perStatement = Math.Max(1, MaxParametersPerInsert / rows[0].Length);
+        for (var start = 0; start < rows.Count; start += perStatement)
         {
-            await import.StartRowAsync(ct);
-            await import.WriteAsync(versionId, NpgsqlDbType.Bigint, ct);
-            await import.WriteAsync(true, NpgsqlDbType.Boolean, ct);
-            await import.WriteAsync(k.Ordinal, NpgsqlDbType.Integer, ct);
-            await import.WriteAsync(k.Name, NpgsqlDbType.Text, ct);
-            await import.WriteAsync(k.TypeName, NpgsqlDbType.Text, ct);
-            await WriteValueAsync(import, k.MaxLength, NpgsqlDbType.Integer, ct);
-            await WriteValueAsync(import, k.Precision, NpgsqlDbType.Integer, ct);
-            await WriteValueAsync(import, k.Scale, NpgsqlDbType.Integer, ct);
-            await import.WriteAsync(k.IsNullable, NpgsqlDbType.Boolean, ct);
-            await WriteValueAsync(import, k.IdentitySeed, NpgsqlDbType.Numeric, ct);
-            await WriteValueAsync(import, k.IdentityIncrement, NpgsqlDbType.Numeric, ct);
-            await WriteTextAsync(import, k.ComputedDefinition, ct);
-            await WriteValueAsync(import, k.IsPersisted, NpgsqlDbType.Boolean, ct);
-            await WriteTextAsync(import, k.DefaultName, ct);
-            await WriteTextAsync(import, k.DefaultDefinition, ct);
-            await WriteTextAsync(import, k.CollationName, ct);
-            await WriteValueAsync(import, k.IsSparse, NpgsqlDbType.Boolean, ct);
-            await WriteValueAsync(import, k.IsRowGuidCol, NpgsqlDbType.Boolean, ct);
+            await using var cmd = new NpgsqlCommand { Connection = c, Transaction = tx };
+            var text = new StringBuilder("INSERT INTO collect.").Append(tableAndColumns).Append(" VALUES ");
+            for (var r = start; r < Math.Min(rows.Count, start + perStatement); r++)
+            {
+                text.Append(r == start ? "(" : ", (");
+                for (var v = 0; v < rows[r].Length; v++)
+                {
+                    Param(cmd, rows[r][v].Type, rows[r][v].Value);
+                    text.Append(v == 0 ? "$" : ", $").Append(cmd.Parameters.Count.ToString(CultureInfo.InvariantCulture));
+                }
+
+                text.Append(')');
+            }
+
+            cmd.CommandText = text.ToString();
+            await cmd.ExecuteNonQueryAsync(ct);
         }
-
-        await import.CompleteAsync(ct);
-    }
-
-    private static async Task InsertIndexesAsync(NpgsqlConnection c, long versionId, SchemaObjectDefinition d, CancellationToken ct)
-    {
-        if (d.Indexes.Count == 0)
-        {
-            return;
-        }
-
-        await using var import = await c.BeginBinaryImportAsync(
-            "COPY collect.schema_indexes (version_id, is_current, index_id, name, type_desc, is_unique, is_primary_key, is_unique_constraint, "
-            + "key_columns, included_columns, filter_definition, data_compression, is_disabled) FROM STDIN (FORMAT BINARY)", ct);
-        foreach (var i in d.Indexes)
-        {
-            await import.StartRowAsync(ct);
-            await import.WriteAsync(versionId, NpgsqlDbType.Bigint, ct);
-            await import.WriteAsync(true, NpgsqlDbType.Boolean, ct);
-            await import.WriteAsync(i.IndexId, NpgsqlDbType.Integer, ct);
-            await WriteTextAsync(import, i.Name, ct);
-            await import.WriteAsync(i.TypeDesc, NpgsqlDbType.Text, ct);
-            await import.WriteAsync(i.IsUnique, NpgsqlDbType.Boolean, ct);
-            await import.WriteAsync(i.IsPrimaryKey, NpgsqlDbType.Boolean, ct);
-            await import.WriteAsync(i.IsUniqueConstraint, NpgsqlDbType.Boolean, ct);
-            await WriteTextAsync(import, SchemaCatalogReader.JoinList(i.KeyColumns), ct);
-            await WriteTextAsync(import, SchemaCatalogReader.JoinList(i.IncludedColumns), ct);
-            await WriteTextAsync(import, i.FilterDefinition, ct);
-            await WriteTextAsync(import, i.DataCompression, ct);
-            await import.WriteAsync(i.IsDisabled, NpgsqlDbType.Boolean, ct);
-        }
-
-        await import.CompleteAsync(ct);
-    }
-
-    private static async Task InsertConstraintsAsync(NpgsqlConnection c, long versionId, SchemaObjectDefinition d, CancellationToken ct)
-    {
-        if (d.Constraints.Count == 0)
-        {
-            return;
-        }
-
-        await using var import = await c.BeginBinaryImportAsync(
-            "COPY collect.schema_constraints (version_id, is_current, kind, name, definition, fk_columns, referenced_schema, referenced_table, "
-            + "referenced_columns, delete_action, update_action, is_disabled, is_not_trusted, is_system_named) FROM STDIN (FORMAT BINARY)", ct);
-        foreach (var k in d.Constraints)
-        {
-            await import.StartRowAsync(ct);
-            await import.WriteAsync(versionId, NpgsqlDbType.Bigint, ct);
-            await import.WriteAsync(true, NpgsqlDbType.Boolean, ct);
-            await import.WriteAsync(k.Kind.ToString(), NpgsqlDbType.Char, ct);
-            await import.WriteAsync(k.Name, NpgsqlDbType.Text, ct);
-            await WriteTextAsync(import, k.Definition, ct);
-            await WriteTextAsync(import, SchemaCatalogReader.JoinList(k.FkColumns), ct);
-            await WriteTextAsync(import, k.ReferencedSchema, ct);
-            await WriteTextAsync(import, k.ReferencedTable, ct);
-            await WriteTextAsync(import, SchemaCatalogReader.JoinList(k.ReferencedColumns), ct);
-            await WriteTextAsync(import, k.DeleteAction, ct);
-            await WriteTextAsync(import, k.UpdateAction, ct);
-            await import.WriteAsync(k.IsDisabled, NpgsqlDbType.Boolean, ct);
-            await import.WriteAsync(k.IsNotTrusted, NpgsqlDbType.Boolean, ct);
-            await import.WriteAsync(k.IsSystemNamed, NpgsqlDbType.Boolean, ct);
-        }
-
-        await import.CompleteAsync(ct);
-    }
-
-    private static async Task InsertTriggersAsync(NpgsqlConnection c, long versionId, SchemaObjectDefinition d, CancellationToken ct)
-    {
-        if (d.Triggers.Count == 0)
-        {
-            return;
-        }
-
-        await using var import = await c.BeginBinaryImportAsync(
-            "COPY collect.schema_triggers (version_id, is_current, name, is_instead_of, events) FROM STDIN (FORMAT BINARY)", ct);
-        foreach (var g in d.Triggers)
-        {
-            await import.StartRowAsync(ct);
-            await import.WriteAsync(versionId, NpgsqlDbType.Bigint, ct);
-            await import.WriteAsync(true, NpgsqlDbType.Boolean, ct);
-            await import.WriteAsync(g.Name, NpgsqlDbType.Text, ct);
-            await import.WriteAsync(g.IsInsteadOf, NpgsqlDbType.Boolean, ct);
-            await import.WriteAsync(g.Events, NpgsqlDbType.Text, ct);
-        }
-
-        await import.CompleteAsync(ct);
     }
 
     internal static async Task UpsertStateAsync(NpgsqlConnection c, NpgsqlTransaction? tx, SchemaCaptureStateRow s, CancellationToken ct)
@@ -436,11 +449,12 @@ FROM collect.schema_objects WHERE version_id = $1", c, tx);
 INSERT INTO collect.schema_capture_state (
     server_id, database_name, session_create_time, last_event_sequence, last_event_time, total_events_processed, recovery_fork_guid,
     history_server_id, history_ag_group_id, was_primary, baseline_at, last_complete_read_at, last_seen_in_scope_at, last_reconcile_at,
-    last_reconcile_reason)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+    last_reconcile_reason, dropped_event_count)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 ON CONFLICT (server_id, database_name) DO UPDATE SET
     session_create_time = EXCLUDED.session_create_time, last_event_sequence = EXCLUDED.last_event_sequence,
     last_event_time = EXCLUDED.last_event_time, total_events_processed = EXCLUDED.total_events_processed,
+    dropped_event_count = EXCLUDED.dropped_event_count,
     recovery_fork_guid = EXCLUDED.recovery_fork_guid, history_server_id = EXCLUDED.history_server_id,
     history_ag_group_id = EXCLUDED.history_ag_group_id, was_primary = EXCLUDED.was_primary, baseline_at = EXCLUDED.baseline_at,
     last_complete_read_at = EXCLUDED.last_complete_read_at, last_seen_in_scope_at = EXCLUDED.last_seen_in_scope_at,
@@ -460,9 +474,9 @@ ON CONFLICT (server_id, database_name) DO UPDATE SET
         Param(cmd, NpgsqlDbType.Timestamp, NaiveOrNull(s.LastSeenInScopeAt));
         Param(cmd, NpgsqlDbType.Timestamp, NaiveOrNull(s.LastReconcileAt));
         Param(cmd, NpgsqlDbType.Text, s.LastReconcileReason);
+        Param(cmd, NpgsqlDbType.Bigint, s.DroppedEventCount);
         await cmd.ExecuteNonQueryAsync(ct);
     }
-
 
     private static DateTime Naive(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
 
@@ -471,28 +485,5 @@ ON CONFLICT (server_id, database_name) DO UPDATE SET
     private static void Param(NpgsqlCommand cmd, NpgsqlDbType type, object? value)
     {
         cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = type, Value = value ?? DBNull.Value });
-    }
-
-    private static async Task WriteTextAsync(NpgsqlBinaryImporter import, string? value, CancellationToken ct)
-    {
-        if (value == null)
-        {
-            await import.WriteNullAsync(ct);
-            return;
-        }
-
-        await import.WriteAsync(value, NpgsqlDbType.Text, ct);
-    }
-
-    private static async Task WriteValueAsync<T>(NpgsqlBinaryImporter import, T? value, NpgsqlDbType type, CancellationToken ct)
-        where T : struct
-    {
-        if (value is not { } v)
-        {
-            await import.WriteNullAsync(ct);
-            return;
-        }
-
-        await import.WriteAsync(v, type, ct);
     }
 }

@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -20,8 +22,14 @@ namespace PerformanceMonitor.Collectors;
 ///
 /// <para><b>What it records.</b> <c>object_created</c>, <c>object_altered</c> and <c>object_deleted</c> at <c>ddl_phase = 1</c>
 /// (the commit phase, so a rolled-back ALTER leaves no event), outside the system databases, and never for a statistics object
-/// (<c>object_type</c> 21587, which an auto-created statistic would otherwise raise on every query). <c>sp_rename</c> raises none of
-/// those events, so <c>module_end</c> of that procedure stands in for it.</para>
+/// (<c>object_type</c> 21587, which an auto-created statistic would otherwise raise on every query). <c>sp_rename</c>,
+/// <c>sp_refreshview</c> and <c>sp_refreshsqlmodule</c> raise none of those events (a refresh changes a view's columns after its base
+/// table changed), so <c>module_end</c> of those procedures stands in for them, and the pass reads that database in full.</para>
+///
+/// <para><b>Why the buffer holds 1,000 events.</b> SQL Server cuts a ring buffer's XML at about 4.19 million characters and keeps the
+/// oldest events (#6441); one event of this session is about 1,830 characters, so about 2,290 events fit. The buffer drops its oldest
+/// event only once it holds <see cref="MaxEventsLimit"/>, so a cap above that line would cut every read after one busy night and hide
+/// every newer event. At 1,000 a burst past the cap loses its oldest events, the pass reconciles once, and the next read is whole.</para>
 /// </summary>
 public static class SchemaChangesXeSession
 {
@@ -29,7 +37,10 @@ public static class SchemaChangesXeSession
     public const string SessionSuffix = "_SchemaChanges";
 
     /// <summary>The ring buffer's event cap. Past it the oldest event is lost, and the pass reconciles by a full read.</summary>
-    public const int MaxEventsLimit = 10000;
+    public const int MaxEventsLimit = 1000;
+
+    /// <summary>The system procedures whose <c>module_end</c> the session records: each changes a definition without an object event.</summary>
+    public static IReadOnlyList<string> ModuleProcedures { get; } = ["sp_rename", "sp_refreshview", "sp_refreshsqlmodule"];
 
     /// <summary>The ring buffer's memory in KB.</summary>
     public const int MaxMemoryKb = 4096;
@@ -87,16 +98,17 @@ public static class SchemaChangesXeSession
     /// readable ring buffer). Database scope (Azure SQL Database): <c>username</c> in place of <c>server_principal_name</c>, which
     /// the service refuses there (#3753), and no partition mode, which it does not accept. The <c>module_end</c> predicate also drops
     /// <c>source_database_id = 32767</c> there: that is the resource database's id, a fact of the on-premises engine that has not been
-    /// checked on Azure SQL Database, and <c>object_name</c> alone still limits the event to <c>sp_rename</c>.
+    /// checked on Azure SQL Database, and <c>object_name</c> alone still limits the event to <see cref="ModuleProcedures"/>.
     /// </summary>
     public static string BuildCreateSql(string name, bool databaseScoped)
     {
         Require(name);
         var principal = databaseScoped ? "sqlserver.username" : "sqlserver.server_principal_name";
         var partitionMode = databaseScoped ? "" : "\n    MEMORY_PARTITION_MODE = NONE,";
+        var procedures = "(" + string.Join("\n            OR ", ModuleProcedures.Select(p => "object_name = N'" + p + "'")) + ")";
         var renameWhere = databaseScoped
-            ? "object_name = N'sp_rename'"
-            : "source_database_id = 32767\n        AND object_name = N'sp_rename'";
+            ? procedures
+            : "source_database_id = 32767\n        AND " + procedures;
         var actions = $@"
         sqlserver.database_name,
         {principal},

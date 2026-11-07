@@ -124,6 +124,7 @@ ALTER SCHEMA Staging TRANSFER dbo.Moved;");
 
             AssertSameSession(state.CreateTimeUtc, batch.SessionCreateTimeUtc);
             Assert.False(batch.XmlTruncated);
+            Assert.Equal(0L, batch.DroppedEventCount);
             Assert.True(batch.TotalEventsProcessed >= events.Count, described);
 
             var tableId = Convert.ToInt32(await ScalarAsync(ConnectionString(database)!, "SELECT OBJECT_ID(N'dbo.Orders');"));

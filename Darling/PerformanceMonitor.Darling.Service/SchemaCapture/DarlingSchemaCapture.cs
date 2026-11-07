@@ -169,7 +169,7 @@ public static class DarlingSchemaCapture
         private int _started;
         private int _planned;
         private SchemaCaptureStateRow? _serverRow;
-        private Dictionary<string, SchemaCaptureStateRow> _dbStates = new();
+        private Dictionary<string, SchemaCaptureStateRow> _dbStates = new(StringComparer.Ordinal);
         private SchemaCaptureStateRow? _newServerRow;
         private bool _budgetStopped;
 
@@ -204,7 +204,7 @@ public static class DarlingSchemaCapture
             foreach (var plan in plans)
             {
                 _ct.ThrowIfCancellationRequested();
-                var probe = probes.First(p => string.Equals(p.Name, plan.DatabaseName, StringComparison.OrdinalIgnoreCase));
+                var probe = probes.First(p => string.Equals(p.Name, plan.DatabaseName, StringComparison.Ordinal));
                 if (plan.Work == SchemaDatabaseWork.Skip)
                 {
                     NoteSkip(plan, probe);
@@ -285,6 +285,7 @@ public static class DarlingSchemaCapture
                 LastEventSequence = dbRow?.LastEventSequence,
                 LastEventTime = dbRow?.LastEventTime,
                 TotalEventsProcessed = dbRow?.TotalEventsProcessed,
+                DroppedEventCount = dbRow?.DroppedEventCount,
                 LastSeenInScopeAt = _serverRow?.LastSeenInScopeAt,
             };
             var batch = session.Running ? await ReadEventsAsync(connection, dbRow?.LastEventTime, database, token) : null;
@@ -297,6 +298,7 @@ public static class DarlingSchemaCapture
                 LastEventSequence = advanced.LastEventSequence,
                 LastEventTime = advanced.LastEventTime,
                 TotalEventsProcessed = advanced.TotalEventsProcessed,
+                DroppedEventCount = advanced.DroppedEventCount,
             };
 
             if (plan.Work == SchemaDatabaseWork.Skip)
@@ -317,7 +319,8 @@ public static class DarlingSchemaCapture
         {
             var rows = await TimedStore(() => SchemaCaptureStateStore.LoadAsync(Store, _server.ServerId, _ct));
             _serverRow = rows.FirstOrDefault(r => r.DatabaseName.Length == 0);
-            _dbStates = rows.Where(r => r.DatabaseName.Length > 0).ToDictionary(r => r.DatabaseName, StringComparer.OrdinalIgnoreCase);
+            /* Keyed as the store keys them, case-sensitively: a server with a case-sensitive collation can hold SalesDb and salesdb. */
+            _dbStates = rows.Where(r => r.DatabaseName.Length > 0).ToDictionary(r => r.DatabaseName, StringComparer.Ordinal);
         }
 
         private async Task<SchemaEventBatch?> ReadEventsAsync(ISchemaCaptureConnection connection, DateTime? lastEventTime, string? database, CancellationToken? token = null)
@@ -426,7 +429,7 @@ public static class DarlingSchemaCapture
                 HistoryServerId = plan.Key.ServerId,
                 HistoryAgGroupId = plan.Key.AgGroupId,
                 WasPrimary = probe.IsPrimaryReplica,
-                BaselineAt = existing?.BaselineAt ?? (plan.Work == SchemaDatabaseWork.Baseline ? _passTime : null),
+                BaselineAt = plan.Work == SchemaDatabaseWork.Baseline ? _passTime : existing?.BaselineAt,
                 LastCompleteReadAt = complete && fullRead ? _passTime : existing?.LastCompleteReadAt,
                 LastSeenInScopeAt = _passTime,
                 LastReconcileAt = plan.Work == SchemaDatabaseWork.Reconcile ? _passTime : existing?.LastReconcileAt,
@@ -492,13 +495,14 @@ public static class DarlingSchemaCapture
                 return row;
             }
 
-            var same = SchemaWorkPlanner.IsSameSession(row, session);
+            var same = SchemaWorkPlanner.IsSameSession(row, session.CreateTimeUtc, batch);
             return row with
             {
                 SessionCreateTime = session.CreateTimeUtc,
                 LastEventSequence = batch.Events.Count > 0 ? batch.Events.Max(e => e.Sequence) : same ? row.LastEventSequence : null,
                 LastEventTime = batch.Events.Count > 0 ? batch.Events.Max(e => e.TimeUtc) : same ? row.LastEventTime : null,
                 TotalEventsProcessed = batch.TotalEventsProcessed,
+                DroppedEventCount = batch.DroppedEventCount,
             };
         }
 

@@ -30,7 +30,7 @@ public static class SchemaCaptureStateStore
         await using var cmd = new NpgsqlCommand(@"
 SELECT database_name, session_create_time, last_event_sequence, last_event_time, total_events_processed, recovery_fork_guid,
        history_server_id, history_ag_group_id, was_primary, baseline_at, last_complete_read_at, last_seen_in_scope_at,
-       last_reconcile_at, last_reconcile_reason
+       last_reconcile_at, last_reconcile_reason, dropped_event_count
 FROM collect.schema_capture_state
 WHERE server_id = $1", c);
         Param(cmd, NpgsqlDbType.Integer, serverId);
@@ -56,6 +56,7 @@ WHERE server_id = $1", c);
                 LastSeenInScopeAt = Utc(reader, 11),
                 LastReconcileAt = Utc(reader, 12),
                 LastReconcileReason = reader.IsDBNull(13) ? null : reader.GetString(13),
+                DroppedEventCount = reader.IsDBNull(14) ? null : reader.GetInt64(14),
             });
         }
 
@@ -112,7 +113,7 @@ WHERE server_id = $1", c);
         ArgumentNullException.ThrowIfNull(c);
         await using (var clear = new NpgsqlCommand(@"
 UPDATE collect.schema_capture_state
-SET session_create_time = NULL, last_event_sequence = NULL, last_event_time = NULL, total_events_processed = NULL
+SET session_create_time = NULL, last_event_sequence = NULL, last_event_time = NULL, total_events_processed = NULL, dropped_event_count = NULL
 WHERE server_id = $1", c))
         {
             Param(clear, NpgsqlDbType.Integer, serverId);

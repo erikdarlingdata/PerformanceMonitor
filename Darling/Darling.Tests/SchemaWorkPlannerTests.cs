@@ -56,8 +56,8 @@ public class SchemaWorkPlannerTests
 
     private static SchemaEvent Event(
         long sequence, string database, string name = "object_altered", int type = UserTable, int? objectId = 100,
-        int? relatedId = null) =>
-        new(name, sequence, Pass, database, objectId, type, null, "Orders", "login1", "app1", "host1", relatedId);
+        int? relatedId = null, string objectName = "Orders", DateTime? time = null) =>
+        new(name, sequence, time ?? Pass, database, objectId, type, null, objectName, "login1", "app1", "host1", relatedId);
 
     private static SchemaEventBatch Batch(long total, params SchemaEvent[] events) =>
         new(Session1, total, false, events);
@@ -227,7 +227,8 @@ public class SchemaWorkPlannerTests
     [Fact]
     public void Planner_EventsAlreadySeen_AreIgnoredAndRaiseNoGap()
     {
-        var batch = Batch(11, Event(9, "SalesDb", objectId: 90), Event(10, "SalesDb", objectId: 91), Event(11, "SalesDb", objectId: 92));
+        var seen = Pass.AddMinutes(-5);
+        var batch = Batch(11, Event(9, "SalesDb", objectId: 90, time: seen), Event(10, "SalesDb", objectId: 91, time: seen), Event(11, "SalesDb", objectId: 92));
 
         var plan = For(Plan([Probe("SalesDb")], States(Db("SalesDb")), batch), "SalesDb");
 
@@ -239,7 +240,7 @@ public class SchemaWorkPlannerTests
     [Fact]
     public void Planner_OnlyEventsAlreadySeen_Skips()
     {
-        var plan = For(Plan([Probe("SalesDb")], States(Db("SalesDb")), Batch(10, Event(10, "SalesDb"))), "SalesDb");
+        var plan = For(Plan([Probe("SalesDb")], States(Db("SalesDb")), Batch(10, Event(10, "SalesDb", time: Pass.AddMinutes(-5)))), "SalesDb");
 
         Assert.Equal(SchemaDatabaseWork.Skip, plan.Work);
         Assert.Null(plan.Reason);
@@ -261,7 +262,9 @@ public class SchemaWorkPlannerTests
     {
         var primary = Probe("SalesDb") with { AgGroupId = Group, AgName = "Ag1", IsPrimaryReplica = true };
 
-        var plan = For(Plan([primary], States(Db("SalesDb", r => r with { WasPrimary = false })), Batch(10)), "SalesDb");
+        var plan = For(
+            Plan([primary], States(Db("SalesDb", r => r with { WasPrimary = false, HistoryServerId = null, HistoryAgGroupId = Group })), Batch(10)),
+            "SalesDb");
 
         Assert.Equal("became_primary", plan.Reason);
         Assert.Equal(new SchemaHistoryKey(null, Group, "Ag1"), plan.Key);
@@ -272,7 +275,9 @@ public class SchemaWorkPlannerTests
     {
         var primary = Probe("SalesDb") with { AgGroupId = Group, AgName = "Ag1", IsPrimaryReplica = true };
 
-        var plan = For(Plan([primary], States(Db("SalesDb", r => r with { WasPrimary = true })), Batch(10)), "SalesDb");
+        var plan = For(
+            Plan([primary], States(Db("SalesDb", r => r with { WasPrimary = true, HistoryServerId = null, HistoryAgGroupId = Group })), Batch(10)),
+            "SalesDb");
 
         Assert.Equal(SchemaDatabaseWork.Skip, plan.Work);
     }
@@ -365,5 +370,223 @@ public class SchemaWorkPlannerTests
 
         Assert.Equal(SchemaDatabaseWork.Skip, plan.Work);
         Assert.Null(plan.Reason);
+    }
+
+    [Theory]
+    [InlineData("sp_refreshview")]
+    [InlineData("sp_refreshsqlmodule")]
+    public void Planner_ViewRefreshEvent_ReconcilesItsDatabase(string procedure)
+    {
+        var refresh = Event(11, "SalesDb", "module_end", type: 0, objectId: -77, objectName: procedure);
+
+        var plans = Plan([Probe("SalesDb"), Probe("OpsDb")], States(Db("SalesDb"), Db("OpsDb")), Batch(11, refresh));
+
+        Assert.Equal(SchemaDatabaseWork.Reconcile, For(plans, "SalesDb").Work);
+        Assert.Equal("module_refreshed", For(plans, "SalesDb").Reason);
+        Assert.Equal(SchemaDatabaseWork.Skip, For(plans, "OpsDb").Work);
+    }
+
+    [Fact]
+    public void Planner_RenameAndRefreshInOneBatch_ReasonIsRenamed()
+    {
+        var batch = Batch(
+            12,
+            Event(11, "SalesDb", "module_end", type: 0, objectId: -77, objectName: "sp_refreshview"),
+            Event(12, "SalesDb", "module_end", type: 0, objectId: -78, objectName: "sp_rename"));
+
+        Assert.Equal("renamed", For(Plan([Probe("SalesDb")], States(Db("SalesDb")), batch), "SalesDb").Reason);
+    }
+
+    [Fact]
+    public void Planner_EarlierCreateTimeWithAReusedSequence_IsARestart()
+    {
+        /* The create time reads earlier (a drifting tick clock) but the session was restarted: its sequence starts again, so an event
+           numbered at or below the stored one is newer than the stored event. Nothing of the new session is dropped as already seen. */
+        var session = new SchemaSessionState(true, Session1.AddMinutes(-3), null, false);
+        var batch = new SchemaEventBatch(Session1.AddMinutes(-3), 12, false, [Event(5, "SalesDb", objectId: 55, time: Pass.AddMinutes(-1))]);
+
+        var plan = For(Plan([Probe("SalesDb")], States(Db("SalesDb")), batch, session: session), "SalesDb");
+
+        Assert.Equal("session_restarted", plan.Reason);
+        Assert.Equal([5L], plan.Attribution.Select(e => e.Sequence).ToArray());
+    }
+
+    [Fact]
+    public void Planner_EarlierCreateTimeWithALowerTotal_IsARestart()
+    {
+        var session = new SchemaSessionState(true, Session1.AddMinutes(-3), null, false);
+        var batch = new SchemaEventBatch(Session1.AddMinutes(-3), 3, false, []);
+
+        var plan = For(Plan([Probe("SalesDb")], States(Db("SalesDb")), batch, session: session), "SalesDb");
+
+        Assert.Equal("session_restarted", plan.Reason);
+    }
+
+    [Fact]
+    public void Planner_SequenceAtOrBelowTheStoredOneWithTheStoredTime_IsTheSameSession()
+    {
+        /* The read starts a second before the stored event, so the stored event itself comes back: it is not a restart. */
+        var batch = Batch(11, Event(10, "SalesDb", time: Pass.AddMinutes(-5)), Event(11, "SalesDb", objectId: 101));
+
+        var plan = For(Plan([Probe("SalesDb")], States(Db("SalesDb")), batch), "SalesDb");
+
+        Assert.Equal(SchemaDatabaseWork.Targeted, plan.Work);
+        Assert.Equal([101], plan.ObjectIds.ToArray());
+    }
+
+    [Fact]
+    public void Planner_NoServerRowButDatabaseRows_ReconcilesWithSessionStarted()
+    {
+        /* A first pass that wrote database rows and then failed before it stored the server row: the session position is unknown. */
+        var plans = SchemaWorkPlanner.Plan(
+            ServerId, null, States(Db("SalesDb"), Db("OpsDb")), Running, Batch(4, Event(4, "SalesDb")), [Probe("SalesDb"), Probe("OpsDb")], SalesAndOps, false);
+
+        Assert.All(plans, p => Assert.Equal("session_started", p.Reason));
+        Assert.All(plans, p => Assert.Equal(SchemaDatabaseWork.Reconcile, p.Work));
+    }
+
+    [Fact]
+    public void Planner_DroppedEventCountRose_ReconcilesWithEventsLost()
+    {
+        var server = Server() with { DroppedEventCount = 0 };
+        var batch = new SchemaEventBatch(Session1, 11, false, [Event(11, "SalesDb")], DroppedEventCount: 2);
+
+        var plans = Plan([Probe("SalesDb"), Probe("OpsDb")], States(Db("SalesDb"), Db("OpsDb")), batch, server: server);
+
+        Assert.All(plans, p => Assert.Equal("events_lost", p.Reason));
+    }
+
+    [Fact]
+    public void Planner_HoleBetweenFreshSequences_ReconcilesWithEventsLost()
+    {
+        /* 11 and 13: the first follows the stored 10 and the total moved by two, so only the step between them shows the lost 12. */
+        var plan = For(Plan([Probe("SalesDb")], States(Db("SalesDb")), Batch(12, Event(11, "SalesDb"), Event(13, "SalesDb"))), "SalesDb");
+
+        Assert.Equal("events_lost", plan.Reason);
+    }
+
+    [Fact]
+    public void Planner_DatabaseJoinedAnAvailabilityGroup_BaselinesUnderTheGroupKey()
+    {
+        var primary = Probe("SalesDb") with { AgGroupId = Group, AgName = "Ag1", IsPrimaryReplica = true };
+
+        var plan = For(Plan([primary], States(Db("SalesDb")), Batch(10)), "SalesDb");
+
+        Assert.Equal(SchemaDatabaseWork.Baseline, plan.Work);
+        Assert.Equal("history_key_changed", plan.Reason);
+        Assert.Equal(new SchemaHistoryKey(null, Group, "Ag1"), plan.Key);
+    }
+
+    [Fact]
+    public void Planner_DatabaseLeftItsAvailabilityGroup_BaselinesUnderTheServerKey()
+    {
+        var state = Db("SalesDb", r => r with { HistoryServerId = null, HistoryAgGroupId = Group, WasPrimary = true });
+
+        var plan = For(Plan([Probe("SalesDb")], States(state), Batch(10)), "SalesDb");
+
+        Assert.Equal(SchemaDatabaseWork.Baseline, plan.Work);
+        Assert.Equal("history_key_changed", plan.Reason);
+        Assert.Equal(new SchemaHistoryKey(ServerId, null, null), plan.Key);
+    }
+
+    /* Precedence: each test below fails if the two rules it names swap places. */
+
+    [Fact]
+    public void Guard_NotWritableOutranksHistoryKeyChanged()
+    {
+        var secondary = Probe("SalesDb") with { AgGroupId = Group, AgName = "Ag1", IsPrimaryReplica = false };
+
+        var plan = For(Plan([secondary], States(Db("SalesDb")), Batch(10)), "SalesDb");
+
+        Assert.Equal(SchemaDatabaseWork.Skip, plan.Work);
+        Assert.Equal("The database is a secondary replica.", plan.Reason);
+    }
+
+    [Fact]
+    public void Guard_HistoryKeyChangedOutranksRunNow()
+    {
+        var primary = Probe("SalesDb") with { AgGroupId = Group, AgName = "Ag1", IsPrimaryReplica = true };
+
+        var plan = For(Plan([primary], States(Db("SalesDb")), Batch(10), runNow: true), "SalesDb");
+
+        Assert.Equal(SchemaDatabaseWork.Baseline, plan.Work);
+        Assert.Equal("history_key_changed", plan.Reason);
+    }
+
+    [Fact]
+    public void Guard_HistoryKeyChangedOutranksTheSessionBeingDown()
+    {
+        var state = Db("SalesDb", r => r with { HistoryServerId = null, HistoryAgGroupId = Group });
+
+        var plan = For(Plan([Probe("SalesDb")], States(state), null, session: new SchemaSessionState(false, null, null, false)), "SalesDb");
+
+        Assert.Equal("history_key_changed", plan.Reason);
+    }
+
+    [Fact]
+    public void Guard_RestoredOutranksTheSessionBeingDown()
+    {
+        var plan = For(
+            Plan([Probe("SalesDb") with { RecoveryForkGuid = Guid.NewGuid() }], States(Db("SalesDb")), null, session: new SchemaSessionState(false, null, null, false)),
+            "SalesDb");
+
+        Assert.Equal(SchemaDatabaseWork.Reconcile, plan.Work);
+        Assert.Equal("restored", plan.Reason);
+    }
+
+    [Fact]
+    public void Guard_ReturnedToScopeOutranksTheSessionBeingDown()
+    {
+        var plan = For(
+            Plan([Probe("SalesDb")], States(Db("SalesDb", r => r with { LastSeenInScopeAt = Pass.AddMinutes(-15) })), null, session: new SchemaSessionState(false, null, null, false)),
+            "SalesDb");
+
+        Assert.Equal(SchemaDatabaseWork.Reconcile, plan.Work);
+        Assert.Equal("returned_to_scope", plan.Reason);
+    }
+
+    [Fact]
+    public void Guard_SessionStartedOutranksReturnedToScope()
+    {
+        var server = Server() with { SessionCreateTime = null, LastEventSequence = null, LastEventTime = null, TotalEventsProcessed = null };
+
+        var plan = For(
+            Plan([Probe("SalesDb")], States(Db("SalesDb", r => r with { LastSeenInScopeAt = Pass.AddMinutes(-15) })), Batch(0), server: server),
+            "SalesDb");
+
+        Assert.Equal("session_started", plan.Reason);
+    }
+
+    [Fact]
+    public void Guard_SessionRestartedOutranksEventsLost()
+    {
+        var session = new SchemaSessionState(true, Session1.AddHours(1), null, false);
+        var batch = new SchemaEventBatch(Session1.AddHours(1), 40, false, [Event(30, "SalesDb")]);
+
+        var plan = For(Plan([Probe("SalesDb")], States(Db("SalesDb")), batch, session: session), "SalesDb");
+
+        Assert.Equal("session_restarted", plan.Reason);
+    }
+
+    [Fact]
+    public void Guard_EventsLostOutranksRestored()
+    {
+        var plan = For(
+            Plan([Probe("SalesDb") with { RecoveryForkGuid = Guid.NewGuid() }], States(Db("SalesDb")), Batch(11, Event(12, "SalesDb"))),
+            "SalesDb");
+
+        Assert.Equal("events_lost", plan.Reason);
+    }
+
+    [Fact]
+    public void Guard_ReturnedToScopeOutranksARenameEvent()
+    {
+        var plan = For(
+            Plan(
+                [Probe("SalesDb")], States(Db("SalesDb", r => r with { LastSeenInScopeAt = Pass.AddMinutes(-15) })),
+                Batch(11, Event(11, "SalesDb", "module_end", type: 0, objectId: -78, objectName: "sp_rename"))),
+            "SalesDb");
+
+        Assert.Equal("returned_to_scope", plan.Reason);
     }
 }

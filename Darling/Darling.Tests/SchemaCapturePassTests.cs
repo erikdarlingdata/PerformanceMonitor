@@ -41,7 +41,7 @@ public sealed class SchemaCapturePassTests
         public SchemaSessionState Session { get; set; } = new(true, s_created, null, false);
         public Dictionary<string, SchemaSessionState> AzureSessions { get; } = new(StringComparer.OrdinalIgnoreCase);
         public List<SchemaDatabaseProbe> Probes { get; } = new();
-        public Dictionary<string, List<SchemaObjectDefinition>> Catalog { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, List<SchemaObjectDefinition>> Catalog { get; } = new(StringComparer.Ordinal);
         public HashSet<string> OverCap { get; } = new(StringComparer.OrdinalIgnoreCase);
         public HashSet<string> NoViewDefinition { get; } = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, Exception> Faults { get; } = new(StringComparer.OrdinalIgnoreCase);
@@ -550,6 +550,9 @@ public sealed class SchemaCapturePassTests
             /* The server's event position moved on, which is why the database needs the reconcile. */
             Assert.Equal("2", await rig.ScalarAsync($"SELECT last_event_sequence FROM collect.schema_capture_state WHERE server_id = {server.ServerId} AND database_name = ''", ct));
 
+            /* The next pass finds the session down (a probe fault while it still runs): the owed full read needs no session, so it runs. */
+            var running = rig.Source.Session;
+            rig.Source.Session = new SchemaSessionState(false, null, "The probe timed out.", false);
             rig.Source.Faults.Clear();
             rig.Source.Reads.Clear();
             await rig.PassAsync(server, ct);
@@ -559,6 +562,89 @@ public sealed class SchemaCapturePassTests
             Assert.Null(read.Ids);
             Assert.Equal("1", await rig.ScalarAsync("SELECT count(*) FROM collect.schema_capture_passes WHERE database_name = 'SalesDb' AND reason = 'returned_to_scope' AND complete", ct));
             Assert.Equal("1", await Versions(rig, "database_name = 'SalesDb' AND change_kind = 'altered'", ct));
+
+            /* The session is seen again, the same one: nothing is owed. */
+            rig.Source.Session = running;
+            rig.Source.Reads.Clear();
+            await rig.PassAsync(server, ct);
+            Assert.Empty(rig.Source.Reads);
+        });
+    }
+
+    [Fact]
+    public async Task Pass_DatabaseJoinsAnAvailabilityGroup_StartsTheGroupHistoryWithABaseline()
+    {
+        await WithRigAsync(async (rig, ct) =>
+        {
+            Seed(rig.Source);
+            var server = rig.Server();
+            await rig.PassAsync(server, ct);
+
+            /* SalesDb joins a group, as its primary. */
+            rig.Source.Probes[0] = Probe(Sales, 5, group: s_group, primary: true);
+            rig.Source.Reads.Clear();
+            await rig.PassAsync(server, ct);
+
+            var read = Assert.Single(rig.Source.Reads);
+            Assert.Null(read.Ids);
+            Assert.Equal("2", await Versions(rig, $"ag_group_id = '{s_group}' AND change_kind = 'baseline' AND valid_to IS NULL", ct));
+            Assert.Equal("0", await Versions(rig, "change_kind = 'created'", ct));
+            Assert.Equal("1", await rig.ScalarAsync("SELECT count(*) FROM collect.schema_capture_passes WHERE database_name = 'SalesDb' AND pass_kind = 'baseline' AND reason = 'history_key_changed'", ct));
+            Assert.Equal(s_group.ToString(), await rig.ScalarAsync($"SELECT history_ag_group_id::text FROM collect.schema_capture_state WHERE server_id = {server.ServerId} AND database_name = 'SalesDb'", ct));
+
+            /* Once: the pass after it has nothing to read. */
+            rig.Source.Reads.Clear();
+            await rig.PassAsync(server, ct);
+            Assert.Empty(rig.Source.Reads);
+        });
+    }
+
+    [Fact]
+    public async Task Pass_DatabaseLeavesItsAvailabilityGroup_StartsTheServerHistoryWithABaseline()
+    {
+        await WithRigAsync(async (rig, ct) =>
+        {
+            rig.Source.Probes.Add(Probe(Sales, 5, group: s_group, primary: true));
+            rig.Source.Catalog[Sales] = [Table(100, "Orders", "Id", "Total"), Table(101, "Customers", "Id")];
+            var server = rig.Server();
+            await rig.PassAsync(server, ct);
+            Assert.Equal("2", await Versions(rig, $"ag_group_id = '{s_group}' AND valid_to IS NULL", ct));
+
+            /* The group is removed and the former primary's copy stays online as a standalone database. */
+            rig.Source.Probes[0] = Probe(Sales, 5);
+            rig.Source.Reads.Clear();
+            await rig.PassAsync(server, ct);
+
+            Assert.Null(Assert.Single(rig.Source.Reads).Ids);
+            Assert.Equal("2", await Versions(rig, $"server_id = {server.ServerId} AND change_kind = 'baseline' AND valid_to IS NULL", ct));
+            Assert.Equal("1", await rig.ScalarAsync("SELECT count(*) FROM collect.schema_capture_passes WHERE database_name = 'SalesDb' AND pass_kind = 'baseline' AND reason = 'history_key_changed'", ct));
+            Assert.Equal(server.ServerId.ToString(System.Globalization.CultureInfo.InvariantCulture), await rig.ScalarAsync($"SELECT history_server_id::text FROM collect.schema_capture_state WHERE server_id = {server.ServerId} AND database_name = 'SalesDb'", ct));
+        });
+    }
+
+    [Fact]
+    public async Task Pass_DatabasesWhoseNamesDifferOnlyInCase_EachKeepTheirOwnState()
+    {
+        await WithRigAsync(async (rig, ct) =>
+        {
+            /* A server with a case-sensitive collation can hold both. */
+            rig.Source.Probes.Add(Probe(Sales, 5));
+            rig.Source.Probes.Add(Probe("salesdb", 6));
+            rig.Source.Catalog[Sales] = [Table(100, "Orders", "Id")];
+            rig.Source.Catalog["salesdb"] = [Table(100, "Orders", "Id", "Total")];
+            var server = rig.Server();
+            await rig.PassAsync(server, ct);
+
+            rig.Source.Catalog["salesdb"] = [Table(100, "Orders", "Id", "Total", "Extra")];
+            rig.Source.AddEvent("object_altered", "salesdb", 100);
+            rig.Source.Reads.Clear();
+            var result = await rig.PassAsync(server, ct);
+
+            Assert.Equal("salesdb", Assert.Single(rig.Source.Reads).Database);
+            Assert.Equal("1", await Versions(rig, "database_name = 'salesdb' AND change_kind = 'altered'", ct));
+            Assert.Equal("0", await Versions(rig, "database_name = 'SalesDb' AND change_kind = 'altered'", ct));
+            Assert.Equal("2", await rig.ScalarAsync($"SELECT count(*) FROM collect.schema_capture_state WHERE server_id = {server.ServerId} AND database_name <> ''", ct));
+            Assert.Null(result.HostNote);
         });
     }
 

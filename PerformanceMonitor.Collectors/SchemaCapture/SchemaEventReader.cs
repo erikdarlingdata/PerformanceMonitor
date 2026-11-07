@@ -27,10 +27,11 @@ public sealed record SchemaEvent(
 /// <summary>
 /// #7643: what one read of the ring buffer returned. <see cref="SessionCreateTimeUtc"/> is null when the session does not run,
 /// <see cref="TotalEventsProcessed"/> is the target's own count of every event it took, and <see cref="XmlTruncated"/> says SQL Server
-/// cut the buffer's XML, keeping the oldest events.
+/// cut the buffer's XML, keeping the oldest events. <see cref="DroppedEventCount"/> is the session's count of events it lost before they
+/// reached the buffer (null when it was not read).
 /// </summary>
 public sealed record SchemaEventBatch(
-    DateTime? SessionCreateTimeUtc, long TotalEventsProcessed, bool XmlTruncated, IReadOnlyList<SchemaEvent> Events);
+    DateTime? SessionCreateTimeUtc, long TotalEventsProcessed, bool XmlTruncated, IReadOnlyList<SchemaEvent> Events, long? DroppedEventCount = null);
 
 /// <summary>#7643: turns the two result sets of <see cref="SchemaEventQuery"/> into a <see cref="SchemaEventBatch"/>.</summary>
 public static class SchemaEventReader
@@ -42,8 +43,10 @@ public static class SchemaEventReader
         DateTime? createTime = null;
         long total = 0;
         var truncated = false;
+        long? dropped = null;
         if (await reader.ReadAsync(ct))
         {
+            dropped = Long(reader, "dropped_event_count");
             var createOrdinal = reader.GetOrdinal("create_time");
             createTime = reader.IsDBNull(createOrdinal)
                 ? null
@@ -73,7 +76,7 @@ public static class SchemaEventReader
             }
         }
 
-        return new SchemaEventBatch(createTime, total, truncated, events);
+        return new SchemaEventBatch(createTime, total, truncated, events, dropped);
     }
 
     private static string? Str(DbDataReader reader, string name)

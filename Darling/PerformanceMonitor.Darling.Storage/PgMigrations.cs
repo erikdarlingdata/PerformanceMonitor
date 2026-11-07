@@ -3431,6 +3431,7 @@ CREATE TABLE IF NOT EXISTS collect.schema_capture_state (
     last_event_sequence bigint,
     last_event_time timestamp,
     total_events_processed bigint,
+    dropped_event_count bigint,
     recovery_fork_guid uuid,
     history_server_id integer,
     history_ag_group_id uuid,
