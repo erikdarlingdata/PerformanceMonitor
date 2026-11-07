@@ -247,4 +247,46 @@ VALUES ($1,$2,$3,$4,$2,12000,60,61,'suspended','AppDb')",
 
             Assert.Equal(12, root.GetProperty("ring_buffer_loss").GetProperty("evicted_events").GetInt64());
         });
+
+    /* M9: the XE session is the server's, so a database filter does not narrow the loss, and the answer says so. */
+    [Fact]
+    public async Task GetBlocking_DatabaseFilterAndLoss_SaysFilterDoesNotNarrowLoss_AgainstDevPostgres() =>
+        await RunAsync("blocking-filter-note", async (c, ds, name, end) =>
+        {
+            await SeedRunAsync(BlockedProcessReportCollector.Instance.Name, end.AddHours(-3), LossNote, c, name);
+            await SeedRunAsync(BlockedProcessReportCollector.Instance.Name, end.AddMinutes(-2), null, c, name);
+
+            var root = Parse(await DarlingMcpBlockingTools.GetBlocking(ds, name, 24, 15, as_of: AsOf(end), database_name: "AppDb"));
+
+            var loss = root.GetProperty("hints").GetProperty("ring_buffer_loss");
+            Assert.Equal(12, loss.GetProperty("evicted_events").GetInt64());
+            Assert.Equal(RingBufferLossAnswer.DatabaseFilterNote, loss.GetProperty("database_filter_note").GetString());
+        });
+
+    [Fact]
+    public async Task GetBlocking_NoDatabaseFilterAndLoss_HasNoFilterNote_AgainstDevPostgres() =>
+        await RunAsync("blocking-no-filter-note", async (c, ds, name, end) =>
+        {
+            await SeedRunAsync(BlockedProcessReportCollector.Instance.Name, end.AddHours(-3), LossNote, c, name);
+            await SeedRunAsync(BlockedProcessReportCollector.Instance.Name, end.AddMinutes(-2), null, c, name);
+
+            var root = Parse(await DarlingMcpBlockingTools.GetBlocking(ds, name, 24, 15, as_of: AsOf(end)));
+
+            Assert.False(root.GetProperty("hints").GetProperty("ring_buffer_loss").TryGetProperty("database_filter_note", out _));
+        });
+
+    [Fact]
+    public async Task GetBlockingTrend_DatabaseFilterAndLoss_SaysFilterDoesNotNarrowLoss_AgainstDevPostgres() =>
+        await RunAsync("trend-filter-note", async (c, ds, name, end) =>
+        {
+            await DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken,
+                @"INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocked_spid, blocking_status, database_name)
+VALUES ($1,$2,$3,$4,$2,12000,60,61,'suspended','AppDb')",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(end.AddHours(-2)), ServerIdHelper.GetDeterministicHashCode(name), name);
+            await SeedRunAsync(BlockedProcessReportCollector.Instance.Name, end.AddHours(-1), LossNote, c, name);
+
+            var root = Parse(await DarlingMcpBlockingTools.GetBlockingTrend(ds, name, 24, AsOf(end), DatabaseFilter.One("AppDb")));
+
+            Assert.Equal(RingBufferLossAnswer.DatabaseFilterNote, root.GetProperty("ring_buffer_loss").GetProperty("database_filter_note").GetString());
+        });
 }

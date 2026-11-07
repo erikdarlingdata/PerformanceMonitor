@@ -204,15 +204,32 @@ public static class RingBufferLossNote
             return count == 0 ? null : new LossWindow(evicted, dropped, unknownRuns, first, last, newest!);
         }
 
-        public IReadOnlyDictionary<string, object?> ToPayload() => new Dictionary<string, object?>
+        /// <summary>
+        /// The payload of <c>ring_buffer_loss</c>. A window whose lossy runs were all restarts has nothing countable, so both counts are
+        /// null there, never 0: an unknowable value is not a zero (REVIEW-TRAPS:20/36). <paramref name="databaseFiltered"/> adds the note
+        /// that a database filter does not narrow the loss.
+        /// </summary>
+        public IReadOnlyDictionary<string, object?> ToPayload(bool databaseFiltered = false)
         {
-            ["evicted_events"] = Evicted,
-            ["dropped_events"] = Dropped,
-            ["unknown_spans"] = UnknownRuns,
-            ["first_loss_utc"] = Iso(FirstLossUtc),
-            ["last_loss_utc"] = Iso(LastLossUtc),
-            ["note"] = Sentence(),
-        };
+            /* A run is lossy only on an evicted, a dropped or an unknown count (TryParse), and a restart carries only the last, so zero in
+               both sums means no run of the window could be counted. */
+            var countable = Evicted > 0 || Dropped > 0;
+            var payload = new Dictionary<string, object?>
+            {
+                ["evicted_events"] = countable ? Evicted : null,
+                ["dropped_events"] = countable ? Dropped : null,
+                ["unknown_spans"] = UnknownRuns,
+                ["first_loss_utc"] = Iso(FirstLossUtc),
+                ["last_loss_utc"] = Iso(LastLossUtc),
+                ["note"] = Sentence(),
+            };
+            if (databaseFiltered)
+            {
+                payload["database_filter_note"] = RingBufferLossAnswer.DatabaseFilterNote;
+            }
+
+            return payload;
+        }
 
         /* The same "o" round-trip text the neighbouring timestamp keys use, with the Z of an instant the store holds in UTC. */
         private static string Iso(DateTime utc) => DateTime.SpecifyKind(utc, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture);
@@ -241,8 +258,13 @@ public static class RingBufferLossNote
                 parts.Add(string.Format(inv, "{0:N0} span(s) after a session restart could not be counted", UnknownRuns));
             }
 
-            var text = string.Join("; ", parts)
-                + string.Format(inv, " between {0:yyyy-MM-dd HH:mm} and {1:yyyy-MM-dd HH:mm} UTC", FirstLossUtc, LastLossUtc);
+            /* The times are the collector runs that FOUND the loss; each loss happened in the window before its run. */
+            var first = FirstLossUtc.ToString("yyyy-MM-dd HH:mm", inv);
+            var last = LastLossUtc.ToString("yyyy-MM-dd HH:mm", inv);
+            var found = first == last
+                ? string.Format(inv, " found by the run at {0} UTC", first)
+                : string.Format(inv, " found by the runs between {0} and {1} UTC", first, last);
+            var text = string.Join("; ", parts) + found;
             return Describe(NewestNote) is { } latest ? text + ". Latest: " + latest : text;
         }
     }

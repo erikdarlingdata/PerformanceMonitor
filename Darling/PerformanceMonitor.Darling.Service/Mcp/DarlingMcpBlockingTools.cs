@@ -180,7 +180,7 @@ public sealed class DarlingMcpBlockingTools
                         RingBufferLossAnswer.WithLoss((await DarlingMcpWindowNotice.ReadEventAsync(
                             () => DarlingMcpWindowNotice.Probe(postgres, BlockingPageSources, resolved.ServerName, windowStart, now, cancellationToken),
                             null, windowStart, now, BlockingPageTables, emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints(),
-                            await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, BlockedProcessReportCollector.Instance.Name, windowStart, now, cancellationToken))), cancellationToken, windowStart);
+                            await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, BlockedProcessReportCollector.Instance.Name, windowStart, now, cancellationToken), !databases.IsAll)), cancellationToken, windowStart);
 
             var scanTruncated = filtering && rows.Count > DarlingBlockingReader.FingerprintScanCeiling;
             if (scanTruncated) rows = rows.Take(DarlingBlockingReader.FingerprintScanCeiling).ToList();
@@ -336,7 +336,7 @@ public sealed class DarlingMcpBlockingTools
             /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). #8146: the window's ring-buffer loss is a top-level key when there was any. */
             return RingBufferLossAnswer.Attach(
                 notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json,
-                await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, BlockedProcessReportCollector.Instance.Name, windowStart, now, cancellationToken));
+                await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, BlockedProcessReportCollector.Instance.Name, windowStart, now, cancellationToken), !databases.IsAll);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -945,7 +945,7 @@ public sealed class DarlingMcpBlockingTools
             /* #8146: the blocked-process-report collector's ring-buffer loss over the window, a top-level key when there was any. */
             return RingBufferLossAnswer.Attach(
                 DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(reply, McpHelpers.JsonOptions), notice),
-                await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, BlockedProcessReportCollector.Instance.Name, start, now, cancellationToken));
+                await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, BlockedProcessReportCollector.Instance.Name, start, now, cancellationToken), !databases.IsAll);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1219,7 +1219,7 @@ public sealed class DarlingMcpBlockingTools
         /* #8146: events the ring buffer lost over the window, so an empty trend is not read as an all-clear. */
         if (loss is { } lost)
         {
-            hints[RingBufferLossAnswer.Key] = lost.ToPayload();
+            hints[RingBufferLossAnswer.Key] = lost.ToPayload(!databases.IsAll);
         }
 
         /* #8146: runs that saw nothing say nothing about the events the ring buffer lost before they read it, so a lossy window

@@ -258,7 +258,7 @@ public sealed class McpBlockingTools
                         (await McpQueryTools.EventWindowNoticeAsync(
                             () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
                             null, windowEnd.AddHours(-hours_back), windowEnd, "blocked_process_report", emptyAnswer: true)).AsHints()), windowEnd.AddHours(-hours_back)),
-                    await dataService.GetLossRunsInWindowAsync(resolved.ServerId, BlockedProcessReportCollector.Instance.Name, windowEnd.AddHours(-hours_back), windowEnd));
+                    await dataService.GetLossRunsInWindowAsync(resolved.ServerId, BlockedProcessReportCollector.Instance.Name, windowEnd.AddHours(-hours_back), windowEnd), database != null);
             }
 
             var truncated = rows.Count > limit;
@@ -345,7 +345,7 @@ public sealed class McpBlockingTools
                 order = "event_time_desc",
                 separately_monitored_note = SeparatelyMonitoredScope.ListNote(resolved.ServerId),
                 reports = result
-            }, McpHelpers.JsonOptions), await dataService.GetLossRunsInWindowAsync(resolved.ServerId, BlockedProcessReportCollector.Instance.Name, requestedStart, windowEnd));
+            }, McpHelpers.JsonOptions), await dataService.GetLossRunsInWindowAsync(resolved.ServerId, BlockedProcessReportCollector.Instance.Name, requestedStart, windowEnd), database != null);
         }
         catch (Exception ex)
         {
@@ -546,7 +546,7 @@ public sealed class McpBlockingTools
                     () => dataService.HasAnyBlockingCollectorRunAsync(resolved.ServerId),
                     database, emptyLoss)),
                     dataService, QueryWindowRelation.BlockedProcessReports, resolved.ServerId, anchorEnd.AddHours(-hours_back), anchorEnd, "blocked_process_report"),
-                    emptyLoss);
+                    emptyLoss, database != null);
             }
 
             var result = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count });
@@ -563,7 +563,7 @@ public sealed class McpBlockingTools
                 trend = result
             }, McpHelpers.JsonOptions),
                 dataService, QueryWindowRelation.BlockedProcessReports, resolved.ServerId, anchorEnd.AddHours(-hours_back), anchorEnd, "blocked_process_report"),
-                await dataService.GetLossRunsInWindowAsync(resolved.ServerId, BlockedProcessReportCollector.Instance.Name, anchorEnd.AddHours(-hours_back), anchorEnd));
+                await dataService.GetLossRunsInWindowAsync(resolved.ServerId, BlockedProcessReportCollector.Instance.Name, anchorEnd.AddHours(-hours_back), anchorEnd), database != null);
         }
         catch (Exception ex)
         {

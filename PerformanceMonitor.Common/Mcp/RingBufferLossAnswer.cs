@@ -28,8 +28,18 @@ public static class RingBufferLossAnswer
     public const string LostEventsClaim =
         "the ring buffer lost events before they were collected (see hints.ring_buffer_loss), so the window is incomplete and finding nothing does not mean nothing happened";
 
-    /// <summary>The serialized data answer with <c>ring_buffer_loss</c> appended at the top level, or the answer as is when nothing was lost.</summary>
-    public static string Attach(string json, RingBufferLossNote.LossWindow? loss)
+    /// <summary>
+    /// The note a database-filtered answer adds to its <c>ring_buffer_loss</c> (#8146): the XE session and its ring buffer are the
+    /// server's, so the loss is counted over every database whatever the filter was. One text for Lite and Darling.
+    /// </summary>
+    public const string DatabaseFilterNote =
+        "This answer is filtered by database, but the ring-buffer loss is not: the session's buffer holds events of every database, so these counts are for the whole session and the filter does not narrow them.";
+
+    /// <summary>
+    /// The serialized data answer with <c>ring_buffer_loss</c> appended at the top level, or the answer as is when nothing was lost.
+    /// <paramref name="databaseFiltered"/> adds <see cref="DatabaseFilterNote"/> to the loss.
+    /// </summary>
+    public static string Attach(string json, RingBufferLossNote.LossWindow? loss, bool databaseFiltered = false)
     {
         if (loss is not { } window)
         {
@@ -37,7 +47,7 @@ public static class RingBufferLossAnswer
         }
 
         var node = JsonNode.Parse(json)!.AsObject();
-        node[Key] = JsonSerializer.SerializeToNode(window.ToPayload(), McpHelpers.JsonOptions);
+        node[Key] = JsonSerializer.SerializeToNode(window.ToPayload(databaseFiltered), McpHelpers.JsonOptions);
         return node.ToJsonString(McpHelpers.JsonOptions);
     }
 
@@ -45,7 +55,7 @@ public static class RingBufferLossAnswer
     /// The hints of an empty answer with <c>ring_buffer_loss</c> added. <paramref name="hints"/> is the window notice's hints
     /// (null when its probe failed); the loss stands on its own then. Returns <paramref name="hints"/> untouched when nothing was lost.
     /// </summary>
-    public static object? WithLoss(object? hints, RingBufferLossNote.LossWindow? loss)
+    public static object? WithLoss(object? hints, RingBufferLossNote.LossWindow? loss, bool databaseFiltered = false)
     {
         if (loss is not { } window)
         {
@@ -55,7 +65,7 @@ public static class RingBufferLossAnswer
         var node = hints is null
             ? new JsonObject()
             : JsonSerializer.SerializeToNode(hints, McpHelpers.JsonOptions)!.AsObject();
-        node[Key] = JsonSerializer.SerializeToNode(window.ToPayload(), McpHelpers.JsonOptions);
+        node[Key] = JsonSerializer.SerializeToNode(window.ToPayload(databaseFiltered), McpHelpers.JsonOptions);
         return node;
     }
 
@@ -90,7 +100,7 @@ public static class RingBufferLossAnswer
     /// <c>unavailable</c> one that already carries hints) takes it; <c>not_collected</c>, <c>precondition</c>, an offline answer and any
     /// data answer stay as they were. Lite writes its empty answers as strings, so this is its twin of <see cref="WithLoss"/>.
     /// </summary>
-    public static string AttachToHints(string answer, RingBufferLossNote.LossWindow? loss)
+    public static string AttachToHints(string answer, RingBufferLossNote.LossWindow? loss, bool databaseFiltered = false)
     {
         if (loss is not { } window || JsonNode.Parse(answer) is not JsonObject node)
         {
@@ -106,7 +116,7 @@ public static class RingBufferLossAnswer
 
         hints ??= new JsonObject();
         node["hints"] = hints;
-        hints[Key] = JsonSerializer.SerializeToNode(window.ToPayload(), McpHelpers.JsonOptions);
+        hints[Key] = JsonSerializer.SerializeToNode(window.ToPayload(databaseFiltered), McpHelpers.JsonOptions);
         return node.ToJsonString(McpHelpers.JsonOptions);
     }
 }

@@ -11,6 +11,7 @@ using System.IO;
 using System.Text.Json;
 using System.Threading.Tasks;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -288,5 +289,32 @@ VALUES ($1, $2, $3, $4, $2, 'rpc_completed', 'testdb', 'EXEC p', 5000000)",
         var root = Root(await McpBlockingTools.GetBlockingTrend(Service(), _serverManager, ServerName, 24, AsOf));
 
         Assert.Equal(12, root.GetProperty("ring_buffer_loss").GetProperty("evicted_events").GetInt64());
+    }
+
+    /* M9: the XE session is the server's, so a database filter does not narrow the loss, and the answer says so. */
+    [Fact]
+    public async Task GetBlockedProcessReports_DatabaseFilterAndLoss_SaysFilterDoesNotNarrowLoss()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await SeedRunAsync(BlockedProcessReportCollector.Instance.Name, Anchor.AddHours(-3), LossNote);
+        await SeedRunAsync(BlockedProcessReportCollector.Instance.Name, Anchor.AddMinutes(-2), null);
+
+        var root = Root(await McpBlockingTools.GetBlockedProcessReports(Service(), _serverManager, ServerName, 24, 15, as_of: AsOf, database_name: "AppDb"));
+
+        var loss = root.GetProperty("hints").GetProperty("ring_buffer_loss");
+        Assert.Equal(12, loss.GetProperty("evicted_events").GetInt64());
+        Assert.Equal(RingBufferLossAnswer.DatabaseFilterNote, loss.GetProperty("database_filter_note").GetString());
+    }
+
+    [Fact]
+    public async Task GetBlockedProcessReports_NoDatabaseFilterAndLoss_HasNoFilterNote()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await SeedRunAsync(BlockedProcessReportCollector.Instance.Name, Anchor.AddHours(-3), LossNote);
+        await SeedRunAsync(BlockedProcessReportCollector.Instance.Name, Anchor.AddMinutes(-2), null);
+
+        var root = Root(await McpBlockingTools.GetBlockedProcessReports(Service(), _serverManager, ServerName, 24, 15, as_of: AsOf));
+
+        Assert.False(root.GetProperty("hints").GetProperty("ring_buffer_loss").TryGetProperty("database_filter_note", out _));
     }
 }
