@@ -1433,8 +1433,17 @@ public sealed class McpQueryTools
     /// <summary>The grain of the Query Store series, whose points sit at runtime-interval starts: not bucketed.</summary>
     private static readonly TrendGrain PerInterval = new("per-interval", null, null);
 
-    /// <summary>The grain of get_query_trend's per-collection history of one query: not bucketed.</summary>
-    private static readonly TrendGrain PerCollection = new("per-collection", null, null);
+    /// <summary>
+    /// The grain of get_query_trend's bucketed points (#7907): what each figure of a point is once a point holds the
+    /// collections of one bucket. Its own sentence rather than <see cref="TrendBuckets.AggregateNote"/>, because this
+    /// read's figures are sums and execution-weighted averages, not rates over seconds, and it has no peak fields.
+    /// </summary>
+    private static TrendGrain QueryTrendBucketed(int bucketMinutes, bool requested, int autoPoints) =>
+        new(TrendBuckets.Word(bucketMinutes), bucketMinutes,
+            $"Each point holds the collections in one {TrendBuckets.Adjective(bucketMinutes)} bucket and is stamped at the bucket's start (the first point at the window's start); collection_count says how many. "
+            + "execution_count, cpu_ms, elapsed_ms, logical_reads, logical_writes, physical_reads, rows and spills are summed across those collections, and avg_cpu_ms and avg_elapsed_ms are those sums divided by the summed executions, so a busy collection weighs more than a quiet one. "
+            + "min_dop and max_dop are the extremes across the plans that ran in the bucket, query_plan_hash is null when more than one plan ran in it, and plan_count counts its distinct plans. "
+            + TrendBuckets.Sizing(requested, autoPoints));
 
     /// <summary>
     /// How far past the requested start the first served point may sit before the answer calls itself
@@ -2199,18 +2208,36 @@ public sealed class McpQueryTools
     }
 
     /// <summary>
+    /// One point of get_query_trend (#7907): the bucket it is stamped at, the first collection it holds (the store's
+    /// <c>effective_start</c> when it is the first point), how many collections it holds, and their folded figures.
+    /// </summary>
+    internal sealed record QueryTrendBucket(DateTime BucketStart, DateTime FirstCollectionTime, int CollectionCount, QueryStatsHistoryRow Figures);
+
+    /// <summary>
     /// #7608: folds the history rows to one point per <c>collection_time</c>, the rule Darling's raw tier applies in SQL.
     /// Deltas are summed over every row. <c>MinDop</c>, <c>MaxDop</c>, <c>QueryPlanHash</c> and <c>PlanCount</c> come only
     /// from the rows that ran in the interval (<c>DeltaExecutions &gt; 0</c>), so a stale plan's lifetime DOP does not
     /// ride along. When none ran, the hash and count come from all the rows and the DOP pair is null: the DOP describes
     /// an execution and there was none. <c>QueryPlanHash</c> is the hash when every such row carries the
     /// same one and empty (null in the payload) otherwise. <c>PlanCount</c> is the number of distinct non-empty hashes.
-    /// The points come back oldest first.
+    /// The points come back oldest first. <see cref="BucketPoints"/> applies the same rule at bucket grain.
     /// </summary>
-    internal static List<QueryStatsHistoryRow> OnePointPerCollection(List<QueryStatsHistoryRow> rows)
+    internal static List<QueryStatsHistoryRow> OnePointPerCollection(List<QueryStatsHistoryRow> rows) =>
+        Fold(rows, r => r.CollectionTime).Select(p => p.Figures).ToList();
+
+    /// <summary>
+    /// #7907: folds the history rows to one point per <paramref name="bucketMinutes"/>-wide bucket from the window's
+    /// start, by the <see cref="OnePointPerCollection"/> rule over every row the bucket holds: deltas summed across
+    /// its collections and handles, the DOP pair and plan facts from the rows that ran in it. Each point carries its
+    /// first collection and how many collections it holds.
+    /// </summary>
+    internal static List<QueryTrendBucket> BucketPoints(List<QueryStatsHistoryRow> rows, int bucketMinutes, DateTime windowStart) =>
+        Fold(rows, r => TrendBuckets.BucketStart(r.CollectionTime, bucketMinutes, windowStart));
+
+    private static List<QueryTrendBucket> Fold(List<QueryStatsHistoryRow> rows, Func<QueryStatsHistoryRow, DateTime> pointOf)
     {
-        var points = new List<QueryStatsHistoryRow>();
-        foreach (var group in rows.GroupBy(r => r.CollectionTime))
+        var points = new List<QueryTrendBucket>();
+        foreach (var group in rows.GroupBy(pointOf))
         {
             var members = group.ToList();
             var ran = members.Where(m => m.DeltaExecutions > 0).ToList();
@@ -2218,15 +2245,17 @@ public sealed class McpQueryTools
             if (!anyRan) ran = members;
             var hashes = ran.Select(m => m.QueryPlanHash).Distinct(StringComparer.Ordinal).ToList();
             var planCount = ran.Select(m => m.QueryPlanHash).Where(h => !string.IsNullOrEmpty(h)).Distinct(StringComparer.Ordinal).Count();
+            var firstCollection = members.Min(m => m.CollectionTime);
+            var collectionCount = members.Select(m => m.CollectionTime).Distinct().Count();
             if (members.Count == 1)
             {
                 members[0].PlanCount = planCount;
                 if (!anyRan) { members[0].MinDop = null; members[0].MaxDop = null; }
-                points.Add(members[0]);
+                points.Add(new QueryTrendBucket(group.Key, firstCollection, collectionCount, members[0]));
                 continue;
             }
 
-            points.Add(new QueryStatsHistoryRow
+            points.Add(new QueryTrendBucket(group.Key, firstCollection, collectionCount, new QueryStatsHistoryRow
             {
                 CollectionTime = group.Key,
                 DeltaExecutions = members.Sum(m => m.DeltaExecutions),
@@ -2241,13 +2270,13 @@ public sealed class McpQueryTools
                 MaxDop = anyRan ? ran.Max(m => m.MaxDop) : null,
                 QueryPlanHash = hashes.Count == 1 ? hashes[0] : "",
                 PlanCount = planCount,
-            });
+            }));
         }
 
-        return points.OrderBy(p => p.CollectionTime).ToList();
+        return points.OrderBy(p => p.BucketStart).ToList();
     }
 
-    [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time. A raw point is one collection time, summed across the query's plans and handles. min_dop and max_dop are each plan's cached extremes across the plans that ran at that time (a time where nothing ran leaves both blank), plan_count says how many plans, and query_plan_hash is null when that is more than one or no hash was captured." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time. Points are time buckets (bucket, bucket_minutes, aggregate_note) sized to the window unless bucket_minutes names a width: each point sums the collections it holds across the query's plans and handles, collection_count says how many, and avg_cpu_ms and avg_elapsed_ms are weighted by executions. min_dop and max_dop are each plan's cached extremes across the plans that ran in the bucket (a bucket where nothing ran leaves both blank), plan_count says how many plans, and query_plan_hash is null when that is more than one or no hash was captured." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -2255,7 +2284,8 @@ public sealed class McpQueryTools
         [Description("The database name the query belongs to.")] string database_name,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -2265,10 +2295,20 @@ public sealed class McpQueryTools
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
+            /* #7907: bucketed and capped like the sibling trends. Lite collects query_stats every minute, so a point per
+               collection is about 1,440 points over the default day and about 10,000 over a week. */
+            var budget = TrendBudget.Mcp(TrendBuckets.QueryTrendMaxPoints);
+            var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
+            if (bucketError != null) return bucketError;
+
             /* #7608: one query_hash runs under several sql_handles and plans, and the store keeps a row per handle per
-               collection, so the rows are folded to one point per collection_time. */
-            var rows = OnePointPerCollection(await dataService.GetQueryStatsHistoryAsync(resolved.ServerId, database_name, query_hash, hours_back, asOfUtc: windowEnd));
-            if (rows.Count == 0)
+               collection, so the rows are folded to one point per bucket (one per collection_time at a one-minute width).
+               The window start is in the store's frame (naive UTC) so a clamped first point prints like the others. */
+            var windowStart = DateTime.SpecifyKind(windowEnd.AddHours(-hours_back), DateTimeKind.Unspecified);
+            var points = BucketPoints(
+                await dataService.GetQueryStatsHistoryAsync(resolved.ServerId, database_name, query_hash, hours_back, asOfUtc: windowEnd),
+                bucketMinutes, windowStart);
+            if (points.Count == 0)
             {
                 /* #7005: the empty answer says whether the store holds the window. */
                 return await WithEmptyWindowNoticeAsync(
@@ -2277,29 +2317,33 @@ public sealed class McpQueryTools
                     dataService, QueryWindowRelation.QueryStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "query_stats");
             }
 
-            var result = rows.Select(r => new
+            var result = points.Select(p =>
             {
-                collection_time = r.CollectionTime.ToString("o"),
-                execution_count = r.DeltaExecutions,
-                cpu_ms = Math.Round(r.DeltaCpuMs, 2),
-                elapsed_ms = Math.Round(r.DeltaElapsedMs, 2),
-                avg_cpu_ms = Math.Round(r.AvgCpuMs, 2),
-                avg_elapsed_ms = Math.Round(r.AvgElapsedMs, 2),
-                logical_reads = r.DeltaLogicalReads,
-                logical_writes = r.DeltaLogicalWrites,
-                physical_reads = r.DeltaPhysicalReads,
-                rows = r.DeltaRows,
-                spills = r.DeltaSpills,
-                min_dop = r.MinDop,
-                max_dop = r.MaxDop,
-                query_plan_hash = string.IsNullOrEmpty(r.QueryPlanHash) ? null : r.QueryPlanHash,
-                plan_count = r.PlanCount
+                var r = p.Figures;
+                return new
+                {
+                    collection_time = p.BucketStart.ToString("o"),
+                    execution_count = r.DeltaExecutions,
+                    cpu_ms = Math.Round(r.DeltaCpuMs, 2),
+                    elapsed_ms = Math.Round(r.DeltaElapsedMs, 2),
+                    avg_cpu_ms = Math.Round(r.AvgCpuMs, 2),
+                    avg_elapsed_ms = Math.Round(r.AvgElapsedMs, 2),
+                    logical_reads = r.DeltaLogicalReads,
+                    logical_writes = r.DeltaLogicalWrites,
+                    physical_reads = r.DeltaPhysicalReads,
+                    rows = r.DeltaRows,
+                    spills = r.DeltaSpills,
+                    min_dop = r.MinDop,
+                    max_dop = r.MaxDop,
+                    query_plan_hash = string.IsNullOrEmpty(r.QueryPlanHash) ? null : r.QueryPlanHash,
+                    plan_count = r.PlanCount,
+                    collection_count = p.CollectionCount,
+                };
             });
 
             /* The same disclosure block Darling's get_query_trend has carried since #2353 and the
                duration-trend trio carries on both SKUs since #3541 A2 — with Lite's truth: one raw tier,
-               per-collection, the first point the store held as effective_start. Left as the one tool where
-               the SKUs' envelopes disagreed until a review of the trio's change pointed at it. */
+               bucketed, the first collection the store held as effective_start (not its bucket's start). */
             var envelope = new Dictionary<string, object?>
             {
                 ["server"] = resolved.DisplayName,
@@ -2307,8 +2351,9 @@ public sealed class McpQueryTools
                 ["query_hash"] = query_hash,
                 ["hours_back"] = hours_back,
             };
-            WriteDisclosure(envelope, rows[0].CollectionTime, windowEnd.AddHours(-hours_back), windowEnd, PerCollection);
-            envelope["data_points"] = rows.Count;
+            WriteDisclosure(envelope, points[0].FirstCollectionTime, windowEnd.AddHours(-hours_back), windowEnd,
+                QueryTrendBucketed(bucketMinutes, bucket_minutes is not null, budget.AutoPoints));
+            envelope["data_points"] = points.Count;
             envelope["trend"] = result;
             /* #3653 A5: the window's baseline discontinuities as the trailing key — see BaselineDiscontinuities. */
             envelope[BaselineDiscontinuities.PayloadKey] = BaselineDiscontinuities.ToPayload(

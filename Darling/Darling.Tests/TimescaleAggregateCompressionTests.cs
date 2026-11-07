@@ -228,7 +228,7 @@ public sealed class TimescaleAggregateCompressionTests
         Assert.Equal(
             TimescaleSupport.HeaviestRefreshStartMinute + TimescaleSupport.HeaviestRefreshWindowMinutes - 1,
             minute);
-        Assert.Equal(35, minute);
+        Assert.Equal(34, minute);
 
         /* No hourly refresh starts on it, no raw compression policy starts on it, and it is the minute
            immediately before the raw compression band opens — the tiling identity from the daily band's side. */
@@ -243,7 +243,7 @@ public sealed class TimescaleAggregateCompressionTests
            margin. */
         var secondsPastHeaviest = (minute - TimescaleSupport.HeaviestRefreshStartMinute) * 60;
         /* #5329: (35 - 17) * 60 = 1,080 s past the heaviest start (1,200 s at :15 before the two io hourlies),
-           184 s over the 896 s ceiling (was 304 s). */
+           184 s over the 896 s ceiling (was 304 s). #8053: (34 - 16) * 60, the same 1,080 s. */
         Assert.Equal(1080, secondsPastHeaviest);
         Assert.True(
             secondsPastHeaviest > TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds,
@@ -251,7 +251,8 @@ public sealed class TimescaleAggregateCompressionTests
             + $"{TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds}s recorded ceiling — a once-a-day rewrite would "
             + "start inside the heaviest refresh's tail");
 
-        /* And past every light refresh's ceiling, measured from each one's own start. */
+        /* And past every light refresh's ceiling, measured forward round the hour from each one's own start: the
+           corrected Query Store hourly is on the hour's tail (#8053), so its distance crosses the hour boundary. */
         foreach (var view in TimescaleSupport.HourlyRefreshPhaseOrder)
         {
             if (string.Equals(view, TimescaleSupport.HeaviestHourlyRefreshView, StringComparison.Ordinal))
@@ -259,15 +260,18 @@ public sealed class TimescaleAggregateCompressionTests
                 continue;
             }
 
-            var secondsPast = (minute - TimescaleSupport.RefreshPhaseMinutesFor(view)) * 60;
+            var secondsPast = ((minute - TimescaleSupport.RefreshPhaseMinutesFor(view) + TimescaleSupport.MinutesInHourlyCadence) % TimescaleSupport.MinutesInHourlyCadence) * 60;
             Assert.True(
                 secondsPast > TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds,
                 $"{view}'s refresh could still be running at :{minute:00} against its {TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds}s ceiling");
         }
 
         /* The run has the rest of the hour to the next refresh START — the relation-agnostic clearance the
-           raw band's watch is measured in, so the two bands are stated in one unit. */
-        Assert.Equal(TimescaleSupport.MinutesInHourlyCadence - minute, TimescaleSupport.CompressionMinuteClearanceMinutes(minute));
+           raw band's watch is measured in, so the two bands are stated in one unit. The next start is the hour's
+           tail, where the hourly built from another hourly runs (#8053), one minute before the hour. */
+        Assert.Equal(
+            TimescaleSupport.MinutesInHourlyCadence - HourlyRefreshLineage.HierarchicalPairs().Count - minute,
+            TimescaleSupport.CompressionMinuteClearanceMinutes(minute));
         Assert.Equal(25, TimescaleSupport.CompressionMinuteClearanceMinutes(minute));
 
         /* THE HOURS: one per aggregate in registry order from hour 1, distinct, never the midnight hour, all
