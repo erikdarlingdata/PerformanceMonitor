@@ -205,6 +205,20 @@ function expiryForSave(model) {
   return model.expiresAt + ":00Z";
 }
 
+/** The mode a saved scope loads as. An explicit "servers" or "tag" is kept; any other explicit mode is "all". With no mode
+ *  (#8077) the one key present is the author's statement of the scope, so a servers list alone loads as "servers" and a
+ *  tagId alone as "tag", and a save writes that mode back rather than "all". With both keys or neither the editor does not
+ *  guess: it stays on "all" and the backend's refusal of the stored rule stands until the author resolves it. */
+function scopeModeOf(scope) {
+  if (scope.mode === "servers" || scope.mode === "tag") return scope.mode;
+  if (scope.mode != null) return "all";
+  const hasServers = Array.isArray(scope.servers) && scope.servers.length > 0;
+  const hasTagId = typeof scope.tagId === "number";
+  if (hasServers && !hasTagId) return "servers";
+  if (hasTagId && !hasServers) return "tag";
+  return "all";
+}
+
 /** A rule DEFINITION (+ name/description/enabled) -> the editor model. Shared by the load path and the template
  *  path. The metric is parsed by the SAME descToComposedPanel the composer uses (it reads only the composed keys),
  *  then locked to Scalar; predicate/hysteresis/scope map to their controls. */
@@ -231,7 +245,7 @@ function definitionToModel(def, name, description, enabled) {
     critUpper: pred.criticalUpperBound != null ? String(pred.criticalUpperBound) : "",
     breachSamples: intOr(hyst.breachSamples, 1),
     clearSamples: intOr(hyst.clearSamples, 1),
-    scopeMode: scope.mode === "servers" ? "servers" : scope.mode === "tag" ? "tag" : "all",
+    scopeMode: scopeModeOf(scope),
     scopeServers: Array.isArray(scope.servers) ? scope.servers.map(String) : [],
     scopeTagId: typeof scope.tagId === "number" ? scope.tagId : null,
     intervalSeconds: typeof def.evaluationIntervalSeconds === "number" ? String(def.evaluationIntervalSeconds) : "",
