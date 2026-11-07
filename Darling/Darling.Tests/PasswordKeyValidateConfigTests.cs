@@ -55,7 +55,8 @@ public sealed class PasswordKeyValidateConfigTests
 
             using var output = new StringWriter();
             using var error = new StringWriter();
-            await DarlingCliCommands.ValidateConfigAsync(null, output, error, TestContext.Current.CancellationToken);
+            /* Not registered, so a machine that has the service registered does not leak its account into later tests. */
+            await DarlingCliCommands.ValidateConfigAsync(null, output, error, _ => null, TestContext.Current.CancellationToken);
 
             var line = Array.Find(
                 output.ToString().Split('\n'),

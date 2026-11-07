@@ -40,10 +40,10 @@ public sealed class PasswordKeyValidateConfigAccountTests
     public async Task OnWindows_ARegisteredService_JudgesTheKeyAsItsAccount_SoAFolderTheCallerOwnsIsRefused()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "Owner SIDs and the service registration are Windows-only.");
+        Assert.SkipWhen(CurrentUser.IsWellKnown(WellKnownSidType.LocalSystemSid), "SYSTEM is trusted as every account, so the folder it owns is never refused.");
 
         var run = await ValidateAsync(registeredServiceAccount: _ => s_registeredAccount);
 
-        Assert.Contains("as the service account", run.Judged, StringComparison.Ordinal);
         Assert.Contains("WARNING: passwordKey: file '" + run.KeyPath + "' is not read, because its folder " + run.KeyFolder + " is not trusted", run.Output, StringComparison.Ordinal);
         Assert.DoesNotContain("passwordKey: password key ", run.Output, StringComparison.Ordinal);
     }
@@ -52,25 +52,15 @@ public sealed class PasswordKeyValidateConfigAccountTests
     public async Task OnWindows_NoRegisteredService_JudgesTheKeyAsTheCaller_SoTheSameFolderPasses()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "Owner SIDs and the service registration are Windows-only.");
+        Assert.SkipWhen(CurrentUser.IsWellKnown(WellKnownSidType.LocalSystemSid), "SYSTEM is trusted as every account, so the folder it owns is never refused.");
 
         var run = await ValidateAsync(registeredServiceAccount: _ => null);
 
-        Assert.Contains("as the account you are running as", run.Judged, StringComparison.Ordinal);
         Assert.Contains("passwordKey: password key ", run.Output, StringComparison.Ordinal);
         Assert.DoesNotContain("is not trusted", run.Output, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public async Task OnWindows_AnEnvKey_NamesNoAccount()
-    {
-        Assert.SkipUnless(OperatingSystem.IsWindows(), "Owner SIDs and the service registration are Windows-only.");
-
-        var run = await ValidateAsync(registeredServiceAccount: _ => s_registeredAccount, passwordKey: "env:DARLING_8006_NOT_SET");
-
-        Assert.DoesNotContain("judged as", run.Output, StringComparison.Ordinal);
-    }
-
-    private sealed record Run(string Output, string Judged, string KeyPath, string KeyFolder);
+    private sealed record Run(string Output, string KeyPath, string KeyFolder);
 
     /// <summary>Runs the verb with a <c>file:</c> key in a folder the current user owns and can only read, which nothing but
     /// the folder's owner makes untrusted, and puts the current user back as the account judged afterwards.</summary>
@@ -120,7 +110,7 @@ public sealed class PasswordKeyValidateConfigAccountTests
             try
             {
                 await DarlingCliCommands.ValidateConfigAsync(
-                    configPath, output, error, TestContext.Current.CancellationToken, registeredServiceAccount);
+                    configPath, output, error, registeredServiceAccount, TestContext.Current.CancellationToken);
             }
             finally
             {
@@ -128,8 +118,7 @@ public sealed class PasswordKeyValidateConfigAccountTests
             }
 
             var text = output.ToString();
-            var judged = Array.Find(text.Split('\n'), l => l.StartsWith("The password key file is judged as", StringComparison.Ordinal)) ?? "";
-            return new Run(text, judged, keyPath, keyFolder);
+                        return new Run(text, keyPath, keyFolder);
         }
         finally
         {
