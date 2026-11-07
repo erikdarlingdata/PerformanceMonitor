@@ -137,7 +137,7 @@ public sealed class ThemeLeftoversRenderTests
     [Fact]
     public void TheRecommendationsGrid_HasAFilterButtonOnEveryColumn_AndWrapsItsDetail()
     {
-        var (buttons, columns, lines) = Themed(app =>
+        var (buttons, columns, lines, tips) = Themed(app =>
         {
             var tab = new FinOpsTab();
             var window = new Window { Content = tab, Width = 1280, Height = 800 };
@@ -145,6 +145,9 @@ public sealed class ThemeLeftoversRenderTests
             try
             {
                 var grid = (DataGrid)tab.FindName("RecommendationsDataGrid");
+                /* The Detail and Est. Savings headers carry a tooltip on the whole header (the filter button and the title), as the cells do. */
+                var tipped = grid.Columns.Where(c => c.Header is StackPanel p && p.Children.OfType<TextBlock>().Any(t => t.Text is "Detail" or "Est. Savings ($/mo)"))
+                    .Select(c => ((StackPanel)c.Header).ToolTip as string).ToList();
                 Reveal(grid);
                 grid.ItemsSource = new List<RecommendationRow>
                 {
@@ -160,7 +163,7 @@ public sealed class ThemeLeftoversRenderTests
                 var block = Visuals<DataGridCell>(grid).Where(c => c.Column == grid.Columns[4])
                     .SelectMany(c => Visuals<TextBlock>(c)).First();
                 var lineCount = (int)Math.Round(block.ActualHeight / (block.FontSize * block.FontFamily.LineSpacing));
-                return (filterButtons, grid.Columns.Count, lineCount);
+                return (filterButtons, grid.Columns.Count, lineCount, tipped);
             }
             finally
             {
@@ -168,8 +171,54 @@ public sealed class ThemeLeftoversRenderTests
             }
         });
 
+        Assert.Equal(2, tips.Count);
+        Assert.All(tips, tip => Assert.True(tip is { Length: >= 20 }, "a findings header has no tooltip"));
         Assert.Equal(columns, buttons);
         Assert.True(lines >= 2, $"the Detail text drew on {lines} line(s)");
+    }
+
+    /// <summary>
+    /// The Recommendations grid is loaded through its filter manager (<c>UpdateData</c>), which the load path in the tab now uses. A filter set on
+    /// one server's rows narrows the grid, and the switch to another server (which clears the filters and reloads, as the tab does) shows all of
+    /// the new server's rows rather than the old filter's answer.
+    /// </summary>
+    [Fact]
+    public void TheRecommendationsGrid_ShowsTheNewServersRows_AfterAFilterAndAServerSwitch()
+    {
+        var (first, filtered, second) = Themed(app =>
+        {
+            var tab = new FinOpsTab();
+            var window = new Window { Content = tab, Width = 1280, Height = 800 };
+            window.Show();
+            try
+            {
+                var grid = (DataGrid)tab.FindName("RecommendationsDataGrid");
+                Reveal(grid);
+                var manager = (DataGridFilterManager<RecommendationRow>)typeof(FinOpsTab)
+                    .GetField("_recommendationsFilterMgr", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(tab)!;
+                static RecommendationRow Row(string category, string finding) => new() { Category = category, Severity = "High", Confidence = "High", Finding = finding, Detail = "d" };
+
+                manager.UpdateData(new List<RecommendationRow> { Row("Memory", "a1"), Row("Memory", "a2"), Row("Cpu", "a3") });
+                Settle(window);
+                var firstRows = grid.Items.Count;
+
+                manager.SetFilter(new ColumnFilterState { ColumnName = "Category", Operator = FilterOperator.Equals, Value = "Memory" });
+                var filteredRows = grid.Items.Count;
+
+                manager.ClearFilters();
+                manager.UpdateData(new List<RecommendationRow> { Row("Storage", "b1"), Row("Cpu", "b2"), Row("Cpu", "b3"), Row("Cpu", "b4") });
+                Settle(window);
+                return (firstRows, filteredRows, grid.Items.OfType<RecommendationRow>().Select(r => r.Finding).ToList());
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        Assert.Equal(3, first);
+        Assert.Equal(2, filtered);
+        Assert.Equal(new[] { "b1", "b2", "b3", "b4" }, second);
     }
 
     /// <summary>
@@ -207,11 +256,11 @@ public sealed class ThemeLeftoversRenderTests
 
     // ── Overview fleet card ────────────────────────────────────────────────────────────────────
 
-    private static ServerSummaryItem FleetCard(int blocking, int deadlocks) => new()
+    private static ServerSummaryItem FleetCard(int blocking, int deadlocks, ServerFreshness freshness = ServerFreshness.Fresh) => new()
     {
         DisplayName = "SQL01", ServerName = "SQL01", IsOnline = true, CpuPercent = 20, OtherProcessCpuPercent = 5, MemoryMb = 32768,
         BlockingCount = blocking, DeadlockCount = deadlocks,
-        LastCollectionTime = DateTime.UtcNow, CollectionFreshness = ServerFreshness.Fresh,
+        LastCollectionTime = DateTime.UtcNow, CollectionFreshness = freshness,
     };
 
     /// <summary>The border a fleet card renders under <paramref name="theme"/>, after the app was themed Dark and switched at run time.</summary>
@@ -227,7 +276,8 @@ public sealed class ThemeLeftoversRenderTests
                 Settle(window);
                 var box = Visuals<OverviewCardBorder>(card).First();
                 var found = Visuals<TextBlock>(card)
-                    .Where(t => t.Text == "Online" || t.Text == item.CpuDisplay || t.Text == item.LastCollectionDisplay)
+                    .Where(t => t.Text == "Online" || t.Text == item.CpuDisplay || t.Text == item.LastCollectionDisplay
+                        || (item.BlockingCount > 0 && t.Text == item.BlockingDisplay))
                     .Select(t => (t.Text, Fore: ColorOf(t.Foreground)))
                     .ToList();
                 return (ColorOf(box.BorderBrush), Resource(app, "CardBorderBrush"), ColorOf(item.StatusBrush), ColorOf(box.Background), found);
@@ -264,18 +314,41 @@ public sealed class ThemeLeftoversRenderTests
         Assert.NotEqual(warning, critical);
     }
 
+    private static double Distance(Color a, Color b) =>
+        Math.Sqrt(Math.Pow(a.R - b.R, 2) + Math.Pow(a.G - b.G, 2) + Math.Pow(a.B - b.B, 2));
+
+    /// <summary>
+    /// A blocking card (orange) and a stale one (amber) stay apart in every theme. Light and Cool Breeze once mapped both to the theme's
+    /// Warning brush. Dark keeps them 30 apart in RGB, so the two light themes may not be closer than 25.
+    /// </summary>
+    [Theory]
+    [InlineData("Dark")]
+    [InlineData("Light")]
+    [InlineData("CoolBreeze")]
+    public void ABlockingFleetCard_LooksDifferentFromAStaleOne_InEveryTheme(string theme)
+    {
+        var (blocking, _, _, _, _) = RenderedCard(theme, FleetCard(3, 0));
+        var (stale, _, _, _, _) = RenderedCard(theme, FleetCard(0, 0, ServerFreshness.Stale));
+
+        Assert.NotEqual(blocking, stale);
+        Assert.True(Distance(blocking, stale) >= 25, $"blocking {blocking} and stale {stale} are {Distance(blocking, stale):0} apart in {theme}");
+    }
+
     [Theory]
     [InlineData("Light")]
     [InlineData("CoolBreeze")]
     public void TheBandTextOnAFleetCard_IsReadable_InTheLightThemes(string theme)
     {
-        var (_, _, _, background, texts) = RenderedCard(theme, FleetCard(0, 0));
-
-        Assert.True(texts.Count >= 3, $"found {texts.Count} band texts");
-        foreach (var (text, fore) in texts)
+        foreach (var card in new[] { FleetCard(0, 0), FleetCard(3, 0), FleetCard(0, 0, ServerFreshness.Stale) })
         {
-            var ratio = WcagContrast.Ratio(fore, background);
-            Assert.True(ratio >= 4.5, $"'{text}' is {ratio:0.00}:1 on the card in {theme}");
+            var (_, _, _, background, texts) = RenderedCard(theme, card);
+
+            Assert.True(texts.Count >= 3, $"found {texts.Count} band texts");
+            foreach (var (text, fore) in texts)
+            {
+                var ratio = WcagContrast.Ratio(fore, background);
+                Assert.True(ratio >= 4.5, $"'{text}' is {ratio:0.00}:1 on the card in {theme}");
+            }
         }
     }
 

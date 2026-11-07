@@ -23,17 +23,13 @@ namespace Darling.Tests;
 /// Release walk V10, D20, D21 and D22 in the server tab of Lite and of the Darling Viewer (a copy of Lite's): the four toolbar
 /// combos had no name for a screen reader, the Compare box was greyed on most tabs with a tooltip that WPF never shows on a
 /// disabled control, the Running Jobs tab with no running job was an empty grid with no words, the plan viewer's operator tooltips
-/// could not be read by a screen reader, and two FinOps column headers had no tooltip while their cells did.
+/// could not be read by a screen reader, and two FinOps column headers had no tooltip while their cells did (that one is now checked on the rendered headers, in ThemeLeftoversRenderTests and ViewerThemeLeftoversRenderTests).
 /// </summary>
 public sealed class ServerTabToolbarAndTooltipsTests
 {
     private static string Xaml(string app) => app == "Lite"
         ? RepoFile.ReadRepoFile("Lite", "Controls", "ServerTab.xaml")
         : RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerServerTab.xaml");
-
-    private static string FinOpsXaml(string app) => app == "Lite"
-        ? RepoFile.ReadRepoFile("Lite", "Controls", "FinOpsTab.xaml")
-        : RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "FinOpsTab.xaml");
 
     public static IEnumerable<object[]> BothTabs() => new[] { new object[] { "Lite" }, new object[] { "Viewer" } };
 
@@ -136,24 +132,6 @@ public sealed class ServerTabToolbarAndTooltipsTests
         Assert.True(call.Success, $"{app}: the Running Jobs load no longer calls the engine-gap step");
         Assert.Contains("keepsOwnEmptyText:", call.Value, StringComparison.Ordinal);
         Assert.DoesNotContain("keepsOwnEmptyText: false", call.Value, StringComparison.Ordinal);
-    }
-
-    [Theory]
-    [MemberData(nameof(BothTabs))]
-    public void FinOpsFindingsGrid_DetailAndSavingsHeaders_HaveATooltip(string app)
-    {
-        var xaml = FinOpsXaml(app);
-
-        foreach (var header in new[] { "Detail", "Est. Savings ($/mo)" })
-        {
-            // #8221: the header is a filter button plus the title in a StackPanel; the tooltip sits on that panel so it shows over the button and the title.
-            var title = xaml.IndexOf($"<TextBlock Text=\"{header}\"", StringComparison.Ordinal);
-            Assert.True(title > 0, $"{app}: column {header} not found");
-            var panel = xaml.LastIndexOf("<StackPanel Orientation=\"Horizontal\"", title, StringComparison.Ordinal);
-            var openingTag = xaml[panel..xaml.IndexOf('>', panel)];
-
-            Assert.Matches(@"ToolTip=""[^""]{20,}""", openingTag);
-        }
     }
 
     private static PlanNode Scan() => new()

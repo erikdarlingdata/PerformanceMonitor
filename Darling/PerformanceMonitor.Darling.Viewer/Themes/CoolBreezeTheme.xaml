@@ -159,8 +159,8 @@
     <Style TargetType="Button">
         <Setter Property="Background" Value="{StaticResource BackgroundLightBrush}"/>
         <Setter Property="Foreground" Value="#1A2A3A"/>
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
-        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="BorderBrush" Value="{StaticResource ControlBorderBrush}"/>
+        <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="12,6"/>
         <Setter Property="Cursor" Value="Hand"/>
         <Setter Property="Template">
@@ -396,7 +396,7 @@
     <Style x:Key="FilterTextBoxStyle" TargetType="TextBox">
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
         <Setter Property="Foreground" Value="#1A2A3A"/>
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource ControlBorderBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="4,2"/>
         <Setter Property="CaretBrush" Value="#1A2A3A"/>
@@ -453,7 +453,7 @@
     <Style TargetType="TextBox">
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource ControlBorderBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="6,4"/>
         <Setter Property="CaretBrush" Value="{StaticResource ForegroundBrush}"/>
@@ -488,7 +488,7 @@
     <Style TargetType="PasswordBox">
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource ControlBorderBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="6,4"/>
         <Setter Property="CaretBrush" Value="{StaticResource ForegroundBrush}"/>
@@ -528,7 +528,7 @@
             </Grid.ColumnDefinitions>
             <Border x:Name="Border" Grid.ColumnSpan="2"
                     Background="{StaticResource BackgroundDarkBrush}"
-                    BorderBrush="{StaticResource BorderBrush}"
+                    BorderBrush="{StaticResource ControlBorderBrush}"
                     BorderThickness="1" CornerRadius="2"/>
             <Border Grid.Column="0" Margin="1"
                     Background="{StaticResource BackgroundDarkBrush}"
@@ -546,7 +546,7 @@
     <Style TargetType="ComboBox">
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource ControlBorderBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="6,4"/>
         <Setter Property="Template">
@@ -1482,6 +1482,9 @@
 
     <!-- Viewer secondary-window surfaces (write-back windows that merge ViewerDarkTheme.xaml). Cool-breeze values. -->
     <SolidColorBrush x:Key="CardBorderBrush" Color="{StaticResource BorderLightColor}"/>
+    <!-- #8221: the outline of a button, a text box and a combo box, and the track a bar sits on. Same values as the Lite themes. -->
+    <SolidColorBrush x:Key="ControlBorderBrush" Color="#5F7C95"/>
+    <SolidColorBrush x:Key="BarTrackBrush" Color="#B7CADB"/>
     <SolidColorBrush x:Key="ViewerSelectionBrush" Color="#B7CEE2"/>
     <SolidColorBrush x:Key="ViewerHoverBrush" Color="{StaticResource BackgroundLighterColor}"/>
     <SolidColorBrush x:Key="ViewerGridHeaderBrush" Color="{StaticResource BackgroundLighterColor}"/>

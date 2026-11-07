@@ -1604,8 +1604,9 @@ public sealed class ServerSummaryItem
     /// <see cref="FleetRollup.ClassifyBand"/> bands that Warning the way it bands a server awaiting its
     /// first collection — and the two amber arms below are the SAME hex (<c>#FFD54F</c>), so the border says
     /// what the band says in the colour the card already uses for "nothing to report yet". A dark border
-    /// here was the card claiming calm about readings it never took. The cached brush rather than
-    /// another <c>MakeBrush</c>: this getter runs per card per refresh.</para>
+    /// here was the card claiming calm about readings it never took. Each read builds a fresh frozen
+    /// brush (#8221: the band takes the current theme's color, so nothing is cached across a theme change), and the Overview binds its cards again
+    /// on a theme change.</para>
     /// </summary>
     public SolidColorBrush CardBorderBrush
     {

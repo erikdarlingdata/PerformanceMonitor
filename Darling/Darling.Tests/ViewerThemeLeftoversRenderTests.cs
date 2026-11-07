@@ -124,6 +124,37 @@ public sealed class ViewerThemeLeftoversRenderTests
         Assert.All(backgrounds, background => Assert.Equal(expected, background));
     }
 
+    /// <summary>The Detail and Est. Savings headers carry a tooltip on the whole header (the filter button and the title), as the cells do. Replaces a text pin on the XAML.</summary>
+    [Fact]
+    public void TheRecommendationsDetailAndSavingsHeaders_HaveATooltipAndAFilterButton()
+    {
+        var (tips, buttons) = Themed(app =>
+        {
+            var tab = new FinOpsTab();
+            var window = new Window { Content = tab, Width = 1280, Height = 800 };
+            window.Show();
+            try
+            {
+                var grid = (DataGrid)tab.FindName("FinOpsRecommendationsDataGrid");
+                Reveal(grid);
+                ClippedTextProbe.Settle(window);
+                var tipped = grid.Columns.Where(c => c.Header is StackPanel p && p.Children.OfType<TextBlock>().Any(t => t.Text is "Detail" or "Est. Savings ($/mo)"))
+                    .Select(c => ((StackPanel)c.Header).ToolTip as string).ToList();
+                var filterButtons = Enumerable.Range(0, grid.Columns.Count)
+                    .Count(i => Visuals<Button>(Visuals<DataGridColumnHeader>(grid).First(h => h.Column == grid.Columns[i])).Any(b => b.Tag is string));
+                return (tipped, filterButtons == grid.Columns.Count);
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        Assert.Equal(2, tips.Count);
+        Assert.All(tips, tip => Assert.True(tip is { Length: >= 20 }, "a findings header has no tooltip"));
+        Assert.True(buttons, "a Recommendations column has no filter button");
+    }
+
     // ── Availability Groups ────────────────────────────────────────────────────────────────────
 
     [Theory]
@@ -319,6 +350,82 @@ public sealed class ViewerThemeLeftoversRenderTests
         Assert.NotEqual(neutral, warning);
         Assert.NotEqual(neutral, critical);
         Assert.NotEqual(warning, critical);
+    }
+
+    // ── Buttons, text boxes and bar tracks (the Viewer twin of Lite's) ────────────────────────────
+
+    [Theory]
+    [InlineData("Light")]
+    [InlineData("CoolBreeze")]
+    public void AButtonAndATextBox_HaveAnOutlineOfThreeToOne_InTheLightThemes(string theme)
+    {
+        var (button, box, page) = Themed(app =>
+        {
+            var panel = new StackPanel();
+            var b = new Button { Content = "Refresh" };
+            var t = new TextBox { Text = "filter" };
+            panel.Children.Add(b);
+            panel.Children.Add(t);
+            var window = new Window { Content = panel, Width = 300, Height = 200 };
+            window.Show();
+            try
+            {
+                ThemeManager.Apply(theme);
+                ClippedTextProbe.Settle(window);
+                var bt = Visuals<Border>(b).First();
+                var tt = Visuals<Border>(t).First();
+                var worst = new[] { "BackgroundBrush", "BackgroundDarkBrush", "BackgroundLightBrush" }
+                    .Select(k => Resource(app, k)).ToList();
+                return ((ColorOf(bt.BorderBrush), bt.BorderThickness.Left), (ColorOf(tt.BorderBrush), tt.BorderThickness.Left), worst);
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        Assert.True(button.Item2 > 0, "the button draws no border");
+        Assert.True(box.Item2 > 0, "the text box draws no border");
+        foreach (var surface in page)
+        {
+            Assert.True(WcagContrast.Ratio(button.Item1, surface) >= 3, $"button outline on {surface} in {theme}");
+            Assert.True(WcagContrast.Ratio(box.Item1, surface) >= 3, $"text box outline on {surface} in {theme}");
+        }
+    }
+
+    [Theory]
+    [InlineData("Light")]
+    [InlineData("CoolBreeze")]
+    public void TheUtilizationBarTracks_CanBeSeen_InTheLightThemes(string theme)
+    {
+        var (tracks, page) = Themed(app =>
+        {
+            var tab = new FinOpsTab();
+            var window = new Window { Content = tab, Width = 1280, Height = 900 };
+            window.Show();
+            try
+            {
+                var content = (FrameworkElement)tab.FindName("FinOpsUtilizationContent");
+                content.Visibility = Visibility.Visible;
+                Reveal(content);
+                ThemeManager.Apply(theme);
+                ClippedTextProbe.Settle(window);
+                var found = Visuals<Border>(content).Where(b => b.Height == 16 && string.IsNullOrEmpty(b.Name) && b.Background is SolidColorBrush)
+                    .Select(b => (Fill: ColorOf(b.Background), Edge: ColorOf(b.BorderBrush), b.BorderThickness.Left)).ToList();
+                return (found, Resource(app, "BackgroundBrush"));
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        Assert.True(tracks.Count >= 5, $"found {tracks.Count} bar tracks");
+        foreach (var track in tracks)
+        {
+            Assert.True(track.Left > 0);
+            Assert.True(WcagContrast.Ratio(track.Edge, page) >= 3, $"a track edge is {WcagContrast.Ratio(track.Edge, page):0.00}:1 in {theme}");
+        }
     }
 
     // ── The server tab's tab rows after a run-time switch ──────────────────────────────────────

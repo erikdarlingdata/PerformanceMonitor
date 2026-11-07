@@ -129,17 +129,10 @@ public sealed class ClickThroughUiTextTests : IDisposable
     {
         var main = File.ReadAllText(FindRepoFile(@"Lite\MainWindow.xaml"));
         var card = File.ReadAllText(FindRepoFile(@"Lite\Controls\ServerOverviewCard.xaml"));
-        var finOps = File.ReadAllText(FindRepoFile(@"Lite\Controls\FinOpsTab.xaml"));
 
         Assert.Contains("AutomationProperties.Name\" Value=\"{Binding AutomationName", main, StringComparison.Ordinal);
         Assert.Contains("AutomationProperties.Name=\"{Binding DisplayName}\"", card, StringComparison.Ordinal);
-        // #8221: the item name moved from the tab into each theme's ServerSelectorItemStyle; the tab points its combo at that style.
-        Assert.Contains("ItemContainerStyle=\"{DynamicResource ServerSelectorItemStyle}\"", finOps, StringComparison.Ordinal);
-        foreach (var theme in new[] { "Dark", "Light", "CoolBreeze" })
-        {
-            var themeText = File.ReadAllText(FindRepoFile($@"Lite\Themes\{theme}Theme.xaml"));
-            Assert.Contains("AutomationProperties.Name\" Value=\"{Binding DisplayNameWithIntent", themeText, StringComparison.Ordinal);
-        }
+        // The server picker's item names are checked on the rendered containers: ThemeLeftoversRenderTests.TheServerBoxItems_AreNamedByTheServer_AfterARunTimeThemeSwitch.
     }
 
     [Fact]
