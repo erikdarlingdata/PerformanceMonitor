@@ -544,14 +544,7 @@ internal static class InvestigationToolCore
         if (r.DisplayName is { } displayName)
             payload["display_name"] = displayName;
         if (r.InstanceName is { } instanceName)
-        {
             payload["instance_name"] = instanceName;
-            /* #8090: server_name is the registry's current name (RequestFields), so two requests for one server_id never list under two
-               labels when one alert path labelled the server with its registry name and another with its host name. The label the
-               opening alert carried rides as opened_as only when it differs, so the stored row is still readable from the answer. */
-            if (!string.Equals(instanceName, r.ServerName, StringComparison.Ordinal))
-                payload["opened_as"] = r.ServerName;
-        }
         /* #6551: a change-watch request has no alert row in get_alert_history, so its detail (what changed, on which database, which
            measure moved) rides the answer under the key an alert's brief row uses; the mcp.dataDetail filter masks detail_text by key. */
         if (r.DetailText is { } detailText)
@@ -564,8 +557,7 @@ internal static class InvestigationToolCore
         request_id = r.RequestId,
         route_id = r.RouteId,
         server_id = r.ServerId,
-        /* #8090: the registry's current name for server_id when the server is still registered; the stored label only once it has left. */
-        server_name = r.InstanceName ?? r.ServerName,
+        server_name = r.ServerName,
         family = r.Family,
         first_metric = r.FirstMetric,
         first_alert_at = r.FirstAlertAtUtc,

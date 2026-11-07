@@ -629,12 +629,13 @@ FROM generate_series(1, " + (InvestigationToolCore.MaxLimit + 1) + ") AS i", ct)
     }
 
     /// <summary>
-    /// #8090 item 4: <c>server_name</c> on a listed request is the registry's current name for its <c>server_id</c>, however the
-    /// opening alert labelled the server (one path labels it with the registry name, another with the host name). The label the
-    /// alert carried rides beside it as <c>opened_as</c> only when it differs, so two requests for one server never list under two names.
+    /// #8090 item 4: two requests for one <c>server_id</c> opened under two labels (one alert path labels a server with its registry
+    /// name, another with its host name) carry the registry's one current name as <c>instance_name</c> and <c>display_name</c> on both
+    /// rows, read when served, while <c>server_name</c> keeps the label each was opened with (#5999, the webhook token's contract). The
+    /// guide says which to group by.
     /// </summary>
     [Fact]
-    public async Task List_NamesTheServerByItsRegistryName_WhateverLabelTheOpeningAlertCarried()
+    public async Task List_CarriesTheRegistrysOneName_BesideEachRequestsOpenedWithLabel()
     {
         await RunAsync(async (store, dataSource, connection, ct) =>
         {
@@ -646,10 +647,16 @@ FROM generate_series(1, " + (InvestigationToolCore.MaxLimit + 1) + ") AS i", ct)
                 .GetProperty("requests").EnumerateArray().ToDictionary(r => Guid.Parse(r.GetProperty("request_id").GetString()!));
 
             Assert.Equal("alpha", rows[byRegistryName].GetProperty("server_name").GetString());
-            Assert.Equal("alpha", rows[byHostName].GetProperty("server_name").GetString());
-            Assert.Equal("alpha", rows[byHostName].GetProperty("display_name").GetString());
-            Assert.Equal("alpha.example.internal", rows[byHostName].GetProperty("opened_as").GetString());
-            Assert.False(rows[byRegistryName].TryGetProperty("opened_as", out _));
+            Assert.Equal("alpha.example.internal", rows[byHostName].GetProperty("server_name").GetString());
+            foreach (var row in new[] { rows[byRegistryName], rows[byHostName] })
+            {
+                Assert.Equal(7, row.GetProperty("server_id").GetInt32());
+                Assert.Equal("alpha", row.GetProperty("instance_name").GetString());
+                Assert.Equal("alpha", row.GetProperty("display_name").GetString());
+            }
+
+            var guide = McpToolGuideTests.Served("list_investigation_requests").Tail!;
+            Assert.Contains("group requests by server_id or instance_name", guide, StringComparison.Ordinal);
         });
     }
 

@@ -70,7 +70,7 @@ public sealed partial class DarlingMcpInvestigationTools
     [McpServerTool(Name = "list_investigation_requests"), Description(
         "Lists the investigation requests alerts opened for your agent, newest first, with state, lease and expiry. Writes " +
         "nothing. status ok or empty. Claim one with claim_investigation_request. <<GUIDE>> " +
-        "Each row: id, server (server_name is the registry's current name for server_id, display_name its display name, and opened_as the label the opening alert carried, present only when it differs), family, first metric, alert count, state, lease and expiry; a Change Watch request also carries detail_text, " +
+        "Each row: id, server (server_name is the label the opening alert carried, kept for the request's life, so two requests for one server can carry two labels; instance_name is the registry's current name for server_id and display_name its display name, read when served, so group requests by server_id or instance_name), family, first metric, alert count, state, lease and expiry; a Change Watch request also carries detail_text, " +
         "its changes and the measures that moved, each query measure with its database. The state is computed from the " +
         "lease and expiry at read time (a lapsed lease reads open), and the read writes nothing. " +
         "A request is opened when an alert matches a notification route whose agent_level is 1 (get_notification_routes), " +

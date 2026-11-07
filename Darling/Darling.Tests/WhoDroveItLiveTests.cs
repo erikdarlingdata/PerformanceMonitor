@@ -273,6 +273,7 @@ public sealed class WhoDroveItLiveTests
         /* One login is one number everywhere; two logins never share one. */
         Assert.Equal(3, callers.Select(c => c.GetProperty("login_name").GetString()).Distinct().Count());
         Assert.Equal(new[] { "SSMS", "api", "api" }, callers.Select(c => c.GetProperty("program_name").GetString()));
+        Assert.Equal(3000.0, callers[0].GetProperty("cpu_ms").GetDouble(), 3);
     });
 
     /// <summary>
@@ -317,7 +318,6 @@ public sealed class WhoDroveItLiveTests
         Assert.Equal(3_000_000.0, batch.GetProperty("elapsed_ms").GetDouble(), 1);
         Assert.Equal(3_060_000.0, root.GetProperty("total_elapsed_ms").GetDouble(), 1);
         Assert.Equal(Math.Round(60_000 / 3_060_000.0, 4), Assert.Single(callers, c => c.GetProperty("host_name").GetString() == "APP01").GetProperty("elapsed_share").GetDouble(), 4);
-        Assert.Equal(3000.0, callers[0].GetProperty("cpu_ms").GetDouble(), 3);
     });
 
     [Fact]
