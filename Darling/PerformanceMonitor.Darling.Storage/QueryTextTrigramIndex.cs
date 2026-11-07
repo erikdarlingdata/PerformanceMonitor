@@ -49,15 +49,19 @@ public enum TrigramIndexStatus
     Unconfigured,
 }
 
-/// <summary>What one catalog read found about the table, the index and the extension.</summary>
+/// <summary>What one catalog read found about the table, the index and the extension, and about the sample index (#7849).</summary>
 /// <param name="TableExists">Whether <c>collect.query_text_dim</c> exists.</param>
 /// <param name="IndexValid">Null when the index does not exist, otherwise <c>pg_index.indisvalid</c>.</param>
 /// <param name="IndexSizeBytes">The index's size, null when it does not exist.</param>
 /// <param name="ExtensionSchema">The schema <c>pg_trgm</c> is installed in, null when it is not installed.</param>
 /// <param name="ExtensionAvailable">Whether the server ships <c>pg_trgm</c> at all.</param>
 /// <param name="BuildRunning">Whether a backend this login can see is building an index on the table.</param>
+/// <param name="SampleIndexValid">Null when the sample index on <c>collect.query_stats</c> does not exist, otherwise its <c>pg_index.indisvalid</c>.</param>
+/// <param name="SampleIndexSizeBytes">The sample index's size over the table and its chunks, null when it does not exist.</param>
+/// <param name="SampleBuildRunning">Whether a backend this login can see is building an index on <c>collect.query_stats</c> or one of its chunks.</param>
 public sealed record TrigramCatalogState(
-    bool TableExists, bool? IndexValid, long? IndexSizeBytes, string? ExtensionSchema, bool ExtensionAvailable, bool BuildRunning);
+    bool TableExists, bool? IndexValid, long? IndexSizeBytes, string? ExtensionSchema, bool ExtensionAvailable, bool BuildRunning,
+    bool? SampleIndexValid = null, long? SampleIndexSizeBytes = null, bool SampleBuildRunning = false);
 
 /// <summary>The store health read's answer for the trigram index.</summary>
 public sealed record TrigramIndexHealth(
@@ -75,7 +79,10 @@ public sealed record TrigramIndexHealth(
     string? LastSqlState,
     DateTime? LastFailedUtc,
     DateTime? NextAttemptUtc,
-    string? OperatorStatement);
+    string? OperatorStatement,
+    bool SampleIndexExists = false,
+    bool? SampleIndexValid = null,
+    long? SampleIndexSizeBytes = null);
 
 /// <summary>
 /// What this process remembers about the trigram index between passes: whether the option is on, whether a build or a drop is
@@ -109,9 +116,13 @@ public sealed class QueryTextTrigramIndexTracker
     private bool _extensionBlocked;
     private string? _extensionError;
     private int _buildsStarted;
+    private int _sampleBuildsStarted;
 
-    /// <summary>How many builds this instance started. A test reads it to prove a pass built once and the next did not.</summary>
+    /// <summary>How many trigram index builds this instance started. A test reads it to prove a pass built once and the next did not.</summary>
     public int BuildsStarted { get { lock (_gate) { return _buildsStarted; } } }
+
+    /// <summary>How many sample index builds (#7849, <see cref="QueryTextTrigramIndex.SampleIndexName"/>) this instance started.</summary>
+    public int SampleBuildsStarted { get { lock (_gate) { return _sampleBuildsStarted; } } }
 
     /// <summary>
     /// Sets whether the option is on. The worker calls it the moment <c>darling.json</c> loads, before it migrates the store, so the
@@ -141,6 +152,16 @@ public sealed class QueryTextTrigramIndexTracker
             _phase = PhaseKind.Building;
             _buildStartedUtc = utcNow;
             _buildsStarted++;
+        }
+    }
+
+    internal void BeginSampleBuild(DateTime utcNow)
+    {
+        lock (_gate)
+        {
+            _phase = PhaseKind.Building;
+            _buildStartedUtc = utcNow;
+            _sampleBuildsStarted++;
         }
     }
 
@@ -219,6 +240,26 @@ public sealed class QueryTextTrigramIndexTracker
 ///
 /// <para><b>Collection never waits.</b> <see cref="RunAsync"/> is a background task the worker starts after migrations and drains at shutdown, the
 /// way the Query Store index ensures are. It uses its own connections and never holds a collector's.</para>
+///
+/// <para><b>#7849: the sample index rides on the same option, and the search does not wait for it.</b> The trigram index finds the matching
+/// texts; the all-servers search then has to find where those texts ran, which is a read of <c>collect.query_stats</c> by <c>query_text_digest</c>, and
+/// no index a migration ships has that column as a key. The search reads the matched digests first and binds them to the sample read as an array
+/// (at most 1,000 of them; past that it joins the window to the matches, which is the right plan for a pattern most texts contain), so it is served
+/// as soon as the trigram index is valid. The same pass then owns a second index, <see cref="SampleIndexName"/> on <c>collect.query_stats
+/// (query_text_digest, collection_time DESC) WHERE query_text_digest IS NOT NULL</c>, built after the trigram index is valid and dropped with it when
+/// the option is off, which turns the probe's filtered scan of an uncompressed chunk into an index scan. <c>Ready</c> is the trigram index valid; the
+/// health read carries the sample index's own state beside it. Measured on TimescaleDB 2.30.1 (40 servers, 3.0 M rows over four days, 300,000 texts,
+/// the older half of the window compressed the way the product runs it): a pattern matching one text took 0.73 s cold through the join, 0.33 s
+/// through the probe with no sample index, and 0.11 s with it, where the uncompressed chunks cost 0.02 ms each and the compressed chunks' decompression
+/// is what remains; a pattern a third of the texts contain stays at about 2 s through the join, with or without the index. A compressed chunk keeps no
+/// rows in the index, and the probe applies the digest's per-batch min/max metadata there instead, which skips nothing when the batch spans the digest's
+/// whole range, so each compressed chunk is still decompressed once per read.
+/// <c>query_stats</c> is a hypertable on a TimescaleDB store, which refuses <c>CREATE INDEX CONCURRENTLY</c> and <c>DROP INDEX CONCURRENTLY</c>,
+/// so there the build is <c>WITH (timescaledb.transaction_per_chunk)</c>, which takes a ShareLock on one chunk at a time for that chunk's scan
+/// and none on the root (measured on TimescaleDB 2.30.1: an insert into the newest chunk during the build of an older one waited 58 ms, against
+/// 0.7 s behind a plain build of the same index), and the drop is a plain <c>DROP INDEX</c>, which is a catalog change (14 ms on the seeded store).
+/// A build that stops part way leaves the parent INVALID, which the next pass drops and rebuilds, as it does a trigram leftover. On a plain PostgreSQL
+/// store both are <c>CONCURRENTLY</c>, as the trigram index's are.</para>
 /// </summary>
 public static class QueryTextTrigramIndex
 {
@@ -227,6 +268,15 @@ public static class QueryTextTrigramIndex
 
     /// <summary>The index's schema-qualified name.</summary>
     public const string IndexName = "collect.ix_query_text_dim_trgm";
+
+    /// <summary>#7849: the table the sample index is on.</summary>
+    public const string SampleTableName = "collect.query_stats";
+
+    /// <summary>#7849: the sample index's bare name, which a hypertable's chunk indexes carry as their suffix.</summary>
+    public const string SampleIndexBareName = "ix_query_stats_text_digest";
+
+    /// <summary>#7849: the sample index's schema-qualified name.</summary>
+    public const string SampleIndexName = "collect." + SampleIndexBareName;
 
     /// <summary>The statement an operator runs when the store login cannot create the extension.</summary>
     public const string OperatorStatement = "CREATE EXTENSION IF NOT EXISTS pg_trgm;";
@@ -251,7 +301,9 @@ public static class QueryTextTrigramIndex
         return wait > BackoffCap || wait < TimeSpan.Zero ? BackoffCap : wait;
     }
 
-    /// <summary>One catalog read: the table, the index, the extension and any build in progress. No parameters.</summary>
+    /// <summary>One catalog read: the table, the index, the extension and any build in progress, and the sample index (#7849). The sample index's
+    /// size sums the parent and the chunk indexes (a hypertable's parent index is an 8 KB shell), and a build on any chunk counts as a build on the
+    /// table, because a per-chunk build reports the chunk's relid. No parameters.</summary>
     internal const string StateSql = $@"
 SELECT to_regclass('{TableName}') IS NOT NULL AS table_exists,
        i.indisvalid,
@@ -260,14 +312,43 @@ SELECT to_regclass('{TableName}') IS NOT NULL AS table_exists,
        EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'pg_trgm') AS extension_available,
        EXISTS (SELECT 1 FROM pg_stat_progress_create_index AS p
                WHERE p.relid = to_regclass('{TableName}')
-               AND   p.datid = (SELECT oid FROM pg_database WHERE datname = current_database())) AS build_running
+               AND   p.datid = (SELECT oid FROM pg_database WHERE datname = current_database())) AS build_running,
+       si.indisvalid AS sample_index_valid,
+       CASE WHEN si.indexrelid IS NULL THEN NULL
+            ELSE pg_relation_size(si.indexrelid)
+                 + COALESCE((SELECT sum(pg_relation_size(ci.indexrelid))
+                             FROM pg_index AS ci
+                             JOIN pg_class AS cc ON cc.oid = ci.indexrelid
+                             WHERE ci.indrelid IN (SELECT h.inhrelid FROM pg_inherits AS h WHERE h.inhparent = to_regclass('{SampleTableName}'))
+                             AND   cc.relname LIKE '%\_{SampleIndexBareName}'), 0)
+       END AS sample_index_size_bytes,
+       EXISTS (SELECT 1 FROM pg_stat_progress_create_index AS p
+               WHERE (p.relid = to_regclass('{SampleTableName}')
+                      OR p.relid IN (SELECT h.inhrelid FROM pg_inherits AS h WHERE h.inhparent = to_regclass('{SampleTableName}')))
+               AND   p.datid = (SELECT oid FROM pg_database WHERE datname = current_database())) AS sample_build_running
 FROM (SELECT 1) AS one
 LEFT JOIN pg_index AS i ON i.indexrelid = to_regclass('{IndexName}')
+LEFT JOIN pg_index AS si ON si.indexrelid = to_regclass('{SampleIndexName}')
 LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.oid = e.extnamespace WHERE e.extname = 'pg_trgm') AS ext ON true";
 
     internal const string CreateExtensionSql = "CREATE EXTENSION IF NOT EXISTS pg_trgm";
 
     internal const string DropSql = "DROP INDEX CONCURRENTLY IF EXISTS " + IndexName;
+
+    /// <summary>#7849: the sample index's build. On a hypertable the per-chunk form, because TimescaleDB refuses <c>CONCURRENTLY</c> there and a plain
+    /// build holds a ShareLock on the root and every chunk for its whole length; on a plain table <c>CONCURRENTLY</c>, as the trigram index's build is.
+    /// Partial on <c>query_text_digest IS NOT NULL</c>: the join's equality is strict, so the planner proves the predicate from it, and a row with no
+    /// digest can never be a hit.</summary>
+    internal static string CreateSampleIndexSql(bool hypertable) =>
+        "CREATE INDEX " + (hypertable ? "" : "CONCURRENTLY ") + "IF NOT EXISTS " + SampleIndexBareName
+        + " ON " + SampleTableName + " (query_text_digest, collection_time DESC)"
+        + (hypertable ? " WITH (timescaledb.transaction_per_chunk)" : "")
+        + " WHERE query_text_digest IS NOT NULL";
+
+    /// <summary>#7849: the sample index's drop. A hypertable index refuses <c>DROP INDEX CONCURRENTLY</c> (it is several objects), so there the drop is
+    /// plain, which is a catalog change (14 ms on a seeded large store).</summary>
+    internal static string DropSampleIndexSql(bool hypertable) =>
+        "DROP INDEX " + (hypertable ? "" : "CONCURRENTLY ") + "IF EXISTS " + SampleIndexName;
 
     /// <summary>The build, with the operator class named in the schema the extension lives in (it is not always on the search path).</summary>
     internal static string CreateIndexSql(string extensionSchema) =>
@@ -295,7 +376,10 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
             reader.IsDBNull(2) ? null : reader.GetInt64(2),
             reader.IsDBNull(3) ? null : reader.GetString(3),
             reader.GetBoolean(4),
-            reader.GetBoolean(5));
+            reader.GetBoolean(5),
+            reader.IsDBNull(6) ? null : reader.GetBoolean(6),
+            reader.IsDBNull(7) ? null : reader.GetInt64(7),
+            reader.GetBoolean(8));
     }
 
     /// <summary>
@@ -332,19 +416,28 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
         var snapshot = tracker.Read();
         if (!enabled)
         {
-            if (state.IndexValid is null)
+            if (state.IndexValid is null && state.SampleIndexValid is null)
             {
                 return true;
             }
 
-            await DropAsync(connection, tracker, logger, "the option is off", cancellationToken).ConfigureAwait(false);
+            if (state.IndexValid is not null)
+            {
+                await DropAsync(connection, tracker, logger, "the option is off", cancellationToken).ConfigureAwait(false);
+            }
+
+            if (state.SampleIndexValid is not null && !state.SampleBuildRunning)
+            {
+                await DropSampleAsync(connection, tracker, logger, "the option is off", cancellationToken).ConfigureAwait(false);
+            }
+
             return false;
         }
 
         if (state.IndexValid == true)
         {
-            tracker.Succeeded();
             tracker.ClearExtensionBlock();
+            await EnsureSampleIndexAsync(postgres, connection, state, tracker, utcNow, logger, buildTimeoutSeconds, cancellationToken).ConfigureAwait(false);
             return false;
         }
 
@@ -395,11 +488,13 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
 
         tracker.BeginBuild(utcNow);
         var started = System.Diagnostics.Stopwatch.StartNew();
+        var built = false;
         try
         {
             await using var build = new NpgsqlCommand(CreateIndexSql(extensionSchema), connection) { CommandTimeout = buildTimeoutSeconds };
             await build.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             tracker.Succeeded();
+            built = true;
             logger.LogInformation("Trigram index {Index} built in {Seconds:F1}s (valid).", IndexName, started.Elapsed.TotalSeconds);
         }
         catch (OperationCanceledException)
@@ -421,7 +516,110 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
             tracker.EndPhase();
         }
 
+        if (built)
+        {
+            /* The same pass goes on to the sample index, so one pass takes a fresh store from nothing to Ready. */
+            state = await ReadStateAsync(connection, cancellationToken).ConfigureAwait(false);
+            await EnsureSampleIndexAsync(postgres, connection, state, tracker, utcNow, logger, buildTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+        }
+
         return false;
+    }
+
+    /// <summary>
+    /// #7849: the sample index on <see cref="SampleTableName"/>, once the trigram index is valid. Valid, nothing (and the tracker's failure record is
+    /// cleared, so the health read says <c>Ready</c>); a build running in another backend, nothing; inside the wait after a failed build, nothing; an
+    /// INVALID leftover (a per-chunk build that stopped part way, or an interrupted <c>CONCURRENTLY</c> build), dropped first; then the build, with the
+    /// form the table calls for (<see cref="CreateSampleIndexSql"/>). A failed build is recorded on the tracker with the same backoff as a failed
+    /// trigram build, and its leftover is dropped at once.
+    /// </summary>
+    private static async Task EnsureSampleIndexAsync(
+        NpgsqlDataSource postgres, NpgsqlConnection connection, TrigramCatalogState state, QueryTextTrigramIndexTracker tracker, DateTime utcNow,
+        ILogger logger, int buildTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        if (state.SampleIndexValid == true)
+        {
+            tracker.Succeeded();
+            return;
+        }
+
+        if (state.SampleBuildRunning)
+        {
+            logger.LogDebug("Sample index pass skipped: an index build on {Table} is already running.", SampleTableName);
+            return;
+        }
+
+        var snapshot = tracker.Read();
+        if (snapshot.NextAttemptUtc is { } next && utcNow < next)
+        {
+            logger.LogDebug("Sample index build waits until {Next:o} after {Failures} failed attempt(s).", next, snapshot.Failures);
+            return;
+        }
+
+        var hypertable = await QueryStoreBackgroundIndexes.IsHypertableAsync(connection, SampleTableName, cancellationToken).ConfigureAwait(false);
+        if (state.SampleIndexValid == false)
+        {
+            logger.LogWarning("Sample index {Index} exists but is INVALID (an interrupted build); dropping it and rebuilding.", SampleIndexName);
+            await DropSampleAsync(connection, tracker, logger, "an INVALID leftover", cancellationToken, hypertable).ConfigureAwait(false);
+        }
+
+        tracker.BeginSampleBuild(utcNow);
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            await using var build = new NpgsqlCommand(CreateSampleIndexSql(hypertable), connection) { CommandTimeout = buildTimeoutSeconds };
+            await build.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            tracker.Succeeded();
+            logger.LogInformation("Sample index {Index} built in {Seconds:F1}s (valid).", SampleIndexName, started.Elapsed.TotalSeconds);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            var wait = Backoff(tracker.Read().Failures + 1);
+            tracker.Failed(ex, utcNow, wait);
+            logger.LogWarning(
+                "Sample index {Index} build failed after {Seconds:F1}s and is tried again after {Wait}: {Message}",
+                SampleIndexName, started.Elapsed.TotalSeconds, wait, ErrorText(ex));
+            await DropSampleLeftoverAfterFailureAsync(postgres, logger, hypertable, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            tracker.EndPhase();
+        }
+    }
+
+    private static async Task DropSampleAsync(
+        NpgsqlConnection connection, QueryTextTrigramIndexTracker tracker, ILogger logger, string reason, CancellationToken cancellationToken, bool? hypertable = null)
+    {
+        hypertable ??= await QueryStoreBackgroundIndexes.IsHypertableAsync(connection, SampleTableName, cancellationToken).ConfigureAwait(false);
+        tracker.BeginDrop();
+        try
+        {
+            await using var drop = new NpgsqlCommand(DropSampleIndexSql(hypertable.Value), connection) { CommandTimeout = QueryStoreBackgroundIndexes.BuildTimeoutSeconds };
+            await drop.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            logger.LogInformation("Sample index {Index} dropped ({Reason}).", SampleIndexName, reason);
+        }
+        finally
+        {
+            tracker.EndPhase();
+        }
+    }
+
+    private static async Task DropSampleLeftoverAfterFailureAsync(NpgsqlDataSource postgres, ILogger logger, bool hypertable, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using var drop = new NpgsqlCommand(DropSampleIndexSql(hypertable), connection) { CommandTimeout = QueryStoreBackgroundIndexes.BuildTimeoutSeconds };
+            await drop.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogDebug("Dropping the failed sample index build's leftover did not finish ({Message}); the next attempt drops it first.", ErrorText(ex));
+        }
     }
 
     private static async Task DropAsync(
@@ -504,7 +702,8 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
             return TrigramIndexStatus.Unconfigured;
         }
 
-        var exists = state.IndexValid is not null;
+        /* #7849: the sample index is part of the same state. Either index present means there is something to drop. */
+        var exists = state.IndexValid is not null || state.SampleIndexValid is not null;
         if (!snapshot.Enabled)
         {
             if (!exists)
@@ -515,14 +714,17 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
             return snapshot.Phase == QueryTextTrigramIndexTracker.PhaseKind.Dropping ? TrigramIndexStatus.Dropping : TrigramIndexStatus.DropPending;
         }
 
-        if (snapshot.Phase == QueryTextTrigramIndexTracker.PhaseKind.Building || state.BuildRunning)
-        {
-            return TrigramIndexStatus.Building;
-        }
-
+        /* #7849: Ready is the trigram index valid. The sample index on query_stats is an accelerator for the all-servers sample read, which is served
+           without it (the matched digests are bound to the read), so its build or absence never takes the search away; its own state is in the health's
+           sample fields and in the note. */
         if (state.IndexValid == true)
         {
             return TrigramIndexStatus.Ready;
+        }
+
+        if (snapshot.Phase == QueryTextTrigramIndexTracker.PhaseKind.Building || state.BuildRunning)
+        {
+            return TrigramIndexStatus.Building;
         }
 
         if (snapshot.ExtensionBlocked && state.ExtensionSchema is null)
@@ -555,7 +757,10 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
             snapshot.LastSqlState,
             snapshot.LastFailedUtc,
             snapshot.NextAttemptUtc,
-            status == TrigramIndexStatus.WaitingOnExtension ? OperatorStatement : null);
+            status == TrigramIndexStatus.WaitingOnExtension ? OperatorStatement : null,
+            state.SampleIndexValid is not null,
+            state.SampleIndexValid,
+            state.SampleIndexSizeBytes);
     }
 
     /// <summary>One sentence for the health block's note, per status.</summary>
@@ -563,14 +768,22 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     {
         ArgumentNullException.ThrowIfNull(health);
         var size = health.SizeBytes is { } bytes ? (bytes / 1048576.0).ToString("F1", CultureInfo.InvariantCulture) + " MB" : "no size";
+        var sampleSize = health.SampleIndexSizeBytes is { } sampleBytes ? (sampleBytes / 1048576.0).ToString("F1", CultureInfo.InvariantCulture) + " MB" : "no size";
         return health.Status switch
         {
-            TrigramIndexStatus.Off => "The option queryTextTrigramIndexEnabled is off and there is no trigram index on the plan-cache text.",
-            TrigramIndexStatus.DropPending => "The option queryTextTrigramIndexEnabled is off. The index still exists and the service drops it on its next pass.",
+            TrigramIndexStatus.Off => "The option queryTextTrigramIndexEnabled is off and there is no trigram index on the plan-cache text, and no sample index on query_stats.",
+            TrigramIndexStatus.DropPending => "The option queryTextTrigramIndexEnabled is off. An index still exists and the service drops it on its next pass.",
             TrigramIndexStatus.Dropping => "The option queryTextTrigramIndexEnabled is off. The service is dropping the index now.",
-            TrigramIndexStatus.Pending => "The option is on and the index does not exist yet. The service builds it in the background after startup, and an INVALID leftover is dropped first.",
-            TrigramIndexStatus.Building => "A build is running. Collection is not waiting for it. The size is what has been written so far (" + size + ").",
-            TrigramIndexStatus.Ready => "The trigram index exists and is valid (" + size + ").",
+            TrigramIndexStatus.Pending => "The option is on and the index does not exist yet. The service builds it in the background after startup, and an INVALID leftover is dropped first. The sample index on query_stats follows it.",
+            TrigramIndexStatus.Building => "A build is running. Collection is not waiting for it. The size is what has been written so far (trigram index " + size + ", sample index " + sampleSize + ").",
+            TrigramIndexStatus.Ready => "The trigram index exists and is valid (" + size + ")" + health.SampleIndexValid switch
+            {
+                true => ", and so does the sample index on query_stats (" + sampleSize + "), which the all-servers search reads the matched texts' samples through.",
+                false => ". The sample index on query_stats is INVALID (an interrupted build): the service drops it and builds it again, and until then the all-servers search reads the samples by the matched digests without it.",
+                null => ". The sample index on query_stats does not exist yet: the service builds it in the background"
+                    + (health.LastError is not null ? ", trying again at next_attempt_at after a failed build" : "")
+                    + ", and until then the all-servers search reads the samples by the matched digests without it.",
+            },
             TrigramIndexStatus.Unconfigured => "The service has not read darling.json yet, so the option queryTextTrigramIndexEnabled is not known. Try again in a moment.",
             TrigramIndexStatus.Failed => "The last build failed. Its leftover was dropped and the service tries again at next_attempt_at, after a wait that doubles to a cap of "
                 + ((int)BackoffCap.TotalHours).ToString(CultureInfo.InvariantCulture) + " hours.",
