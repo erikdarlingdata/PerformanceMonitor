@@ -314,9 +314,13 @@ function drawList(state) {
     .filter((h) => h !== null)
     .map((h) => el("th", { text: h }));
   const rows = state.rules.map((r) => ruleRow(r, state.canEdit));
-  mount(state.listBox, el("table", { class: "data mute-rules" }, [
-    el("thead", {}, [el("tr", {}, head)]),
-    el("tbody", {}, rows),
+  /* #8082: #main clips sideways and the page never scrolls, so a bare table with a long Scope or Reason cell runs past the right edge with Expires, Created
+     and the action cell out of reach. In a .table-wrap it scrolls inside its own box, as every other grid does. */
+  mount(state.listBox, el("div", { class: "table-wrap" }, [
+    el("table", { class: "data mute-rules" }, [
+      el("thead", {}, [el("tr", {}, head)]),
+      el("tbody", {}, rows),
+    ]),
   ]));
 }
 
