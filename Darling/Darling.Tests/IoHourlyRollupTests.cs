@@ -101,14 +101,17 @@ public sealed class IoHourlyRollupRegistrationTests
         Assert.True(TimescaleSupport.IsUnboundedCardinalityRefresh(TimescaleSupport.QueryStatsIoHourlyView));
         Assert.False(TimescaleSupport.IsUnboundedCardinalityRefresh(TimescaleSupport.ProcedureStatsIoHourlyView));
 
-        /* band index 12 of 0-13: the 4th unbounded member takes 3 * 4 */
-        Assert.Equal(12, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.QueryStatsIoHourlyView));
+        /* band index 11 of 0-12: the third unbounded LIGHT member (the corrected Query Store hourly is unbounded
+           but on the hour's tail, #8053) takes 3 + 2 * 4 */
+        Assert.Equal(11, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.QueryStatsIoHourlyView));
         Assert.Equal(
             4,
             TimescaleSupport.HourlyRefreshPhaseOrder.Count(v =>
                 v != TimescaleSupport.HeaviestHourlyRefreshView && TimescaleSupport.IsUnboundedCardinalityRefresh(v)));
-        Assert.True(TimescaleSupport.LightBandHoldsUnboundedRefreshCount(4));
-        Assert.False(TimescaleSupport.LightBandHoldsUnboundedRefreshCount(5));
+        /* The band separates its three unbounded LIGHT members (the corrected hourly is on the tail) and has no room
+           for a fourth at position 3 + 3 * 4 = 15 of 0-12. */
+        Assert.True(TimescaleSupport.LightBandHoldsUnboundedRefreshCount(3));
+        Assert.False(TimescaleSupport.LightBandHoldsUnboundedRefreshCount(4));
 
         /* compression: 22 of the 23 hours; appending moved the daily and baseline members by +2 */
         Assert.Equal(22, TimescaleSupport.AggregateCompressionTargets.Count);
