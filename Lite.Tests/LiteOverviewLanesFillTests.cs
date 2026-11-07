@@ -40,7 +40,7 @@ public sealed class LiteOverviewLanesFillTests
     /// <summary>The most the last lane may hold under its plot: its X labels (a line of text plus tick marks) and a hair of margin.</summary>
     private const double MaxBelowLastLane = 40;
 
-    private sealed record Lane(int Index, Rect Chart, ScottPlot.PixelRect Data, float BottomPanel, bool TickLabelsOn, int CaptionsInTopLeft);
+    private sealed record Lane(int Index, Rect Chart, ScottPlot.PixelRect Data, float BottomPanel, bool TickLabelsOn, int CaptionsInTopLeft, double CaptionClearance);
 
     private static List<(double Time, double Value)> Series(DateTime from, DateTime to, double lo, double hi) =>
         Enumerable.Range(0, 96).Select(i => (from.AddTicks((to - from).Ticks * i / 95).ToOADate(), lo + (hi - lo) * (i % 12) / 11.0)).ToList();
@@ -111,8 +111,13 @@ public sealed class LiteOverviewLanesFillTests
                         // A caption belongs to the lane when it sits inside the lane's top left corner, over the plot.
                         var inCorner = captions.Count(c => c.Left >= bounds.Left - 1 && c.Left <= bounds.Left + 90
                             && c.Top >= bounds.Top - 1 && c.Top <= bounds.Top + 24);
+                        // How far past the plot's left edge (the end of the Y labels) the lane's caption starts. The plot rectangle is in
+                        // the same units as the layout (ScottPlot reports layout units, not device pixels).
+                        var clearance = captions.Where(c => c.Left >= bounds.Left - 1 && c.Left <= bounds.Left + 290
+                                && c.Top >= bounds.Top - 1 && c.Top <= bounds.Top + 24)
+                            .Select(c => c.Left - (bounds.Left + last.DataRect.Left)).DefaultIfEmpty(double.NaN).Min();
                         return new Lane(i, bounds, last.DataRect, last.Layout.PanelSizes[chart.Plot.Axes.Bottom],
-                            chart.Plot.Axes.Bottom.TickLabelStyle.IsVisible, inCorner);
+                            chart.Plot.Axes.Bottom.TickLabelStyle.IsVisible, inCorner, clearance);
                     }).ToList();
                 }
                 finally
@@ -173,6 +178,19 @@ public sealed class LiteOverviewLanesFillTests
         // No gutter: the plots start where the control starts (its own 8 px margin), not 100 px in.
         Assert.All(lanes, l => Assert.True(l.Chart.Left <= 12, $"lane {l.Index} starts {l.Chart.Left:0.#} px from the left edge"));
         Assert.All(lanes, l => Assert.True(l.CaptionsInTopLeft == 1, $"lane {l.Index} has {l.CaptionsInTopLeft} captions in its top left corner"));
+    }
+
+    /// <summary>
+    /// A caption sits past the end of its lane's Y labels, never over them. The labels' width is measured in the shared gutter pass, but
+    /// at a display scale above 100% the lane renders wider than that pass measured, so a caption placed from the measurement alone lands on
+    /// the top Y label ("CPU %" over "100"). The caption follows the plot's rendered left edge.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(Windows))]
+    public void EachLaneCaption_StartsPastItsLanesYLabels(int width, int height)
+    {
+        var lanes = Measure(width, height);
+        Assert.All(lanes, l => Assert.True(l.CaptionClearance >= -0.5, $"lane {l.Index} caption starts {l.CaptionClearance:0.#} px from the plot's left edge"));
     }
 
     [Theory]

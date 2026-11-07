@@ -645,7 +645,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
            once at Initialize: ClearChart() calls WpfPlot.Reset(), which swaps in a fresh Plot and takes
            any axis floor with it. */
         var gutter = LaneAxisAligner.AlignLeftGutters(charts);
-        PlaceCaptions(gutter / CpuChart.DisplayScale);
+        PlaceCaptions(gutter);
 
         foreach (var chart in charts)
             chart.Refresh();
@@ -718,7 +718,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     /// <summary>
     /// #8162: each lane's label is a caption at the top left of its lane, over the plot and clear of the Y tick labels, so the
     /// lanes need no gutter of their own. The tick labels' width is the lanes' shared left gutter (<paramref name="gutter"/>, in
-    /// device-independent pixels), and the caption starts just past it.
+    /// the same units the layout uses: at a display scale above 100% it is not a device pixel count, and dividing it by the scale put "CPU %" over the top Y label), and the caption starts just past it.
     /// </summary>
     private void PlaceCaptions(double gutter)
     {
