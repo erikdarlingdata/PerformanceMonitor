@@ -58,12 +58,20 @@ public sealed class DurationTrendExecutionCountLiveTests
                 The store's first collection keeps its stored interval and the second is rated over its gap, so both are
                 rated at 2/sec. One 60-minute bucket holds both: its rate is 1,200 over 600 s (2/sec) and its count is the
                 1,200 executions that ran, not the rate truncated to an integer (2).
+
+                Buckets are aligned to the clock, not to the window, so the window is anchored with as_of at the end of
+                the previous clock hour and the collections sit at :10 and :15 of that hour: one aligned bucket holds both
+                whatever the wall clock reads. Anchored at now, a run a few minutes past the hour would put the two
+                collections either side of the hour boundary and read two points.
             */
-            await SeedQueryAsync(connection, ct, MinutesAgo(15), executions: 600, elapsedUs: 300_000, intervalSeconds: 300);
-            await SeedQueryAsync(connection, ct, MinutesAgo(10), executions: 600, elapsedUs: 300_000, intervalSeconds: 300);
+            var hour = DateTime.UtcNow.AddHours(-1);
+            hour = new DateTime(hour.Year, hour.Month, hour.Day, hour.Hour, 0, 0, DateTimeKind.Utc);
+            var asOf = hour.AddMinutes(59).ToString("o");
+            await SeedQueryAsync(connection, ct, hour.AddMinutes(10), executions: 600, elapsedUs: 300_000, intervalSeconds: 300);
+            await SeedQueryAsync(connection, ct, hour.AddMinutes(15), executions: 600, elapsedUs: 300_000, intervalSeconds: 300);
 
             var queries = JsonDocument.Parse(
-                await DarlingMcpTrendTools.GetQueryDurationTrend(postgres, ServerName, hours_back: 1, bucket_minutes: 60)).RootElement;
+                await DarlingMcpTrendTools.GetQueryDurationTrend(postgres, ServerName, hours_back: 1, as_of: asOf, bucket_minutes: 60)).RootElement;
             Assert.Equal("raw", queries.GetProperty("source").GetString());
             var queryTrend = queries.GetProperty("trend");
             Assert.Equal(1, queryTrend.GetArrayLength());
@@ -72,11 +80,11 @@ public sealed class DurationTrendExecutionCountLiveTests
             Assert.Equal(1200, queryTrend[0].GetProperty("execution_count").GetInt64());
 
             /* ── procedure_stats: the same two collections through the procedure sibling ── */
-            await SeedProcedureAsync(connection, ct, MinutesAgo(15), executions: 600, elapsedUs: 300_000, intervalSeconds: 300);
-            await SeedProcedureAsync(connection, ct, MinutesAgo(10), executions: 600, elapsedUs: 300_000, intervalSeconds: 300);
+            await SeedProcedureAsync(connection, ct, hour.AddMinutes(10), executions: 600, elapsedUs: 300_000, intervalSeconds: 300);
+            await SeedProcedureAsync(connection, ct, hour.AddMinutes(15), executions: 600, elapsedUs: 300_000, intervalSeconds: 300);
 
             var procedures = JsonDocument.Parse(
-                await DarlingMcpTrendTools.GetProcedureDurationTrend(postgres, ServerName, hours_back: 1, bucket_minutes: 60)).RootElement;
+                await DarlingMcpTrendTools.GetProcedureDurationTrend(postgres, ServerName, hours_back: 1, as_of: asOf, bucket_minutes: 60)).RootElement;
             Assert.Equal("raw", procedures.GetProperty("source").GetString());
             var procedureTrend = procedures.GetProperty("trend");
             Assert.Equal(1, procedureTrend.GetArrayLength());
