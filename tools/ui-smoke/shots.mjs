@@ -20,6 +20,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PNG } from "pngjs";
 import pixelmatch from "pixelmatch";
+import { judgeFleetStale } from "./fleet-stale.mjs";
 
 export const FIXED_ANCHOR_MS = Date.UTC(2026, 2, 15, 12, 0, 0);
 const AS_OF_AFTER_ANCHOR_MS = 60000;
@@ -155,12 +156,9 @@ export async function runShots({ config, baseUrl, outDir, only, settle }) {
 
   /* The service marks a server it cannot reach "collection stale" some minutes after it started, on its own clock: a page shot before
      that shows "Online", one shot after shows "Warning" (the red-proof run caught this, #5744). Wait until /api/fleet says every
-     card is stale, so every run photographs the same state.
-     "Stale" is a BAND, not a threshold: it opens 2 minutes after a server's last collection and closes at 30 (ServerHealthBands.cs,
-     where the card turns Offline and is_online goes false). So the wait has two ways to fail, and each names its own cause: the cards
-     are already past the band (the seed anchor aged past 30 minutes before the shots started), or they never reached it. The anchor
-     is a minute old when this starts and the band opens at 2 minutes, so a real run is stale within a minute or two; the deadline is
-     a few minutes, well inside the job's timeout-minutes. */
+     card is stale, so every run photographs the same state. The decision on each answer is judgeFleetStale (fleet-stale.mjs), which
+     names each way the wait can fail. The anchor is a minute old when this starts and the band opens at 2 minutes, so a real run is
+     stale within a minute or two; the deadline is a few minutes, well inside the job's timeout-minutes. */
   const staleStarted = Date.now();
   const staleDeadline = staleStarted + STALE_WAIT_MS;
   let seen = "no answer from /api/fleet";
@@ -169,17 +167,13 @@ export async function runShots({ config, baseUrl, outDir, only, settle }) {
       /* The signed-in session, like the browser pages: a bare fetch is refused with 401 now that the dashboard asks for its token. */
       const cookie = process.env.UI_SMOKE_SESSION_COOKIE ? { Cookie: "darling_web_session=" + process.env.UI_SMOKE_SESSION_COOKIE } : {};
       const fleet = await (await fetch(baseUrl + "/api/fleet", { headers: cookie })).json();
-      const cards = fleet.cards || [];
-      const stale = cards.filter((c) => c.collection_stale === true).length;
-      const offline = cards.filter((c) => c.is_online === false).length;
-      seen = `${cards.length} cards, ${stale} stale, ${offline} offline`;
-      if (cards.length > 0 && stale === cards.length) {
+      const judged = judgeFleetStale(fleet.cards || []);
+      seen = judged.seen;
+      if (judged.verdict === "ready") {
         console.log(`ok   fleet is collection stale after ${((Date.now() - staleStarted) / 1000).toFixed(0)}s of waiting (${seen})`);
         break;
       }
-      if (offline > 0) {
-        return { problems: [`screenshots: the fleet is already past collection stale (${seen}); a card reads Offline either 30 minutes after the seed anchor (the run took too long: shorten it or re-seed) or from the first poll when seed.sql wrote it no collection_log row (#7569).`], shots: [] };
-      }
+      if (judged.verdict === "problem") return { problems: [judged.problem], shots: [] };
     } catch {
       /* the service answers again on the next poll */
     }
