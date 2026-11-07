@@ -1432,9 +1432,17 @@ internal static class DarlingDataReader
                 COUNT(DISTINCT query_text_digest) AS distinct_texts,
                 /* #2235: the fragment count IS the finding — 21 here is why a per-hash ranking missed it. */
                 COUNT(DISTINCT query_hash) AS distinct_query_hashes,
+                /* #8138: the group's newest text-bearing row, picked in this pass over the winners' rows so latest_text
+                   below is a lookup on the capped rows and not a third read of the window: the same byte-key MAX as
+                   TopQueriesSql's pass 2 (collection time, collection id, then a flag byte and the inline text or the
+                   digest; see its note). This pass groups by the lens's key, so a proc-hosted group's pick is the newest
+                   text of ANY of its fragments and an ad-hoc group's the newest of its own hash, as the lookup chose. */
+                MAX(timestamp_send(q.collection_time) || int8send(q.collection_id)
+                    || CASE WHEN q.query_text IS NOT NULL THEN '\x00'::bytea || convert_to(q.query_text, 'UTF8') ELSE '\x01'::bytea || q.query_text_digest END)
+                    FILTER (WHERE q.query_text IS NOT NULL OR q.query_text_digest IS NOT NULL) AS latest_text_key,
                 MAX(w.rank_metric) AS rank_metric,
                 MAX(w.rank_cpu) AS rank_cpu
-            FROM query_stats
+            FROM query_stats AS q
             JOIN winners AS w
                 ON  COALESCE(host_object_name, '') = COALESCE(w.win_host_object_name, '')
                 AND COALESCE(CASE WHEN host_object_name IS NULL THEN query_hash END, '') = COALESCE(w.win_group_hash, '')
@@ -1451,36 +1459,19 @@ internal static class DarlingDataReader
                      CASE WHEN host_object_name IS NULL THEN query_hash END
         ),
         latest_text AS MATERIALIZED (
-            /* #5309: one lookup for every ranked group - see TopQueriesSql. The key is the grouping key: a
-               proc-hosted group takes the newest text of ANY of its fragments (host object, no hash), an
-               ad-hoc group the newest text of its OWN hash, exactly the old per-row predicate. */
+            /* #5309, #8138: the representative text of EVERY ranked group, resolved for the capped rows only, as in
+               TopQueriesSql. Pass 2 carries each group's newest text-bearing row (latest_text_key: 8 bytes of time, 8 of
+               collection id, a flag byte at offset 16, then the payload from byte 18), so this reads at most $7 rows and
+               the dimension: the inline text when that row has one (flag 0x00), else its digest (flag 0x01) resolved from
+               query_text_dim. The key is the grouping key: a proc-hosted group carries its host object and a NULL group
+               hash, an ad-hoc group its own hash, so the page's NULL-safe join below finds each. */
             SELECT
-                l.database_name,
-                l.host_object_name,
-                l.group_hash,
-                COALESCE(l.query_text, d.query_text) AS query_text
-            FROM
-            (
-                SELECT DISTINCT ON (q.database_name, q.host_object_name, CASE WHEN q.host_object_name IS NULL THEN q.query_hash END)
-                    q.database_name,
-                    q.host_object_name,
-                    CASE WHEN q.host_object_name IS NULL THEN q.query_hash END AS group_hash,
-                    q.query_text,
-                    q.query_text_digest
-                FROM query_stats AS q
-                JOIN winners AS w
-                    ON  COALESCE(q.host_object_name, '') = COALESCE(w.win_host_object_name, '')
-                    AND COALESCE(CASE WHEN q.host_object_name IS NULL THEN q.query_hash END, '') = COALESCE(w.win_group_hash, '')
-                    AND q.database_name IS NOT DISTINCT FROM w.win_database_name
-                    AND q.host_object_name IS NOT DISTINCT FROM w.win_host_object_name
-                    AND CASE WHEN q.host_object_name IS NULL THEN q.query_hash END IS NOT DISTINCT FROM w.win_group_hash
-                WHERE q.server_id = $1
-                AND   q.collection_time >= $2
-                AND   q.collection_time <= $3
-                AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
-                ORDER BY q.database_name, q.host_object_name, CASE WHEN q.host_object_name IS NULL THEN q.query_hash END, q.collection_time DESC, q.collection_id DESC
-            ) AS l
-            LEFT JOIN query_text_dim AS d ON d.digest = l.query_text_digest
+                k.database_name,
+                k.host_object_name,
+                CASE WHEN k.host_object_name IS NULL THEN k.query_hash END AS group_hash,
+                COALESCE(CASE WHEN get_byte(k.latest_text_key, 16) = 0 THEN convert_from(substring(k.latest_text_key FROM 18), 'UTF8') END, d.query_text) AS query_text
+            FROM ranked AS k
+            LEFT JOIN query_text_dim AS d ON d.digest = CASE WHEN get_byte(k.latest_text_key, 16) = 1 THEN substring(k.latest_text_key FROM 18) END
         ),
         page AS (
         SELECT
