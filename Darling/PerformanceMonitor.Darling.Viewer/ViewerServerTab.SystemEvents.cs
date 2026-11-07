@@ -306,7 +306,7 @@ public partial class ViewerServerTab
         try
         {
             await LoadSystemEventsAsync();
-            StatusChanged?.Invoke($"{_server.DisplayName} — refreshed {DateTime.Now:HH:mm:ss}");
+            StatusChanged?.Invoke($"{_server.DisplayName} — refreshed {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {
