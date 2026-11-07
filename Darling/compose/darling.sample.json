@@ -7,7 +7,7 @@
   "servers": [
     {
       "host": "your-sql-server.example.com,1433",
-      "displayName": "prod-sql-01",
+      "name": "prod-sql-01",
       "auth": "sql",
       "username": "DarlingMonitor",
       "password": "file:/run/secrets/sql_password",
