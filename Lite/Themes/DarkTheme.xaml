@@ -77,6 +77,10 @@
     <SolidColorBrush x:Key="BorderLightBrush" Color="{StaticResource BorderLightColor}"/>
     <!-- #7218: the Availability Groups cards draw their outline from this key. Same value as the Darling Viewer dark theme. -->
     <SolidColorBrush x:Key="CardBorderBrush" Color="#3A3D45"/>
+    <!-- #8221: the outline of a button, a text box and a combo box, and the track a bar sits on. 3:1 or better against the page and the card
+         on the two light themes, where the pale BorderBrush (a grid line) left them looking like no control at all. -->
+    <SolidColorBrush x:Key="ControlBorderBrush" Color="#3A3D45"/>
+    <SolidColorBrush x:Key="BarTrackBrush" Color="#1AFFFFFF"/>
 
     <SolidColorBrush x:Key="SuccessBrush" Color="{StaticResource SuccessColor}"/>
     <SolidColorBrush x:Key="WarningBrush" Color="{StaticResource WarningColor}"/>
@@ -624,6 +628,12 @@
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
+    </Style>
+
+    <!-- #8221: the server pickers name each item by the server (a screen reader would say the model type). It lives in the theme, not in the tab,
+         because a tab's BasedOn="{StaticResource {x:Type ComboBoxItem}}" is looked up once when the tab loads and keeps the theme it loaded under. -->
+    <Style x:Key="ServerSelectorItemStyle" TargetType="ComboBoxItem" BasedOn="{StaticResource {x:Type ComboBoxItem}}">
+        <Setter Property="AutomationProperties.Name" Value="{Binding DisplayNameWithIntent, Mode=OneTime}"/>
     </Style>
 
     <!-- ============================================ -->
