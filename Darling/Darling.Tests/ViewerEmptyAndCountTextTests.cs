@@ -39,6 +39,16 @@ public sealed class ViewerEmptyAndCountTextTests
         Assert.Equal(expected, FinOpsRecommendationsCountText.For(count));
     }
 
+    [Theory]
+    [InlineData(0, "0 events")]
+    [InlineData(1, "1 event")]
+    [InlineData(2, "2 events")]
+    [InlineData(1500, "1500 events")]
+    public void ACount_ReadsAsANaturalPlural(int count, string expected)
+    {
+        Assert.Equal(expected, PerformanceMonitor.Common.CountText.Plural(count, "event"));
+    }
+
     public static IEnumerable<object[]> ThemesAndSizes()
     {
         foreach (var theme in new[] { "DarkTheme", "LightTheme", "CoolBreezeTheme" })
