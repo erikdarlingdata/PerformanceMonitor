@@ -146,11 +146,15 @@ public sealed class SlackThreadPass
     private readonly Func<string> _baseUrl;
     private readonly Func<DateTime> _utcNow;
     private readonly Func<bool> _ready;
+    private readonly Func<bool> _buttons;
 
     /// <param name="ready">Whether the bot can post now (a token is set). False leaves every row unmarked and posts nothing.</param>
+    /// <param name="buttons">Whether this store is listening (its app-level token is set), so its cards may carry buttons (#7658). A store that is
+    /// not listening posts its cards without them, since a press would reach another store's listener and be dropped, and the card points at
+    /// the web page instead. True when null.</param>
     public SlackThreadPass(ISlackThreadRowSource rows, ISlackRequestThreadStore threads, SlackThreadPoster poster, SlackPostThrottle throttle,
         Func<IReadOnlyList<NotificationRoute>> routes, ILogger logger, McpDataDetail dataDetail, Func<string> baseUrl,
-        Func<DateTime>? utcNow = null, Func<bool>? ready = null)
+        Func<DateTime>? utcNow = null, Func<bool>? ready = null, Func<bool>? buttons = null)
     {
         _rows = rows ?? throw new ArgumentNullException(nameof(rows));
         _threads = threads ?? throw new ArgumentNullException(nameof(threads));
@@ -162,6 +166,7 @@ public sealed class SlackThreadPass
         _baseUrl = baseUrl ?? throw new ArgumentNullException(nameof(baseUrl));
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
         _ready = ready ?? (() => true);
+        _buttons = buttons ?? (() => true);
     }
 
     /// <summary>One pass. Answers how many posts Slack took. Throws what the store throws.</summary>
@@ -231,7 +236,7 @@ public sealed class SlackThreadPass
             var changes = string.Equals(row.Event, "reported", StringComparison.Ordinal)
                 ? await _rows.ChangesForRequestAsync(row.RequestId, cancellationToken)
                 : [];
-            var content = Content(row, changes, _dataDetail, _baseUrl() ?? "");
+            var content = Content(row, changes, _dataDetail, _baseUrl() ?? "", _buttons());
             var outcome = await _poster.PostAsync(target, row.PostKey, content, cancellationToken);
             switch (outcome)
             {
@@ -283,8 +288,13 @@ public sealed class SlackThreadPass
         }
     }
 
-    /// <summary>PURE: the post of one journal row, at <paramref name="mode"/>. Every collected value goes through the builders' one escape.</summary>
-    internal static SlackThreadPostContent Content(SlackThreadJournalRow row, IReadOnlyList<RequestChangeRow> changes, McpDataDetail mode, string baseUrl)
+    /// <summary>PURE: the post of one journal row, at <paramref name="mode"/>, with its buttons. Every collected value goes through the builders' one escape.</summary>
+    internal static SlackThreadPostContent Content(SlackThreadJournalRow row, IReadOnlyList<RequestChangeRow> changes, McpDataDetail mode, string baseUrl) =>
+        Content(row, changes, mode, baseUrl, buttons: true);
+
+    /// <summary>PURE: the post of one journal row, at <paramref name="mode"/>. With <paramref name="buttons"/> false (this store is not listening)
+    /// a card that would carry buttons carries none and points at the web page instead.</summary>
+    internal static SlackThreadPostContent Content(SlackThreadJournalRow row, IReadOnlyList<RequestChangeRow> changes, McpDataDetail mode, string baseUrl, bool buttons)
     {
         ArgumentNullException.ThrowIfNull(row);
         var detail = ParseObject(row.DetailJson);
@@ -302,9 +312,10 @@ public sealed class SlackThreadPass
                     new ReportNoticeContent(row.RequestId, row.Verdict ?? row.Reason ?? "", row.ServerName, row.Metric, row.RootCause,
                         changes.Select(c => new ReportNoticeChange(c.Tool, InvestigationEventDelivery.ChangeObject(c.TargetId, c.Database, mode), ResultWord(c.Result))).ToList(),
                         baseUrl),
-                    mode, verdictButtons: true);
+                    mode, verdictButtons: buttons).WebInstead(buttons, "Mark the verdict on the web page, on the request.");
             case InvestigationRequestStore.NotePending:
-                return SlackThreadPosts.NotePost(row.JournalId, row.Actor, row.Reason ?? "", row.ServerName, Text(detail?["metric"]), mode);
+                return SlackThreadPosts.NotePost(row.JournalId, row.Actor, row.Reason ?? "", row.ServerName, Text(detail?["metric"]), mode, buttons)
+                    .WebInstead(buttons, "Decide this note on the web page or in the Viewer.");
             case "action_done":
             case "action_failed":
             case "action_undone":
@@ -327,7 +338,10 @@ public sealed class SlackThreadPass
                         && long.TryParse(Text(detail?["called_id"]), NumberStyles.None, CultureInfo.InvariantCulture, out var calledId)
                         ? calledId
                         : null;
-                    return SlackThreadPosts.ChangePost(Text(called?["tool"]) ?? "change", objectText, word, mode, undoCalledId, Text(called?["kind"]));
+                    var changeCard = SlackThreadPosts.ChangePost(Text(called?["tool"]) ?? "change", objectText, word, mode, buttons ? undoCalledId : null, Text(called?["kind"]));
+                    return undoCalledId is not null && SlackCards.HasUndo(Text(called?["kind"]))
+                        ? changeCard.WebInstead(buttons, "Undo this change on the web page, in the agent changes.")
+                        : changeCard;
                 }
 
             case InvestigationEvents.Resolved:
@@ -355,7 +369,8 @@ public sealed class SlackThreadPass
                         : (DateTime?)null;
                     /* The card made for a new proposal carries the Approve and Refuse buttons (#7658); a decision row carries none. */
                     var pendingProposal = string.Equals(row.Event, "proposal_created", StringComparison.Ordinal) && proposalId != Guid.Empty ? proposalId : (Guid?)null;
-                    return SlackThreadPosts.ProposalPost(Text(detail?["tool"]) ?? "action", row.ServerName, stateText, null, proposalUrl, mode, expiresUtc, pendingProposal);
+                    return SlackThreadPosts.ProposalPost(Text(detail?["tool"]) ?? "action", row.ServerName, stateText, null, proposalUrl, mode, expiresUtc, buttons ? pendingProposal : null)
+                        .WebInstead(buttons || pendingProposal is null, "Approve or refuse this on the web page, on the proposal.");
                 }
         }
     }

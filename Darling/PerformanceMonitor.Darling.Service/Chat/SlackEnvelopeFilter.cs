@@ -28,7 +28,8 @@ public enum SlackEnvelopeVerdict
     /// <summary>The payload's <c>api_app_id</c> is not the app the connection belongs to.</summary>
     DropApp,
 
-    /// <summary>A press whose <c>user.team_id</c> differs from <c>team.id</c>: a person from another workspace in a shared channel.</summary>
+    /// <summary>A press whose <c>user.team_id</c> differs from <c>team.id</c>, or a message or mention whose author's workspace
+    /// (<c>user_team</c>, else <c>team</c>) is not the store's: a person from another workspace in a shared channel.</summary>
     DropUserTeam,
 
     /// <summary>The channel is not a bot channel of this store's own routes: another store's thread, or a channel nobody set.</summary>
@@ -46,7 +47,9 @@ public enum SlackEnvelopeVerdict
 
 /// <summary>
 /// #7657: the listener's filters, pure over one envelope's type and payload. The order is the design's: the <c>bot_id</c> filter runs
-/// first, before any other work; then the workspace and app checks (the security points); then the channel-ownership rule (a store acts
+/// first, before any other work; then the workspace and app checks (the security points); then the author's workspace, on a press
+/// (<c>user.team_id</c>) and on a message or mention (<c>user_team</c>, else <c>team</c>), because a Slack Connect channel a route owns
+/// delivers an outside organization's message under the host workspace's <c>team_id</c>; then the channel-ownership rule (a store acts
 /// only on events from channels set on its own routes, and stays silent elsewhere); then, for an event, the duplicate check the caller
 /// runs with <see cref="SlackEventDedupe"/>, because that one needs state.
 /// </summary>
@@ -117,6 +120,21 @@ public static class SlackEnvelopeFilter
         if (string.IsNullOrWhiteSpace(type) || string.IsNullOrWhiteSpace(channel) || string.IsNullOrWhiteSpace(ts))
         {
             return SlackEnvelopeVerdict.DropMalformed;
+        }
+
+        /* Every event that reaches here is a person's: the subscriptions are message.channels, message.groups and app_mention, and the
+           bot filter above took every bot post. Slack names the author's workspace in user_team when it differs from the channel's host
+           (a Slack Connect member), else in team. An event that names neither is dropped: a person's workspace that cannot be checked
+           is not accepted. */
+        var authorTeam = Text(ev, "user_team") ?? Text(ev, "team");
+        if (string.IsNullOrWhiteSpace(authorTeam))
+        {
+            return SlackEnvelopeVerdict.DropMalformed;
+        }
+
+        if (!string.Equals(authorTeam, teamId, StringComparison.Ordinal))
+        {
+            return SlackEnvelopeVerdict.DropUserTeam;
         }
 
         if (!channelOwned(channel))

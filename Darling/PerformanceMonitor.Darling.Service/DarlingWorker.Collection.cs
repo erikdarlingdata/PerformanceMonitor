@@ -1094,7 +1094,9 @@ public sealed partial class DarlingWorker
                 investigationStore, slackBotPosts, _loggerFactory.CreateLogger<PerformanceMonitor.Darling.Service.Chat.SlackThreadPoster>(), slackThrottle,
                 cards: investigationStore),
             slackThrottle, () => alertSettings.NotificationRoutes, _logger, dataDetail, () => alertSettings.TriageBaseUrl,
-            ready: slackBotPosts.HasToken);
+            ready: slackBotPosts.HasToken,
+            /* #7658: only a store that is listening (its app-level token is set) posts cards with buttons; the others point at the web page. */
+            buttons: () => !string.IsNullOrWhiteSpace(alertSettings.SlackAppToken));
         var investigationEvents = new PerformanceMonitor.Darling.Service.Investigations.InvestigationEventDelivery(
             investigationStore, () => alertSettings.NotificationRoutes,
             new PerformanceMonitor.Darling.Service.Investigations.ServiceInvestigationEventSends(

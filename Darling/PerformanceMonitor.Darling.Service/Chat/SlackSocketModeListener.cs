@@ -70,6 +70,14 @@ public sealed class SlackSocketModeListener
     private readonly object _warnLock = new();
     private string? _teamId;
     private string? _appId;
+    private readonly Func<DateTime> _now;
+    private long _unownedSinceWarning;
+    private DateTime? _lastUnownedWarningUtc;
+
+    /// <summary>How often the listener warns that events keep arriving for channels no route of this store owns. The likely cause is
+    /// a second store listening on the same Slack app: Socket Mode hands each event to one connection, so both stores acknowledge and
+    /// lose each other's events. One line per window names it; the drops themselves are counted in the status.</summary>
+    public static readonly TimeSpan UnownedChannelWarningWindow = TimeSpan.FromMinutes(10);
 
     /// <param name="transport">The network: the product's <see cref="SlackSocketModeWebApi"/>, or a test's scripted one.</param>
     /// <param name="appToken">The opened app-level token, read at each connect.</param>
@@ -82,6 +90,7 @@ public sealed class SlackSocketModeListener
     /// <param name="queueCapacity">The queue's bound; <see cref="DefaultQueueCapacity"/> in the product.</param>
     /// <param name="backoff">The wait before connect attempt <c>n</c> (1-based) after a failure; doubling to <see cref="MaxBackoff"/> by default.</param>
     /// <param name="delay">How the wait is taken; <see cref="Task.Delay(TimeSpan, CancellationToken)"/> in the product, a fake clock in a test.</param>
+    /// <param name="nowUtc">The clock for the rate-limited warning; a fake clock in a test.</param>
     public SlackSocketModeListener(
         ISlackSocketModeTransport transport,
         Func<string> appToken,
@@ -93,7 +102,8 @@ public sealed class SlackSocketModeListener
         int connections = DefaultConnections,
         int queueCapacity = DefaultQueueCapacity,
         Func<int, TimeSpan>? backoff = null,
-        Func<TimeSpan, CancellationToken, Task>? delay = null)
+        Func<TimeSpan, CancellationToken, Task>? delay = null,
+        Func<DateTime>? nowUtc = null)
     {
         ArgumentNullException.ThrowIfNull(transport);
         ArgumentNullException.ThrowIfNull(appToken);
@@ -115,6 +125,7 @@ public sealed class SlackSocketModeListener
         _open = new bool[connections];
         _backoff = backoff ?? DefaultBackoff;
         _delay = delay ?? (static (wait, ct) => Task.Delay(wait, ct));
+        _now = nowUtc ?? (static () => DateTime.UtcNow);
         _queue = Channel.CreateBounded<QueuedEnvelope>(
             new BoundedChannelOptions(queueCapacity) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true, SingleWriter = false },
             _ => _status.QueueDropped());
@@ -206,6 +217,12 @@ public sealed class SlackSocketModeListener
                 socket = await _transport.ConnectAsync(open.Url, cancellationToken);
                 var reason = await ReceiveLoopAsync(socket, index, cancellationToken);
                 var wasOpen = CloseAccounting(index, reason);
+                if (wasOpen)
+                {
+                    /* The connection was healthy (it received hello), so the next retry starts the backoff over. */
+                    attempt = 0;
+                }
+
                 if (reason.IsDisconnect)
                 {
                     /* Slack's own disconnect: reconnect at once. */
@@ -476,6 +493,11 @@ public sealed class SlackSocketModeListener
 
     private void LogDrop(SlackEnvelopeVerdict verdict, string name, int connection)
     {
+        if (verdict == SlackEnvelopeVerdict.DropChannel)
+        {
+            NoteUnownedChannel();
+        }
+
         if (verdict is SlackEnvelopeVerdict.DropTeam or SlackEnvelopeVerdict.DropApp or SlackEnvelopeVerdict.DropUserTeam)
         {
             bool first;
@@ -492,6 +514,32 @@ public sealed class SlackSocketModeListener
         }
 
         _logger.LogDebug("Slack listener dropped a payload on connection {Index} by the {Filter} filter", connection, name);
+    }
+
+    /// <summary>One Information line per <see cref="UnownedChannelWarningWindow"/> when events arrive for channels no route of this store owns,
+    /// with the count since the last line. Expected in the shared setup: the bot is a member of every posting store's channel and the app
+    /// subscribes to messages, so people's replies there reach this listener and are dropped. The line also names the one case that is a
+    /// problem, another store with this app's app-level token set. The window is measured on the injected clock, so a test pins it.</summary>
+    private void NoteUnownedChannel()
+    {
+        long count;
+        lock (_warnLock)
+        {
+            _unownedSinceWarning++;
+            var now = _now();
+            if (_lastUnownedWarningUtc is DateTime last && now - last < UnownedChannelWarningWindow)
+            {
+                return;
+            }
+
+            count = _unownedSinceWarning;
+            _unownedSinceWarning = 0;
+            _lastUnownedWarningUtc = now;
+        }
+
+        _logger.LogInformation(
+            "Slack listener dropped {Count} event(s) from channels no route of this store owns. This is expected when other stores share the app only to post: the bot is in their channels and the app subscribes to messages there. But if another store also has this app's app-level token set, the two lose each other's button presses and mentions, and each listening store needs its own Slack app. The next line of this kind comes after {Window}",
+            count, UnownedChannelWarningWindow);
     }
 
     private bool ChannelOwned(string channel)

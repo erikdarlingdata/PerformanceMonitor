@@ -21,8 +21,9 @@ namespace PerformanceMonitor.Darling.Service.Chat;
 
 /// <summary>
 /// #7657: the product's <see cref="ISlackSocketModeTransport"/>: <c>auth.test</c> and <c>apps.connections.open</c> over the Slack Web
-/// API with the token as a bearer header, and a <see cref="ClientWebSocket"/> for the Socket Mode connection, straight to Slack with no
-/// proxy. A token goes only into the Authorization header of its one call; every text that could echo it (a response body, an
+/// API with the token as a bearer header, and a <see cref="ClientWebSocket"/> for the Socket Mode connection. Both follow the system
+/// proxy (<see cref="HttpClient.DefaultProxy"/>: the HTTPS_PROXY variables or the operating system's setting), as the alert webhook and
+/// <see cref="SlackBotClient"/> do; the tokens have no proxy setting of their own. A token goes only into the Authorization header of its one call; every text that could echo it (a response body, an
 /// exception message) passes through <see cref="SlackBotClient.Redact"/> first. The API root is injectable, so a test drives the two
 /// Web API calls with a loopback listener.
 /// </summary>
@@ -52,7 +53,9 @@ public sealed class SlackSocketModeWebApi : ISlackSocketModeTransport
         var rootUri = new Uri(root, UriKind.Absolute);
         _authTestUri = new Uri(rootUri, "auth.test");
         _openUri = new Uri(rootUri, "apps.connections.open");
-        _http = handler is null ? new HttpClient() : new HttpClient(handler, disposeHandler: false);
+        _http = handler is null
+            ? new HttpClient(new HttpClientHandler { UseProxy = true, Proxy = HttpClient.DefaultProxy })
+            : new HttpClient(handler, disposeHandler: false);
         _http.Timeout = CallTimeout;
     }
 
@@ -142,6 +145,7 @@ public sealed class SlackSocketModeWebApi : ISlackSocketModeTransport
     {
         ArgumentNullException.ThrowIfNull(url);
         var socket = new ClientWebSocket();
+        socket.Options.Proxy = HttpClient.DefaultProxy;
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
