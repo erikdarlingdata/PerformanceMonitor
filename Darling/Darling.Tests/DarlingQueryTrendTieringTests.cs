@@ -8,6 +8,7 @@
 
 using System;
 using System.Linq;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -112,7 +113,7 @@ public class DarlingQueryTrendTieringTests
         var raw = Columns(DarlingTrendReader.QueryHistorySql);
         var hourly = Columns(DarlingTrendReader.QueryHistoryHourlySql);
 
-        Assert.Equal(13, raw.Length);
+        Assert.Equal(15, raw.Length);
         Assert.Equal(raw.Length, hourly.Length);
         Assert.Equal(raw, hourly);
     }
@@ -138,16 +139,18 @@ public class DarlingQueryTrendTieringTests
     }
 
     /// <summary>
-    /// The raw query still reads the raw table, so the common path keeps per-collection resolution and every
-    /// column. Pinned alongside the above so the pair cannot drift into both reading the same place.
+    /// The raw query still reads the raw table, so the common path keeps every column, and (#8063) it gathers the
+    /// collections into buckets of the width the tool resolves, $6 minutes from the shared origin, the first clamped
+    /// to the window's start. Pinned alongside the above so the pair cannot drift into both reading the same place.
     /// </summary>
     [Fact]
-    public void TheRawQuery_StillReadsPerCollectionRows()
+    public void TheRawQuery_StillReadsTheRawTable_InBucketsOfTheResolvedWidth()
     {
         var sql = DarlingTrendReader.QueryHistorySql;
 
         Assert.Contains("FROM query_stats", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("query_stats_hourly", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("date_bin(CAST($6 AS integer) * INTERVAL '1 minute', qs.collection_time, " + TrendBuckets.OriginSql + "), $4)", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY bucket_start", sql, StringComparison.Ordinal);
     }
 }
