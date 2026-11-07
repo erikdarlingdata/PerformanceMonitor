@@ -4,8 +4,8 @@
         xmlns:ui="clr-namespace:PerformanceMonitor.Ui;assembly=PerformanceMonitor.Ui"
         xmlns:local="clr-namespace:PerformanceMonitor.Darling.Viewer"
         Title="Settings"
-        Height="750" Width="750"
-        MinHeight="500" MinWidth="600"
+        Height="750" Width="880"
+        MinHeight="500" MinWidth="880"
         ResizeMode="CanResizeWithGrip"
         WindowStartupLocation="CenterOwner"
         Icon="EDD.ico"
@@ -1010,7 +1010,7 @@
                             </StackPanel>
                         </Border>
                         <TextBlock Style="{StaticResource ScopeLineStyle}" Text="This viewer only. The defaults below apply to what you do in this viewer."/>
-                        <Border Background="{DynamicResource BackgroundLightBrush}" CornerRadius="4" Padding="12" Margin="0,0,0,12">
+                        <Border x:Name="ViewerOnlyTriageDefaults" Background="{DynamicResource BackgroundLightBrush}" CornerRadius="4" Padding="12" Margin="0,0,0,12">
                             <StackPanel>
                                 <TextBlock Text="Triage Defaults" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <WrapPanel Orientation="Horizontal" Margin="20,0,0,4">
