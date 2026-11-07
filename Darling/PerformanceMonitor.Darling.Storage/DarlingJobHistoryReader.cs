@@ -48,9 +48,19 @@ public sealed record DarlingJobHistoryRow(
 /// instant: the SQL bounds the newest runs by it (widened by an hour, like the start) and the job stats exactly,
 /// and <see cref="DarlingJobHistoryReader.GetAsync"/> then cuts the runs exactly in C#.
 /// </summary>
-public sealed record JobHistoryFilter(string? JobName = null, int? RunStatus = null, string? Category = null, DateTime? UntilUtc = null, int? MinDurationSeconds = null)
+public sealed record JobHistoryFilter(string? JobName = null, int? RunStatus = null, string? Category = null, DateTime? UntilUtc = null, int? MinDurationSeconds = null, int? PerServerLimit = null)
 {
     private int UntilParam(int firstParam) => firstParam + (JobName is null ? 0 : 1) + (RunStatus is null ? 0 : 1) + (Category is null ? 0 : 1) + (MinDurationSeconds is null ? 0 : 1);
+
+    private int PerServerLimitParam(int firstParam) => UntilParam(firstParam) + (UntilUtc is null ? 0 : 1);
+
+    /// <summary>
+    /// #8133: the per-server top-N's LIMIT. <see cref="PerServerLimit"/> set: its own parameter, the share of the row cap each
+    /// server gets on an All Servers read, so the page holds that many of every server's newest runs rather than the newest of
+    /// the fleet; unset: <paramref name="limitParam"/>, the row cap itself, and the statement text is unchanged.
+    /// </summary>
+    internal string PerServerLimitSql(int firstParam, string limitParam) =>
+        PerServerLimit is null ? limitParam : $"${PerServerLimitParam(firstParam)}";
 
     /// <summary>The <c>AND</c> clauses for the set filters, numbering their parameters from <paramref name="firstParam"/>.</summary>
     public string Clauses(int firstParam)
@@ -118,6 +128,11 @@ public sealed record JobHistoryFilter(string? JobName = null, int? RunStatus = n
         if (UntilUtc is not null)
         {
             yield return new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(UntilUtc.Value, DateTimeKind.Unspecified) };
+        }
+
+        if (PerServerLimit is not null)
+        {
+            yield return new NpgsqlParameter<int> { TypedValue = PerServerLimit.Value };
         }
     }
 }
@@ -365,6 +380,7 @@ ORDER BY jh.category_name";
         var limitParam = scopedToServer ? "$4" : "$3";
         var filterSql = filter is null ? string.Empty : filter.Clauses(scopedToServer ? 5 : 4);
         var statsUntilSql = filter is null ? string.Empty : filter.StatsClause(scopedToServer ? 5 : 4);
+        var perServerLimitParam = filter is null ? limitParam : filter.PerServerLimitSql(scopedToServer ? 5 : 4, limitParam);
 
         return $@"
 WITH svr AS (
@@ -430,7 +446,7 @@ top_by_server AS (
         AND   jh.collection_time >= {floorParam}
         AND   jh.run_datetime >= $1 + make_interval(mins => so.offset_minutes) - interval '1 hour'{filterSql}
         ORDER BY jh.run_datetime DESC, jh.instance_id DESC
-        LIMIT {limitParam}
+        LIMIT {perServerLimitParam}
     ) AS top
 ),
 base AS (

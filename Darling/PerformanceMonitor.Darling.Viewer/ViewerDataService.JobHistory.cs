@@ -177,7 +177,7 @@ public sealed partial class ViewerDataService
     /// </summary>
     public async Task<List<ViewerJobHistoryRow>> GetJobHistoryAsync(
         DateTime sinceUtc, int? serverId = null, int limit = 2000, DateTime? untilUtc = null, int? runStatus = null, string? category = null,
-        CancellationToken cancellationToken = default)
+        int? perServerLimit = null, CancellationToken cancellationToken = default)
     {
         /* #5562 R6: a finished range's end goes into the read (the shared reader's UntilUtc), so the SQL bounds the runs before the
            per-server top-N and the row cap count them. A window that ended in the past on a busy fleet keeps every run inside it, not
@@ -187,13 +187,16 @@ public sealed partial class ViewerDataService
            and one busy server (a job every minute) fills it with its latest runs, so a filter applied to the rows afterwards never
            saw an older failure on a quieter server: the All Servers grid lost runs the single-server grid showed. The reader's
            filters run inside the per-server top-N, so the cap counts only matching runs. They do not touch the job stats (the long-running
-           flag and the last success come from the job's successful outcomes, whatever status the grid is filtered to). */
-        var filter = untilUtc is null && runStatus is null && string.IsNullOrWhiteSpace(category)
+           flag and the last success come from the job's successful outcomes, whatever status the grid is filtered to).
+           #8133: the All Servers read passes a per-server share of its cap (JobHistoryCap.PerServerShare), so the per-server top-N
+           keeps that many of every server's newest runs and one server that runs a job every minute cannot fill the page alone. */
+        var filter = untilUtc is null && runStatus is null && string.IsNullOrWhiteSpace(category) && perServerLimit is null
             ? null
             : new JobHistoryFilter(
                 RunStatus: runStatus,
                 Category: string.IsNullOrWhiteSpace(category) ? null : category,
-                UntilUtc: untilUtc is { } until ? until.AddTicks(-TimeSpan.TicksPerMicrosecond) : null);
+                UntilUtc: untilUtc is { } until ? until.AddTicks(-TimeSpan.TicksPerMicrosecond) : null,
+                PerServerLimit: perServerLimit);
         var dtos = await DarlingJobHistoryReader.GetAsync(
             _dataSource, sinceUtc, serverId, limit, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, filter, cancellationToken);
 

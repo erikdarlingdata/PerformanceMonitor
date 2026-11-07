@@ -82,13 +82,17 @@ public partial class LocalDataService
             ? new List<int> { serverId.Value }
             : await ReadJobHistoryServerIdsAsync(windowStartUtc);
 
+        /* #8133: at All Servers each server reads a share of the cap (JobHistoryCap.PerServerShare), so one server that runs a
+           job every minute cannot fill the page alone and the quieter servers keep their day. One server reads the whole cap. */
+        var perServerLimit = serverId.HasValue ? limit : JobHistoryCap.PerServerShare(limit, serverIds.Count);
+
         var rows = new List<JobHistoryRow>();
         var clocks = new Dictionary<int, ServerClock>();
         foreach (var id in serverIds)
         {
             var clock = await ReadJobHistoryClockAsync(id, openTabClocks is not null && openTabClocks.TryGetValue(id, out var tabClock) ? tabClock : null);
             clocks[id] = clock;
-            rows.AddRange(await ReadJobHistoryForServerAsync(id, clock, windowStartUtc, limit, windowEndUtc, runStatus, category));
+            rows.AddRange(await ReadJobHistoryForServerAsync(id, clock, windowStartUtc, perServerLimit, windowEndUtc, runStatus, category));
         }
 
         return (ApplyJobHistoryWindow(rows, windowStartUtc, limit, windowEndUtc), clocks);

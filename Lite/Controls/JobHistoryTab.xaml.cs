@@ -232,7 +232,11 @@ public partial class JobHistoryTab : UserControl
 
             /* The cap applies to the read (all.Count), not the column-filtered display count: a column filter narrowing the
                grid must not make the "newest 2,000" label disappear when the underlying read still hit the cap. */
-            JobCountIndicator.Text = JobHistoryCap.CountText(displayCount, all.Count, RowCap);
+            /* #8133: at All Servers the read took a share of the cap from each server (the clocks are keyed by the servers it read), so
+               the count names the servers at their share rather than the fleet cap. */
+            JobCountIndicator.Text = serverId is null
+                ? JobHistoryCap.FleetCountText(displayCount, all.GroupBy(r => r.ServerId).Select(g => g.Count()).ToList(), JobHistoryCap.PerServerShare(RowCap, readClocks.Count))
+                : JobHistoryCap.CountText(displayCount, all.Count, RowCap);
             AppLogger.Debug("JobHistory", $"Loaded {displayCount} job run(s) (query returned {all.Count}, since={startUtc:O}, until={(rangeEndUtc.HasValue ? rangeEndUtc.Value.ToString("O") : "now")}, serverId={serverId?.ToString() ?? "all"})");
 
             _lastRefreshed = DateTime.UtcNow;
