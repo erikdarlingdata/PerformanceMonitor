@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -19,9 +20,13 @@ public sealed partial class PgTargetFactCollector
     /// <summary>
     /// The per-database counters of the window, differenced per <c>database_name</c> series and summed —
     /// one row per database, spilled bytes first. <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC),
-    /// <c>$4</c> the window's midpoint (naive UTC) — the transactions and intervals of the SECOND half ride as two
-    /// extra columns so <c>PG_TPS</c> can carry a trend (second-half rate minus first-half rate) as a reader's
-    /// figure in its metadata, without a second scan. Nothing in the engine reads the trend since #3747 retired the
+    /// <c>$4</c> the window's midpoint (naive UTC) — the transactions and observed seconds of the SECOND half ride
+    /// as two extra columns so <c>PG_TPS</c> can carry a trend (second-half rate minus first-half rate) as a reader's
+    /// figure in its metadata, without a second scan — and <c>$5</c>
+    /// <see cref="CollectorDeltaCalculator.DefaultMaxGapSeconds"/>, the gap policy (#8156): a difference whose own
+    /// interval is longer than it spans a collector outage, and is left out of every sum the way the coverage
+    /// witness leaves its seconds out of the observed time, so a rate over observed seconds counts only what was
+    /// observed. Nothing in the engine reads the trend since #3747 retired the
     /// raw-trend co-fire hook it was first stamped for; the columns stay because the figure is cheap here and
     /// useful on the fact.
     ///
@@ -50,7 +55,7 @@ public sealed partial class PgTargetFactCollector
     /// and sums in.</para>
     /// </summary>
     public const string PgTargetDatabaseCountersSql = @"
-WITH sampled AS (
+WITH differenced AS (
     SELECT
         database_name,
         collection_time,
@@ -59,6 +64,7 @@ WITH sampled AS (
         temp_files    - LAG(temp_files)    OVER series AS raw_temp_files,
         temp_bytes    - LAG(temp_bytes)    OVER series AS raw_temp_bytes,
         deadlocks     - LAG(deadlocks)     OVER series AS raw_deadlocks,
+        extract(epoch FROM (collection_time - LAG(collection_time) OVER series)) AS interval_sec,
         (ROW_NUMBER() OVER series > 1
          AND stats_reset IS DISTINCT FROM LAG(stats_reset) OVER series) AS reset_here
     FROM pg_database_stats
@@ -69,6 +75,22 @@ WITH sampled AS (
         PARTITION BY database_name
         ORDER BY collection_time
     )
+),
+sampled AS (
+    /* #8156: a difference whose own interval is longer than the gap policy ($5) spans a collector outage. The
+       coverage witness leaves those seconds out of the observed time, so the deltas leave the counters out too;
+       the row stays a sample and its reset stamp still counts. */
+    SELECT
+        database_name,
+        collection_time,
+        reset_here,
+        interval_sec,
+        CASE WHEN interval_sec <= $5 THEN raw_xact_commit   END AS raw_xact_commit,
+        CASE WHEN interval_sec <= $5 THEN raw_xact_rollback END AS raw_xact_rollback,
+        CASE WHEN interval_sec <= $5 THEN raw_temp_files    END AS raw_temp_files,
+        CASE WHEN interval_sec <= $5 THEN raw_temp_bytes    END AS raw_temp_bytes,
+        CASE WHEN interval_sec <= $5 THEN raw_deadlocks     END AS raw_deadlocks
+    FROM differenced
 )
 SELECT
     database_name,
@@ -78,11 +100,12 @@ SELECT
     CAST(coalesce(SUM(GREATEST(raw_temp_bytes, 0)), 0) AS bigint)    AS temp_bytes,
     CAST(coalesce(SUM(GREATEST(raw_deadlocks, 0)), 0) AS bigint)     AS deadlocks,
     CAST(coalesce(SUM(GREATEST(raw_xact_commit, 0) + GREATEST(raw_xact_rollback, 0)) FILTER (WHERE collection_time > $4), 0) AS bigint) AS xact_second_half,
-    CAST(count(raw_deadlocks) FILTER (WHERE collection_time > $4) AS integer) AS intervals_second_half,
+    coalesce(SUM(interval_sec) FILTER (WHERE raw_deadlocks IS NOT NULL AND collection_time > $4), 0) AS observed_seconds_second_half,
     CAST(count(*) FILTER (WHERE reset_here) AS integer)              AS stats_reset_count,
     CAST(count(*) FILTER (WHERE LEAST(raw_xact_commit, raw_xact_rollback, raw_temp_files, raw_temp_bytes, raw_deadlocks) < 0) AS integer) AS counter_rewind_count,
     CAST(count(*) AS integer)                                        AS sample_count,
-    CAST(count(raw_deadlocks) AS integer)                            AS intervals
+    CAST(count(raw_deadlocks) AS integer)                            AS intervals,
+    coalesce(SUM(interval_sec) FILTER (WHERE raw_deadlocks IS NOT NULL), 0) AS observed_seconds
 FROM sampled
 GROUP BY database_name
 ORDER BY coalesce(SUM(GREATEST(raw_temp_bytes, 0)), 0) DESC";
@@ -132,7 +155,7 @@ AND   collection_time >= $4";
     /// <para><b><c>PG_TPS</c></b> is context (base 0): <c>xact_commit + xact_rollback</c> per observed second,
     /// with the rollback share stamped so the advice for a busier fact can say what kind of busy, and
     /// <c>tps_trend</c> — the second half of the window's rate minus the first half's, each over its own
-    /// observed time — as a reader's figure: the offered-vs-delivered co-fire it was stamped for reads the
+    /// observed seconds, the seconds of the differences that fell in it — as a reader's figure: the offered-vs-delivered co-fire it was stamped for reads the
     /// anomaly pair since #3747, and nothing in the engine reads the trend. On any server doing work it is also
     /// this family's witness that the read ran: a pass with a <c>PG_TPS</c> and no <c>PG_TEMP_SPILL</c> means "nothing
     /// spilled", not "not collected".</para>
@@ -171,7 +194,8 @@ AND   collection_time >= $4";
         if (context.ObservedDurationMs <= 0) return;
 
         long xactCommit = 0, xactRollback = 0, tempFiles = 0, tempBytes = 0, deadlocks = 0, xactSecondHalf = 0;
-        int statsResetCount = 0, counterRewindCount = 0, sampleCount = 0, intervals = 0, intervalsSecondHalf = 0, databases = 0;
+        int statsResetCount = 0, counterRewindCount = 0, sampleCount = 0, intervals = 0, databases = 0;
+        double observedSecondsBySeries = 0, observedSecondsSecondHalf = 0;
         string? topSpillDatabase = null;
         long topSpillBytes = 0;
         string? topDeadlockDatabase = null;
@@ -186,6 +210,7 @@ AND   collection_time >= $4";
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart + (context.TimeRangeEnd - context.TimeRangeStart) / 2));
+            cmd.Parameters.AddWithValue(CollectorDeltaCalculator.DefaultMaxGapSeconds);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             while (await reader.ReadAsync(context.CancellationToken))
@@ -205,11 +230,12 @@ AND   collection_time >= $4";
                 tempBytes += rowTempBytes;
                 deadlocks += rowDeadlocks;
                 xactSecondHalf += ToInt64(reader.GetValue(6));
-                intervalsSecondHalf += Convert.ToInt32(reader.GetValue(7));
+                observedSecondsSecondHalf = Math.Max(observedSecondsSecondHalf, Convert.ToDouble(reader.GetValue(7)));
                 statsResetCount += Convert.ToInt32(reader.GetValue(8));
                 counterRewindCount += Convert.ToInt32(reader.GetValue(9));
                 sampleCount += Convert.ToInt32(reader.GetValue(10));
                 intervals += Convert.ToInt32(reader.GetValue(11));
+                observedSecondsBySeries = Math.Max(observedSecondsBySeries, Convert.ToDouble(reader.GetValue(12)));
                 databases++;
 
                 if (databaseName is not null && rowTempBytes > topSpillBytes)
@@ -264,16 +290,17 @@ AND   collection_time >= $4";
             };
 
             /* The trend — a reader's figure on the fact since #3747 retired the raw-trend co-fire hook it was first
-               stamped for; nothing in the engine reads it. Each half's rate over ITS OWN observed seconds,
-               apportioned by the intervals that fell in it (one-minute cadence, so intervals ARE the observed
-               minutes), so a half the collector missed is
-               not read as a quiet half. Stamped only when both halves were observed — a trend over one half is
-               not a trend. */
-            var intervalsFirstHalf = intervals - intervalsSecondHalf;
-            if (intervalsFirstHalf > 0 && intervalsSecondHalf > 0)
+               stamped for; nothing in the engine reads it. Each half's rate over ITS OWN observed seconds: the
+               seconds of the differences that fell in it, summed per series by the read and taken from the fullest
+               series (every database shares the collection's instants, so the sums agree unless a database was
+               created or dropped mid-window), so a half the collector missed is not read as a quiet half and a gap
+               interval is in neither half (#8156). Stamped only when both halves were observed — a trend over one
+               half is not a trend. */
+            var observedSecondsFirstHalf = observedSecondsBySeries - observedSecondsSecondHalf;
+            if (observedSecondsFirstHalf > 0 && observedSecondsSecondHalf > 0)
             {
-                var tpsFirstHalf = (transactions - xactSecondHalf) / (observedSeconds * intervalsFirstHalf / intervals);
-                var tpsSecondHalf = xactSecondHalf / (observedSeconds * intervalsSecondHalf / intervals);
+                var tpsFirstHalf = (transactions - xactSecondHalf) / observedSecondsFirstHalf;
+                var tpsSecondHalf = xactSecondHalf / observedSecondsSecondHalf;
                 tps.Metadata[PgTargetScorer.TpsFirstHalfKey] = tpsFirstHalf;
                 tps.Metadata[PgTargetScorer.TpsSecondHalfKey] = tpsSecondHalf;
                 tps.Metadata[PgTargetScorer.TpsTrendKey] = tpsSecondHalf - tpsFirstHalf;

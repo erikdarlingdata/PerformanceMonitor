@@ -380,7 +380,6 @@ public sealed class PgTargetTempTests
         Assert.Contains("count(raw_deadlocks) AS integer)                            AS intervals", sql, StringComparison.Ordinal);
         /* The trend halves ride the same scan, split on the midpoint bound as $4. */
         Assert.Contains("FILTER (WHERE collection_time > $4), 0) AS bigint) AS xact_second_half", sql, StringComparison.Ordinal);
-        Assert.Contains("count(raw_deadlocks) FILTER (WHERE collection_time > $4) AS integer) AS intervals_second_half", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("LAG(stats_reset) OVER series IS NOT NULL", sql, StringComparison.Ordinal);
         /* The RATE never comes from the log capture (design §6 C). */
         Assert.DoesNotContain("pg_deadlocks", sql, StringComparison.Ordinal);
@@ -409,7 +408,7 @@ public sealed class PgTargetTempTests
         Assert.Contains("if (tempFiles > 0)", code, StringComparison.Ordinal);
         Assert.Contains("workMem.Metadata[PgTargetScorer.WorkMemSpillBytesPerSecKey] = bytesPerSec;", code, StringComparison.Ordinal);
         /* A trend needs both halves observed; one half is not a trend. */
-        Assert.Contains("if (intervalsFirstHalf > 0 && intervalsSecondHalf > 0)", code, StringComparison.Ordinal);
+        Assert.Contains("if (observedSecondsFirstHalf > 0 && observedSecondsSecondHalf > 0)", code, StringComparison.Ordinal);
         /* Rates over observed time, never the nominal window: the one use of the window's own span is the
            midpoint bound for the trend halves, and nothing divides by a TimeSpan of it. */
         Assert.Contains("context.ObservedDurationMs / 1000.0", code, StringComparison.Ordinal);
