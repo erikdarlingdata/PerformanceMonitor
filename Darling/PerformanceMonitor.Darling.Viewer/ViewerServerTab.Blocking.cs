@@ -42,7 +42,7 @@ public partial class ViewerServerTab
     internal const string BlockingTrendAxisTitle = "reports/min";
 
     /// <summary>#8151: the same title when the DMV snapshot answered and the points are snapshot rows, not reports.</summary>
-    internal const string BlockingTrendSnapshotAxisTitle = "rows/min";
+    internal const string BlockingTrendSnapshotAxisTitle = "snapshots/min";
 
     /// <summary>#8151: the collector that answered a severity chart (blocked-process-report or DMV snapshot), for the card subtitle now that the Y axis shows only the unit.
     /// Empty when no row names one, so nothing answered and nothing is named.</summary>
@@ -51,7 +51,7 @@ public partial class ViewerServerTab
         foreach (var source in sources)
         {
             if (source is PerformanceMonitor.Ui.BlockingSourceLabel.BlockedProcessReport or PerformanceMonitor.Ui.BlockingSourceLabel.DmvSnapshot)
-                return source;
+                return "Source: " + source;
         }
 
         return string.Empty;
@@ -580,7 +580,7 @@ public partial class ViewerServerTab
             LockWaitTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             LockWaitTrendChart.Plot.Axes.SetLimitsX(ChartXStart(LockWaitTrendChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
             ReapplyAxisColors(LockWaitTrendChart);
-            LockWaitTrendChart.Plot.YLabel("ms/s");
+            LockWaitTrendChart.Plot.YLabel("ms/sec");
             SetChartYLimitsWithLegendPadding(LockWaitTrendChart, 0, 1);
             ShowChartLegend(LockWaitTrendChart);
             LockWaitTrendChart.Refresh();
@@ -608,7 +608,7 @@ public partial class ViewerServerTab
         LockWaitTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         LockWaitTrendChart.Plot.Axes.SetLimitsX(ChartXStart(LockWaitTrendChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
         ReapplyAxisColors(LockWaitTrendChart);
-        LockWaitTrendChart.Plot.YLabel("ms/s");
+        LockWaitTrendChart.Plot.YLabel("ms/sec");
         SetChartYLimitsWithLegendPadding(LockWaitTrendChart, 0, globalMax > 0 ? globalMax : 1);
         ShowChartLegend(LockWaitTrendChart);
         LockWaitTrendChart.Refresh();

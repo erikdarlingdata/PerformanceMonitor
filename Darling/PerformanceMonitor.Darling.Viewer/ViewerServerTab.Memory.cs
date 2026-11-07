@@ -520,7 +520,7 @@ public partial class ViewerServerTab
         MemoryPressureEventsChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         MemoryPressureEventsChart.Plot.Axes.SetLimitsX(ChartXStart(MemoryPressureEventsChart.Plot, xMin, xMax), xMax);
         ReapplyAxisColors(MemoryPressureEventsChart);
-        MemoryPressureEventsChart.Plot.YLabel("events/hr");
+        MemoryPressureEventsChart.Plot.YLabel("events/hour");
         PerformanceMonitor.Ui.ChartStyle.UseCountAxis(MemoryPressureEventsChart); // #7606: a count, whole-number ticks
         SetChartYLimitsWithLegendPadding(MemoryPressureEventsChart, 0, Math.Max(maxBarCount, 5));
 

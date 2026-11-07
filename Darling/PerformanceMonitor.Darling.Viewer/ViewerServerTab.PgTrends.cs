@@ -200,7 +200,7 @@ public partial class ViewerServerTab
                 : $"Wait Trend: {trend.Subject}, the event that dominates this window, over time. Estimates from a sampling profiler, so the shape is the finding.", null));
         RenderPgTrendPanels(PgWaitTrendHost, new[]
         {
-            new PgTrendPanel("PgWait_Trend", "Est. wait ms/sec", "ms/s", p.Count == 0 ? Array.Empty<PgTrendLine>() : new[]
+            new PgTrendPanel("PgWait_Trend", "Est. wait ms/sec", "ms/sec", p.Count == 0 ? Array.Empty<PgTrendLine>() : new[]
             {
                 new PgTrendLine(trend.Subject ?? "Wait", Times(p, x => x.CollectionTimeUtc), Values(p, x => x.EstimatedWaitMsPerSecond)),
             }),
