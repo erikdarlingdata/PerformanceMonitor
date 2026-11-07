@@ -225,8 +225,9 @@ public class FactScorer
     }
 
     /// <summary>
-    /// The hours the collector actually observed inside the window a wait fact was summed over — the
-    /// divisor for the per-hour gates above (#3538 A7). Read from the fact's own metadata rather than
+    /// The hours the collector actually observed inside the window a fact was summed over — the divisor
+    /// for the per-hour wait gates above (#3538 A7) and for the QUERY_SPILLS pages-per-hour grade (#7884),
+    /// and what <c>FactAdvice</c> divides by to state that rate. Read from the fact's own metadata rather than
     /// from <see cref="AnalysisContext"/>, which the scorer never sees: every wait fact carries
     /// <c>period_duration_ms</c> (the nominal window) and, from a collector that stamps coverage (#3538
     /// A2), <c>coverage_fraction</c>; their product is the observed time (see
@@ -247,7 +248,7 @@ public class FactScorer
     /// artifact; the nominal reading is the pre-#3538 form — the least-sensitive honest one — and is pinned
     /// so the choice cannot silently flip.</para>
     /// </summary>
-    private static double ObservedHours(Fact fact)
+    internal static double ObservedHours(Fact fact)
     {
         var periodMs = fact.Metadata.GetValueOrDefault("period_duration_ms");
         if (periodMs <= 0) return 1.0;
@@ -261,24 +262,27 @@ public class FactScorer
     /// </summary>
     private static double ScoreBlockingFact(Fact fact)
     {
-        var value = fact.Value; // events per hour, over the busiest 4-hour sub-window since #3871
+        var value = fact.Value; // events per hour over the busiest sub-window: 4 hours for blocking (#3871), 1 hour for deadlocks (#7893)
         if (value <= 0) return 0.0;
 
         return fact.Key switch
         {
-            // Blocking: concerning >10/hr, critical >50/hr — MEASURED, at the 4-hour grain, and the value
-            // graded here is that grain's: the busiest 4-hour sub-window of the pass, computed by the
-            // collectors (#3871), with the whole-window average kept beside it as events_per_hour context.
-            // Lineage: the primary production fleet's 14-day read (#3653 box (a), 2026-09-22) put non-zero
-            // 4-HOUR windows at p99 = 59 events/h with five windows >= 50, so the pair sits on the storm
-            // mode at the grain it was measured on — which is exactly why the value had to become the peak:
-            // graded as a 24-hour average the same storm read Information, graded at its own grain it reads
-            // CRITICAL on any pass length. (This paragraph supersedes the earlier "inherited, not measured"
-            // note: the #3539 A3 alerting band at 5/20 remains a different instrument — the scorer's story
-            // still reaches CRITICAL through its amplifiers — but the pair itself is now measured, not
-            // inherited.)
+            // Blocking: concerning >10/hr, critical >50/hr, at the 4-hour grain, and the value graded here is
+            // that grain's: the busiest 4-hour bucket of the pass, computed by the collectors (#3871) as waits
+            // per covered hour (#7895), with the whole-window average kept beside it as events_per_hour context.
+            // The value counts WAITS (#5644): a blocked session, its blocker and the wait's derived start, one
+            // row however many blocked-process reports SQL Server wrote while it lasted. Lineage: the pair was
+            // measured on REPORTS, the primary production fleet's 14-day read (#3653 box (a), 2026-09-22), which
+            // put non-zero 4-hour windows at p99 = 59 reports/h with five windows >= 50. On a production fleet
+            // one wait yields about 1.1 reports, so in waits that p99 is about 54/h and the pair still sits on
+            // the storm mode at the grain it was measured on, which is why the value is the peak: graded as a
+            // 24-hour average the same storm read Information, graded at its own grain it reads CRITICAL on any
+            // pass length. The #3539 A3 alerting band at 5/20 is a different instrument; the scorer's story
+            // still reaches CRITICAL through its amplifiers.
             "BLOCKING_EVENTS" => ApplyThresholdFormula(value, 10, 50),
-            // Deadlocks: 5/hr concerning, 20/hr critical — the SAME pair the alerting layer derived from
+            // Deadlocks: 5/hr concerning, 20/hr critical, graded on the busiest ONE-HOUR bucket of the pass
+            // (#7893), the server-hour grain the pair was measured on, with the whole-window average kept
+            // beside it as deadlocks_per_hour context — the SAME pair the alerting layer derived from
             // 14 days of collect.deadlocks on the 43-server dogfood fleet (2,722 deadlocks over 14,448
             // server-hours; ServerHealthThresholds.DeadlockWarnPerHourDefault /
             // DeadlockCriticalPerHourDefault in PerformanceMonitor.Common/ServerHealthBands.cs, #3368):
@@ -522,8 +526,9 @@ public class FactScorer
     {
         return fact.Key switch
         {
-            // Spilled pages (8 KB each, sys.dm_exec_query_stats total_spills deltas): concerning at 100, critical at 1000 in the period
-            "QUERY_SPILLS" => ApplyThresholdFormula(fact.Value, 100, 1000),
+            // Spilled pages (8 KB each, sys.dm_exec_query_stats total_spills deltas) per OBSERVED hour (#7884), so the
+            // same spill rate scores the same at every hours_back; the pair sits at the fleet tail, see the constants.
+            "QUERY_SPILLS" => ApplyThresholdFormula(fact.Value / ObservedHours(fact), QuerySpillsWarningPagesPerObservedHour, QuerySpillsCriticalPagesPerObservedHour),
             // High DOP queries: concerning at 5, critical at 20 in the period
             "QUERY_HIGH_DOP" => ApplyThresholdFormula(fact.Value, 5, 20),
             // Parameter sensitivity: worst max/min worker-time ratio. Magnitude-driven —
@@ -830,6 +835,22 @@ public class FactScorer
     /// </summary>
     private const double PagelatchUpMinWaitMsPerObservedHour = 10_000;
 
+    /// <summary>
+    /// QUERY_SPILLS (#7884): spilled 8 KB pages per OBSERVED hour at which the fact enters the warning ramp (0.5) and
+    /// at which it saturates (1.0). The fact's Value is the window's page total, so <see cref="ScoreQueryFact"/>
+    /// divides it by <see cref="ObservedHours"/> first; both producers stamp <c>period_duration_ms</c> and
+    /// <c>coverage_fraction</c> for that, the same way the wait facts do. The pair marks the tail of the fleet, not
+    /// its middle. Measured on a production fleet, spilled pages per observed hour run p50 17,000 (about 130 MB),
+    /// p90 57,000 (about 450 MB) and p99 173,000 (about 1.4 GB): the warning bar is the p90 and the critical bar the
+    /// p99, so about one server-hour in ten clears the warning bar and one in a hundred saturates. A warning bar at
+    /// the median was rejected because it would flag half of all server-hours, and a severity bar marks the tail.
+    /// A total-pages bar cannot do this job at any value: it scales with hours_back, so a 24 h read of an unchanged
+    /// server reads six times a 4 h one. What this cannot see: a burst of spills inside one hour of a long window
+    /// averages out (the per-sample-vs-window class, #3538 A8).
+    /// </summary>
+    internal const double QuerySpillsWarningPagesPerObservedHour = 57_000;
+    internal const double QuerySpillsCriticalPagesPerObservedHour = 173_000;
+
     // Layer-3 tuning-class severity ceiling (see ScoreAll). Parallelism/anomaly signals describe a tuning
     // opportunity, not an outage — their FINAL severity is capped here (bands are >= 1.5 CRITICAL) unless an
     // impact peer co-fired or (#3526, ANOMALY_* only) the anomaly's own deviation is extreme. 1.49 keeps a
@@ -991,12 +1012,12 @@ public class FactScorer
             if (fact.Metadata.GetValueOrDefault("baseline_low_quality") >= 1.0)
             {
                 var over = Math.Max(0.0, fact.Metadata.GetValueOrDefault("fallback_exceedance") - 1.0);
-                // Floor AFTER the confidence multiply, not before it. confidence is a hardcoded 1.0
-                // everywhere today so the ramp already lands >= 0.5 at the bar, but if confidence ever
-                // drops sub-1.0 the un-floored product would fall below InferenceEngine's 0.5 root
-                // entry-point and silently drop the finding — re-breaking the "fire on the absolute bar,
-                // not silence" guarantee. Math.Max(0.5, ...) keeps a fired low-quality anomaly rootable
-                // regardless of confidence. Behaviorally identical at confidence == 1.0.
+                // Floor AFTER the confidence multiply, not before it. confidence is the baseline bucket's own
+                // trustworthiness (BaselineBucket.Confidence, which both detectors stamp as metadata["confidence"]),
+                // and it sits below 1.0 on exactly the thin baseline this branch grades, so the un-floored product
+                // would fall below InferenceEngine's 0.5 root entry-point and silently drop the finding, breaking
+                // the "fire on the absolute bar, not silence" guarantee. Math.Max(0.5, ...) keeps a fired
+                // low-quality anomaly rootable regardless of confidence.
                 return Math.Max(0.5, (0.5 + 0.5 * Math.Min(over / LowQualityFallbackSpan, 1.0)) * confidence);
             }
 
@@ -1783,7 +1804,7 @@ public class FactScorer
         {
             Description = "Query spills present — spills to disk on a nearly full volume",
             Boost = 0.2,
-            Predicate = facts => facts.TryGetValue("QUERY_SPILLS", out var s) && s.BaseSeverity > 0
+            Predicate = facts => facts.TryGetValue("QUERY_SPILLS", out var s) && ClearsRootBar(s)
         }
     ];
 
@@ -1874,7 +1895,7 @@ public class FactScorer
         {
             Description = "Query spills present — queries running with insufficient memory grants",
             Boost = 0.2,
-            Predicate = facts => facts.TryGetValue("QUERY_SPILLS", out var s) && s.BaseSeverity > 0
+            Predicate = facts => facts.TryGetValue("QUERY_SPILLS", out var s) && ClearsRootBar(s)
         }
     ];
 

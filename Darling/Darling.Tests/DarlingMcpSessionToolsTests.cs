@@ -99,7 +99,8 @@ public sealed class DarlingMcpSessionToolsSurfaceAndSqlTests
         Assert.Contains("FROM v_session_stats", sql, StringComparison.Ordinal);
         Assert.Contains("program_name", sql, StringComparison.Ordinal);
         Assert.Contains("connection_count", sql, StringComparison.Ordinal);
-        Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
+        /* That the rows are the newest snapshot's is asserted by running the read, in
+           LatestSnapshotLookupLiveTests.SessionStats_ReturnsOnlyTheNewestSnapshot_AndNothingForAServerWithNone. */
         Assert.Contains("ORDER BY connection_count DESC", sql, StringComparison.Ordinal);
     }
 

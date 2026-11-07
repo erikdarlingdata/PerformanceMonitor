@@ -38,7 +38,7 @@ public class StoredEventCopiesSweepTests
         [("LocalDataService.Blocking.cs", "v_deadlocks")] = 4,
         [("AnomalyDetector.cs", "v_deadlocks")] = 1,
         [("BaselineProvider.cs", "v_deadlocks")] = 1,
-        [("DuckDbFactCollector.Waits.cs", "v_deadlocks")] = 1,
+        [("DuckDbFactCollector.Waits.cs", "v_deadlocks")] = 2, // #7893: the window's count and its busiest one-hour bucket
         [("LocalDataService.Overview.cs", "v_deadlocks")] = 1,
         [("LocalDataService.DailySummary.cs", "v_deadlocks")] = 1,
         [("DrillDownCollector.Config.cs", "v_deadlocks")] = 1, // #7448: the per-database RCSI deadlock count, DeadlockDistinctCount grouped by database
@@ -163,7 +163,7 @@ public class StoredEventCopiesSweepTests
             ["LocalDataService.Blocking.cs"] = 3,
             ["AnomalyDetector.cs"] = 1,
             ["BaselineProvider.cs"] = 1,
-            ["DuckDbFactCollector.Waits.cs"] = 1,
+            ["DuckDbFactCollector.Waits.cs"] = 2, // #7893: the window's count and its busiest one-hour bucket
             ["LocalDataService.Overview.cs"] = 1,
             ["LocalDataService.DailySummary.cs"] = 1,
             ["DrillDownCollector.Config.cs"] = 2,

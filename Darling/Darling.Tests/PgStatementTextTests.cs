@@ -213,9 +213,8 @@ public sealed class PgStatementTextTests
         Assert.Contains("LEFT JOIN collect.pg_statement_text", sql, StringComparison.Ordinal);
         Assert.Contains("t.server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("t.queryid = differenced.queryid", sql, StringComparison.Ordinal);
-        /* MAX, because the read's grain is (queryid, database_id) while text is keyed on queryid alone —
-           one text per group by construction, so this picks it without widening the GROUP BY. */
-        Assert.Contains("MAX(t.query_text) AS query_text", sql, StringComparison.Ordinal);
+        /* #8054: the text column itself is read once per returned row, onto the ranked page; which rows carry text and
+           which read null is pinned by DarlingPgTopQueriesLiveTests against a real store. */
         /* #2554: qualified, because THIS join is what made it ambiguous. */
         Assert.Contains("GROUP BY differenced.queryid, database_id", sql, StringComparison.Ordinal);
     }

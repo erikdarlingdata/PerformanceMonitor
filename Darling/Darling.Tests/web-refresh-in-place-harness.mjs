@@ -9,21 +9,27 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+/* As in a browser, an observer is told only about the kinds of change it asked for: a child added or removed reaches one that asked for
+   `childList`, and `hidden` or `style` set on a node reaches one that asked for `attributes` (with that name in its `attributeFilter`, when
+   it gave one). An observer that watches children only never hears of a panel that hides itself. */
 const observers = [];
-const notify = () => queueMicrotask(() => observers.slice().forEach((o) => o.cb()));
+const wants = (init, kind, name) => !!init[kind] && (kind !== "attributes" || !init.attributeFilter || init.attributeFilter.includes(name));
+const notify = (kind = "childList", name = null) => queueMicrotask(() => observers.slice().forEach((o) => { if (o.inits.some((i) => wants(i, kind, name))) o.cb(); }));
 globalThis.MutationObserver = class {
-  constructor(cb) { this.cb = cb; }
-  observe() { observers.push(this); }
-  disconnect() { const i = observers.indexOf(this); if (i >= 0) observers.splice(i, 1); }
+  constructor(cb) { this.cb = cb; this.inits = []; }
+  observe(target, init) { this.inits.push(init || {}); if (!observers.includes(this)) observers.push(this); }
+  disconnect() { const i = observers.indexOf(this); if (i >= 0) observers.splice(i, 1); this.inits = []; }
 };
 
 class FakeNode {
   constructor(tag) {
     this.tag = tag; this.children = []; this.attrs = {}; this.listeners = {}; this.parent = null; this._text = "";
-    this.className = ""; this.dataset = {}; this.value = ""; this.checked = false; this.disabled = false; this.hidden = false; this.isRoot = false;
-    this.style = {};
+    this.className = ""; this.dataset = {}; this.value = ""; this.checked = false; this.disabled = false; this._hidden = false; this.isRoot = false;
+    this.style = { _display: "", get display() { return this._display; }, set display(v) { this._display = String(v); notify("attributes", "style"); } };
     this.classList = { add() {}, remove() {}, toggle() {}, contains: () => false };
   }
+  get hidden() { return this._hidden; }
+  set hidden(v) { this._hidden = v; notify("attributes", "hidden"); }
   get firstChild() { return this.children[0] || null; }
   get nextSibling() { const i = this.parent ? this.parent.children.indexOf(this) : -1; return i >= 0 ? this.parent.children[i + 1] || null : null; }
   get isConnected() { let n = this; while (n.parent) n = n.parent; return n.isRoot; }
@@ -66,8 +72,10 @@ globalThis.scrollTo = (x, y) => { scrolledTo = y; };
 const [jsDir, scenario] = process.argv.slice(-2);
 
 /* ── the scripted fetch: each route has a version the scenario bumps, and a gate that holds the answer until released ── */
-const state = { fleetVersion: 1, readVersion: 1, fleetFail: false, readFail: false, fleetGate: null, readGate: null, fleetCalls: 0, readCalls: 0, online: true };
+const state = { fleetVersion: 1, readVersion: 1, fleetFail: false, readFail: false, fleetGate: null, readGate: null, fleetCalls: 0, readCalls: 0, online: true, busyOnce: false };
 const reply = (status, body) => ({ status, ok: status >= 200 && status < 300, text: async () => JSON.stringify(body) });
+/* The service refusing a read as busy: HTTP 429 with a Retry-After header of one second. */
+const busyReply = () => ({ ...reply(429, { error: "busy" }), headers: { get: (k) => (String(k).toLowerCase() === "retry-after" ? "1" : null) } });
 const card = () => ({ server_id: 7, server_name: "SRV1", display_name: "SRV1", is_postgres: false, band: "Healthy", band_label: "Healthy", is_online: state.online, status: "ok", last_collection: null, tags: [], is_silenced: false, metric_count: 0, measured_metric_count: 0 });
 globalThis.fetch = async (url) => {
   const u = String(url);
@@ -81,6 +89,7 @@ globalThis.fetch = async (url) => {
   if (u.startsWith("/api/read/get_stub")) {
     state.readCalls++;
     if (state.readGate) await state.readGate;
+    if (state.busyOnce) { state.busyOnce = false; return busyReply(); }
     if (state.readFail) return reply(500, { error: "read down" });
     return reply(200, { value: "value-" + state.readVersion });
   }
@@ -300,6 +309,36 @@ try {
       out.sameHidden = live.children[0] === hiddenLive;
       out.textAfter = text(shownLive);
     },
+    /* #7934: the whole-grid swap (a different set of panels) waits for every staged panel to draw. A panel that hides itself
+       (hideWhenNotCollected) sets `hidden` and `style.display` and leaves its loading strip, so when it is the last to answer the
+       only change is to its attributes. The swap must still land. */
+    async hiddenLastPanelSwap() {
+      const rip = await load("refresh-in-place.js");
+      const panel = (title, body, loading) => {
+        const p = new FakeNode("div"); p.className = "panel"; p.setAttribute("data-panel", title); p.setAttribute("data-title", title);
+        const b = new FakeNode("div"); b.className = "panel-body"; p.appendChild(b);
+        const c = new FakeNode("div"); c.className = loading ? "strip loading" : "stub-result"; c.textContent = body; b.appendChild(c);
+        return p;
+      };
+      const live = new FakeNode("div"); live.className = "panel-grid"; live.isRoot = true;
+      live.appendChild(panel("Stats", "old", false));
+      const stats = panel("Stats", "Loading", true);
+      const cpu = panel("Instance CPU", "Loading", true);
+      let doneRuns = 0;
+      rip.whenSettled([stats, cpu], () => { doneRuns++; });
+      rip.refreshGridInPlace(live, [stats, cpu]);
+      /* the Stats panel answers first and draws */
+      const strip = stats.byClass("loading")[0]; strip.className = "stub-result"; strip.textContent = "new";
+      await settle();
+      out.swappedBeforeHide = live.children[0] === stats;
+      /* the Instance CPU panel answers last, as not collected: it hides itself the way panels.js does, and nothing else changes */
+      cpu.style.display = "none";
+      cpu.hidden = true;
+      await settle();
+      out.doneRuns = doneRuns;
+      out.swapped = live.children.length === 2 && live.children[0] === stats && live.children[1] === cpu;
+      out.textAfter = text(live);
+    },
     /* #7534: a lone half-width panel carries `span-solo` on the live grid. A poll must still take the per-panel path (the same elements
        stay) and the panel must keep the mark. */
     async soloPanelPoll() {
@@ -351,6 +390,34 @@ try {
       g.release();
       await settle();
       out.loadingAfter = loadingStrips(main);
+    },
+    /* #7942: a saved view's panel (it reads through a gate, so a busy refusal is sent once more after the Retry-After) polled while the
+       service answers 429. During the wait the panel on screen keeps its data: the "Retrying in N seconds" notice is not a drawn panel, so
+       the swap waits for the second answer. The wait counts as a read of the page, so the footer is not stamped and the next poll is not
+       planned before that answer. */
+    async busyRetryPoll() {
+      const rip = await load("refresh-in-place.js");
+      const panels = await load("panels.js");
+      const util = await load("util.js");
+      const gate = (start) => start(); /* a saved view's read gate with every slot free */
+      const desc = { read: "get_stub", params: { server: "SRV1" }, title: "Stub panel", render: (d) => util.el("div", { class: "stub-result", text: d.value }) };
+      const live = new FakeNode("div"); live.className = "panel-grid"; live.isRoot = true;
+      live.appendChild(panels.renderPanel(desc, undefined, gate));
+      await settle();
+      const livePanel = live.children[0];
+      out.firstText = text(livePanel);
+      state.busyOnce = true;
+      state.readVersion = 2;
+      rip.refreshGridInPlace(live, [panels.renderPanel(desc, undefined, gate)]);
+      await settle();
+      out.samePanel = live.children[0] === livePanel;
+      out.textDuringWait = text(livePanel);
+      out.inFlightDuringWait = util.hasInFlightReads();
+      await new Promise((r) => setTimeout(r, 1300));
+      out.textAfter = text(livePanel);
+      out.inFlightAfter = util.hasInFlightReads();
+      out.loadingAfter = loadingStrips(live);
+      out.readCalls = state.readCalls;
     },
   };
   if (!scenarios[scenario]) throw new Error("unknown scenario " + scenario);

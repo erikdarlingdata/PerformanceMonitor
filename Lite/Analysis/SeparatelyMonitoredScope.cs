@@ -69,7 +69,7 @@ internal static class SeparatelyMonitoredScope
         IReadOnlyList<string> databases, CancellationToken token)
     {
         using var command = connection.CreateCommand();
-        return await CountDeadlocksAsync(command, serverId, start, end, inclusiveEnd, databases, token);
+        return (await CountDeadlocksAsync(command, serverId, start, end, inclusiveEnd, databases, token)).Count;
     }
 
     /// <summary>The same count on a connection held under the store's read lock (the overview card's).</summary>
@@ -78,30 +78,47 @@ internal static class SeparatelyMonitoredScope
         IReadOnlyList<string> databases, CancellationToken token)
     {
         using var command = connection.CreateCommand();
+        return (await CountDeadlocksAsync(command, serverId, start, end, inclusiveEnd, databases, token)).Count;
+    }
+
+    /// <summary>#7893: the same count, beside the busiest one-hour bucket's count. Buckets take the window start as
+    /// their origin, the grain the DEADLOCKS fact grades (<c>DuckDbFactCollector.CollectDeadlockFactsAsync</c>).</summary>
+    public static async Task<(long Count, long PeakHourCount)> CountDeadlocksAndPeakHourAsync(
+        DuckDBConnection connection, int serverId, DateTime start, DateTime end, bool inclusiveEnd,
+        IReadOnlyList<string> databases, CancellationToken token)
+    {
+        using var command = connection.CreateCommand();
         return await CountDeadlocksAsync(command, serverId, start, end, inclusiveEnd, databases, token);
     }
 
-    private static async Task<long> CountDeadlocksAsync(
+    private static async Task<(long Count, long PeakHourCount)> CountDeadlocksAsync(
         DuckDBCommand command, int serverId, DateTime start, DateTime end, bool inclusiveEnd,
         IReadOnlyList<string> databases, CancellationToken token)
     {
         var window = "server_id = $1 AND deadlock_time >= $2 AND deadlock_time " + (inclusiveEnd ? "<=" : "<") + " $3";
         var outside = DeadlockOutsideSql(databases, 4);
         command.CommandText = "SELECT CASE WHEN " + outside + " THEN NULL ELSE deadlock_graph_xml END, "
-            + "CASE WHEN " + outside + " THEN 1 ELSE 0 END FROM " + StoredEventCopies.Deadlocks(window) + " AS dl";
+            + "CASE WHEN " + outside + " THEN 1 ELSE 0 END, deadlock_time FROM " + StoredEventCopies.Deadlocks(window) + " AS dl";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = start });
         command.Parameters.Add(new DuckDBParameter { Value = end });
         AddParameters(command, databases);
         long count = 0;
+        var perHour = new Dictionary<long, long>();
         using var reader = await command.ExecuteReaderAsync(token);
         while (await reader.ReadAsync(token))
         {
-            if (Convert.ToInt32(reader.GetValue(1)) == 1) { count++; continue; }
-            var xml = reader.IsDBNull(0) ? null : reader.GetString(0);
-            if (!DeadlockGraphDatabases.AllIn(xml, databases)) count++;
+            if (Convert.ToInt32(reader.GetValue(1)) != 1)
+            {
+                var xml = reader.IsDBNull(0) ? null : reader.GetString(0);
+                if (DeadlockGraphDatabases.AllIn(xml, databases)) continue;
+            }
+            count++;
+            if (reader.IsDBNull(2)) continue;
+            var hour = (long)Math.Floor((Convert.ToDateTime(reader.GetValue(2)) - start).TotalHours);
+            perHour[hour] = perHour.TryGetValue(hour, out var n) ? n + 1 : 1;
         }
-        return count;
+        return (count, perHour.Count == 0 ? 0 : perHour.Values.Max());
     }
 
     /// <summary>

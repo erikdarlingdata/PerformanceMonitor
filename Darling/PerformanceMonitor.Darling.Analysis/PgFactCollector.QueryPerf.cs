@@ -135,6 +135,18 @@ LIMIT " + FactRanked.MaxObjects + ";";
 
             if (totalSpills > 0)
             {
+                /* #7884: the period and coverage stamps the wait facts carry, so the scorer grades pages per OBSERVED hour
+                   (FactScorer.ObservedHours) and the same spill rate reads the same at every hours_back. */
+                var spillMetadata = new Dictionary<string, double>
+                {
+                    ["total_spills"] = totalSpills,
+                    /* #5633: DISTINCT queries (database + query_hash) with a spill, not snapshot rows. */
+                    ["spilling_query_count"] = spillingQueries,
+                    ["total_executions"] = totalExecutions,
+                    ["period_duration_ms"] = context.PeriodDurationMs
+                };
+                FactCollectorHelpers.AddCoverageFraction(spillMetadata, context);
+
                 facts.Add(new Fact
                 {
                     Source = "queries",
@@ -143,13 +155,7 @@ LIMIT " + FactRanked.MaxObjects + ";";
                     ServerId = context.ServerId,
                     ObjectName = spillRanked.Count > 0 ? spillRanked[0].ObjectName : null,
                     Ranked = spillRanked,
-                    Metadata = new Dictionary<string, double>
-                    {
-                        ["total_spills"] = totalSpills,
-                        /* #5633: DISTINCT queries (database + query_hash) with a spill, not snapshot rows. */
-                        ["spilling_query_count"] = spillingQueries,
-                        ["total_executions"] = totalExecutions
-                    }
+                    Metadata = spillMetadata
                 });
             }
 
