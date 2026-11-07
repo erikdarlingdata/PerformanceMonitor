@@ -1252,6 +1252,29 @@ internal static partial class AlertNotebookEndpoint
     /// <c>server=</c> query used to let another host's resolution or re-fire answer for a server the caller
     /// never actually reached. When a server id IS known, rows are filtered to that server before either arm
     /// runs, for the same reason.</para></summary>
+    /// <summary>#8095: the metric a resolution row closes: the canonical name behind a <see cref="DarlingTriageEndpoint.ResolutionAliases"/>
+    /// alias, or the name before a " Cleared" or " Resolved" suffix the alert engine writes directly; <c>null</c> for a firing metric.</summary>
+    internal static string? ResolvedMetricOf(string metric)
+    {
+        foreach (var (alias, canonical) in DarlingTriageEndpoint.ResolutionAliases)
+        {
+            if (string.Equals(alias, metric, StringComparison.OrdinalIgnoreCase))
+            {
+                return canonical;
+            }
+        }
+
+        foreach (var suffix in new[] { " Cleared", " Resolved" })
+        {
+            if (metric.Length > suffix.Length && metric.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            {
+                return metric.Substring(0, metric.Length - suffix.Length).TrimEnd();
+            }
+        }
+
+        return null;
+    }
+
     internal static string? StatusFromHistory(
         IReadOnlyList<DarlingAlertReader.AlertHistoryReadRow> rows, string metric, DateTime anchor,
         DarlingAlertReader.AlertHistoryReadRow? matchedRow, int? serverId, bool fleetLevelStore)
@@ -1265,6 +1288,29 @@ internal static partial class AlertNotebookEndpoint
         var scoped = serverId.HasValue
             ? rows.Where(row => row.ServerId == serverId.Value)
             : rows;
+
+        /* #8095: the row opened is itself a resolution ("Blocking Cleared", "CPU Resolved", or "<metric> Cleared" as the Alert History
+           link names a Cleared row). The arms below look for a resolution of the metric they are given, so for this row they find none and
+           would say "No resolution recorded" about the resolution. It reads as what it is, with the firing it closed when the rows hold one:
+           the newest firing of the resolved metric at or before `at`. */
+        var resolvedMetric = ResolvedMetricOf(trimmedMetric);
+        if (resolvedMetric is not null)
+        {
+            DateTime? firedAt = null;
+            foreach (var row in scoped)
+            {
+                if (row.AlertTime <= anchor
+                    && string.Equals(row.MetricName, resolvedMetric, StringComparison.OrdinalIgnoreCase)
+                    && (firedAt is null || row.AlertTime > firedAt))
+                {
+                    firedAt = row.AlertTime;
+                }
+            }
+
+            return firedAt is DateTime fired
+                ? "Resolution of the " + resolvedMetric + " alert that fired at " + fired.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)
+                : "Resolution of a " + resolvedMetric + " alert";
+        }
 
         /* Arm 1: a resolution row for THIS metric after `at`. ResolutionAliases maps a resolution TITLE to
            its firing metric; a resolution row's own metric_name is the alias, not the canonical name, so the

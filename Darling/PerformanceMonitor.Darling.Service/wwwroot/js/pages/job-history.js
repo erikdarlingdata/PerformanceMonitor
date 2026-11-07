@@ -110,8 +110,13 @@ function serverRows(data) {
 /** #6178: the sentence for a server whose engine is Azure SQL Database, which has no SQL Agent, so no job will ever match. The service
     says "not_collected" and names the engine for it; any other answer keeps its own sentence. */
 const AZURE_NO_AGENT_LINE = "Azure SQL Database has no SQL Agent, so it has no job history.";
-export function noAgentLine(res) {
-  return res && res.status === "not_collected" && /runs on Azure SQL Database \(EngineEdition 5\)/.test(String(res.message || "")) ? AZURE_NO_AGENT_LINE : null;
+/** #8095: the sentence under All servers when the answer is not_collected: the service answers that way for the fleet only when no registered
+    server can run the job history collector (a store of PostgreSQL targets), so a sentence about "this server" would have no server to mean. */
+export const FLEET_NO_AGENT_LINE = "None of this store's servers runs SQL Agent, so there is no job history.";
+export function noAgentLine(res, server) {
+  if (!res || res.status !== "not_collected") return null;
+  if (/runs on Azure SQL Database \(EngineEdition 5\)/.test(String(res.message || ""))) return AZURE_NO_AGENT_LINE;
+  return server === "" ? FLEET_NO_AGENT_LINE : null;
 }
 
 /* Agent history exists only on SQL Server targets; a server whose engine is not stamped yet stays on offer. */
@@ -367,7 +372,7 @@ export function renderJobHistory(main) {
       if (res.kind === "empty") {
         /* An answer with no runs (an Azure SQL Database has no SQL Agent) offers only the categories this server has been seen to have. */
         fill(category.sel, categoryOptions(), state.category);
-        return mount(body, [kept, noticeFor(retainedNote(res.hints)), emptyStrip(noAgentLine(res) || res.message)]);
+        return mount(body, [kept, noticeFor(retainedNote(res.hints)), emptyStrip(noAgentLine(res, state.server) || res.message)]);
       }
       for (const r of data.runs || []) if (r.category) seenFor(state.server).add(r.category);
       fill(category.sel, categoryOptions(), state.category);

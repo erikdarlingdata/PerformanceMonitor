@@ -85,6 +85,25 @@ export function problemServerCount(d) {
   return ((d && d.worst_servers) || []).length + ((d && d.additional_problem_count) || 0);
 }
 
+/* #8095: a Healthy-banded card the problem list holds for a tile no band reads (#7561). The roll-up's band tiles leave such a server under
+   Healthy, so every count that includes it says how many of its servers are of this kind: "1 Critical" above "3 need attention" is then
+   reconcilable on one screen. The predicate and the bands are the service's and are not changed here. */
+export function isHealthyWithAdvisory(c) {
+  return c.band === "Healthy" && c.has_advisory_tile === true;
+}
+
+function advisorySplit(n) {
+  return n > 0 ? " (" + n + " healthy with " + (n === 1 ? "an advisory" : "advisories") + ")" : "";
+}
+
+/** The overflow line under the problem list: the servers past the list's cap, and how many of those are Healthy with an advisory. A card the
+    list already names is in the rows, not past them, so it is not counted again. */
+export function moreNeedAttentionText(d) {
+  const listed = new Set(((d && d.worst_servers) || []).map((r) => r.display_name));
+  const advisory = ((d && d.cards) || []).filter((c) => isHealthyWithAdvisory(c) && !listed.has(c.display_name)).length;
+  return "+ " + d.additional_problem_count + " more need attention" + advisorySplit(advisory);
+}
+
 /* What the filter did, shown beside the cards it left. Word-for-word the desktop viewer's
    FleetRollup.AttentionFilterCountText (#2424), because the point of doing all three surfaces at once is
    that a reader moving between them meets one vocabulary rather than three. The all-clear arms matter as
@@ -96,8 +115,8 @@ export function problemServerCount(d) {
    there. Here the denominator is what the SEARCH left, so on a 57-server fleet narrowed to one match that
    sentence claims the fleet holds one server, while 56 others exist and were never looked at. The all-clear
    has to name the population it is clearing. */
-function attentionCountText(shown, total, narrowed) {
-  if (shown > 0) return "showing " + shown + " of " + total;
+function attentionCountText(shown, total, narrowed, healthyWithAdvisories) {
+  if (shown > 0) return "showing " + shown + " of " + total + advisorySplit(healthyWithAdvisories);
   if (total <= 0) return "no servers to filter";
   if (narrowed) return total === 1 ? "the 1 matching server is healthy" : "all " + total + " matching servers are healthy";
   if (total === 1) return "the 1 server monitored is healthy";
@@ -332,7 +351,55 @@ function showStoreFailure(body, inPlace, message) {
 function storeFleetBody(d, store, own) {
   if (!d.total_servers) return [emptyStrip("No servers are enabled in this store yet.")];
   const cards = (d.cards || []).slice().sort(SORTS.severity);
-  return [rollup(d), el("div", { class: "grid server-grid" }, cards.map((c) => serverCard(c, store, own)))];
+  /* #8095: the single-store page's reading aids, inside the section: the problem list, its overflow line and the updated stamp. The controls
+     (Search, the attention filter, grouping, Silence) stay out, as renderStoreFleets says. The overflow line is a count alone here, because
+     there is no filter for it to switch on, and a row of the list opens its server in this section's store. */
+  return [
+    rollup(d),
+    ...attentionNodes(d, store, null),
+    el("div", { class: "grid server-grid" }, cards.map((c) => serverCard(c, store, own))),
+    el("div", { class: "meta fleet-store-updated", text: "Updated " + localTime(d.generated_at) }),
+  ];
+}
+
+/** The all-healthy line, or the "Needs attention" list with its overflow line (#2437, #7561). `store` is the store a row opens its server
+    in (null for the page's own store); `onMore` is what the overflow line does when activated, or null to draw it as a count alone. */
+function attentionNodes(d, store, onMore) {
+  if (problemServerCount(d) === 0) {
+    return [
+      el("div", { class: "all-healthy" }, [
+        el("span", { class: "dot band-Healthy" }),
+        "All " + d.total_servers + " server" + (d.total_servers === 1 ? "" : "s") + " healthy.",
+      ]),
+    ];
+  }
+  const nodes = [
+    el("h3", { class: "section-title", text: "Needs attention" }),
+    VIZ.bandlist(d, {
+      rowsKey: "worst_servers",
+      primaryKey: "display_name",
+      bandKey: "band",
+      bandLabelKey: "band_label",
+      advisoryKey: "advisory_tiles",
+      reasonKey: "reason",
+      navKey: "display_name",
+      navStore: store,
+    }),
+  ];
+  if (d.additional_problem_count > 0) {
+    /* #2437: the overflow line is the way TO the overflow, not a report that it exists. It was an inert
+       muted div: on a 57-server fleet it read "+52 more need attention" and the reporter's question was
+       literally "where do I find these warnings?". Activating it turns the needs-attention filter on, so
+       the answer is the card grid below, with every metric chip those servers have. onActivate rather than
+       onClick because a line that navigates has to be reachable from the keyboard too — it installs
+       role=button, tabindex and Enter/Space alongside the click. */
+    nodes.push(
+      onMore
+        ? el("div", { class: "attention-link", text: moreNeedAttentionText(d), title: "Show only the servers that need attention", onActivate: onMore })
+        : el("div", { class: "attention-more muted", text: moreNeedAttentionText(d) })
+    );
+  }
+  return nodes;
 }
 
 export async function renderFleet(main, opts) {
@@ -367,43 +434,7 @@ export async function renderFleet(main, opts) {
     return;
   }
 
-  if (problemServerCount(d) === 0) {
-    nodes.push(
-      el("div", { class: "all-healthy" }, [
-        el("span", { class: "dot band-Healthy" }),
-        "All " + d.total_servers + " server" + (d.total_servers === 1 ? "" : "s") + " healthy.",
-      ])
-    );
-  } else {
-    nodes.push(el("h3", { class: "section-title", text: "Needs attention" }));
-    nodes.push(
-      VIZ.bandlist(d, {
-        rowsKey: "worst_servers",
-        primaryKey: "display_name",
-        bandKey: "band",
-        bandLabelKey: "band_label",
-        advisoryKey: "advisory_tiles",
-        reasonKey: "reason",
-        navKey: "display_name",
-      })
-    );
-    if (d.additional_problem_count > 0) {
-      /* #2437: the overflow line is the way TO the overflow, not a report that it exists. It was an inert
-         muted div: on a 57-server fleet it read "+52 more need attention" and the reporter's question was
-         literally "where do I find these warnings?". Activating it turns the needs-attention filter on, so
-         the answer is the card grid below, with every metric chip those servers have. onActivate rather than
-         onClick because a line that navigates has to be reachable from the keyboard too — it installs
-         role=button, tabindex and Enter/Space alongside the click. */
-      nodes.push(
-        el("div", {
-          class: "attention-link",
-          text: "+ " + d.additional_problem_count + " more need attention",
-          title: "Show only the servers that need attention",
-          onActivate: () => setAttentionOnly(true),
-        })
-      );
-    }
-  }
+  nodes.push(...attentionNodes(d, null, () => setAttentionOnly(true)));
 
   nodes.push(el("h3", { class: "section-title", style: "margin-top:1.25rem", text: "Servers" }));
   lastCards = d.cards || [];
@@ -433,7 +464,7 @@ function redrawCards() {
      page head scrolls away, so a reader who has scrolled down to the grid would see a short fleet and nothing
      saying why. A filtered grid that looks unfiltered is a worse defect than the dead end it replaced, so the
      notice sits on the grid and carries its own way out. */
-  const notice = attentionOnly ? attentionNotice(matched.length, searched.length) : null;
+  const notice = attentionOnly ? attentionNotice(matched.length, searched.length, matched.filter(isHealthyWithAdvisory).length) : null;
 
   if (fleetGrouped && lastTags.length) {
     mount(gridNode, [silenceNoticeNode(), notice, renderGrouped(matched)]);
@@ -464,14 +495,14 @@ function redrawCards() {
     role="status" is util.js's noticeStrip idiom for exactly this: a non-fatal notice that appears and
     re-words itself with no page load, so a screen reader hears the count change instead of the grid silently
     shrinking. Raised in review. */
-function attentionNotice(shown, total) {
+function attentionNotice(shown, total, healthyWithAdvisories) {
   const term = fleetFilter.trim();
   const label = term ? "Needs attention only, matching “" + term + "”" : "Needs attention only";
   const searchFoundNothing = term !== "" && total === 0;
   const kind = searchFoundNothing ? "none" : shown > 0 ? "warn" : "ok";
   const sentence = searchFoundNothing
     ? label + " — nothing matches that term, so no server was judged."
-    : label + " — " + attentionCountText(shown, total, term !== "") + ".";
+    : label + " — " + attentionCountText(shown, total, term !== "", healthyWithAdvisories) + ".";
 
   return el("div", { class: "attention-note " + kind, role: "status" }, [
     el("span", { text: sentence }),
@@ -603,7 +634,7 @@ function attentionControl() {
   attentionToggle = cb;
   return el("label", {
     class: "attention-control",
-    title: "Show only the cards that are not Healthy — Critical, Warning or Offline. Uncheck to show the whole fleet again.",
+    title: "Show only the servers that need attention: a Critical, Warning or Offline band, or a Healthy band with a warning tile. Uncheck to show the whole fleet again.",
   }, [cb, el("span", { text: "Needs attention only" })]);
 }
 
