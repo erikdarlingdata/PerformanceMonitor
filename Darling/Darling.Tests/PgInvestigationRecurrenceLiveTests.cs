@@ -138,10 +138,17 @@ VALUES ($1, $2, $3, $4, 45, 30, $5, 'email', NULL, $6, FALSE, NULL, NULL)",
                 sql.Parameters.Add(new NpgsqlParameter { Value = requestId });
                 sql.Parameters.Add(new NpgsqlParameter { Value = ServerId });
                 await using var reader = await sql.ExecuteReaderAsync(ct);
-                var counted = 0L;
+                /* The SQL returns the bounded fires; the clock test is the shared builder's, as in the reader. */
+                var around = default(DateTime);
+                var fires = new System.Collections.Generic.List<(DateTime FireUtc, bool Muted)>();
                 while (await reader.ReadAsync(ct))
-                    if (!reader.IsDBNull(2)) counted += reader.GetInt64(4);
-                Assert.Equal(2L, counted);
+                {
+                    around = DateTime.SpecifyKind(reader.GetFieldValue<DateTime>(1), DateTimeKind.Utc);
+                    if (!reader.IsDBNull(2))
+                        fires.Add((DateTime.SpecifyKind(reader.GetFieldValue<DateTime>(2), DateTimeKind.Utc), reader.GetBoolean(3)));
+                }
+                Assert.Equal(anchor, around);
+                Assert.Equal(2, InvestigationAlertRecurrence.FromFires("Blocking", around, fires, null).Fired);
             }
         });
     }
