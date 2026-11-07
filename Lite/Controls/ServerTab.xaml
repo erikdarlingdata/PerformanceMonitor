@@ -1712,15 +1712,19 @@
                         <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                     </Grid.RowDefinitions>
 
+                    <!-- #8144: the first chart in a ChartPanel card. The card adds 13 px (12 padding, 1 border) on each side of its plot, so the two
+                         charts below take the same margin until they move into cards too: the group keeps its plots one width. -->
                     <Border Grid.Row="0" Margin="0,0,0,4">
-                        <ScottPlot:WpfPlot x:Name="TempDbChart"/>
+                        <ui:ChartPanel Title="tempdb">
+                            <ScottPlot:WpfPlot x:Name="TempDbChart"/>
+                        </ui:ChartPanel>
                     </Border>
 
-                    <Border Grid.Row="1" Margin="0,4,0,4">
+                    <Border Grid.Row="1" Margin="13,4,13,4">
                         <ScottPlot:WpfPlot x:Name="TempDbSizeChart"/>
                     </Border>
 
-                    <Border Grid.Row="2" Margin="0,4,0,0">
+                    <Border Grid.Row="2" Margin="13,4,13,0">
                         <ScottPlot:WpfPlot x:Name="TempDbFileIoChart"/>
                     </Border>
 

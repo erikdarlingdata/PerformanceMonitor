@@ -189,10 +189,19 @@ namespace PerformanceMonitor.Ui
             };
         }
 
+        /// <summary>The element the tab's Grid sees for a chart: the chart, or the <see cref="ChartPanel"/> card it sits in.</summary>
+        private static System.Windows.DependencyObject HostOf(WpfPlot chart)
+        {
+            for (System.Windows.DependencyObject? up = chart; up is not null; up = System.Windows.Media.VisualTreeHelper.GetParent(up))
+                if (up is ChartPanel card) return card;
+            return chart;
+        }
+
         private static void FitRow(WpfPlot chart)
         {
             // WpfPlot -> Border -> Grid is how every chart tab hosts a chart; walk up to the Grid whichever the nesting.
-            System.Windows.DependencyObject child = chart;
+            // #8144: a chart in a ChartPanel card is hosted by the card's Border in the tab's Grid, so the walk starts at the card.
+            System.Windows.DependencyObject child = HostOf(chart);
             System.Windows.Controls.Grid? grid = null;
             while (child is not null)
             {
@@ -212,10 +221,12 @@ namespace PerformanceMonitor.Ui
             foreach (System.Windows.UIElement sibling in grid.Children)
             {
                 if (System.Windows.Controls.Grid.GetRow(sibling) != row) continue;
-                var plot = ((sibling as System.Windows.Controls.Border)?.Child as WpfPlot ?? sibling as WpfPlot)?.Plot;
-                // The Border around the chart has a margin between charts, and that is part of the row, not of the chart.
-                var margin = sibling is System.Windows.FrameworkElement fe ? fe.Margin.Top + fe.Margin.Bottom : 0;
-                if (plot is not null && ChromeHeight(plot) is { } h) need = Math.Max(need, Math.Ceiling(RowMinHeightFor(h) + margin)); // whole pixels: the chart renders at its pixel size, truncated
+                var inner = (sibling as System.Windows.Controls.Border)?.Child ?? sibling;
+                var card = inner as ChartPanel;
+                var plot = ((card?.Content ?? inner) as WpfPlot)?.Plot;
+                // The Border around the chart has a margin between charts, and that is part of the row, not of the chart. So is a card's own chrome.
+                var margin = (sibling is System.Windows.FrameworkElement fe ? fe.Margin.Top + fe.Margin.Bottom : 0) + (card?.ChromeHeight ?? 0);
+                if (plot is not null && ChromeHeight(plot) is { } h) need = Math.Max(need, Math.Ceiling(RowMinHeightFor(h) + margin) + (card is null ? 0 : 1)); // whole pixels; a card's fractional chrome rounds the chart down by up to one more: the chart renders at its pixel size, truncated
             }
             if (Math.Abs(definition.MinHeight - need) > 0.5) definition.MinHeight = need;
 
