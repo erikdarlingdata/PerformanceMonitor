@@ -34,6 +34,18 @@ public static class McpPlanAnalysisFormatter
     public const int TopOperatorCap = 10;
 
     /// <summary>
+    /// How many statistics <c>statistics_used</c> carries per statement (#8147), published beside
+    /// <c>statistics_returned</c> / <c>total_statistics</c> / <c>statistics_truncated</c> so the cut is never silent.
+    /// </summary>
+    public const int StatisticsUsedCap = 10;
+
+    /// <summary>
+    /// The <c>statistics_note</c> of a statement whose plan carries a QueryPlan but no OptimizerStatsUsage element
+    /// (<c>statistics_usage</c> = <c>not_in_plan</c>, #8147).
+    /// </summary>
+    public const string StatisticsNotInPlanNote = "This plan has no record of the statistics it used (SQL Server before 2017 / 2016 SP2, or a plan that loaded none), so their state at compile is unknown.";
+
+    /// <summary>
     /// The two <c>top_operators</c> ranking bases, published per statement as <c>operators_ranked_by</c>
     /// (#3653 A15/A16). A plan with runtime statistics ranks by each operator's OWN measured elapsed time
     /// (#7887): a row-mode operator's <c>ActualElapsedMs</c> is cumulative over its subtree, so a parent is
@@ -221,9 +233,35 @@ public static class McpPlanAnalysisFormatter
                         };
                     });
 
+                var statsUsage = !s.HasQueryPlan ? "no_query_plan" : s.HasStatsUsage ? "recorded" : "not_in_plan";
+                var statsRows = s.StatsUsage
+                    .OrderByDescending(i => i.ModificationCount)
+                    .ThenBy(i => i.DatabaseName, StringComparer.Ordinal)
+                    .ThenBy(i => i.SchemaName, StringComparer.Ordinal)
+                    .ThenBy(i => i.TableName, StringComparer.Ordinal)
+                    .ThenBy(i => i.StatisticsName, StringComparer.Ordinal)
+                    .Take(StatisticsUsedCap)
+                    .Select(i =>
+                    {
+                        var tableRows = TableRowsFor(i, allNodes);
+                        return new
+                        {
+                            database = i.DatabaseName,
+                            schema = i.SchemaName,
+                            table = i.TableName,
+                            statistic = i.StatisticsName,
+                            modification_count = i.ModificationCount,
+                            table_rows = tableRows,
+                            modified_percent = tableRows is > 0 ? Math.Round(i.ModificationCount * 100.0 / tableRows.Value, 1) : (double?)null,
+                            last_update = i.LastUpdate,
+                            sampling_percent = i.SamplingPercent
+                        };
+                    })
+                    .ToList();
+
                 return new
                 {
-                    statement_text = McpHelpers.Truncate(s.StatementText, 2000),
+                    statement_text =McpHelpers.Truncate(s.StatementText, 2000),
                     statement_type = s.StatementType,
                     estimated_cost = Math.Round(s.StatementSubTreeCost, 4),
                     /* #5633 item 21: cache and Query Store plans carry no QueryPlan DegreeOfParallelism, so
@@ -300,7 +338,16 @@ public static class McpPlanAnalysisFormatter
                     operators_returned = Math.Min(allNodes.Count, TopOperatorCap),
                     total_operators = allNodes.Count,
                     truncated = allNodes.Count > TopOperatorCap,
-                    top_operators = topOps
+                    top_operators = topOps,
+                    /* #8147: what the optimizer's statistics looked like at compile. Ordered by modification
+                       count, truncation observed against the whole list. */
+                    statistics_usage = statsUsage,
+                    statistics_note = statsUsage == "not_in_plan" ? StatisticsNotInPlanNote : null,
+                    statistics_cap = StatisticsUsedCap,
+                    statistics_returned = Math.Min(s.StatsUsage.Count, StatisticsUsedCap),
+                    total_statistics = s.StatsUsage.Count,
+                    statistics_truncated = s.StatsUsage.Count > StatisticsUsedCap,
+                    statistics_used = statsRows
                 };
             })
             .ToList();
@@ -326,6 +373,26 @@ public static class McpPlanAnalysisFormatter
         };
 
         return JsonSerializer.Serialize(result, McpHelpers.JsonOptions);
+    }
+
+    /// <summary>
+    /// The row count of the statistic's table as the plan saw it (#8147): the largest <c>TableCardinality</c> among
+    /// the operators that read that table, or null when no operator in the statement does.
+    /// </summary>
+    private static double? TableRowsFor(OptimizerStatsUsageItem item, IReadOnlyList<PlanNode> nodes)
+    {
+        var qualified = $"{item.SchemaName}.{item.TableName}";
+        double? rows = null;
+        foreach (var n in nodes)
+        {
+            if (string.Equals(n.DatabaseName, item.DatabaseName, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(n.ObjectName, qualified, StringComparison.OrdinalIgnoreCase))
+            {
+                rows = rows is null ? n.TableCardinality : Math.Max(rows.Value, n.TableCardinality);
+            }
+        }
+
+        return rows;
     }
 
     private static void CollectNodes(PlanNode node, List<PlanNode> nodes)
