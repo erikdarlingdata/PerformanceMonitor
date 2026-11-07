@@ -67,6 +67,10 @@ public sealed class ChartRenderHelper
         {
             legend.Orientation = ScottPlot.Orientation.Horizontal;
             legend.TightHorizontalWrapping = true;
+            /* ScottPlot pads a legend panel 20 px on every side, which is 40 px of blank under the legend (Session Stats at
+               800x600: 90 of the chart's 286 px). The entries carry their own spacing, so 10 px above and below is enough and the
+               plot gets the rest. */
+            panel.Padding = new ScottPlot.PixelPadding(panel.Padding.Left, panel.Padding.Right, 10, 10);
         }
 
         chart.Plot.Layout.LayoutEngine = new WrappedLegendLayout(panel);
