@@ -235,6 +235,7 @@
         <Setter Property="ui:DataGridClipboardBehavior.FixHeaderCopy" Value="True"/>
         <Setter Property="ui:DataGridSortBehavior.SortDescendingFirst" Value="True"/>
         <Setter Property="ui:DataGridFillColumn.Enabled" Value="True"/>
+        <Setter Property="ui:DataGridHeaderFit.Enabled" Value="True"/>
         <Setter Property="ui:ScrollPanBehavior.EnableMiddleClickPanning" Value="True"/>
         <Setter Property="AutoGenerateColumns" Value="False"/>
         <Setter Property="IsReadOnly" Value="True"/>
