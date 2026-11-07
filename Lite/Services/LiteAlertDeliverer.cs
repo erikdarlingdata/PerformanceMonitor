@@ -28,14 +28,12 @@ namespace PerformanceMonitorLite.Services;
 /// metric's exact old toast body), icon = Error for "Deadlocks Detected"/"Poison Wait" and Warning
 /// for everything else, always the snoozable balloon — marshaled to the WPF dispatcher because the
 /// tray icon is a UI element;</item>
-/// <item>then the email/webhook/history send: "Blocking Detected"/"Deadlocks Detected" go through
-/// the old <c>SendDetectedAlertAsync</c> semantics — the #1236 per-server delivery-mode override
+/// <item>then the email/webhook/history send: the #1236 per-server delivery-mode override
 /// (from <c>servers.json</c> via <see cref="ServerManager"/>) resolved against the global
-/// <c>App.AlertDeliveryMode</c>, #1141 Per-event mode splitting the context into one send per
-/// distinct incident (capped at <c>App.AlertPerEventMaxPerCycle</c> with a "+N more" trailer),
-/// Summary mode (or no incidents) falling back to ONE combined send, and — like the old loop —
-/// no numeric values on these two metrics; every other metric is the old direct
-/// <see cref="EmailAlertService.TrySendAlertEmailAsync"/> call WITH the outcome's numerics.</item>
+/// <c>App.AlertDeliveryMode</c>; an incident-carrying alert in Per-event mode is split into one send per
+/// distinct incident (<see cref="PerEventNotification.Splits"/>, the rule Darling's deliverer reads too, capped at
+/// <c>App.AlertPerEventMaxPerCycle</c> with a "+N more" trailer), and every other alert is ONE
+/// <see cref="EmailAlertService.TrySendAlertEmailAsync"/> call with the outcome's numerics.</item>
 /// </list>
 /// <see cref="EmailAlertService.TrySendAlertEmailAsync"/> keeps Lite's history-row semantics
 /// unchanged: one combined <c>config_alert_log</c> row per send, written even when muted
@@ -48,8 +46,8 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
 {
     /* Test seams — the production ctor wires the real tray/email/servers.json paths. */
     internal delegate void ShowToast(string title, string message, BalloonIcon icon, string serverName, string metricName);
-    /* #4752: the send answers the delivery the email service recorded its history row with (null when it could not
-       say), so the deliverer can pass on whether any channel received the alert. */
+    /* #4752: the send answers the delivery the email service recorded its history row with (a failed one when it
+       threw, #8246), so the deliverer can pass on whether any channel received the alert. */
     internal delegate Task<AlertDelivery?> SendAlert(
         string metricName, string serverName, string currentValue, string thresholdValue,
         int serverId, AlertContext? context, double? numericCurrentValue, double? numericThresholdValue,
@@ -157,8 +155,9 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
     /// split there are N sends and N rows, and the answer is the one <see cref="FailedSendBackoff.ReportForSplit"/>
     /// picks (#4822), as Darling's deliverer answers it: a delivery that reached a channel, else a failed one so
     /// the engine tries the alert again, else <c>null</c> when no send was attempted. <c>null</c> is
-    /// "unreported", never "failed": the engine reads it as delivered, and it is also the answer when the send
-    /// threw anything but the caller's cancel, or could not say what it did.</para>
+    /// "unreported", never "failed": the engine reads it as delivered. A send that threw anything but the caller's
+    /// cancel answers <see cref="AlertDelivery.DelivererFailed"/> (#8246): nothing is known to have reached anyone, so
+    /// the engine tries the alert again.</para>
     ///
     /// <para>The caller's own cancel leaves as the <see cref="OperationCanceledException"/> it is, before any
     /// history row is written (see <see cref="EmailAlertService.TrySendAlertEmailAsync"/>).</para>
@@ -220,16 +219,14 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
                (outcome.Context.NewestSample), never recomputed here; no line when the context carries none. */
             var detailText = AlertDetailText.WithSampleAge(outcome.DetailText, outcome.Context);
 
-            /* Only blocking/deadlocks ever routed through SendDetectedAlertAsync's #1141 split in
-               the old loop; every other metric was a direct single send with its numerics. */
-            /* #1839's "Blocking Wait Time" joins them: it carries the same blocked-process incident
-               context, so it splits per-event the same way. */
-            if (outcome.MetricName is "Blocking Detected" or "Blocking Wait Time" or "Deadlocks Detected")
+            /* #8246: the Per-event split is decided by the shared rule Darling's deliverer reads (Per-event mode, and a
+               context that carries incidents), so a family that gains incidents pages per incident in both apps or in
+               neither. Every other delivery is one send with the outcome's numerics. */
+            if (PerEventNotification.Splits(deliveryMode, outcome.Context))
             {
-                return await SendDetectedAlertAsync(
-                    outcome.MetricName, outcome.ServerName, outcome.CurrentValue, outcome.ThresholdValue,
-                    serverId, outcome.Context, outcome.NumericCurrentValue, outcome.NumericThresholdValue,
-                    outcome.Muted, detailText, deliveryMode, cancellationToken);
+                return await SendPerEventAsync(
+                    outcome.MetricName, outcome.ServerName, outcome.ThresholdValue,
+                    serverId, outcome.Context, outcome.NumericThresholdValue, outcome.Muted, deliveryMode, cancellationToken);
             }
 
             return await _sendAlert(
@@ -247,7 +244,7 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
         catch (Exception ex)
         {
             AppLogger.Error("Alerts", $"Alert delivery failed for {outcome.MetricName} on {outcome.ServerName}: {ex.Message}", ex);
-            return null;
+            return AlertDelivery.DelivererFailed(ex.Message);
         }
     }
 
@@ -260,38 +257,28 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
 
     /* #1141: in Per-event mode, deliver one notification per distinct incident (capped at
        AlertPerEventMaxPerCycle, with a trailing "+N more" that still carries the remaining
-       fingerprints) instead of one batched summary card. Falls back to the single summary send in
-       Summary mode or when there are no incidents. The engine's edge-triggered gating already
-       decided whether to fire; this only shapes delivery. Moved verbatim from the pre-forwarding
-       MainWindow.SendDetectedAlertAsync. */
-    private async Task<AlertDelivery?> SendDetectedAlertAsync(
-        string metricName, string serverName, string summaryCurrentValue, string thresholdValue,
-        int serverId, AlertContext? context, double? numericCurrentValue, double? numericThresholdValue,
-        bool isMuted, string? summaryDetailText, AlertNotificationMode deliveryMode,
-        CancellationToken cancellationToken)
+       fingerprints) instead of one batched summary card. The engine's edge-triggered gating already
+       decided whether to fire; this only shapes delivery. The caller has already decided the split applies
+       (PerEventNotification.Splits), so the context carries incidents. */
+    private async Task<AlertDelivery?> SendPerEventAsync(
+        string metricName, string serverName, string thresholdValue,
+        int serverId, AlertContext context, double? numericThresholdValue,
+        bool isMuted, AlertNotificationMode deliveryMode, CancellationToken cancellationToken)
     {
-        if (deliveryMode == AlertNotificationMode.PerEvent && context?.Incidents is { Count: > 0 })
+        var deliveries = new List<AlertDelivery?>();
+        foreach (var msg in PerEventNotification.Split(context, App.AlertPerEventMaxPerCycle))
         {
-            var deliveries = new List<AlertDelivery?>();
-            foreach (var msg in PerEventNotification.Split(context, App.AlertPerEventMaxPerCycle))
-            {
-                /* Each per-event row stores its OWN numeric (#1830): the overflow message's
-                   "+N more incident(s)" text is unparseable, and the history store's text fallback
-                   silently recorded 0 for it. The threshold is the outcome's, unchanged. */
-                deliveries.Add(await _sendAlert(
-                    metricName, serverName, msg.CurrentValue, thresholdValue, serverId,
-                    msg.Context, msg.NumericValue, numericThresholdValue, isMuted,
-                    AlertDetailText.WithSampleAge(AlertContextBuilders.ContextToDetailText(msg.Context), msg.Context),
-                    deliveryMode, cancellationToken));
-            }
-
-            /* N sends, N rows: the split reports the one delivery the engine acts on (#4822). */
-            return FailedSendBackoff.ReportForSplit(deliveries);
+            /* Each per-event row stores its OWN numeric (#1830): the overflow message's
+               "+N more incident(s)" text is unparseable, and the history store's text fallback
+               silently recorded 0 for it. The threshold is the outcome's, unchanged. */
+            deliveries.Add(await _sendAlert(
+                metricName, serverName, msg.CurrentValue, thresholdValue, serverId,
+                msg.Context, msg.NumericValue, numericThresholdValue, isMuted,
+                AlertDetailText.WithSampleAge(AlertContextBuilders.ContextToDetailText(msg.Context), msg.Context),
+                deliveryMode, cancellationToken));
         }
 
-        return await _sendAlert(
-            metricName, serverName, summaryCurrentValue, thresholdValue, serverId,
-            context, numericCurrentValue, numericThresholdValue, isMuted, summaryDetailText, deliveryMode,
-            cancellationToken);
+        /* N sends, N rows: the split reports the one delivery the engine acts on (#4822). */
+        return FailedSendBackoff.ReportForSplit(deliveries);
     }
 }

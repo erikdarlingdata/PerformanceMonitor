@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 
 namespace PerformanceMonitor.Notifications;
@@ -46,6 +47,14 @@ public static class AlertDeliveryModeResolver
 /// </summary>
 public static class PerEventNotification
 {
+    /// <summary>
+    /// #8246: whether a delivery is split into one message per incident: Per-event mode, and a context that carries
+    /// incidents. The one rule for both apps' deliverers, so a family that gains incidents pages per incident in both or in
+    /// neither.
+    /// </summary>
+    public static bool Splits(AlertNotificationMode mode, [NotNullWhen(true)] AlertContext? context) =>
+        mode == AlertNotificationMode.PerEvent && context?.Incidents is { Count: > 0 };
+
     /// <summary>One per-event notification to send: the single-incident (or overflow) context plus the
     /// "current value" string the caller passes to its alert sender. <see cref="NumericValue"/> carries
     /// the same value as a number for the history stores (#1830): the overflow message's text
