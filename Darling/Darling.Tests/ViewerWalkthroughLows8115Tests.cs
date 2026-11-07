@@ -170,6 +170,11 @@ public sealed class ViewerWalkthroughLows8115Tests
         var count = Method(type, "For", typeof(int));
         Assert.Equal("no recommendations", (string)count.Invoke(null, new object[] { 0 })!);
         Assert.Equal("3 recommendation(s)", (string)count.Invoke(null, new object[] { 3 })!);
+
+        /* A read that threw must not leave the count saying it is loading. */
+        var failed = Constant(type, "Failed");
+        Assert.NotEqual(Constant(type, "Loading"), failed);
+        Assert.Contains("could not be read", failed, StringComparison.Ordinal);
     }
 
     // ── F9: a toast names the server once ──
@@ -248,6 +253,32 @@ public sealed class ViewerWalkthroughLows8115Tests
             Assert.True(button.IsEnabled);
             Assert.Equal("shown for reference", text.ToolTip);
         });
+    }
+
+    [Fact]
+    public void ReadOnlyGate_OnTheRealMutingTab_LeavesTheViewerOnlyTriageDefaultsEditable()
+    {
+        var gate = Method(ViewerType("ReadOnlySettingsGate"), "Apply", typeof(DependencyObject), typeof(string), typeof(string[]));
+        var (gated, comboEnabled, checkEnabled) = StaTestThread.Run(() => WithTheme(() =>
+        {
+            var store = new ViewerAppSettingsStore(Path.Combine(Path.GetTempPath(), "settings-gate-8115-" + Guid.NewGuid().ToString("N") + ".json"));
+            var window = new SettingsWindow(new ViewerPreferences(), store, null);
+            try
+            {
+                var content = (DependencyObject)window.MutingTriageTab.Content;
+                var count = (int)gate.Invoke(null, new object[] { content, "shown for reference", new[] { "ViewerOnlyTriageDefaults" } })!;
+                return (count, window.MuteRuleDefaultExpirationCombo.IsEnabled, window.LogAlertDismissalsCheckBox.IsEnabled);
+            }
+            finally
+            {
+                typeof(SettingsWindow).GetField("_themeSaved", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(window, true);
+                window.Close();
+            }
+        }));
+
+        Assert.True(gated > 0, "nothing on the Muting & triage tab was gated");
+        Assert.True(comboEnabled, "the viewer-local mute-rule expiration default was disabled on a read-only seat");
+        Assert.True(checkEnabled, "the viewer-local dismissal-logging option was disabled on a read-only seat");
     }
 
     // ── F15: the People window's empty state on a read-only seat gives no step the seat cannot take ──

@@ -18,6 +18,15 @@ namespace PerformanceMonitor.Common;
 /// </summary>
 public static class QueryTagUsageLabels
 {
+    /// <summary>
+    /// #8115: the Query Tag Usage window's whole answer, in Lite and the Darling Viewer, on a store that defines no query tag. Every row of
+    /// every section would be untagged and every untagged figure would equal its total, so the window says that once instead of drawing one
+    /// "untagged = total" table per server per section.
+    /// </summary>
+    public const string NoTagsWindowMessage =
+        "No query tags are defined, so there is nothing to roll up by tag: every row in the window would be untagged. "
+        + "Define a query tag and a rule that puts work under it, then open this window again.";
+
     private static readonly Dictionary<string, string> Sections = new()
     {
         ["plan_cache"] = "Plan cache",

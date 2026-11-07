@@ -366,7 +366,18 @@ public partial class FinOpsTab : UserControl
             RecommendationsNoDataMessage.Visibility = Visibility.Collapsed;
 
             var utilityConnectionString = _credentialResolver.GetUtilityConnectionString(selectedServer!);
-            var (data, skippedNote) = await Task.Run(() => _dataService.GetRecommendationsWithNoteAsync(serverId, connectionString, utilityConnectionString, _currentServerMonthlyCost));
+            System.Collections.Generic.List<PerformanceMonitorLite.Services.RecommendationRow> data;
+            string? skippedNote;
+            try
+            {
+                (data, skippedNote) = await Task.Run(() => _dataService.GetRecommendationsWithNoteAsync(serverId, connectionString, utilityConnectionString, _currentServerMonthlyCost));
+            }
+            catch
+            {
+                /* A failed read must not keep saying it is loading; a newer load's text is left to that load. */
+                if (!_loads.Superseded(nameof(LoadRecommendationsAsync), gen)) RecommendationsCountIndicator.Text = "Recommendations could not be read";
+                throw;
+            }
             if (_loads.Superseded(nameof(LoadRecommendationsAsync), gen)) return;
             RecommendationsDataGrid.ItemsSource = data;
             /* #5558: databases this server holds only as an Availability Group secondary copy are left to the primary's findings. */

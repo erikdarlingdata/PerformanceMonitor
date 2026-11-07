@@ -1010,7 +1010,7 @@
                             </StackPanel>
                         </Border>
                         <TextBlock Style="{StaticResource ScopeLineStyle}" Text="This viewer only. The defaults below apply to what you do in this viewer."/>
-                        <Border Background="{DynamicResource BackgroundLightBrush}" CornerRadius="4" Padding="12" Margin="0,0,0,12">
+                        <Border x:Name="ViewerOnlyTriageDefaults" Background="{DynamicResource BackgroundLightBrush}" CornerRadius="4" Padding="12" Margin="0,0,0,12">
                             <StackPanel>
                                 <TextBlock Text="Triage Defaults" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <WrapPanel Orientation="Horizontal" Margin="20,0,0,4">

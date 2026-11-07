@@ -14,13 +14,19 @@ namespace PerformanceMonitor.Darling.Viewer;
 public static class ReadOnlySettingsGate
 {
     /// <summary>Gates every input under <paramref name="root"/> in the logical tree, and returns how many it gated.</summary>
-    public static int Apply(DependencyObject root, string tooltip)
+    /// <param name="skipNames">Named elements whose subtree is left alone: the viewer-local preferences that a read-only seat still saves.</param>
+    public static int Apply(DependencyObject root, string tooltip, params string[] skipNames)
     {
         ArgumentNullException.ThrowIfNull(root);
         var gated = 0;
         foreach (var child in LogicalTreeHelper.GetChildren(root))
         {
             if (child is not DependencyObject node)
+            {
+                continue;
+            }
+
+            if (node is FrameworkElement { Name: { Length: > 0 } name } && Array.IndexOf(skipNames, name) >= 0)
             {
                 continue;
             }
@@ -40,7 +46,7 @@ public static class ReadOnlySettingsGate
                     break;
             }
 
-            gated += Apply(node, tooltip);
+            gated += Apply(node, tooltip, skipNames);
         }
 
         return gated;

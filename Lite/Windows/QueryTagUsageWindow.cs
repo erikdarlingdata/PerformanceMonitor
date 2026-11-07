@@ -33,9 +33,7 @@ public sealed class QueryTagUsageWindow : Window
     private readonly TextBlock _message = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 4) };
     private readonly StackPanel _tables = new();
 
-    internal const string NoTagsMessage =
-        "No query tags are defined, so there is nothing to roll up by tag: every row in the window would be untagged. "
-        + "Define a query tag and a rule that puts work under it, then open this window again.";
+    internal const string NoTagsMessage = PerformanceMonitor.Common.QueryTagUsageLabels.NoTagsWindowMessage;
     private List<QueryTagRow> _tags = [];
     private bool _loading;
 
@@ -105,8 +103,8 @@ public sealed class QueryTagUsageWindow : Window
                 _tag.SelectedItem = keep is not null && choices.Contains(keep) ? keep : QueryTagGrid.AllChoice;
             }
 
-            /* #8115: with no tag defined every table would be one untagged row equal to its total, so the answer is one sentence. The
-               words follow the Darling Viewer's QueryTagUsageText.NoTagsMessage and the first sentence of the MCP tools' answer (#8083). */
+            /* #8115: with no tag defined every table would be one untagged row equal to its total, so the answer is one sentence, the one
+               the Darling Viewer's window gives. */
             if (data.Tags.Count == 0)
             {
                 _message.Text = NoTagsMessage;

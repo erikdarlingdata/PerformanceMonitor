@@ -367,7 +367,8 @@ public partial class SettingsWindow : Window
             {
                 if (!ReferenceEquals(tab, ViewerTab) && tab.Content is DependencyObject content)
                 {
-                    ReadOnlySettingsGate.Apply(content, ReadOnlyFieldTooltip);
+                    /* The "This viewer only" triage defaults are saved to this person's own settings file, so they stay editable. */
+                    ReadOnlySettingsGate.Apply(content, ReadOnlyFieldTooltip, "ViewerOnlyTriageDefaults");
                 }
             }
         }
