@@ -172,6 +172,102 @@ public class HourlyRollupExporterTests
         Assert.Contains("granted_memory_mb", ex.Message);
     }
 
+    // ---- counters across the hour boundary (pg_database_stats_hourly) ----
+
+    private static readonly string[] DatabaseStatsColumns =
+    [
+        "server_name", "collection_time", "database_name",
+        "xact_commit", "xact_rollback", "blks_read", "blks_hit", "temp_files", "temp_bytes", "deadlocks",
+        "numbackends", "stats_reset",
+    ];
+
+    private static readonly string[] DatabaseStatsPgTypes =
+    [
+        "varchar", "timestamp", "varchar",
+        "int8", "int8", "int8", "int8", "int8", "int8", "int8",
+        "int4", "timestamp",
+    ];
+
+    /// <summary>One sample a minute through the hour, the counter up by one each minute, with an optional sample
+    /// one minute before the window: the previous hour's last sample.</summary>
+    private static List<object[]> CounterRows(DateTime hour, bool withSampleBeforeWindow)
+    {
+        var rows = new List<object[]>();
+        var reset = new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Unspecified);
+        if (withSampleBeforeWindow)
+        {
+            rows.Add(["server1", hour.AddMinutes(-1), "db1", 1000L, 0L, 0L, 0L, 0L, 0L, 0L, 1, reset]);
+        }
+
+        for (var minute = 0; minute < 60; minute++)
+        {
+            rows.Add(["server1", hour.AddMinutes(minute), "db1", 1001L + minute, 0L, 0L, 0L, 0L, 0L, 0L, 1, reset]);
+        }
+
+        return rows;
+    }
+
+    [Fact]
+    public async Task A_sample_before_the_window_bridges_the_counter_into_the_hour_and_is_not_itself_counted()
+    {
+        var hour = new DateTime(2026, 9, 27, 3, 0, 0, DateTimeKind.Unspecified);
+        var reader = new FakeDbDataReader(DatabaseStatsColumns, DatabaseStatsPgTypes, CounterRows(hour, withSampleBeforeWindow: true));
+        var outDir = NewOutDir();
+        var spec = RollupSql.Specs["pg_database_stats_hourly"];
+
+        var result = await HourlyRollupExporter.ExportAsync(
+            spec, "store_a", outDir, hour, hour.AddHours(1),
+            _ => Task.FromResult<DbDataReader>(reader), CancellationToken.None);
+
+        Assert.Equal(1, result.RolledRowCount);
+        var absolute = Path.Combine(outDir, "store_a", result.Part.RelativePath.Replace('/', Path.DirectorySeparatorChar));
+        const string theHour = "database_name = 'db1' AND hour = TIMESTAMP '2026-09-27 03:00:00'";
+
+        // The sample before the window feeds the first in-hour step and nothing else.
+        Assert.Equal(60L, Convert.ToInt64(await Scalar(absolute, "sample_count", theHour)));
+        Assert.Equal(1001L, Convert.ToInt64(await Scalar(absolute, "xact_commit_first", theHour)));
+        Assert.Equal(1060L, Convert.ToInt64(await Scalar(absolute, "xact_commit_last", theHour)));
+        // Unchanged: the steps between the hour's own samples.
+        Assert.Equal(59L, Convert.ToInt64(await Scalar(absolute, "xact_commit_delta_in_hour", theHour)));
+        // New: the step from the previous hour's last sample into this hour is counted too.
+        Assert.Equal(60L, Convert.ToInt64(await Scalar(absolute, "xact_commit_delta_hour_bridged", theHour)));
+    }
+
+    [Fact]
+    public async Task Without_a_sample_before_the_window_the_bridged_delta_equals_the_in_hour_delta()
+    {
+        var hour = new DateTime(2026, 9, 27, 3, 0, 0, DateTimeKind.Unspecified);
+        var reader = new FakeDbDataReader(DatabaseStatsColumns, DatabaseStatsPgTypes, CounterRows(hour, withSampleBeforeWindow: false));
+        var outDir = NewOutDir();
+        var spec = RollupSql.Specs["pg_database_stats_hourly"];
+
+        var result = await HourlyRollupExporter.ExportAsync(
+            spec, "store_a", outDir, hour, hour.AddHours(1),
+            _ => Task.FromResult<DbDataReader>(reader), CancellationToken.None);
+
+        var absolute = Path.Combine(outDir, "store_a", result.Part.RelativePath.Replace('/', Path.DirectorySeparatorChar));
+        const string theHour = "database_name = 'db1' AND hour = TIMESTAMP '2026-09-27 03:00:00'";
+
+        using (var connection = new DuckDBConnection("Data Source=:memory:"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = $"SELECT column_name FROM (DESCRIBE SELECT * FROM read_parquet('{absolute}'))";
+            using var describeReader = await command.ExecuteReaderAsync();
+            var names = new List<string>();
+            while (await describeReader.ReadAsync())
+            {
+                names.Add(describeReader.GetString(0));
+            }
+
+            Assert.Contains("xact_commit_delta_in_hour", names);
+            Assert.Contains("xact_commit_delta_hour_bridged", names);
+        }
+
+        Assert.Equal(59L, Convert.ToInt64(await Scalar(absolute, "xact_commit_delta_in_hour", theHour)));
+        Assert.Equal(59L, Convert.ToInt64(await Scalar(absolute, "xact_commit_delta_hour_bridged", theHour)));
+    }
+
     [Fact]
     public async Task Unknown_spec_name_is_not_a_valid_call()
     {

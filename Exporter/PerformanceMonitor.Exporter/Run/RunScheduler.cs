@@ -30,6 +30,11 @@ public sealed class RunScheduler(
             return ExitRefused;
         }
 
+        foreach (var warning in settings.Warnings())
+        {
+            output.WriteLine($"warning: {warning}");
+        }
+
         var nowUtc = (options.NowUtc ?? clock()).ToUniversalTime();
         var (loaded, stateError) = ScheduleState.Load(settings.StatePath);
         if (options.PlanOnly) return PlanOnly(nowUtc, loaded, stateError);
@@ -267,7 +272,7 @@ public sealed class RunScheduler(
         return tail.Length > 500 ? tail[^500..] : tail;
     }
 
-    // ---- R14: exit 3 reads failed_optional from the OPTIONAL manifest ----
+    // ---- R14: exit 3 reads failed_optional, and the denied names under skipped_optional, from the OPTIONAL manifest ----
 
     private void RecordOptionalFailures(ScheduleState state, PlannedCall call, FamilyPlan plan, ChildResult result)
     {
@@ -288,21 +293,38 @@ public sealed class RunScheduler(
     internal IReadOnlyList<(string Table, string Error)> ReadFailedOptional(PlannedCall call, FamilyPlan plan)
     {
         var unknown = new[] { ("unknown", "exit 3; optional manifest not readable") };
-        if (string.IsNullOrEmpty(call.Also)) return unknown;
+        // The child names its optional manifest by the call's optional names: the --also names plus the optional-registry
+        // names in --tables. The same helper builds the same set here, so the two cannot drift.
+        var optionalNames = ExportRunner.OptionalNames(SplitCsv(call.Tables), SplitCsv(call.Also));
+        if (optionalNames.Length == 0) return unknown;
         try
         {
-            var also = call.Also.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
-            var path = OutputPaths.ManifestFilePath(settings.OutDir, settings.Store, call.From, call.To, also, dimensionOrigin: null);
+            var path = OutputPaths.ManifestFilePath(settings.OutDir, settings.Store, call.From, call.To, optionalNames, dimensionOrigin: null);
             if (!File.Exists(path)) return unknown;
             var node = JsonNode.Parse(File.ReadAllText(path));
-            if (node?["failed_optional"] is not JsonArray arr) return [];
-            return arr.Select(f => (f?["table"]?.GetValue<string>() ?? "", f?["error"]?.GetValue<string>() ?? "")).ToArray();
+            var failures = new List<(string Table, string Error)>();
+            if (node?["failed_optional"] is JsonArray failed)
+            {
+                failures.AddRange(failed.Select(f => (f?["table"]?.GetValue<string>() ?? "", f?["error"]?.GetValue<string>() ?? "")));
+            }
+            // A denied name never runs, so the exporter lists it as skipped with reason "denied"; it is what made the
+            // exit 3, so it is recorded as a failure with that reason.
+            if (node?["skipped_optional"] is JsonArray skipped)
+            {
+                failures.AddRange(skipped
+                    .Where(s => s?["reason"]?.GetValue<string>() == "denied")
+                    .Select(s => (s?["table"]?.GetValue<string>() ?? "", "denied")));
+            }
+            return failures;
         }
         catch (Exception ex) when (ex is IOException or JsonException or InvalidOperationException or FormatException)
         {
             return unknown;
         }
     }
+
+    private static string[] SplitCsv(string? csv) =>
+        string.IsNullOrEmpty(csv) ? [] : csv.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
 
     private List<string> ReadOptionalTables()
     {

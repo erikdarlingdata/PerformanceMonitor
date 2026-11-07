@@ -39,17 +39,15 @@ public sealed class ChartRenderHelper
     }
 
     /// <summary>
-    /// Shows the legend on a chart and tracks it for cleanup on the next refresh. #7385: the legend runs horizontally and
-    /// wraps only when it does not fit the chart's width, so a chart pays for a second legend line only when it must (the
-    /// default is one line per series). <see cref="WrappedLegendLayout"/> gives the panel the wrapped height in the same render.
+    /// Shows the legend on a chart and tracks it for cleanup on the next refresh. #8220: where the legend goes is not decided here. The
+    /// chart's <see cref="WrappedLegendLayout"/> applies the one legend rule on every layout, at the size the chart has then, so a chart
+    /// drawn before it had a size, or resized later, still gets the right place (beside the plot, under it, or as one row).
+    /// #7385: a legend under the plot wraps only when it does not fit the chart's width, so a chart pays for a second legend line only when it must.
     /// </summary>
     public void ShowChartLegend(ScottPlot.WPF.WpfPlot chart)
     {
-        /* #8086: the edge is chosen from the control's size NOW, so the first render already has the right chrome and no
-           extra pass is needed. A control with no size yet (a tab not shown) keeps the legend under the axis. */
         ChartStyle.FloorAllZeroYAxis(chart.Plot);
-        var edge = LegendEdgeFor(chart.ActualWidth, chart.ActualHeight, chart.Plot.Legend.GetItems().Length);
-        var panel = chart.Plot.ShowLegend(edge);
+        var panel = chart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
         _legendPanels[chart] = panel;
         var legend = chart.Plot.Legend;
         legend.FontSize = 13;
@@ -58,38 +56,8 @@ public sealed class ChartRenderHelper
         legend.OutlineColor = ScottPlot.Colors.Transparent;
         legend.OutlineWidth = 0;
         legend.ShadowColor = ScottPlot.Colors.Transparent;
-        if (edge == ScottPlot.Edge.Right)
-        {
-            legend.Orientation = ScottPlot.Orientation.Vertical;
-            panel.Alignment = ScottPlot.Alignment.MiddleLeft;
-        }
-        else
-        {
-            legend.Orientation = ScottPlot.Orientation.Horizontal;
-            legend.TightHorizontalWrapping = true;
-            /* ScottPlot pads a legend panel 20 px on every side, which is 40 px of blank under the legend (Session Stats at
-               800x600: 90 of the chart's 286 px). The entries carry their own spacing, so 10 px above and below is enough and the
-               plot gets the rest. */
-            panel.Padding = new ScottPlot.PixelPadding(panel.Padding.Left, panel.Padding.Right, 10, 10);
-        }
-
+        // The engine sets the edge, the orientation, the padding and the alignment for the side it picks, on every layout.
         chart.Plot.Layout.LayoutEngine = new WrappedLegendLayout(panel);
-    }
-
-    /// <summary>Most series a right-edge legend lists; more than this and the legend goes under the axis.</summary>
-    internal const int MaxRightLegendSeries = 12;
-
-    /// <summary>
-    /// #8086: the right edge when the chart is at least three times as wide as it is tall and has at most
-    /// <see cref="MaxRightLegendSeries"/> series (and the chart is tall enough to list them), else under the axis. Pure, so the
-    /// rule can be tested without a control.
-    /// </summary>
-    internal static ScottPlot.Edge LegendEdgeFor(double width, double height, int series)
-    {
-        if (width <= 0 || height <= 0 || series < 1 || series > MaxRightLegendSeries) return ScottPlot.Edge.Bottom;
-        /* A vertical legend is about 20 px a row at the 13 px font; one taller than the chart would be cut off. */
-        if (series * 20.0 + 40 > height) return ScottPlot.Edge.Bottom;
-        return width >= 3 * height ? ScottPlot.Edge.Right : ScottPlot.Edge.Bottom;
     }
 
     /// <summary>

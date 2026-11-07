@@ -621,7 +621,7 @@ public sealed partial class DarlingWorker
         await configProvider.SeedIfEmptyAsync(config, stoppingToken);
         /* #5366: the service's password key, after migrations, role provisioning and the seed, and before the first config view (#5455:
            that view reads the legacy pins this start takes, and a view built before them leaves every saved old-format password
-           unpinned for the whole run). It reads only config.Postgres, which the view never changes. Before any collection or reload
+           unpinned for the whole run). It reads only config.Postgres and config.PasswordKey (#8006), which the view never changes. Before any collection or reload
            can need it: loaded (or made and published) here, with the legacy pin snapshot, and the ring every writer and
            the resolver seal and open through is set. Until this returns the ring refuses with the "still loading" reason.
            Never throws; a key that cannot be used is a refusing ring with the reason logged and recorded in the store. */

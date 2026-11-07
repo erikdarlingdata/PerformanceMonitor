@@ -321,7 +321,7 @@ public sealed class LiteOverviewCardExplainsItselfTests
     [Fact]
     public void TheCardStatusLine_IsBoundToTheTooltip_AndIsHoverable()
     {
-        var xaml = ReadRepoFile(Path.Combine("Lite", "MainWindow.xaml"));
+        var xaml = ReadRepoFile(Path.Combine("Lite", "Controls", "ServerOverviewCard.xaml"));
 
         var at = xaml.IndexOf("Text=\"{Binding StatusDisplay}\"", StringComparison.Ordinal);
         Assert.True(at > 0, "the Overview card's status TextBlock is gone — find where it moved before editing this test");

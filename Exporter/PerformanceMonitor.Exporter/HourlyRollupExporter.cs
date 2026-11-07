@@ -33,10 +33,19 @@ public static class HourlyRollupExporter
     private const string PartParquetOptions = "FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '64MB'";
 
     /// <summary>
+    /// How far before the window the read of a spec with Counter rules starts, so that each key's last sample before
+    /// the window is in the read: the longest collector cycle (15 minutes) plus slack. Those rows feed only the
+    /// counters' `_delta_hour_bridged` and are never counted (see <see cref="RollupSql.Build"/>).
+    /// </summary>
+    public static readonly TimeSpan CounterBridgeLookback = TimeSpan.FromMinutes(20);
+
+    /// <summary>
     /// Reads <paramref name="reader"/>'s rows into a DuckDB table named <c>raw</c>, checks that every key and
     /// rule column named by <paramref name="spec"/> is present in the discovered shape, builds
     /// <c>rolled</c> via <see cref="RollupSql.Build"/>, and writes it as one sorted Parquet part under
-    /// <paramref name="outDir"/>/<paramref name="store"/>/<paramref name="spec"/>.Name/.
+    /// <paramref name="outDir"/>/<paramref name="store"/>/<paramref name="spec"/>.Name/. Rows before
+    /// <paramref name="fromUtc"/> are bridge samples for the counters (see <see cref="CounterBridgeLookback"/>): they
+    /// are read and appended, but only the counters' `_delta_hour_bridged` sees them.
     /// </summary>
     public static async Task<HourlyRollupExportResult> ExportAsync(
         RollupSpec spec,
@@ -100,7 +109,7 @@ public static class HourlyRollupExporter
                 storeStopwatch.Stop();
 
                 var writeStopwatch = System.Diagnostics.Stopwatch.StartNew();
-                var rollupSql = RollupSql.Build(spec);
+                var rollupSql = RollupSql.Build(spec, DateTime.SpecifyKind(fromUtc, DateTimeKind.Unspecified));
                 Execute(connection, $"CREATE TABLE rolled AS {rollupSql}");
                 // RollupSql emits source_store as a NULL placeholder; the store this export ran for fills it in.
                 Execute(connection, $"UPDATE rolled SET source_store = '{store.Replace("'", "''")}'");
