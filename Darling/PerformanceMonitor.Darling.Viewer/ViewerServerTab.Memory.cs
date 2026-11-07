@@ -423,7 +423,8 @@ public partial class ViewerServerTab
     /// <summary>
     /// The Memory Pressure Events sub-tab — Lite's <c>UpdateMemoryPressureEventsChart</c>: hour-bucketed
     /// stacked bars of pressure events, SQL Server (process) vs OS (system) side-by-side and stacked by
-    /// severity (medium = indicator 2, severe = indicator ≥ 3). Bar geometry copied verbatim from Lite;
+    /// severity (medium = indicator 2, severe = indicator ≥ 3). The hour bins and bar geometry are
+    /// <see cref="MemoryPressureBars"/>, shared with Lite;
     /// the X range is the toolbar's settable window and every bar/bound is the UTC
     /// instant (see the class remarks on pressure sample_time).
     /// </summary>
@@ -444,14 +445,12 @@ public partial class ViewerServerTab
 
         if (pressureRows.Count > 0)
         {
-            var grouped = pressureRows
-                .GroupBy(d => new DateTime(d.SampleTime.Year, d.SampleTime.Month, d.SampleTime.Day, d.SampleTime.Hour, 0, 0))
-                .OrderBy(g => g.Key)
-                .ToList();
+            /* #8109: binned on the display zone's hour, where the ticks are; each hour's two stacks sit inside that hour, either side of its midpoint. */
+            var hours = MemoryPressureBars.Place(
+                pressureRows.Select(d => (d.SampleTime, d.MemoryIndicatorsProcess, d.MemoryIndicatorsSystem)),
+                ViewerTimeHelper.CurrentDisplayZone());
 
-            double hourWidth = 1.0 / 24.0;
-            double barSize = hourWidth * 0.4;
-            double barOffset = hourWidth * 0.22;
+            double barSize = MemoryPressureBars.BarSize;
 
             var sqlMediumColor = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("SqlPressureMedium"));
             var sqlSevereColor = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("SqlPressureSevere"));
@@ -463,22 +462,23 @@ public partial class ViewerServerTab
             var osMediumBars = new List<ScottPlot.Bar>();
             var osSevereBars = new List<ScottPlot.Bar>();
 
-            foreach (var g in grouped)
+            foreach (var h in hours)
             {
-                int sqlMedium = g.Count(d => d.MemoryIndicatorsProcess == 2);
-                int sqlSevere = g.Count(d => d.MemoryIndicatorsProcess >= 3);
-                int osMedium = g.Count(d => d.MemoryIndicatorsSystem == 2);
-                int osSevere = g.Count(d => d.MemoryIndicatorsSystem >= 3);
-                double x = g.Key.ToOADate();
+                int sqlMedium = h.SqlMedium;
+                int sqlSevere = h.SqlSevere;
+                int osMedium = h.OsMedium;
+                int osSevere = h.OsSevere;
+                double sqlX = h.SqlStackPosition;
+                double osX = h.OsStackPosition;
 
                 if (sqlMedium > 0)
-                    sqlMediumBars.Add(new ScottPlot.Bar { Position = x - barOffset, ValueBase = 0, Value = sqlMedium, Size = barSize, FillColor = sqlMediumColor, LineWidth = 0 });
+                    sqlMediumBars.Add(new ScottPlot.Bar { Position = sqlX, ValueBase = 0, Value = sqlMedium, Size = barSize, FillColor = sqlMediumColor, LineWidth = 0 });
                 if (sqlSevere > 0)
-                    sqlSevereBars.Add(new ScottPlot.Bar { Position = x - barOffset, ValueBase = sqlMedium, Value = sqlMedium + sqlSevere, Size = barSize, FillColor = sqlSevereColor, LineWidth = 0 });
+                    sqlSevereBars.Add(new ScottPlot.Bar { Position = sqlX, ValueBase = sqlMedium, Value = sqlMedium + sqlSevere, Size = barSize, FillColor = sqlSevereColor, LineWidth = 0 });
                 if (osMedium > 0)
-                    osMediumBars.Add(new ScottPlot.Bar { Position = x + barOffset, ValueBase = 0, Value = osMedium, Size = barSize, FillColor = osMediumColor, LineWidth = 0 });
+                    osMediumBars.Add(new ScottPlot.Bar { Position = osX, ValueBase = 0, Value = osMedium, Size = barSize, FillColor = osMediumColor, LineWidth = 0 });
                 if (osSevere > 0)
-                    osSevereBars.Add(new ScottPlot.Bar { Position = x + barOffset, ValueBase = osMedium, Value = osMedium + osSevere, Size = barSize, FillColor = osSevereColor, LineWidth = 0 });
+                    osSevereBars.Add(new ScottPlot.Bar { Position = osX, ValueBase = osMedium, Value = osMedium + osSevere, Size = barSize, FillColor = osSevereColor, LineWidth = 0 });
 
                 int sqlTotal = sqlMedium + sqlSevere;
                 int osTotal = osMedium + osSevere;
