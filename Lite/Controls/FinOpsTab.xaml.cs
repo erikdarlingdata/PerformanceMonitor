@@ -375,7 +375,8 @@ public partial class FinOpsTab : UserControl
             catch
             {
                 /* A failed read must not keep saying it is loading; a newer load's text is left to that load. */
-                if (!_loads.Superseded(nameof(LoadRecommendationsAsync), gen)) RecommendationsCountIndicator.Text = "Recommendations could not be read";
+                if (_loads.Superseded(nameof(LoadRecommendationsAsync), gen)) throw;
+                RecommendationsCountIndicator.Text = "Recommendations could not be read";
                 throw;
             }
             if (_loads.Superseded(nameof(LoadRecommendationsAsync), gen)) return;
