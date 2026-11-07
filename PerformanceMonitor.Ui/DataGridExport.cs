@@ -165,7 +165,7 @@ public static class DataGridExport
 
     /// <summary>One cell's text for Copy Row and Copy All Rows (see <see cref="FormatForClipboard"/>).</summary>
     public static string GetClipboardCellValue(DataGridColumn column, object item) =>
-        ReadCell(column, item, FormatForClipboard);
+        ReadCell(column, item, FormatForClipboard, shown: true);
 
     /// <summary>
     /// Extracts a cell value for any column type. Bound columns read their binding path directly;
@@ -173,7 +173,7 @@ public static class DataGridExport
     /// types yield an empty string so the value count always matches the column count.
     /// </summary>
     public static string GetCellValue(DataGridColumn column, object item) =>
-        ReadCell(column, item, FormatForExport);
+        ReadCell(column, item, FormatForExport, shown: true);
 
     /// <summary>
     /// One cell's text exactly as it is, with no apostrophe added: what Copy Cell puts on the clipboard. Copy Row,
@@ -181,12 +181,42 @@ public static class DataGridExport
     /// <see cref="GetCellValue"/>, because those land in a spreadsheet.
     /// </summary>
     public static string GetRawCellValue(DataGridColumn column, object item) =>
-        ReadCell(column, item, FormatRaw);
+        ReadCell(column, item, FormatRaw, shown: false);
 
-    private static string ReadCell(DataGridColumn column, object item, Func<object?, string> format)
+    /// <param name="shown">
+    /// True for the copies that land in a spreadsheet: a <see cref="DateTime"/> or <see cref="DateTimeOffset"/> cell is then
+    /// written as the grid shows it, through its binding's <see cref="Binding.Converter"/> and <see cref="Binding.StringFormat"/>,
+    /// so a stamp the grid prints as "2026-01-15 14:30" is not exported in the invariant "01/15/2026 14:30:00" shape. A number
+    /// keeps its raw value whatever its format, so it stays a number in the spreadsheet. False for Copy Cell, which is raw.
+    /// </param>
+    private static string ReadCell(DataGridColumn column, object item, Func<object?, string> format, bool shown)
     {
-        var path = CellPath(column, item);
-        return path is null ? string.Empty : format(ResolvePath(item, path));
+        var path = CellPath(column, item, out var binding);
+        if (path is null) return string.Empty;
+        var value = ResolvePath(item, path);
+        return format(shown && binding is not null ? AsShown(binding, value) : value);
+    }
+
+    /// <summary>A date or time stamp as its binding displays it; every other value as it is.</summary>
+    private static object? AsShown(Binding binding, object? value)
+    {
+        if (value is not (DateTime or DateTimeOffset)) return value;
+
+        object? shown = value;
+        if (binding.Converter is { } converter)
+        {
+            shown = converter.Convert(shown, typeof(string), binding.ConverterParameter, binding.ConverterCulture ?? CultureInfo.InvariantCulture);
+        }
+
+        if (shown is not null && binding.StringFormat is { Length: > 0 } stringFormat)
+        {
+            /* A binding's StringFormat with no "{0" is the item format alone, as the binding engine reads it. */
+            shown = stringFormat.Contains("{0", StringComparison.Ordinal)
+                ? string.Format(CultureInfo.InvariantCulture, stringFormat, shown)
+                : shown is IFormattable formattable ? formattable.ToString(stringFormat, CultureInfo.InvariantCulture) : shown;
+        }
+
+        return shown;
     }
 
     /// <summary>
@@ -195,11 +225,13 @@ public static class DataGridExport
     /// <see cref="DataGridColumn.SortMemberPath"/> (the Query Stats bar cells and the FinOps heat cells sort by the measure they
     /// draw), else through the first <see cref="TextBlock"/> inside its content that binds its text to the row.
     /// </summary>
-    private static string? CellPath(DataGridColumn column, object item)
+    private static string? CellPath(DataGridColumn column, object item, out Binding? binding)
     {
+        binding = null;
         if (column is DataGridBoundColumn boundColumn)
         {
-            return boundColumn.Binding is Binding binding ? binding.Path?.Path : null;
+            binding = boundColumn.Binding as Binding;
+            return binding?.Path?.Path;
         }
 
         if (column is not DataGridTemplateColumn { CellTemplate: { } template })
@@ -208,9 +240,10 @@ public static class DataGridExport
         }
 
         var content = template.LoadContent();
-        if (content is TextBlock textBlock && RowPath(textBlock) is { } rootPath)
+        if (content is TextBlock textBlock && RowBinding(textBlock) is { } rootBinding)
         {
-            return rootPath;
+            binding = rootBinding;
+            return rootBinding.Path.Path;
         }
 
         if (!string.IsNullOrEmpty(column.SortMemberPath))
@@ -218,13 +251,16 @@ public static class DataGridExport
             return column.SortMemberPath;
         }
 
-        return content is DependencyObject root
-            ? Descendants(root).OfType<TextBlock>().Select(RowPath).FirstOrDefault(p => p is not null)
-            : null;
+        if (content is DependencyObject root)
+        {
+            binding = Descendants(root).OfType<TextBlock>().Select(RowBinding).FirstOrDefault(b => b is not null);
+        }
+
+        return binding?.Path.Path;
     }
 
-    /// <summary>The path a text block binds its text to on the row, or null when it binds elsewhere (an element, a relative source) or not at all.</summary>
-    private static string? RowPath(TextBlock textBlock)
+    /// <summary>The binding a text block's text takes from the row, or null when it binds elsewhere (an element, a relative source) or not at all.</summary>
+    private static Binding? RowBinding(TextBlock textBlock)
     {
         var binding = BindingOperations.GetBinding(textBlock, TextBlock.TextProperty);
         if (binding?.Path is null || binding.ElementName != null || binding.RelativeSource != null || binding.Source != null)
@@ -232,7 +268,7 @@ public static class DataGridExport
             return null;
         }
 
-        return binding.Path.Path;
+        return binding;
     }
 
     private static IEnumerable<DependencyObject> Descendants(DependencyObject root)

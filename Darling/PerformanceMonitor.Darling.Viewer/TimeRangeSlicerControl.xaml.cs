@@ -78,7 +78,29 @@ public partial class TimeRangeSlicerControl : UserControl
         InitializeComponent();
         SlicerBorder.SizeChanged += (_, _) => Redraw();
         IsVisibleChanged += (_, _) => { if (IsVisible) Redraw(); };
+        // #8219: a window under 700 DIPs high (the 900x600 minimum is one) gets the compact 70 strip; Lite's slicer does the same.
+        Loaded += (_, _) =>
+        {
+            UnhookWindow();
+            _hookedWindow = Window.GetWindow(this);
+            if (_hookedWindow is not null) _hookedWindow.SizeChanged += OnWindowSizeChanged;
+            ApplyHeight();
+        };
+        Unloaded += (_, _) => UnhookWindow();
     }
+
+    private Window? _hookedWindow;
+
+    private void OnWindowSizeChanged(object sender, SizeChangedEventArgs e) => ApplyHeight();
+
+    private void UnhookWindow()
+    {
+        if (_hookedWindow is not null) _hookedWindow.SizeChanged -= OnWindowSizeChanged;
+        _hookedWindow = null;
+    }
+
+    private void ApplyHeight() =>
+        SlicerBorder.Height = Window.GetWindow(this) is { ActualHeight: > 0 and < 700 } ? 70 : 130;
 
     public bool IsExpanded
     {
@@ -115,6 +137,7 @@ public partial class TimeRangeSlicerControl : UserControl
         _data = FillEmptyBuckets(data, requestedStartUtc, requestedEndUtc);
         _runs = StripGaps.RunsOverFilledBuckets(_data.Select(d => d.BucketTime).ToList(), data.Select(d => d.BucketTime).ToList());
         _emptyText = null;
+        ShowSlicer();
         _metricLabel = metricLabel;
 
         var carried = _data.Count >= 2 ? SlicerReloadSelection.Carry(prevStart, prevEnd, DataStartUtc, DataEndUtc) : null;
@@ -153,8 +176,38 @@ public partial class TimeRangeSlicerControl : UserControl
         _rangeStart = 0;
         _rangeEnd = 1.0;
         _emptyText = text;
+        /* #8197: with a message host the sentence shows once in the grid area and the slicer band goes; without one the slicer still draws it itself. */
+        if (EmptyMessage is { } host)
+        {
+            host.Text = text;
+            host.Visibility = Visibility.Visible;
+            Visibility = Visibility.Collapsed;
+        }
         UpdateRangeLabel();
         Redraw();
+    }
+
+    /// <summary>
+    /// #8197: the <c>EmptyHint</c> text in the grid area that shows the empty-window sentence instead of this slicer, which collapses while the
+    /// window is empty. Bound by element name, so a slicer without one keeps drawing its own sentence.
+    /// </summary>
+    public static readonly DependencyProperty EmptyMessageProperty =
+        DependencyProperty.Register(nameof(EmptyMessage), typeof(TextBlock), typeof(TimeRangeSlicerControl));
+
+    public TextBlock? EmptyMessage
+    {
+        get => (TextBlock?)GetValue(EmptyMessageProperty);
+        set => SetValue(EmptyMessageProperty, value);
+    }
+
+    /// <summary>Data is back: the slicer shows again and its message host goes away.</summary>
+    private void ShowSlicer()
+    {
+        Visibility = Visibility.Visible;
+        if (EmptyMessage is { } host)
+        {
+            host.Visibility = Visibility.Collapsed;
+        }
     }
 
     /// <summary>The empty-window text (null when the slicer holds data); exposed for the tests.</summary>

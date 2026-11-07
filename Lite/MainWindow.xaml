@@ -227,7 +227,7 @@
                                             HeaderTemplate="{StaticResource FleetHeaderRowTemplate}"/>
         </ResourceDictionary>
     </Window.Resources>
-    <Grid>
+    <Grid SizeChanged="RootGrid_SizeChanged">
         <Grid.ColumnDefinitions>
             <ColumnDefinition x:Name="SidebarColumn" Width="280" MinWidth="40"/>
             <ColumnDefinition Width="*"/>
@@ -257,7 +257,7 @@
                                 <TextBlock x:Name="SidebarTitle" Text="SQL Servers" FontSize="16" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <TextBlock x:Name="SidebarSubtitle" Text="Double-click or press Enter to open a server tab" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,0,0"/>
                             </StackPanel>
-                            <Button Grid.Column="1" Content="«" Click="ToggleSidebar_Click"
+                            <Button Grid.Column="1" x:Name="SidebarToggleButton" Content="«" Click="ToggleSidebar_Click"
                                     ToolTip="Toggle sidebar" VerticalAlignment="Top"
                                     Width="24" Height="24" Padding="0" FontSize="14"/>
                         </Grid>
@@ -451,7 +451,7 @@
             </Grid>
 
             <!-- Status Bar -->
-            <Border Grid.Row="2" Background="{DynamicResource BackgroundLightBrush}" Padding="12,8">
+            <Border Grid.Row="2" Background="{DynamicResource BackgroundLightBrush}" Padding="12,6">
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
@@ -462,13 +462,14 @@
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
 
-                    <TextBlock Grid.Column="0" x:Name="StatusText" Text="Ready" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" TextWrapping="Wrap"/>
+                    <TextBlock Grid.Column="0" x:Name="StatusText" Text="Ready" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                               ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
                     <!-- Lite's own database after a fatal error: why collection stopped, or when it was reopened. -->
-                    <TextBlock Grid.Column="1" x:Name="LocalDatabaseStatusText" Text="" Visibility="Collapsed" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" Margin="16,0" VerticalAlignment="Center"/>
-                    <TextBlock Grid.Column="2" x:Name="CollectorHealthText" Text="" Foreground="{DynamicResource ForegroundBrush}" Margin="16,0" VerticalAlignment="Center"/>
-                    <TextBlock Grid.Column="3" x:Name="DatabaseSizeText" Text="Database: --" Foreground="{DynamicResource ForegroundBrush}" Margin="16,0" VerticalAlignment="Center"/>
-                    <TextBlock Grid.Column="4" x:Name="CollectionStatusText" Text="Collection: Stopped" Foreground="{DynamicResource ForegroundBrush}" Margin="16,0" VerticalAlignment="Center"/>
-                    <TextBlock Grid.Column="5" x:Name="ServerCountText" Text="Servers: 0" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="1" x:Name="LocalDatabaseStatusText" Text="" Visibility="Collapsed" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" Margin="12,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="2" x:Name="CollectorHealthText" Text="" Foreground="{DynamicResource ForegroundBrush}" Margin="12,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="3" x:Name="DatabaseSizeText" Text="Database: --" Foreground="{DynamicResource ForegroundBrush}" Margin="12,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="4" x:Name="CollectionStatusText" Text="Collection: Stopped" Foreground="{DynamicResource ForegroundBrush}" Margin="12,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="5" x:Name="ServerCountText" Margin="12,0,0,0" Text="Servers: 0" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
                 </Grid>
             </Border>
         </Grid>

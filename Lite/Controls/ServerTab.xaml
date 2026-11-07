@@ -158,6 +158,56 @@
             <Style x:Key="DeadlockRowStyle" TargetType="DataGridRow">
                 <Setter Property="ContextMenu" Value="{StaticResource DeadlockContextMenu}"/>
             </Style>
+            <!-- #8219: a ToolBar with the app's colors: no gradient, no grip, and an overflow button that opens the controls that did not fit. A ToolBar gives its own flat face to every Button in it, so the Buttons below name the theme's Button style (Style="{DynamicResource {x:Type Button}}") to keep the face. -->
+            <Style x:Key="ServerToolbarStyle" TargetType="ToolBar">
+                <Setter Property="Background" Value="Transparent"/>
+                <Setter Property="Foreground" Value="{DynamicResource ForegroundBrush}"/>
+                <Setter Property="Padding" Value="0,2"/>
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="ToolBar">
+                            <DockPanel Background="{TemplateBinding Background}" LastChildFill="True">
+                                <ToggleButton x:Name="OverflowButton" DockPanel.Dock="Right" Visibility="Collapsed" VerticalAlignment="Center"
+                                              ToolTip="More controls" AutomationProperties.Name="More controls" ClickMode="Press" Margin="8,0,0,0"
+                                              IsChecked="{Binding Path=IsOverflowOpen, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}"
+                                              IsEnabled="{TemplateBinding HasOverflowItems}">
+                                    <ToggleButton.Template>
+                                        <ControlTemplate TargetType="ToggleButton">
+                                            <Border x:Name="face" Background="{DynamicResource BackgroundLightBrush}" BorderBrush="{DynamicResource BorderBrush}"
+                                                    BorderThickness="1" CornerRadius="3" Padding="8,2">
+                                                <TextBlock Text="&#x22EF;" FontSize="14" Foreground="{DynamicResource ForegroundBrush}" HorizontalAlignment="Center"/>
+                                            </Border>
+                                            <ControlTemplate.Triggers>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter TargetName="face" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                                                </Trigger>
+                                                <Trigger Property="IsChecked" Value="True">
+                                                    <Setter TargetName="face" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                                                    <Setter TargetName="face" Property="Background" Value="{DynamicResource BackgroundDarkBrush}"/>
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </ToggleButton.Template>
+                                </ToggleButton>
+                                <Popup x:Name="OverflowPopup" AllowsTransparency="False" Placement="Bottom" Focusable="False" StaysOpen="False"
+                                       IsOpen="{Binding Path=IsOverflowOpen, RelativeSource={RelativeSource TemplatedParent}}"
+                                       PlacementTarget="{Binding ElementName=OverflowButton}">
+                                    <Border Background="{DynamicResource BackgroundDarkBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="6">
+                                        <ToolBarOverflowPanel x:Name="PART_ToolBarOverflowPanel" WrapWidth="300" Focusable="True"
+                                                              KeyboardNavigation.TabNavigation="Cycle" KeyboardNavigation.DirectionalNavigation="Cycle"/>
+                                    </Border>
+                                </Popup>
+                                <ToolBarPanel x:Name="PART_ToolBarPanel" IsItemsHost="True"/>
+                            </DockPanel>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="HasOverflowItems" Value="True">
+                                    <Setter TargetName="OverflowButton" Property="Visibility" Value="Visible"/>
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
         </ResourceDictionary>
     </UserControl.Resources>
 
@@ -170,27 +220,67 @@
         <!-- Header Bar. A WrapPanel, as the Darling Viewer's server toolbar is: a control that does not fit on the line
              starts the next one instead of being arranged past the border's edge, so Refresh, Auto-refresh and the Times
              picker are reachable at every width the window allows. -->
-        <Border Grid.Row="0" Background="{DynamicResource BackgroundDarkBrush}" Padding="12,8">
-            <WrapPanel Orientation="Horizontal">
-                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,8,4">
+        <!-- #8219: two rows at most. Each row is a ToolBar: a control that does not fit moves into that row's "..." menu, so the
+             toolbar never grows past two rows however narrow the window is. Refresh, Auto-refresh and the server name never move. -->
+        <Border Grid.Row="0" Background="{DynamicResource BackgroundDarkBrush}" Padding="12,4,12,0">
+            <StackPanel>
+                <ToolBar x:Name="ServerToolbarMain" Style="{StaticResource ServerToolbarStyle}">
+                    <StackPanel ToolBar.OverflowMode="Never" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,8,0">
                     <TextBlock x:Name="ServerNameText" Text="Server Name" FontSize="16" FontWeight="SemiBold"
                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,16,0"/>
                     <TextBlock x:Name="ConnectionStatusText" Text="Collecting..." FontSize="12"
                                Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center"/>
                 </StackPanel>
-                <!-- #5993: the query tag filter for the Queries grids and the by-tag view. -->
-                <StackPanel Orientation="Horizontal">
-                    <TextBlock Text="Query tag:" VerticalAlignment="Center" Margin="0,0,4,4" FontSize="11"/>
-                    <ComboBox x:Name="QueryTagFilterCombo" Width="170" Margin="0,0,8,4" Padding="4,2" FontSize="11"
+                    <Button Style="{DynamicResource {x:Type Button}}" ToolBar.OverflowMode="Never" x:Name="RefreshDataButton" Content="Refresh" Click="RefreshDataButton_Click" Padding="12,4" Margin="0,0,8,0"/>
+                    <StackPanel ToolBar.OverflowMode="Never" Orientation="Horizontal">
+                    <CheckBox x:Name="AutoRefreshCheckBox" Content="_Auto-refresh" VerticalAlignment="Center" Margin="0,0,4,0"
+                              IsChecked="True" Checked="AutoRefreshCheckBox_Changed" Unchecked="AutoRefreshCheckBox_Changed"/>
+                    <ComboBox x:Name="AutoRefreshIntervalCombo" AutomationProperties.Name="Auto-refresh interval" SelectedIndex="1" Width="70" Margin="0,0,8,0"
+                              SelectionChanged="AutoRefreshInterval_Changed">
+                        <ComboBoxItem Content="30s"/>
+                        <ComboBoxItem Content="1m"/>
+                        <ComboBoxItem Content="5m"/>
+                    </ComboBox>
+                </StackPanel>
+                    <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="Times:" VerticalAlignment="Center" Margin="0,0,4,0" Foreground="{DynamicResource ForegroundBrush}"/>
+                    <ComboBox x:Name="TimeDisplayModeBox" AutomationProperties.Name="Time display" Width="120" Margin="0,0,0,0" SelectionChanged="TimeDisplayMode_SelectionChanged"
+                              ToolTip="How timestamps are displayed">
+                        <ComboBoxItem Content="Server Time" Tag="ServerTime"/>
+                        <ComboBoxItem Content="Local Time" Tag="LocalTime"/>
+                        <ComboBoxItem Content="UTC" Tag="UTC"/>
+                    </ComboBox>
+                </StackPanel>
+                </ToolBar>
+                <ToolBar x:Name="ServerToolbarFilters" Style="{StaticResource ServerToolbarStyle}">
+                    <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="Query tag:" VerticalAlignment="Center" Margin="0,0,4,0" FontSize="11"/>
+                    <ComboBox x:Name="QueryTagFilterCombo" Width="170" Margin="0,0,8,0" Padding="4,2" FontSize="11"
                               DropDownOpened="QueryTagFilterCombo_DropDownOpened" SelectionChanged="QueryTagFilterCombo_SelectionChanged"
                               ToolTip="Show only the Queries grids' rows with this tag (a parent shows its children), or only untagged rows. Applied before each grid's top-N cut."/>
                 </StackPanel>
-                <Button Content="Use by tag" Click="ResourceUseByTagButton_Click" Padding="8,4" Margin="0,0,8,4"
-                        ToolTip="Resource use rolled up by query tag, one table per source."/>
-                <!-- #1319: per-server global database filter (display-only) -->
-                <Button x:Name="DatabaseFilterButton" Content="Databases: All" Click="DatabaseFilterButton_Click"
-                        Padding="8,4" Margin="0,0,8,4"
+                    <Button Style="{DynamicResource {x:Type Button}}" x:Name="DatabaseFilterButton" Content="Databases: All" Click="DatabaseFilterButton_Click"
+                        Padding="8,4" Margin="0,0,8,0"
                         ToolTip="Filter database-scoped views (queries, blocking, per-database config, trends) to selected databases. No effect on server-wide views such as CPU, memory, waits, or jobs."/>
+                    <ui:TimeRangePicker x:Name="RangePicker" AutomationProperties.Name="Time range" Margin="0,0,8,0" VerticalAlignment="Center"
+                                    RangeChanged="RangePicker_RangeChanged"/>
+                    <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="Compare:" VerticalAlignment="Center" Margin="0,0,4,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <ComboBox x:Name="CompareToCombo" AutomationProperties.Name="Compare to" ToolTipService.ShowOnDisabled="True" SelectedIndex="0" Width="130" Margin="0,0,8,0"
+                              SelectionChanged="CompareToCombo_SelectionChanged"
+                              ToolTip="Compare current period against a baseline">
+                        <ComboBoxItem Content="None"/>
+                        <ComboBoxItem Content="Yesterday"/>
+                        <ComboBoxItem Content="Last week"/>
+                        <ComboBoxItem Content="Same day last week"/>
+                    </ComboBox>
+                </StackPanel>
+                    <Button Style="{DynamicResource {x:Type Button}}" Content="Apply to All" Click="ApplyTimeRangeToAll_Click" Padding="8,4" Margin="0,0,8,0"
+                        ToolTip="Apply this time range to all open server tabs"/>
+                    <Button Style="{DynamicResource {x:Type Button}}" Content="Use by tag" Click="ResourceUseByTagButton_Click" Padding="8,4" Margin="0,0,0,0"
+                        ToolTip="Resource use rolled up by query tag, one table per source."/>
+                </ToolBar>
                 <Popup x:Name="DatabaseFilterPopup" PlacementTarget="{Binding ElementName=DatabaseFilterButton}"
                        Placement="Bottom" StaysOpen="False" AllowsTransparency="True"
                        Closed="DatabaseFilterPopup_Closed">
@@ -228,46 +318,7 @@
                         </Grid>
                     </Border>
                 </Popup>
-                <!-- #5562: the shared picker replaces the preset combo and the From/To date, hour and minute pickers. -->
-                <ui:TimeRangePicker x:Name="RangePicker" AutomationProperties.Name="Time range" Margin="0,0,8,4" VerticalAlignment="Center"
-                                    RangeChanged="RangePicker_RangeChanged"/>
-                <Button Content="Apply to All" Click="ApplyTimeRangeToAll_Click" Padding="8,4" Margin="0,0,8,4"
-                        ToolTip="Apply this time range to all open server tabs"/>
-                <StackPanel Orientation="Horizontal">
-                    <TextBlock Text="Compare:" VerticalAlignment="Center" Margin="0,0,4,4"
-                               Foreground="{DynamicResource ForegroundBrush}"/>
-                    <ComboBox x:Name="CompareToCombo" AutomationProperties.Name="Compare to" ToolTipService.ShowOnDisabled="True" SelectedIndex="0" Width="130" Margin="0,0,8,4"
-                              SelectionChanged="CompareToCombo_SelectionChanged"
-                              ToolTip="Compare current period against a baseline">
-                        <ComboBoxItem Content="None"/>
-                        <ComboBoxItem Content="Yesterday"/>
-                        <ComboBoxItem Content="Last week"/>
-                        <ComboBoxItem Content="Same day last week"/>
-                    </ComboBox>
-                </StackPanel>
-                <Button x:Name="RefreshDataButton" Content="Refresh" Click="RefreshDataButton_Click" Padding="12,4" Margin="0,0,0,4"/>
-                <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="8,2"/>
-                <StackPanel Orientation="Horizontal">
-                    <CheckBox x:Name="AutoRefreshCheckBox" Content="_Auto-refresh" VerticalAlignment="Center" Margin="0,0,4,4"
-                              IsChecked="True" Checked="AutoRefreshCheckBox_Changed" Unchecked="AutoRefreshCheckBox_Changed"/>
-                    <ComboBox x:Name="AutoRefreshIntervalCombo" AutomationProperties.Name="Auto-refresh interval" SelectedIndex="1" Width="70" Margin="0,0,0,4"
-                              SelectionChanged="AutoRefreshInterval_Changed">
-                        <ComboBoxItem Content="30s"/>
-                        <ComboBoxItem Content="1m"/>
-                        <ComboBoxItem Content="5m"/>
-                    </ComboBox>
-                </StackPanel>
-                <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="8,2"/>
-                <StackPanel Orientation="Horizontal">
-                    <TextBlock Text="Times:" VerticalAlignment="Center" Margin="0,0,4,4" Foreground="{DynamicResource ForegroundBrush}"/>
-                    <ComboBox x:Name="TimeDisplayModeBox" AutomationProperties.Name="Time display" Width="120" Margin="0,0,0,4" SelectionChanged="TimeDisplayMode_SelectionChanged"
-                              ToolTip="How timestamps are displayed">
-                        <ComboBoxItem Content="Server Time" Tag="ServerTime"/>
-                        <ComboBoxItem Content="Local Time" Tag="LocalTime"/>
-                        <ComboBoxItem Content="UTC" Tag="UTC"/>
-                    </ComboBox>
-                </StackPanel>
-            </WrapPanel>
+            </StackPanel>
         </Border>
 
         <!-- Main Tab Control -->
@@ -365,15 +416,17 @@
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
-                                <controls:TimeRangeSlicerControl x:Name="ActiveQueriesSlicer" Grid.Row="0"/>
+                                <controls:TimeRangeSlicerControl x:Name="ActiveQueriesSlicer" Grid.Row="0" EmptyMessage="{Binding ElementName=ActiveQueriesEmptyMessage}"/>
+                                <!-- #8197: the one empty sentence, in the grid area, while the slicer above it is collapsed. -->
+                                <TextBlock x:Name="ActiveQueriesEmptyMessage" Grid.Row="2" Margin="0,36,0,0" Panel.ZIndex="5" Style="{DynamicResource EmptyHint}"/>
                                 <StackPanel Grid.Row="1">
                                     <!-- Where the stored snapshots start, when that is after the window's start (the same
                                          "Showing since <time>" the Queries grids carry; Lite twin of Darling's Active Queries notice). -->
                                     <TextBlock x:Name="ActiveQueriesWindowTruncatedBanner" Visibility="Collapsed"
                                                Padding="8,4" FontWeight="Bold"
-                                               Foreground="{DynamicResource ForegroundBrush}"
+                                               Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
                                                Background="#22FFAA00"/>
-                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                    <WrapPanel Orientation="Horizontal" Margin="0,0,0,8">
                                         <TextBlock Text="Currently Running Queries" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center"/>
                                         <Button x:Name="LiveSnapshotButton" Content="Live Snapshot"
                                                 Click="LiveSnapshot_Click" Padding="12,4" Margin="16,0,8,0"
@@ -385,7 +438,7 @@
                                                   Foreground="{DynamicResource ForegroundBrush}"
                                                   ToolTip="Off by default: on a quiet server every active query can be the monitor's own. The rows are stored either way. Turn on to see them."
                                                   Checked="ActiveQueriesIncludeMonitorCheckBox_Changed" Unchecked="ActiveQueriesIncludeMonitorCheckBox_Changed"/>
-                                    </StackPanel>
+                                    </WrapPanel>
                                 </StackPanel>
                                 <DataGrid Grid.Row="2" x:Name="QuerySnapshotsGrid"
                                           AutoGenerateColumns="False" IsReadOnly="True"
@@ -499,16 +552,18 @@
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
-                                <controls:TimeRangeSlicerControl x:Name="QueryStatsSlicer" Grid.Row="0"/>
+                                <controls:TimeRangeSlicerControl x:Name="QueryStatsSlicer" Grid.Row="0" EmptyMessage="{Binding ElementName=QueryStatsEmptyMessage}"/>
+                                <!-- #8197: the one empty sentence, in the grid area, while the slicer above it is collapsed. -->
+                                <TextBlock x:Name="QueryStatsEmptyMessage" Grid.Row="2" Margin="0,36,0,0" Panel.ZIndex="5" Style="{DynamicResource EmptyHint}"/>
                                 <StackPanel Grid.Row="1">
                                     <!-- #4231: "Showing since <time>" when the raw query_stats floor cuts the window short. -->
                                     <TextBlock x:Name="QueryStatsWindowTruncatedBanner" Visibility="Collapsed"
                                                Padding="8,4" FontWeight="Bold"
-                                               Foreground="{DynamicResource ForegroundBrush}"
+                                               Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
                                                Background="#22FFAA00"/>
                                     <TextBlock x:Name="QueryStatsComparisonBanner" Visibility="Collapsed"
                                                Padding="8,4" FontWeight="Bold"
-                                               Foreground="{DynamicResource ForegroundBrush}"
+                                               Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
                                                Background="#2244AAFF"/>
                                     <Expander Header="CPU by database" IsExpanded="False" Margin="4,2,4,0">
                                         <ScrollViewer MaxHeight="220" VerticalScrollBarVisibility="Auto">
@@ -807,12 +862,14 @@
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
-                                <controls:TimeRangeSlicerControl x:Name="ProcStatsSlicer" Grid.Row="0"/>
+                                <controls:TimeRangeSlicerControl x:Name="ProcStatsSlicer" Grid.Row="0" EmptyMessage="{Binding ElementName=ProcStatsEmptyMessage}"/>
+                                <!-- #8197: the one empty sentence, in the grid area, while the slicer above it is collapsed. -->
+                                <TextBlock x:Name="ProcStatsEmptyMessage" Grid.Row="2" Margin="0,36,0,0" Panel.ZIndex="5" Style="{DynamicResource EmptyHint}"/>
                                 <StackPanel Grid.Row="1">
                                     <!-- #4231: "Showing since <time>" when the raw procedure_stats floor cuts the window short. -->
                                     <TextBlock x:Name="ProcStatsWindowTruncatedBanner" Visibility="Collapsed"
                                                Padding="8,4" FontWeight="Bold"
-                                               Foreground="{DynamicResource ForegroundBrush}"
+                                               Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
                                                Background="#22FFAA00"/>
                                     <!-- #6651: the databases the ranking left out (dropped since an earlier snapshot), and the empty-page
                                          sentence when that left nothing. -->
@@ -822,7 +879,7 @@
                                                Background="#22FFAA00"/>
                                     <TextBlock x:Name="ProcStatsComparisonBanner" Visibility="Collapsed"
                                                Padding="8,4" FontWeight="Bold"
-                                               Foreground="{DynamicResource ForegroundBrush}"
+                                               Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
                                                Background="#2244AAFF"/>
                                 </StackPanel>
                             <DataGrid Grid.Row="2" x:Name="ProcedureStatsGrid"
@@ -1021,16 +1078,18 @@
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
-                                <controls:TimeRangeSlicerControl x:Name="QueryStoreSlicer" Grid.Row="0"/>
+                                <controls:TimeRangeSlicerControl x:Name="QueryStoreSlicer" Grid.Row="0" EmptyMessage="{Binding ElementName=QueryStoreEmptyMessage}"/>
+                                <!-- #8197: the one empty sentence, in the grid area, while the slicer above it is collapsed. -->
+                                <TextBlock x:Name="QueryStoreEmptyMessage" Grid.Row="2" Margin="0,36,0,0" Panel.ZIndex="5" Style="{DynamicResource EmptyHint}"/>
                                 <StackPanel Grid.Row="1">
                                     <!-- #4231: "Showing since <time>" when the raw query_store_stats floor cuts the window short. -->
                                     <TextBlock x:Name="QueryStoreWindowTruncatedBanner" Visibility="Collapsed"
                                                Padding="8,4" FontWeight="Bold"
-                                               Foreground="{DynamicResource ForegroundBrush}"
+                                               Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
                                                Background="#22FFAA00"/>
                                     <TextBlock x:Name="QueryStoreComparisonBanner" Visibility="Collapsed"
                                                Padding="8,4" FontWeight="Bold"
-                                               Foreground="{DynamicResource ForegroundBrush}"
+                                               Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
                                                Background="#2244AAFF"/>
                                 </StackPanel>
                             <DataGrid Grid.Row="2" x:Name="QueryStoreGrid"
@@ -1331,7 +1390,7 @@
                                 <!-- #4966: "Showing since <time>" when the stored plan corrections start after the range's start. -->
                                 <TextBlock Grid.Row="1" x:Name="PlanCorrectionsWindowTruncatedBanner" Visibility="Collapsed"
                                            Padding="8,4" FontWeight="Bold"
-                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
                                            Background="#22FFAA00"/>
                                 <DataGrid Grid.Row="2" x:Name="PlanCorrectionGrid"
                                           AutoGenerateColumns="False" IsReadOnly="True"
@@ -1437,7 +1496,10 @@
                             </Grid>
                         </TabItem>
                         <TabItem Header="Query Heatmap">
-                            <Grid>
+                            <!-- #8220: the tab scrolls when the chart card cannot keep a plot of 120 DIPs: the grid is as tall as the viewport but never under
+                                 MinHeight (the metric row, the banner and a 280 DIP card). -->
+                            <ScrollViewer x:Name="HeatmapScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                                <Grid Height="{Binding ViewportHeight, ElementName=HeatmapScroll}" MinHeight="360">
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
@@ -1456,7 +1518,7 @@
                                 <!-- #4966: the heatmap draws one column per 5-minute bucket across the asked range, so a gap shows as empty columns; this says where the stored rows start, which an empty column cannot (a server that did not exist yet looks like one that ran nothing). -->
                                 <TextBlock Grid.Row="1" x:Name="QueryHeatmapWindowTruncatedBanner" Visibility="Collapsed"
                                            Padding="8,4" FontWeight="Bold"
-                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
                                            Background="#22FFAA00"/>
                                 <ui:ChartPanel Title="Query Heatmap" Grid.Row="2">
                                     <ScottPlot:WpfPlot x:Name="QueryHeatmapChart"
@@ -1464,6 +1526,7 @@
                                                         MouseLeave="HeatmapChart_MouseLeave"/>
                                 </ui:ChartPanel>
                             </Grid>
+                            </ScrollViewer>
                         </TabItem>
                     </TabControl>
                 </Grid>
@@ -1509,13 +1572,18 @@
 
             <!-- CPU Tab -->
             <TabItem Header="CPU">
-                <TabControl x:Name="CpuSubTabControl" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
+                <TabControl x:Name="CpuSubTabControl" Background="Transparent" BorderThickness="0" ui:TabStripOverflow.HeaderMargin="8,0,0,0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                     <TabItem Header="CPU Utilization">
-                        <Grid Margin="8">
-                            <ui:ChartPanel Title="CPU">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8"><!-- #8220: scrolls when the chart cannot keep its minimum height with its legend -->
+                        <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="300">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                            </Grid.RowDefinitions>
+                            <ui:ChartPanel Title="CPU" Grid.Row="0">
                                 <ScottPlot:WpfPlot x:Name="CpuChart"/>
                             </ui:ChartPanel>
                         </Grid>
+                        </ScrollViewer>
                     </TabItem>
 
                     <!-- CPU Scheduler sub-tab (#8169: under CPU, as in the Viewer) — the Lite port of Darling's CPU Scheduler surface
@@ -1555,7 +1623,7 @@
                                 </DataGrid.Columns>
                             </DataGrid>
                             <!-- Shown only where the cpu_scheduler_stats collector does not run (Azure SQL Database). -->
-                            <TextBlock Grid.Row="1" x:Name="CpuSchedulerNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
+                            <TextBlock Style="{DynamicResource EmptyHint}" Grid.Row="1" x:Name="CpuSchedulerNoDataMessage" Visibility="Collapsed"/>
                         </Grid></ScrollViewer>
                     </TabItem>
                 </TabControl>
@@ -1563,7 +1631,7 @@
 
             <!-- Memory Tab -->
             <TabItem Header="Memory">
-                <TabControl x:Name="MemorySubTabControl" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
+                <TabControl x:Name="MemorySubTabControl" Background="Transparent" BorderThickness="0" ui:TabStripOverflow.HeaderMargin="8,0,0,0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                     <!-- Memory Overview Sub-Tab -->
                     <TabItem Header="Overview">
                         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8"><!-- #8098: scrolls when the chart cannot keep its minimum height under the summary panel -->
@@ -1717,13 +1785,13 @@
                             <!-- #4966: "Showing since <time>" when the stored events start after the range's start; the chart draws bars only where pressure was recorded, so an empty span reads as no pressure. -->
                             <TextBlock Grid.Row="0" x:Name="MemoryPressureEventsWindowTruncatedBanner" Visibility="Collapsed"
                                        Padding="8,4" FontWeight="Bold"
-                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
                                        Background="#22FFAA00"/>
                             <ui:ChartPanel Title="Memory Pressure Events" Grid.Row="1">
                                 <ScottPlot:WpfPlot x:Name="MemoryPressureEventsChart"/>
                             </ui:ChartPanel>
                             <!-- Shown only where the memory_pressure_events collector does not collect for this server and the chart has no points. -->
-                            <TextBlock Grid.Row="1" x:Name="MemoryPressureEventsNoDataMessage" Text="No memory pressure events in the selected time window." Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
+                            <TextBlock Style="{DynamicResource EmptyHint}" Grid.Row="1" x:Name="MemoryPressureEventsNoDataMessage" Text="No memory pressure events in the selected time window." Visibility="Collapsed"/>
                         </Grid>
                     </TabItem>
 
@@ -1742,7 +1810,7 @@
                                 <ScottPlot:WpfPlot x:Name="PlanCacheChart"/>
                             </ui:ChartPanel>
                             <Border Grid.Row="1" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12,8" Margin="0,8,0,0">
-                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                <WrapPanel HorizontalAlignment="Center">
                                     <TextBlock Text="Total Plans:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                                     <TextBlock x:Name="PlanCacheTotalPlansText" Text="--" VerticalAlignment="Center" Margin="0,0,20,0"/>
                                     <TextBlock Text="Oldest Plan Age:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
@@ -1757,7 +1825,7 @@
                                     <TextBlock x:Name="PlanCacheRecommendationText" Text="" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,20,0"/>
                                     <TextBlock Text="Collected:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                                     <TextBlock x:Name="PlanCacheCollectedText" Text="--" VerticalAlignment="Center"/>
-                                </StackPanel>
+                                </WrapPanel>
                             </Border>
                         </Grid>
                     </TabItem>
@@ -1847,12 +1915,12 @@
                     <Border Grid.Row="2" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False"
                             Background="{DynamicResource BackgroundDarkBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="4" Padding="16,12"
                             Visibility="{Binding Visibility, ElementName=TempDbFileIoNoDataMessage}">
-                        <TextBlock x:Name="TempDbFileIoNoDataMessage" Visibility="Collapsed" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
+                        <TextBlock Style="{DynamicResource EmptyHint}" x:Name="TempDbFileIoNoDataMessage" Visibility="Collapsed"/>
                     </Border>
                     <Border Grid.Row="0" Grid.RowSpan="2" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False"
                             Background="{DynamicResource BackgroundDarkBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="4" Padding="16,12"
                             Visibility="{Binding Visibility, ElementName=TempDbNoDataMessage}">
-                        <TextBlock x:Name="TempDbNoDataMessage" Visibility="Collapsed" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
+                        <TextBlock Style="{DynamicResource EmptyHint}" x:Name="TempDbNoDataMessage" Visibility="Collapsed"/>
                     </Border>
                 </Grid></ScrollViewer>
             </TabItem>
@@ -1876,7 +1944,7 @@
                                      (wait_stats, the blocked-process-report sources, deadlocks), so no one note is true of all of them. -->
                                 <TextBlock x:Name="LockWaitTrendTruncationBanner" Grid.Row="0" Visibility="Collapsed"
                                            Padding="8,4" FontWeight="Bold"
-                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
                                            Background="#22FFAA00"/>
                                 <Border Grid.Row="1" Margin="0,0,0,4">
                                     <ui:ChartPanel Title="Lock Wait Time">
@@ -1885,7 +1953,7 @@
                                 </Border>
                                 <TextBlock x:Name="BlockingTrendTruncationBanner" Grid.Row="2" Visibility="Collapsed"
                                            Padding="8,4" FontWeight="Bold"
-                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
                                            Background="#22FFAA00"/>
                                 <Border Grid.Row="3" Margin="0,4,0,4">
                                     <ui:ChartPanel Title="Blocking Trend">
@@ -1894,7 +1962,7 @@
                                 </Border>
                                 <TextBlock x:Name="DeadlockTrendTruncationBanner" Grid.Row="4" Visibility="Collapsed"
                                            Padding="8,4" FontWeight="Bold"
-                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
                                            Background="#22FFAA00"/>
                                 <Border Grid.Row="5" Margin="0,4,0,0">
                                     <ui:ChartPanel Title="Deadlocks">
@@ -1904,32 +1972,34 @@
                             </Grid></ScrollViewer>
                         </TabItem>
                         <TabItem Header="Current Waits">
-                            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #7385: scrolls when the charts cannot all keep their minimum height -->
-                            <Grid ui:ChartGroup.IsAligned="True" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="460">
+                            <ScrollViewer x:Name="CurrentWaitsScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #7385: scrolls when the charts cannot all keep their minimum height -->
+                            <!-- #8219: two columns so the charts sit side by side (ChartPairLayout) when the tab cannot give both a stacked row. MinHeight is one chart row with the banner and note; the stacked layout adds the second row's MinHeight to it. -->
+                            <Grid x:Name="CurrentWaitsGrid" ui:ChartGroup.IsAligned="True" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="260">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
-                                    <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                                    <RowDefinition x:Name="CurrentWaitsSecondRow" Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                                     <RowDefinition Height="Auto"/>
                                 </Grid.RowDefinitions>
                                 <!-- Where the stored waiting-task rows start, when that is after the window's start (the same
                                      "Showing since <time>" the Queries grids carry; Lite twin of Darling's Current Waits notice). -->
-                                <TextBlock Grid.Row="0" x:Name="CurrentWaitsWindowTruncatedBanner" Visibility="Collapsed"
+                                <TextBlock Grid.Row="0" Grid.ColumnSpan="2" x:Name="CurrentWaitsWindowTruncatedBanner" Visibility="Collapsed"
                                            Padding="8,4" FontWeight="Bold"
-                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
                                            Background="#22FFAA00"/>
-                                <Border Grid.Row="1" Margin="0,0,0,4">
+                                <Border x:Name="CurrentWaitsFirstCard" Grid.Row="1" Grid.ColumnSpan="2" Margin="0,0,0,4">
                                     <ui:ChartPanel Title="Total Wait Duration">
                                         <ScottPlot:WpfPlot x:Name="CurrentWaitsDurationChart"/>
                                     </ui:ChartPanel>
                                 </Border>
-                                <Border Grid.Row="2" Margin="0,4,0,0">
+                                <Border x:Name="CurrentWaitsSecondCard" Grid.Row="2" Grid.ColumnSpan="2" Margin="0,4,0,0">
                                     <ui:ChartPanel Title="Blocked Sessions">
                                         <ScottPlot:WpfPlot x:Name="CurrentWaitsBlockedChart"/>
                                     </ui:ChartPanel>
                                 </Border>
                                 <!-- Both charts read waiting_tasks, which stores a row only when a collection found a task waiting or blocked, so a quiet server draws few points and a gap means nothing was waiting. -->
-                                <TextBlock Grid.Row="3" x:Name="CurrentWaitsSparseNote" Padding="8,4" FontStyle="Italic" TextWrapping="Wrap"
+                                <TextBlock Grid.Row="3" Grid.ColumnSpan="2" x:Name="CurrentWaitsSparseNote" Padding="8,4" FontStyle="Italic" TextWrapping="Wrap"
                                            Foreground="{DynamicResource ForegroundDimBrush}"
                                            Text="Points appear only when a collection found waiting or blocked tasks. A gap means nothing was waiting at that time."/>
                             </Grid></ScrollViewer>
@@ -1941,13 +2011,15 @@
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
-                                <controls:TimeRangeSlicerControl x:Name="BlockingSlicer" Grid.Row="0"/>
+                                <controls:TimeRangeSlicerControl x:Name="BlockingSlicer" Grid.Row="0" EmptyMessage="{Binding ElementName=BlockingEmptyMessage}"/>
+                                <!-- #8197: the one empty sentence, in the grid area, while the slicer above it is collapsed. -->
+                                <TextBlock x:Name="BlockingEmptyMessage" Grid.Row="2" Margin="0,36,0,0" Panel.ZIndex="5" Style="{DynamicResource EmptyHint}"/>
                                 <StackPanel Grid.Row="1">
                                     <!-- Where the stored blocked-process coverage starts, when that is after the window's start (the same
                                          "Showing since <time>" the Queries grids carry). -->
                                     <TextBlock x:Name="BlockedProcessReportsWindowTruncatedBanner" Visibility="Collapsed"
                                                Padding="8,4" FontWeight="Bold"
-                                               Foreground="{DynamicResource ForegroundBrush}"
+                                               Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
                                                Background="#22FFAA00"/>
                                     <TextBlock x:Name="BlockedProcessReportNoteText" Visibility="Collapsed" TextWrapping="Wrap" Margin="8,4,8,4"
                                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
@@ -2075,13 +2147,15 @@
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
-                                <controls:TimeRangeSlicerControl x:Name="DeadlockSlicer" Grid.Row="0"/>
+                                <controls:TimeRangeSlicerControl x:Name="DeadlockSlicer" Grid.Row="0" EmptyMessage="{Binding ElementName=DeadlockEmptyMessage}"/>
+                                <!-- #8197: the one empty sentence, in the grid area, while the slicer above it is collapsed. -->
+                                <TextBlock x:Name="DeadlockEmptyMessage" Grid.Row="2" Margin="0,36,0,0" Panel.ZIndex="5" Style="{DynamicResource EmptyHint}"/>
                                 <StackPanel Grid.Row="1">
                                     <!-- Where the stored deadlock coverage starts, when that is after the window's start (the same
                                          "Showing since <time>" the Queries grids carry). -->
                                     <TextBlock x:Name="DeadlocksWindowTruncatedBanner" Visibility="Collapsed"
                                                Padding="8,4" FontWeight="Bold"
-                                               Foreground="{DynamicResource ForegroundBrush}"
+                                               Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
                                                Background="#22FFAA00"/>
                                     <TextBlock x:Name="DeadlockNoteText" Visibility="Collapsed" TextWrapping="Wrap" Margin="8,4,8,4"
                                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
@@ -2203,7 +2277,7 @@
                                 <!-- One note per chart pair (#4966): blocking pair from the blocked-process-report sources, deadlock pair from deadlocks. -->
                                 <TextBlock x:Name="BlockingStatsBlockingTruncationBanner" Grid.Row="0" Grid.ColumnSpan="2" Visibility="Collapsed"
                                            Padding="8,4" FontWeight="Bold"
-                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
                                            Background="#22FFAA00"/>
                                 <Border Grid.Row="1" Grid.Column="0" Margin="0,0,4,4">
                                     <ui:ChartPanel Title="Block Duration">
@@ -2217,7 +2291,7 @@
                                 </Border>
                                 <TextBlock x:Name="BlockingStatsDeadlockTruncationBanner" Grid.Row="2" Grid.ColumnSpan="2" Visibility="Collapsed"
                                            Padding="8,4" FontWeight="Bold"
-                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
                                            Background="#22FFAA00"/>
                                 <Border Grid.Row="3" Grid.Column="0" Margin="0,4,4,0">
                                     <ui:ChartPanel Title="Deadlock Wait">
@@ -2357,7 +2431,7 @@
                         </DataGrid.Columns>
                     </DataGrid>
                     <!-- Says no job is running when the grid has no rows; where the running_jobs collector does not collect for this server, or the login lacks msdb access, the not-collected note or the msdb warning replaces it. -->
-                    <TextBlock Grid.Row="2" x:Name="RunningJobsNoDataMessage" Text="No SQL Agent jobs are running." Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
+                    <TextBlock Style="{DynamicResource EmptyHint}" Grid.Row="2" x:Name="RunningJobsNoDataMessage" Text="No SQL Agent jobs are running." Visibility="Collapsed"/>
                 </Grid>
             </TabItem>
 
@@ -2393,7 +2467,7 @@
                                     </DataGrid.Columns>
                                 </DataGrid>
                                 <!-- Shown only where the server_config collector does not collect for this server and the grid has no rows. -->
-                                <TextBlock x:Name="ServerConfigNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
+                                <TextBlock Style="{DynamicResource EmptyHint}" x:Name="ServerConfigNoDataMessage" Visibility="Collapsed"/>
                             </Grid>
                         </TabItem>
                         <TabItem Header="Database Configuration">
@@ -2411,7 +2485,7 @@
                                     <DataGridTextColumn Binding="{Binding CompatibilityLevel}" ElementStyle="{StaticResource NumericCell}" Width="125">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CompatibilityLevel" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Compat Level" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding CollationName}" Width="180">
+                                    <DataGridTextColumn Binding="{Binding CollationName}" Width="260">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollationName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collation" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding RecoveryModel}" Width="135">
@@ -2609,7 +2683,7 @@
                                     </DataGrid.Columns>
                                 </DataGrid>
                                 <!-- Shown when the grid has no rows: its own words say no trace flags are enabled, and the engine-gap sentence replaces them where the trace_flags collector does not collect for this server. -->
-                                <TextBlock x:Name="TraceFlagsNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" Text="No trace flags are enabled on this server."/>
+                                <TextBlock Style="{DynamicResource EmptyHint}" x:Name="TraceFlagsNoDataMessage" Visibility="Collapsed" Text="No trace flags are enabled on this server."/>
                             </Grid>
                         </TabItem>
                     </TabControl>
@@ -2657,7 +2731,7 @@
                     </Grid.RowDefinitions>
 
                     <!-- Latch wait-time trend (top 5 classes by delta wait) + per-class latest-snapshot grid. -->
-                    <TextBlock Grid.Row="0" x:Name="LatchStatsWindowTruncatedBanner" Visibility="Collapsed" Padding="8,4" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Background="#22FFAA00"/>
+                    <TextBlock Grid.Row="0" x:Name="LatchStatsWindowTruncatedBanner" Visibility="Collapsed" Padding="8,4" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                     <ui:ChartPanel Title="Latch Waits" Grid.Row="1">
                         <ScottPlot:WpfPlot x:Name="LatchStatsChart"/>
                     </ui:ChartPanel>
@@ -2700,7 +2774,7 @@
                     </Expander>
 
                     <!-- Spinlock collisions trend (top 5 spinlocks by delta collisions) + per-spinlock snapshot grid. -->
-                    <TextBlock Grid.Row="3" x:Name="SpinlockStatsWindowTruncatedBanner" Visibility="Collapsed" Padding="8,4" Margin="0,8,0,0" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Background="#22FFAA00"/>
+                    <TextBlock Grid.Row="3" x:Name="SpinlockStatsWindowTruncatedBanner" Visibility="Collapsed" Padding="8,4" Margin="0,8,0,0" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                     <ui:ChartPanel Title="Spinlock Collisions" Grid.Row="4" Margin="0,8,0,0">
                         <ScottPlot:WpfPlot x:Name="SpinlockStatsChart"/>
                     </ui:ChartPanel>
@@ -2870,7 +2944,7 @@
                                 </Grid.RowDefinitions>
                                 <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,4,0,8">
                                     <Button Content="Open Log File" Click="OpenLogFile_Click" Padding="12,4" Margin="0,0,8,0"/>
-                                    <TextBlock x:Name="CollectionLogWindowTruncatedBanner" Visibility="Collapsed" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Background="#22FFAA00"/>
+                                    <TextBlock x:Name="CollectionLogWindowTruncatedBanner" Visibility="Collapsed" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                                 </StackPanel>
                                 <DataGrid Grid.Row="1" x:Name="CollectionLogGrid"
                                           AutoGenerateColumns="False" IsReadOnly="True"
@@ -2931,7 +3005,7 @@
                  Default Trace lane. Appended as the LAST top-level tab (index 18); loads via
                  RefreshVisibleTabAsync case 18, sub-tab switches reload via MainTabControl_SelectionChanged. -->
             <TabItem Header="System Events">
-                <TabControl x:Name="SystemEventsSubTabControl" Background="Transparent" BorderThickness="0"
+                <TabControl x:Name="SystemEventsSubTabControl" Background="Transparent" BorderThickness="0" ui:TabStripOverflow.HeaderMargin="8,0,0,0"
                             ItemContainerStyle="{DynamicResource SubTabItemStyle}">
 
                     <!-- Corruption Events Sub-Tab (sp_server_diagnostics SYSTEM component counter charts) -->
@@ -2951,7 +3025,7 @@
                                 <Border Grid.Row="1" Grid.Column="0" Margin="2"><ui:ChartPanel Title="Access Violations"><ScottPlot:WpfPlot x:Name="AccessViolationsChart"/></ui:ChartPanel></Border>
                                 <Border Grid.Row="1" Grid.Column="1" Margin="2"><ui:ChartPanel Title="Write Access Violations"><ScottPlot:WpfPlot x:Name="WriteAccessViolationsChart"/></ui:ChartPanel></Border>
                             </Grid></ScrollViewer>
-                            <TextBlock Grid.Row="1" x:Name="CorruptionEventsNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
+                            <TextBlock Style="{DynamicResource EmptyHint}" Grid.Row="1" x:Name="CorruptionEventsNoDataMessage" Visibility="Collapsed"/>
                         </Grid>
                     </TabItem>
 
@@ -2972,7 +3046,7 @@
                                 <Border Grid.Row="1" Grid.Column="0" Margin="2"><ui:ChartPanel Title="Sick Spinlocks"><ScottPlot:WpfPlot x:Name="SickSpinlocksChart"/></ui:ChartPanel></Border>
                                 <Border Grid.Row="1" Grid.Column="1" Margin="2"><ui:ChartPanel Title="CPU Comparison"><ScottPlot:WpfPlot x:Name="CpuComparisonChart"/></ui:ChartPanel></Border>
                             </Grid></ScrollViewer>
-                            <TextBlock Grid.Row="1" x:Name="ContentionEventsNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
+                            <TextBlock Style="{DynamicResource EmptyHint}" Grid.Row="1" x:Name="ContentionEventsNoDataMessage" Visibility="Collapsed"/>
                         </Grid>
                     </TabItem>
 
@@ -2984,7 +3058,7 @@
                                 <TextBlock Text="Scheduler Issues" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
                                 <TextBlock x:Name="SchedulerIssuesCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
-                                <TextBlock x:Name="SchedulerIssuesWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Background="#22FFAA00"/>
+                                <TextBlock x:Name="SchedulerIssuesWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                             </StackPanel>
                             <Grid Grid.Row="1">
                                 <DataGrid x:Name="SchedulerIssuesGrid" AutoGenerateColumns="False" IsReadOnly="True" RowStyle="{StaticResource GridRowStyle}" HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
@@ -2998,7 +3072,7 @@
                                         <DataGridTextColumn Binding="{Binding WorkingSetDeltaMb, StringFormat=N2}" Width="135" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="WorkingSetDeltaMb" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Working Set Δ MB" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
-                                <TextBlock x:Name="SchedulerIssuesNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="480" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" Text="No significant scheduler-monitor samples (SQL CPU, other-process CPU, or memory utilization outside the warning thresholds) in the selected time window."/>
+                                <TextBlock Style="{DynamicResource EmptyHint}" x:Name="SchedulerIssuesNoDataMessage" Visibility="Collapsed" Text="No significant scheduler-monitor samples (SQL CPU, other-process CPU, or memory utilization outside the warning thresholds) in the selected time window."/>
                             </Grid>
                         </Grid>
                     </TabItem>
@@ -3011,7 +3085,7 @@
                                 <TextBlock Text="Severe Errors (severity 19+)" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
                                 <TextBlock x:Name="SevereErrorsCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
-                                <TextBlock x:Name="SevereErrorsWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Background="#22FFAA00"/>
+                                <TextBlock x:Name="SevereErrorsWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                             </StackPanel>
                             <Grid Grid.Row="1">
                                 <DataGrid x:Name="SevereErrorsGrid" AutoGenerateColumns="False" IsReadOnly="True" RowStyle="{StaticResource GridRowStyle}" HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
@@ -3028,7 +3102,7 @@
                                         </DataGridTemplateColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
-                                <TextBlock x:Name="SevereErrorsNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="480" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" Text="No severe errors (severity 19+) in the selected time window."/>
+                                <TextBlock Style="{DynamicResource EmptyHint}" x:Name="SevereErrorsNoDataMessage" Visibility="Collapsed" Text="No severe errors (severity 19+) in the selected time window."/>
                             </Grid>
                         </Grid>
                     </TabItem>
@@ -3041,7 +3115,7 @@
                                 <TextBlock Text="Memory Conditions (low physical memory)" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
                                 <TextBlock x:Name="MemoryConditionsCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
-                                <TextBlock x:Name="MemoryConditionsWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Background="#22FFAA00"/>
+                                <TextBlock x:Name="MemoryConditionsWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                             </StackPanel>
                             <Grid Grid.Row="1">
                                 <DataGrid x:Name="MemoryConditionsGrid" AutoGenerateColumns="False" IsReadOnly="True" RowStyle="{StaticResource GridRowStyle}" HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
@@ -3080,7 +3154,7 @@
                                         <DataGridTextColumn Binding="{Binding LastOsError, StringFormat=N0}" Width="105" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastOsError" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last OS Error" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
-                                <TextBlock x:Name="MemoryConditionsNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="480" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" Text="No low-physical-memory conditions (RESOURCE_MEMPHYSICAL_LOW) in the selected time window."/>
+                                <TextBlock Style="{DynamicResource EmptyHint}" x:Name="MemoryConditionsNoDataMessage" Visibility="Collapsed" Text="No low-physical-memory conditions (RESOURCE_MEMPHYSICAL_LOW) in the selected time window."/>
                             </Grid>
                         </Grid>
                     </TabItem>
@@ -3090,10 +3164,11 @@
                         <Grid Margin="8">
                             <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
                             <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,4,0,8">
-                                <TextBlock Text="Memory Broker (target shrinks)" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
+                                <!-- #8197: the tab is already named Memory Broker, so the panel keeps only what its tab cannot say. -->
+                                <TextBlock x:Name="MemoryBrokerSubtitle" Text="Target shrinks" Style="{DynamicResource PanelSubtitleText}" VerticalAlignment="Center"/>
                                 <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
                                 <TextBlock x:Name="MemoryBrokerCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
-                                <TextBlock x:Name="MemoryBrokerWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Background="#22FFAA00"/>
+                                <TextBlock x:Name="MemoryBrokerWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                             </StackPanel>
                             <Grid Grid.Row="1">
                                 <DataGrid x:Name="MemoryBrokerGrid" AutoGenerateColumns="False" IsReadOnly="True" RowStyle="{StaticResource GridRowStyle}" HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
@@ -3113,7 +3188,7 @@
                                         <DataGridTextColumn Binding="{Binding PreviouslyAllocated, StringFormat=N0}" Width="125" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PreviouslyAllocated" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Prev Allocated" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
-                                <TextBlock x:Name="MemoryBrokerNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="480" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" Text="No memory broker SHRINK notifications in the selected time window."/>
+                                <TextBlock Style="{DynamicResource EmptyHint}" x:Name="MemoryBrokerNoDataMessage" Visibility="Collapsed" Text="No memory broker SHRINK notifications in the selected time window."/>
                             </Grid>
                         </Grid>
                     </TabItem>
@@ -3126,7 +3201,7 @@
                                 <TextBlock Text="Memory Node OOM" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
                                 <TextBlock x:Name="MemoryNodeOomCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
-                                <TextBlock x:Name="MemoryNodeOomWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Background="#22FFAA00"/>
+                                <TextBlock x:Name="MemoryNodeOomWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                             </StackPanel>
                             <Grid Grid.Row="1">
                                 <DataGrid x:Name="MemoryNodeOomGrid" AutoGenerateColumns="False" IsReadOnly="True" RowStyle="{StaticResource GridRowStyle}" HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
@@ -3161,7 +3236,7 @@
                                         <DataGridTextColumn Binding="{Binding IsProcessVirtualMemoryLow}" Width="105"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="IsProcessVirtualMemoryLow" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Proc Virt Low" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
-                                <TextBlock x:Name="MemoryNodeOomNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="480" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" Text="No memory-node out-of-memory events in the selected time window."/>
+                                <TextBlock Style="{DynamicResource EmptyHint}" x:Name="MemoryNodeOomNoDataMessage" Visibility="Collapsed" Text="No memory-node out-of-memory events in the selected time window."/>
                             </Grid>
                         </Grid>
                     </TabItem>
@@ -3174,7 +3249,7 @@
                                 <TextBlock Text="Significant Waits (duration 500 ms+)" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
                                 <TextBlock x:Name="SignificantWaitsCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
-                                <TextBlock x:Name="SignificantWaitsWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Background="#22FFAA00"/>
+                                <TextBlock x:Name="SignificantWaitsWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                             </StackPanel>
                             <Grid Grid.Row="1">
                                 <DataGrid x:Name="SignificantWaitsGrid" AutoGenerateColumns="False" IsReadOnly="True" RowStyle="{StaticResource GridRowStyle}" HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
@@ -3191,7 +3266,7 @@
                                         <DataGridTextColumn Binding="{Binding SessionId}" Width="70" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SessionId" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Session" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
-                                <TextBlock x:Name="SignificantWaitsNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="480" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" Text="No significant waits (session queries waiting 500 ms+) in the selected time window."/>
+                                <TextBlock Style="{DynamicResource EmptyHint}" x:Name="SignificantWaitsNoDataMessage" Visibility="Collapsed" Text="No significant waits (session queries waiting 500 ms+) in the selected time window."/>
                             </Grid>
                         </Grid>
                     </TabItem>
@@ -3204,7 +3279,7 @@
                                 <TextBlock Text="CPU Tasks (WARNING with 10+ pending tasks)" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
                                 <TextBlock x:Name="CpuTasksCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
-                                <TextBlock x:Name="CpuTasksWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Background="#22FFAA00"/>
+                                <TextBlock x:Name="CpuTasksWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                             </StackPanel>
                             <Grid Grid.Row="1">
                                 <DataGrid x:Name="CpuTasksGrid" AutoGenerateColumns="False" IsReadOnly="True" RowStyle="{StaticResource GridRowStyle}" HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
@@ -3222,7 +3297,7 @@
                                         <DataGridTextColumn Binding="{Binding DidBlockingOccur}" Width="90"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DidBlockingOccur" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Blocking" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
-                                <TextBlock x:Name="CpuTasksNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="480" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" Text="No CPU-task warnings (WARNING state with 10+ pending tasks) in the selected time window."/>
+                                <TextBlock Style="{DynamicResource EmptyHint}" x:Name="CpuTasksNoDataMessage" Visibility="Collapsed" Text="No CPU-task warnings (WARNING state with 10+ pending tasks) in the selected time window."/>
                             </Grid>
                         </Grid>
                     </TabItem>
@@ -3235,7 +3310,7 @@
                                 <TextBlock Text="I/O Issues (WARNING with pending I/O)" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
                                 <TextBlock x:Name="IoIssuesCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
-                                <TextBlock x:Name="IoIssuesWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Background="#22FFAA00"/>
+                                <TextBlock x:Name="IoIssuesWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                             </StackPanel>
                             <Grid Grid.Row="1">
                                 <DataGrid x:Name="IoIssuesGrid" AutoGenerateColumns="False" IsReadOnly="True" RowStyle="{StaticResource GridRowStyle}" HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
@@ -3249,7 +3324,7 @@
                                         <DataGridTextColumn Binding="{Binding LongestPendingRequestsFilePath}" Width="360"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LongestPendingRequestsFilePath" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="File Path" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
-                                <TextBlock x:Name="IoIssuesNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="480" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" Text="No potential I/O issues (WARNING state with pending I/O) in the selected time window."/>
+                                <TextBlock Style="{DynamicResource EmptyHint}" x:Name="IoIssuesNoDataMessage" Visibility="Collapsed" Text="No potential I/O issues (WARNING state with pending I/O) in the selected time window."/>
                             </Grid>
                         </Grid>
                     </TabItem>
@@ -3258,12 +3333,13 @@
                     <TabItem Header="Default Trace">
                         <Grid Margin="8">
                             <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-                            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,4,0,8">
-                                <TextBlock Text="Default Trace (auto-grow/shrink stalls, severe ErrorLog, schema DDL, security audits, memory change)" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
+                            <!-- #8219: a WrapPanel, so the long heading wraps and the Refresh button and count follow it instead of running off the tab. -->
+                            <WrapPanel Grid.Row="0" Orientation="Horizontal" Margin="0,4,0,8">
+                                <TextBlock Text="Default Trace (auto-grow/shrink stalls, severe ErrorLog, schema DDL, security audits, memory change)" VerticalAlignment="Center" TextWrapping="Wrap" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
                                 <TextBlock x:Name="DefaultTraceCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
-                                <TextBlock x:Name="DefaultTraceWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Background="#22FFAA00"/>
-                            </StackPanel>
+                                <TextBlock x:Name="DefaultTraceWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
+                            </WrapPanel>
                             <Grid Grid.Row="1">
                                 <DataGrid x:Name="DefaultTraceGrid" AutoGenerateColumns="False" IsReadOnly="True" RowStyle="{StaticResource GridRowStyle}" HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                     <DataGrid.Columns>
@@ -3283,7 +3359,7 @@
                                         <DataGridTextColumn Binding="{Binding TextData, Converter={StaticResource OneLine}}" Width="400"><DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="ToolTip" Value="{Binding TextData}"/></Style></DataGridTextColumn.ElementStyle><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TextData" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Details" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
-                                <TextBlock x:Name="DefaultTraceNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" Text="No significant Default Trace events (auto-grow/shrink stalls, severe ErrorLog, schema DDL, security audits, memory change) in the selected time window."/>
+                                <TextBlock Style="{DynamicResource EmptyHint}" x:Name="DefaultTraceNoDataMessage" Visibility="Collapsed" Text="No significant Default Trace events (auto-grow/shrink stalls, severe ErrorLog, schema DDL, security audits, memory change) in the selected time window."/>
                             </Grid>
                         </Grid>
                     </TabItem>
@@ -3300,7 +3376,7 @@
                  KEPT (derivable: is_dynamic = 0 AND configured != in-use). Config is captured on connect/restart,
                  so a change appears only when at least two captures bracket it in the window. -->
             <TabItem Header="Configuration Changes">
-                <TabControl x:Name="ConfigChangesSubTabControl" Background="Transparent" BorderThickness="0"
+                <TabControl x:Name="ConfigChangesSubTabControl" Background="Transparent" BorderThickness="0" ui:TabStripOverflow.HeaderMargin="8,0,0,0"
                             ItemContainerStyle="{DynamicResource SubTabItemStyle}">
 
                     <!-- Server Config Changes Sub-Tab (sys.configurations snapshot diff) -->
@@ -3311,7 +3387,7 @@
                                 <TextBlock Text="Server Configuration Changes (sp_configure drift)" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="ConfigChangesRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
                                 <TextBlock x:Name="ServerConfigChangesCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
-                                <TextBlock x:Name="ServerConfigChangesWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Background="#22FFAA00"/>
+                                <TextBlock x:Name="ServerConfigChangesWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                             </StackPanel>
                             <Grid Grid.Row="1">
                                 <DataGrid x:Name="ServerConfigChangesGrid" AutoGenerateColumns="False" IsReadOnly="True" RowStyle="{StaticResource GridRowStyle}" HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
@@ -3329,7 +3405,7 @@
                                     </DataGrid.Columns>
                                 </DataGrid>
                                 <!-- The empty-state text of the grid; where the server_config collector does not collect for this server it says that instead. -->
-                                <TextBlock x:Name="ServerConfigChangesNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="480" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" Text="No server configuration changes in the selected time window (needs at least two config captures bracketing a change)."/>
+                                <TextBlock Style="{DynamicResource EmptyHint}" x:Name="ServerConfigChangesNoDataMessage" Visibility="Collapsed" Text="No server configuration changes in the selected time window (needs at least two config captures bracketing a change)."/>
                             </Grid>
                         </Grid>
                     </TabItem>
@@ -3342,7 +3418,7 @@
                                 <TextBlock Text="Database Configuration Changes (recovery model, RCSI, compat level, etc.)" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="ConfigChangesRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
                                 <TextBlock x:Name="DatabaseConfigChangesCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
-                                <TextBlock x:Name="DatabaseConfigChangesWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Background="#22FFAA00"/>
+                                <TextBlock x:Name="DatabaseConfigChangesWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                             </StackPanel>
                             <Grid Grid.Row="1">
                                 <DataGrid x:Name="DatabaseConfigChangesGrid" AutoGenerateColumns="False" IsReadOnly="True" RowStyle="{StaticResource GridRowStyle}" HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
@@ -3355,7 +3431,7 @@
                                         <DataGridTextColumn Binding="{Binding ChangeDescription}" Width="*" MinWidth="250"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeDescription" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Change Description" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
-                                <TextBlock x:Name="DatabaseConfigChangesNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="480" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" Text="No database configuration changes in the selected time window (needs at least two config captures bracketing a change)."/>
+                                <TextBlock Style="{DynamicResource EmptyHint}" x:Name="DatabaseConfigChangesNoDataMessage" Visibility="Collapsed" Text="No database configuration changes in the selected time window (needs at least two config captures bracketing a change)."/>
                             </Grid>
                         </Grid>
                     </TabItem>
@@ -3368,7 +3444,7 @@
                                 <TextBlock Text="Trace Flag Changes (enabled / disabled / scope changed)" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="ConfigChangesRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
                                 <TextBlock x:Name="TraceFlagChangesCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
-                                <TextBlock x:Name="TraceFlagChangesWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Background="#22FFAA00"/>
+                                <TextBlock x:Name="TraceFlagChangesWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                             </StackPanel>
                             <Grid Grid.Row="1">
                                 <DataGrid x:Name="TraceFlagChangesGrid" AutoGenerateColumns="False" IsReadOnly="True" RowStyle="{StaticResource GridRowStyle}" HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
@@ -3384,7 +3460,7 @@
                                     </DataGrid.Columns>
                                 </DataGrid>
                                 <!-- The empty-state text of the grid; where the trace_flags collector does not collect for this server it says that instead. -->
-                                <TextBlock x:Name="TraceFlagChangesNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="480" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" Text="No trace flag changes in the selected time window (needs at least two config captures bracketing an enable/disable)."/>
+                                <TextBlock Style="{DynamicResource EmptyHint}" x:Name="TraceFlagChangesNoDataMessage" Visibility="Collapsed" Text="No trace flag changes in the selected time window (needs at least two config captures bracketing an enable/disable)."/>
                             </Grid>
                         </Grid>
                     </TabItem>
@@ -3401,17 +3477,21 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
-                    <CheckBox Grid.Row="0" x:Name="LongQueriesIncludeMonitorCheckBox" Content="Include the monitor's own statements"
-                              HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,0,8"
+                    <!-- #8219: the title takes the width the check box leaves, so the two never sit on each other. -->
+                    <Grid Grid.Row="0">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <CheckBox Grid.Row="0" Grid.Column="1" x:Name="LongQueriesIncludeMonitorCheckBox" Content="Include the monitor's own statements"
+                              HorizontalAlignment="Right" VerticalAlignment="Top" Margin="12,0,0,8"
                               Foreground="{DynamicResource ForegroundBrush}"
                               ToolTip="Off by default: on an idle server every long completion can be the monitor's own. Turn on to see a slow collector run."
                               Checked="LongQueriesIncludeMonitorCheckBox_Changed" Unchecked="LongQueriesIncludeMonitorCheckBox_Changed"/>
-                    <TextBlock Grid.Row="0" Text="Long-Running Query Completions (RPC / batch completions over the duration threshold, plus attentions / cancels)" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8" TextWrapping="Wrap"/>
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Long-Running Query Completions (RPC / batch completions over the duration threshold, plus attentions / cancels)" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8" TextWrapping="Wrap"/>
+                    </Grid>
                     <StackPanel Grid.Row="1">
                         <!-- Where the stored completions start, when that is after the window's start (the same "Showing since <time>"
                              the Queries grids carry). -->
                         <TextBlock x:Name="LongQueriesWindowTruncatedBanner" Visibility="Collapsed" Padding="8,4" FontWeight="Bold"
-                                   Foreground="{DynamicResource ForegroundBrush}" Background="#22FFAA00"/>
+                                   Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                         <TextBlock x:Name="LongQueriesDisabledWarning" Visibility="Collapsed"
                                    Foreground="{DynamicResource WarningTextBrush}" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"/>
                     </StackPanel>
