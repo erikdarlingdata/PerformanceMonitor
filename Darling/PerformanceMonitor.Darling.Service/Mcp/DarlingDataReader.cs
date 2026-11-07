@@ -1499,7 +1499,9 @@ internal static class DarlingDataReader
                    below is a lookup on the capped rows and not a third read of the window: the same byte-key MAX as
                    TopQueriesSql's pass 2 (collection time, collection id, then a flag byte and the inline text or the
                    digest; see its note). This pass groups by the lens's key, so a proc-hosted group's pick is the newest
-                   text of ANY of its fragments and an ad-hoc group's the newest of its own hash, as the lookup chose. */
+                   text of ANY of its fragments and an ad-hoc group's the newest of its own hash. The pick sits inside
+                   this pass's tag filter (#5984), so under a tag it is the newest text of the group's TAGGED fragments,
+                   the rows the row's measures come from; fallback_text below carries the same token. */
                 MAX(timestamp_send(q.collection_time) || int8send(q.collection_id)
                     || CASE WHEN q.query_text IS NOT NULL THEN '\x00'::bytea || convert_to(q.query_text, 'UTF8') ELSE '\x01'::bytea || q.query_text_digest END)
                     FILTER (WHERE q.query_text IS NOT NULL OR q.query_text_digest IS NOT NULL) AS latest_text_key,
@@ -1551,9 +1553,11 @@ internal static class DarlingDataReader
         fallback_text AS MATERIALIZED (
             /* The lookup latest_text replaced, run for the orphan keys only: the newest row of each whose inline text or
                dimension row exists, the rule v_query_stats' COALESCE gives, keyed as the lens groups (a proc-hosted group
-               takes the newest text of ANY of its fragments). The EXISTS over orphans is an init plan that gates the window
-               scan (a one-time filter in the plan), so with no orphans the window is not read at all; with one, this reads
-               the window for that key's rows, as every read did before #8138. MATERIALIZED for the same reason latest_text is. */
+               takes the newest text of ANY of its fragments). It carries the tag token pass 2 carries, so under a tag it
+               reads the group's tagged fragments only, the rows the pick and the measures read. The EXISTS over orphans is
+               an init plan that gates the window scan (a one-time filter in the plan), so with no orphans the window is not
+               read at all; with one, this reads the window for that key's rows, as every read did before #8138.
+               MATERIALIZED for the same reason latest_text is. */
             SELECT
                 l.database_name,
                 l.host_object_name,
@@ -1577,6 +1581,7 @@ internal static class DarlingDataReader
                 WHERE q.server_id = $1
                 AND   q.collection_time >= $2
                 AND   q.collection_time <= $3
+                /*TAG:hash:q.query_hash*/
                 AND   EXISTS (SELECT 1 FROM orphans)
                 AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
                 ORDER BY q.database_name, q.host_object_name, CASE WHEN q.host_object_name IS NULL THEN q.query_hash END, q.collection_time DESC, q.collection_id DESC
