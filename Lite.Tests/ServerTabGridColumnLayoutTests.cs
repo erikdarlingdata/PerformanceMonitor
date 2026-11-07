@@ -9,8 +9,10 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Windows;
+using System.Windows.Controls;
 using Darling.Tests;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Database;
@@ -81,6 +83,57 @@ public sealed class ServerTabGridColumnLayoutTests
 
         Assert.True(found.Count == 0, $"Query Store Health at {GridColumnLayoutProbe.Viewport} px:{Environment.NewLine}" + string.Join(Environment.NewLine, found));
     }
+
+    /// <summary>
+    /// #8101: the Collection Health grid's newest error and its time are the two columns after Status, and both end inside the
+    /// viewport, so a HEALTHY row with Errors 1 says what the error was and when without a sideways scroll. The Viewer's twin is
+    /// in <c>ViewerFillColumnTests</c>.
+    /// </summary>
+    [Fact]
+    public void CollectionHealth_ShowsLastErrorAtAndLastError_RightAfterStatus_InsideTheViewport()
+    {
+        var rows = new List<CollectorHealthRow>
+        {
+            new()
+            {
+                CollectorName = "wait_stats", TotalRuns = 10080, SuccessCount = 10079, ErrorCount = 1,
+                LastRunTime = DateTime.UtcNow, LastSuccessTime = DateTime.UtcNow, LastErrorTime = DateTime.UtcNow.AddMinutes(-30),
+                LastError = "A connection was successfully established with the server, but then an error occurred during the pre-login handshake.",
+            },
+        };
+
+        var found = WithServerTab(tab => GridColumnLayoutProbe.Shown(
+            GridColumnLayoutProbe.Detach(tab, "CollectionHealthGrid"), rows,
+            grid =>
+            {
+                var failures = new List<string>();
+                var ordered = grid.Columns.OrderBy(c => c.DisplayIndex).ToList();
+                var keys = ordered.Select(ColumnKey).ToList();
+                var status = keys.IndexOf("DisplayStatus");
+                if (status < 0 || status + 2 >= keys.Count || keys[status + 1] != "LastErrorTime" || keys[status + 2] != "LastError")
+                {
+                    failures.Add("the columns after Status are not Last Error At and Last Error: " + string.Join(", ", keys));
+                    return failures;
+                }
+
+                var rightEdge = ordered.Take(status + 3).Sum(c => c.ActualWidth);
+                var viewport = ((ScrollViewer)grid.Template.FindName("DG_ScrollViewer", grid)).ViewportWidth;
+                if (rightEdge > viewport)
+                {
+                    failures.Add($"Last Error ends at {rightEdge} in a viewport of {viewport}");
+                }
+
+                return failures;
+            }));
+
+        Assert.True(found.Count == 0, $"Collection Health at {GridColumnLayoutProbe.Viewport} px:{Environment.NewLine}" + string.Join(Environment.NewLine, found));
+    }
+
+    /// <summary>What a column shows: its sort member, else the path its cells bind to, else its header.</summary>
+    private static string ColumnKey(DataGridColumn column) =>
+        !string.IsNullOrEmpty(column.SortMemberPath) ? column.SortMemberPath
+        : column is DataGridBoundColumn { Binding: System.Windows.Data.Binding binding } ? binding.Path.Path
+        : column.Header?.ToString() ?? "";
 
     /// <summary>Builds the real server tab against an empty local store, on the STA thread with the theme loaded, and hands it to <paramref name="body"/>.</summary>
     private static List<string> WithServerTab(Func<ServerTab, List<string>> body)

@@ -21,16 +21,21 @@ import { codeDisclosure, pgQueryIdText } from "./shared.js";
 /* #7394: the Wait Trend as a chart, the one series of the desktop viewer's PgWaitTrendHost. `counter_reset` is a profile reset
    (pg_wait_sampling_reset_profile() or a restart): the interval reports everything since it, so it is marked rather than read as a spike. */
 export function pgWaitTrendSpecs(ctx) {
-  const tail = "; estimates from a sampling profiler, so the shape is the finding";
+  /* #8074: what the figures are, by the instrument the answer names: measured wait time on the engine's cumulative counters
+     (engine_cumulative, an Aurora target), estimates from a sampling profiler on the sampled arms. The sampler's tail stands
+     until an answer arrives. */
+  const tail = (data) => data && data.instrument === "engine_cumulative"
+    ? "; measured wait time from the engine's cumulative counters, per second of each interval"
+    : "; estimates from a sampling profiler, so the shape is the finding";
   return [
     {
       viz: "line",
       title: "Wait Trend",
-      subtitle: ctx.label + ", the event that dominates this window, over time" + tail,
+      subtitle: ctx.label + ", the event that dominates this window, over time" + tail(null),
       /* #7428: names the event the read followed. */
       subtitleFrom: (data) => {
         const subject = trendSubject(data && data.wait_event, data && data.wait_event_source);
-        return subject ? ctx.label + ", " + subject + ", over time" + tail : null;
+        return subject ? ctx.label + ", " + subject + ", over time" + tail(data) : null;
       },
       rowsKey: "points",
       xKey: "collection_time",
@@ -39,7 +44,8 @@ export function pgWaitTrendSpecs(ctx) {
       unit: "ms/s",
       span: 2,
       hideEmptySeries: true,
-      /* #7409: Amazon Aurora has its own instrument and answers "not collected" here, so the chart is not drawn there. */
+      /* #7409: a target with no PostgreSQL wait history answers "not collected" here, so the chart is not drawn there. #8074: an
+         Aurora target is served from its own instrument and draws. */
       hideWhenNotCollected: true,
       resetKey: "counter_reset",
       resetLabel: "Profile reset",
