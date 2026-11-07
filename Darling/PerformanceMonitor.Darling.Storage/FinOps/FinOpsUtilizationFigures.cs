@@ -82,14 +82,16 @@ public static class FinOpsUtilizationFigures
         {
             var bpPct = BufferPoolPct(d.BufferPoolMb, d.PhysicalMemoryMb);
             var azureSqlDb = ServerHardwareScope.HardwareIsTheHosts(d.EngineEdition);
+            /* #7906: a window with no grant sample reads null for the four grant figures; the verdict was judged with them as 0 (no grant
+               pressure), and its sentence reads the same 0. */
             return d.ProvisioningStatus switch
             {
-                "RIGHT_SIZED" => ServerHardwareScope.RightSizedExplanation(d.AvgCpuPct, d.P95CpuPct, d.MaxCpuPct, d.GrantUtilizationPct, bpPct, azureSqlDb),
+                "RIGHT_SIZED" => ServerHardwareScope.RightSizedExplanation(d.AvgCpuPct, d.P95CpuPct, d.MaxCpuPct, d.GrantUtilizationPct ?? 0m, bpPct, azureSqlDb),
                 "OVER_PROVISIONED" => ServerHardwareScope.OverProvisionedExplanation(d.AvgCpuPct, d.MaxCpuPct, bpPct, azureSqlDb),
                 /* The reason comes from the same place as the verdict, so a server flagged for grant pressure or
                    worker saturation is not explained as a memory ratio that no longer decides anything (#2246). */
                 "UNDER_PROVISIONED" => ProvisioningVerdict.UnderProvisionedReason(
-                    d.P95CpuPct, d.MaxGrantWaiters, d.GrantTimeouts, d.ForcedGrants,
+                    d.P95CpuPct, d.MaxGrantWaiters ?? 0L, d.GrantTimeouts ?? 0L, d.ForcedGrants ?? 0L,
                     d.MaxWorkersCount, d.CurrentWorkersCount,
                     (decimal)StolenMemoryPct(d.TotalMemoryMb, d.BufferPoolMb), d.EngineEdition),
                 ProvisioningVerdict.NotEnoughData => ProvisioningVerdict.NotEnoughDataExplanation(d.CpuSamples),

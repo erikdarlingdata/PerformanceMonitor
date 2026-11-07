@@ -5,7 +5,7 @@
         Height="720" Width="1180"
         WindowStartupLocation="CenterOwner"
         ResizeMode="CanResizeWithGrip"
-        Icon="/EDD.ico"
+        Icon="pack://application:,,,/PerformanceMonitorLite;component/EDD.ico"
         Background="{DynamicResource BackgroundBrush}">
     <!-- #5904: the investigation requests agents were asked to look into, with each report and the journal per request.
          Read only: nothing here claims, releases, reports or approves anything. The same ten columns and grouping as the
