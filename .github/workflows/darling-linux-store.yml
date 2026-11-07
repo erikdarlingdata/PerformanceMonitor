@@ -34,6 +34,11 @@ on:
       - 'Darling/PerformanceMonitor.Darling.Storage/PgSchemaGenerator.cs'
       - 'Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs'
       - 'Darling/PerformanceMonitor.Darling.Storage/RollupBackfill.cs'
+      - '.github/scripts/darling-nonroot-legs.sh'
+      - 'Darling/compose/setup.sh'
+      - 'Darling/PerformanceMonitor.Darling.Service/DarlingManagedRoles.cs'
+      - 'Darling/PerformanceMonitor.Darling.Service/DarlingServiceKeyFile.cs'
+      - 'Darling/PerformanceMonitor.Darling.Service/DarlingWorker.Bootstrap.cs'
 
 permissions:
   contents: read
@@ -176,6 +181,23 @@ jobs:
           docker logs darling 2>&1 | tail -n 60
           exit 1
 
+      # #8141: the image runs as UID 1654, not root.
+      - name: Check the service runs as UID 1654
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker exec darling id -u)" = 1654
+
+      - name: Check the password key on Linux as UID 1654
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          vector="${GITHUB_WORKSPACE}/Darling/Darling.Tests/Fixtures/PasswordSeal/linux-self-check-vector.json"
+          test -f "${vector}"
+          docker run --rm --user 1654:1654             -v "${vector}:/vector/linux-self-check-vector.json:ro"             "${DARLING_IMAGE}"             --self-check-password-key /vector/linux-self-check-vector.json
+
       # A rollup short of its source: raw query_stats rows 9 to 12 days old, written straight into the raw table, so no
       # refresh covers them (the INSERT of RollupBackfillLiveTests.SeedHourlyQueryStatsAsync, over a fixed window). The
       # verb returns early on a store with nothing to back fill, so without this the free-space step would never run.
@@ -258,3 +280,40 @@ jobs:
           echo "::endgroup::"
           docker rm -f darling store >/dev/null 2>&1 || true
           docker network rm darling-store-net >/dev/null 2>&1 || true
+
+  # #8141: the fresh, upgrade (from the previous release, which runs as root) and missed-chown paths of a compose-shaped
+  # deployment, each on its own store. Parallel to linux-store: it shares nothing with it.
+  compose-nonroot:
+    name: Darling compose non-root
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build container image
+        timeout-minutes: 12
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Darling/Dockerfile
+          tags: ${{ env.DARLING_IMAGE }}
+          load: true
+          cache-from: type=gha
+          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}
+
+      - name: Pull the previous release image
+        timeout-minutes: 5
+        run: docker pull ghcr.io/erikdarlingdata/performancemonitor-darling:latest
+
+      - name: Run the fresh, upgrade and missed-step legs
+        timeout-minutes: 12
+        shell: bash
+        run: bash .github/scripts/darling-nonroot-legs.sh "${DARLING_IMAGE}" ghcr.io/erikdarlingdata/performancemonitor-darling:latest
