@@ -6263,8 +6263,8 @@ WITH NO DATA";
     /// space the something has.</para>
     ///
     /// <para><b>What the shipped grid puts where, so the residual is named rather than left to be found.</b>
-    /// <c>query_store_stats</c> — the largest hypertable this store has — sits at <b>:36</b> with
-    /// <b>1,440 s</b>, and <c>procedure_stats</c> sits at <b>:58</b> with <b>120 s</b>, the tightest placement
+    /// <c>query_store_stats</c> — the largest hypertable this store has — sits at <b>:35</b> with
+    /// <b>1,440 s</b>, and <c>procedure_stats</c> sits at <b>:57</b> with <b>120 s</b>, the tightest placement
     /// any of the large hypertables has. The first of those follows from
     /// <see cref="HeaviestCompressionTables"/> (#3678: it is that list's first member, so it takes the band's
     /// widest minute by MEASUREMENT rather than by where its collector sits in the catalog); the second still
@@ -6288,8 +6288,8 @@ WITH NO DATA";
     /// <b>240 s</b>, <b>180 s</b> and <b>120 s</b> of clearance, so every one of them ran past the refresh
     /// that followed it. The one whose hypertable that refresh also READ was <c>query_store_stats</c>, and it
     /// is that refresh — not the other two — whose runtime went to 160.4 s and then 226.8 s against a
-    /// 20–58 s steady state. On the grid this file ships the same three hold <c>:44</c>, <c>:52</c> and
-    /// <c>:36</c>, where those readings are <b>38%</b>, <b>41%</b> and <b>38%</b> of their clearance —
+    /// 20–58 s steady state. On the grid this file ships the same three hold <c>:43</c>, <c>:51</c> and
+    /// <c>:35</c>, where those readings are <b>38%</b>, <b>41%</b> and <b>38%</b> of their clearance —
     /// eight minutes apart rather than consecutive, because #3678's
     /// <see cref="HeaviestCompressionTables"/> places these three by measured weight and the rest of the
     /// catalog fills in around them.
