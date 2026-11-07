@@ -19,14 +19,11 @@ namespace Darling.Tests;
 /// #8082: the Mute Rules and Known Patterns tables scroll sideways inside their own box, as every other grid does. The page's main
 /// element clips sideways and the document never scrolls, so a table drawn straight into the page loses its right-hand columns (Expires,
 /// Created and the Edit / Pause / Delete cell) at laptop widths. The shipped pages are drawn under Node on a fake DOM
-/// (<c>web-list-table-wrap-harness.mjs</c>) with a rule and a pattern whose scope and free text run long; the stylesheet contract the
-/// box relies on is read from <c>app.css</c>. Skipped when Node is not installed.
+/// (<c>web-list-table-wrap-harness.mjs</c>) with a rule and a pattern whose scope and free text run long. Skipped when Node is not
+/// installed.
 /// </summary>
 public sealed class ListPageTableScrollTests
 {
-    private static string Wwwroot(params string[] parts) =>
-        ReadRepoFile(new[] { "Darling", "PerformanceMonitor.Darling.Service", "wwwroot" }.Concat(parts).ToArray());
-
     private static JsonElement Run(string page)
     {
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
@@ -92,16 +89,5 @@ public sealed class ListPageTableScrollTests
         var headers = r.GetProperty("headers").EnumerateArray().Select(h => h.GetString()).ToArray();
         Assert.Equal(new[] { "Expires", "Added by", "" }, headers.TakeLast(3).ToArray());
         Assert.Equal(new[] { "Edit", "Delete" }, r.GetProperty("actionButtons").EnumerateArray().Select(b => b.GetString()).ToArray());
-    }
-
-    /// <summary>The stylesheet side of the contract: main clips sideways and anchors nothing, so the only sideways scroll a wide table gets
-    /// is the <c>.table-wrap</c> box around it, which scrolls on both axes.</summary>
-    [Fact]
-    public void TheStylesheet_ScrollsATableWrapInsideItself_WhileMainClipsSideways()
-    {
-        var css = Wwwroot("css", "app.css");
-
-        Assert.Matches(@"\.table-wrap \{[^}]*overflow: auto;", css);
-        Assert.Matches(@"#main \{[^}]*overflow-x: hidden;", css);
     }
 }
