@@ -143,8 +143,9 @@ public sealed class ChangeWatchWindowEdgeLiveTests
 
     /// <summary>#8078: <c>sample_interval_seconds</c> is a per-row figure. A wait type that returns after missing some passes stores the
     /// seconds since its own previous sighting, several cadences, while its siblings in the same collection store one cadence. The measure
-    /// rates each row over its own interval, so the returning type's longer interval never re-rates its siblings: two steady types at 500
-    /// and 100 ms/s and a third seen every fifth minute (600 ms over its own 300 s, 2 ms/s) read 600.4 ms/s over the hour's 3,600 s.</summary>
+    /// credits each collection's whole stored wait over the collection's cadence, so the returning type's longer interval never re-rates
+    /// its siblings and none of its wait is lost: two steady types at 500 and 100 ms/s and a third seen every fifth minute (600 ms over its
+    /// own 300 s, 2 ms/s) read the sum of their three per-type hour rates, 602 ms/s, over the window's 3,600 s.</summary>
     [Fact]
     public async Task AWaitTypeThatReturnsAfterMissingPasses_DoesNotDeflateTheWindowsWaitRate()
     {
@@ -165,14 +166,37 @@ public sealed class ChangeWatchWindowEdgeLiveTests
             await h.Store.RecordChangesAsync(ServerId, ServerName, await OneChange(change, "max degree of parallelism"), ct);
             await h.NewPass().EvaluateDueAsync(ct);
 
+            /* Each type alone over the after-window through the per-type read, as one bucket: 500, 100 and 2 ms/s. */
+            var parts = 0.0;
+            foreach (var waitType in new[] { "SOS_SCHEDULER_YIELD", "PAGEIOLATCH_SH", "CXCONSUMER" })
+            {
+                await using var command = new NpgsqlCommand(DarlingDataReader.WaitTrendBucketedSql, h.Connection);
+                command.Parameters.Add(new NpgsqlParameter { Value = ServerId });
+                command.Parameters.Add(new NpgsqlParameter { Value = waitType });
+                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = Naive(change.AddSeconds(1)) });
+                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = Naive(change.AddMinutes(60)) });
+                command.Parameters.Add(new NpgsqlParameter { Value = 100_000_000 });
+                parts += await ScalarRateAsync(command, ct);
+            }
+
+            Assert.Equal(602.0, parts, 2);
             var wait = Measure(await ResultAsync(h.Connection, ct), "total_wait_ms_per_second");
             Assert.Equal(600.0, (double)wait["before"]!, 1);
-            Assert.Equal(600.4, (double)wait["after"]!, 1);
+            Assert.Equal(parts, (double)wait["after"]!, 2);
             Assert.Equal("flat", await TextAsync(h.Connection, "SELECT result FROM config.change_watches", ct));
         });
     }
 
-    /// <summary>The Aurora twin of the test above: the wait collector there also stores each (wait_type, wait_event) row's own interval.</summary>
+    /// <summary>The second column of one bucketed wait-trend row: the bucket's rate.</summary>
+    private static async Task<double> ScalarRateAsync(NpgsqlCommand command, CancellationToken ct)
+    {
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct));
+        return reader.GetDouble(1);
+    }
+
+    /// <summary>The Aurora twin of the test above: the wait collector there also stores each (wait_type, wait_event) row's own interval,
+    /// and the measure reads the sum of the three per-event rates, 500 + 100 + 2.</summary>
     [Fact]
     public async Task AnAuroraWaitEventThatReturnsAfterMissingPasses_DoesNotDeflateTheWindowsWaitRate()
     {
@@ -197,7 +221,7 @@ public sealed class ChangeWatchWindowEdgeLiveTests
 
             var wait = Measure(await ResultAsync(h.Connection, ct), "total_wait_ms_per_second");
             Assert.Equal(600.0, (double)wait["before"]!, 1);
-            Assert.Equal(600.4, (double)wait["after"]!, 1);
+            Assert.Equal(602.0, (double)wait["after"]!, 2);
             Assert.Equal("flat", await TextAsync(h.Connection, "SELECT result FROM config.change_watches", ct));
         });
     }
