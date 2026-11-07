@@ -159,6 +159,59 @@ public sealed class ViewerThemeLeftoversRenderTests
         Assert.Equal(1, hidden);
     }
 
+    /// <summary>The first opaque solid fill behind <paramref name="element"/>: a Border, panel or control (a grid cell) up its visual parents.</summary>
+    private static Color BackgroundBehind(DependencyObject element)
+    {
+        for (var at = VisualTreeHelper.GetParent(element); at is not null; at = VisualTreeHelper.GetParent(at))
+        {
+            Brush? fill = at switch { Border b => b.Background, Panel p => p.Background, Control c => c.Background, _ => null };
+            if (fill is SolidColorBrush { Color.A: > 0 } solid)
+            {
+                return solid.Color;
+            }
+        }
+
+        return Colors.Magenta;
+    }
+
+    [Theory]
+    [InlineData("Light")]
+    [InlineData("CoolBreeze")]
+    public void TheSeverityTextOnAnAvailabilityGroupCard_IsReadable_AfterARunTimeSwitchToTheLightThemes(string theme)
+    {
+        var texts = Themed(app =>
+        {
+            var tab = new AvailabilityGroupsTab();
+            var window = new Window { Content = tab, Width = 1280, Height = 800 };
+            window.Show();
+            try
+            {
+                tab.Render(Topology());
+                ClippedTextProbe.Settle(window);
+                ThemeManager.Apply(theme);
+                ClippedTextProbe.Settle(window);
+                var band = new[] { "SuccessBrush", "WarningBrush", "ErrorBrush" }.Select(k => Resource(app, k))
+                    .Concat(new[] { Color.FromRgb(0x81, 0xC7, 0x84), Color.FromRgb(0xFF, 0xD5, 0x4F), Color.FromRgb(0xE5, 0x73, 0x73) }).ToList();
+                var found = Visuals<TextBlock>(tab)
+                    .Where(t => t.Text.Length > 0 && band.Contains(ColorOf(t.Foreground)))
+                    .Select(t => (t.Text, Ratio: WcagContrast.Ratio(ColorOf(t.Foreground), BackgroundBehind(t))))
+                    .ToList();
+                return found;
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        /* The group's "Healthy" badge, the sync state "SYNCHRONIZED" and the data movement text all take a severity color. */
+        Assert.True(texts.Count >= 3, $"found {texts.Count} severity texts in {theme}");
+        foreach (var (text, ratio) in texts)
+        {
+            Assert.True(ratio >= 4.5, $"'{text}' is {ratio:0.00}:1 on its card in {theme}");
+        }
+    }
+
     /// <summary>One group with a database and one with none, so the grid shows for the first and is hidden for the second.</summary>
     private static List<AgTopologyCard> Topology()
     {
@@ -241,5 +294,53 @@ public sealed class ViewerThemeLeftoversRenderTests
 
         Assert.Equal(Color.FromRgb(0xFF, 0xD5, 0x4F), warning);
         Assert.Equal(Color.FromRgb(0xE5, 0x73, 0x73), critical);
+    }
+
+    // ── The server tab's tab rows after a run-time switch ──────────────────────────────────────
+
+    [Fact]
+    public void TheSelectedTabsOfTheServerTabRows_TakeTheCurrentThemesInkAndUnderline_AfterRunTimeSwitchesDarkLightCoolBreeze()
+    {
+        var seen = Themed(app =>
+        {
+            var tab = new ViewerServerTab(
+                new ViewerDataService("Host=127.0.0.1;Port=1;Database=darling;Username=darling"),
+                new DarlingServer(1, "theme-test", "theme-test", true, null));
+            typeof(ViewerServerTab).GetField("_suppressDrillDownAutoRefresh", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(tab, true);
+            var window = new Window { Content = tab, Width = 1280, Height = 800, Left = 0, Top = 0 };
+            window.Show();
+            try
+            {
+                var inner = (TabControl)tab.FindName("InnerTabs");
+                var queries = (TabControl)tab.FindName("QueriesSubTabControl");
+                var found = new List<(string Theme, string Row, Color Ink, Color WantInk, Color Underline, Color WantUnderline)>();
+                foreach (var theme in new[] { "Dark", "Light", "CoolBreeze" })
+                {
+                    ThemeManager.Apply(theme);
+                    inner.SelectedItem = inner.Items.OfType<TabItem>().First(t => Equals(t.Header, "Queries"));
+                    ClippedTextProbe.Settle(window);
+                    foreach (var (row, tabs) in new[] { ("inner", inner), ("queries", queries) })
+                    {
+                        var item = (TabItem)tabs.SelectedItem;
+                        var chrome = (Border)item.Template.FindName("border", item);
+                        found.Add((theme, row + " > " + item.Header, ColorOf(item.Foreground), Resource(app, "ForegroundBrush"),
+                            ColorOf(chrome.BorderBrush), Resource(app, "AccentBrush")));
+                    }
+                }
+
+                return found;
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        Assert.Equal(6, seen.Count);
+        foreach (var r in seen)
+        {
+            Assert.True(r.Ink == r.WantInk, $"{r.Theme} {r.Row}: the selected tab's text is {r.Ink}, the theme says {r.WantInk}");
+            Assert.True(r.Underline == r.WantUnderline, $"{r.Theme} {r.Row}: the selected tab's underline is {r.Underline}, the theme says {r.WantUnderline}");
+        }
     }
 }

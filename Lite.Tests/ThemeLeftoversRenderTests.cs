@@ -456,6 +456,15 @@ public sealed class ThemeLeftoversRenderTests
                             found.Add((theme, header, ColorOf(item.Foreground), Resource(app, "ForegroundBrush"),
                                 ColorOf(chrome.BorderBrush), Resource(app, "AccentBrush")));
                         }
+
+                        /* #8221 round 2: the sub-tab row under Queries is a second TabControl with its own ItemContainerStyle. */
+                        main.SelectedItem = main.Items.OfType<TabItem>().First(t => Equals(t.Header, "Queries"));
+                        Settle(window);
+                        var sub = (TabControl)tab.FindName("QueriesSubTabControl");
+                        var subItem = (TabItem)sub.SelectedItem;
+                        var subChrome = (Border)subItem.Template.FindName("border", subItem);
+                        found.Add((theme, "Queries > " + subItem.Header, ColorOf(subItem.Foreground), Resource(app, "ForegroundBrush"),
+                            ColorOf(subChrome.BorderBrush), Resource(app, "AccentBrush")));
                     }
 
                     return found;
@@ -467,16 +476,140 @@ public sealed class ThemeLeftoversRenderTests
             });
 
             // The fill is not read: the hover state paints it, so it follows where the mouse happens to be. The ink and underline are the selected state's own.
-            Assert.Equal(6, seen.Count);
-            foreach (var r in seen)
-            {
-                Assert.True(r.Ink == r.WantInk, $"{r.Theme} {r.Tab}: the selected tab's text is {r.Ink}, the theme says {r.WantInk}");
-                Assert.True(r.Underline == r.WantUnderline, $"{r.Theme} {r.Tab}: the selected tab's underline is {r.Underline}, the theme says {r.WantUnderline}");
-            }
+            Assert.Equal(9, seen.Count);
+            var stale = seen
+                .Where(r => r.Ink != r.WantInk || r.Underline != r.WantUnderline)
+                .Select(r => $"{r.Theme} {r.Tab}: text {r.Ink} (theme {r.WantInk}), underline {r.Underline} (theme {r.WantUnderline})")
+                .ToList();
+            Assert.True(stale.Count == 0, string.Join("; ", stale));
         }
         finally
         {
             try { System.IO.Directory.Delete(dir, true); } catch (System.IO.IOException) { }
+        }
+    }
+
+    // ── Availability Group cards: the severity text ─────────────────────────────────────────────
+
+    /// <summary>The first opaque solid fill behind <paramref name="element"/>: a Border, panel or control (a grid cell) up its visual parents.</summary>
+    private static Color BackgroundBehind(DependencyObject element)
+    {
+        for (var at = VisualTreeHelper.GetParent(element); at is not null; at = VisualTreeHelper.GetParent(at))
+        {
+            Brush? fill = at switch { Border b => b.Background, Panel p => p.Background, Control c => c.Background, _ => null };
+            if (fill is SolidColorBrush { Color.A: > 0 } solid)
+            {
+                return solid.Color;
+            }
+        }
+
+        return Colors.Magenta;
+    }
+
+    private static List<AgTopologyCard> OneGroup()
+    {
+        var at = new DateTime(2026, 9, 25, 12, 0, 0);
+        var replicas = new List<AgTopologyReplicaRow>
+        {
+            new()
+            {
+                ServerId = 1, ServerName = "NODE0", CollectionTime = at, AgName = "AG0", ReplicaServerName = "NODE0_0",
+                RoleDesc = "PRIMARY", OperationalStateDesc = "ONLINE", ConnectedStateDesc = "CONNECTED", RecoveryHealthDesc = "ONLINE",
+                SynchronizationHealthDesc = "HEALTHY", AvailabilityModeDesc = "SYNCHRONOUS_COMMIT", FailoverModeDesc = "AUTOMATIC",
+            },
+        };
+        var databases = new List<AgTopologyDatabaseRow>
+        {
+            new()
+            {
+                ServerId = 1, ServerName = "NODE0", CollectionTime = at, AgName = "AG0", DatabaseName = "DB0", ReplicaServerName = "NODE0_0",
+                SynchronizationStateDesc = "SYNCHRONIZED", AvailabilityModeDesc = "SYNCHRONOUS_COMMIT", IsSuspended = false,
+                SecondaryLagSeconds = 0, LogSendQueueKb = 0, RedoQueueKb = 0, LogSendRateKbPerSec = 0, RedoRateKbPerSec = 0,
+            },
+        };
+        return AgTopology.BuildCards(replicas, databases);
+    }
+
+    [Theory]
+    [InlineData("Light")]
+    [InlineData("CoolBreeze")]
+    public void TheSeverityTextOnAnAvailabilityGroupCard_IsReadable_AfterARunTimeSwitchToTheLightThemes(string theme)
+    {
+        var texts = Themed(app =>
+        {
+            var tab = new AvailabilityGroupsTab();
+            var window = new Window { Content = tab, Width = 1280, Height = 800 };
+            window.Show();
+            try
+            {
+                tab.Render(OneGroup());
+                Settle(window);
+                ThemeManager.Apply(theme);
+                Settle(window);
+                var band = new[] { "SuccessBrush", "WarningBrush", "ErrorBrush" }.Select(k => Resource(app, k))
+                    .Concat(new[] { Color.FromRgb(0x81, 0xC7, 0x84), Color.FromRgb(0xFF, 0xD5, 0x4F), Color.FromRgb(0xE5, 0x73, 0x73) }).ToList();
+                return Visuals<TextBlock>(tab)
+                    .Where(t => t.Text.Length > 0 && band.Contains(ColorOf(t.Foreground)))
+                    .Select(t => (t.Text, Ratio: WcagContrast.Ratio(ColorOf(t.Foreground), BackgroundBehind(t))))
+                    .ToList();
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        /* The group's "Healthy" badge, the sync state "SYNCHRONIZED" and the data movement text all take a severity color. */
+        Assert.True(texts.Count >= 3, $"found {texts.Count} severity texts in {theme}");
+        foreach (var (text, ratio) in texts)
+        {
+            Assert.True(ratio >= 4.5, $"'{text}' is {ratio:0.00}:1 on its card in {theme}");
+        }
+    }
+
+    // ── The other Lite tab rows: the FinOps tab's sub-tabs, and a top tab row written like the main window's ──
+
+    [Fact]
+    public void TheSelectedTabsOfTheFinOpsAndTopRows_TakeTheCurrentThemesInk_AfterRunTimeSwitchesDarkLightCoolBreeze()
+    {
+        var seen = Themed(app =>
+        {
+            var finOps = new FinOpsTab();
+            /* The main window's row: TabItems under an app-level TabControl, no ItemContainerStyle of their own. */
+            var top = new TabControl { Background = Brushes.Transparent, BorderThickness = new Thickness(0) };
+            top.Items.Add(new TabItem { Header = "Overview", Content = new TextBlock { Text = "a" } });
+            top.Items.Add(new TabItem { Header = "FinOps", Content = finOps });
+            top.SelectedIndex = 1;
+            var window = new Window { Content = top, Width = 1280, Height = 900, Left = 0, Top = 0 };
+            window.Show();
+            try
+            {
+                var sub = Visuals<TabControl>(finOps).First();
+                var found = new List<(string Theme, string Row, Color Ink, Color WantInk)>();
+                foreach (var theme in new[] { "Dark", "Light", "CoolBreeze" })
+                {
+                    ThemeManager.Apply(theme);
+                    foreach (var (row, tabs) in new[] { ("top", top), ("FinOps", sub) })
+                    {
+                        tabs.SelectedIndex = 1;
+                        Settle(window);
+                        var item = (TabItem)tabs.SelectedItem;
+                        found.Add((theme, row + " > " + item.Header, ColorOf(item.Foreground), Resource(app, "ForegroundBrush")));
+                    }
+                }
+
+                return found;
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        Assert.Equal(6, seen.Count);
+        foreach (var r in seen)
+        {
+            Assert.True(r.Ink == r.WantInk, $"{r.Theme} {r.Row}: the selected tab's text is {r.Ink}, the theme says {r.WantInk}");
         }
     }
 }
