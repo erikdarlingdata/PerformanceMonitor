@@ -34,10 +34,10 @@ public partial class ViewerServerTab
 
     private sealed record PgTrendLine(string Label, double[] Times, double[] Values);
 
-    /// <summary>One chart of a trend: its key, y-axis label, hover unit, and the lines it draws.</summary>
+    /// <summary>One chart of a trend: its key, card title (<c>YLabel</c>), hover unit (also the Y axis title), and the lines it draws.</summary>
     private sealed record PgTrendPanel(string Key, string YLabel, string Unit, IReadOnlyList<PgTrendLine> Lines);
 
-    private (WpfPlot Chart, ChartHoverHelper Hover) PgTrendChart(Panel host, string key, string unit)
+    private (WpfPlot Chart, ChartHoverHelper Hover) PgTrendChart(Panel host, string key, string unit, string title)
     {
         if (_pgTrendCharts.TryGetValue(key, out var existing))
         {
@@ -49,7 +49,10 @@ public partial class ViewerServerTab
         chart.Refresh();
         var hover = new ChartHoverHelper(chart, unit, displayZone: ViewerTimeHelper.CurrentDisplayZone);
         BuildChartContextMenu(chart, key);
-        host.Children.Add(chart);
+        // #8151: the chart sits in a titled card; the Y axis shows only the unit.
+        var card = new PerformanceMonitor.Ui.ChartPanel { Title = title, Content = chart };
+        host.Children.Add(card);
+        ViewerChartCards.Attach(card);
         _pgTrendCharts[key] = (chart, hover);
         return _pgTrendCharts[key];
     }
@@ -69,7 +72,7 @@ public partial class ViewerServerTab
     {
         foreach (var panel in panels)
         {
-            var (chart, hover) = PgTrendChart(host, panel.Key, panel.Unit);
+            var (chart, hover) = PgTrendChart(host, panel.Key, panel.Unit, panel.YLabel);
             ClearChart(chart);
             hover.Clear();
             ApplyTheme(chart);
@@ -79,7 +82,7 @@ public partial class ViewerServerTab
                 /* The shared empty chart installs its own empty tick generators on a plain numeric axis. A date axis
                    refuses that ("Date axis must have a ITickGenerator generator"), which aborted the whole load and left
                    one oversized blank chart, so the date axis is set only for a chart that has lines (#6385). */
-                RefreshEmptyChart(chart, panel.YLabel, panel.YLabel);
+                RefreshEmptyChart(chart, panel.YLabel, panel.Unit);
                 continue;
             }
 
@@ -103,7 +106,7 @@ public partial class ViewerServerTab
 
             chart.Plot.Axes.SetLimitsX(ChartXStart(chart.Plot, startUtc, endUtc), endUtc.ToOADate());
             ReapplyAxisColors(chart);
-            chart.Plot.YLabel(panel.YLabel);
+            chart.Plot.YLabel(panel.Unit);
             SetChartYLimitsWithLegendPadding(chart, 0, max > 0 ? max : 1);
             ShowChartLegend(chart);
             chart.Refresh();
@@ -197,7 +200,7 @@ public partial class ViewerServerTab
                 : $"Wait Trend: {trend.Subject}, the event that dominates this window, over time. Estimates from a sampling profiler, so the shape is the finding.", null));
         RenderPgTrendPanels(PgWaitTrendHost, new[]
         {
-            new PgTrendPanel("PgWait_Trend", "Est. wait ms/sec", "ms/s", p.Count == 0 ? Array.Empty<PgTrendLine>() : new[]
+            new PgTrendPanel("PgWait_Trend", "Est. wait ms/sec", "ms/sec", p.Count == 0 ? Array.Empty<PgTrendLine>() : new[]
             {
                 new PgTrendLine(trend.Subject ?? "Wait", Times(p, x => x.CollectionTimeUtc), Values(p, x => x.EstimatedWaitMsPerSecond)),
             }),

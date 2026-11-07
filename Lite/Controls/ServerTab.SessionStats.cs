@@ -80,6 +80,7 @@ public partial class ServerTab : UserControl
         }
 
         SessionStatsRenderer.Render(SessionStatsChart, _sessionStatsHover, data, ChartXStart(rangeStart, rangeEnd), rangeEnd.ToOADate());
+        SetYUnit(SessionStatsChart, "count");
         KeepPlottedInView(SessionStatsChart, rangeStart, rangeEnd);
 
         /* Summary panel reflects the latest snapshot in the window (Dashboard uses the last point). */
