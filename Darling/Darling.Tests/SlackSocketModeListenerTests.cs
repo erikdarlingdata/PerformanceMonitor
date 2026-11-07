@@ -266,6 +266,11 @@ internal sealed class RecordingLogger : ILogger
 
     public IEnumerable<string> Warnings => Entries.Where(e => e.Level == LogLevel.Warning).Select(e => e.Message);
 
+    /// <summary>The Information lines about events from channels no route of this store owns (#7658: a note, not a warning).</summary>
+    public IEnumerable<string> UnownedChannelNotes => Entries
+        .Where(e => e.Level == LogLevel.Information && e.Message.Contains("channels no route of this store owns", StringComparison.Ordinal))
+        .Select(e => e.Message);
+
     public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 
     public bool IsEnabled(LogLevel logLevel) => true;
@@ -673,8 +678,11 @@ public sealed class SlackSocketModeListenerTests
         await run.WaitAsync(Guard);
     }
 
+    /// <summary>Events from another store's bot channel are expected in the shared setup (the bot is a member of every posting store's channel and
+    /// the app subscribes to messages), so the line is a note at Information that names both causes, not a warning that blames another
+    /// listening store; one per window, with the count since the last.</summary>
     [Fact]
-    public async Task Warns_once_per_window_while_events_keep_arriving_for_channels_no_route_owns()
+    public async Task Notes_once_per_window_at_Information_while_events_keep_arriving_for_channels_no_route_owns()
     {
         var now = new DateTime(2026, 11, 6, 12, 0, 0, DateTimeKind.Utc);
         var log = new RecordingLogger();
@@ -686,16 +694,19 @@ public sealed class SlackSocketModeListenerTests
         socket.Feed(MessageEnvelope("e2", channel: OtherChannel, ts: "1700000000.000002"));
         socket.Feed(MessageEnvelope("e3", ts: "1700000000.000003"));
         await handlers.WhenHandled(1).WaitAsync(Guard);
-        var first = Assert.Single(log.Warnings);
-        Assert.Contains("another store sharing this Slack app", first, StringComparison.Ordinal);
+        var first = Assert.Single(log.UnownedChannelNotes);
         Assert.Contains("dropped 1 event(s)", first, StringComparison.Ordinal);
+        Assert.Contains("expected when other stores share the app only to post", first, StringComparison.Ordinal);
+        Assert.Contains("app-level token", first, StringComparison.Ordinal);
+        Assert.Contains("its own Slack app", first, StringComparison.Ordinal);
+        Assert.DoesNotContain(log.Warnings, w => w.Contains("channels no route of this store owns", StringComparison.Ordinal));
 
         /* Inside the window: more drops, no new line. */
         now = now.AddMinutes(9);
         socket.Feed(MessageEnvelope("e4", channel: OtherChannel, ts: "1700000000.000004"));
         socket.Feed(MessageEnvelope("e5", ts: "1700000000.000005"));
         await handlers.WhenHandled(2).WaitAsync(Guard);
-        Assert.Single(log.Warnings);
+        Assert.Single(log.UnownedChannelNotes);
 
         /* After the window: one more line, carrying the drops since the last one. */
         now = now.AddMinutes(2);
@@ -703,8 +714,9 @@ public sealed class SlackSocketModeListenerTests
         socket.Feed(MessageEnvelope("e7", ts: "1700000000.000007"));
         await handlers.WhenHandled(3).WaitAsync(Guard);
         await StopAsync(run, stop);
-        Assert.Equal(2, log.Warnings.Count());
-        Assert.Contains("dropped 3 event(s)", log.Warnings.Last(), StringComparison.Ordinal);
+        Assert.Equal(2, log.UnownedChannelNotes.Count());
+        Assert.Contains("dropped 3 event(s)", log.UnownedChannelNotes.Last(), StringComparison.Ordinal);
+        Assert.Empty(log.Warnings);
         Assert.Equal(4, status.Read().DroppedByReason["channel"]);
     }
 

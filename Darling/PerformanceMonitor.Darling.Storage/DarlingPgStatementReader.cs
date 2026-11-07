@@ -471,11 +471,41 @@ public static class DarlingPgStatementReader
         LIMIT 1
         """;
 
+    /// <summary>
+    /// #8075: whether an unknown counter is explained by the Aurora native path. The registry's engine kind for the server
+    /// (<see cref="MonitoredEngineKind"/> token), whether the extension inventory (<c>pg_extension_availability</c>) has
+    /// ever listed <c>pg_stat_statements</c> for it, and whether the latest row of any database it saw has the extension
+    /// created (<c>installed</c> or <c>outdated</c>). The inventory runs per database and does not mark the one the
+    /// statements collector connects to, so "created in no database" is the condition that is known, and "created
+    /// somewhere" makes no claim about the collector's database. $1 server_id.
+    /// </summary>
+    public const string StatementsExtensionStandingSql = """
+        SELECT s.engine_kind,
+               EXISTS (SELECT 1
+                       FROM pg_extension_availability AS a
+                       WHERE a.server_id = s.server_id
+                       AND   a.extension_name = 'pg_stat_statements') AS inventoried,
+               EXISTS (SELECT 1
+                       FROM (SELECT DISTINCT ON (database_name) state
+                             FROM pg_extension_availability
+                             WHERE server_id = s.server_id
+                             AND   extension_name = 'pg_stat_statements'
+                             ORDER BY database_name, collection_time DESC) AS latest
+                       WHERE latest.state IN ('installed', 'outdated')) AS created_somewhere
+        FROM servers AS s
+        WHERE s.server_id = $1
+        """;
+
     /// <summary>What the window's collection runs recorded about pg_stat_statements evictions.</summary>
     /// <param name="Known">True when at least one run in the window observed the counter. False means unknown, never zero.</param>
     /// <param name="EvictionPasses">Eviction passes in the window; null when <paramref name="Known"/> is false.</param>
     /// <param name="MaxEntries">The latest recorded pg_stat_statements.max, or null when not recorded.</param>
-    public sealed record PgEvictionInfo(bool Known, long? EvictionPasses, long? MaxEntries);
+    /// <param name="AuroraWithoutExtension">#8075: true when the counter is unknown, the registry says the target is Aurora,
+    /// and the latest extension inventory shows pg_stat_statements created in no database it saw. The collector reads
+    /// aurora_stat_statements() there, which needs no extension, so the counter's view (pg_stat_statements_info) is what the
+    /// missing extension costs. False when the counter is known, the engine is not Aurora, there is no inventory, or the
+    /// inventory shows the extension created somewhere, where no claim about the collector's database can be made.</param>
+    public sealed record PgEvictionInfo(bool Known, long? EvictionPasses, long? MaxEntries, bool AuroraWithoutExtension = false);
 
     /// <summary>#4677: the eviction disclosure inputs for one server and window.</summary>
     public static async Task<PgEvictionInfo> GetEvictionInfoAsync(
@@ -498,6 +528,23 @@ public static class DarlingPgStatementReader
             }
         }
 
+        /* #8075: only an unknown counter needs explaining, so the registry and the inventory are read only then. */
+        bool auroraWithoutExtension = false;
+        if (!known)
+        {
+            await using var command = postgres.CreateCommand(StatementsExtensionStandingSql);
+            command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+            command.Parameters.AddWithValue(serverId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                var engineKind = reader.IsDBNull(0) ? null : reader.GetString(0);
+                var inventoried = !reader.IsDBNull(1) && reader.GetBoolean(1);
+                var createdSomewhere = !reader.IsDBNull(2) && reader.GetBoolean(2);
+                auroraWithoutExtension = MonitoredEngineKind.IsAurora(engineKind) && inventoried && !createdSomewhere;
+            }
+        }
+
         long? max = null;
         await using (var command = postgres.CreateCommand(StatementsMaxSql))
         {
@@ -510,6 +557,6 @@ public static class DarlingPgStatementReader
             }
         }
 
-        return new PgEvictionInfo(known, passes, max);
+        return new PgEvictionInfo(known, passes, max, auroraWithoutExtension);
     }
 }
