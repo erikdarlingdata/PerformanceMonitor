@@ -1413,7 +1413,10 @@
         <!-- Version Store (PVS) Sub-Tab — #1951, beside Database Sizes because ADR's version store
              lives INSIDE the database and is a silent consumer of the space that tab reports. -->
         <TabItem Header="Version Store (PVS)">
-            <Grid>
+            <!-- #8220: the tab scrolls when the chart and the grid cannot both fit. The grid below is as tall as the viewport (so its
+                     rows still scroll inside it) but never under MinHeight, which keeps the chart card and about seven grid rows. -->
+            <ScrollViewer x:Name="PvsScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <Grid Height="{Binding ViewportHeight, ElementName=PvsScroll}" MinHeight="600">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
@@ -1650,6 +1653,7 @@
                                Visibility="Collapsed"/>
                 </Grid>
             </Grid>
+            </ScrollViewer>
         </TabItem>
 
         <!-- Index Analysis Sub-Tab -->
