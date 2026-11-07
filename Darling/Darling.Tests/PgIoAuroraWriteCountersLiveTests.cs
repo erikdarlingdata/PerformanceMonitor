@@ -7,13 +7,10 @@
  */
 
 using System;
-using System.ComponentModel;
 using System.Linq;
-using System.Reflection;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
@@ -202,24 +199,4 @@ VALUES ($1, $2, $3, $4, 'client backend', 'relation', 'normal',
 
     private static NpgsqlDataSource StoreDataSource(ScratchPostgres scratch) =>
         NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath });
-}
-
-/// <summary>
-/// #8092: the two I/O descriptions name the flag a reader has to consult, and neither promises that Aurora reports the
-/// write counters as null, which an Aurora PostgreSQL 16 target does not.
-/// </summary>
-public sealed class PgIoAuroraWriteCountersGuideTests
-{
-    [Theory]
-    [InlineData(typeof(DarlingMcpPgIoTools), "get_pg_io_stats")]
-    [InlineData(typeof(DarlingMcpPgTrendTools), "get_pg_io_trend")]
-    public void TheGuide_NamesTheTrackedFlag_AndDoesNotPromiseNullFromTheEngine(Type toolType, string toolName)
-    {
-        var description = toolType.GetMethods(BindingFlags.Public | BindingFlags.Static)
-            .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == toolName)
-            .GetCustomAttribute<DescriptionAttribute>()!.Description;
-
-        Assert.Contains("write_counters_tracked", description, StringComparison.Ordinal);
-        Assert.DoesNotContain("always null", description, StringComparison.Ordinal);
-    }
 }

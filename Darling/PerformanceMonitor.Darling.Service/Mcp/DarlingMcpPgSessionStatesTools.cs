@@ -98,7 +98,9 @@ public sealed class DarlingMcpPgSessionStatesTools
                       + r.PeakHorizonAge.ToString("N0", CultureInfo.InvariantCulture)
                       + " transaction(s), under the "
                       + DarlingPgSessionStatesReader.MinSustainedHolderHorizonAge.ToString("N0", CultureInfo.InvariantCulture)
-                      + " that makes a hold: at most that many transactions' row versions waited behind it, "
+                      + " that makes a hold: at most "
+                      + r.PeakHorizonAge.ToString("N0", CultureInfo.InvariantCulture)
+                      + " transactions' row versions waited behind it, "
                       + "which is the shape of a short writer seen at each sample rather than a transaction "
                       + "VACUUM was stuck behind. It becomes a finding if the age climbs.";
 

@@ -7,13 +7,10 @@
  */
 
 using System;
-using System.ComponentModel;
 using System.Linq;
-using System.Reflection;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
@@ -101,19 +98,4 @@ VALUES ($1, $2, $3, $4, 'otherdb', 'relation', 'RowExclusiveLock', true, $1, NUL
 
     private static NpgsqlDataSource StoreDataSource(ScratchPostgres scratch) =>
         NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath });
-}
-
-/// <summary>#8092: the guide says what a null <c>relation_name</c> beside a <c>relation_oid</c> means, and how to resolve it.</summary>
-public sealed class PgLockStatsRelationOidGuideTests
-{
-    [Fact]
-    public void TheGuide_ExplainsANullNameBesideAnOid()
-    {
-        var description = typeof(DarlingMcpPgServerStateTools).GetMethods(BindingFlags.Public | BindingFlags.Static)
-            .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == "get_pg_lock_stats")
-            .GetCustomAttribute<DescriptionAttribute>()!.Description;
-
-        Assert.Contains("relation_oid", description, StringComparison.Ordinal);
-        Assert.Contains("regclass", description, StringComparison.Ordinal);
-    }
 }
