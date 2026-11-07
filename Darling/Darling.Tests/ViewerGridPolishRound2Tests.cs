@@ -144,6 +144,30 @@ public sealed class ViewerGridPolishRound2Tests
             }
         }
 
+        // #8223: the first number column of these two grids must end inside the viewport (not only start there),
+        // so the first text columns start narrow instead of pushing the numbers to the edge.
+        var wholeNumber = new Dictionary<string, string>
+        {
+            ["FinOpsIndexLockingDataGrid"] = "Row Lock Waits",
+        };
+        foreach (var view in Views("FinOps", new Case("FinOpsIndexLockingDataGrid", typeof(IndexLockingRow))))
+        {
+            var col = Col(view, wholeNumber[view.Grid]);
+            if (col.Left + col.Width > view.Viewport)
+            {
+                problems.Add($"{view.Grid} at {view.Label}: '{col.Header}' runs from {col.Left:0} to {col.Left + col.Width:0} in a {view.Viewport:0} px viewport");
+            }
+        }
+
+        foreach (var view in Views("Server", new Case("DatabaseScopedConfigGrid", typeof(DatabaseScopedConfigRow))))
+        {
+            var col = Col(view, "Value");
+            if (col.Left + col.Width > view.Viewport)
+            {
+                problems.Add($"{view.Grid} at {view.Label}: '{col.Header}' runs from {col.Left:0} to {col.Left + col.Width:0} in a {view.Viewport:0} px viewport");
+            }
+        }
+
         Empty(problems, "A first column keeps the number columns out of view:");
     }
 
