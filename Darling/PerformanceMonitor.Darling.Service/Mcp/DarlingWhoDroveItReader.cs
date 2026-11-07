@@ -263,8 +263,12 @@ internal static class DarlingWhoDroveItReader
     /// buckets, and the request is then counted twice (an overcount of one request, never a loss), the price of a key with no request id.
     /// A session that runs two requests one after the other has two starts, so they count as two. The figure is what the captures saw: a request
     /// that began before the window or ran on after it counts only the captures inside, and one shorter than the capture interval may not be seen at all.
-    /// A request that runs several statements adds its figure to each statement's per-hash total, so the per-statement figures can add up to
-    /// more than the caller's. The WAITFOR shells get_active_queries drops are dropped here too. The totals are window functions over every
+    /// <c>elapsed_ms</c> is cut to the window at each capture (#8090): the lesser of the cumulative figure and the time from the window start to the
+    /// capture, so a request that began before the window counts only the elapsed inside it, never its whole lifetime (the start key is still
+    /// derived from the uncut figure). A request that runs several statements adds its figure to each statement's per-hash total, so the per-statement
+    /// figures can add up to more than the caller's. The WAITFOR shells get_active_queries drops are dropped here too, and so is the
+    /// sp_server_diagnostics session (#8090), the health-check request that runs for the life of the instance and that the long-running-query alert
+    /// drops by the same text match: left in, its elapsed is days wide at every capture and takes the whole of <c>total_elapsed_ms</c>. The totals are window functions over every
     /// group BEFORE the cap, so a share is a share of the window. Statement text is fetched in the same pass, for the top statements only.
     /// Reads query_snapshots by (server_id, collection_time) range; no index is added.
     /// </summary>
@@ -278,13 +282,14 @@ internal static class DarlingWhoDroveItReader
                    query_hash,
                    collection_time,
                    COALESCE(cpu_time_ms, 0) AS cpu_ms,
-                   COALESCE(total_elapsed_time_ms, 0) AS elapsed_ms,
+                   LEAST(COALESCE(total_elapsed_time_ms, 0), EXTRACT(EPOCH FROM (collection_time - $2)) * 1000.0) AS elapsed_ms,
                    query_text
             FROM query_snapshots
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   (query_text IS NULL OR query_text NOT LIKE 'WAITFOR%')
+            AND   (query_text IS NULL OR query_text NOT ILIKE '%sp_server_diagnostics%')
             AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
         ),
         req AS (
