@@ -5218,7 +5218,7 @@ WHERE u.rolname = current_user";
     /// that fixes it; no exception text, because it reaches the ping body. Null when there is nothing to refuse: this
     /// platform has no Unix modes, the service is root, nothing is at the path, or the service owns it and can list it.
     /// </summary>
-    internal static string? ComposeCredentialDirectoryOwnershipRefusal(string directory)
+    internal static ComposeCredentialDirectoryRefusal? ComposeCredentialDirectoryOwnershipRefusal(string directory)
     {
         if (ComposeCredentialDirectoryGuard.Current.UnixModes is not { } modes || modes.EffectiveUserId == 0)
         {
@@ -5226,7 +5226,6 @@ WHERE u.rolname = current_user";
         }
 
         var euid = modes.EffectiveUserId;
-        var euidText = euid.ToString(CultureInfo.InvariantCulture);
         UnixFileOwner? owner;
         try
         {
@@ -5234,7 +5233,12 @@ WHERE u.rolname = current_user";
         }
         catch (UnauthorizedAccessException)
         {
-            return CannotBeReadSentence(directory, euid, euidText);
+            return new ComposeCredentialDirectoryRefusal(directory, euid, null);
+        }
+        catch (Exception ex) when (ex is IOException or PlatformNotSupportedException)
+        {
+            // Cannot tell who owns it: not a reason to stop the start.
+            return null;
         }
 
         if (owner is not { } found)
@@ -5244,18 +5248,11 @@ WHERE u.rolname = current_user";
 
         if (found.UserId != euid)
         {
-            return $"The credentials directory {directory} belongs to user {found.UserId.ToString(CultureInfo.InvariantCulture)}, "
-                + $"but the service runs as user {euidText}, so collection is stopped and nothing in it was read or changed; "
-                + $"to give it to the service's user, run: {CredentialOwnershipFix(euid, directory)}, then start the service again.";
+            return new ComposeCredentialDirectoryRefusal(directory, euid, found.UserId);
         }
 
-        return modes.CanList(directory) ? null : CannotBeReadSentence(directory, euid, euidText);
+        return modes.CanList(directory) ? null : new ComposeCredentialDirectoryRefusal(directory, euid, null);
     }
-
-    private static string CannotBeReadSentence(string directory, uint euid, string euidText)
-        => $"The credentials directory {directory} cannot be read by user {euidText}, which the service runs as, "
-            + "so collection is stopped and nothing in it was read or changed; "
-            + $"to give it to that user, run: {CredentialOwnershipFix(euid, directory)}, then start the service again.";
 
     /// <summary>
     /// Sets the compose store's credentials directory owner-only again before any file in it is read, and says what

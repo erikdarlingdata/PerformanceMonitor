@@ -283,10 +283,10 @@ public sealed class CollectorRuntimeState
         => PublishStoppedCore(StartupStep.ManagedStore, ManagedStoreNeedsWindowsDetail);
 
     /// <summary>Publishes the terminal Configuration stand-down for a credentials directory another user owns or the
-    /// service's user cannot list (worker only; #8141). <paramref name="detail"/> is only ever
-    /// <c>DarlingManagedRoles.ComposeCredentialDirectoryOwnershipRefusal</c>'s sentence: a path, two user ids and a
-    /// command, never exception text.</summary>
-    public void PublishCredentialDirectoryRefused(string detail) => PublishStoppedCore(StartupStep.Configuration, detail);
+    /// service's user cannot list (worker only; #8141). The detail is the refusal's sentence: a path, two user ids and a
+    /// fixed command, never exception text.</summary>
+    internal void PublishCredentialDirectoryRefused(ComposeCredentialDirectoryRefusal refusal)
+        => PublishStoppedCore(StartupStep.Configuration, refusal.Sentence);
 
     /// <summary>The shared body every terminal stand-down publishes through, whatever its detail's source —
     /// an exception's fixed sentence (<see cref="PublishStopped"/>), the joined config problems

@@ -6,6 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+using System.IO;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
 
@@ -20,6 +22,8 @@ public sealed class ComposeCredentialDirectoryOwnershipTests
 {
     private const string Dir = "/var/lib/darling/credentials";
 
+    private static string Key(string path) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+
     [Fact]
     public void RootOwned_ServiceIs1654_Refuses_NamingPathBothUsersAndTheChown()
     {
@@ -30,11 +34,15 @@ public sealed class ComposeCredentialDirectoryOwnershipTests
             var refusal = DarlingManagedRoles.ComposeCredentialDirectoryOwnershipRefusal(Dir);
 
             Assert.NotNull(refusal);
-            Assert.Contains(Dir, refusal, System.StringComparison.Ordinal);
-            Assert.Contains("belongs to user 0", refusal, System.StringComparison.Ordinal);
-            Assert.Contains("runs as user 1654", refusal, System.StringComparison.Ordinal);
-            Assert.Contains("chown darling -R 1654:1654 /var/lib/darling", refusal, System.StringComparison.Ordinal);
-            Assert.Contains("collection is stopped", refusal, System.StringComparison.Ordinal);
+            Assert.Equal(Dir, refusal.Directory);
+            Assert.Equal(1654u, refusal.UserId);
+            Assert.Equal(0u, refusal.OwnerUserId);
+            var sentence = refusal.Sentence;
+            Assert.Contains(Dir, sentence, StringComparison.Ordinal);
+            Assert.Contains("belongs to user 0", sentence, StringComparison.Ordinal);
+            Assert.Contains("runs as user 1654", sentence, StringComparison.Ordinal);
+            Assert.Contains("chown darling -R 1654:1654 /var/lib/darling", sentence, StringComparison.Ordinal);
+            Assert.Contains("collection is stopped", sentence, StringComparison.Ordinal);
         }
     }
 
@@ -76,14 +84,41 @@ public sealed class ComposeCredentialDirectoryOwnershipTests
     {
         var modes = new StandInUnixModes { EffectiveUserId = 1654 };
         modes.ReportOwner(Dir, 1654);
-        modes.Unlistable.Add(System.IO.Path.TrimEndingDirectorySeparator(System.IO.Path.GetFullPath(Dir)));
+        modes.Unlistable.Add(Key(Dir));
         using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
         {
             var refusal = DarlingManagedRoles.ComposeCredentialDirectoryOwnershipRefusal(Dir);
 
             Assert.NotNull(refusal);
-            Assert.Contains("cannot be read by user 1654", refusal, System.StringComparison.Ordinal);
-            Assert.Contains("chown darling -R 1654:1654 /var/lib/darling", refusal, System.StringComparison.Ordinal);
+            Assert.Null(refusal.OwnerUserId);
+            Assert.Contains("cannot be read by user 1654", refusal.Sentence, StringComparison.Ordinal);
+            Assert.Contains("chown darling -R 1654:1654 /var/lib/darling", refusal.Sentence, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void OwnerUnreadable_Refuses_AsCannotBeRead()
+    {
+        var modes = new StandInUnixModes { EffectiveUserId = 1654 };
+        modes.OwnerThrows[Key(Dir)] = new UnauthorizedAccessException();
+        using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
+        {
+            var refusal = DarlingManagedRoles.ComposeCredentialDirectoryOwnershipRefusal(Dir);
+
+            Assert.NotNull(refusal);
+            Assert.Null(refusal.OwnerUserId);
+            Assert.Contains("cannot be read by user 1654", refusal.Sentence, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void OwnerLookupFails_IsNull()
+    {
+        var modes = new StandInUnixModes { EffectiveUserId = 1654 };
+        modes.OwnerThrows[Key(Dir)] = new IOException();
+        using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
+        {
+            Assert.Null(DarlingManagedRoles.ComposeCredentialDirectoryOwnershipRefusal(Dir));
         }
     }
 

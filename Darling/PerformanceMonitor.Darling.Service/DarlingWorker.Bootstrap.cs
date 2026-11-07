@@ -288,7 +288,7 @@ public sealed partial class DarlingWorker
             && Hosting.DarlingHostBinding.IsRunningInContainer
             && DarlingManagedRoles.ComposeCredentialDirectoryOwnershipRefusal(DarlingManagedRoles.ComposeStoreCredentialDirectory) is { } refusal)
         {
-            _logger.LogCritical("{Refusal}", refusal);
+            _logger.LogCritical("{Refusal}", refusal.Sentence);
             _collectorState.PublishCredentialDirectoryRefused(refusal);
             return;
         }

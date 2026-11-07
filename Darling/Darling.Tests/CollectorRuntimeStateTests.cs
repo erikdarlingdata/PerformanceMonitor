@@ -501,6 +501,8 @@ public sealed class CollectorRuntimeStateTests
         var approvedParameterTypes = new[]
         {
             typeof(CollectorRuntimeState.StartupStep), typeof(int), typeof(DarlingConfig), typeof(bool),
+            // #8141: carries only a path, two user ids and the fixed chown text.
+            typeof(ComposeCredentialDirectoryRefusal),
         };
 
         var publishMethods = typeof(CollectorRuntimeState)
@@ -512,15 +514,6 @@ public sealed class CollectorRuntimeStateTests
 
         foreach (var method in publishMethods)
         {
-            /* #8141: the one sanctioned string seat. Its only caller passes
-               DarlingManagedRoles.ComposeCredentialDirectoryOwnershipRefusal's sentence (a path, two user ids and a
-               chown command); the maintainer approved that stop and its text. */
-            if (method.Name == nameof(CollectorRuntimeState.PublishCredentialDirectoryRefused))
-            {
-                Assert.Equal([typeof(string)], method.GetParameters().Select(p => p.ParameterType).ToArray());
-                continue;
-            }
-
             Assert.True(
                 method.GetParameters().All(p => approvedParameterTypes.Contains(p.ParameterType)),
                 $"{method.Name} takes a parameter of type "
