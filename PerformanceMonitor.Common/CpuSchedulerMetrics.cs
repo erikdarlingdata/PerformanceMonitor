@@ -74,13 +74,13 @@ public static class CpuSchedulerMetrics
     }
 
     /// <summary>
-    /// The rolled-up CPU-scheduler pressure classification, a pure client-side derivation mirroring
-    /// install/47's <c>report.cpu_scheduler_pressure</c> (pressure_level + recommendation). The banding is the
-    /// proc's own CASE: runnable task queue &gt; 50 CRITICAL / &gt; 20 HIGH / &gt; 10 MEDIUM, then the collector's
-    /// worker-exhaustion flag CRITICAL, then worker-utilization &gt; 90% HIGH, then the runnable-tasks and
-    /// queued-requests warning flags. The exhaustion flag is tested before the utilization arm because the collector
-    /// raises it at 90% of max worker threads, so above 90% both hold and the flag's CRITICAL is the level a server
-    /// at 95% reads; tested after it, CRITICAL would be reachable only at exactly 90%.
+    /// The rolled-up CPU-scheduler pressure classification, a pure client-side derivation of install/47's
+    /// <c>report.cpu_scheduler_pressure</c> (pressure_level + recommendation). The banding is the proc's CASE with one
+    /// deliberate difference in order: runnable task queue &gt; 50 CRITICAL / &gt; 20 HIGH / &gt; 10 MEDIUM, then the
+    /// collector's worker-exhaustion flag CRITICAL, then worker-utilization &gt; 90% HIGH, then the runnable-tasks and
+    /// queued-requests warning flags. The proc tests the 90% arm before the flag; because the collector raises the flag
+    /// at 90% of max worker threads, that order makes the proc's CRITICAL reachable only at exactly 90%, and a server
+    /// at 95% reads HIGH there. Here the flag comes first, so above 90% the level is CRITICAL.
     /// </summary>
     public static CpuPressure ClassifyCpuPressure(ICpuSchedulerSnapshot s)
     {
@@ -133,6 +133,6 @@ public static class CpuSchedulerMetrics
 public sealed record CpuSchedulerMetricRow(string Metric, string Value, bool IsWarning, string? Hint = null);
 
 /// <summary>The rolled-up CPU-scheduler pressure classification for the metric grid's headline rows: the
-/// banded pressure level plus its paired recommendation, mirroring install/47's
+/// banded pressure level plus its paired recommendation, derived from install/47's
 /// report.cpu_scheduler_pressure.</summary>
 public sealed record CpuPressure(string Level, string Recommendation);
