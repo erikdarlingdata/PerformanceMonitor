@@ -11,8 +11,10 @@ name: PR CI fork result
 # - every fact comes from the GitHub API (fork-ci-result.py): the finished run's jobs, the open pull requests at its head commit,
 #   their changed files, and the newer runs. Nothing the run wrote (logs, artifacts, outputs) is read;
 # - the status is written only for a pull_request run from a fork whose head commit is still the pull request's head, that changes
-#   no file under .github/workflows/ (a run executes the pull request's own copy of PR CI, so such a verdict is not vouched for),
-#   and that no newer PR CI run has replaced. success only on a successful `CI verdict`, failure for any other conclusion;
+#   no file the run executes or reads to decide what runs (a run takes the pull request's own copies of PR CI, the CI scripts,
+#   the path filters, the build pins and the test project files, so such a verdict is the fork's own and is not vouched for; the
+#   list is in fork-ci-result.py), and that no newer PR CI run has replaced. success only on a successful `CI verdict`, failure
+#   for any other conclusion;
 # - untrusted fields (the branch name, the head repository) reach no `run:` line: the script reads them from the event payload
 #   and passes them to gh as arguments, and the write step takes the sha and the state from the script's outputs, not the event.
 #

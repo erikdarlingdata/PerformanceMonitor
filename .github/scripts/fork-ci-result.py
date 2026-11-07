@@ -16,8 +16,9 @@ The decision, in order; the first rule that answers wins:
      no status either (the plan asked for no work);
   4. no open pull request from that head repository and branch has the run's head commit as its head: the head moved, and the run
      for the new head writes the status;
-  5. such a pull request changes a file under .github/workflows/: the run executed the pull request's own copy of PR CI, so its
-     `CI verdict` conclusion says only what that copy chose to say, and this script does not vouch for it (merged by hand);
+  5. such a pull request changes a file its run executes, or reads to decide what runs (NOT_RELAYED_PREFIXES and
+     NOT_RELAYED_FILES below): the run executed the pull request's own copy of PR CI and of everything PR CI calls, so its
+     `CI verdict` conclusion says only what those copies chose to say, and this script does not vouch for it (merged by hand);
   6. a newer PR CI pull_request run exists for the same head repository and branch: it writes the status (the same rule the
      verdict job applies before it posts a failure);
   7. otherwise: success when the verdict job's conclusion is success, failure for any other conclusion.
@@ -36,8 +37,23 @@ from dataclasses import dataclass
 
 VERDICT_JOB = "CI verdict"
 PR_WORKFLOW = "pr.yml"
-WORKFLOWS_DIR = ".github/workflows/"
 SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+# The files a PR CI run executes, or reads to decide what runs. A pull_request run takes the pull request's own copies, so a fork
+# that changes one of these controls what its `CI verdict` job concludes, and its run is not relayed. One list, read by
+# _not_relayed_file; a prefix guards a tree, a file guards itself.
+NOT_RELAYED_PREFIXES = (
+    ".github/",       # the workflows, the CI scripts and their tests, the path filters, the quarantine list and the CI history
+    "Darling/tools/",  # fetch-pg-runtime.ps1 and fetch-pg-target.ps1, which the build and the test legs run
+)
+NOT_RELAYED_FILES = (
+    "global.json",               # the SDK version the build installs
+    "nuget.config",              # the feeds the restore reads
+    "Directory.Build.props",     # read by the plan and by every build
+    "Directory.Packages.props",  # the package versions the locked restore pins
+    "Darling/Darling.Tests/Darling.Tests.csproj",    # the test projects: a project file decides which tests exist
+    "Lite.Tests/Lite.Tests.csproj",
+    "Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj",
+)
 DESCRIPTION_MAX = 140  # a commit status description holds 140 characters
 
 
@@ -107,11 +123,12 @@ def _pulls_at_head(repo: str, owner: str, branch: str, head_repo: str, sha: str,
     return out
 
 
-def _workflow_file_changed(repo: str, number, fetch) -> "str | None":
+def _not_relayed_file(repo: str, number, fetch) -> "str | None":
+    """The first changed file of the pull request that the run executes or reads to decide what runs, or None."""
     files = fetch(f"repos/{repo}/pulls/{number}/files", {"per_page": "100"}, paginate=True) or []
     for entry in files:
         name = entry.get("filename") or ""
-        if name.startswith(WORKFLOWS_DIR):
+        if name.startswith(NOT_RELAYED_PREFIXES) or name in NOT_RELAYED_FILES:
             return name
     return None
 
@@ -154,10 +171,10 @@ def decide(event: dict, fetch) -> Decision:
         return skip(f"no open pull request from {head_repo}:{branch} has {sha[:9]} as its head, so the head moved or the pull request closed")
 
     for number in numbers:
-        changed = _workflow_file_changed(repo, number, fetch)
+        changed = _not_relayed_file(repo, number, fetch)
         if changed:
-            return skip(f"pull request #{number} changes {changed}, so this run executed the pull request's own copy of PR CI "
-                        "and its verdict is not relayed; such a pull request is merged by hand")
+            return skip(f"pull request #{number} changes {changed}, a file its run executes or reads to decide what runs, so the "
+                        "run's verdict is the pull request's own and is not relayed; such a pull request is merged by hand")
 
     newer = _newer_run(repo, branch, head_repo, run_id, fetch)
     if newer is not None:
