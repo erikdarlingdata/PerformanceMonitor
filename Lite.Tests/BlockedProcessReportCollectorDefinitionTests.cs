@@ -341,4 +341,68 @@ public sealed class BlockedProcessReportCollectorDefinitionTests
         Assert.Null(writer.Values[39]);
         Assert.Empty(s_deltas.Calls);
     }
+
+    /* #8146: the loss accounting reads the ring-buffer position the trailing row carries. */
+    private static readonly DateTime s_ringCreated = new(2026, 7, 2, 6, 0, 0, DateTimeKind.Utc);
+    private static readonly DateTime s_ringReadAt = new(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc);
+
+    private static System.Collections.Generic.Dictionary<string, string> RingPrior(long total, long held, long dropped = 0) => new()
+    {
+        [RingBufferLossAccounting.StateKey] = PerformanceMonitor.Common.RingBufferLoss.ToStateValue(
+            new PerformanceMonitor.Common.RingBufferPrior(total, held, dropped, s_ringCreated, s_ringReadAt.AddSeconds(-60), false)),
+    };
+
+    private static object[] PositionColumns(object total, object held, object dropped) =>
+        new object[] { total, held, s_ringCreated, dropped, 1000L, s_ringReadAt };
+
+    private static long? Measured(CollectorContext context, string label) =>
+        context.Measurements.Where(m => m.Label == label).Select(m => (long?)m.Value).FirstOrDefault();
+
+    /* The gate row: execution_count, gated, then the three truncation columns, then the position. */
+    private static object[] GateRow(bool gated, object total, object held, object dropped) =>
+        new object[] { 5L, gated, gated ? DBNull.Value : false, 0L, DBNull.Value }
+            .Concat(PositionColumns(total, held, dropped)).ToArray();
+
+    private static CollectorContext RingContext(
+        bool azure = false, bool logicalServer = false, long priorTotal = 34, long priorHeld = 10, long priorDropped = 0) => new()
+    {
+        ServerId = 42,
+        ServerName = "test-server",
+        CollectionTime = s_ringReadAt,
+        Deltas = s_deltas,
+        Target = new CollectorTargetInfo { IsAzureSqlDb = azure },
+        AzureRegistrationIsLogicalServer = logicalServer,
+        State = RingPrior(priorTotal, priorHeld, priorDropped),
+    };
+
+    [Fact]
+    public async Task ReadAsync_TrailingPosition_MeasuresEviction()
+    {
+        var context = RingContext();
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            Array.Empty<object[]>(), new[] { GateRow(false, 59L, 10L, 0L) });
+
+        await BlockedProcessReportCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(15, Measured(context, "ring_buffer_evicted"));
+        Assert.True(context.StagedItemState.ContainsKey(RingBufferLossAccounting.StateKey));
+    }
+
+    [Fact]
+    public async Task BlockedProcess_GatedRun_StillMeasuresDropped()
+    {
+        var context = RingContext(priorTotal: 34, priorHeld: 34, priorDropped: 2);
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            Array.Empty<object[]>(), new[] { GateRow(true, DBNull.Value, DBNull.Value, 5L) });
+
+        await BlockedProcessReportCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(3, Measured(context, "xe_session_dropped"));
+    }
+
+    [Fact]
+    public void BlockedProcess_DeclaresTheRingPositionStateKey()
+    {
+        Assert.Contains(RingBufferLossAccounting.StateKey, BlockedProcessReportCollector.Instance.StateKeys);
+    }
 }

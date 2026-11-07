@@ -245,8 +245,14 @@ public partial class RemoteCollectorService
             }
         }
 
+        /* #8146: the deadlocks collector skips ring-buffer loss accounting for a logical-server registration. */
+        var registeredAsLogicalServer = target.IsAzureSqlDb
+            && AzureSweepScope.IsLogicalServerRegistration(
+                target, new SqlConnectionStringBuilder(_serverManager.CredentialResolver.GetConnectionString(server)).InitialCatalog);
+
         var context = new CollectorContext
         {
+            AzureRegistrationIsLogicalServer = registeredAsLogicalServer,
             ServerId = serverId,
             ServerName = GetServerNameForStorage(server),
             CollectionTime = collectionTime,
