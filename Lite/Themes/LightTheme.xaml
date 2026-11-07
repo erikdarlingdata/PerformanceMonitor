@@ -720,7 +720,7 @@
                                     <ControlTemplate TargetType="Button">
                                         <Border x:Name="overflowBorder" Background="Transparent" CornerRadius="3,3,0,0"
                                                 Padding="{TemplateBinding Padding}">
-                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center">
+                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True">
                                                 <ContentPresenter.Resources>
                                                     <Style TargetType="TextBlock">
                                                         <Setter Property="FontSize" Value="16"/>
