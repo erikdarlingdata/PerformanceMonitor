@@ -109,7 +109,10 @@ jobs:
       # #5366, #8006: the test project runs on Windows, so the Unix file checks behind the password key (owner, link count, file
       # identity), the Linux crypto path and the passwordKey source (base64, PEM, a Kubernetes-style ..data link, env:) run
       # here, inside the image the service ships in. It ran in build.yml until that became release-only (#6656), and was then
-      # skipped on every run. The vector is mounted read-only; any failure exits non-zero and fails the job.
+      # skipped on every run. The vector is mounted read-only; any failure exits non-zero and fails the job. It runs as root
+      # (--user 0:0): the image runs as UID 1654 (#8141), and only root can give a file to another user, so as 1654 the
+      # passwordKey owner cases would be skipped. The run as the image's own user is "Check the password key on Linux as
+      # UID 1654" below.
       - name: Check the password key on Linux (self-check verb in the built image)
         timeout-minutes: 3
         shell: bash
@@ -117,7 +120,7 @@ jobs:
           set -euo pipefail
           vector="${GITHUB_WORKSPACE}/Darling/Darling.Tests/Fixtures/PasswordSeal/linux-self-check-vector.json"
           test -f "${vector}"
-          docker run --rm -v "${vector}:/vector/linux-self-check-vector.json:ro" "${DARLING_IMAGE}" \
+          docker run --rm --user 0:0 -v "${vector}:/vector/linux-self-check-vector.json:ro" "${DARLING_IMAGE}" \
             --self-check-password-key /vector/linux-self-check-vector.json
 
       - name: Start the store (a TimescaleDB container with a non-superuser owner)
