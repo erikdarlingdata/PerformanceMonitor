@@ -253,7 +253,7 @@ Some data follows its own horizon, not a collector's.
 |---|---|
 | Raw `query_stats`, `procedure_stats` and `query_store_stats`, with TimescaleDB | 4, then the hourly and daily rollups hold the history |
 | Query Store interval tables `collect.query_store_interval_wide` and `collect.query_store_interval_latest` | 10 and 15 |
-| `analysis_findings`, finished rows of `config.config_command`, and closed versions in `collect.schema_objects` (current versions never expire) | 30 |
+| `analysis_findings`, finished rows of `config.config_command`, and closed versions in `collect.schema_objects` (a current version stays while a pass still sees its database) | 30 |
 | `collection_log` | 60 |
 | Hourly history rollups, and `config_alert_log` | 90 |
 | `collect.plan_force_actions` | 365 |

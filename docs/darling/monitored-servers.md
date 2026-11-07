@@ -25,7 +25,7 @@ Each Darling install has an eight-character id. The service makes it at start an
 ### The sessions
 
 - `PerformanceMonitor_Darling_<id>_LongQueryCompletions` is this install's long-query trace. The service creates it while the opt-in `long_query_completions` collector is on. It is created with `STARTUP_STATE = OFF`, so it stays stopped after a server restart. Each check starts it again when it finds it stopped.
-- `PerformanceMonitor_Darling_<id>_SchemaChanges` records committed table, view, index and trigger DDL (`object_created`, `object_altered`, `object_deleted` and `sp_rename`), so the schema pass reads only the objects that changed. It carries the database, login, application and host of each change and no statement text. It has a 4 MB ring buffer capped at 10,000 events and `STARTUP_STATE = OFF`, so the service starts it again when it finds it stopped. A restart or a full buffer leaves a gap, which the pass closes by reading the whole database.
+- `PerformanceMonitor_Darling_<id>_SchemaChanges` records committed table, view, index and trigger DDL (`object_created`, `object_altered`, `object_deleted`, and the end of `sp_rename`, `sp_refreshview` and `sp_refreshsqlmodule`), so the schema pass reads only the objects that changed. It carries the database, login, application and host of each change and no statement text. It has a 4 MB ring buffer capped at 1,000 events and `STARTUP_STATE = OFF`, so the service starts it again when it finds it stopped. The cap stays under the size at which SQL Server cuts the buffer's XML (about 2,300 of these events), so a burst past it costs one full read and the next pass reads the whole buffer again. A restart, a full buffer or an event the session dropped leaves a gap, which the pass closes by reading the whole database.
 - `PerformanceMonitor_Deadlock`, `PerformanceMonitor_BlockedProcess` and `PerformanceMonitor_Attention` keep their shared names, because Lite and other installs read them too. The service never drops them. It checks them at connect and then once an hour. It creates a missing one and starts a stopped one, so a deliberate stop lasts less than an hour.
 - On Azure SQL Database, a shared session can stay unusable after a start. The service then creates `PerformanceMonitor_Darling_<id>_Deadlock`, `PerformanceMonitor_Darling_<id>_BlockedProcess` or `PerformanceMonitor_Darling_<id>_Attention` in that database, with `STARTUP_STATE = OFF`, and reads that one. When the shared session works again, the service switches back and drops its own fallback.
 
@@ -113,7 +113,7 @@ Collectors that hit a permission error (SQL errors 229/297/300, plus 8189 from `
 
 ### Which collectors run on which platform
 
-Every collector declares its own applicability in code (`AppliesTo(CollectorTargetInfo)`), so this is not a hand-maintained per-collector list — the SQL Server collectors fall into eight groups, and a collector outside its supported platform is **skipped before it runs**, not failed and logged every cycle.
+Every collector declares its own applicability in code (`AppliesTo(CollectorTargetInfo)`), so this is not a hand-maintained per-collector list — the SQL Server collectors fall into nine groups, and a collector outside its supported platform is **skipped before it runs**, not failed and logged every cycle.
 
 | Runs on | Collectors | Gate |
 |---|---|---|
