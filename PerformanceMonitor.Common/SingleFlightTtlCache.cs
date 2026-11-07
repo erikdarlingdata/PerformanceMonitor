@@ -42,6 +42,7 @@ public sealed class SingleFlightTtlCache<T>
 {
     private readonly object _gate = new();
     private readonly TimeSpan _ttl;
+    private readonly Func<DateTime> _clock;
 
     private T _value = default!;
     private bool _hasValue;
@@ -49,8 +50,18 @@ public sealed class SingleFlightTtlCache<T>
     private Task<T>? _inFlight;
 
     public SingleFlightTtlCache(TimeSpan ttl)
+        : this(ttl, static () => DateTime.UtcNow)
     {
+    }
+
+    /// <summary>The same cache judging its TTL against <paramref name="clock"/>, a UTC reading. Production builds the
+    /// cache with the one-argument constructor and the wall clock; a test hands in a clock it steps across the TTL
+    /// instead of waiting the TTL out.</summary>
+    public SingleFlightTtlCache(TimeSpan ttl, Func<DateTime> clock)
+    {
+        ArgumentNullException.ThrowIfNull(clock);
         _ttl = ttl;
+        _clock = clock;
     }
 
     /// <summary>
@@ -72,7 +83,7 @@ public sealed class SingleFlightTtlCache<T>
 
         lock (_gate)
         {
-            if (_hasValue && DateTime.UtcNow - _valueAtUtc < _ttl)
+            if (_hasValue && _clock() - _valueAtUtc < _ttl)
             {
                 return Task.FromResult(_value);
             }
@@ -116,7 +127,7 @@ public sealed class SingleFlightTtlCache<T>
                             {
                                 _value = result;
                                 _hasValue = true;
-                                _valueAtUtc = DateTime.UtcNow;
+                                _valueAtUtc = _clock();
                             }
                         }
                     }

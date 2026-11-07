@@ -156,10 +156,14 @@ public sealed class SingleFlightTtlCacheTests
         Assert.Equal(2, attempt);
     }
 
+    /// <summary>The TTL is judged on the cache's own clock: a fake clock steps 49 ms (still cached) and then 2 ms more
+    /// (past the 50 ms TTL, refetched), so no wall-clock wait sits between the stamp and the next call for a stalled
+    /// runner to overrun.</summary>
     [Fact]
     public async Task WithinTheTtl_Cached_AfterTheTtl_Refetched()
     {
-        var cache = new SingleFlightTtlCache<int>(TimeSpan.FromMilliseconds(50));
+        var now = new DateTime(2026, 10, 14, 12, 0, 0, DateTimeKind.Utc);
+        var cache = new SingleFlightTtlCache<int>(TimeSpan.FromMilliseconds(50), () => now);
         var attempt = 0;
 
         Task<int> Fetch()
@@ -169,12 +173,13 @@ public sealed class SingleFlightTtlCacheTests
         }
 
         var first = await cache.GetOrStartAsync(Fetch);
+        now = now.AddMilliseconds(49);
         var second = await cache.GetOrStartAsync(Fetch);
         Assert.Equal(1, first);
         Assert.Equal(1, second);
         Assert.Equal(1, attempt);
 
-        await Task.Delay(100);
+        now = now.AddMilliseconds(2);
 
         var third = await cache.GetOrStartAsync(Fetch);
         Assert.Equal(2, third);
