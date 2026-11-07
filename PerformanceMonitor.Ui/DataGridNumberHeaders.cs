@@ -16,8 +16,8 @@ namespace PerformanceMonitor.Ui;
 /// #8223: puts a number column's header on the same edge as its values. A column whose cells are right-aligned (its element style sets
 /// <c>TextAlignment</c> or <c>HorizontalAlignment</c> to Right, as the themes' <c>NumericCell</c> does) got a left-aligned header, which sat
 /// a column's width to the left of the figures it names: "Total Duration (ms)" about 100 px left of its values in a wide column.
-/// Called once by a tab after its markup loads, for every grid under it. A column that already has a header style, and a column whose
-/// cells are not right-aligned, are left as they are. A template column, which has no element style to read, says it is a number column
+/// Called once by a tab after its markup loads, for every grid under it. A column that sets its own header style, and a column whose
+/// cells are not right-aligned, are left as they are. The right-aligned style builds on the grid's column header style when it has one. A template column, which has no element style to read, says it is a number column
 /// with <see cref="IsNumberColumnProperty"/>.
 /// </summary>
 public static class DataGridNumberHeaders
@@ -50,7 +50,8 @@ public static class DataGridNumberHeaders
         Style? right = null;
         foreach (var column in grid.Columns)
         {
-            if (column.HeaderStyle is not null || !IsNumber(column))
+            /* HeaderStyle reads the grid's ColumnHeaderStyle when the column sets none (the Viewer's DarkGrid sets one), so only a value set on the column itself counts as its own style. */
+            if (column.ReadLocalValue(DataGridColumn.HeaderStyleProperty) != DependencyProperty.UnsetValue || !IsNumber(column))
             {
                 continue;
             }
@@ -62,7 +63,7 @@ public static class DataGridNumberHeaders
 
     private static Style RightHeaderStyle(DataGrid grid)
     {
-        var style = new Style(typeof(System.Windows.Controls.Primitives.DataGridColumnHeader), grid.TryFindResource(typeof(System.Windows.Controls.Primitives.DataGridColumnHeader)) as Style);
+        var style = new Style(typeof(System.Windows.Controls.Primitives.DataGridColumnHeader), grid.ColumnHeaderStyle ?? grid.TryFindResource(typeof(System.Windows.Controls.Primitives.DataGridColumnHeader)) as Style);
         style.Setters.Add(new Setter(Control.HorizontalContentAlignmentProperty, HorizontalAlignment.Right));
         return style;
     }
