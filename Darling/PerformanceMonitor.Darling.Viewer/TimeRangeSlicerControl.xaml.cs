@@ -78,7 +78,29 @@ public partial class TimeRangeSlicerControl : UserControl
         InitializeComponent();
         SlicerBorder.SizeChanged += (_, _) => Redraw();
         IsVisibleChanged += (_, _) => { if (IsVisible) Redraw(); };
+        // #8219: a window under 700 DIPs high (the 900x600 minimum is one) gets the compact 70 strip; Lite's slicer does the same.
+        Loaded += (_, _) =>
+        {
+            UnhookWindow();
+            _hookedWindow = Window.GetWindow(this);
+            if (_hookedWindow is not null) _hookedWindow.SizeChanged += OnWindowSizeChanged;
+            ApplyHeight();
+        };
+        Unloaded += (_, _) => UnhookWindow();
     }
+
+    private Window? _hookedWindow;
+
+    private void OnWindowSizeChanged(object sender, SizeChangedEventArgs e) => ApplyHeight();
+
+    private void UnhookWindow()
+    {
+        if (_hookedWindow is not null) _hookedWindow.SizeChanged -= OnWindowSizeChanged;
+        _hookedWindow = null;
+    }
+
+    private void ApplyHeight() =>
+        SlicerBorder.Height = Window.GetWindow(this) is { ActualHeight: > 0 and < 700 } ? 70 : 130;
 
     public bool IsExpanded
     {
