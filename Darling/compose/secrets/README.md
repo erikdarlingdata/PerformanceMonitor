@@ -19,4 +19,4 @@ Nothing here for the store's least-privilege `admin`/`viewer`/`mcp` roles: the s
 
 Nor is the password key kept here. It is the key for the SQL login passwords saved in the store. The service makes it on first start and keeps it as `password-key` in the same `darling-credentials` volume ([#5366](https://github.com/erikdarlingdata/PerformanceMonitor/issues/5366)). Back that volume up after the first start and after every `--reset-password-key`, and keep the backup apart from the store's backups. If the key may have been copied, reset it, change the SQL logins' passwords, and delete `password-key.retired` from the volume.
 
-Keep this directory out of version control and readable only by the deploying user (`chmod 700 secrets`, `chmod 600 secrets/*`).
+Keep this directory out of version control (`chmod 700 secrets`, `chmod 644 secrets/*`). The container reads the files as user 1654 through compose's bind mounts, and the folder's 0700 is what keeps other users on the host out.
