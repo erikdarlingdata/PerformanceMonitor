@@ -115,13 +115,11 @@ public partial class ViewerServerTab
     /// <summary>The web's tooltip for "Run all collectors now" while the server is unreachable (collector-run.js OFFLINE_TIP).</summary>
     internal const string OfflineRunTip = "This server is offline: the service has no connection to it, so a collector run would be skipped. Collection resumes on its own when the server is reachable again.";
 
-    /// <summary>The "Run all collectors now" button's tooltip while the server is reachable.</summary>
-    private const string RunAllReadyTip = "Runs every enabled collector for this server once, now. Disabled collectors are skipped. Schedules do not change.";
-
     /// <summary>
     /// #7590: while the service's connect to this server has failed, the Collection Health tab says collection is waiting on the connection
     /// (since when, the last error, the next retry) and "Run all collectors now" is off with the offline tip, since a run would be skipped.
-    /// The collector rows are not relabelled. A reachable server shows neither.
+    /// The collector rows are not relabelled. A reachable server shows neither. The button's state comes from
+    /// <see cref="ViewerCollectorRun.RunAllState"/>, which says a read-only seat first (#8103).
     /// </summary>
     internal void ShowServerConnectionState()
     {
@@ -130,8 +128,38 @@ public partial class ViewerServerTab
             ? ServerHealthClassifier.WaitingOnConnectionText(_server.ConnectDownSince!.Value, _server.LastConnectError, _server.NextConnectAttemptUtc, DateTime.UtcNow)
             : string.Empty;
         ServerConnectionLine.Visibility = down ? Visibility.Visible : Visibility.Collapsed;
-        RunAllCollectorsButton.IsEnabled = !down && !_collectorRunActive;
-        RunAllCollectorsButton.ToolTip = down ? OfflineRunTip : RunAllReadyTip;
+        ApplyButtonState(RunAllCollectorsButton, ViewerCollectorRun.RunAllState(_dataService.IsReadOnly, down, _collectorRunActive));
+    }
+
+    /// <summary>
+    /// #8103: a read-only seat sees "Purge Now..." and "Run all collectors now" off from the moment the tab is built, with the reason as the
+    /// tooltip of the disabled button, as Alert History's Dismiss buttons are. Called from the constructor after <c>InitializeComponent</c>.
+    /// A writable seat's buttons are as the XAML draws them. The Health Summary rows' "Run now" take theirs as each is built
+    /// (<see cref="RunCollectorNowButton_Initialized"/>). The click handlers' own read of the seat stays as the backstop for grants that
+    /// change while the tab is open.
+    /// </summary>
+    private void InitializeCollectionHealthSeat()
+    {
+        ApplyButtonState(PurgeNowButton, ViewerCollectorRun.PurgeState(_dataService.IsReadOnly));
+        ApplyButtonState(RunAllCollectorsButton, ViewerCollectorRun.RunAllState(_dataService.IsReadOnly, _server.ConnectDownSince.HasValue, _collectorRunActive));
+    }
+
+    /// <summary>
+    /// #8103: a Health Summary row's "Run now" takes its seat state as the row template builds it. <c>Initialized</c> rather than <c>Loaded</c>:
+    /// it fires as the button is made, before the row's first layout, so the state is on the button as soon as the row exists.
+    /// </summary>
+    private void RunCollectorNowButton_Initialized(object? sender, EventArgs e)
+    {
+        if (sender is Button button)
+        {
+            ApplyButtonState(button, ViewerCollectorRun.RunOneState(_dataService.IsReadOnly));
+        }
+    }
+
+    private static void ApplyButtonState(Button button, (bool IsEnabled, string? ToolTip) state)
+    {
+        button.IsEnabled = state.IsEnabled;
+        button.ToolTip = state.ToolTip;
     }
 
     /// <summary>
@@ -327,8 +355,9 @@ public partial class ViewerServerTab
     /// "Purge Now" (Collection Health): runs the daily retention purge on demand via the fleet-wide
     /// <c>purge_now</c> control command, after a confirm — it permanently deletes collected data older than the
     /// configured retention horizons across ALL monitored servers (the purge is fleet-wide over the shared
-    /// store). A read-only viewer seat can't enqueue commands, so it shows an explanation instead (same rule as
-    /// Pause / live-plan fetch). #4825: a current service starts the purge in the background, paced, and answers
+    /// store). A read-only viewer seat can't enqueue commands: its button is off with the reason (#8103,
+    /// <see cref="InitializeCollectionHealthSeat"/>), and the seat check here is the backstop for grants that changed while the tab
+    /// is open. #4825: a current service starts the purge in the background, paced, and answers
     /// at once, with the time it started; this then watches the collection log for the purge's totals
     /// (<see cref="StartPurgeWatch"/>) and reloads the tab when they turn up. "Already running" shows as it is and
     /// starts no watch. An older service still runs the purge inline and answers with its totals, which are shown,
@@ -548,7 +577,8 @@ public partial class ViewerServerTab
     /// Sends the <c>snapshot_now</c> command for this server (<see cref="ViewerDataService.RequestCollectorRunAsync"/>), the command
     /// the Active Queries "Latest Snapshot" button and the web's run route send, and says the web's words about the result
     /// (<see cref="ViewerCollectorRun"/>). A finished run reloads the tab so its grids show the new rows. A read-only seat cannot send
-    /// commands (the same rule as Purge Now and Latest Snapshot) and is told so on the status line.
+    /// commands: its buttons are off with the reason (#8103), and the seat check here, which says so on the status line, is the backstop
+    /// for grants that changed while the tab is open.
     /// </summary>
     private async Task RunCollectorsNowAsync(IReadOnlyList<string>? collectors)
     {
@@ -593,7 +623,7 @@ public partial class ViewerServerTab
         finally
         {
             _collectorRunActive = false;
-            RunAllCollectorsButton.IsEnabled = !_server.ConnectDownSince.HasValue;
+            ApplyButtonState(RunAllCollectorsButton, ViewerCollectorRun.RunAllState(_dataService.IsReadOnly, _server.ConnectDownSince.HasValue, runActive: false));
         }
     }
 

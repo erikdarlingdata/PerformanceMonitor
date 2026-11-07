@@ -129,7 +129,7 @@ public sealed class DisplayZoneTickTests
 
 /// <summary>
 /// #4766: the ScottPlot tick generator over <see cref="DisplayZone.WallTicks"/> and the axis extension that installs
-/// it. The step ladder, the labels (24-hour time, the date on the first tick and at each date change), the
+/// it. The step ladder, the labels (24-hour time on one line, the date only at a date change), the
 /// no-re-plot zone switch, and the integration through ScottPlot's own render pass.
 /// </summary>
 public sealed class DisplayZoneTickGeneratorTests
@@ -160,7 +160,7 @@ public sealed class DisplayZoneTickGeneratorTests
     }
 
     [Fact]
-    public void TheDateIsOnTheFirstTickAndAtEachDateChange_AndTheTimeIsTwentyFourHour()
+    public void TheDateIsOnlyOnATickWhereTheDateChanges_OnOneLine_AndTheTimeIsTwentyFourHour()
     {
         var generator = new DisplayZoneTickGenerator(() => TimeZoneInfo.Utc, Invariant);
         var min = DisplayZoneFixtures.At(2026, 3, 8, 22).ToOADate();
@@ -168,13 +168,36 @@ public sealed class DisplayZoneTickGeneratorTests
 
         var ticks = generator.Build(min, max, 1000);
 
-        Assert.Equal("03/08\n22:00", ticks[0].Label);
+        Assert.Equal("22:00", ticks[0].Label);
         Assert.Equal("22:30", ticks[1].Label);
         var midnight = ticks.Single(t => t.Label.EndsWith("00:00", StringComparison.Ordinal));
-        Assert.Equal("03/09\n00:00", midnight.Label);
+        Assert.Equal("03/09 00:00", midnight.Label);
         Assert.Equal(1, ticks.Count(t => t.Label.StartsWith("03/09", StringComparison.Ordinal)));
+        Assert.DoesNotContain(ticks, t => t.Label.Contains('\n'));
         Assert.All(ticks, t => Assert.True(t.IsMajor));
         Assert.Equal(DisplayZoneFixtures.At(2026, 3, 8, 22).ToOADate(), ticks[0].Position);
+    }
+
+    [Fact]
+    public void AWindowInsideOneDay_ShowsNoDate()
+    {
+        var generator = new DisplayZoneTickGenerator(() => TimeZoneInfo.Utc, Invariant);
+
+        var ticks = generator.Build(DisplayZoneFixtures.At(2026, 3, 8, 2).ToOADate(), DisplayZoneFixtures.At(2026, 3, 8, 20).ToOADate(), 1000);
+
+        Assert.NotEmpty(ticks);
+        Assert.All(ticks, t => Assert.Matches(@"^\d\d:\d\d$", t.Label));
+    }
+
+    [Fact]
+    public void WhenTheStepIsWholeDays_EveryTickIsTheDateAlone()
+    {
+        var generator = new DisplayZoneTickGenerator(() => TimeZoneInfo.Utc, Invariant);
+
+        var ticks = generator.Build(DisplayZoneFixtures.At(2026, 3, 1, 0).ToOADate(), DisplayZoneFixtures.At(2026, 3, 15, 0).ToOADate(), 1000);
+
+        Assert.True(ticks.Length >= 2);
+        Assert.All(ticks, t => Assert.Matches(@"^\d\d/\d\d$", t.Label));
     }
 
     [Fact]
@@ -189,8 +212,8 @@ public sealed class DisplayZoneTickGeneratorTests
         zone = DisplayZoneFixtures.Eastern;
         var inServer = generator.Build(min, max, 1000);
 
-        Assert.Equal("11/01\n06:00", inUtc[0].Label);
-        Assert.Equal("11/01\n01:00", inServer[0].Label);
+        Assert.Equal("06:00", inUtc[0].Label);
+        Assert.Equal("01:00", inServer[0].Label);
         Assert.Equal(inUtc.Select(t => t.Position), inServer.Select(t => t.Position));
     }
 

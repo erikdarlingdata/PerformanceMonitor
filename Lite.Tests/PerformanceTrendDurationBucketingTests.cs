@@ -139,13 +139,16 @@ public sealed class PerformanceTrendDurationBucketingTests : IClassFixture<Share
         Assert.Equal(new[] { t1, excluded, t2 }, points.Select(p => p.CollectionTime).ToArray());
         Assert.Equal(0.0, points[1].Value!.Value);
 
+        /* #8073: ExecutionCount is the executions in the bucket, the rate's numerator: 12 over the stored 30 s, 100 over the
+           25 s gap, and a measured 0 where only OtherDb ran. The rate below one per second keeps its own member. */
         Assert.Equal(12.0, points[0].Value!.Value, precision: 6);
         Assert.Equal(0.4, points[0].ExecutionsPerSecond!.Value, precision: 6);
-        Assert.Equal(0L, points[0].ExecutionCount);
+        Assert.Equal(12L, points[0].ExecutionCount);
+        Assert.Equal(0L, points[1].ExecutionCount);
 
         Assert.Equal(10.0, points[2].Value!.Value, precision: 6);
         Assert.Equal(4.0, points[2].ExecutionsPerSecond!.Value, precision: 6);
-        Assert.Equal(4L, points[2].ExecutionCount);
+        Assert.Equal(100L, points[2].ExecutionCount);
 
         /* #4234: only Value/ExecutionCount/ExecutionsPerSecond are filled for a chart point — the MCP-only
            bucket fields stay null, as they always have for these three reads. */

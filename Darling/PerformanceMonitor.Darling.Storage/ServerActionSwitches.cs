@@ -26,6 +26,7 @@ public static class ServerActionSurfaces
     public const string Viewer = "viewer";
     public const string Web = "web";
     public const string Mcp = "mcp";
+    public const string Slack = "slack";
 }
 
 /// <summary>One server's view of one action's switch (#6269): <see cref="Valid"/> is false when the engine cannot run the action (the

@@ -732,6 +732,10 @@ ALTER TABLE IF EXISTS config.config_notification_routes DROP COLUMN IF EXISTS sl
 ALTER TABLE IF EXISTS config.config_notification_routes DROP COLUMN IF EXISTS slack_bot_channel_set_at;
 ALTER TABLE IF EXISTS config.config_notification DROP COLUMN IF EXISTS slack_bot_token;
 ALTER TABLE IF EXISTS config.config_notification DROP COLUMN IF EXISTS slack_app_token;"),
+        // V253 (#7658): the Slack card table. The probe's sentinel is the table, so the rewind drops it and a re-run of V253 makes it again. Safe on a
+        // store that never had it.
+        new(253, "hasSlackCards",
+            @"DROP TABLE IF EXISTS config.investigation_slack_posts;"),
     ];
 
     /// <summary>

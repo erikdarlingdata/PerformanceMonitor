@@ -167,79 +167,76 @@
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
-        <!-- Header Bar -->
+        <!-- Header Bar. A WrapPanel, as the Darling Viewer's server toolbar is: a control that does not fit on the line
+             starts the next one instead of being arranged past the border's edge, so Refresh, Auto-refresh and the Times
+             picker are reachable at every width the window allows. -->
         <Border Grid.Row="0" Background="{DynamicResource BackgroundDarkBrush}" Padding="12,8">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-
-                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+            <WrapPanel Orientation="Horizontal">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,8,4">
                     <TextBlock x:Name="ServerNameText" Text="Server Name" FontSize="16" FontWeight="SemiBold"
                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,16,0"/>
                     <TextBlock x:Name="ConnectionStatusText" Text="Collecting..." FontSize="12"
                                Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center"/>
                 </StackPanel>
-
-                <StackPanel Grid.Column="1" Orientation="Horizontal">
-                    <!-- #5993: the query tag filter for the Queries grids and the by-tag view. -->
-                    <TextBlock Text="Query tag:" VerticalAlignment="Center" Margin="0,0,4,0" FontSize="11"/>
-                    <ComboBox x:Name="QueryTagFilterCombo" Width="170" Margin="0,0,8,0" Padding="4,2" FontSize="11"
-                             
+                <!-- #5993: the query tag filter for the Queries grids and the by-tag view. -->
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="Query tag:" VerticalAlignment="Center" Margin="0,0,4,4" FontSize="11"/>
+                    <ComboBox x:Name="QueryTagFilterCombo" Width="170" Margin="0,0,8,4" Padding="4,2" FontSize="11"
                               DropDownOpened="QueryTagFilterCombo_DropDownOpened" SelectionChanged="QueryTagFilterCombo_SelectionChanged"
                               ToolTip="Show only the Queries grids' rows with this tag (a parent shows its children), or only untagged rows. Applied before each grid's top-N cut."/>
-                    <Button Content="Use by tag" Click="ResourceUseByTagButton_Click" Padding="8,4" Margin="0,0,8,0"
-                            ToolTip="Resource use rolled up by query tag, one table per source."/>
-                    <!-- #1319: per-server global database filter (display-only) -->
-                    <Button x:Name="DatabaseFilterButton" Content="Databases: All" Click="DatabaseFilterButton_Click"
-                            Padding="8,4" Margin="0,0,8,0"
-                            ToolTip="Filter database-scoped views (queries, blocking, per-database config, trends) to selected databases. No effect on server-wide views such as CPU, memory, waits, or jobs."/>
-                    <Popup x:Name="DatabaseFilterPopup" PlacementTarget="{Binding ElementName=DatabaseFilterButton}"
-                           Placement="Bottom" StaysOpen="False" AllowsTransparency="True"
-                           Closed="DatabaseFilterPopup_Closed">
-                        <Border Background="{DynamicResource BackgroundDarkBrush}" BorderBrush="{DynamicResource BorderBrush}"
-                                BorderThickness="1" CornerRadius="4" Padding="8" Width="300">
-                            <Grid>
-                                <Grid.RowDefinitions>
-                                    <RowDefinition Height="Auto"/>
-                                    <RowDefinition Height="Auto"/>
-                                    <RowDefinition Height="Auto"/>
-                                    <RowDefinition Height="Auto"/>
-                                </Grid.RowDefinitions>
-                                <TextBlock Grid.Row="0" Text="Filter Databases" FontWeight="SemiBold" Margin="0,0,0,4"
-                                           Foreground="{DynamicResource ForegroundBrush}"/>
-                                <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,4">
-                                    <Button Content="Select All" Click="DatabaseFilterSelectAll_Click" Padding="6,2" Margin="0,0,4,0" FontSize="11"/>
-                                    <Button Content="Clear All" Click="DatabaseFilterClearAll_Click" Padding="6,2" FontSize="11"/>
-                                    <TextBlock x:Name="DatabaseFilterCountText" Text="All databases" FontSize="10"
-                                               Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
-                                </StackPanel>
-                                <TextBox Grid.Row="2" x:Name="DatabaseFilterSearchBox" TextChanged="DatabaseFilterSearch_TextChanged"
-                                         Margin="0,0,0,4" Padding="4,2"/>
-                                <ListBox Grid.Row="3" x:Name="DatabaseFilterList" Background="Transparent" BorderThickness="0"
-                                         MaxHeight="320" ScrollViewer.VerticalScrollBarVisibility="Auto">
-                                    <ListBox.ItemTemplate>
-                                        <DataTemplate>
-                                            <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
-                                                      Checked="DatabaseFilter_CheckChanged" Unchecked="DatabaseFilter_CheckChanged"
-                                                      Foreground="{DynamicResource ForegroundBrush}" FontSize="11">
-                                                <TextBlock Text="{Binding DisplayName}"/>
-                                            </CheckBox>
-                                        </DataTemplate>
-                                    </ListBox.ItemTemplate>
-                                </ListBox>
-                            </Grid>
-                        </Border>
-                    </Popup>
-                    <!-- #5562: the shared picker replaces the preset combo and the From/To date, hour and minute pickers. -->
-                    <ui:TimeRangePicker x:Name="RangePicker" AutomationProperties.Name="Time range" Margin="0,0,8,0" VerticalAlignment="Center"
-                                        RangeChanged="RangePicker_RangeChanged"/>
-                    <Button Content="Apply to All" Click="ApplyTimeRangeToAll_Click" Padding="8,4" Margin="0,0,8,0"
-                            ToolTip="Apply this time range to all open server tabs"/>
-                    <TextBlock Text="Compare:" VerticalAlignment="Center" Margin="0,0,4,0"
+                </StackPanel>
+                <Button Content="Use by tag" Click="ResourceUseByTagButton_Click" Padding="8,4" Margin="0,0,8,4"
+                        ToolTip="Resource use rolled up by query tag, one table per source."/>
+                <!-- #1319: per-server global database filter (display-only) -->
+                <Button x:Name="DatabaseFilterButton" Content="Databases: All" Click="DatabaseFilterButton_Click"
+                        Padding="8,4" Margin="0,0,8,4"
+                        ToolTip="Filter database-scoped views (queries, blocking, per-database config, trends) to selected databases. No effect on server-wide views such as CPU, memory, waits, or jobs."/>
+                <Popup x:Name="DatabaseFilterPopup" PlacementTarget="{Binding ElementName=DatabaseFilterButton}"
+                       Placement="Bottom" StaysOpen="False" AllowsTransparency="True"
+                       Closed="DatabaseFilterPopup_Closed">
+                    <Border Background="{DynamicResource BackgroundDarkBrush}" BorderBrush="{DynamicResource BorderBrush}"
+                            BorderThickness="1" CornerRadius="4" Padding="8" Width="300">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Text="Filter Databases" FontWeight="SemiBold" Margin="0,0,0,4"
+                                       Foreground="{DynamicResource ForegroundBrush}"/>
+                            <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,4">
+                                <Button Content="Select All" Click="DatabaseFilterSelectAll_Click" Padding="6,2" Margin="0,0,4,0" FontSize="11"/>
+                                <Button Content="Clear All" Click="DatabaseFilterClearAll_Click" Padding="6,2" FontSize="11"/>
+                                <TextBlock x:Name="DatabaseFilterCountText" Text="All databases" FontSize="10"
+                                           Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                            </StackPanel>
+                            <TextBox Grid.Row="2" x:Name="DatabaseFilterSearchBox" TextChanged="DatabaseFilterSearch_TextChanged"
+                                     Margin="0,0,0,4" Padding="4,2"/>
+                            <ListBox Grid.Row="3" x:Name="DatabaseFilterList" Background="Transparent" BorderThickness="0"
+                                     MaxHeight="320" ScrollViewer.VerticalScrollBarVisibility="Auto">
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
+                                                  Checked="DatabaseFilter_CheckChanged" Unchecked="DatabaseFilter_CheckChanged"
+                                                  Foreground="{DynamicResource ForegroundBrush}" FontSize="11">
+                                            <TextBlock Text="{Binding DisplayName}"/>
+                                        </CheckBox>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </Grid>
+                    </Border>
+                </Popup>
+                <!-- #5562: the shared picker replaces the preset combo and the From/To date, hour and minute pickers. -->
+                <ui:TimeRangePicker x:Name="RangePicker" AutomationProperties.Name="Time range" Margin="0,0,8,4" VerticalAlignment="Center"
+                                    RangeChanged="RangePicker_RangeChanged"/>
+                <Button Content="Apply to All" Click="ApplyTimeRangeToAll_Click" Padding="8,4" Margin="0,0,8,4"
+                        ToolTip="Apply this time range to all open server tabs"/>
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="Compare:" VerticalAlignment="Center" Margin="0,0,4,4"
                                Foreground="{DynamicResource ForegroundBrush}"/>
-                    <ComboBox x:Name="CompareToCombo" AutomationProperties.Name="Compare to" ToolTipService.ShowOnDisabled="True" SelectedIndex="0" Width="130" Margin="0,0,8,0"
+                    <ComboBox x:Name="CompareToCombo" AutomationProperties.Name="Compare to" ToolTipService.ShowOnDisabled="True" SelectedIndex="0" Width="130" Margin="0,0,8,4"
                               SelectionChanged="CompareToCombo_SelectionChanged"
                               ToolTip="Compare current period against a baseline">
                         <ComboBoxItem Content="None"/>
@@ -247,26 +244,30 @@
                         <ComboBoxItem Content="Last week"/>
                         <ComboBoxItem Content="Same day last week"/>
                     </ComboBox>
-                    <Button x:Name="RefreshDataButton" Content="Refresh" Click="RefreshDataButton_Click" Padding="12,4"/>
-                    <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="8,2"/>
-                    <CheckBox x:Name="AutoRefreshCheckBox" Content="_Auto-refresh" VerticalAlignment="Center" Margin="0,0,4,0"
+                </StackPanel>
+                <Button x:Name="RefreshDataButton" Content="Refresh" Click="RefreshDataButton_Click" Padding="12,4" Margin="0,0,0,4"/>
+                <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="8,2"/>
+                <StackPanel Orientation="Horizontal">
+                    <CheckBox x:Name="AutoRefreshCheckBox" Content="_Auto-refresh" VerticalAlignment="Center" Margin="0,0,4,4"
                               IsChecked="True" Checked="AutoRefreshCheckBox_Changed" Unchecked="AutoRefreshCheckBox_Changed"/>
-                    <ComboBox x:Name="AutoRefreshIntervalCombo" AutomationProperties.Name="Auto-refresh interval" SelectedIndex="1" Width="70" Margin="0,0,0,0"
+                    <ComboBox x:Name="AutoRefreshIntervalCombo" AutomationProperties.Name="Auto-refresh interval" SelectedIndex="1" Width="70" Margin="0,0,0,4"
                               SelectionChanged="AutoRefreshInterval_Changed">
                         <ComboBoxItem Content="30s"/>
                         <ComboBoxItem Content="1m"/>
                         <ComboBoxItem Content="5m"/>
                     </ComboBox>
-                    <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="8,2"/>
-                    <TextBlock Text="Times:" VerticalAlignment="Center" Margin="0,0,4,0" Foreground="{DynamicResource ForegroundBrush}"/>
-                    <ComboBox x:Name="TimeDisplayModeBox" AutomationProperties.Name="Time display" Width="120" SelectionChanged="TimeDisplayMode_SelectionChanged"
+                </StackPanel>
+                <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="8,2"/>
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="Times:" VerticalAlignment="Center" Margin="0,0,4,4" Foreground="{DynamicResource ForegroundBrush}"/>
+                    <ComboBox x:Name="TimeDisplayModeBox" AutomationProperties.Name="Time display" Width="120" Margin="0,0,0,4" SelectionChanged="TimeDisplayMode_SelectionChanged"
                               ToolTip="How timestamps are displayed">
                         <ComboBoxItem Content="Server Time" Tag="ServerTime"/>
                         <ComboBoxItem Content="Local Time" Tag="LocalTime"/>
                         <ComboBoxItem Content="UTC" Tag="UTC"/>
                     </ComboBox>
                 </StackPanel>
-            </Grid>
+            </WrapPanel>
         </Border>
 
         <!-- Main Tab Control -->
@@ -389,11 +390,11 @@
                                         <DataGridTextColumn Binding="{Binding CollectionTimeLocal}" Width="140" SortMemberPath="CollectionTime">
                                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         </DataGridTextColumn>
-                                        <DataGridTemplateColumn Width="500">
+                                        <DataGridTemplateColumn Width="320">
                                             <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryText" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Query Text" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
                                                                                         <DataGridTemplateColumn.CellTemplate>
                                                 <DataTemplate>
-                                                    <TextBlock Text="{Binding QueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2"
+                                                    <TextBlock Text="{Binding QueryText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" Margin="5,2"
                                                                ToolTip="{Binding QueryText}"/>
                                                 </DataTemplate>
                                             </DataGridTemplateColumn.CellTemplate>
@@ -514,24 +515,35 @@
                                       Sorting="QueryStatsGrid_Sorting"
                                       MouseDoubleClick="QueryStatsGrid_MouseDoubleClick">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Header="Tag" Binding="{Binding QueryTag}" Width="140"/>
                                     <DataGridTextColumn Binding="{Binding DatabaseDisplay}" SortMemberPath="DatabaseName" Width="120">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding ModuleName}" Width="200">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ModuleName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Module" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
-                                    </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding LastExecutionTimeLocal}" Width="140" SortMemberPath="LastExecutionTime">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastExecutionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Execution" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
-                                    </DataGridTextColumn>
+                                    <DataGridTemplateColumn SortMemberPath="TotalExecutions" Width="90">
+                                        <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalExecutions" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Executions" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
+                                        <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                                            <ui:BarChartCell Value="{Binding TotalExecutions}" Maximum="{Binding BarMaxExecutions, RelativeSource={RelativeSource AncestorType={x:Type controls:ServerTab}}}" Text="{Binding TotalExecutions, StringFormat=N0}"/>
+                                        </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                    <DataGridTemplateColumn SortMemberPath="TotalCpuMs" Width="110">
+                                        <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Total CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
+                                        <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                                            <ui:BarChartCell Value="{Binding TotalCpuMs}" Maximum="{Binding BarMaxTotalCpu, RelativeSource={RelativeSource AncestorType={x:Type controls:ServerTab}}}" Text="{Binding TotalCpuMs, StringFormat=N1}"/>
+                                        </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                    <DataGridTemplateColumn SortMemberPath="TotalElapsedMs" Width="130">
+                                        <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalElapsedMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Total Duration (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
+                                        <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                                            <ui:BarChartCell Value="{Binding TotalElapsedMs}" Maximum="{Binding BarMaxTotalElapsed, RelativeSource={RelativeSource AncestorType={x:Type controls:ServerTab}}}" Text="{Binding TotalElapsedMs, StringFormat=N1}"/>
+                                        </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
                                     <DataGridTextColumn Binding="{Binding CreationTimeLocal}" Width="140" SortMemberPath="CreationTime">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CreationTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Creation Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTemplateColumn Width="500">
+                                    <DataGridTemplateColumn Width="320">
                                         <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryText" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Query Text" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
                                                                                 <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
-                                                <TextBlock Text="{Binding QueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2"
+                                                <TextBlock Text="{Binding QueryText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" Margin="5,2"
                                                            ToolTip="{Binding QueryText}"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
@@ -545,20 +557,18 @@
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>
-                                    <DataGridTemplateColumn SortMemberPath="TotalExecutions" Width="90">
-                                        <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalExecutions" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Executions" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
-                                        <DataGridTemplateColumn.CellTemplate><DataTemplate>
-                                            <ui:BarChartCell Value="{Binding TotalExecutions}" Maximum="{Binding BarMaxExecutions, RelativeSource={RelativeSource AncestorType={x:Type controls:ServerTab}}}" Text="{Binding TotalExecutions, StringFormat=N0}"/>
-                                        </DataTemplate></DataGridTemplateColumn.CellTemplate>
-                                    </DataGridTemplateColumn>
-                                    <DataGridTemplateColumn SortMemberPath="TotalCpuMs" Width="110">
-                                        <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Total CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
-                                        <DataGridTemplateColumn.CellTemplate><DataTemplate>
-                                            <ui:BarChartCell Value="{Binding TotalCpuMs}" Maximum="{Binding BarMaxTotalCpu, RelativeSource={RelativeSource AncestorType={x:Type controls:ServerTab}}}" Text="{Binding TotalCpuMs, StringFormat=N1}"/>
-                                        </DataTemplate></DataGridTemplateColumn.CellTemplate>
-                                    </DataGridTemplateColumn>
+                                    <DataGridTextColumn Header="Tag" Binding="{Binding QueryTag}" Width="140"/>
                                     <DataGridTextColumn Binding="{Binding AvgCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="100">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Avg CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding AvgElapsedMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="120">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgElapsedMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Avg Duration (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding ModuleName}" Width="200">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ModuleName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Module" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding LastExecutionTimeLocal}" Width="140" SortMemberPath="LastExecutionTime">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastExecutionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Execution" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding WorkerTimePerSecond, StringFormat=N1}" ElementStyle="{StaticResource NumericCell}" Width="120">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="WorkerTimePerSecond" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Peak CPU (ms/s)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
@@ -568,15 +578,6 @@
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding TotalClrMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="110">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalClrMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Total CLR (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
-                                    </DataGridTextColumn>
-                                    <DataGridTemplateColumn SortMemberPath="TotalElapsedMs" Width="130">
-                                        <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalElapsedMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Total Duration (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
-                                        <DataGridTemplateColumn.CellTemplate><DataTemplate>
-                                            <ui:BarChartCell Value="{Binding TotalElapsedMs}" Maximum="{Binding BarMaxTotalElapsed, RelativeSource={RelativeSource AncestorType={x:Type controls:ServerTab}}}" Text="{Binding TotalElapsedMs, StringFormat=N1}"/>
-                                        </DataTemplate></DataGridTemplateColumn.CellTemplate>
-                                    </DataGridTemplateColumn>
-                                    <DataGridTextColumn Binding="{Binding AvgElapsedMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="120">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgElapsedMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Avg Duration (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTemplateColumn SortMemberPath="TotalLogicalReads" Width="100">
                                         <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalLogicalReads" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Total Reads" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
@@ -705,11 +706,11 @@
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
                                         <DataGridTextColumn.Header><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTemplateColumn Width="500">
+                                    <DataGridTemplateColumn Width="320">
                                         <DataGridTemplateColumn.Header><TextBlock Text="Query Text" FontWeight="Bold" VerticalAlignment="Center"/></DataGridTemplateColumn.Header>
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
-                                                <TextBlock Text="{Binding QueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2"
+                                                <TextBlock Text="{Binding QueryText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" Margin="5,2"
                                                            ToolTip="{Binding QueryText}"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
@@ -950,11 +951,11 @@
                                     <!-- #1981: parity with the other two comparison grids' text columns. This is a
                                          REPRESENTATIVE statement captured from inside the procedure (latest text
                                          sharing the module's sql_handle), not the definition. -->
-                                    <DataGridTemplateColumn Width="500">
+                                    <DataGridTemplateColumn Width="320">
                                         <DataGridTemplateColumn.Header><TextBlock Text="Statement (representative)" FontWeight="Bold"/></DataGridTemplateColumn.Header>
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
-                                                <TextBlock Text="{Binding QueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2"
+                                                <TextBlock Text="{Binding QueryText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" Margin="5,2"
                                                            ToolTip="{Binding QueryText}"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
@@ -1050,11 +1051,11 @@
                                     <DataGridTextColumn Binding="{Binding FirstExecutionTimeLocal}" Width="140" SortMemberPath="FirstExecutionTime">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FirstExecutionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="First Execution" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTemplateColumn Width="500">
+                                    <DataGridTemplateColumn Width="320">
                                         <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryText" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Query Text" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
                                                                                 <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
-                                                <TextBlock Text="{Binding QueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2"
+                                                <TextBlock Text="{Binding QueryText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" Margin="5,2"
                                                            ToolTip="{Binding QueryText}"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
@@ -1246,11 +1247,11 @@
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
                                         <DataGridTextColumn.Header><TextBlock Text="Database" FontWeight="Bold"/></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTemplateColumn Width="500">
+                                    <DataGridTemplateColumn Width="320">
                                         <DataGridTemplateColumn.Header><TextBlock Text="Query Text" FontWeight="Bold"/></DataGridTemplateColumn.Header>
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
-                                                <TextBlock Text="{Binding QueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2"
+                                                <TextBlock Text="{Binding QueryText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" Margin="5,2"
                                                            ToolTip="{Binding QueryText}"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
@@ -1331,11 +1332,11 @@
                                         <DataGridTextColumn Binding="{Binding CollectionTimeLocal}" Width="150" SortMemberPath="CollectionTime">
                                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectionTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         </DataGridTextColumn>
-                                        <DataGridTemplateColumn Width="500" SortMemberPath="QueryText">
+                                        <DataGridTemplateColumn Width="320" SortMemberPath="QueryText">
                                             <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryText" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Query Text" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
                                             <DataGridTemplateColumn.CellTemplate>
                                                 <DataTemplate>
-                                                    <TextBlock Text="{Binding QueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2"
+                                                    <TextBlock Text="{Binding QueryText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" Margin="5,2"
                                                                ToolTip="{Binding QueryText}"/>
                                                 </DataTemplate>
                                             </DataGridTemplateColumn.CellTemplate>
@@ -1506,10 +1507,11 @@
                 <TabControl x:Name="MemorySubTabControl" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                     <!-- Memory Overview Sub-Tab -->
                     <TabItem Header="Overview">
-                        <Grid Margin="8">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8"><!-- #8098: scrolls when the chart cannot keep its minimum height under the summary panel -->
+                        <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="420">
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
-                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                             </Grid.RowDefinitions>
 
                             <!-- Memory Summary Panel -->
@@ -1564,7 +1566,7 @@
 
                             <!-- Memory Trend Chart -->
                             <ScottPlot:WpfPlot Grid.Row="1" x:Name="MemoryChart"/>
-                        </Grid>
+                        </Grid></ScrollViewer>
                     </TabItem>
 
                     <!-- Memory Clerks Sub-Tab -->
@@ -2385,21 +2387,21 @@
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="200">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding StateDisplay}" Width="200">
+                                    <DataGridTextColumn Binding="{Binding StateDisplay}" Width="Auto" MinWidth="120">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="StateDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="State" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
-                                    </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding ReadonlyReasonDisplay}" Width="190">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ReadonlyReasonDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Read-Only Reason" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
-                                    </DataGridTextColumn>
-                                    <DataGridTextColumn Header="Used MB" Binding="{Binding CurrentStorageMb, StringFormat=N0}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Cap MB" Binding="{Binding MaxStorageMb, StringFormat=N0}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="% of Cap" Binding="{Binding PercentOfCapDisplay}" SortMemberPath="PercentOfCap" Width="80" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Binding="{Binding SizeBasedCleanupMode}" Width="130">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SizeBasedCleanupMode" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Size Cleanup" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Header="Stale Days" Binding="{Binding StaleQueryThresholdDays}" Width="85" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Max Plans/Query" Binding="{Binding MaxPlansPerQuery}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Interval Min" Binding="{Binding IntervalLengthMinutes}" Width="95" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Binding="{Binding SizeBasedCleanupMode}" Width="130">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SizeBasedCleanupMode" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Size Cleanup" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="Used MB" Binding="{Binding CurrentStorageMb, StringFormat=N0}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Cap MB" Binding="{Binding MaxStorageMb, StringFormat=N0}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="% of Cap" Binding="{Binding PercentOfCapDisplay}" SortMemberPath="PercentOfCap" Width="80" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Binding="{Binding ReadonlyReasonDisplay}" Width="Auto">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ReadonlyReasonDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Read-Only Reason" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    </DataGridTextColumn>
                                     <!-- v64 (#3796): the two capture modes, trailing like the store columns and the MCP payload. ALL is the
                                          plan-churn factory; a dash is a pre-rung row (or, for wait stats, a 2016 engine), never OFF. -->
                                     <DataGridTextColumn Binding="{Binding CaptureModeDisplay}" Width="125">
@@ -2609,9 +2611,10 @@
                  latest-snapshot metric/value grid below whose warning rows highlight (the collector's own
                  CASE-computed pressure flags). Loads on tab activation via RefreshVisibleTabAsync (index 14). -->
             <TabItem Header="CPU Scheduler">
-                <Grid Margin="8">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8"><!-- #8098: scrolls when the chart cannot keep its minimum height above the snapshot grid -->
+                <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="420">
                     <Grid.RowDefinitions>
-                        <RowDefinition Height="2*"/>
+                        <RowDefinition Height="2*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
                     <ScottPlot:WpfPlot Grid.Row="0" x:Name="CpuSchedulerChart"/>
@@ -2639,7 +2642,7 @@
                     </DataGrid>
                     <!-- Shown only where the cpu_scheduler_stats collector does not run (Azure SQL Database). -->
                     <TextBlock Grid.Row="1" x:Name="CpuSchedulerNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
-                </Grid>
+                </Grid></ScrollViewer>
             </TabItem>
 
             <!-- Plan Cache Tab — the Lite port of Darling's Plan Cache surface (plan_cache_stats). The
@@ -2831,7 +2834,14 @@
                             </Grid>
                         </TabItem>
                         <TabItem Header="Duration Trends">
-                            <ScottPlot:WpfPlot x:Name="CollectorDurationChart" Margin="4"/>
+                            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #8086: scrolls when the legend leaves the plot under its share of the chart -->
+                            <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="260">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                                </Grid.RowDefinitions>
+                                <ScottPlot:WpfPlot x:Name="CollectorDurationChart" Margin="4"/>
+                            </Grid>
+                        </ScrollViewer>
                         </TabItem>
                     </TabControl>
                 </Grid>
@@ -3093,9 +3103,9 @@
                                 <DataGrid x:Name="SignificantWaitsGrid" AutoGenerateColumns="False" IsReadOnly="True" RowStyle="{StaticResource GridRowStyle}" HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                     <DataGrid.Columns>
                                         <DataGridTextColumn Binding="{Binding EventTimeLocal}" Width="145" SortMemberPath="EventTime"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EventTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Event Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
-                                        <DataGridTemplateColumn Width="560">
+                                        <DataGridTemplateColumn Width="320">
                                             <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryText" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Query Text" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
-                                            <DataGridTemplateColumn.CellTemplate><DataTemplate><TextBlock Text="{Binding QueryText}" TextWrapping="Wrap" MaxHeight="90" Margin="5,2" ToolTip="{Binding QueryText}"/></DataTemplate></DataGridTemplateColumn.CellTemplate>
+                                            <DataGridTemplateColumn.CellTemplate><DataTemplate><TextBlock Text="{Binding QueryText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" Margin="5,2" ToolTip="{Binding QueryText}"/></DataTemplate></DataGridTemplateColumn.CellTemplate>
                                         </DataGridTemplateColumn>
                                         <DataGridTextColumn Binding="{Binding WaitType}" Width="190"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="WaitType" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Wait Type" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding DurationMs, StringFormat=N0}" Width="105" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DurationMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Duration ms" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
