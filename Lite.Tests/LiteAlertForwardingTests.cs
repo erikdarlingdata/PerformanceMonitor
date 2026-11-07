@@ -1210,16 +1210,12 @@ public partial class LiteAlertForwardingTests : IDisposable
     }
 
     [Fact]
-    public async Task Deliverer_NonBlockingMetrics_SendOnce_WithNumerics()
+    public async Task Deliverer_NonBlockingMetrics_WithoutIncidents_SendOnce_WithNumerics()
     {
-        /* The old loop sent every non-blocking/deadlock metric directly (:312-322 poison,
-           :384-394 LRQ, ...) with its numeric values — never through the per-event split, even
-           when its context has incidents and the mode is PerEvent. */
+        /* A metric whose context carries no incidents is one direct send with its numeric values, in Per-event mode
+           too: the split is decided by the shared rule (#8246, PerEventNotification.Splits), which needs incidents. */
         App.AlertDeliveryMode = AlertNotificationMode.PerEvent;
-        var context = new AlertContext
-        {
-            Incidents = new List<AlertIncident> { new("a", new[] { "dbo.Users" }), new("b", new[] { "dbo.Posts" }) }
-        };
+        var context = new AlertContext();
         var (deliverer, _, sends) = BuildDeliverer();
 
         await deliverer.DeliverAsync(Outcome("Long-Running Query", current: "1 query, longest 45m", threshold: "30m", context: context, numCur: 45, numThr: 30));
