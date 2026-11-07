@@ -43,7 +43,7 @@ The listener holds two Socket Mode connections. Slack sends each event to one of
 
 1. an event with a `bot_id` or the `bot_message` subtype (the alert webhook's posts and the bot's own);
 2. a payload from another workspace (`team_id`, or `team.id` on a press) or another app (`api_app_id`), against the ids learned at connect;
-3. a press whose `user.team_id` differs from `team.id`, a person from another workspace in a shared channel;
+3. an author from another workspace: a press whose `user.team_id` differs from `team.id`, or a message or mention whose `user_team` (else `team`) is not the store's workspace, as a Slack Connect member's is even though the event carries the host workspace's `team_id`; an event that names neither is dropped too;
 4. a channel no route of this store names;
 5. an event already seen by its type, channel and ts, one of Slack's retries.
 

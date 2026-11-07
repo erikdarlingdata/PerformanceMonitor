@@ -277,7 +277,7 @@ public sealed class SlackSocketModeListenerTests
     private static string Disconnect(string reason = "warning") =>
         new JsonObject { ["type"] = "disconnect", ["reason"] = reason, ["debug_info"] = new JsonObject { ["host"] = "applink-1" } }.ToJsonString();
 
-    private static string MessageEnvelope(string envelopeId, string channel = OwnedChannel, string ts = "1700000000.000100", string teamId = Team, string appId = App, string? botId = null, string? subtype = null, string eventType = "message", string user = "U0PERSON")
+    private static string MessageEnvelope(string envelopeId, string channel = OwnedChannel, string ts = "1700000000.000100", string teamId = Team, string appId = App, string? botId = null, string? subtype = null, string eventType = "message", string user = "U0PERSON", string? authorTeam = Team, string? userTeam = null)
     {
         var ev = new JsonObject
         {
@@ -288,6 +288,16 @@ public sealed class SlackSocketModeListenerTests
             ["text"] = "hello there",
             ["thread_ts"] = "1699999999.000001",
         };
+        if (authorTeam is not null)
+        {
+            ev["team"] = authorTeam;
+        }
+
+        if (userTeam is not null)
+        {
+            ev["user_team"] = userTeam;
+        }
+
         if (botId is not null)
         {
             ev["bot_id"] = botId;
@@ -415,6 +425,30 @@ public sealed class SlackSocketModeListenerTests
         Assert.True(snapshot.IdsLearned);
         Assert.Empty(handlers.Interactions);
         Assert.Single(handlers.Events);
+    }
+
+    [Fact]
+    public async Task Drops_a_mention_by_a_person_of_another_workspace_in_an_owned_channel()
+    {
+        var (listener, transport, handlers, status, _) = Build();
+        var (run, stop) = await StartAsync(listener, transport);
+        var socket = transport.Sockets[0];
+        /* A Slack Connect member's mention arrives under the host workspace's team_id, with the author's own workspace in user_team. */
+        socket.Feed(MessageEnvelope("e1", eventType: "app_mention", userTeam: "T9SHARED"));
+        socket.Feed(MessageEnvelope("e2", ts: "1700000000.000101", authorTeam: "T9SHARED"));
+        socket.Feed(MessageEnvelope("e3", ts: "1700000000.000102", authorTeam: null));
+        socket.Feed(MessageEnvelope("e4", ts: "1700000000.000103", botId: "B0HOOK", userTeam: "T9SHARED"));
+        socket.Feed(MessageEnvelope("e5", eventType: "app_mention", ts: "1700000000.000104", userTeam: Team, authorTeam: "T9HOST"));
+        await handlers.WhenHandled(1).WaitAsync(Guard);
+        await StopAsync(run, stop);
+
+        var snapshot = status.Read();
+        Assert.Equal(2, snapshot.DroppedByReason["user_team"]);
+        Assert.Equal(1, snapshot.DroppedByReason["malformed"]);
+        Assert.Equal(1, snapshot.DroppedByReason["bot"]);
+        Assert.Equal(5, snapshot.Acked);
+        var inbound = Assert.Single(handlers.Events);
+        Assert.Equal("1700000000.000104", inbound.Ts);
     }
 
     [Fact]
@@ -625,13 +659,15 @@ public sealed class SlackEnvelopeFilterTests
 {
     private static bool Owned(string channel) => channel == "C0OWNED";
 
-    private static JsonObject Event(string? teamId = "T1", string? appId = "A1", string? channel = "C0OWNED", string? ts = "1.2", string? botId = null, string? type = "message")
+    private static JsonObject Event(string? teamId = "T1", string? appId = "A1", string? channel = "C0OWNED", string? ts = "1.2", string? botId = null, string? type = "message", string? team = "T1", string? userTeam = null)
     {
         var ev = new JsonObject();
         if (type is not null) ev["type"] = type;
         if (channel is not null) ev["channel"] = channel;
         if (ts is not null) ev["ts"] = ts;
         if (botId is not null) ev["bot_id"] = botId;
+        if (team is not null) ev["team"] = team;
+        if (userTeam is not null) ev["user_team"] = userTeam;
         ev["user"] = "U1";
         var payload = new JsonObject { ["event"] = ev };
         if (teamId is not null) payload["team_id"] = teamId;
@@ -657,6 +693,22 @@ public sealed class SlackEnvelopeFilterTests
         Assert.Equal(SlackEnvelopeVerdict.DropMalformed, SlackEnvelopeFilter.Judge("events_api", new JsonObject { ["team_id"] = "T1" }, "T1", "A1", Owned, out _, out _));
         Assert.Equal(SlackEnvelopeVerdict.DropMalformed, SlackEnvelopeFilter.Judge("events_api", null, "T1", "A1", Owned, out _, out _));
         Assert.Equal(SlackEnvelopeVerdict.DropUnhandledType, SlackEnvelopeFilter.Judge("slash_commands", Event(), "T1", "A1", Owned, out _, out _));
+    }
+
+    [Fact]
+    public void Judges_an_event_by_its_author_workspace()
+    {
+        /* user_team names a Slack Connect author's own workspace; team is the host's. user_team wins when both are there. */
+        Assert.Equal(SlackEnvelopeVerdict.DropUserTeam, SlackEnvelopeFilter.Judge("events_api", Event(type: "app_mention", userTeam: "T9"), "T1", "A1", Owned, out _, out _));
+        Assert.Equal(SlackEnvelopeVerdict.DropUserTeam, SlackEnvelopeFilter.Judge("events_api", Event(team: "T9"), "T1", "A1", Owned, out _, out _));
+        Assert.Equal(SlackEnvelopeVerdict.DropUserTeam, SlackEnvelopeFilter.Judge("events_api", Event(team: null, userTeam: "T9"), "T1", "A1", Owned, out _, out _));
+        Assert.Equal(SlackEnvelopeVerdict.Accept, SlackEnvelopeFilter.Judge("events_api", Event(team: "T9", userTeam: "T1"), "T1", "A1", Owned, out _, out _));
+        Assert.Equal(SlackEnvelopeVerdict.Accept, SlackEnvelopeFilter.Judge("events_api", Event(team: null, userTeam: "T1"), "T1", "A1", Owned, out _, out _));
+        /* Neither field: the author's workspace cannot be checked, so the event is not accepted. */
+        Assert.Equal(SlackEnvelopeVerdict.DropMalformed, SlackEnvelopeFilter.Judge("events_api", Event(team: null), "T1", "A1", Owned, out _, out _));
+        /* The bot filter still runs first, and the author check runs before the channel check. */
+        Assert.Equal(SlackEnvelopeVerdict.DropBot, SlackEnvelopeFilter.Judge("events_api", Event(botId: "B1", userTeam: "T9"), "T1", "A1", Owned, out _, out _));
+        Assert.Equal(SlackEnvelopeVerdict.DropUserTeam, SlackEnvelopeFilter.Judge("events_api", Event(channel: "C9", userTeam: "T9"), "T1", "A1", Owned, out _, out _));
     }
 
     [Fact]
