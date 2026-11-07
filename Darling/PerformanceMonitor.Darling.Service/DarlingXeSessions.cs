@@ -1181,7 +1181,7 @@ WHERE des.name = @session_name;", connection))
                 LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds, limit), connection);
             createCmd.CommandTimeout = 60;
             await ExecuteLongQueryAzureDdlAsync(createCmd, cancellationToken);
-        }, IsBenignXeSessionAlreadyPresentException);
+        }, ErrorNumbersOf);
         logger?.LogInformation("[{Server}] [{Database}] Created the long-query completion XE session's definition over a connection without read-only intent (database-scoped)", server.Config.DisplayName, databaseName);
         return true;
     }
@@ -1784,7 +1784,7 @@ END;", connection);
                 + "\n\n" + LongQueryCompletionsCollector.BuildStartSessionSql(sessionName, databaseScoped: true), connection);
             createCmd.CommandTimeout = 60;
             await ExecuteLongQueryAzureDdlAsync(createCmd, cancellationToken);
-        }, IsBenignXeSessionAlreadyPresentException);
+        }, ErrorNumbersOf);
         logger?.LogInformation("[{Server}] [{Database}] Created and started long-query completion XE session (database-scoped)", server.Config.DisplayName, databaseName);
     }
 
@@ -1818,10 +1818,6 @@ END;", connection);
 
         return true;
     }
-
-    /// <summary><see cref="IsBenignXeSessionAlreadyPresent(SqlException)"/> for any exception; false when it is not a <see cref="SqlException"/>.</summary>
-    private static bool IsBenignXeSessionAlreadyPresentException(Exception ex) =>
-        ex is SqlException sql && IsBenignXeSessionAlreadyPresent(sql);
 }
 
 /// <summary>

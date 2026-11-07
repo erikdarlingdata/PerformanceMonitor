@@ -1098,10 +1098,11 @@ public static class AlwaysOnXeAzureEnsure
             }
             catch (Exception ex) when (ex is not OperationCanceledException
                 && kind is AlwaysOnXeSessionKind.Deadlock or AlwaysOnXeSessionKind.BlockedProcess
-                && !database.IsAlreadyPresent(ex))
+                && database.ErrorNumbers(ex).Any(RingBufferTarget.OptionRefusedErrorNumbers.Contains))
             {
-                /* #8146: max_events_limit is unverified on Azure SQL Database; a session at the default limit is better than none, and
-                   the loss note shows the session's actual limit. One retry without it; if that fails too, its exception surfaces. */
+                /* #8146: the engine refused max_events_limit (RingBufferTarget.OptionRefusedErrorNumbers); a session at the default limit
+                   is better than none, and the loss note shows the session's actual limit. One retry without it; if that fails too, its
+                   exception surfaces. Any other failure, "already there" included, surfaces as before #8146. */
                 await CreateOnceAsync(database, kind, sessionName, withoutUnverifiedActions: false, ringBufferMaxEvents: null, cancellationToken);
                 return false;
             }

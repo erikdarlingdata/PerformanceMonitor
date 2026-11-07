@@ -200,10 +200,6 @@ WHERE ses.name = @session_name;", connection))
         AppLogger.Info("XeSession", $"[{server.DisplayName}] Created and started blocked process XE session");
     }
 
-    /// <summary><see cref="IsBenignXeSessionAlreadyPresent(SqlException)"/> for any exception; false when it is not a <see cref="SqlException"/> (#8146).</summary>
-    private static bool IsBenignXeSessionAlreadyPresentException(Exception ex) =>
-        ex is SqlException sql && IsBenignXeSessionAlreadyPresent(sql);
-
     /// <summary>
     /// True when every error is a benign "the session is already there" extended-events error:
     /// 25631 (event session already exists) or 25705 (already started). On Azure SQL DB the XE

@@ -33,20 +33,22 @@ public sealed class RingBufferTargetTests
         Assert.Contains("max_events_limit = 5000", sql, StringComparison.Ordinal);
     }
 
-    private static bool AlreadyPresent(Exception ex) => ex is SqlException sql && sql.Number == 25631;
+    private static IEnumerable<int> Numbers(Exception ex) => ex is SqlException sql ? [sql.Number] : [];
 
     /* The Azure SQL Database long-query creates (both apps) go through CreateWithoutLimitOnRefusalAsync, because
        max_events_limit is unverified there: a refusal gets one retry without the option, so the session still exists. */
-    [Fact]
-    public async Task AzureCreate_Refused_IsRetriedOnceWithoutTheLimit()
+    [Theory]
+    [InlineData(25629)]
+    [InlineData(25713)]
+    public async Task AzureCreate_OptionRefused_IsRetriedOnceWithoutTheLimit(int refusal)
     {
         var sent = new List<int?>();
 
         await RingBufferTarget.CreateWithoutLimitOnRefusalAsync(5000, limit =>
         {
             sent.Add(limit);
-            return limit is null ? Task.CompletedTask : Task.FromException(SqlExceptionFactory.Create(25706, errorClass: 16, message: "refused"));
-        }, AlreadyPresent);
+            return limit is null ? Task.CompletedTask : Task.FromException(SqlExceptionFactory.Create(refusal, errorClass: 16, message: "refused"));
+        }, Numbers);
 
         Assert.Equal(new int?[] { 5000, null }, sent);
     }
@@ -60,11 +62,31 @@ public sealed class RingBufferTargetTests
         {
             sent.Add(limit);
             return Task.CompletedTask;
-        }, AlreadyPresent);
+        }, Numbers);
 
         Assert.Equal(new int?[] { 5000 }, sent);
     }
 
+
+    /* #8146: only the engine refusing the option is worth a retry without it. A create that fails for another reason (a read-only
+       database, a missing permission) would fail again, and sending it twice doubles the load on a server that said no. */
+    [Theory]
+    [InlineData(3906)]
+    [InlineData(262)]
+    [InlineData(1088)]
+    public async Task AzureCreate_FailureUnrelatedToTheOption_IsNotRetried_AndReachesTheCaller(int number)
+    {
+        var sent = new List<int?>();
+
+        var ex = await Assert.ThrowsAsync<SqlException>(() => RingBufferTarget.CreateWithoutLimitOnRefusalAsync(5000, limit =>
+        {
+            sent.Add(limit);
+            return Task.FromException(SqlExceptionFactory.Create(number, errorClass: 16, message: "not about the limit"));
+        }, Numbers));
+
+        Assert.Equal(number, ex.Number);
+        Assert.Equal(new int?[] { 5000 }, sent);
+    }
     [Fact]
     public async Task AzureCreate_AlreadyPresent_IsNotRetried_AndReachesTheCaller()
     {
@@ -74,7 +96,7 @@ public sealed class RingBufferTargetTests
         {
             sent.Add(limit);
             return Task.FromException(SqlExceptionFactory.Create(25631, errorClass: 16, message: "already exists"));
-        }, AlreadyPresent));
+        }, Numbers));
 
         Assert.Equal(25631, ex.Number);
         Assert.Equal(new int?[] { 5000 }, sent);
@@ -89,7 +111,7 @@ public sealed class RingBufferTargetTests
         {
             sent.Add(limit);
             return Task.FromCanceled(new CancellationToken(canceled: true));
-        }, AlreadyPresent));
+        }, Numbers));
 
         Assert.Equal(new int?[] { 5000 }, sent);
     }
@@ -98,7 +120,7 @@ public sealed class RingBufferTargetTests
     public async Task AzureCreate_RetryAlsoRefused_SurfacesTheRetrysException()
     {
         var ex = await Assert.ThrowsAsync<SqlException>(() => RingBufferTarget.CreateWithoutLimitOnRefusalAsync(5000, limit =>
-            Task.FromException(SqlExceptionFactory.Create(limit is null ? 1088 : 25706, errorClass: 16, message: "refused")), AlreadyPresent));
+            Task.FromException(SqlExceptionFactory.Create(limit is null ? 1088 : 25629, errorClass: 16, message: "refused")), Numbers));
 
         Assert.Equal(1088, ex.Number);
     }

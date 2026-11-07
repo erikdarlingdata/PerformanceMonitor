@@ -799,7 +799,7 @@ WHERE des.name = @session_name;", connection))
                     LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds, limit), connection);
                 createCmd.CommandTimeout = CommandTimeoutSeconds;
                 await ExecuteLongQueryAzureDdlAsync(createCmd, cancellationToken);
-            }, IsBenignXeSessionAlreadyPresentException);
+            }, ErrorNumbersOf);
         }
         catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))
         {
@@ -952,7 +952,7 @@ END;", connection);
                 + "\n\n" + LongQueryCompletionsCollector.BuildStartSessionSql(sessionName, databaseScoped: true), connection);
             createCmd.CommandTimeout = CommandTimeoutSeconds;
             await ExecuteLongQueryAzureDdlAsync(createCmd, cancellationToken);
-        }, IsBenignXeSessionAlreadyPresentException);
+        }, ErrorNumbersOf);
         AppLogger.Info("XeSession", $"[Azure SQL DB:{connection.Database}] Created and started long-query completion XE session (database-scoped)");
     }
 
