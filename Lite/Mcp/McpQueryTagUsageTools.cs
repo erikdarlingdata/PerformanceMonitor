@@ -157,7 +157,21 @@ public sealed class McpQueryTagUsageTools
 
             if (tags.Count == 0)
             {
-                return McpHelpers.Status("empty", QueryTagUsageLabels.NoTagsMessage);
+                /* The shape of Darling's no-tag answer and of this tool's own empty answer below: the scope, the resolved window, tag null and
+                   sections_additive false, with no sections. The outer wrapper adds the window notice as it does for every empty answer. */
+                var noTags = new Dictionary<string, object?>
+                {
+                    ["status"] = "empty",
+                    ["message"] = QueryTagUsageLabels.NoTagsMessage,
+                    ["scope"] = allServers ? "fleet" : "server",
+                    ["server"] = allServers ? null : scope[0].Name,
+                    ["hours_back"] = hours_back,
+                    ["window_start"] = windowStart.ToString("o", CultureInfo.InvariantCulture),
+                    ["window_end"] = windowEnd.ToString("o", CultureInfo.InvariantCulture),
+                    ["tag"] = null,
+                    ["sections_additive"] = false,
+                };
+                return JsonSerializer.Serialize(noTags, McpHelpers.JsonOptions);
             }
 
             var data = await dataService.GetQueryTagRollupDataAsync(scope.Select(s => s.Id).ToList(), windowStart, windowEnd);

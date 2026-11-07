@@ -257,6 +257,13 @@ public sealed class LiteQueryTagMcpToolTests : IDisposable
             Assert.Equal("empty", status.GetString());
             Assert.Contains("No query tags are defined", root.GetProperty("message").GetString(), StringComparison.Ordinal);
             Assert.False(root.TryGetProperty("sections", out _), "no section is read on a store with no tag");
+            // The answer keeps the shape of the tool's other empty answers (and of the Darling twin's): the scope and the resolved window.
+            Assert.Equal(server is null ? "fleet" : "server", root.GetProperty("scope").GetString());
+            Assert.Equal(server, root.GetProperty("server").GetString());
+            Assert.Equal(24, root.GetProperty("hours_back").GetInt32());
+            Assert.Equal(JsonValueKind.String, root.GetProperty("window_start").ValueKind);
+            Assert.Equal(JsonValueKind.String, root.GetProperty("window_end").ValueKind);
+            Assert.False(root.GetProperty("sections_additive").GetBoolean());
         }
     }
 
