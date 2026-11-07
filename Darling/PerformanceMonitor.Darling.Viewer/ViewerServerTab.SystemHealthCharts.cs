@@ -97,6 +97,14 @@ public partial class ViewerServerTab
         SysHealthRenderer.RenderSickSpinlocksChart(SickSpinlocksChart, _sickSpinlocksHover, data, xMin, xMax);
         SysHealthRenderer.RenderCpuComparisonChart(CpuComparisonChart, _cpuComparisonHover, data, xMin, xMax);
 
+        // #8151: the shared renderer names each axis; the card carries the name and the Y axis shows only the unit.
+        foreach (var counter in new[] { BadPagesChart, DumpRequestsChart, AccessViolationsChart, WriteAccessViolationsChart, NonYieldingTasksChart, LatchWarningsChart, SickSpinlocksChart })
+        {
+            ViewerChartCards.SetUnit(counter, "count");
+        }
+
+        ViewerChartCards.SetUnit(CpuComparisonChart, "%");
+
         KeepPlottedInView(BadPagesChart, startUtc, endUtc);
         KeepPlottedInView(DumpRequestsChart, startUtc, endUtc);
         KeepPlottedInView(AccessViolationsChart, startUtc, endUtc);

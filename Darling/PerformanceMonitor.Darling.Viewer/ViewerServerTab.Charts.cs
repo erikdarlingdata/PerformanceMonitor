@@ -192,7 +192,7 @@ public partial class ViewerServerTab : IDisposable
         CpuChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         CpuChart.Plot.Axes.SetLimitsX(ChartXStart(CpuChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(CpuChart);
-        CpuChart.Plot.YLabel("CPU %");
+        CpuChart.Plot.YLabel("%");
         if (!hostCpuKnown)
         {
             CpuChart.Plot.XLabel(CpuHostUnknownNote);
@@ -288,7 +288,7 @@ public partial class ViewerServerTab : IDisposable
 
         TempDbSizeChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         ReapplyAxisColors(TempDbSizeChart);
-        TempDbSizeChart.Plot.YLabel("Allocated MB");
+        TempDbSizeChart.Plot.YLabel("MB");
         TempDbSizeChart.Plot.Axes.AutoScaleY();
         TempDbSizeChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbSizeChart.Plot, rangeStart, rangeEnd), rangeEnd);
         TempDbSizeChart.Refresh();
@@ -344,7 +344,7 @@ public partial class ViewerServerTab : IDisposable
         TempDbFileIoChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         TempDbFileIoChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbFileIoChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(TempDbFileIoChart);
-        TempDbFileIoChart.Plot.YLabel("tempdb latency ms");
+        TempDbFileIoChart.Plot.YLabel("ms");
         SetChartYLimitsWithLegendPadding(TempDbFileIoChart, 0, maxLatency > 0 ? maxLatency : 10);
         ShowChartLegend(TempDbFileIoChart);
         TempDbFileIoChart.Refresh();
