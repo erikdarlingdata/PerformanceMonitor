@@ -692,8 +692,8 @@
                                  does (DataWindowFloor via LoadActiveQueriesAsync). -->
                             <TextBlock Grid.Row="1" x:Name="QuerySnapshotsTruncationBanner" Visibility="Collapsed"
                                        Padding="8,4" FontWeight="Bold"
-                                       Foreground="{DynamicResource ForegroundBrush}"
-                                       Background="#22FFAA00" TextWrapping="Wrap"/>
+                                       Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                                       Background="#22FFAA00"/>
                             <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,8">
                                 <TextBlock Text="Currently Running Queries" Style="{StaticResource SectionHeader}" VerticalAlignment="Center" Margin="0"/>
                                 <Button x:Name="LatestSnapshotButton" Content="Latest Snapshot"
@@ -906,12 +906,12 @@
                                      than the requested window (RawWindowFloor via LoadTopQueriesAsync). -->
                                 <TextBlock x:Name="QueryStatsTruncationBanner" Visibility="Collapsed"
                                            Padding="8,4" FontWeight="Bold"
-                                           Foreground="{DynamicResource ForegroundBrush}"
-                                           Background="#22FFAA00" TextWrapping="Wrap"/>
+                                           Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                                           Background="#22FFAA00"/>
                                 <TextBlock x:Name="QueryStatsComparisonBanner" Visibility="Collapsed"
                                            Padding="8,4" FontWeight="Bold"
-                                           Foreground="{DynamicResource ForegroundBrush}"
-                                           Background="#2244AAFF" TextWrapping="Wrap"/>
+                                           Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                                           Background="#2244AAFF"/>
                                 <Expander Header="CPU by database" IsExpanded="False" Margin="4,2,4,0">
                                     <ScrollViewer MaxHeight="220" VerticalScrollBarVisibility="Auto">
                                         <ui:MetricBarCards x:Name="QueryStatsByDbCards" Margin="4,4,4,8"/>
@@ -1228,8 +1228,8 @@
                                      shorter than the requested window (RawWindowFloor via LoadTopProceduresAsync). -->
                                 <TextBlock x:Name="ProcStatsTruncationBanner" Visibility="Collapsed"
                                            Padding="8,4" FontWeight="Bold"
-                                           Foreground="{DynamicResource ForegroundBrush}"
-                                           Background="#22FFAA00" TextWrapping="Wrap"/>
+                                           Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                                           Background="#22FFAA00"/>
                                 <!-- #6651: the databases the ranking left out (dropped since an earlier snapshot), and the empty-page
                                      sentence when that left nothing. -->
                                 <TextBlock x:Name="ProcStatsLeftOutBanner" Visibility="Collapsed" TextWrapping="Wrap"
@@ -1238,8 +1238,8 @@
                                            Background="#22FFAA00"/>
                                 <TextBlock x:Name="ProcStatsComparisonBanner" Visibility="Collapsed"
                                            Padding="8,4" FontWeight="Bold"
-                                           Foreground="{DynamicResource ForegroundBrush}"
-                                           Background="#2244AAFF" TextWrapping="Wrap"/>
+                                           Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                                           Background="#2244AAFF"/>
                             </StackPanel>
                             <DataGrid Grid.Row="2" x:Name="ProcedureStatsGrid" Style="{StaticResource DarkGrid}"
                                       RowStyle="{StaticResource QueryPlanGridRowStyle}"
@@ -1456,12 +1456,12 @@
                                      QueryStoreSlicerSql shares the same window, so it shares this floor). -->
                                 <TextBlock x:Name="QueryStoreTruncationBanner" Visibility="Collapsed"
                                            Padding="8,4" FontWeight="Bold"
-                                           Foreground="{DynamicResource ForegroundBrush}"
-                                           Background="#22FFAA00" TextWrapping="Wrap"/>
+                                           Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                                           Background="#22FFAA00"/>
                                 <TextBlock x:Name="QueryStoreComparisonBanner" Visibility="Collapsed"
                                            Padding="8,4" FontWeight="Bold"
-                                           Foreground="{DynamicResource ForegroundBrush}"
-                                           Background="#2244AAFF" TextWrapping="Wrap"/>
+                                           Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                                           Background="#2244AAFF"/>
                             </StackPanel>
                             <DataGrid Grid.Row="2" x:Name="QueryStoreGrid" Style="{StaticResource DarkGrid}"
                                       RowStyle="{StaticResource QueryStorePlanGridRowStyle}"
@@ -1932,8 +1932,8 @@
                                  and a range that reaches before it would read as a verdict over the whole of it (#4966, #5022). -->
                             <TextBlock Grid.Row="2" x:Name="QueryStoreClutterTruncationBanner" Visibility="Collapsed"
                                        Padding="8,4" FontWeight="Bold"
-                                       Foreground="{DynamicResource ForegroundBrush}"
-                                       Background="#22FFAA00" TextWrapping="Wrap"/>
+                                       Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                                       Background="#22FFAA00"/>
                             <!-- The measured columns bind NUMBERS with StringFormat and TargetNullValue rather than
                                  pre-formatted text: this grid exists to rank, so a column must sort by magnitude, and a
                                  string column would sort 9 above 1,234 while looking like a working sort. The em-dash
@@ -2032,8 +2032,8 @@
                                  coverage (DataWindowFloor) and the earliest row shown, or the oldest row of a full page (#4966). -->
                             <TextBlock Grid.Row="1" x:Name="PlanCorrectionsTruncationBanner" Visibility="Collapsed"
                                        Padding="8,4" FontWeight="Bold"
-                                       Foreground="{DynamicResource ForegroundBrush}"
-                                       Background="#22FFAA00" TextWrapping="Wrap"/>
+                                       Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                                       Background="#22FFAA00"/>
                             <DataGrid Grid.Row="2" x:Name="PlanCorrectionGrid" Style="{StaticResource DarkGrid}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
@@ -2159,8 +2159,8 @@
                                  that hold a row, so a stretch with no row has no column to say it is empty (#4966). -->
                             <TextBlock Grid.Row="1" x:Name="QueryHeatmapTruncationBanner" Visibility="Collapsed"
                                        Padding="8,4" FontWeight="Bold"
-                                       Foreground="{DynamicResource ForegroundBrush}"
-                                       Background="#22FFAA00" TextWrapping="Wrap"/>
+                                       Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                                       Background="#22FFAA00"/>
                             <ui:ChartPanel Title="Query heatmap" Grid.Row="2">
                                 <scottplot:WpfPlot x:Name="QueryHeatmapChart" MouseMove="HeatmapChart_MouseMove" MouseLeave="HeatmapChart_MouseLeave"/>
                             </ui:ChartPanel>
@@ -2541,8 +2541,8 @@
                              recorded, so a span with no data reads as a span with no pressure (#4966). -->
                         <TextBlock Grid.Row="0" x:Name="MemoryPressureEventsTruncationBanner" Visibility="Collapsed"
                                    Padding="8,4" FontWeight="Bold"
-                                   Foreground="{DynamicResource ForegroundBrush}"
-                                   Background="#22FFAA00" TextWrapping="Wrap"/>
+                                   Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                                   Background="#22FFAA00"/>
                         <ui:ChartPanel Title="Memory pressure events" Grid.Row="1">
                             <scottplot:WpfPlot x:Name="MemoryPressureEventsChart"/>
                         </ui:ChartPanel>
@@ -2683,8 +2683,8 @@
                                  (wait_stats, the blocked-process-report sources, deadlocks), so no one note is true of all of them. -->
                             <TextBlock Grid.Row="0" x:Name="LockWaitTrendTruncationBanner" Visibility="Collapsed"
                                        Padding="8,4" FontWeight="Bold"
-                                       Foreground="{DynamicResource ForegroundBrush}"
-                                       Background="#22FFAA00" TextWrapping="Wrap"/>
+                                       Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                                       Background="#22FFAA00"/>
                             <Border Grid.Row="1" Margin="0,0,0,4">
                                 <ui:ChartPanel Title="Lock waits">
                                     <scottplot:WpfPlot x:Name="LockWaitTrendChart"/>
@@ -2692,8 +2692,8 @@
                             </Border>
                             <TextBlock Grid.Row="2" x:Name="BlockingTrendTruncationBanner" Visibility="Collapsed"
                                        Padding="8,4" FontWeight="Bold"
-                                       Foreground="{DynamicResource ForegroundBrush}"
-                                       Background="#22FFAA00" TextWrapping="Wrap"/>
+                                       Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                                       Background="#22FFAA00"/>
                             <Border Grid.Row="3" Margin="0,4,0,4">
                                 <ui:ChartPanel Title="Blocking">
                                     <scottplot:WpfPlot x:Name="BlockingTrendChart"/>
@@ -2701,8 +2701,8 @@
                             </Border>
                             <TextBlock Grid.Row="4" x:Name="DeadlockTrendTruncationBanner" Visibility="Collapsed"
                                        Padding="8,4" FontWeight="Bold"
-                                       Foreground="{DynamicResource ForegroundBrush}"
-                                       Background="#22FFAA00" TextWrapping="Wrap"/>
+                                       Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                                       Background="#22FFAA00"/>
                             <Border Grid.Row="5" Margin="0,4,0,0">
                                 <ui:ChartPanel Title="Deadlocks">
                                     <scottplot:WpfPlot x:Name="DeadlockTrendChart"/>
@@ -2748,8 +2748,8 @@
                                  covered by these. -->
                             <TextBlock Grid.Row="0" Grid.ColumnSpan="2" x:Name="BlockingStatsBlockingTruncationBanner" Visibility="Collapsed"
                                        Padding="8,4" FontWeight="Bold"
-                                       Foreground="{DynamicResource ForegroundBrush}"
-                                       Background="#22FFAA00" TextWrapping="Wrap"/>
+                                       Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                                       Background="#22FFAA00"/>
                             <Border Grid.Row="1" Grid.Column="0" Margin="0,0,4,4">
                                 <ui:ChartPanel Title="Block duration">
                                     <scottplot:WpfPlot x:Name="BlockingDurationChart"/>
@@ -2762,8 +2762,8 @@
                             </Border>
                             <TextBlock Grid.Row="2" Grid.ColumnSpan="2" x:Name="BlockingStatsDeadlockTruncationBanner" Visibility="Collapsed"
                                        Padding="8,4" FontWeight="Bold"
-                                       Foreground="{DynamicResource ForegroundBrush}"
-                                       Background="#22FFAA00" TextWrapping="Wrap"/>
+                                       Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                                       Background="#22FFAA00"/>
                             <Border Grid.Row="3" Grid.Column="0" Margin="0,4,4,0">
                                 <ui:ChartPanel Title="Deadlock wait">
                                     <scottplot:WpfPlot x:Name="DeadlockWaitChart"/>
@@ -2807,8 +2807,8 @@
                                  does (DataWindowFloor via LoadBlockingAsync). Both charts read waiting_tasks. -->
                             <TextBlock Grid.Row="0" x:Name="CurrentWaitsTruncationBanner" Visibility="Collapsed"
                                        Padding="8,4" FontWeight="Bold"
-                                       Foreground="{DynamicResource ForegroundBrush}"
-                                       Background="#22FFAA00" TextWrapping="Wrap"/>
+                                       Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                                       Background="#22FFAA00"/>
                             <Border Grid.Row="1" Margin="0,0,0,4">
                                 <ui:ChartPanel Title="Total wait duration">
                                     <scottplot:WpfPlot x:Name="CurrentWaitsDurationChart"/>
@@ -2843,8 +2843,8 @@
                             <StackPanel Grid.Row="1">
                                 <TextBlock x:Name="BlockedProcessReportsTruncationBanner" Visibility="Collapsed"
                                            Padding="8,4" FontWeight="Bold"
-                                           Foreground="{DynamicResource ForegroundBrush}"
-                                           Background="#22FFAA00" TextWrapping="Wrap"/>
+                                           Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                                           Background="#22FFAA00"/>
                                 <TextBlock x:Name="BlockingSeparatelyMonitoredNote" Visibility="Collapsed" TextWrapping="Wrap" Margin="10,2,10,4" FontSize="11"
                                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
                             </StackPanel>
@@ -2981,8 +2981,8 @@
                             <StackPanel Grid.Row="1">
                                 <TextBlock x:Name="DeadlocksTruncationBanner" Visibility="Collapsed"
                                            Padding="8,4" FontWeight="Bold"
-                                           Foreground="{DynamicResource ForegroundBrush}"
-                                           Background="#22FFAA00" TextWrapping="Wrap"/>
+                                           Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                                           Background="#22FFAA00"/>
                                 <TextBlock x:Name="DeadlockSeparatelyMonitoredNote" Visibility="Collapsed" TextWrapping="Wrap" Margin="10,2,10,4" FontSize="11"
                                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
                             </StackPanel>
@@ -3508,8 +3508,8 @@
                                  collector's coverage (DataWindowFloor) and the earliest change shown (#4966). -->
                             <TextBlock Grid.Row="0" x:Name="ServerConfigChangesTruncationBanner" Visibility="Collapsed"
                                        Padding="8,4" FontWeight="Bold" Margin="0,0,0,8"
-                                       Foreground="{DynamicResource ForegroundBrush}"
-                                       Background="#22FFAA00" TextWrapping="Wrap"/>
+                                       Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                                       Background="#22FFAA00"/>
                             <DataGrid Grid.Row="1" x:Name="ServerConfigChangesGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding ChangeTimeDisplay}" Width="320" SortMemberPath="ChangeTime"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeTimeDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="First Seen" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -3536,8 +3536,8 @@
                             <!-- The same note for the database_config snapshots (#4966). -->
                             <TextBlock Grid.Row="0" x:Name="DatabaseConfigChangesTruncationBanner" Visibility="Collapsed"
                                        Padding="8,4" FontWeight="Bold" Margin="0,0,0,8"
-                                       Foreground="{DynamicResource ForegroundBrush}"
-                                       Background="#22FFAA00" TextWrapping="Wrap"/>
+                                       Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                                       Background="#22FFAA00"/>
                             <DataGrid Grid.Row="1" x:Name="DatabaseConfigChangesGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding ChangeTimeDisplay}" Width="320" SortMemberPath="ChangeTime"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeTimeDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="First Seen" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -3560,8 +3560,8 @@
                             <!-- The same note for the trace_flags snapshots (#4966). -->
                             <TextBlock Grid.Row="0" x:Name="TraceFlagChangesTruncationBanner" Visibility="Collapsed"
                                        Padding="8,4" FontWeight="Bold" Margin="0,0,0,8"
-                                       Foreground="{DynamicResource ForegroundBrush}"
-                                       Background="#22FFAA00" TextWrapping="Wrap"/>
+                                       Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                                       Background="#22FFAA00"/>
                             <DataGrid Grid.Row="1" x:Name="TraceFlagChangesGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding ChangeTimeDisplay}" Width="150" SortMemberPath="ChangeTime"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeTimeDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Change Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -3624,8 +3624,8 @@
                      chart sub-tabs take it down. -->
                 <TextBlock x:Name="SystemEventsTruncationBanner" Grid.Row="0" Visibility="Collapsed"
                            Padding="8,4" FontWeight="Bold"
-                           Foreground="{DynamicResource ForegroundBrush}"
-                           Background="#22FFAA00" TextWrapping="Wrap"/>
+                           Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                           Background="#22FFAA00"/>
             <TabControl Grid.Row="1" x:Name="SystemEventsSubTabControl" Background="Transparent" BorderThickness="0"
                         ItemContainerStyle="{DynamicResource SubTabItemStyle}"
                         SelectionChanged="SystemEventsSubTabs_SelectionChanged">
@@ -4044,8 +4044,8 @@
                 <!-- "Showing since <start>" when this server's latch_stats rows start after the range does: the trend draws a flat zero over an empty stretch (#4966). -->
                 <TextBlock Grid.Row="0" x:Name="LatchStatsTruncationBanner" Visibility="Collapsed"
                            Padding="8,4" FontWeight="Bold"
-                           Foreground="{DynamicResource ForegroundBrush}"
-                           Background="#22FFAA00" TextWrapping="Wrap"/>
+                           Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                           Background="#22FFAA00"/>
                 <ui:ChartPanel Title="Latch waits" Grid.Row="1">
                     <scottplot:WpfPlot x:Name="LatchStatsChart"/>
                 </ui:ChartPanel>
@@ -4071,8 +4071,8 @@
                 <!-- "Showing since <start>" when this server's spinlock_stats rows start after the range does: the trend draws a flat zero over an empty stretch (#4966). -->
                 <TextBlock Grid.Row="3" x:Name="SpinlockStatsTruncationBanner" Visibility="Collapsed"
                            Padding="8,4" FontWeight="Bold"
-                           Foreground="{DynamicResource ForegroundBrush}"
-                           Background="#22FFAA00" TextWrapping="Wrap"/>
+                           Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                           Background="#22FFAA00"/>
                 <ui:ChartPanel Title="Spinlock backoffs" Grid.Row="4" Margin="0,8,0,0">
                     <scottplot:WpfPlot x:Name="SpinlockStatsChart"/>
                 </ui:ChartPanel>
@@ -4283,8 +4283,8 @@
                              stop short of its start: the earlier of the log's coverage (DataWindowFloor) and the earliest run shown (#4966). -->
                         <TextBlock Grid.Row="0" x:Name="CollectionLogTruncationBanner" Visibility="Collapsed"
                                    Padding="8,4" FontWeight="Bold" Margin="0,0,0,8"
-                                   Foreground="{DynamicResource ForegroundBrush}"
-                                   Background="#22FFAA00" TextWrapping="Wrap"/>
+                                   Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                                   Background="#22FFAA00"/>
                         <DataGrid Grid.Row="1" x:Name="CollectionLogGrid" Style="{StaticResource DarkGrid}">
                             <DataGrid.Columns>
                                 <DataGridTextColumn Binding="{Binding CollectionTimeFormatted}" Width="130" SortMemberPath="CollectionTime">
@@ -4372,8 +4372,8 @@
                      collector's coverage (DataWindowFloor) and the earliest event shown (#4966). -->
                 <TextBlock Grid.Row="2" x:Name="LongQueriesTruncationBanner" Visibility="Collapsed"
                            Padding="8,4" FontWeight="Bold" Margin="0,0,0,8"
-                           Foreground="{DynamicResource ForegroundBrush}"
-                           Background="#22FFAA00" TextWrapping="Wrap"/>
+                           Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
+                           Background="#22FFAA00"/>
                 <DataGrid Grid.Row="3" x:Name="LongQueryCompletionsGrid"
                           Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
