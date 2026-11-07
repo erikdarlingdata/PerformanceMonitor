@@ -206,6 +206,9 @@ public partial class ViewerServerTab : UserControl
         /* Collection Health's Duration Trends chart (copied from Lite): up-front theme + hover. */
         InitializeCollectionHealthChart();
 
+        /* #8103: a read-only seat sees Collection Health's write buttons off with the reason, before it clicks one. */
+        InitializeCollectionHealthSeat();
+
         /* System Events inner tab (system_health parity): register the category grids' filter managers. */
         InitializeSystemEventsTab();
 
@@ -541,7 +544,7 @@ public partial class ViewerServerTab : UserControl
                     break;
             }
 
-            StatusChanged?.Invoke($"{_server.DisplayName} — refreshed {DateTime.Now:HH:mm:ss}");
+            StatusChanged?.Invoke($"{_server.DisplayName} — refreshed {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {

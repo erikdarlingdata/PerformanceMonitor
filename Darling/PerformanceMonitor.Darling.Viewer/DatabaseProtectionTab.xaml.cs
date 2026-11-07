@@ -94,7 +94,7 @@ public partial class DatabaseProtectionTab : UserControl
             if (_loads.Superseded(nameof(LoadAsync), gen)) return;
 
             Show(read, clock);
-            LastRefreshedIndicator.Text = "Last refreshed " + ViewerTimeHelper.FormatFleetWide(DateTime.UtcNow, "HH:mm:ss");
+            LastRefreshedIndicator.Text = "Last refreshed " + ViewerTimeHelper.RefreshedStamp();
         }
         catch (Exception ex)
         {

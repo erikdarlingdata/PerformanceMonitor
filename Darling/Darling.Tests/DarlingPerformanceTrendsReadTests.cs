@@ -144,9 +144,9 @@ public sealed class DarlingPerformanceTrendsReadTests
 
             /*
                 ── the procedure series, at a rate BELOW one execution per second ──
-                Two snapshots five minutes apart, two executions between them: 0.0067/sec. The shipped
-                integer field truncates that to 0, which reads as an idle server; the double does not.
-                This is the whole reason executions_per_second exists.
+                Two snapshots five minutes apart, two executions between them: 0.0067/sec. An integer
+                cannot carry that rate, so executions_per_second carries it and execution_count carries
+                the two executions (#8073).
 
                 These rows carry no sample_interval_seconds (the pre-V128 shape), so the read LAG-derives
                 the interval — and the FIRST snapshot, which has nothing to LAG against, is UNRATED: two
@@ -181,10 +181,12 @@ public sealed class DarlingPerformanceTrendsReadTests
 
             var second = procTrend[1];
             Assert.True(second.GetProperty("value").GetDouble() > 0, "elapsed ms/sec must be a real rate");
-            Assert.Equal(0, second.GetProperty("execution_count").GetInt64());
+            /* #8073: execution_count is the executions the point's rate was built from, the 2 seeded here, and the
+               rate below one per second keeps its own key instead of being truncated into the count. */
+            Assert.Equal(2, second.GetProperty("execution_count").GetInt64());
             Assert.True(
                 second.GetProperty("executions_per_second").GetDouble() > 0,
-                "executions_per_second must survive a rate below 1/sec that execution_count truncates to zero");
+                "executions_per_second must survive a rate below 1/sec");
 
             /* #3541 A2: the unit is in the field name now. Same quantity as `value`, kept beside it on the
                execution_count precedent. */
@@ -452,6 +454,9 @@ public sealed class DarlingPerformanceTrendsTierRoutingLiveTests
         Assert.StartsWith("2026-03-04T11:00:00", queryTrend[1].GetProperty("time").GetString()!, StringComparison.Ordinal);
         Assert.Equal(0.5, queryTrend[1].GetProperty("value").GetDouble(), 9);
         Assert.Equal(0.005, queryTrend[1].GetProperty("executions_per_second").GetDouble(), 9);
+        /* #8073: the hour's summed executions ride beside the rate: 36 + 72 in the 10:00 hour, 18 in the 11:00 hour. */
+        Assert.Equal(108, queryTrend[0].GetProperty("execution_count").GetInt64());
+        Assert.Equal(18, queryTrend[1].GetProperty("execution_count").GetInt64());
 
         /* #3897: a six-hour window would bucket at two minutes on raw, but this one is served by the rollup, whose
            grain is the hour — the automatic width is raised to it, never finer. At that width each point's peak
@@ -471,6 +476,7 @@ public sealed class DarlingPerformanceTrendsTierRoutingLiveTests
         Assert.StartsWith("2026-03-04T10:00:00", wideTrend[0].GetProperty("time").GetString()!, StringComparison.Ordinal);
         Assert.Equal(1.75, wideTrend[0].GetProperty("elapsed_ms_per_second").GetDouble(), 9);
         Assert.Equal(126d / 7200d, wideTrend[0].GetProperty("executions_per_second").GetDouble(), 9);
+        Assert.Equal(126, wideTrend[0].GetProperty("execution_count").GetInt64());
         Assert.Equal(3.0, wideTrend[0].GetProperty("peak_elapsed_ms_per_second").GetDouble(), 9);
         Assert.Contains("one 2-hour bucket", wide.GetProperty("aggregate_note").GetString()!, StringComparison.Ordinal);
         Assert.StartsWith("2026-03-04T10:00:00", wide.GetProperty("effective_start").GetString()!, StringComparison.Ordinal);
@@ -493,6 +499,9 @@ public sealed class DarlingPerformanceTrendsTierRoutingLiveTests
         Assert.Equal(1.0, procedureTrend[0].GetProperty("value").GetDouble(), 9);
         Assert.Equal(0.005, procedureTrend[0].GetProperty("executions_per_second").GetDouble(), 9);
         Assert.Equal(0.1, procedureTrend[1].GetProperty("value").GetDouble(), 9);
+        /* #8073: 9 + 9 executions in the 10:00 hour, 2 in the 11:00 hour. */
+        Assert.Equal(18, procedureTrend[0].GetProperty("execution_count").GetInt64());
+        Assert.Equal(2, procedureTrend[1].GetProperty("execution_count").GetInt64());
 
         /* ── the raw-only read of the SAME fixture: the estimator this replaced, and the revert-proof.
               Three per-collection points, the first UNRATED (null) because the LAG idiom has no previous

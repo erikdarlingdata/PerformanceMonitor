@@ -33,14 +33,28 @@ public interface ISlackBotPosts
     Task<SlackPostResult> PostAsync(string channel, string text, IReadOnlyList<object>? blocks, string? threadTs, CancellationToken cancellationToken);
 }
 
+/// <summary>#7658: the two calls a press answer needs. <see cref="UpdateAsync"/> edits a card the bot posted (<c>chat.update</c>, the bot token);
+/// <see cref="RespondAsync"/> answers the presser alone through the payload's <c>response_url</c>, which needs no token.</summary>
+public interface ISlackCardApi
+{
+    /// <summary>Replaces the text and blocks of the message at <paramref name="channel"/> and <paramref name="ts"/>. Never throws for a failed edit.</summary>
+    Task<SlackPostResult> UpdateAsync(string channel, string ts, string text, IReadOnlyList<object>? blocks, CancellationToken cancellationToken);
+
+    /// <summary>Posts an ephemeral answer to <paramref name="responseUrl"/>: only the presser sees it, and the card stays. Never throws for a failed post.</summary>
+    Task<SlackPostResult> RespondAsync(Uri responseUrl, string text, IReadOnlyList<object>? blocks, CancellationToken cancellationToken);
+}
+
 /// <summary>
 /// #7656: the Slack Web API client of the bot: <c>chat.postMessage</c> with the bot token as a bearer header. Every post sets
 /// <c>unfurl_links</c> and <c>unfurl_media</c> to false, so Slack fetches no URL an agent wrote (the design's security points).
 /// The token is held here and goes only into the Authorization header: it is never logged, never put in a result, and every
 /// text that could echo it (a response body, an exception message) passes through <see cref="Redact"/> first.
 /// </summary>
-public sealed class SlackBotClient : ISlackBotPosts
+public sealed class SlackBotClient : ISlackBotPosts, ISlackCardApi
 {
+    /// <summary>The host a <c>response_url</c> must be on: Slack's own. A payload that names another host is not answered.</summary>
+    public const string ResponseUrlHost = "hooks.slack.com";
+
     /// <summary>Slack's Web API root. A test points the client at a loopback listener instead.</summary>
     public const string DefaultApiBase = "https://slack.com/api/";
 
@@ -54,12 +68,15 @@ public sealed class SlackBotClient : ISlackBotPosts
 
     private readonly string _token;
     private readonly Uri _postUri;
+    private readonly Uri _updateUri;
+    private readonly string _responseUrlHost;
     private readonly HttpClient _http;
 
     /// <param name="botToken">The opened bot token. The caller opens the sealed value; this class never sees the store.</param>
     /// <param name="apiBase">The Web API root, <see cref="DefaultApiBase"/> by default.</param>
     /// <param name="handler">An HTTP handler for a test; the product uses the default.</param>
-    public SlackBotClient(string botToken, string? apiBase = null, HttpMessageHandler? handler = null)
+    /// <param name="responseUrlHost">The host a <c>response_url</c> must be on; <see cref="ResponseUrlHost"/> by default, a loopback host in a test.</param>
+    public SlackBotClient(string botToken, string? apiBase = null, HttpMessageHandler? handler = null, string? responseUrlHost = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(botToken);
         _token = botToken.Trim();
@@ -70,6 +87,8 @@ public sealed class SlackBotClient : ISlackBotPosts
         }
 
         _postUri = new Uri(new Uri(root, UriKind.Absolute), "chat.postMessage");
+        _updateUri = new Uri(new Uri(root, UriKind.Absolute), "chat.update");
+        _responseUrlHost = string.IsNullOrWhiteSpace(responseUrlHost) ? ResponseUrlHost : responseUrlHost.Trim();
         _http = handler is null ? new HttpClient() : new HttpClient(handler, disposeHandler: false);
         _http.Timeout = PostTimeout;
     }
@@ -95,6 +114,110 @@ public sealed class SlackBotClient : ISlackBotPosts
         {
             return new SlackPostResult(false, null, null, Redact(ex.GetBaseException().Message, _token));
         }
+    }
+
+    /// <inheritdoc />
+    public async Task<SlackPostResult> UpdateAsync(string channel, string ts, string text, IReadOnlyList<object>? blocks, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(channel);
+        ArgumentException.ThrowIfNullOrWhiteSpace(ts);
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, _updateUri);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _token);
+            request.Content = new StringContent(BuildUpdateBody(channel, ts, text, blocks), Encoding.UTF8, "application/json");
+            using var response = await _http.SendAsync(request, cancellationToken);
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            return ParseResponse((int)response.StatusCode, body, _token, RetryAfterOf(response));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return new SlackPostResult(false, null, null, Redact(ex.GetBaseException().Message, _token));
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<SlackPostResult> RespondAsync(Uri responseUrl, string text, IReadOnlyList<object>? blocks, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(responseUrl);
+        if (!IsAllowedResponseUrl(responseUrl, _responseUrlHost))
+        {
+            return new SlackPostResult(false, null, null, "response_url is not on " + _responseUrlHost);
+        }
+
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, responseUrl);
+            request.Content = new StringContent(BuildResponseBody(text, blocks), Encoding.UTF8, "application/json");
+            using var response = await _http.SendAsync(request, cancellationToken);
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            /* A response_url answers "ok" as plain text, not JSON: a 200 is a delivered answer. */
+            if ((int)response.StatusCode == 200)
+            {
+                return new SlackPostResult(true, null, null, null);
+            }
+
+            return ParseResponse((int)response.StatusCode, body, _token, RetryAfterOf(response));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return new SlackPostResult(false, null, null, Redact(ex.GetBaseException().Message, _token));
+        }
+    }
+
+    /// <summary>PURE: whether <paramref name="responseUrl"/> may be posted to: HTTPS on <paramref name="host"/> (or any scheme on a loopback host, for a test).</summary>
+    internal static bool IsAllowedResponseUrl(Uri responseUrl, string host)
+    {
+        if (responseUrl is null || !responseUrl.IsAbsoluteUri)
+        {
+            return false;
+        }
+
+        if (responseUrl.IsLoopback && string.Equals(responseUrl.Host, host, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return string.Equals(responseUrl.Scheme, "https", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(responseUrl.Host, host, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>PURE: the <c>chat.update</c> body: the channel, the ts and the new text and blocks.</summary>
+    internal static string BuildUpdateBody(string channel, string ts, string text, IReadOnlyList<object>? blocks)
+    {
+        var body = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["channel"] = channel,
+            ["ts"] = ts,
+            ["text"] = text ?? "",
+            ["blocks"] = blocks is { Count: > 0 } ? blocks : Array.Empty<object>(),
+        };
+        return JsonSerializer.Serialize(body, s_jsonOptions);
+    }
+
+    /// <summary>PURE: the <c>response_url</c> body: ephemeral, the card kept (<c>replace_original</c> false), the text and blocks.</summary>
+    internal static string BuildResponseBody(string text, IReadOnlyList<object>? blocks)
+    {
+        var body = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["response_type"] = "ephemeral",
+            ["replace_original"] = false,
+            ["text"] = text ?? "",
+        };
+        if (blocks is { Count: > 0 })
+        {
+            body["blocks"] = blocks;
+        }
+
+        return JsonSerializer.Serialize(body, s_jsonOptions);
     }
 
     /// <summary>PURE: the <c>chat.postMessage</c> body. <c>thread_ts</c> only when given, so a parent post opens a thread and a
