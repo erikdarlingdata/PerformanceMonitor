@@ -49,7 +49,7 @@ public sealed class CompressionPhaseAssignmentTests
         var order = TimescaleSupport.CompressionPhaseOrder;
 
         /* BEFORE: the replaced rule, re-run. Indices 28/29/30 of the catalog, so slots 4/5/6 of a 24-minute
-           band -> :40, :41, :42. Asserted CONSECUTIVE rather than asserted equal to three literals, because
+           band -> :39, :40, :41 (the band is :35-:58 since #8053 put the corrected Query Store hourly on :59). Asserted CONSECUTIVE rather than asserted equal to three literals, because
            the consecutiveness is the defect and the literals are only where it happened to land. */
         var before = TimescaleSupport.HeaviestCompressionTables
             .Select(table =>
@@ -61,7 +61,7 @@ public sealed class CompressionPhaseAssignmentTests
             .OrderBy(minute => minute)
             .ToArray();
 
-        Assert.Equal(new[] { 40, 41, 42 }, before);
+        Assert.Equal(new[] { 39, 40, 41 }, before);
         Assert.Equal(new[] { minutes[4], minutes[5], minutes[6] }, before);
         for (var index = 1; index < before.Length; index++)
         {
@@ -80,7 +80,7 @@ public sealed class CompressionPhaseAssignmentTests
             .ToArray();
 
         Assert.Equal(new[] { minutes[0], minutes[8], minutes[16] }, after);
-        Assert.Equal(new[] { 36, 44, 52 }, after);
+        Assert.Equal(new[] { 35, 43, 51 }, after);
     }
 
     /// <summary>
@@ -255,7 +255,7 @@ public sealed class CompressionPhaseAssignmentTests
             TimescaleSupport.CompressionPhaseBandMinutes,
             TimescaleSupport.CompressionPhaseMinutes.Count);
         Assert.Equal(
-            new[] { 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59 },
+            new[] { 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58 },
             TimescaleSupport.CompressionPhaseMinutes.ToArray());
 
         /* The assignment's IMAGE is the band and nothing but the band, which is the permutation claim stated

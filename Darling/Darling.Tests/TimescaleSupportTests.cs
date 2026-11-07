@@ -3497,7 +3497,8 @@ LIMIT 1", connection))
 
         Assert.Equal("wait_stats", TimescaleSupport.CompressionPhaseOrder[0]);
         Assert.True(TimescaleSupport.TryCompressionPhaseMinutesFor("wait_stats", out var waitStats));
-        Assert.Equal(36, waitStats);
+        /* #8053: the band opens at :35, the minute after the heaviest refresh's window. */
+        Assert.Equal(35, waitStats);
         Assert.Equal(TimescaleSupport.CompressionPhaseMinutes[0], waitStats);
 
         /* A FOREIGN hypertable is left unphased rather than assigned a minute this code has no basis for
@@ -3755,7 +3756,7 @@ LIMIT 1", connection))
            ProcedureStatsHourlyView is frozen off this grid since LC (FrozenRollupAggregates); its successor
            holds the position it used to and is what a live policy is built for now. */
         var refreshSql = TimescaleSupport.AddHourlyRefreshPolicySql(TimescaleSupport.ProcedureStatsIntervalHourlyView);
-        Assert.Contains("INTERVAL '1 minutes'", refreshSql, StringComparison.Ordinal);
+        Assert.Contains($"INTERVAL '{TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.ProcedureStatsIntervalHourlyView).ToString(CultureInfo.InvariantCulture)} minutes'", refreshSql, StringComparison.Ordinal);
         Assert.Contains("add_continuous_aggregate_policy", refreshSql, StringComparison.Ordinal);
         Assert.DoesNotContain("compression", refreshSql, StringComparison.Ordinal);
         Assert.DoesNotContain("columnstore", refreshSql, StringComparison.Ordinal);

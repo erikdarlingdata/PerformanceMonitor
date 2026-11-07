@@ -60,6 +60,10 @@ internal static class HourlyRefreshLineage
 /// an hour late, every bucket twice. The pin here is derived from the shipped CREATE text, so it covers every such
 /// pair rather than the one that exists today.
 /// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every live test here goes through
+   ScratchPostgres.CreateAsync, which reaches DARLING_TEST_PG only to CREATE and DROP its own database and then
+   works entirely inside it. It never touches the shared database's tables, so it cannot race the live
+   collection, and serializing it would be pure slowdown. */
 public sealed class HourlyChildRefreshOrderTests
 {
     /// <summary>
