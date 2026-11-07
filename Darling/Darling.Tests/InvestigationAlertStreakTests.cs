@@ -186,6 +186,21 @@ public sealed class InvestigationAlertStreakTests
         Assert.Null(InvestigationAlertStreak.DaysAgo(afterSpring, afterSpring.AddDays(-5).AddMinutes(60), TimeZoneInfo.Utc));  // no daylight rules
     }
 
+    /// <summary>The skipped-hour reading is for a forward jump only. At the fall-back (2026-11-01, 02:00 EDT becomes 01:00 EST at
+    /// 06:00 UTC) nothing is skipped: a fire at 06:10 UTC is 01:10 EST, 50 minutes off a 02:00 EST anchor, both at the same offset,
+    /// and the half hour before it being EDT does not make it the anchor's time of day. The spring Sunday's 03:00 fire still is.</summary>
+    [Fact]
+    public void TheSkippedHour_IsReadOnlyAtAForwardJump()
+    {
+        var anchor = new DateTime(2026, 11, 5, 7, 0, 0, DateTimeKind.Utc); // Thursday, 02:00 EST
+        Assert.Null(InvestigationAlertStreak.DaysAgo(anchor, new DateTime(2026, 11, 1, 6, 10, 0, DateTimeKind.Utc), Eastern));
+        Assert.Null(InvestigationAlertStreak.DaysAgo(anchor, new DateTime(2026, 11, 1, 6, 29, 0, DateTimeKind.Utc), Eastern));
+        Assert.Equal(4, InvestigationAlertStreak.DaysAgo(anchor, new DateTime(2026, 11, 1, 7, 0, 0, DateTimeKind.Utc), Eastern));
+
+        var springAnchor = new DateTime(2026, 3, 12, 6, 0, 0, DateTimeKind.Utc); // Thursday, 02:00 EDT
+        Assert.Equal(4, InvestigationAlertStreak.DaysAgo(springAnchor, new DateTime(2026, 3, 8, 7, 0, 0, DateTimeKind.Utc), Eastern)); // 03:00 EDT, the landing
+    }
+
     [Fact]
     public void TheRecurrenceRecord_PublishesTheStreak_AndSaysWhenItFilledTheLookBack()
     {

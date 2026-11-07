@@ -49,9 +49,17 @@ public static class InvestigationAlertStreak
             return null;
 
         var anchorOffset = zone.GetUtcOffset(AsUtc(anchorUtc));
-        var shift = zone.GetUtcOffset(AsUtc(fireUtc)) - anchorOffset;
+        var fireOffset = zone.GetUtcOffset(AsUtc(fireUtc));
+        var shift = fireOffset - anchorOffset;
         if (shift == TimeSpan.Zero)
-            shift = zone.GetUtcOffset(AsUtc(fireUtc - window)) - anchorOffset;
+        {
+            /* The skipped hour: at a forward jump the clock lands on the far side of the gap, and a job scheduled inside the gap
+               runs at that instant, already at the new offset. Only a forward jump within the window before the fire counts;
+               at a fall-back nothing is skipped, and a fire just after one is at its own local time. */
+            var beforeOffset = zone.GetUtcOffset(AsUtc(fireUtc - window));
+            if (fireOffset > beforeOffset)
+                shift = beforeOffset - anchorOffset;
+        }
         if (shift == TimeSpan.Zero)
             return null;
 
