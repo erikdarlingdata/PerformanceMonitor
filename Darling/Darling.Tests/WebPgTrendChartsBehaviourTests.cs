@@ -152,6 +152,20 @@ public sealed class WebPgTrendChartsBehaviourTests
         Assert.Contains("Profile reset", Assert.Single(Strings(r.GetProperty("keys"))));
     }
 
+    /// <summary>#8074: an Aurora answer names engine_cumulative, and the chart's caption says its figures are measured on the
+    /// engine's counters rather than estimates from a sampling profiler, which no sampler produced.</summary>
+    [Fact]
+    public void TheWaitTrend_OnAnAuroraAnswer_CaptionsMeasuredCounters_NotASampler()
+    {
+        var r = Run("waitAurora");
+
+        Assert.Equal(new[] { "Est. wait ms/sec" }, Labels(r.GetProperty("wait")));
+        Assert.Equal(3, r.GetProperty("wait").GetProperty("points").GetInt32());
+        var subtitle = Assert.Single(Strings(r.GetProperty("subtitles")), s => s.Contains("DataFileRead", StringComparison.Ordinal));
+        Assert.Contains("cumulative counters", subtitle, StringComparison.Ordinal);
+        Assert.DoesNotContain("sampling profiler", subtitle, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TheIoTrend_DropsASeriesWithNoValue_KeepsABlankIntervalBlank_AndMarksTheReset()
     {

@@ -152,16 +152,49 @@ public sealed class ViewerFillColumnTests
             }
         });
 
-    /// <summary>The grid that already gave its two fill columns their own MinWidth: it still shares what is left between them and keeps its fixed columns.</summary>
+    /// <summary>
+    /// #8101: the newest error and its time are the two columns after Status, and at 1400 wide both are on screen, so a HEALTHY
+    /// row with Errors 1 says what the error was and when without a sideways scroll.
+    /// </summary>
     [Fact]
-    public void TheCollectionHealthGrid_KeepsItsFixedColumns_AndGivesBothFillColumnsAtLeastTheirMinWidth()
+    public void TheCollectionHealthGrid_ShowsLastErrorAtAndLastError_RightAfterStatus_WithoutScrolling()
+    {
+        var (keys, rightEdges, viewport) = OnServerGrid(1400, "CollectionHealthTab", "CollectionHealthGrid", (_, _, grid, _) =>
+        {
+            var ordered = grid.Columns.OrderBy(c => c.DisplayIndex).ToList();
+            var edges = new List<double>();
+            var right = 0.0;
+            foreach (var column in ordered)
+            {
+                right += column.ActualWidth;
+                edges.Add(right);
+            }
+
+            return (ordered.Select(ColumnKey).ToList(), edges, ScrollOf(grid).ViewportWidth);
+        });
+
+        var status = keys.IndexOf("DisplayStatus");
+        Assert.True(status >= 0, "the grid has a Status column: " + string.Join(", ", keys));
+        Assert.Equal("LastErrorTime", keys[status + 1]);
+        Assert.Equal("LastError", keys[status + 2]);
+        Assert.True(rightEdges[status + 2] <= viewport, $"Last Error ends at {rightEdges[status + 2]} in a viewport of {viewport}");
+    }
+
+    /// <summary>What a column shows: its sort member, else the path its cells bind to, else its header.</summary>
+    private static string ColumnKey(DataGridColumn column) =>
+        !string.IsNullOrEmpty(column.SortMemberPath) ? column.SortMemberPath
+        : column is DataGridBoundColumn { Binding: System.Windows.Data.Binding binding } ? binding.Path.Path
+        : column.Header?.ToString() ?? "";
+
+    /// <summary>The grid whose one fill column, Note, has its own MinWidth: it keeps that floor and its fixed columns keep their width, the 320-wide Last Error column beside Status among them.</summary>
+    [Fact]
+    public void TheCollectionHealthGrid_KeepsItsFixedColumns_AndGivesItsFillColumnAtLeastItsMinWidth()
     {
         var laid = OnServerGrid(1400, "CollectionHealthTab", "CollectionHealthGrid", (_, _, grid, declared) => Read(grid, declared));
 
         AssertFixedColumnsKeepTheirWidth(laid);
-        var fills = laid.Columns.Where(c => c.Fill).Select(c => c.Actual).ToList();
-        Assert.Equal(2, fills.Count);
-        Assert.All(fills, w => Assert.True(w >= 160, $"a fill column fell under its MinWidth: {laid}"));
+        var fill = Assert.Single(laid.Columns, c => c.Fill);
+        Assert.True(fill.Actual >= 160, $"the fill column fell under its MinWidth: {laid}");
         Assert.True(laid.Scrollable > 0, $"the grid should scroll sideways: {laid}");
     }
 

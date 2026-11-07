@@ -1401,6 +1401,13 @@ public partial class ServerTab : UserControl
             foreach (var row in collectionLogTask.Result) row.Clock = tabClock;
 
             SkippedCyclesSummary.Text = (await skippedCyclesTask)?.SummaryLine(tabClock) ?? "Skipped cycles in 24 h: could not be read";
+            /* #8101: one connection failure that reached several collectors in one cycle is worded once above the grid, in the
+               rows' own zone, rather than left as one ERROR on each of their rows with nothing to join them. */
+            var connectionFailureLine = CollectionConnectionFailures.SummaryLine(
+                collectionHealthTask.Result.Select(row => new CollectorErrorSample(row.CollectorName, row.LastErrorTime, row.LastError, row.ErrorCount)),
+                utc => CollectionHealthTime.Format(utc, tabClock));
+            ConnectionFailureSummary.Text = connectionFailureLine ?? string.Empty;
+            ConnectionFailureSummary.Visibility = connectionFailureLine is null ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible;
             _collectionHealthFilterMgr!.UpdateData(collectionHealthTask.Result);
             _collectionLogFilterMgr!.UpdateData(collectionLogTask.Result);
             UpdateCollectorDurationChart(collectorDurationTask.Result, hoursBack, fromDate, toDate);
