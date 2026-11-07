@@ -74,7 +74,13 @@ internal sealed class StandInUnixModes : IUnixDirectoryModes
     /// <summary>Directories the stand-in reports as unlistable by the service's user (#8141).</summary>
     public HashSet<string> Unlistable { get; } = new(StringComparer.OrdinalIgnoreCase);
 
-    public bool CanList(string directory) => !Unlistable.Contains(Key(directory));
+    /// <summary>Exceptions <see cref="CanList"/> throws for a directory, keyed like the other maps (#8141).</summary>
+    public Dictionary<string, Exception> ListThrows { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public bool CanList(string directory)
+        => ListThrows.TryGetValue(Key(directory), out var thrown)
+            ? throw thrown
+            : !Unlistable.Contains(Key(directory));
 
     /// <summary>A file someone else wrote that the file check trusts, which is the point: owner-only on Unix (a 0600
     /// file whose owner managed code cannot see), and the temp directory's inherited ACL on Windows.</summary>

@@ -67,7 +67,7 @@ public sealed class CredentialOwnershipMessageTests
             var reason = DarlingServiceKeyFile.UnexpectedOwnerReason(path);
 
             Assert.NotNull(reason);
-            Assert.Contains("chown 1000:1000 '/opt/darling/darling-keys/password-key'", reason);
+            Assert.Contains("chown -R 1000:1000 '/opt/darling/darling-keys/password-key'", reason);
             Assert.DoesNotContain("docker compose", reason);
         }
     }
@@ -143,6 +143,10 @@ public sealed class CredentialOwnershipMessageTests
                 Assert.False(load.Generated);
                 Assert.Contains("cannot be read (permission denied)", load.Refusal);
                 Assert.Empty(Directory.GetFileSystemEntries(dir));
+
+                /* The key is likely behind the directory: the chown keeps it, so no "delete it" advice. */
+                Assert.EndsWith("Run the command above, then restart; the key is kept.", load.Refusal, StringComparison.Ordinal);
+                Assert.DoesNotContain("delete it", load.Refusal, StringComparison.Ordinal);
             }
         }
         finally

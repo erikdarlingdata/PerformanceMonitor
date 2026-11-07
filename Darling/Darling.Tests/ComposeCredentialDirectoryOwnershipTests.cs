@@ -14,7 +14,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #8141: a credentials directory another user owns, or one the service's user cannot list, stops the start before
+/// #8141: a credentials directory another user owns, or one whose owner cannot be read, stops the start before
 /// the store is opened, with one sentence naming the path, both users and the chown that fixes it.
 /// <see cref="CollectorStoppedMarkerTests"/> pins that the stand-down writes the marker.
 /// </summary>
@@ -43,6 +43,10 @@ public sealed class ComposeCredentialDirectoryOwnershipTests
             Assert.Contains("runs as user 1654", sentence, StringComparison.Ordinal);
             Assert.Contains("chown darling -R 1654:1654 /var/lib/darling", sentence, StringComparison.Ordinal);
             Assert.Contains("collection is stopped", sentence, StringComparison.Ordinal);
+
+            /* `docker compose up -d` leaves the running container as it is, so collection would stay stopped. */
+            Assert.EndsWith("then restart the service (docker compose restart darling).", sentence, StringComparison.Ordinal);
+            Assert.DoesNotContain("start the service again", sentence, StringComparison.Ordinal);
         }
     }
 
@@ -80,19 +84,28 @@ public sealed class ComposeCredentialDirectoryOwnershipTests
     }
 
     [Fact]
-    public void OwnedByTheService_ButNotListable_Refuses()
+    public void OwnedByTheService_ButNotListable_FallsThrough_IsNull()
     {
+        /* A chown cannot fix a mode problem on the service's own directory; the start's
+           PrepareComposeCredentialDirectory sets it owner-only again. */
         var modes = new StandInUnixModes { EffectiveUserId = 1654 };
         modes.ReportOwner(Dir, 1654);
         modes.Unlistable.Add(Key(Dir));
         using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
         {
-            var refusal = DarlingManagedRoles.ComposeCredentialDirectoryOwnershipRefusal(Dir);
+            Assert.Null(DarlingManagedRoles.ComposeCredentialDirectoryOwnershipRefusal(Dir));
+        }
+    }
 
-            Assert.NotNull(refusal);
-            Assert.Null(refusal.OwnerUserId);
-            Assert.Contains("cannot be read by user 1654", refusal.Sentence, StringComparison.Ordinal);
-            Assert.Contains("chown darling -R 1654:1654 /var/lib/darling", refusal.Sentence, StringComparison.Ordinal);
+    [Fact]
+    public void ListingThrows_IsNull_NotACrash()
+    {
+        var modes = new StandInUnixModes { EffectiveUserId = 1654 };
+        modes.ReportOwner(Dir, 1654);
+        modes.ListThrows[Key(Dir)] = new IOException("Not a directory");
+        using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
+        {
+            Assert.Null(DarlingManagedRoles.ComposeCredentialDirectoryOwnershipRefusal(Dir));
         }
     }
 

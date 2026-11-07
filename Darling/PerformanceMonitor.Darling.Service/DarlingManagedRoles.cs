@@ -4899,7 +4899,8 @@ WHERE t.tgrelid = 'config.investigation_journal'::regclass
     /// <summary>
     /// The command that gives the credential file or directory at <paramref name="path"/> to <paramref name="userId"/>
     /// (#8141). Inside the compose volume the files are reachable only through the container, so the fix is the
-    /// one-off root container that chowns the volume; elsewhere it is a plain chown of the path.
+    /// one-off root container that chowns the volume; elsewhere it is a recursive chown of the path, so a directory's
+    /// files follow it.
     /// </summary>
     internal static string CredentialOwnershipFix(uint userId, string path)
     {
@@ -4907,7 +4908,7 @@ WHERE t.tgrelid = 'config.investigation_journal'::regclass
         return path == ComposeCredentialVolumeRoot || path.StartsWith(ComposeCredentialVolumeRoot + "/", StringComparison.Ordinal)
             ? $"docker compose run --rm --no-deps --user 0 --entrypoint chown darling -R {u}:{u} {ComposeCredentialVolumeRoot} "
                 + $"(on Kubernetes, chown the volume mounted at {ComposeCredentialVolumeRoot} to {u}:{u})"
-            : $"chown {u}:{u} '{path}'";
+            : $"chown -R {u}:{u} '{path}'";
     }
 
     /// <summary>The compose store's credential file for <paramref name="role"/>: the managed file's name without
@@ -5121,9 +5122,15 @@ WHERE u.rolname = current_user";
                 return EarlierComposeCredential.Trusted(password);
             }
 
-            return EarlierComposeCredential.None(untrusted is null
-                ? $"{path} does not exist"
-                : $"{path} is not trusted ({untrusted})");
+            if (untrusted is not null)
+            {
+                return EarlierComposeCredential.None($"{path} is not trusted ({untrusted})");
+            }
+
+            /* #8141: a file in a directory the service cannot list reads as absent; say so, never "does not exist". */
+            return EarlierComposeCredential.None(DarlingServiceKeyFile.UnreadableDirectoryReason(directory) is { } unreadable
+                ? $"{path} could not be looked for: {unreadable}"
+                : $"{path} does not exist");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -5216,9 +5223,10 @@ WHERE u.rolname = current_user";
 
     /// <summary>
     /// Why the service must not start collecting with the credentials directory at <paramref name="directory"/> (#8141):
-    /// another user owns it, or the service's user cannot list it. One sentence with the path, both users and the command
-    /// that fixes it; no exception text, because it reaches the ping body. Null when there is nothing to refuse: this
-    /// platform has no Unix modes, the service is root, nothing is at the path, or the service owns it and can list it.
+    /// another user owns it, or its owner cannot be read because a parent cannot be searched. One sentence with the path,
+    /// both users and the command that fixes it; no exception text, because it reaches the ping body. Null when there is
+    /// nothing to refuse: this platform has no Unix modes, the service is root, nothing is at the path, the owner cannot
+    /// be told, or the service owns it (even unlistable: the start sets its own directory owner-only again).
     /// </summary>
     internal static ComposeCredentialDirectoryRefusal? ComposeCredentialDirectoryOwnershipRefusal(string directory)
     {
@@ -5248,12 +5256,11 @@ WHERE u.rolname = current_user";
             return null;
         }
 
-        if (found.UserId != euid)
-        {
-            return new ComposeCredentialDirectoryRefusal(directory, euid, found.UserId);
-        }
-
-        return modes.CanList(directory) ? null : new ComposeCredentialDirectoryRefusal(directory, euid, null);
+        /* The service's own directory is never refused, even one it cannot list (and CanList, which can throw, is never
+           asked here): PrepareComposeCredentialDirectory sets it owner-only again, which a chown would not fix. */
+        return found.UserId != euid
+            ? new ComposeCredentialDirectoryRefusal(directory, euid, found.UserId)
+            : null;
     }
 
     /// <summary>

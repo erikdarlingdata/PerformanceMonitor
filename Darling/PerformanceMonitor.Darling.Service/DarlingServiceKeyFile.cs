@@ -265,6 +265,9 @@ internal static class DarlingServiceKeyFile
             : $"it has {owner.Links.ToString(CultureInfo.InvariantCulture)} names, not one";
     }
 
+    /// <summary>How <see cref="UnreadableDirectoryReason"/> begins, so a caller can tell that reason from the others (#8141).</summary>
+    internal const string UnreadableDirectoryLead = "it cannot be read (permission denied)";
+
     /// <summary>Why a key that looks absent is not known to be (#8141): the service's user cannot list
     /// <paramref name="directory"/>, so a file in it would read as missing. Null when it can, when the directory is not
     /// there, or when this platform has no Unix modes.</summary>
@@ -278,7 +281,7 @@ internal static class DarlingServiceKeyFile
         }
 
         var euid = modes.EffectiveUserId;
-        return $"it cannot be read (permission denied): user {euid.ToString(CultureInfo.InvariantCulture)}, which the service runs as, cannot list {directory}; "
+        return $"{UnreadableDirectoryLead}: user {euid.ToString(CultureInfo.InvariantCulture)}, which the service runs as, cannot list {directory}; "
             + $"to give it to that user, run: {DarlingManagedRoles.CredentialOwnershipFix(euid, directory)}";
     }
 
