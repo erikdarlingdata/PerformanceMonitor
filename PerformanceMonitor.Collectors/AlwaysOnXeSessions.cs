@@ -331,8 +331,9 @@ public static class AlwaysOnXeSessions
     /// (<c>STARTUP_STATE = ON</c>, as it always has); an own session does not (<c>OFF</c>), so a database that restarts does
     /// not bring back a fallback the install may have dropped. Refuses a name that is not the shared name or an own name.
     /// </summary>
-    public static string BuildAzureCreateSql(AlwaysOnXeSessionKind kind, string sessionName, bool withoutUnverifiedActions = false) =>
-        BuildAzureCreateDefinitionSql(kind, sessionName, withoutUnverifiedActions) + "\n" + BuildAzureStartSql(kind, sessionName);
+    public static string BuildAzureCreateSql(
+        AlwaysOnXeSessionKind kind, string sessionName, bool withoutUnverifiedActions = false, int? ringBufferMaxEvents = RingBufferTarget.DefaultMaxEvents) =>
+        BuildAzureCreateDefinitionSql(kind, sessionName, withoutUnverifiedActions, ringBufferMaxEvents) + "\n" + BuildAzureStartSql(kind, sessionName);
 
     /// <summary>
     /// The create alone, with no start: what a registration with read-only intent sends over a connection without the intent
@@ -340,7 +341,8 @@ public static class AlwaysOnXeSessions
     /// connection, because run state is per replica. A start here would run the session on the primary only. The same
     /// statement <see cref="BuildAzureCreateSql"/> begins with, and it refuses the same names.
     /// </summary>
-    public static string BuildAzureCreateDefinitionSql(AlwaysOnXeSessionKind kind, string sessionName, bool withoutUnverifiedActions = false)
+    public static string BuildAzureCreateDefinitionSql(
+        AlwaysOnXeSessionKind kind, string sessionName, bool withoutUnverifiedActions = false, int? ringBufferMaxEvents = RingBufferTarget.DefaultMaxEvents)
     {
         RequireName(kind, sessionName);
         var shared = string.Equals(sessionName, SharedNameFor(kind), StringComparison.Ordinal);
@@ -349,11 +351,11 @@ public static class AlwaysOnXeSessions
         {
             AlwaysOnXeSessionKind.Deadlock => (
                 "ADD EVENT sqlserver.database_xml_deadlock_report\n",
-                "ADD TARGET package0.ring_buffer\n(\n    SET max_memory = 4096\n)\n",
+                RingBufferTarget.Sql(ringBufferMaxEvents) + "\n",
                 "    EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS,\n"),
             AlwaysOnXeSessionKind.BlockedProcess => (
                 "ADD EVENT sqlserver.blocked_process_report\n",
-                "ADD TARGET package0.ring_buffer\n(\n    SET max_memory = 4096\n)\n",
+                RingBufferTarget.Sql(ringBufferMaxEvents) + "\n",
                 string.Empty),
             AlwaysOnXeSessionKind.Attention => (
                 AttentionEventClause(azure: true, withoutUnverifiedActions),
@@ -917,7 +919,8 @@ public static class AlwaysOnXeAzureEnsure
         string? ownName,
         AlwaysOnXeChoice current,
         CancellationToken cancellationToken,
-        string? idFailure = null)
+        string? idFailure = null,
+        int ringBufferMaxEvents = RingBufferTarget.DefaultMaxEvents)
     {
         ArgumentNullException.ThrowIfNull(database);
 
@@ -926,7 +929,7 @@ public static class AlwaysOnXeAzureEnsure
             (bool Usable, AlwaysOnXeChange Change) shared;
             try
             {
-                shared = await TrySharedAsync(database, kind, cancellationToken);
+                shared = await TrySharedAsync(database, kind, ringBufferMaxEvents, cancellationToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -940,11 +943,11 @@ public static class AlwaysOnXeAzureEnsure
                 return new AlwaysOnXeAzureResult(AlwaysOnXeChoice.Shared, AlwaysOnXeChange.SwitchedBack);
             }
 
-            var ownChange = await EnsureOwnAsync(database, kind, ownName, cancellationToken);
+            var ownChange = await EnsureOwnAsync(database, kind, ownName, ringBufferMaxEvents, cancellationToken);
             return new AlwaysOnXeAzureResult(AlwaysOnXeChoice.Own, ownChange);
         }
 
-        var first = await TrySharedAsync(database, kind, cancellationToken);
+        var first = await TrySharedAsync(database, kind, ringBufferMaxEvents, cancellationToken);
         if (first.Usable)
         {
             return new AlwaysOnXeAzureResult(AlwaysOnXeChoice.Shared, first.Change);
@@ -955,12 +958,12 @@ public static class AlwaysOnXeAzureEnsure
             throw new InvalidOperationException(NoOwnSessionMessage(kind, idFailure));
         }
 
-        await EnsureOwnAsync(database, kind, ownName, cancellationToken);
+        await EnsureOwnAsync(database, kind, ownName, ringBufferMaxEvents, cancellationToken);
         return new AlwaysOnXeAzureResult(AlwaysOnXeChoice.Own, AlwaysOnXeChange.FellBack);
     }
 
     private static async Task<(bool Usable, AlwaysOnXeChange Change)> TrySharedAsync(
-        IAlwaysOnXeDatabase database, AlwaysOnXeSessionKind kind, CancellationToken cancellationToken)
+        IAlwaysOnXeDatabase database, AlwaysOnXeSessionKind kind, int ringBufferMaxEvents, CancellationToken cancellationToken)
     {
         var shared = AlwaysOnXeSessions.SharedNameFor(kind);
         var catalog = await database.ReadCatalogAsync(kind, shared, cancellationToken);
@@ -982,7 +985,7 @@ public static class AlwaysOnXeAzureEnsure
             default:
                 try
                 {
-                    var withoutStatementText = await CreateAsync(database, kind, shared, cancellationToken);
+                    var withoutStatementText = await CreateAsync(database, kind, shared, ringBufferMaxEvents, cancellationToken);
                     return (true, withoutStatementText ? AlwaysOnXeChange.CreatedWithoutStatementText : AlwaysOnXeChange.Created);
                 }
                 catch (Exception ex) when (database.IsAlreadyPresent(ex))
@@ -1008,7 +1011,7 @@ public static class AlwaysOnXeAzureEnsure
     }
 
     private static async Task<AlwaysOnXeChange> EnsureOwnAsync(
-        IAlwaysOnXeDatabase database, AlwaysOnXeSessionKind kind, string ownName, CancellationToken cancellationToken)
+        IAlwaysOnXeDatabase database, AlwaysOnXeSessionKind kind, string ownName, int ringBufferMaxEvents, CancellationToken cancellationToken)
     {
         var catalog = await database.ReadCatalogAsync(kind, ownName, cancellationToken);
         if (catalog != AlwaysOnXeCatalog.Missing)
@@ -1024,7 +1027,7 @@ public static class AlwaysOnXeAzureEnsure
 
         try
         {
-            var withoutStatementText = await CreateAsync(database, kind, ownName, cancellationToken);
+            var withoutStatementText = await CreateAsync(database, kind, ownName, ringBufferMaxEvents, cancellationToken);
             return withoutStatementText ? AlwaysOnXeChange.CreatedWithoutStatementText : AlwaysOnXeChange.Created;
         }
         catch (Exception ex) when (database.IsAlreadyPresent(ex))
@@ -1084,12 +1087,25 @@ public static class AlwaysOnXeAzureEnsure
     /// (#4961). A failure of either is marked for the caps sentence, unless it is the engine's "already there".
     /// </summary>
     private static async Task<bool> CreateAsync(
-        IAlwaysOnXeDatabase database, AlwaysOnXeSessionKind kind, string sessionName, CancellationToken cancellationToken)
+        IAlwaysOnXeDatabase database, AlwaysOnXeSessionKind kind, string sessionName, int ringBufferMaxEvents, CancellationToken cancellationToken)
     {
         try
         {
-            await CreateOnceAsync(database, kind, sessionName, withoutUnverifiedActions: false, cancellationToken);
-            return false;
+            try
+            {
+                await CreateOnceAsync(database, kind, sessionName, withoutUnverifiedActions: false, ringBufferMaxEvents, cancellationToken);
+                return false;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException
+                && kind is AlwaysOnXeSessionKind.Deadlock or AlwaysOnXeSessionKind.BlockedProcess
+                && database.ErrorNumbers(ex).Any(RingBufferTarget.OptionRefusedErrorNumbers.Contains))
+            {
+                /* #8146: the engine refused max_events_limit (RingBufferTarget.OptionRefusedErrorNumbers); a session at the default limit
+                   is better than none, and the loss note shows the session's actual limit. One retry without it; if that fails too, its
+                   exception surfaces. Any other failure, "already there" included, surfaces as before #8146. */
+                await CreateOnceAsync(database, kind, sessionName, withoutUnverifiedActions: false, ringBufferMaxEvents: null, cancellationToken);
+                return false;
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException
             && kind == AlwaysOnXeSessionKind.Attention
@@ -1098,22 +1114,22 @@ public static class AlwaysOnXeAzureEnsure
         {
             /* #5640: an action the engine has not been proved to accept was refused (error 25744 refuses the whole create). The
                session is more use without statement text than not at all: retry once without the unverified actions. */
-            await CreateOnceAsync(database, kind, sessionName, withoutUnverifiedActions: true, cancellationToken);
+            await CreateOnceAsync(database, kind, sessionName, withoutUnverifiedActions: true, ringBufferMaxEvents, cancellationToken);
             return true;
         }
     }
 
     private static async Task CreateOnceAsync(
-        IAlwaysOnXeDatabase database, AlwaysOnXeSessionKind kind, string sessionName, bool withoutUnverifiedActions, CancellationToken cancellationToken)
+        IAlwaysOnXeDatabase database, AlwaysOnXeSessionKind kind, string sessionName, bool withoutUnverifiedActions, int? ringBufferMaxEvents, CancellationToken cancellationToken)
     {
         if (!database.ReadOnlyIntent)
         {
-            await ExecuteDdlAsync(database, AlwaysOnXeSessions.BuildAzureCreateSql(kind, sessionName, withoutUnverifiedActions), cancellationToken);
+            await ExecuteDdlAsync(database, AlwaysOnXeSessions.BuildAzureCreateSql(kind, sessionName, withoutUnverifiedActions, ringBufferMaxEvents), cancellationToken);
             return;
         }
 
         await ExecuteDdlAsync(
-            database, AlwaysOnXeSessions.BuildAzureCreateDefinitionSql(kind, sessionName, withoutUnverifiedActions), cancellationToken, withoutReadOnlyIntent: true);
+            database, AlwaysOnXeSessions.BuildAzureCreateDefinitionSql(kind, sessionName, withoutUnverifiedActions, ringBufferMaxEvents), cancellationToken, withoutReadOnlyIntent: true);
         await StartByNameAsync(database, kind, sessionName, cancellationToken);
     }
 

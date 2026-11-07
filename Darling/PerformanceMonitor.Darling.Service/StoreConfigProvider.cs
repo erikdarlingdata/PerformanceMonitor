@@ -2171,6 +2171,24 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
     internal static int ClampProcedureStatsPlanCycleInterval(int value) =>
         Math.Clamp(value, MinProcedureStatsPlanCycleInterval, MaxProcedureStatsPlanCycleInterval);
 
+    /// <summary>
+    /// The #8146 <c>xeRingBufferMaxEvents</c> setting, clamped to [1000, 10000] (unset is 1000). A given value that is not
+    /// used as written is logged once, naming the key, the value given and the value used, because the file is read once
+    /// at start and nobody would otherwise learn the setting was not honoured.
+    /// </summary>
+    internal static int ClampXeRingBufferMaxEvents(int? configured, ILogger? logger)
+    {
+        var used = RingBufferTarget.Clamp(configured);
+        if (configured is { } given && given != used)
+        {
+            logger?.LogWarning(
+                "darling.json xeRingBufferMaxEvents is {Given}, outside {Min} to {Max}; using {Used}",
+                given, RingBufferTarget.MinMaxEvents, RingBufferTarget.MaxMaxEvents, used);
+        }
+
+        return used;
+    }
+
     /// <summary>The V75 plan-content horizon clamps (#2316) — 0 (and any negative) means DISABLED
     /// (the fact-coupled dimension horizon stands alone); an enabled value clamps to [7,365], because a
     /// sub-week horizon would age plan XML out from under the viewer's default history windows.</summary>

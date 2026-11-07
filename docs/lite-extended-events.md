@@ -15,6 +15,24 @@ If Lite cannot read `install-id.json` (another program holds it open, or the rea
 - `PerformanceMonitor_Attention` is the client-timeout session that the `attention` collector reads. It also keeps its shared name, and Lite never drops it. Lite checks it while the `attention` collector is on. It creates a missing one with `STARTUP_STATE = ON` and starts a stopped one. On Azure SQL Database, Lite creates one in every monitored database. If a session of that name has an older definition, Lite drops it and creates it again once for each run of the app.
 - On Azure SQL Database, a shared session can stay unusable after a start. Lite then creates `PerformanceMonitor_Lite_<id>_Deadlock`, `PerformanceMonitor_Lite_<id>_BlockedProcess` or `PerformanceMonitor_Lite_<id>_Attention` in that database, with `STARTUP_STATE = OFF`, and reads that one. When the shared session works again, Lite switches back and drops its own fallback.
 
+## The ring buffer limit
+
+The ring buffer of the long-query, deadlock and blocked-process sessions is created with `max_events_limit` from `xe_ring_buffer_max_events` in `settings.json` (default 1000, clamped to 1000-10000), and `max_memory` of 4096 KB. A buffer holds at most that many events or 4 MB, whichever fills first. The `PerformanceMonitor_Attention` session is not affected. For the key, the loss note and how to read it, see [Extended Events ring buffer limit](lite-guide.md#extended-events-ring-buffer-limit).
+
+The limit applies when a session is created, so a session keeps the limit it was created with. The deadlock and blocked-process sessions are shared by name across installs, so when two installs with different settings watch one server, whichever created the session wins. The loss note shows the session's actual limit.
+
+To recreate a shared session with the current value, drop it and let Lite create it again. Run these only when no other install needs the session kept, because every install that monitors the server uses these names. Lite creates a missing session the next time its collector runs.
+
+```sql
+IF EXISTS (SELECT 1/0 FROM sys.server_event_sessions AS ses WHERE ses.name = N'PerformanceMonitor_Deadlock')
+    DROP EVENT SESSION [PerformanceMonitor_Deadlock] ON SERVER;
+
+IF EXISTS (SELECT 1/0 FROM sys.server_event_sessions AS ses WHERE ses.name = N'PerformanceMonitor_BlockedProcess')
+    DROP EVENT SESSION [PerformanceMonitor_BlockedProcess] ON SERVER;
+```
+
+On Azure SQL Database, use `sys.database_event_sessions` and `ON DATABASE`, in each monitored database, as under [Cleaning up by hand](#cleaning-up-by-hand). To recreate the long-query session, turn the `long_query_completions` collector off and on again.
+
 ## The old shared session
 
 Earlier versions shared one session, `PerformanceMonitor_LongQueryCompletions`, between all installs. An upgraded install drops it once for each registration and database. It then records that drop and never touches the session again. If an older install creates it again later, Lite logs one Information line per start and leaves the session alone. To remove it, run the statements under "Cleaning up by hand" below.

@@ -267,7 +267,7 @@ public static class DarlingXeSessions
                batch, silently skipping the blocked-process ensure until the next reconnect. */
             try
             {
-                await EnsureDeadlockOnPremAsync(connection, server, logger, cancellationToken);
+                await EnsureDeadlockOnPremAsync(connection, server, runner.RingBufferMaxEvents, logger, cancellationToken);
             }
             catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))
             {
@@ -290,7 +290,7 @@ public static class DarlingXeSessions
 
             try
             {
-                await EnsureBlockedProcessOnPremAsync(connection, server, logger, cancellationToken);
+                await EnsureBlockedProcessOnPremAsync(connection, server, runner.RingBufferMaxEvents, logger, cancellationToken);
             }
             catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))
             {
@@ -564,7 +564,23 @@ public static class DarlingXeSessions
         }
     }
 
-    private static async Task EnsureDeadlockOnPremAsync(SqlConnection connection, ServerRuntime server, ILogger? logger, CancellationToken cancellationToken)
+    /// <summary>The deadlock session's create and start (#8146): the ring_buffer clause carries <c>max_events_limit</c> through <see cref="RingBufferTarget.Sql"/>.</summary>
+    internal static string BuildDeadlockOnPremCreateSql(int ringBufferMaxEvents) => $@"
+CREATE EVENT SESSION [{DeadlocksCollector.XeSessionName}]
+ON SERVER
+ADD EVENT sqlserver.xml_deadlock_report
+{RingBufferTarget.Sql(ringBufferMaxEvents)}
+WITH
+(
+    MAX_DISPATCH_LATENCY = 5 SECONDS,
+    EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS,
+    MEMORY_PARTITION_MODE = NONE,
+    STARTUP_STATE = ON
+);
+
+ALTER EVENT SESSION [{DeadlocksCollector.XeSessionName}] ON SERVER STATE = START;";
+
+    private static async Task EnsureDeadlockOnPremAsync(SqlConnection connection, ServerRuntime server, int ringBufferMaxEvents, ILogger? logger, CancellationToken cancellationToken)
     {
         using (var cmd = new SqlCommand(@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -595,29 +611,27 @@ WHERE ses.name = @session_name;", connection))
         }
 
         /* MEMORY_PARTITION_MODE = NONE for AWS RDS compatibility (mirrors Lite). */
-        using var createCmd = new SqlCommand($@"
-CREATE EVENT SESSION [{DeadlocksCollector.XeSessionName}]
-ON SERVER
-ADD EVENT sqlserver.xml_deadlock_report
-ADD TARGET package0.ring_buffer
-(
-    SET max_memory = 4096
-)
-WITH
-(
-    MAX_DISPATCH_LATENCY = 5 SECONDS,
-    EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS,
-    MEMORY_PARTITION_MODE = NONE,
-    STARTUP_STATE = ON
-);
-
-ALTER EVENT SESSION [{DeadlocksCollector.XeSessionName}] ON SERVER STATE = START;", connection);
+        using var createCmd = new SqlCommand(BuildDeadlockOnPremCreateSql(ringBufferMaxEvents), connection);
         createCmd.CommandTimeout = 60;
         await createCmd.ExecuteNonQueryAsync(cancellationToken);
         logger?.LogInformation("[{Server}] Created and started deadlock XE session", server.Config.DisplayName);
     }
 
-    private static async Task EnsureBlockedProcessOnPremAsync(SqlConnection connection, ServerRuntime server, ILogger? logger, CancellationToken cancellationToken)
+    /// <summary>The blocked-process session's create and start (#8146): the ring_buffer clause carries <c>max_events_limit</c> through <see cref="RingBufferTarget.Sql"/>.</summary>
+    internal static string BuildBlockedProcessOnPremCreateSql(int ringBufferMaxEvents) => $@"
+CREATE EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}]
+ON SERVER
+ADD EVENT sqlserver.blocked_process_report
+{RingBufferTarget.Sql(ringBufferMaxEvents)}
+WITH
+(
+    MAX_DISPATCH_LATENCY = 5 SECONDS,
+    STARTUP_STATE = ON
+);
+
+ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER STATE = START;";
+
+    private static async Task EnsureBlockedProcessOnPremAsync(SqlConnection connection, ServerRuntime server, int ringBufferMaxEvents, ILogger? logger, CancellationToken cancellationToken)
     {
         /* Blocked process threshold bootstrap — sp_configure is unavailable on AWS RDS
            (parameter groups there), hence the tolerant catch (mirrors Lite). */
@@ -691,21 +705,7 @@ WHERE ses.name = @session_name;", connection))
             }
         }
 
-        using var createCmd = new SqlCommand($@"
-CREATE EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}]
-ON SERVER
-ADD EVENT sqlserver.blocked_process_report
-ADD TARGET package0.ring_buffer
-(
-    SET max_memory = 4096
-)
-WITH
-(
-    MAX_DISPATCH_LATENCY = 5 SECONDS,
-    STARTUP_STATE = ON
-);
-
-ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER STATE = START;", connection);
+        using var createCmd = new SqlCommand(BuildBlockedProcessOnPremCreateSql(ringBufferMaxEvents), connection);
         createCmd.CommandTimeout = 60;
         await createCmd.ExecuteNonQueryAsync(cancellationToken);
         logger?.LogInformation("[{Server}] Created and started blocked process XE session", server.Config.DisplayName);
@@ -905,7 +905,7 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER ST
         {
             using var connection = new SqlConnection(server.ConnectionString);
             await connection.OpenAsync(cancellationToken);
-            await EnsureLongQueryCompletionsOnPremAsync(connection, server, sessionName, legacy, logger, cancellationToken);
+            await EnsureLongQueryCompletionsOnPremAsync(connection, server, sessionName, legacy, runner.RingBufferMaxEvents, logger, cancellationToken);
         }
 
         /* One server-scoped session: it either exists now or the CREATE above threw. There is no partial. A failed legacy
@@ -1048,7 +1048,7 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER ST
                 {
                     using var definition = new SqlConnection(withoutIntent);
                     await definition.OpenAsync(cancellationToken);
-                    created = await CreateLongQueryCompletionsDefinitionAzureAsync(definition, server, databaseName, sessionName, logger, cancellationToken);
+                    created = await CreateLongQueryCompletionsDefinitionAzureAsync(definition, server, databaseName, sessionName, runner.RingBufferMaxEvents, logger, cancellationToken);
                 }
             }
             catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))
@@ -1156,7 +1156,7 @@ SELECT /* PerformanceMonitorDarling */
     /// one, false when the definition was already there.
     /// </summary>
     private static async Task<bool> CreateLongQueryCompletionsDefinitionAzureAsync(
-        SqlConnection connection, ServerRuntime server, string databaseName, string sessionName, ILogger? logger, CancellationToken cancellationToken)
+        SqlConnection connection, ServerRuntime server, string databaseName, string sessionName, int ringBufferMaxEvents, ILogger? logger, CancellationToken cancellationToken)
     {
         using (var cmd = new SqlCommand(@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -1174,10 +1174,14 @@ WHERE des.name = @session_name;", connection))
             }
         }
 
-        using var createCmd = new SqlCommand(
-            LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds), connection);
-        createCmd.CommandTimeout = 60;
-        await ExecuteLongQueryAzureDdlAsync(createCmd, cancellationToken);
+        /* #8146: max_events_limit is unverified on Azure SQL Database, so a refused create is retried once without it. */
+        await RingBufferTarget.CreateWithoutLimitOnRefusalAsync(ringBufferMaxEvents, async limit =>
+        {
+            using var createCmd = new SqlCommand(
+                LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds, limit), connection);
+            createCmd.CommandTimeout = 60;
+            await ExecuteLongQueryAzureDdlAsync(createCmd, cancellationToken);
+        }, ErrorNumbersOf);
         logger?.LogInformation("[{Server}] [{Database}] Created the long-query completion XE session's definition over a connection without read-only intent (database-scoped)", server.Config.DisplayName, databaseName);
         return true;
     }
@@ -1282,7 +1286,7 @@ END;", connection);
         await DropLongQueryCompletionsAsync(connection, sessionName, databaseScoped: false, cancellationToken);
     }
 
-    private static async Task EnsureLongQueryCompletionsOnPremAsync(SqlConnection connection, ServerRuntime server, string sessionName, DarlingLegacyLongQuerySession legacy, ILogger? logger, CancellationToken cancellationToken)
+    private static async Task EnsureLongQueryCompletionsOnPremAsync(SqlConnection connection, ServerRuntime server, string sessionName, DarlingLegacyLongQuerySession legacy, int ringBufferMaxEvents, ILogger? logger, CancellationToken cancellationToken)
     {
         int? isRunning = null;
         var legacyPresent = false;
@@ -1335,7 +1339,7 @@ SELECT /* PerformanceMonitorDarling */
         }
 
         using var createCmd = new SqlCommand(
-            LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: false, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds)
+            LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: false, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds, ringBufferMaxEvents)
             + "\n\n" + LongQueryCompletionsCollector.BuildStartSessionSql(sessionName, databaseScoped: false), connection);
         createCmd.CommandTimeout = 60;
         await createCmd.ExecuteNonQueryAsync(cancellationToken);
@@ -1544,7 +1548,7 @@ SELECT /* PerformanceMonitorDarling */
 
                 try
                 {
-                    await EnsureLongQueryCompletionsAzureAsync(connection, server, databaseName, sessionName, runner.LegacyLongQuery, logger, cancellationToken);
+                    await EnsureLongQueryCompletionsAzureAsync(connection, server, databaseName, sessionName, runner.LegacyLongQuery, runner.RingBufferMaxEvents, logger, cancellationToken);
                 }
                 catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))
                 {
@@ -1717,7 +1721,7 @@ SELECT /* PerformanceMonitorDarling */
         }
     }
 
-    private static async Task EnsureLongQueryCompletionsAzureAsync(SqlConnection connection, ServerRuntime server, string databaseName, string sessionName, DarlingLegacyLongQuerySession legacy, ILogger? logger, CancellationToken cancellationToken)
+    private static async Task EnsureLongQueryCompletionsAzureAsync(SqlConnection connection, ServerRuntime server, string databaseName, string sessionName, DarlingLegacyLongQuerySession legacy, int ringBufferMaxEvents, ILogger? logger, CancellationToken cancellationToken)
     {
         string? existing = null;
         var legacyPresent = false;
@@ -1772,11 +1776,15 @@ END;", connection);
             return;
         }
 
-        using var createCmd = new SqlCommand(
-            LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds)
-            + "\n\n" + LongQueryCompletionsCollector.BuildStartSessionSql(sessionName, databaseScoped: true), connection);
-        createCmd.CommandTimeout = 60;
-        await ExecuteLongQueryAzureDdlAsync(createCmd, cancellationToken);
+        /* #8146: max_events_limit is unverified on Azure SQL Database, so a refused create is retried once without it. */
+        await RingBufferTarget.CreateWithoutLimitOnRefusalAsync(ringBufferMaxEvents, async limit =>
+        {
+            using var createCmd = new SqlCommand(
+                LongQueryCompletionsCollector.BuildCreateSessionSql(sessionName, databaseScoped: true, LongQueryCompletionsCollector.DefaultDurationThresholdMicroseconds, limit)
+                + "\n\n" + LongQueryCompletionsCollector.BuildStartSessionSql(sessionName, databaseScoped: true), connection);
+            createCmd.CommandTimeout = 60;
+            await ExecuteLongQueryAzureDdlAsync(createCmd, cancellationToken);
+        }, ErrorNumbersOf);
         logger?.LogInformation("[{Server}] [{Database}] Created and started long-query completion XE session (database-scoped)", server.Config.DisplayName, databaseName);
     }
 

@@ -261,6 +261,25 @@ public sealed class LongQueryCompletionsCollectorDefinitionTests
         Assert.Equal("ringdb", Assert.Single(rows).DatabaseName);
     }
 
+    /* #8146 */
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void LongQuery_CreateSql_CarriesLimit(bool databaseScoped)
+    {
+        var sql = LongQueryCompletionsCollector.BuildCreateSessionSql(Session, databaseScoped, 2_000_000, 2500);
+
+        Assert.Contains("max_events_limit = 2500", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LongQuery_CreateSql_WritesTheDefaultLimitExplicitly()
+    {
+        var sql = LongQueryCompletionsCollector.BuildCreateSessionSql(Session, databaseScoped: false, 2_000_000);
+
+        Assert.Contains("max_events_limit = " + RingBufferTarget.DefaultMaxEvents, sql, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void BuildCreateSessionSql_ServerScoped_PredicateOnCompletedOnly_AttentionUnfiltered()
     {
@@ -659,5 +678,58 @@ public sealed class LongQueryCompletionsCollectorDefinitionTests
         Assert.Contains($"N'{other}'", plan.Text, StringComparison.Ordinal);
         Assert.DoesNotContain(Session, plan.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("N'PerformanceMonitor_LongQueryCompletions'", plan.Text, StringComparison.Ordinal);
+    }
+
+    /* #8146: the loss accounting reads the ring-buffer position the trailing row carries. */
+    private static readonly DateTime s_ringCreated = new(2026, 7, 2, 6, 0, 0, DateTimeKind.Utc);
+    private static readonly DateTime s_ringReadAt = new(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc);
+
+    private static System.Collections.Generic.Dictionary<string, string> RingPrior(long total, long held, long dropped = 0) => new()
+    {
+        [RingBufferLossAccounting.StateKey] = PerformanceMonitor.Common.RingBufferLoss.ToStateValue(
+            new PerformanceMonitor.Common.RingBufferPrior(total, held, dropped, s_ringCreated, s_ringReadAt.AddSeconds(-60), false)),
+    };
+
+    private static object[] PositionColumns(object total, object held, object dropped) =>
+        new object[] { total, held, s_ringCreated, dropped, 1000L, s_ringReadAt };
+
+    private static long? Measured(CollectorContext context, string label) =>
+        context.Measurements.Where(m => m.Label == label).Select(m => (long?)m.Value).FirstOrDefault();
+
+    /* The gate row: execution_count, gated, then the three truncation columns, then the position. */
+    private static object[] GateRow(bool gated, object total, object held, object dropped) =>
+        new object[] { 5L, gated, gated ? DBNull.Value : false, 0L, DBNull.Value }
+            .Concat(PositionColumns(total, held, dropped)).ToArray();
+
+    private static CollectorContext RingContext(
+        bool azure = false, bool logicalServer = false, long priorTotal = 34, long priorHeld = 10, long priorDropped = 0) => new()
+    {
+        ServerId = 42,
+        ServerName = "test-server",
+        CollectionTime = s_ringReadAt,
+        Deltas = s_deltas,
+        Target = new CollectorTargetInfo { IsAzureSqlDb = azure },
+        AzureRegistrationIsLogicalServer = logicalServer,
+        State = RingPrior(priorTotal, priorHeld, priorDropped),
+    };
+
+    [Fact]
+    public async Task ReadAsync_TrailingPosition_MeasuresEviction()
+    {
+        var context = RingContext();
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            Array.Empty<object[]>(),
+            new[] { new object[] { false, 0L, DBNull.Value }.Concat(PositionColumns(59L, 10L, 0L)).ToArray() });
+
+        await LongQueryCompletionsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(15, Measured(context, "ring_buffer_evicted"));
+        Assert.True(context.StagedItemState.ContainsKey(RingBufferLossAccounting.StateKey));
+    }
+
+    [Fact]
+    public void LongQuery_DeclaresRingPositionStateKey()
+    {
+        Assert.Contains("xe_ring_position", LongQueryCompletionsCollector.Instance.StateKeys);
     }
 }

@@ -280,18 +280,20 @@ public static class CollectorMeasurementNote
     /// (<c>plan_fetch_ms=3</c> from <c>plan_fetch_ms=31</c>) still reads as digits and passes, and it is a benign count either way.
     /// Blank is false here, because blank is "no note" and the caller already handles it.
     ///
-    /// <para>Counts are benign except one: the ring-buffer truncation counts
+    /// <para>Counts are benign except two: the ring-buffer truncation counts
     /// (<see cref="PerformanceMonitor.Common.RingBufferTruncationNote"/>, <c>ring_buffer_truncated=1
     /// ring_buffer_events_hidden=773 newest_visible_event_age_s=19380</c>) have the same shape but mean the read was blind
     /// to the newest events. <c>CollectorHealthClassifier.Classify</c> bands that note WARNING, so it is a fault record and
     /// this returns false for it. Any other note of this shape is what a healthy run leaves (the deferred plan fetch writes
     /// <c>plans_rendered=0 plans_rendered_bytes=0 plan_fetch_ms=31</c> on every query_stats run). Values are the ASCII
     /// digits <see cref="Render"/> writes. Nothing emits a negative count, so a leading <c>-</c> is not accepted, as in
-    /// <c>CollectorHealthClassifier.HasMeasurements</c>.</para>
+    /// <c>CollectorHealthClassifier.HasMeasurements</c>. The other exception (#8146) is a note that <see cref="PerformanceMonitor.Common.RingBufferLossNote.TryParse"/> reads as lossy (evicted, dropped or unknown above zero): events were lost, so this returns false for it.</para>
     /// </summary>
     public static bool IsMeasurementsOnly(string? note)
     {
-        if (string.IsNullOrEmpty(note) || PerformanceMonitor.Common.RingBufferTruncationNote.TryParse(note, out _, out _))
+        if (string.IsNullOrEmpty(note)
+            || PerformanceMonitor.Common.RingBufferTruncationNote.TryParse(note, out _, out _)
+            || PerformanceMonitor.Common.RingBufferLossNote.TryParse(note, out _))
         {
             return false;
         }
