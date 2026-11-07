@@ -215,7 +215,7 @@ Optional tables are off unless the config or the command line names them.
 
 A table with grain `hourly` writes its rollup to `<table>_hourly` and no raw rows. The tables that do this are: `ag_database_replica_states`, `cpu_scheduler_stats`, `memory_grant_stats`, `pg_cpu_utilization`, `pg_database_stats`, `pg_io_stats`, `pg_replication_slot_stats`, `pg_replication_stats`, `pg_statement_stats`, `pg_wait_stats`, `pg_write_stats`, `pg_xmin_horizon`, `session_summary_stats`.
 
-A table with grain `daily` writes the last complete collection cycle per server before 00:00 UTC. It is written only in the run whose window starts at 00:00 UTC.
+A table with grain `daily` writes the last complete collection cycle per server before 00:00 UTC. It is written in the run whose window starts at 00:00 UTC. If that run did not produce it, the first later run of the same UTC day produces it instead, with the same read range (`read_from`, `read_to`) and the same `snapshot_time`, and its manifest is that later window's. A `snapshot` table (`servers`) follows the same rule, stamped with the day's 00:00 UTC.
 
 A table with grain `change` writes a row only when the tracked columns changed since the last exported row. The first export is a full baseline and its manifest entry has `change_baseline` set to true. The change keys are:
 
@@ -282,7 +282,7 @@ The Parquet types follow the store types. Exact numerics with a precision and sc
 Kinds:
 
 - **window**: rows with a time column, filtered to `[from, to)`.
-- **snapshot**: a table with no time column of its own. The exporter stamps `snapshot_time` on each row. It is written once a day, in the window that starts at 00:00 UTC.
+- **snapshot**: a table with no time column of its own. The exporter stamps `snapshot_time` on each row with the day's 00:00 UTC. It is written once a day, in the window that starts at 00:00 UTC, or in the first later window of the day when that one did not produce it.
 - **dimension**: a table that holds content or keys, such as `plan_shape` and `query_text`. The exporter writes a key once. It remembers the keys it already wrote in its local state, so a later run does not write them again. The `--ignore-state` flag writes them again.
 
 Grains:

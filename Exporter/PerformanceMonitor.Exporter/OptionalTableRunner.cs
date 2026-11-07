@@ -135,10 +135,18 @@ public static class OptionalTableRunner
                     var policy = ColumnPolicies.For(table.Name);
                     var sql = SqlBuilder.BuildOptionalSelect(table, columns, policy);
 
+                    // The day's snapshot is produced once: by the 00:00 window, or by the first later window of the
+                    // day when no run has recorded it. Under --ignore-state nothing is recorded, so only 00:00 runs it.
+                    using var dailyState = options.IgnoreState ? null : StateStore.Open(options.StateDir);
+                    var day = options.FromUtc.Date;
+                    var dayAlreadyExported = dailyState is null
+                        ? !OptionalTableExporter.IsDailySnapshotWindow(options.FromUtc)
+                        : dailyState.HasDailySnapshot(options.Store, table.Name, day);
+
                     var result = await DailySnapshotExporter.ExportAsync(
                         table, options, options.Store, options.OutDir,
                         (readFrom, readTo, innerCt) => OpenRangeReaderAsync(connectionStringBuilder, sql, readFrom, readTo, options, table, innerCt),
-                        ct).ConfigureAwait(false);
+                        ct, dayAlreadyExported).ConfigureAwait(false);
 
                     if (result.SkippedReason is not null)
                     {
@@ -146,6 +154,8 @@ public static class OptionalTableRunner
                         output.WriteLine($"  {result.SkippedReason}");
                         continue;
                     }
+
+                    dailyState?.RecordDailySnapshot(options.Store, table.Name, day);
 
                     foreach (var part in result.Parts)
                     {
@@ -273,7 +283,17 @@ public static class OptionalTableRunner
                 var policy = ColumnPolicies.For(table.Name);
                 var sql = SqlBuilder.BuildOptionalSelect(table, columns, policy);
 
-                var request = new OptionalExportRequest(table.Name, table.TimeColumn, table.Kind == OptionalTableKind.Snapshot, options.FromUtc, options.ToUtc);
+                // A snapshot table's day is produced once, like a Daily-grain table's: by the 00:00 window, or by the
+                // first later window of the day when no run has recorded it.
+                var isSnapshot = table.Kind == OptionalTableKind.Snapshot;
+                using var snapshotState = isSnapshot && !options.IgnoreState ? StateStore.Open(options.StateDir) : null;
+                var day = options.FromUtc.Date;
+                var request = new OptionalExportRequest(table.Name, table.TimeColumn, isSnapshot, options.FromUtc, options.ToUtc)
+                {
+                    DayAlreadyExported = isSnapshot && (snapshotState is null
+                        ? !OptionalTableExporter.IsDailySnapshotWindow(options.FromUtc)
+                        : snapshotState.HasDailySnapshot(options.Store, table.Name, day)),
+                };
                 var result = await OptionalTableExporter.ExportAsync(
                     request,
                     options.Store,
@@ -287,6 +307,8 @@ public static class OptionalTableRunner
                     output.WriteLine($"  {result.SkippedReason}");
                     continue;
                 }
+
+                snapshotState?.RecordDailySnapshot(options.Store, table.Name, day);
 
                 if (table.Name == "pg_statement_stats")
                 {

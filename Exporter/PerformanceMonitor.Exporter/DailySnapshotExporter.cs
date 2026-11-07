@@ -20,9 +20,11 @@ public static class DailySnapshotExporter
     private const string PartParquetOptions = "FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '64MB'";
 
     /// <summary>
-    /// Exports <paramref name="table"/>'s daily snapshot for <paramref name="options"/>.FromUtc. Returns a skip,
-    /// without ever calling <paramref name="readerFactory"/>, when <paramref name="options"/>.FromUtc is not exactly a
-    /// UTC midnight.
+    /// Exports <paramref name="table"/>'s daily snapshot for the UTC day of <paramref name="options"/>.FromUtc: the
+    /// read range ends at that day's 00:00 and the rows are stamped with it, whichever window of the day runs it. The
+    /// 00:00 window always runs it. A later window of the day runs it only when <paramref name="dayAlreadyExported"/>
+    /// is false (no run has produced the day's part yet); otherwise it returns a skip without ever calling
+    /// <paramref name="readerFactory"/>.
     /// </summary>
     public static async Task<OptionalTableExportResult> ExportAsync(
         OptionalTable table,
@@ -30,9 +32,11 @@ public static class DailySnapshotExporter
         string store,
         string outDir,
         Func<DateTime, DateTime, CancellationToken, Task<DbDataReader>> readerFactory,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool dayAlreadyExported = false)
     {
-        if (!OptionalTableExporter.IsDailySnapshotWindow(options.FromUtc))
+        var day = options.FromUtc.Date;
+        if (!OptionalTableExporter.IsDailySnapshotWindow(options.FromUtc) && dayAlreadyExported)
         {
             return new OptionalTableExportResult
             {
@@ -41,14 +45,14 @@ public static class DailySnapshotExporter
                 Parts = [],
                 StoreQueryElapsedMs = 0,
                 WriteElapsedMs = 0,
-                SkippedReason = "skipped: not the daily snapshot window",
+                SkippedReason = $"skipped: the daily snapshot for {day:yyyy-MM-dd} is already exported",
             };
         }
 
         var lookbackHours = table.DailyLookbackHours
             ?? throw new InvalidOperationException($"Daily-grain table '{table.Name}' has no DailyLookbackHours.");
 
-        var readTo = options.FromUtc;
+        var readTo = day;
         var readFrom = readTo.AddHours(-lookbackHours);
 
         var tableDir = Path.Combine(outDir, store, table.Name);
@@ -85,14 +89,14 @@ public static class DailySnapshotExporter
         var writeStopwatch = Stopwatch.StartNew();
 
         // The last complete cycle per server: every row whose collection_time equals that server's max collection_time
-        // in the read range, stamped with the window start as snapshot_time.
+        // in the read range, stamped with the day's 00:00 as snapshot_time.
         Execute(rawWriter,
             "CREATE TABLE snap AS " +
             "SELECT r.*, CAST(? AS TIMESTAMP) AS snapshot_time " +
             "FROM raw r " +
             "JOIN (SELECT server_name, max(collection_time) AS ct FROM raw GROUP BY server_name) m " +
             "  ON r.server_name = m.server_name AND r.collection_time = m.ct",
-            DateTime.SpecifyKind(options.FromUtc, DateTimeKind.Unspecified));
+            DateTime.SpecifyKind(day, DateTimeKind.Unspecified));
 
         var relativePath = OutputPaths.RelativeParquetPath(store, table.Name, readFrom, readTo, part: "p00000");
         var absolutePath = Path.Combine(outDir, store, relativePath.Replace('/', Path.DirectorySeparatorChar));
