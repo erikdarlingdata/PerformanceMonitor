@@ -50,7 +50,7 @@ public sealed class FlatTabsFocusTests
     [InlineData("CoolBreeze")]
     public void EverySelectedTab_ShowsTheUnderlineAndNoFill_OnTheTopRowTheSubRowsAndTheSubSubRows(string theme)
     {
-        StaTestThread.Run(() => WithAppTheme(() =>
+        StaTestThread.Run(() => WithAppTheme(theme, () =>
         {
             var dict = LoadTheme(theme);
             var accent = ((SolidColorBrush)dict["AccentBrush"]).Color;
@@ -80,7 +80,9 @@ public sealed class FlatTabsFocusTests
                     var bounds = selected.TransformToAncestor(window).TransformBounds(new Rect(selected.RenderSize));
                     var bitmap = Render(window, Path.Combine("tabs", $"{theme}-{what.Replace(' ', '-')}"));
                     var underline = Pixel(bitmap, bounds.Left + bounds.Width / 2, bounds.Bottom - 1);
-                    Assert.True(underline == accent, $"[{theme} {what}] the pixel at the bottom of the selected tab is {underline}, not the accent {accent}");
+                    /* A 1 px underline (the sub-sub row) lands between device pixels and blends; a 2 px one is the accent itself. */
+                    Assert.True(chrome.BorderThickness.Bottom < 2 ? underline != background : underline == accent,
+                        $"[{theme} {what}] the pixel at the bottom of the selected tab is {underline} (accent {accent}, background {background})");
                     var body = Pixel(bitmap, bounds.Left + 3, bounds.Top + bounds.Height / 2);
                     Assert.True(body == background, $"[{theme} {what}] the selected tab's body pixel is {body}, not the window background {background}");
                 }
@@ -101,7 +103,7 @@ public sealed class FlatTabsFocusTests
     [InlineData("CoolBreeze", 1280, 800)]
     public void TheTopTabRow_ScrollsWholeTabs_AndTheOverflowButtonListsTheTabsThatDoNotFit(string theme, int width, int height)
     {
-        StaTestThread.Run(() => WithAppTheme(() =>
+        StaTestThread.Run(() => WithAppTheme(theme, () =>
         {
             var dict = LoadTheme(theme);
             var servers = width >= 1280 ? Servers.Concat(Servers.Select(s => s + "-2")).ToArray() : Servers;
@@ -181,7 +183,7 @@ public sealed class FlatTabsFocusTests
         try
         {
             using var duckDb = new DuckDbInitializer(Path.Combine(dir, "test.duckdb"));
-            var problems = StaTestThread.Run(() => WithAppTheme(() =>
+            var problems = StaTestThread.Run(() => WithAppTheme(theme, () =>
             {
                 var server = new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "flat-tabs-test", DisplayName = "flat-tabs-test", IsEnabled = true };
                 var tab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
@@ -202,7 +204,8 @@ public sealed class FlatTabsFocusTests
                         main.SelectedItem = item;
                         StaTestThread.WaitForIdle(window.Dispatcher, TimeSpan.FromSeconds(10));
                         found.AddRange(PartialTabs(main, scroll, $"server tabs, selecting '{item.Header}'"));
-                        var sub = Descendants<TabControl>(item)
+                        /* The selected tab's content is shown by the strip's own content host, not under the TabItem. */
+                        var sub = Descendants<TabControl>(main)
                             .FirstOrDefault(t => ReferenceEquals(t.ItemContainerStyle, subStyle) && t.IsVisible && t.ActualWidth > 0);
                         if (sub is null)
                         {
@@ -252,7 +255,7 @@ public sealed class FlatTabsFocusTests
     [InlineData("CoolBreeze")]
     public void TheOverflowMenu_HasNoEmptyIconColumn_AndMarksTheCurrentTab(string theme)
     {
-        StaTestThread.Run(() => WithAppTheme(() =>
+        StaTestThread.Run(() => WithAppTheme(theme, () =>
         {
             var dict = LoadTheme(theme);
             var tabs = BuildTopRow(Servers);
@@ -276,12 +279,13 @@ public sealed class FlatTabsFocusTests
                 StaTestThread.WaitForIdle(window.Dispatcher, TimeSpan.FromSeconds(10));
                 var items = menu.Items.OfType<MenuItem>().ToList();
                 Assert.NotEmpty(items);
+                Render(menu, Path.Combine("menus", $"{theme}-overflow"));
                 var current = items.Single(i => i.IsChecked);
                 Assert.Equal(Text((TabItem)tabs.SelectedItem), (string)current.Header);
 
                 var wide = items.Max(i => i.ActualWidth);
                 var text = items.Select(i => TextWidth(i)).Max();
-                Assert.True(wide - text < 60, $"[{theme}] the menu is {wide:F0} px wide for text {text:F0} px wide: an empty icon column is left");
+                Assert.True(wide - text < 40, $"[{theme}] the menu is {wide:F0} px wide for text {text:F0} px wide: an empty icon column is left");
                 var mark = Descendants<FrameworkElement>(current).FirstOrDefault(e => e.Name == "CheckMark");
                 Assert.True(mark is { IsVisible: true }, $"[{theme}] the current tab's menu item shows no check mark");
                 var other = items.First(i => !i.IsChecked);
@@ -300,9 +304,49 @@ public sealed class FlatTabsFocusTests
     [InlineData("Dark")]
     [InlineData("Light")]
     [InlineData("CoolBreeze")]
+    public void TheSidebarMoreMenu_OpensBesideItsButton_WithNoEmptyIconColumn(string theme)
+    {
+        StaTestThread.Run(() => WithAppTheme(theme, () =>
+        {
+            var footer = new SidebarFooter { Width = 260, VerticalAlignment = VerticalAlignment.Bottom, HorizontalAlignment = HorizontalAlignment.Left };
+            var window = new Window { Content = footer, Width = 900, Height = 600, Left = 0, Top = 0 };
+            window.Resources.MergedDictionaries.Add(LoadTheme(theme));
+            window.Show();
+            try
+            {
+                StaTestThread.Settle(window);
+                var more = (Button)footer.FindName("MoreButton");
+                var menu = (ContextMenu)footer.FindName("MoreMenu");
+                more.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+                StaTestThread.WaitForIdle(window.Dispatcher, TimeSpan.FromSeconds(10));
+                Assert.True(menu.IsOpen);
+                Render(menu, Path.Combine("menus", $"{theme}-more"));
+
+                var button = new Rect(more.PointToScreen(new Point(0, 0)), more.RenderSize);
+                var shown = new Rect(menu.PointToScreen(new Point(0, 0)), menu.RenderSize);
+                Assert.True(shown.Left >= button.Right - 2, $"[{theme}] the menu opens at x {shown.Left:F0}, not beside the button (its right edge is {button.Right:F0})");
+                Assert.True(shown.Top < button.Bottom + 2 && shown.Bottom > button.Top - 2, $"[{theme}] the menu ({shown.Top:F0}..{shown.Bottom:F0}) is not level with the button ({button.Top:F0}..{button.Bottom:F0})");
+
+                var items = menu.Items.OfType<MenuItem>().ToList();
+                var wide = items.Max(i => i.ActualWidth);
+                var text = items.Max(TextWidth);
+                Assert.True(wide - text < 40, $"[{theme}] the More menu is {wide:F0} px wide for text {text:F0} px wide: an empty icon column is left");
+                menu.IsOpen = false;
+            }
+            finally
+            {
+                window.Close();
+            }
+        }));
+    }
+
+    [Theory]
+    [InlineData("Dark")]
+    [InlineData("Light")]
+    [InlineData("CoolBreeze")]
     public void TabItems_UseTheThemedKeyboardFocusCue_NotTheStockDottedBox(string theme)
     {
-        StaTestThread.Run(() => WithAppTheme(() =>
+        StaTestThread.Run(() => WithAppTheme(theme, () =>
         {
             var dict = LoadTheme(theme);
             var cue = (Style?)dict["KeyboardFocusVisualStyle"];
@@ -341,7 +385,7 @@ public sealed class FlatTabsFocusTests
     [Fact]
     public void TheAppLevelFocusDefault_IsTheThemedCue_ForControlsWithoutTheirOwnFocusStyle()
     {
-        StaTestThread.Run(() => WithAppTheme(() =>
+        StaTestThread.Run(() => WithAppTheme("Dark", () =>
         {
             var install = typeof(PerformanceMonitorLite.App).GetMethod("InstallKeyboardFocusCue", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
             Assert.NotNull(install);
@@ -479,13 +523,14 @@ public sealed class FlatTabsFocusTests
     private static ResourceDictionary LoadTheme(string theme) =>
         new() { Source = new Uri($"pack://application:,,,/PerformanceMonitorLite;component/Themes/{theme}Theme.xaml") };
 
-    private static T WithAppTheme<T>(Func<T> body)
+    /// <summary>Runs <paramref name="body"/> with the theme under test as the application's own, so a control resolves its brushes and the app-level text style from it as the running app does.</summary>
+    private static T WithAppTheme<T>(string theme, Func<T> body)
     {
         var app = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         ResourceDictionary? added = null;
         if (!app.Resources.Contains("NumericCell"))
         {
-            added = new ResourceDictionary { Source = new Uri("pack://application:,,,/PerformanceMonitorLite;component/Themes/DarkTheme.xaml") };
+            added = LoadTheme(theme);
             app.Resources.MergedDictionaries.Add(added);
         }
 
@@ -502,7 +547,7 @@ public sealed class FlatTabsFocusTests
         }
     }
 
-    private static void WithAppTheme(Action body) => WithAppTheme(() =>
+    private static void WithAppTheme(string theme, Action body) => WithAppTheme(theme, () =>
     {
         body();
         return 0;
