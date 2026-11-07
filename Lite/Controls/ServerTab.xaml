@@ -158,7 +158,7 @@
             <Style x:Key="DeadlockRowStyle" TargetType="DataGridRow">
                 <Setter Property="ContextMenu" Value="{StaticResource DeadlockContextMenu}"/>
             </Style>
-            <!-- #8219: a ToolBar with the app's colors: no gradient, no grip, and an overflow button that opens the controls that did not fit. -->
+            <!-- #8219: a ToolBar with the app's colors: no gradient, no grip, and an overflow button that opens the controls that did not fit. A ToolBar gives its own flat face to every Button in it, so the Buttons below name the theme's Button style (Style="{DynamicResource {x:Type Button}}") to keep the face. -->
             <Style x:Key="ServerToolbarStyle" TargetType="ToolBar">
                 <Setter Property="Background" Value="Transparent"/>
                 <Setter Property="Foreground" Value="{DynamicResource ForegroundBrush}"/>
@@ -173,10 +173,19 @@
                                               IsEnabled="{TemplateBinding HasOverflowItems}">
                                     <ToggleButton.Template>
                                         <ControlTemplate TargetType="ToggleButton">
-                                            <Border Background="{DynamicResource BackgroundLightBrush}" BorderBrush="{DynamicResource BorderBrush}"
+                                            <Border x:Name="face" Background="{DynamicResource BackgroundLightBrush}" BorderBrush="{DynamicResource BorderBrush}"
                                                     BorderThickness="1" CornerRadius="3" Padding="8,2">
                                                 <TextBlock Text="&#x22EF;" FontSize="14" Foreground="{DynamicResource ForegroundBrush}" HorizontalAlignment="Center"/>
                                             </Border>
+                                            <ControlTemplate.Triggers>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter TargetName="face" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                                                </Trigger>
+                                                <Trigger Property="IsChecked" Value="True">
+                                                    <Setter TargetName="face" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                                                    <Setter TargetName="face" Property="Background" Value="{DynamicResource BackgroundDarkBrush}"/>
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
                                         </ControlTemplate>
                                     </ToggleButton.Template>
                                 </ToggleButton>
@@ -222,7 +231,7 @@
                     <TextBlock x:Name="ConnectionStatusText" Text="Collecting..." FontSize="12"
                                Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center"/>
                 </StackPanel>
-                    <Button ToolBar.OverflowMode="Never" x:Name="RefreshDataButton" Content="Refresh" Click="RefreshDataButton_Click" Padding="12,4" Margin="0,0,8,0"/>
+                    <Button Style="{DynamicResource {x:Type Button}}" ToolBar.OverflowMode="Never" x:Name="RefreshDataButton" Content="Refresh" Click="RefreshDataButton_Click" Padding="12,4" Margin="0,0,8,0"/>
                     <StackPanel ToolBar.OverflowMode="Never" Orientation="Horizontal">
                     <CheckBox x:Name="AutoRefreshCheckBox" Content="_Auto-refresh" VerticalAlignment="Center" Margin="0,0,4,0"
                               IsChecked="True" Checked="AutoRefreshCheckBox_Changed" Unchecked="AutoRefreshCheckBox_Changed"/>
@@ -250,7 +259,7 @@
                               DropDownOpened="QueryTagFilterCombo_DropDownOpened" SelectionChanged="QueryTagFilterCombo_SelectionChanged"
                               ToolTip="Show only the Queries grids' rows with this tag (a parent shows its children), or only untagged rows. Applied before each grid's top-N cut."/>
                 </StackPanel>
-                    <Button x:Name="DatabaseFilterButton" Content="Databases: All" Click="DatabaseFilterButton_Click"
+                    <Button Style="{DynamicResource {x:Type Button}}" x:Name="DatabaseFilterButton" Content="Databases: All" Click="DatabaseFilterButton_Click"
                         Padding="8,4" Margin="0,0,8,0"
                         ToolTip="Filter database-scoped views (queries, blocking, per-database config, trends) to selected databases. No effect on server-wide views such as CPU, memory, waits, or jobs."/>
                     <ui:TimeRangePicker x:Name="RangePicker" AutomationProperties.Name="Time range" Margin="0,0,8,0" VerticalAlignment="Center"
@@ -267,9 +276,9 @@
                         <ComboBoxItem Content="Same day last week"/>
                     </ComboBox>
                 </StackPanel>
-                    <Button Content="Apply to All" Click="ApplyTimeRangeToAll_Click" Padding="8,4" Margin="0,0,8,0"
+                    <Button Style="{DynamicResource {x:Type Button}}" Content="Apply to All" Click="ApplyTimeRangeToAll_Click" Padding="8,4" Margin="0,0,8,0"
                         ToolTip="Apply this time range to all open server tabs"/>
-                    <Button Content="Use by tag" Click="ResourceUseByTagButton_Click" Padding="8,4" Margin="0,0,0,0"
+                    <Button Style="{DynamicResource {x:Type Button}}" Content="Use by tag" Click="ResourceUseByTagButton_Click" Padding="8,4" Margin="0,0,0,0"
                         ToolTip="Resource use rolled up by query tag, one table per source."/>
                 </ToolBar>
                 <Popup x:Name="DatabaseFilterPopup" PlacementTarget="{Binding ElementName=DatabaseFilterButton}"
