@@ -34,24 +34,114 @@ public sealed class NotificationRouteCategoryLevelTests
         };
 
     [Fact]
-    public void ExactBeatsCategoryBeatsFamilyBeatsWildcard()
+    public void ExactBeatsCategoryBeatsAnalysisAllBeatsFamilyBeatsWildcard()
     {
         var routes = new List<NotificationRoute>
         {
             Route(1, "*", "wild", server: Server),
             Route(2, AlertFamily.Performance, "family", server: Server),
-            Route(3, "Analysis: queries", "category", server: Server),
-            Route(4, Finding, "exact", server: Server),
+            Route(3, "Analysis: *", "all", server: Server),
+            Route(4, "Analysis: queries", "category", server: Server),
+            Route(5, Finding, "exact", server: Server),
         };
 
-        var ladder = new[] { ("exact", RouteSource.Exact), ("category", RouteSource.Category), ("family", RouteSource.Family), ("wild", RouteSource.Wildcard) };
+        var ladder = new[]
+        {
+            ("exact", RouteSource.Exact), ("category", RouteSource.Category), ("all", RouteSource.AnalysisAll),
+            ("family", RouteSource.Family), ("wild", RouteSource.Wildcard),
+        };
         for (var drop = 0; drop < ladder.Length; drop++)
         {
-            /* Remove the more specific routes one at a time: the next level answers each time. */
-            var kept = routes.Where(r => r.RouteId <= 4 - drop).ToList();
+            /* Remove the more specific routes one at a time: the next level answers each time (#7999). */
+            var kept = routes.Where(r => r.RouteId <= 5 - drop).ToList();
             var slack = NotificationRouter.Resolve(Finding, kept, new NoDefaults(), Server).Slack;
             Assert.Equal(ladder[drop], (slack.Destination!, slack.Source));
         }
+    }
+
+    [Theory]
+    [InlineData("Analysis: queries [1a2b3c4d]", true)]
+    [InlineData("Analysis: blocking [ffff0000]", true)]
+    [InlineData("Analysis: brand_new_category [00000000]", true)]
+    [InlineData("Analysis Singles Digest", false)]
+    [InlineData("Analysis: queries", false)]
+    [InlineData("Analysis: 3 findings on 2 servers", false)]
+    [InlineData("High CPU", false)]
+    [InlineData("Custom:12", false)]
+    [InlineData("External:x:y", false)]
+    public void AnalysisAllMatchesFindingsOfAnyCategoryAndNothingElse(string metric, bool matches)
+    {
+        var slack = NotificationRouter.Resolve(metric, new[] { Route(1, "Analysis: *", "all") }, new NoDefaults()).Slack;
+
+        Assert.Equal(matches, slack.Destination == "all");
+        if (matches)
+        {
+            Assert.Equal(RouteSource.AnalysisAll, slack.Source);
+        }
+    }
+
+    [Fact]
+    public void AnalysisAllSpelling_IsTolerantLikeACategory_AndNeverReadAsCategoryStar()
+    {
+        var spaced = Route(1, "  analysis:   * ", "all");
+        Assert.True(spaced.IsAnalysisAll);
+        Assert.Equal("all", NotificationRouter.Resolve(Finding, new[] { spaced }, new NoDefaults()).Slack.Destination);
+
+        Assert.Null(NotificationRoute.AnalysisCategoryOf("Analysis: *"));
+        Assert.Null(NotificationRoute.AnalysisCategoryOf("  analysis:   * "));
+        Assert.Equal("queries", NotificationRoute.AnalysisCategoryOf("Analysis: queries"));
+        Assert.True(NotificationRoute.IsAnalysisAllMatch("Analysis: *"));
+        Assert.False(NotificationRoute.IsAnalysisAllMatch("Analysis:*"));
+        Assert.False(NotificationRoute.IsAnalysisAllMatch("Analysis: **"));
+        Assert.False(NotificationRoute.IsAnalysisAllMatch("Analysis: queries"));
+        Assert.False(NotificationRoute.IsAnalysisAllMatch(null));
+        Assert.Equal("Analysis: *", NotificationRoute.AnalysisAllMatch);
+        /* No space after the colon: not the all shape, and not a category either; it is an exact name, as `Analysis:queries` is today. */
+        Assert.Null(NotificationRouter.Resolve(Finding, new[] { Route(2, "Analysis:*", "all") }, new NoDefaults()).Slack.Destination);
+    }
+
+    [Fact]
+    public void AnalysisAll_CanMatchFleetWide()
+    {
+        /* Unlike `*`, it is narrower than a family, so a fleet-wide one can match (CanMatch only; the writers' acceptance is tested in the Viewer and writer classes). */
+        Assert.True(Route(1, "Analysis: *", "all").CanMatch);
+    }
+
+    [Fact]
+    public void ScopeTierComesBeforeTheAnalysisAllLevel()
+    {
+        var serverFamily = new[] { Route(1, "Analysis: *", "fleetAll"), Route(2, AlertFamily.Performance, "serverFamily", server: Server) };
+        Assert.Equal("serverFamily", NotificationRouter.Resolve(Finding, serverFamily, new NoDefaults(), Server).Slack.Destination);
+
+        var serverAll = new[] { Route(1, "Analysis: queries", "fleetCategory"), Route(2, "Analysis: *", "serverAll", server: Server) };
+        Assert.Equal("serverAll", NotificationRouter.Resolve(Finding, serverAll, new NoDefaults(), Server).Slack.Destination);
+    }
+
+    [Fact]
+    public void AnAnalysisAllRouteWithOnlySlackLetsTeamsFallToTheFamilyRoute()
+    {
+        var routes = new[]
+        {
+            Route(1, "Analysis: *", "slackAll"),
+            new NotificationRoute(2, AlertFamily.Performance, "teamsFamily", "slackFamily", "", "", "", true),
+        };
+
+        var resolved = NotificationRouter.Resolve(Finding, routes, new NoDefaults());
+        Assert.Equal(("slackAll", RouteSource.AnalysisAll), (resolved.Slack.Destination!, resolved.Slack.Source));
+        Assert.Equal(("teamsFamily", RouteSource.Family), (resolved.Teams.Destination!, resolved.Teams.Source));
+    }
+
+    [Fact]
+    public void ACriticalOnlyAnalysisAllRouteTakesNoWarningFinding_AndMatchingGoesOnToTheFamily()
+    {
+        var routes = new[]
+        {
+            Route(1, "Analysis: *", "all") with { Severities = NotificationRouteKinds.SeveritiesCritical },
+            Route(2, AlertFamily.Performance, "family"),
+        };
+
+        var slack = NotificationRouter.Resolve(Finding, routes, new NoDefaults(), severity: AlertSeverityLevel.Warning).Slack;
+        Assert.Equal(("family", RouteSource.Family), (slack.Destination!, slack.Source));
     }
 
     [Fact]
@@ -89,12 +179,23 @@ public sealed class NotificationRouteCategoryLevelTests
     }
 
     [Fact]
-    public void CategoryIsAppendedLastToRouteSource()
+    public void AnalysisAllIsAppendedLastToRouteSource()
     {
-        /* The names persist in the alert-history row, so a new member goes last and the existing ones keep their numbers. */
+        /* The names persist in the alert-history row, so a new member goes last and the existing ones keep their numbers (#7999). */
         Assert.Equal(
-            new[] { "None", "Default", "Family", "Exact", "Wildcard", "Category" },
+            new[] { "None", "Default", "Family", "Exact", "Wildcard", "Category", "AnalysisAll" },
             System.Enum.GetNames<RouteSource>());
+    }
+
+    [Fact]
+    public void TheAnalysisAllMatchKindHasItsOwnWord_AndStaysInThePerformanceFamily()
+    {
+        Assert.Equal("analysis_all", NotificationRouteKinds.AnalysisAllKind);
+        Assert.Equal(NotificationRouteKinds.AnalysisAllKind, NotificationRouteKinds.MatchKind("Analysis: *"));
+        Assert.Equal(NotificationRouteKinds.AnalysisAllKind, NotificationRouteKinds.MatchKind("  analysis:  * "));
+        Assert.Equal(NotificationRouteKinds.AnalysisCategoryKind, NotificationRouteKinds.MatchKind("Analysis: queries"));
+        Assert.Equal(NotificationRouteKinds.Wildcard, NotificationRouteKinds.MatchKind("*"));
+        Assert.Equal(AlertFamily.Performance, NotificationRouteKinds.FamilyOf("Analysis: *"));
     }
 
     [Fact]
@@ -111,6 +212,22 @@ public sealed class NotificationRouteCategoryLevelTests
         Assert.Equal(2, NotificationRouter.ResolveAgent(Finding, routes)?.RouteId);
         /* A finding of another category falls to the family route, whose level 0 says no. */
         Assert.Null(NotificationRouter.ResolveAgent("Analysis: blocking [00000000]", routes));
+    }
+
+    [Fact]
+    public void ResolveAgent_AnAnalysisAllRouteOpensEveryFinding_AndACategoryLevelZeroOptsOneOut()
+    {
+        var routes = new[]
+        {
+            Route(1, "Analysis: *", "all", agentLevel: 1),
+            Route(2, "Analysis: queries", "c", agentLevel: 0),
+            Route(3, AlertFamily.Performance, "f", agentLevel: 0),
+        };
+
+        Assert.Equal(1, NotificationRouter.ResolveAgent("Analysis: blocking [00000000]", routes)?.RouteId);
+        Assert.Null(NotificationRouter.ResolveAgent(Finding, routes));
+        /* Not a finding: the all route never answers, so the family route's level 0 does. */
+        Assert.Null(NotificationRouter.ResolveAgent("High CPU", routes));
     }
 
     [Fact]

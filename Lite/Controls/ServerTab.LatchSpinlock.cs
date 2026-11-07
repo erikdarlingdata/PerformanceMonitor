@@ -123,7 +123,7 @@ public partial class ServerTab : UserControl
 
         LatchSpinlockRenderer.Render(SpinlockStatsChart, _spinlockStatsHover, data,
             d => d.CollectionTime, d => d.SpinlockName, d => d.CollisionsPerSecond,
-            "Spinlock Collisions", "collisions/sec", ChartXStart(rangeStart, rangeEnd), rangeEnd.ToOADate());
+            "Spinlock Collisions", "count/sec", ChartXStart(rangeStart, rangeEnd), rangeEnd.ToOADate());
         KeepPlottedInView(SpinlockStatsChart, rangeStart, rangeEnd);
     }
 

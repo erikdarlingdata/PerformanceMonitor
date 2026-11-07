@@ -738,4 +738,37 @@ public sealed class MonitoringGrantScriptTests
         Assert.True(DarlingCliCommands.IsKnownVerb("--grant-script"));
         Assert.False(DarlingCliCommands.IsGrantScriptVerb("--grant"));
     }
+
+    [Fact]
+    public void OnPremises_Msdb_GrantsSelectOnCdcJobs_GuardedForAServerThatNeverConfiguredCdc()
+    {
+        var script = MonitoringGrantScript.Build(
+            MonitoringGrantScript.ChoosePrincipal(Inputs("sql", "pm_monitor")), finOps: false, azureSqlDatabase: false);
+        var msdb = script[script.IndexOf("USE [msdb];", StringComparison.Ordinal)..script.LastIndexOf("USE [master];", StringComparison.Ordinal)];
+        var lines = msdb.Split('\n').Select(l => l.Trim()).ToArray();
+
+        /* The query snapshots collector reads msdb.dbo.cdc_jobs to leave CDC capture jobs out of the Long-Running Query alert, and msdb
+           grants public no SELECT on it, so the login needs the grant. msdb creates the table the first time CDC is configured, and a
+           GRANT on a missing object raises error 15151, so the grant sits inside an existence guard and the script runs clean on a
+           server that has never used CDC. */
+        var grant = Array.IndexOf(lines, "GRANT SELECT ON dbo.cdc_jobs TO [pm_monitor];");
+        Assert.True(grant >= 2, msdb);
+        Assert.Equal("IF OBJECT_ID(N'dbo.cdc_jobs') IS NOT NULL", lines[grant - 2]);
+        Assert.Equal("BEGIN", lines[grant - 1]);
+        Assert.Equal("END;", lines[grant + 1]);
+        Assert.Contains("GRANT SELECT ON dbo.cdc_jobs TO [pm_monitor];", StatementLines(script));
+    }
+
+    [Fact]
+    public void TheCdcJobsGrant_IsOptional_AndLeftOutOfTheRdsForm()
+    {
+        var entry = Assert.Single(MonitoringGrantScript.All, e => e.Scope == GrantScope.Msdb && e.OnObject == "dbo.cdc_jobs");
+
+        Assert.Equal(GrantSet.Base, entry.Set);
+        Assert.Equal("SELECT", entry.Permission);
+        /* Optional like the other msdb reads: the connection test does not warn when the login lacks it. */
+        Assert.False(entry.Required);
+        /* RDS lets its master user grant only the three job reads in msdb, so the RDS form carries no GRANT on cdc_jobs. */
+        Assert.DoesNotContain(StatementLines(RdsScript()), g => g.Contains("cdc_jobs", StringComparison.Ordinal));
+    }
 }

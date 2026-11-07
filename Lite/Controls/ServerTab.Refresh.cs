@@ -397,13 +397,11 @@ public partial class ServerTab : UserControl
             case 11: await RefreshConfigurationAsync(hoursBack, fromDate, toDate); break;
             case 12: await RefreshDailySummaryAsync(hoursBack, fromDate, toDate); break;
             case 13: await RefreshLatchSpinlockAsync(hoursBack, fromDate, toDate); break;
-            case 14: await RefreshCpuSchedulerAsync(hoursBack, fromDate, toDate); break;
-            case 15: await RefreshPlanCacheAsync(hoursBack, fromDate, toDate); break;
-            case 16: await RefreshSessionStatsAsync(hoursBack, fromDate, toDate); break;
-            case 17: await RefreshCollectionHealthAsync(hoursBack, fromDate, toDate, ct); break;
-            case 18: await RefreshSystemEventsAsync(hoursBack, fromDate, toDate); break;
-            case 19: await RefreshConfigChangesAsync(hoursBack, fromDate, toDate); break;
-            case 20: await RefreshLongQueriesAsync(hoursBack, fromDate, toDate); break;
+            case 14: await RefreshSessionStatsAsync(hoursBack, fromDate, toDate); break;
+            case 15: await RefreshCollectionHealthAsync(hoursBack, fromDate, toDate, ct); break;
+            case 16: await RefreshSystemEventsAsync(hoursBack, fromDate, toDate); break;
+            case 17: await RefreshConfigChangesAsync(hoursBack, fromDate, toDate); break;
+            case 18: await RefreshLongQueriesAsync(hoursBack, fromDate, toDate); break;
         }
         return failedReads;
     }
@@ -949,6 +947,8 @@ public partial class ServerTab : UserControl
             var cpuTask = Task.Run(() => _dataService.GetCpuUtilizationAsync(_serverId, hoursBack, fromDate, toDate, frame: CpuTimeFrame.Utc));
             await cpuTask;
             UpdateCpuChart(cpuTask.Result, hoursBack, fromDate, toDate);
+            /* #8169: CPU Scheduler is a sub-tab of CPU now; both sub-tabs load when CPU is shown, as in the Viewer. */
+            await RefreshCpuSchedulerAsync(hoursBack, fromDate, toDate);
         }
         catch (Exception ex)
         {
@@ -988,6 +988,9 @@ public partial class ServerTab : UserControl
                         /* #4966: where the stored events start, over the SAME UTC window the chart read. */
                         await RefreshMemoryPressureEventsBannerAsync(hoursBack, fromDate, toDate);
                         break;
+                    case 4: // Plan Cache (#8169: under Memory, as in the Viewer)
+                        await RefreshPlanCacheAsync(hoursBack, fromDate, toDate);
+                        break;
                 }
                 return;
             }
@@ -1010,6 +1013,7 @@ public partial class ServerTab : UserControl
             await RefreshMemoryPressureEventsBannerAsync(hoursBack, fromDate, toDate);
             PopulateMemoryClerkPicker(memoryClerkTypesTask.Result);
             await UpdateMemoryClerksChartFromPickerAsync();
+            await RefreshPlanCacheAsync(hoursBack, fromDate, toDate);
         }
         catch (Exception ex)
         {
