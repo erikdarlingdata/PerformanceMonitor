@@ -35,10 +35,10 @@ public sealed class DarlingMcpSchemaToolsTests
     }
 
     private static Task<string> Definition(string? database = "SalesDb", string? name = "dbo.Orders", string? asOf = null, int offset = 0, int limit = 200) =>
-        DarlingMcpSchemaTools.GetObjectDefinition(null!, "srv", database, name, asOf, offset, limit, s_now, CancellationToken.None);
+        DarlingMcpSchemaTools.ReadObjectDefinition(null!, "srv", database, name, asOf, offset, limit, CancellationToken.None);
 
     private static Task<string> Changes(int hoursBack = 24, int limit = 50, int offset = 0, string? name = null) =>
-        DarlingMcpSchemaTools.GetSchemaChanges(null!, "srv", null, name, hoursBack, null, false, limit, offset, s_now, CancellationToken.None);
+        DarlingMcpSchemaTools.ReadSchemaChanges(null!, "srv", null, name, hoursBack, null, false, limit, offset, CancellationToken.None);
 
     private static Task<string> Find(
         string? database = null, string? prefix = "Ord", string? column = null, string? references = null, string? text = null, int limit = 50,

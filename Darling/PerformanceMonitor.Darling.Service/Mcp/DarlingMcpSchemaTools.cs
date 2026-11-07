@@ -65,11 +65,11 @@ public sealed class DarlingMcpSchemaTools
         [Description("Columns to skip, for a wide table. Default 0.")] int column_offset = 0,
         [Description("Columns per page, 1 to 1000. Default 200.")] int column_limit = DefaultColumnLimit,
         CancellationToken cancellationToken = default)
-        => GetObjectDefinition(postgres, server_name, database_name, object_name, as_of, column_offset, column_limit, DateTime.UtcNow, cancellationToken);
+        => ReadObjectDefinition(postgres, server_name, database_name, object_name, as_of, column_offset, column_limit, cancellationToken);
 
-    internal static async Task<string> GetObjectDefinition(
+    internal static async Task<string> ReadObjectDefinition(
         NpgsqlDataSource postgres, string? server_name, string? database_name, string? object_name, string? as_of, int column_offset, int column_limit,
-        DateTime nowUtc, CancellationToken cancellationToken)
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(database_name))
         {
@@ -89,9 +89,9 @@ public sealed class DarlingMcpSchemaTools
         var limitError = McpHelpers.ValidateTop(column_limit, MaxColumnLimit, "column_limit");
         if (limitError != null) return limitError;
 
-        var asOfError = McpHelpers.ResolveAsOf(as_of, out var asOfUtc);
+        var asOfError = McpHelpers.ResolveAsOf(as_of, out var windowEnd);
         if (asOfError != null) return asOfError;
-        DateTime? at = string.IsNullOrWhiteSpace(as_of) ? null : asOfUtc;
+        DateTime? at = string.IsNullOrWhiteSpace(as_of) ? null : windowEnd;
 
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -99,7 +99,7 @@ public sealed class DarlingMcpSchemaTools
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            var resolution = await SchemaHistoryKeyResolver.ResolveAsync(connection, resolved.ServerId, database_name.Trim(), nowUtc, cancellationToken);
+            var resolution = await SchemaHistoryKeyResolver.ResolveAsync(connection, resolved.ServerId, database_name.Trim(), windowEnd, cancellationToken);
             if (!resolution.Collected)
             {
                 return McpHelpers.Status("not_collected", NotCollectedMessage);
@@ -273,11 +273,11 @@ public sealed class DarlingMcpSchemaTools
         [Description("Maximum changes per page, 1 to 100. Default 50.")] int limit = DefaultChangesLimit,
         [Description("Changes to skip. Default 0.")] int offset = 0,
         CancellationToken cancellationToken = default)
-        => GetSchemaChanges(postgres, server_name, database_name, object_name, hours_back, as_of, include_baseline, limit, offset, DateTime.UtcNow, cancellationToken);
+        => ReadSchemaChanges(postgres, server_name, database_name, object_name, hours_back, as_of, include_baseline, limit, offset, cancellationToken);
 
-    internal static async Task<string> GetSchemaChanges(
+    internal static async Task<string> ReadSchemaChanges(
         NpgsqlDataSource postgres, string? server_name, string? database_name, string? object_name, int hours_back, string? as_of, bool include_baseline,
-        int limit, int offset, DateTime nowUtc, CancellationToken cancellationToken)
+        int limit, int offset, CancellationToken cancellationToken)
     {
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
@@ -304,7 +304,7 @@ public sealed class DarlingMcpSchemaTools
             var windowStart = windowEnd.AddHours(-hours_back);
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
             var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name.Trim();
-            var resolution = await SchemaHistoryKeyResolver.ResolveAsync(connection, resolved.ServerId, database, nowUtc, cancellationToken);
+            var resolution = await SchemaHistoryKeyResolver.ResolveAsync(connection, resolved.ServerId, database, windowEnd, cancellationToken);
             if (!resolution.Collected)
             {
                 return McpHelpers.Status("not_collected", NotCollectedMessage);

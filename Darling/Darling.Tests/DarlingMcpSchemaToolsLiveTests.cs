@@ -123,11 +123,11 @@ public sealed class DarlingMcpSchemaToolsLiveTests
     }
 
     private static Task<string> Definition(Store s, CancellationToken ct, string name, string? asOf = null, int offset = 0, int limit = 200, string? server = null, string database = Db) =>
-        DarlingMcpSchemaTools.GetObjectDefinition(s.Source, server ?? ServerName, database, name, asOf, offset, limit, DateTime.UtcNow, ct);
+        DarlingMcpSchemaTools.ReadObjectDefinition(s.Source, server ?? ServerName, database, name, asOf, offset, limit, ct);
 
     private static Task<string> Changes(
-        Store s, CancellationToken ct, int hoursBack = 24, int limit = 50, int offset = 0, bool baseline = false, string? name = null, string? database = null) =>
-        DarlingMcpSchemaTools.GetSchemaChanges(s.Source, ServerName, database, name, hoursBack, null, baseline, limit, offset, DateTime.UtcNow, ct);
+        Store s, CancellationToken ct, int hoursBack = 24, int limit = 50, int offset = 0, bool baseline = false, string? name = null, string? database = null, string? asOf = null) =>
+        DarlingMcpSchemaTools.ReadSchemaChanges(s.Source, ServerName, database, name, hoursBack, asOf, baseline, limit, offset, ct);
 
     private static Task<string> Find(
         Store s, CancellationToken ct, string? database = Db, string? prefix = null, string? contains = null, string? column = null, string? references = null,
@@ -336,7 +336,7 @@ public sealed class DarlingMcpSchemaToolsLiveTests
             Assert.Equal(new[] { "Id", "Total" }, Names(viaSecondary.GetProperty("columns"), "name"));
             Assert.True(viaPrimary.GetProperty("resolved_from_ag").GetBoolean());
 
-            var changes = await Parse(DarlingMcpSchemaTools.GetSchemaChanges(s.Source, "schema-secondary", null, null, 24, null, true, 50, 0, DateTime.UtcNow, ct));
+            var changes = await Parse(DarlingMcpSchemaTools.ReadSchemaChanges(s.Source, "schema-secondary", null, null, 24, null, true, 50, 0, ct));
             Assert.True(changes.GetProperty("resolved_from_ag").GetBoolean());
             Assert.Equal(1, changes.GetProperty("changes_returned").GetInt32());
         });
@@ -425,6 +425,27 @@ public sealed class DarlingMcpSchemaToolsLiveTests
 
             var accepted = await Changes(s, ct, hoursBack: 168, baseline: true);
             Assert.NotEqual("invalid", JsonDocument.Parse(accepted).RootElement.GetProperty("status").GetString());
+        });
+    }
+
+    [Fact]
+    public async Task GetSchemaChanges_AsOfInThePast_EndsTheWindowThere()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            await Baseline(s, ct, Table(10, "Orders", new[] { "Id" }), Table(11, "Customers", new[] { "Id" }));
+            await SchemaVersionStore.ApplyAsync(s.Connection, Write(new[] { Table(10, "Orders", new[] { "Id", "A" }), Table(11, "Customers", new[] { "Id" }) }, s_t0.AddHours(1)), ct);
+            await SchemaVersionStore.ApplyAsync(s.Connection, Write(new[] { Table(10, "Orders", new[] { "Id", "A" }), Table(11, "Customers", new[] { "Id", "B" }) }, s_t0.AddHours(5)), ct);
+
+            var everything = await Parse(Changes(s, ct));
+            Assert.Equal(new[] { "Customers", "Orders" }, Names(everything.GetProperty("changes"), "name"));
+
+            var anchored = await Parse(Changes(s, ct, hoursBack: 6, asOf: Iso(s_t0.AddHours(2))));
+            Assert.Equal(new[] { "Orders" }, Names(anchored.GetProperty("changes"), "name"));
+            Assert.Equal(Iso(s_t0.AddHours(2)), Iso(DateTime.Parse(anchored.GetProperty("window_end").GetString()!, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal)));
+
+            using var before = JsonDocument.Parse(await Changes(s, ct, hoursBack: 1, asOf: Iso(s_t0.AddMinutes(30))));
+            Assert.Equal("empty", before.RootElement.GetProperty("status").GetString());
         });
     }
 
