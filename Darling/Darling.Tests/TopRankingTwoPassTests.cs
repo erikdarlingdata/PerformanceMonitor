@@ -158,8 +158,10 @@ public sealed class TopRankingTwoPassTests
         })
         {
             var text = filter.Replace("{TimescaleSupport.IntervalHonestSourceFilter}", "sample_interval_seconds IS DISTINCT FROM 0", StringComparison.Ordinal);
-            /* once per pass; the queries' one latest-text lookup (#5309) scopes by server and reads the window too */
-            var lookup = name != "TopProceduresSql" && (filter == "server_id = $1" || filter.StartsWith("collection_time", StringComparison.Ordinal));
+            /* once per pass. The host-object read's one latest-text lookup (#5309) scopes by server and reads the window
+               too; TopQueriesSql's lookup reads the ranked rows and the text dimension only (#8136: pass 2 carries each
+               group's newest text-bearing row), so its window predicates appear exactly once per pass. */
+            var lookup = name == "TopQueriesByHostObjectSql" && (filter == "server_id = $1" || filter.StartsWith("collection_time", StringComparison.Ordinal));
             Assert.Equal(lookup ? 3 : 2, Regex.Matches(sql, Regex.Escape(text)).Count);
         }
 
