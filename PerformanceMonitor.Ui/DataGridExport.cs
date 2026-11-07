@@ -185,29 +185,84 @@ public static class DataGridExport
 
     private static string ReadCell(DataGridColumn column, object item, Func<object?, string> format)
     {
-        if (column is DataGridBoundColumn boundColumn
-            && boundColumn.Binding is Binding binding
-            && binding.Path != null)
+        var path = CellPath(column, item);
+        return path is null ? string.Empty : format(ResolvePath(item, path));
+    }
+
+    /// <summary>
+    /// The binding path a column shows for <paramref name="item"/>, or null when none can be found. A bound column names it
+    /// directly. A template column names it through the <see cref="TextBlock"/> at its root, else through its
+    /// <see cref="DataGridColumn.SortMemberPath"/> (the Query Stats bar cells and the FinOps heat cells sort by the measure they
+    /// draw), else through the first <see cref="TextBlock"/> inside its content that binds its text to the row.
+    /// </summary>
+    private static string? CellPath(DataGridColumn column, object item)
+    {
+        if (column is DataGridBoundColumn boundColumn)
         {
-            var property = item.GetType().GetProperty(binding.Path.Path);
-            return format(property?.GetValue(item));
+            return boundColumn.Binding is Binding binding ? binding.Path?.Path : null;
         }
 
-        if (column is DataGridTemplateColumn templateColumn && templateColumn.CellTemplate != null)
+        if (column is not DataGridTemplateColumn { CellTemplate: { } template })
         {
-            var content = templateColumn.CellTemplate.LoadContent();
-            if (content is TextBlock textBlock)
+            return null;
+        }
+
+        var content = template.LoadContent();
+        if (content is TextBlock textBlock && RowPath(textBlock) is { } rootPath)
+        {
+            return rootPath;
+        }
+
+        if (!string.IsNullOrEmpty(column.SortMemberPath))
+        {
+            return column.SortMemberPath;
+        }
+
+        return content is DependencyObject root
+            ? Descendants(root).OfType<TextBlock>().Select(RowPath).FirstOrDefault(p => p is not null)
+            : null;
+    }
+
+    /// <summary>The path a text block binds its text to on the row, or null when it binds elsewhere (an element, a relative source) or not at all.</summary>
+    private static string? RowPath(TextBlock textBlock)
+    {
+        var binding = BindingOperations.GetBinding(textBlock, TextBlock.TextProperty);
+        if (binding?.Path is null || binding.ElementName != null || binding.RelativeSource != null || binding.Source != null)
+        {
+            return null;
+        }
+
+        return binding.Path.Path;
+    }
+
+    private static IEnumerable<DependencyObject> Descendants(DependencyObject root)
+    {
+        foreach (var child in LogicalTreeHelper.GetChildren(root).OfType<DependencyObject>())
+        {
+            yield return child;
+            foreach (var descendant in Descendants(child))
             {
-                var textBinding = BindingOperations.GetBinding(textBlock, TextBlock.TextProperty);
-                if (textBinding != null && textBinding.Path != null)
-                {
-                    var property = item.GetType().GetProperty(textBinding.Path.Path);
-                    return format(property?.GetValue(item));
-                }
+                yield return descendant;
             }
         }
+    }
 
-        return string.Empty;
+    /// <summary>
+    /// Walks a dotted binding path ("Row.ServerName") property by property from <paramref name="item"/>. Null when any step
+    /// is null or names no property, so the cell exports empty rather than failing the row.
+    /// </summary>
+    private static object? ResolvePath(object item, string path)
+    {
+        object? current = item;
+        foreach (var step in path.Split('.'))
+        {
+            if (current is null) return null;
+            var property = current.GetType().GetProperty(step);
+            if (property is null) return null;
+            current = property.GetValue(current);
+        }
+
+        return current;
     }
 
     /// <summary>
