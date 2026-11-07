@@ -253,7 +253,9 @@ public static class McpPlanAnalysisFormatter
                             modification_count = i.ModificationCount,
                             table_rows = tableRows,
                             modified_percent = tableRows is > 0 ? Math.Round(i.ModificationCount * 100.0 / tableRows.Value, 1) : (double?)null,
-                            /* A lead about the statistic's state at compile (modification count past the 2016+ automatic update threshold sqrt(1000 x rows), rows from the plan's TableCardinality), not a cause of the estimate. */
+                            /* A lead about the statistic's state at compile: the modification count is past the
+                               2016+ automatic update threshold sqrt(1000 x rows), with rows from the plan's
+                               TableCardinality. Not a cause of the estimate. */
                             stale_at_compile = tableRows == null ? (bool?)null : i.ModificationCount > Math.Sqrt(1000.0 * tableRows.Value),
                             last_update = i.LastUpdate,
                             sampling_percent = i.SamplingPercent

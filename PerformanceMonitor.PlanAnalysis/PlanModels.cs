@@ -113,7 +113,7 @@ public class PlanStatement
     public List<OptimizerStatsUsageItem> StatsUsage { get; set; } = new();
     /// <summary>#8147: the statement carried a QueryPlan element. False for DECLARE/ASSIGN shells and MULTIPLE PLAN statements whose plan was never captured.</summary>
     public bool HasQueryPlan { get; set; }
-    /// <summary>#8147: the QueryPlan carried an OptimizerStatsUsage element (even an empty one). False means the plan does not say which statistics it used, which is not the same as using none.</summary>
+    /// <summary>#8147: the QueryPlan carried an OptimizerStatsUsage element (even an empty one). False means the plan does not record which statistics it loaded, which is not the same as loading none.</summary>
     public bool HasStatsUsage { get; set; }
     public ThreadStatInfo? ThreadStats { get; set; }
     public SetOptionsInfo? SetOptions { get; set; }
