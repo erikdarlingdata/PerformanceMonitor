@@ -1200,6 +1200,32 @@ public static class DarlingRetention
                 tablesFailed++;
             }
 
+            /* #7643: collect.schema_objects (the schema versions) purges its CLOSED versions on valid_to at the schema_objects
+               collector's retention, resolved like the catalog loop above (fleet-wide override, never under 1 day). NOT
+               reachable from that loop: the collector's catalog table is collect.schema_capture_passes (the pass log, which the
+               loop does purge), while the versions are keyed by valid_from/valid_to, not by a collection time. A CURRENT version
+               has valid_to NULL and never expires, however old: the predicate keeps it out of the DELETE and out of both min()
+               subqueries of the time slice, so an old current row cannot anchor an empty slice. The four child tables
+               (columns, indexes, constraints, triggers) go with their version by ON DELETE CASCADE, so nothing else purges them.
+               A plain table, so the time-sliced DELETE on every store; idx_schema_objects_closed
+               (valid_to) WHERE valid_to IS NOT NULL serves the slice. */
+            var schemaVersionsDeleted = await PurgeOneAsync(
+                postgres, "collect.schema_objects",
+                TimeSlicedDeleteSql("collect.schema_objects", "valid_to", "valid_to IS NOT NULL"),
+                utcNow.AddDays(-EffectivePurgeRetentionDays(
+                    "schema_objects",
+                    retentionDaysFor?.Invoke("schema_objects") ?? CollectorScheduleDefaults.All["schema_objects"].RetentionDays)),
+                logger, cancellationToken, pacer: walPacer);
+            if (schemaVersionsDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += schemaVersionsDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
             /* collect.query_stats_hour_ledger (#4605, V164): the hourly row-count ledger that the long-window count
                guard compares with the hourly rollup, in place of counting raw. NOT in CollectorCatalog.All (the
                collector runner's COPY transaction writes it, not a collector definition), so the loop above skips
