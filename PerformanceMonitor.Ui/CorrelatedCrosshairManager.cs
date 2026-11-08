@@ -38,6 +38,8 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
     private DateTime _lastUpdate;
     private double _lastPixelX = double.NaN;
     private bool _needsReanchor = true;
+    private FrameworkElement? _themeHost;
+    private bool _listensToTheme;
 
     /// <summary>
     /// The display zone when the lanes' X is the UTC instant (#4766), else <c>null</c>: X is then the server-time
@@ -69,12 +71,11 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         };
 
         PaintTooltip();
-        ThemeManager.ThemeChanged += OnThemeChanged;
     }
 
     /* #8306: the tooltip takes the theme's tooltip colours (the ToolTip style's background, border and text), and the arrows the
-       theme's error and success colours. Painted when the manager is built and again on every theme switch, so a theme picked
-       while the app runs reaches a tooltip that already exists. */
+       theme's error and success colours. Painted when the manager is built, when the host given to FollowThemeWhileLoaded loads, and
+       on every theme switch while that host stays loaded, so a theme picked while the app runs reaches a tooltip that already exists. */
     private void PaintTooltip()
     {
         _tooltipFrame.Background = ThemeBrush("BackgroundLightBrush", 0x33, 0x33, 0x33);
@@ -87,6 +88,49 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
     }
 
     private void OnThemeChanged(string theme) => PaintTooltip();
+
+    /// <summary>
+    /// Keeps the tooltip in the theme's colours while <paramref name="host"/>, the control that owns the lanes, is loaded: the tooltip is
+    /// painted when the host loads, and again on every theme switch until it unloads. The <see cref="ThemeManager.ThemeChanged"/>
+    /// subscription is taken on Loaded and dropped on Unloaded, so the static event never holds a closed tab through its manager, its plots
+    /// and their data, and a theme switched while the host is unloaded reaches the tooltip when the host loads again.
+    /// </summary>
+    public void FollowThemeWhileLoaded(FrameworkElement host)
+    {
+        DropThemeHost();
+        _themeHost = host;
+        host.Loaded += OnHostLoaded;
+        host.Unloaded += OnHostUnloaded;
+        if (host.IsLoaded) ListenToTheme();
+    }
+
+    private void OnHostLoaded(object sender, RoutedEventArgs e) => ListenToTheme();
+    private void OnHostUnloaded(object sender, RoutedEventArgs e) => StopListeningToTheme();
+
+    /// <summary>Paints the tooltip for the theme in force and, once, subscribes to theme switches.</summary>
+    private void ListenToTheme()
+    {
+        PaintTooltip();
+        if (_listensToTheme) return;
+        _listensToTheme = true;
+        ThemeManager.ThemeChanged += OnThemeChanged;
+    }
+
+    private void StopListeningToTheme()
+    {
+        if (!_listensToTheme) return;
+        _listensToTheme = false;
+        ThemeManager.ThemeChanged -= OnThemeChanged;
+    }
+
+    private void DropThemeHost()
+    {
+        StopListeningToTheme();
+        if (_themeHost is null) return;
+        _themeHost.Loaded -= OnHostLoaded;
+        _themeHost.Unloaded -= OnHostUnloaded;
+        _themeHost = null;
+    }
 
     /// <summary>The theme's brush under <paramref name="key"/>, or a frozen brush of the given colour when the app has no theme (a headless host).</summary>
     private static SolidColorBrush ThemeBrush(string key, byte r, byte g, byte b) =>
@@ -567,7 +611,7 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
 
     public void Dispose()
     {
-        ThemeManager.ThemeChanged -= OnThemeChanged;
+        DropThemeHost();
         _tooltip.IsOpen = false;
         foreach (var lane in _lanes)
         {

@@ -244,13 +244,23 @@ public sealed class ThemeChromeLeftoversRenderTests
         var (frame, text, wantFrame, wantText) = Themed("Dark", app =>
         {
             using var manager = new CorrelatedCrosshairManager();
-            ThemeManager.Apply(theme);
-            var popup = (Popup)typeof(CorrelatedCrosshairManager).GetField("_tooltip", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(manager)!;
-            var border = (Border)popup.Child;
-            var block = (TextBlock)typeof(CorrelatedCrosshairManager).GetField("_tooltipText", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(manager)!;
-            var tooltipStyle = (Style)app.FindResource(typeof(ToolTip));
-            Color Setter(DependencyProperty property) => ColorOf(tooltipStyle.Setters.OfType<Setter>().First(s => s.Property == property).Value as Brush);
-            return (ColorOf(border.Background), ColorOf(block.Foreground), Setter(Control.BackgroundProperty), Setter(Control.ForegroundProperty));
+            var host = new Border();
+            var window = Show(host, 200, 100);
+            try
+            {
+                manager.FollowThemeWhileLoaded(host);
+                ThemeManager.Apply(theme);
+                var popup = (Popup)typeof(CorrelatedCrosshairManager).GetField("_tooltip", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(manager)!;
+                var border = (Border)popup.Child;
+                var block = (TextBlock)typeof(CorrelatedCrosshairManager).GetField("_tooltipText", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(manager)!;
+                var tooltipStyle = (Style)app.FindResource(typeof(ToolTip));
+                Color Setter(DependencyProperty property) => ColorOf(tooltipStyle.Setters.OfType<Setter>().First(s => s.Property == property).Value as Brush);
+                return (ColorOf(border.Background), ColorOf(block.Foreground), Setter(Control.BackgroundProperty), Setter(Control.ForegroundProperty));
+            }
+            finally
+            {
+                window.Close();
+            }
         });
 
         Assert.Equal(wantFrame, frame);
