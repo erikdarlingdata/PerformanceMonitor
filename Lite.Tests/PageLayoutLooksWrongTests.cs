@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Services;
@@ -251,6 +252,32 @@ public sealed class PageLayoutLooksWrongTests
                 {
                     found.Add($"{name}: the empty lane draws its axes and says nothing");
                 }
+            }
+
+            return found;
+        });
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    [Fact]
+    public void TheCpuComparisonChart_DrawsSystemAndSqlCpu_InTwoColours()
+    {
+        var problems = WithServerTab("DarkTheme", PaneWidth(900), 600, Credentials(), (tab, window, _) =>
+        {
+            var found = new List<string>();
+            var chart = Find<ScottPlot.WPF.WpfPlot>(tab, "CpuComparisonChart");
+            Reveal(chart);
+            Settle(window);
+            var at = new DateTime(2026, 11, 7, 0, 0, 0, DateTimeKind.Utc);
+            var data = Enumerable.Range(0, 12).Select(i => new SystemHealthRecord { EventTime = at.AddHours(i), SystemCpuUtilization = 40 + i, SqlCpuUtilization = 20 + i }).ToList();
+            var renderer = tab.GetType().GetProperty("SysHealthRenderer", Instance)!.GetValue(tab)!;
+            Invoke(renderer, "RenderCpuComparisonChart", chart, null, data, at.ToOADate(), at.AddHours(12).ToOADate());
+            Settle(window);
+            var colours = chart.Plot.GetPlottables<ScottPlot.Plottables.Scatter>().Select(s => s.Color.ToHex()).Distinct().ToList();
+            if (colours.Count < 2)
+            {
+                found.Add($"System CPU % and SQL CPU % share one colour ({string.Join(", ", colours)})");
             }
 
             return found;

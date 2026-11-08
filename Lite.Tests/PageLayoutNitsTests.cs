@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using PerformanceMonitor.Common;
 using Darling.Tests;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Ui;
@@ -317,6 +318,69 @@ public sealed class PageLayoutNitsTests
             }
 
             found.AddRange(Unfilled(grid, "Trace Flags"));
+            return found;
+        });
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    [Fact]
+    public void TheSickSpinlocksChart_WithOnlyZeroBackoffs_ShowsTheEmptyState_NotAZeroSeries()
+    {
+        var problems = WithServerTab("DarkTheme", PaneWidth(900), 600, Credentials(), (tab, window, _) =>
+        {
+            var found = new List<string>();
+            var chart = Find<ScottPlot.WPF.WpfPlot>(tab, "SickSpinlocksChart");
+            Reveal(chart);
+            Settle(window);
+            var at = new DateTime(2026, 11, 7, 0, 0, 0, DateTimeKind.Utc);
+            var data = Enumerable.Range(0, 12).Select(i => new SystemHealthRecord { EventTime = at.AddHours(i), SickSpinlockType = "none", SpinlockBackoffs = 0 }).ToList();
+            var renderer = tab.GetType().GetProperty("SysHealthRenderer", Instance)!.GetValue(tab)!;
+            Invoke(renderer, "RenderSickSpinlocksChart", chart, null, data, at.ToOADate(), at.AddHours(12).ToOADate());
+            Settle(window);
+            var legend = chart.Plot.Legend.GetItems().Select(i => i.LabelText).ToList();
+            if (legend.Count > 0)
+            {
+                found.Add($"the all-zero chart has a legend entry: {string.Join(", ", legend)}");
+            }
+
+            var limits = chart.Plot.Axes.GetLimits();
+            if (limits.Bottom < 0)
+            {
+                found.Add($"the all-zero chart runs from {limits.Bottom:0.##} to {limits.Top:0.##}");
+            }
+
+            if (!chart.Plot.GetPlottables<ScottPlot.Plottables.Text>().Any(t => t.LabelText.StartsWith("No ", StringComparison.Ordinal)))
+            {
+                found.Add("the all-zero chart does not say it has no data");
+            }
+
+            return found;
+        });
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    [Fact]
+    public void TheOverviewWaitLane_LeavesRoomAboveItsPlot_ForTheTopTickLabel()
+    {
+        var problems = WithServerTab("DarkTheme", PaneWidth(900), 600, Credentials(), (tab, window, _) =>
+        {
+            var found = new List<string>();
+            var lanes = Find<CorrelatedTimelineLanesControl>(tab, "CorrelatedLanes");
+            Reveal(lanes);
+            Settle(window);
+            var t0 = new DateTime(2026, 11, 7, 0, 0, 0, DateTimeKind.Utc).ToOADate();
+            var data = Enumerable.Range(0, 48).Select(i => (t0 + i / 48.0, 1500.0 + 1000.0 * (i % 12) / 11.0)).ToList();
+            lanes.UpdateLane(lanes.WaitStatsChart, "Wait ms/sec", data, "#FFB74D");
+            lanes.SyncXAxes(24, null, null);
+            Settle(window);
+            var layout = lanes.WaitStatsChart.Plot.RenderManager.LastRender.Layout;
+            if (layout.DataRect.Top < 7)
+            {
+                found.Add($"the plot starts {layout.DataRect.Top:0.#} px from the lane's top edge, so the top tick label is cut");
+            }
+
             return found;
         });
 
