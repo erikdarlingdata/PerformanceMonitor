@@ -1343,7 +1343,7 @@ collected AS (
        is the witness that the collector was there. Binned to the minute, because a run's log time and its rows'
        collection_time are stamped apart; a run with no rows joins as NULL and is not a sample. */
     SELECT DISTINCT date_trunc('minute', collection_time) AS minute
-    FROM collection_log
+    FROM v_collection_log
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   collector_name = 'session_stats'
     AND   status = 'SUCCESS'
@@ -1496,7 +1496,7 @@ collected AS (
        collector was there. Binned to the minute, because a run's log time and its rows' collection_time are stamped
        apart; a run with no rows joins as NULL and is not a sample. */
     SELECT DISTINCT date_trunc('minute', collection_time) AS minute
-    FROM collection_log
+    FROM v_collection_log
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   collector_name = 'query_stats'
     AND   status = 'SUCCESS'
