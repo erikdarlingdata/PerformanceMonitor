@@ -207,47 +207,71 @@ public static class TabStripOverflow
         }
 
         button.Visibility = Visibility.Visible;
-        button.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-        var available = host.ActualWidth - button.DesiredSize.Width;
-
-        var first = 0;
-        for (var i = 1; i < visible.Count; i++)
-        {
-            if (Math.Abs(lefts[i] - scroll.HorizontalOffset) < Math.Abs(lefts[first] - scroll.HorizontalOffset))
-            {
-                first = i;
-            }
-        }
-
-        first = Math.Clamp(first + step, 0, visible.Count - 1);
         var selected = visible.FindIndex(t => t.IsSelected);
-        if (ensureSelected && selected >= 0)
+
+        /* The first and last whole tabs on a row of the given width. */
+        (int First, int Last) Fit(double available)
         {
-            if (selected < first)
+            var first = 0;
+            for (var i = 1; i < visible.Count; i++)
             {
-                first = selected;
+                if (Math.Abs(lefts[i] - scroll.HorizontalOffset) < Math.Abs(lefts[first] - scroll.HorizontalOffset))
+                {
+                    first = i;
+                }
             }
 
-            while (first < selected && rights[selected] - lefts[first] > available + FitSlack)
+            first = Math.Clamp(first + step, 0, visible.Count - 1);
+            if (ensureSelected && selected >= 0)
             {
-                first++;
+                if (selected < first)
+                {
+                    first = selected;
+                }
+
+                while (first < selected && rights[selected] - lefts[first] > available + FitSlack)
+                {
+                    first++;
+                }
             }
+
+            /* Never start so far along that the row ends short of the last tab with room to spare. */
+            var lastStart = visible.Count - 1;
+            while (lastStart > 0 && total - lefts[lastStart - 1] <= available + FitSlack)
+            {
+                lastStart--;
+            }
+
+            first = Math.Min(first, lastStart);
+
+            var last = first;
+            while (last + 1 < visible.Count && rights[last + 1] - lefts[first] <= available + FitSlack)
+            {
+                last++;
+            }
+
+            return (first, last);
         }
 
-        /* Never start so far along that the row ends short of the last tab with room to spare. */
-        var lastStart = visible.Count - 1;
-        while (lastStart > 0 && total - lefts[lastStart - 1] <= available + FitSlack)
+        /* #8331: the button says how many tabs are behind it ("» 2") and its tooltip names them, so a hidden tab is never silent.
+           A wider caption leaves the row less room, so the fit is settled again after the caption changes, until both agree. */
+        var available = 0.0;
+        var (first, last) = (0, 0);
+        for (var pass = 0; pass < 3; pass++)
         {
-            lastStart--;
+            button.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            available = host.ActualWidth - button.DesiredSize.Width;
+            (first, last) = Fit(available);
+            var caption = OverflowCaption(visible.Count - (last - first + 1));
+            if (Equals(button.Content, caption))
+            {
+                break;
+            }
+
+            button.Content = caption;
         }
 
-        first = Math.Min(first, lastStart);
-
-        var last = first;
-        while (last + 1 < visible.Count && rights[last + 1] - lefts[first] <= available + FitSlack)
-        {
-            last++;
-        }
+        button.ToolTip = OverflowToolTip(visible.Where((_, i) => i < first || i > last).Select(HeaderText));
 
         var width = Math.Min(rights[last] - lefts[first], available);
         if (scroll.HorizontalAlignment != HorizontalAlignment.Left)
@@ -309,6 +333,12 @@ public static class TabStripOverflow
         button.ContextMenu = menu;
         menu.IsOpen = true;
     }
+
+    /// <summary>The "»" button's caption while <paramref name="hiddenCount"/> tabs are behind it: the mark and the count.</summary>
+    private static string OverflowCaption(int hiddenCount) => "» " + hiddenCount;
+
+    /// <summary>The "»" button's tooltip: the hidden tabs by name, in tab order.</summary>
+    private static string OverflowToolTip(IEnumerable<string> hiddenNames) => "Tabs that do not fit: " + string.Join(", ", hiddenNames);
 
     /// <summary>The visible tabs that are cut off or scrolled out of the strip, in tab order.</summary>
     public static IReadOnlyList<TabItem> HiddenTabs(TabControl tabs)
