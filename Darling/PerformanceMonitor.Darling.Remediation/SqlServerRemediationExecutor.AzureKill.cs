@@ -331,7 +331,7 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
             {
                 return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.SignInFailed,
                     $"The remediation login could not open database {database}: {ErrorText(ex, login)} The kill connects to the session's own database, so the "
-                    + $"remediation login needs a user there (CREATE USER <user> FROM LOGIN <login>, or a contained user with a password), with {AzureGrants} Nothing was run.");
+                    + $"remediation login needs a user there (a user made for the login, or a contained user with a password), with {AzureGrants} Nothing was run.");
             }
             catch (SqlException ex) when (IsAzureTransient(ex))
             {

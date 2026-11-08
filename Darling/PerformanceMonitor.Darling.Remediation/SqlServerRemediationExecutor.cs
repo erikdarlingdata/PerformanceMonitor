@@ -403,7 +403,7 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
                 "This server is an Azure SQL Database, which has no plan handle eviction. Nothing was run.") with { Statement = statement };
         if (!granted)
             return RemediationResult.Refused(name, dryRun, EvictDegradeReasons.PermissionDenied,
-                "The remediation login does not hold ALTER SERVER STATE on this server, which evicting a plan needs. A person can grant it. Nothing was run.")
+                "The remediation login does not hold the server-state permission on this server, which evicting a plan needs (the evict_cached_plan description names the grant). A person can grant it. Nothing was run.")
                 with { Statement = statement };
         if (cached is null or 0)
             return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.NotCached,

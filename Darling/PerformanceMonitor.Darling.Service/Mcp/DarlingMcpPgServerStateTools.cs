@@ -885,8 +885,8 @@ public sealed class DarlingMcpPgServerStateTools
                     name = o.Name,
                     setting = o.Setting,
                 }).ToList(), McpHelpers.JsonOptions);
-                node["database_overrides_note"] = "database_overrides are values one DATABASE or one ROLE was given with ALTER DATABASE "
-                    + "/ ALTER ROLE ... SET, read from pg_db_role_setting. A session connecting to that "
+                node["database_overrides_note"] = "database_overrides are values one DATABASE or one ROLE was given with a scoped SET "
+                    + "(ALTER DATABASE ... SET, or the same statement for a role), read from pg_db_role_setting. A session connecting to that "
                     + "database, or as that role, runs with the override rather than with the server-wide "
                     + "value listed above - so a setting that appears in both places has TWO answers and "
                     + "which one applies depends on who is connecting. The stored text is what was SET, "
