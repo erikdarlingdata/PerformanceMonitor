@@ -4947,11 +4947,12 @@ WHERE t.tgrelid = 'config.investigation_journal'::regclass
         }
 
         var image = ImageUserId.ToString(CultureInfo.InvariantCulture);
-        return $"if nothing is mounted at {ComposeCredentialVolumeRoot}, this is the image's own directory, which a chown in a "
-            + $"one-off container cannot change for this one, so run the service as user {image}, or mount a volume at "
-            + $"{ComposeCredentialVolumeRoot} (or {ComposeCredentialVolumeRoot}/credentials) and recreate the container "
-            + $"(docker compose up -d); a new named volume starts owned by user {image} like the image's directory, so then, "
-            + $"as for a volume already mounted there, run: {CredentialOwnershipFix(userId, path)}";
+        return $"run the service as user {image}, or mount a volume at {ComposeCredentialVolumeRoot} "
+            + $"(or {ComposeCredentialVolumeRoot}/credentials) and recreate the container (docker compose up -d); "
+            + $"with nothing mounted at {ComposeCredentialVolumeRoot} this is the image's own directory, and a chown in a "
+            + "one-off container changes only that container, so the next start refuses again; "
+            + $"a new named volume starts owned by user {image}, so then, as for a volume already mounted there, "
+            + $"run: {CredentialOwnershipFix(userId, path)}";
     }
 
     /// <summary>The compose store's credential file for <paramref name="role"/>: the managed file's name without

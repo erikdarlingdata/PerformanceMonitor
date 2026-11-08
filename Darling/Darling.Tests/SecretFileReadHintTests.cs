@@ -108,6 +108,7 @@ public sealed class SecretFileReadHintTests
                 var thrown = Assert.Throws<InvalidOperationException>(() => DarlingSecretSource.Resolve("file:" + dir, Setting));
 
                 Assert.NotNull(thrown.InnerException);
+                Assert.Contains("user 1000", thrown.Message, StringComparison.Ordinal);
                 Assert.Equal(DarlingSecretSource.CouldNotRead(Setting, dir, thrown.InnerException), thrown.Message);
             }
         }
