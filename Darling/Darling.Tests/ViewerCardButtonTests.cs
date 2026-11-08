@@ -106,7 +106,7 @@ public sealed class ViewerCardButtonTests
                     var autoRefresh = (FrameworkElement)tab.FindName("AutoRefreshCheckBox")!;
                     var times = (FrameworkElement)tab.FindName("TimeDisplayModeBox")!;
                     var toolbar = PanelOf(autoRefresh);
-                    var items = toolbar.Children.OfType<DependencyObject>().ToList();
+                    var items = toolbar.Items.OfType<DependencyObject>().ToList();
                     var afterAutoRefresh = items.IndexOf(ItemOf(autoRefresh, toolbar)) + 1;
                     if (afterAutoRefresh <= 0 || afterAutoRefresh >= items.Count || !items[afterAutoRefresh].Equals(ItemOf(times, toolbar)))
                     {
@@ -146,14 +146,14 @@ public sealed class ViewerCardButtonTests
         }
     }
 
-    /// <summary>The toolbar <paramref name="element"/> sits on: the nearest wrapping panel up the logical tree.</summary>
-    private static Panel PanelOf(DependencyObject element)
+    /// <summary>The toolbar row <paramref name="element"/> sits on: the nearest ToolBar up the logical tree (#8266: each row of the server toolbar is one).</summary>
+    private static ToolBar PanelOf(DependencyObject element)
     {
         for (DependencyObject? up = LogicalTreeHelper.GetParent(element); up is not null; up = LogicalTreeHelper.GetParent(up))
         {
-            if (up is WrapPanel panel)
+            if (up is ToolBar row)
             {
-                return panel;
+                return row;
             }
         }
 
@@ -161,11 +161,11 @@ public sealed class ViewerCardButtonTests
     }
 
     /// <summary>The toolbar item that holds <paramref name="element"/>: the element itself, or the group around it.</summary>
-    private static DependencyObject ItemOf(DependencyObject element, Panel toolbar)
+    private static DependencyObject ItemOf(DependencyObject element, ToolBar toolbar)
     {
         for (DependencyObject? up = element; up is not null; up = LogicalTreeHelper.GetParent(up))
         {
-            if (up is UIElement item && toolbar.Children.Contains(item))
+            if (up is UIElement item && toolbar.Items.Contains(item))
             {
                 return up;
             }
