@@ -100,7 +100,7 @@ SELECT edition = @edition, granted = @granted, cached = @cached;";
     /// and stops at the first that applies: the engine is an Azure SQL Database (<c>azure_sql_database</c>: its kill is <see cref="AzureKillSql"/>, in the session's own database), the session is this connection's
     /// own (<c>own_session</c>), no such session (<c>session_gone</c>), a different <c>login_time</c> (<c>session_reused</c>: the id was reused),
     /// not a user session (<c>not_user_session</c>), a session of Darling itself (a program name that starts with <c>PerformanceMonitorDarling</c> AND the monitoring
-    /// or the remediation login, or the remediation login with any program name: <c>tool_login_session</c>; with no monitoring login known, the program name alone), the login lacks <c>ALTER ANY CONNECTION</c> (<c>kill_permission_denied</c>). A write whose <c>@expected_last_end</c> is not the session's <c>last_request_end_time</c>, when <c>@check_activity</c> is 1, stops at <c>session_changed</c> (#7109). Then it runs the
+    /// or the remediation login, or the remediation login with any program name: <c>tool_login_session</c>; with no monitoring login known, the program name alone), the login lacks <c>ALTER ANY CONNECTION</c> (<c>kill_permission_denied</c>). A write whose <c>@expected_last_end</c> is not the session's <c>last_request_end_time</c>, when <c>@check_activity</c> is 1, stops at <c>session_changed</c> (#7109), and one whose <c>@expected_database_id</c> is not the session's <c>database_id</c> stops at <c>database_changed</c>: a running request can move its session to another database without ending, so the database is compared here too. Then it runs the
     /// <c>KILL</c> unless <c>@dry</c>, and answers <c>dry_ok</c> or <c>killed</c>. The check and the <c>KILL</c> are one batch but not one atomic step:
     /// a session can end and its id be reused between them. The <c>KILL</c> text is built from the int parameter's decimal form only. After a real
     /// <c>KILL</c> it reads the session's request once (<c>command</c>, <c>percent_complete</c>), so a rollback shows. That read sits in TRY/CATCH, so
@@ -174,6 +174,9 @@ BEGIN
     ELSE IF @check_activity = 1
          AND NOT (@last_end = @expected_last_end OR (@last_end IS NULL AND @expected_last_end IS NULL))
         SET @outcome = 'session_changed';
+    ELSE IF @check_activity = 1
+         AND NOT (@database_id = @expected_database_id OR (@database_id IS NULL AND @expected_database_id IS NULL))
+        SET @outcome = 'database_changed';
     ELSE IF @dry = 1
         SET @outcome = 'dry_ok';
     ELSE
@@ -466,9 +469,9 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
     };
 
     /// <summary>
-    /// The two parameters both kill batches take for the activity check (#7109). With no <paramref name="expected"/> the check is off (a dry run,
-    /// or a caller that holds no binding). With one, the batch refuses unless <c>last_request_end_time</c> equals the expected value, where a NULL
-    /// equals only a NULL.
+    /// The three parameters both kill batches take for the activity check (#7109). With no <paramref name="expected"/> the check is off (a dry run,
+    /// or a caller that holds no binding). With one, the batch refuses unless <c>last_request_end_time</c> equals the expected value and the session's
+    /// <c>database_id</c> equals the expected one, where a NULL equals only a NULL.
     /// </summary>
     internal static void AddKillActivityParameters(SqlCommand command, KillExpectedActivity? expected)
     {
@@ -477,6 +480,7 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
         {
             Value = expected?.LastRequestEnd is { } ended ? DateTime.SpecifyKind(ended, DateTimeKind.Unspecified) : DBNull.Value,
         });
+        command.Parameters.Add(new SqlParameter("@expected_database_id", SqlDbType.Int) { Value = (object?)expected?.DatabaseId ?? DBNull.Value });
     }
 
     private static async Task<RemediationResult> ReadKillAnswerAsync(SqlCommand command, string name, bool dryRun, int sessionId, CancellationToken ct,
@@ -549,6 +553,8 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
                 $"Session {sessionId} is now a different session: it has another login time, so the server reused the id. Nothing was run."),
             KillOutcomes.SessionChanged => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.SessionChanged,
                 $"Session {sessionId} has run something new since the dry run: its last request ended at another time, so it may hold a different transaction than the one that was checked. Nothing was run. Read it again with a dry run to see what it holds now."),
+            KillOutcomes.DatabaseChanged => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.DatabaseChanged,
+                $"Session {sessionId} has moved to another database since the dry run: its running request changed the session's database, so the kill was not sent to the session that was checked. Nothing was run. Read it again with a dry run to see where it is now."),
             KillOutcomes.NotUserSession => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.NotUserSession,
                 $"Session {sessionId} is not a user session. Nothing was run."),
             KillOutcomes.PermissionDenied => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.KillPermissionDenied,
@@ -696,6 +702,7 @@ internal static class KillOutcomes
     internal const string SessionGone = "session_gone";
     internal const string SessionReused = "session_reused";
     internal const string SessionChanged = "session_changed";
+    internal const string DatabaseChanged = "database_changed";
     internal const string NotUserSession = "not_user_session";
     internal const string PermissionDenied = "kill_permission_denied";
     internal const string DryOk = "dry_ok";
@@ -714,9 +721,11 @@ public sealed record KillSessionFacts(
 
 /// <summary>
 /// What a SQL Server or Azure kill write expects of the session beyond its id and login time (#7109): the <c>last_request_end_time</c> the dry run
-/// read, in the server's own clock. NULL means the session had never finished a request, and it equals only a NULL.
+/// read, in the server's own clock, and the <c>database_id</c> the dry run read the session in. A NULL means the session had never finished a request, or
+/// its database was not read, and it equals only a NULL. A running request can move its session to another database without ending, so the database is
+/// compared in the batch too, not only before it.
 /// </summary>
-public sealed record KillExpectedActivity(DateTime? LastRequestEnd);
+public sealed record KillExpectedActivity(DateTime? LastRequestEnd, int? DatabaseId = null);
 
 /// <summary>Whether the session's request showed a rollback right after a real kill, read once. <c>PercentComplete</c> is null when none runs.</summary>
 public sealed record KillRollback(bool InProgress, double? PercentComplete);
