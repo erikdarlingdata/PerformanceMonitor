@@ -111,9 +111,12 @@ public partial class ServerTab : UserControl
     /// edge.</summary>
     internal DateTime? OldestRetainedUtc { get; set; }
 
-    /// <summary>Reads the server's data start for the charts (#7386), once for the whole tab, with the refresh that is about to
-    /// draw them. The read is kept per server for <see cref="LocalDataService.ServerDataStartMaxAge"/> and never opens the Parquet
-    /// archive (<see cref="LocalDataService.GetServerDataStartAsync"/>). A failed read leaves the axis as picked.</summary>
+    /// <summary>Reads the server's data start for the charts (#7386) and the oldest instant the store holds data from for the
+    /// picker's note, once for the whole tab, with the refresh that is about to draw them. Both reads are kept per server for
+    /// <see cref="LocalDataService.ServerDataStartMaxAge"/>. The charts' read never opens the Parquet archive
+    /// (<see cref="LocalDataService.GetServerDataStartAsync"/>); the note's read opens it once per archive view generation
+    /// (<see cref="LocalDataService.GetOldestRetainedAsync"/>). A failed read leaves the axis as picked and the note at the
+    /// retention edge.</summary>
     private async System.Threading.Tasks.Task RefreshServerDataStartAsync(int hoursBack, DateTime? fromDate)
     {
         try
