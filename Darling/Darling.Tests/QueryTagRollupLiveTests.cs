@@ -867,8 +867,7 @@ public sealed class QueryTagRollupLiveTests
             await CoverQueryStoreAsync(c, ServerOne);
             await QueryStoreAsync(c, ServerOne, "0xA1", 1, 4_000_000, 7);
 
-            await using var holder = new NpgsqlConnection(c.Store.ConnectionString);
-            await holder.OpenAsync(c.Ct);
+            await using var holder = await c.Source.OpenConnectionAsync(c.Ct);
             await ExecAsync(holder, "BEGIN", c.Ct);
             /* The gate does not touch the tag map; the table read joins it, so the read waits here once the gate has decided. */
             await ExecAsync(holder, "LOCK TABLE config.query_tag_map IN ACCESS EXCLUSIVE MODE", c.Ct);

@@ -247,7 +247,7 @@ public sealed class PgTargetAnomalyTests
         Assert.Contains("GROUP BY collection_time", sessions, StringComparison.Ordinal);
 
         var waits = PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.PgWaitMsPerSec)!;
-        Assert.Contains("NULLIF(MAX(sample_interval_seconds), 0)", waits, StringComparison.Ordinal);
+        Assert.Contains("MIN(NULLIF(sample_interval_seconds, 0))", waits, StringComparison.Ordinal);
         Assert.Contains("CASE WHEN MAX(sample_interval_seconds) IS NULL", waits, StringComparison.Ordinal);
         Assert.Contains("LAG(collection_time) OVER (ORDER BY collection_time)", waits, StringComparison.Ordinal);
         Assert.DoesNotContain("ELSE 0", waits, StringComparison.Ordinal);
@@ -388,7 +388,7 @@ public sealed class PgTargetAnomalyTests
         Assert.Contains("(xact_commit + xact_rollback) - LAG(xact_commit + xact_rollback) OVER series", PgTargetAnomalyDetector.DatabaseCounterWindowSql, StringComparison.Ordinal);
         Assert.Contains("MAX(total_sessions)::DOUBLE PRECISION", PgTargetAnomalyDetector.SessionWindowSql, StringComparison.Ordinal);
         Assert.Contains("MAX(acu_utilization_percent) AS peak_capacity_pct", PgTargetAnomalyDetector.CpuWindowSql, StringComparison.Ordinal);
-        Assert.Contains("NULLIF(MAX(sample_interval_seconds), 0)", PgTargetAnomalyDetector.WaitRateWindowSql, StringComparison.Ordinal);
+        Assert.Contains("MIN(NULLIF(sample_interval_seconds, 0))", PgTargetAnomalyDetector.WaitRateWindowSql, StringComparison.Ordinal);
         Assert.Contains("IS DISTINCT FROM 'cpu'", PgTargetAnomalyDetector.WaitRateWindowSql, StringComparison.Ordinal);
         Assert.Contains("IS DISTINCT FROM 'cpu'", PgTargetAnomalyDetector.WaitContribWindowSql, StringComparison.Ordinal);
         Assert.DoesNotContain("pg_wait_sampling", PgTargetAnomalyDetector.WaitRateWindowSql, StringComparison.Ordinal);
@@ -1424,9 +1424,9 @@ FROM generate_series(5, $5, 5) AS k",
         var positions = columns.Select(c => projection.IndexOf(c, StringComparison.Ordinal)).ToArray();
         Assert.All(positions, p => Assert.True(p > 0));
         Assert.Equal(positions.Order().ToArray(), positions);
-        /* The same guarded arm as the peak's — a NULL-interval collection is NULL to both aggregates. */
-        Assert.Contains("MAX(CASE WHEN interval_sec > 0 THEN coalesce(total_wait_ms, 0) / interval_sec END) AS peak_ms_per_sec", sql, StringComparison.Ordinal);
-        Assert.Contains("AVG(CASE WHEN interval_sec > 0 THEN coalesce(total_wait_ms, 0) / interval_sec END) AS mean_ms_per_sec", sql, StringComparison.Ordinal);
+        /* The same per-collection rate feeds both aggregates: a collection without a cadence is NULL to both. */
+        Assert.Contains("MAX(ms_per_sec)                                                  AS peak_ms_per_sec", sql, StringComparison.Ordinal);
+        Assert.Contains("AVG(ms_per_sec)                                                  AS mean_ms_per_sec", sql, StringComparison.Ordinal);
 
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.cs");
         var code = CSharpSourceWalker.StripCommentsAndStrings(source);
