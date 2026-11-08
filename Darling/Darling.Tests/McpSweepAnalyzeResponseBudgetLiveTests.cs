@@ -30,8 +30,9 @@ namespace Darling.Tests;
 /// and say when they cut. Each case seeds its own scratch store (<see cref="ScratchPostgres"/>) and reads it through
 /// the tool itself, so the bytes measured are the bytes a client receives.
 ///
-/// <para><c>get_sweep_reports</c>: the timeline entries are the web feed's and the Viewer's own, each with its document
-/// embedded (the zero-drift rule <c>ViewerFleetSweepsReadTests</c> pins), so a window holding more of them than the
+/// <para><c>get_sweep_reports</c>: the timeline entries are the web feed's and the Viewer's own, each older entry with its
+/// document embedded and the newest sweep's document under <c>latest</c> (#8318; <c>ViewerFleetSweepsReadTests</c>
+/// compares them field for field), so a window holding more of them than the
 /// budget fits is cut newest first and flagged (<c>truncated</c>, <c>sweeps_returned</c> beside the window's
 /// <c>count</c>, <c>budget_note</c>); <c>latest</c> is never cut. <c>analyze_server</c>: the findings are already severity-first, so a cut keeps
 /// the most severe and the reply says so (<c>truncated</c>, <c>findings_returned</c> beside <c>finding_count</c>,
@@ -117,7 +118,12 @@ public sealed class McpSweepAnalyzeResponseBudgetLiveTests
         Assert.Equal(returned, sweeps.GetArrayLength());
         Assert.Contains("response budget", root.GetProperty("budget_note").GetString()!, StringComparison.Ordinal);
         Assert.Equal(ids[0].ToString(CultureInfo.InvariantCulture), sweeps[0].GetProperty("sweep_id").GetString());
-        Assert.Equal(40, sweeps[0].GetProperty("report").GetProperty("servers").GetArrayLength());
+        /* #8318: the newest sweep's document rides once, under latest; its entry says so. The older entries keep theirs. */
+        Assert.Equal("latest", sweeps[0].GetProperty("report_under").GetString());
+        foreach (var older in sweeps.EnumerateArray().Skip(1))
+        {
+            Assert.Equal(40, older.GetProperty("report").GetProperty("servers").GetArrayLength());
+        }
 
         var latest = root.GetProperty("latest");
         Assert.Equal(ids[0].ToString(CultureInfo.InvariantCulture), latest.GetProperty("sweep_id").GetString());
@@ -155,7 +161,16 @@ public sealed class McpSweepAnalyzeResponseBudgetLiveTests
         Assert.Equal(4, sweeps.GetArrayLength());
         foreach (var sweep in sweeps.EnumerateArray())
         {
-            Assert.Equal(6, sweep.GetProperty("report").GetProperty("servers").GetArrayLength());
+            /* #8318: the newest sweep's document rides once, under latest; its entry says so. The older entries keep theirs. */
+            if (sweep.GetProperty("sweep_id").GetString() == ids[0].ToString(CultureInfo.InvariantCulture))
+            {
+                Assert.Equal("latest", sweep.GetProperty("report_under").GetString());
+            }
+            else
+            {
+                Assert.Equal(6, sweep.GetProperty("report").GetProperty("servers").GetArrayLength());
+            }
+
             Assert.Equal(JsonValueKind.String, sweep.GetProperty("sweep_id").ValueKind);
             Assert.Equal(JsonValueKind.String, sweep.GetProperty("swept_at").ValueKind);
             Assert.True(sweep.GetProperty("alerts_enabled").GetBoolean());
