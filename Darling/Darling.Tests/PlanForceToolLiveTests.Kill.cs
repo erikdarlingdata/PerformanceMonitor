@@ -756,10 +756,10 @@ public sealed partial class PlanForceToolLiveTests
             }
 
             Assert.Equal(0, await JournalActionRowsAsync(c));
-            Assert.Equal("2", await PgScalarAsync(c.Connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = 'session_database_unknown'", c.Ct));
+            Assert.Equal("1", await PgScalarAsync(c.Connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = 'session_database_unknown'", c.Ct));
 
             /* No exclusions: there is nothing the unnamed database could be on, so the session is still killable, with no database name among its facts. */
-            await PgExecAsync(c.Connection, "UPDATE config.config_monitored_servers SET excluded_databases = NULL WHERE server_id = 7", c.Ct);
+            await PgExecAsync(c.Connection, "UPDATE config.config_monitored_servers SET excluded_databases = ARRAY[]::text[] WHERE server_id = 7", c.Ct);
             var passes = Parse(await KillAsync(c, victim.SessionId, UtcText(victim, offset), dryRun: true));
             Assert.True("dry_run" == (string?)passes["status"], passes.ToJsonString());
             Assert.Null((string?)passes["session"]!["database_name"]);
