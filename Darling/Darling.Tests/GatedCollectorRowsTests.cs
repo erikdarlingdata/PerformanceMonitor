@@ -503,6 +503,86 @@ public sealed class GatedCollectorRowsLiveTests
         });
     }
 
+    /// <summary>One database's row in a server's newest <c>query_store_health</c> capture: the readable-secondary bit is <c>readonly_reason</c> 8.</summary>
+    private static async Task CaptureAsync(NpgsqlConnection c, int id, string server, DateTime captureTime, string database, int readonlyReason, CancellationToken ct)
+    {
+        await using var cmd = new NpgsqlCommand(
+            """
+            INSERT INTO query_store_health (config_id, capture_time, server_id, server_name, database_name, actual_state, desired_state, readonly_reason,
+                                            current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days,
+                                            max_plans_per_query, interval_length_minutes, query_capture_mode, wait_stats_capture_mode)
+            VALUES ($1, $2, $3, $4, $5, $6, 'READ_WRITE', $7, 100, 1000, 'AUTO', 30, 200, 60, 'AUTO', 'ON')
+            """, c);
+        cmd.Parameters.AddWithValue(CollectionIdGenerator.Next());
+        cmd.Parameters.AddWithValue(DateTime.SpecifyKind(captureTime, DateTimeKind.Unspecified));
+        cmd.Parameters.AddWithValue(id);
+        cmd.Parameters.AddWithValue(server);
+        cmd.Parameters.AddWithValue(database);
+        cmd.Parameters.AddWithValue((readonlyReason & 8) != 0 ? "READ_ONLY" : "READ_WRITE");
+        cmd.Parameters.AddWithValue(readonlyReason);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    [Fact]
+    public async Task ASqlServerThatIsAReadableSecondaryForEveryQueryStoreDatabase_ListsQueryStoreHintsAsNotCollectedWithTheReason_AndAPrimaryDoesNot()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            /* #8361: on a server whose every Query Store database is a readable secondary the scheduler does not run
+               query_store_hints, so its logged row would read as a run that needs a look. The newest health capture saying so turns
+               it into a not_collected row carrying the readable-secondary sentence. A primary, and a server with one database Query
+               Store is still read for, keep the ordinary row. */
+            var capture = DateTime.UtcNow.AddMinutes(-3);
+            async Task LogAllAsync(int id, string server, params int[] readonlyReasons)
+            {
+                await RegisterAsync(connection, id, server, MonitoredEngineKind.SqlServer, null, ct);
+                await LogAsync(connection, id, server, "wait_stats", 5, ct);
+                await LogAsync(connection, id, server, "query_store_hints", 5, ct);
+                for (var i = 0; i < readonlyReasons.Length; i++)
+                {
+                    await CaptureAsync(connection, id, server, capture, $"db{i + 1}", readonlyReasons[i], ct);
+                }
+            }
+
+            async Task<JsonElement[]> RowsAsync(string server, bool full)
+            {
+                var (_, doc) = await HealthAsync(postgres, server, full, ct);
+                using (doc)
+                {
+                    return doc.RootElement.GetProperty("collectors").EnumerateArray().Select(r => r.Clone()).ToArray();
+                }
+            }
+
+            const int secondaryId = 524_921;
+            await LogAllAsync(secondaryId, "qs-secondary", 8, 8);
+            const int primaryId = 524_922;
+            await LogAllAsync(primaryId, "qs-primary", 0, 0);
+            const int mixedId = 524_923;
+            await LogAllAsync(mixedId, "qs-mixed", 8, 0);
+
+            /* The sentence the Query Store reads already answer with on this server; the health row carries the same one. */
+            var reason = await DarlingQueryStoreReadableSecondary.MessageAsync(postgres, secondaryId, "qs-secondary", 30, ct);
+            Assert.NotNull(reason);
+
+            foreach (var full in new[] { false, true })
+            {
+                var rows = await RowsAsync("qs-secondary", full);
+                Assert.Equal(1, rows.Count(r => r.GetProperty("collector").GetString() == "wait_stats"));
+                var hints = rows.Single(r => r.GetProperty("collector").GetString() == "query_store_hints");
+                Assert.Equal("not_collected", hints.GetProperty("status").GetString());
+                Assert.Equal(reason, hints.GetProperty("message").GetString());
+                Assert.Equal(new[] { "collector", "status", "message" }, hints.EnumerateObject().Select(p => p.Name).ToArray());
+
+                foreach (var server in new[] { "qs-primary", "qs-mixed" })
+                {
+                    var other = await RowsAsync(server, full);
+                    Assert.Equal(2, other.Length);
+                    Assert.DoesNotContain(other, r => r.GetProperty("status").GetString() == "not_collected");
+                }
+            }
+        });
+    }
+
     [Fact]
     public async Task OnASqlServerWithoutAlwaysOn_TheCompactNoteCountsOnlyTheRowsListedAsCollected()
     {
