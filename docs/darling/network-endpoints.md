@@ -337,10 +337,11 @@ The listener starts before the worker, so before the store migrations and before
 
 ### What the port cannot cover
 
-Two cases leave the port off. In each, the service logs one Error line and keeps running:
+Three cases leave the port off. In each, the service logs one Error line and keeps running:
 
 - **A `darling.json` that cannot be loaded.** The health listener reads its own block, so it cannot know the block when the file is unparsable, empty, unreadable or access-denied.
-- **A bind failure.** The port is taken by another process, or `health.listen` is not an address on this machine.
+- **A bind failure.** The port is taken by another process, or `health.listen` is an IP address that is not on this machine.
+- **A `health.listen` that is not an IP address.** `Validate()` reports it as a configuration problem, and the listener does not start. So a stopped service with a bad `health.listen` answers nothing on the port.
 
 If an I/O error stops the file from loading, the listener does not retry, so the port stays off for the life of that process. Restart the service after you fix the file.
 
