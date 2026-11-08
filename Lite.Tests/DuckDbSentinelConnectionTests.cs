@@ -14,6 +14,7 @@ using System.IO;
 using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Darling.Tests;
 using DuckDB.NET.Data;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
@@ -392,6 +393,65 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
         }
         finally
         {
+            DuckDbInitializer.TrimThresholdBytes = originalThreshold;
+            initializer.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// The count test above runs one cycle against two zero-wait tries on the process-wide store lock, so any
+    /// holder anywhere in the process at that instant (a reader left behind by an earlier test, a trim tick of an
+    /// initializer that was never disposed) turns the cycle into a skip and the count reads 0. This test holds that
+    /// precondition on purpose: another thread holds the read lock when the cycle is called, and the cycle must
+    /// still complete exactly one cycle. The hold is released only once the cycle is parked on the write lock,
+    /// read through <see cref="DuckDbInitializer.WaitingWriteCountForTests"/>, so the cycle has met the holder
+    /// before the holder lets go.
+    /// </summary>
+    [Fact]
+    public async Task RunMemoryTrimCycle_OverThreshold_ReadHoldAtTheCall_StillCompletesOneCycle()
+    {
+        using var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+
+        var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
+        DuckDbInitializer.TrimThresholdBytes = 1;
+        var readerReady = new ManualResetEventSlim();
+        var releaseReader = new ManualResetEventSlim();
+        var stopWatchingForTheParkedWriter = false;
+        try
+        {
+            var readerTask = Task.Run(() =>
+            {
+                using var readLock = initializer.AcquireReadLock();
+                readerReady.Set();
+                releaseReader.Wait();
+            });
+            Assert.True(readerReady.Wait(TimeSpan.FromSeconds(5)), "The reader never took the read lock");
+
+            /* Lets the reader go once the cycle is parked waiting for the write lock. On a cycle that skips at once
+               there is nothing to park, so the finally below releases the reader instead. */
+            var releaser = Task.Run(() =>
+            {
+                TestWait.TryWaitUntil(
+                    () => Volatile.Read(ref stopWatchingForTheParkedWriter) || DuckDbInitializer.WaitingWriteCountForTests > 0,
+                    TimeSpan.FromSeconds(30),
+                    TimeSpan.FromMilliseconds(1));
+                releaseReader.Set();
+            });
+
+            Assert.Equal(0, initializer.CompletedTrimCycleCount);
+
+            initializer.RunMemoryTrimCycle();
+
+            Assert.Equal(1, initializer.CompletedTrimCycleCount);
+
+            await releaser;
+            await readerTask;
+        }
+        finally
+        {
+            Volatile.Write(ref stopWatchingForTheParkedWriter, true);
+            releaseReader.Set();
             DuckDbInitializer.TrimThresholdBytes = originalThreshold;
             initializer.Dispose();
         }
