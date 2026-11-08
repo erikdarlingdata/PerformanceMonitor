@@ -420,7 +420,12 @@ VALUES ({_nextId++}, {Ts(Whole(NowUtc.AddDays(-10)))}, {ServerId}, 'TestSrv', 'D
 
         /* The write lock is thread-affine (#2463): a hold across an await can resume on another thread, throw on dispose and leave the static
            lock held for every later test. So it is taken, held and released on one dedicated thread, with no await inside. The thread bumps
-           the generation only once the reader is parked on the lock (a deterministic signal, not a sleep) and every wait is bounded. */
+           the generation only once the reader is parked on the lock (a deterministic signal, not a sleep) and every wait is bounded.
+           The lock is also process-wide, and the classes running alongside take it while they build their own databases. A budgeted
+           writer polls for it with no queue position for all but the last second of its budget (#7256), and the writers those classes
+           park on the lock win every handoff, so the holder here parks for its whole budget instead: it holds the lock as soon as the
+           current holder releases, and its budget is the only bound on the wait (#8142). */
+        _duckDb.WriteLockParkTail = waitBudget;
         var holder = DuckDbLockThread.RunAsync(() =>
         {
             using (_duckDb.AcquireWriteLock(waitBudget))
