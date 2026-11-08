@@ -87,7 +87,7 @@ public sealed class MaterializationHoleRepairTests
     public void TheCap_IsOnePolicyWindowInBuckets_PerGrain()
     {
         Assert.Equal(24, TimescaleSupport.MaterializationHoleRepairCapBuckets(TimescaleSupport.HourlyBucket));
-        Assert.Equal(3, TimescaleSupport.MaterializationHoleRepairCapBuckets(TimescaleSupport.DailyBucket));
+        Assert.Equal(4, TimescaleSupport.MaterializationHoleRepairCapBuckets(TimescaleSupport.DailyBucket));
         Assert.Equal((int)(TimescaleSupport.HourlyRefreshStartSpan.Ticks / TimescaleSupport.HourlyBucket.Ticks), TimescaleSupport.MaterializationHoleRepairCapBuckets(TimescaleSupport.HourlyBucket));
         Assert.Equal((int)(TimescaleSupport.DailyRefreshStartSpan.Ticks / TimescaleSupport.DailyBucket.Ticks), TimescaleSupport.MaterializationHoleRepairCapBuckets(TimescaleSupport.DailyBucket));
         Assert.Throws<ArgumentOutOfRangeException>(() => TimescaleSupport.MaterializationHoleRepairCapBuckets(TimeSpan.Zero));

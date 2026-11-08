@@ -220,8 +220,10 @@ public sealed class CrossSkuSurfaceSourceTests
            threshold-override reload, Darling-only (Lite has no override path). Sixteenth and seventeenth since #7041: the
            scheduled Daily Health Report's build read and its own delivery-stamp read, named apart from
            the other daily documents' shared delivery-stamp read because the report keeps its own stamp. Both Darling-only.
-           Eighteenth since #7368: the Store Autovacuum Behind self-alert's hourly read of the store, Darling-only like the other store self-alerts. */
-        Assert.Equal(18, nullKeyReads.Count);
+           Eighteenth since #7368: the Store Autovacuum Behind self-alert's hourly read of the store, Darling-only like the other store self-alerts.
+           Nineteenth and twentieth since #8302: the stale daily rollup self-alert's two alert-history reads, the restart seed
+           and the close of an episode that ended while the service was down, Darling-only like the other store self-alerts. */
+        Assert.Equal(20, nullKeyReads.Count);
 
         var inventory = AlertReadFailureCounter.FleetScopedReads;
 
@@ -248,6 +250,7 @@ public sealed class CrossSkuSurfaceSourceTests
         Assert.Contains(nullKeyReads, r => r.Contains("store autovacuum self-alert", StringComparison.Ordinal));
         Assert.Contains(nullKeyReads, r => r.Contains("daily-health-report", StringComparison.Ordinal));
         Assert.Equal(2, nullKeyReads.Count(r => r.Contains("daily-health-report", StringComparison.Ordinal)));
+        Assert.Equal(2, nullKeyReads.Count(r => r.Contains("stale rollup", StringComparison.Ordinal)));
         /* #3354: config_mute_rules belongs to the store, not to any monitored server, so its failed read
            lands in the instance total and in no server's count — exactly the case a per-server-only
            surface would have given no home. Recorded TWICE across the tree, once per SKU, and that is the
@@ -274,6 +277,7 @@ public sealed class CrossSkuSurfaceSourceTests
         Assert.Contains("threshold-override reload", inventory, StringComparison.Ordinal);
         Assert.Contains("daily report (#7041)", inventory, StringComparison.Ordinal);
         Assert.Contains("store autovacuum (#7368)", inventory, StringComparison.Ordinal);
+        Assert.Contains("stale daily rollup", inventory, StringComparison.Ordinal);
 
         /* And the phantom stays gone. Disk pressure's feed reads are exempt — a local filesystem read and a
            recorded-store-size lookup that is context for the alert text — so naming it here would send an

@@ -58,9 +58,9 @@ public sealed class TimescaleAggregateCompressionTests
 
         /* The ruling's numbers, as the values the expressions evaluate to today. */
         Assert.Equal(TimeSpan.FromDays(2), TimescaleSupport.HourlyAggregateCompressAfterSpan);
-        Assert.Equal(TimeSpan.FromDays(4), TimescaleSupport.DailyAggregateCompressAfterSpan);
+        Assert.Equal(TimeSpan.FromDays(5), TimescaleSupport.DailyAggregateCompressAfterSpan);
         Assert.Equal("2 days", TimescaleSupport.HourlyAggregateCompressAfter);
-        Assert.Equal("4 days", TimescaleSupport.DailyAggregateCompressAfter);
+        Assert.Equal("5 days", TimescaleSupport.DailyAggregateCompressAfter);
 
         /* The condition itself, per tier, with the tier's own bucket width. */
         Assert.True(
@@ -325,7 +325,7 @@ public sealed class TimescaleAggregateCompressionTests
             var sql = TimescaleSupport.AddAggregateCompressionPolicySql(view, night);
 
             Assert.StartsWith($"SELECT add_compression_policy('collect.{view}', ", sql, StringComparison.Ordinal);
-            Assert.Contains($"compress_after => INTERVAL '{(hourly ? "2 days" : view == TimescaleSupport.QueryStoreStatsDayGrainDailyView ? "5 days" : "4 days")}'", sql, StringComparison.Ordinal);
+            Assert.Contains($"compress_after => INTERVAL '{(hourly ? "2 days" : view == TimescaleSupport.QueryStoreStatsDayGrainDailyView ? "6 days" : "5 days")}'", sql, StringComparison.Ordinal);
             Assert.Contains("schedule_interval => INTERVAL '1 day'", sql, StringComparison.Ordinal);
             Assert.Contains("if_not_exists => true", sql, StringComparison.Ordinal);
             Assert.Contains(
