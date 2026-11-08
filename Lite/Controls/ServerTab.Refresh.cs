@@ -1252,7 +1252,7 @@ public partial class ServerTab : UserControl
             if (data.Count == 0)
                 BlockingSlicer.ShowEmpty("No blocked process reports in the selected time window.");
             else
-                BlockingSlicer.LoadData(data, "Blocking Events", slicerStart, slicerEnd);
+                BlockingSlicer.LoadData(data, "Blocking Events", slicerStart, slicerEnd, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(slicerStart, slicerEnd));
         }
         catch (Exception ex)
         {

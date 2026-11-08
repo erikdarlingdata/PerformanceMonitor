@@ -104,7 +104,7 @@ public sealed class SlicerShortWindowTests : IClassFixture<SharedDuckDbFixture>,
             slicer.Measure(new Size(800, 130));
             slicer.Arrange(new Rect(0, 0, 800, 130));
             slicer.UpdateLayout();
-            slicer.LoadData(buckets, "Sessions", start, end);
+            slicer.LoadData(buckets, "Sessions", start, end, SlicerBuckets.MinutesFor(start, end));
             slicer.Redraw();
 
             var area = slicer.SlicerCanvas.Children.OfType<Path>().Single(p => p.Fill is not null && p.Stroke is null);

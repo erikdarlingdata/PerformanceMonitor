@@ -26,8 +26,8 @@ public partial class TimeRangeSlicerControl : UserControl
 
     private DateTime? _requestedStartUtc;
     private DateTime? _requestedEndUtc;
-    /// <summary>The width of the strip's buckets, from <see cref="SlicerBuckets.MinutesFor(DateTime, DateTime)"/> over the requested window: the read that
-    /// grouped the rows took the same width over the same window, so the fill, the end of the span and the selection's snap all land on its stamps.</summary>
+    /// <summary>The width of the strip's buckets, as the host passed it to <see cref="LoadData"/>: the width of the read that grouped the rows, so the
+    /// fill, the end of the span and the selection's snap all land on its stamps. An hour unless the host says otherwise.</summary>
     private int _bucketMinutes = 60;
     private string _metricLabel = "Sessions";
     private bool _isExpanded = true;
@@ -102,7 +102,7 @@ public partial class TimeRangeSlicerControl : UserControl
     /// which the host loaded for the whole window, reads the range the highlight shows.
     /// </summary>
     public void LoadData(List<TimeSliceBucket> data, string metricLabel,
-        DateTime? requestedStartUtc = null, DateTime? requestedEndUtc = null)
+        DateTime? requestedStartUtc = null, DateTime? requestedEndUtc = null, int bucketMinutes = 60)
     {
         // A narrowed selection is kept across a reload (auto-refresh) as its two instants, re-placed on the new span below.
         DateTime? prevStart = null, prevEnd = null;
@@ -114,7 +114,7 @@ public partial class TimeRangeSlicerControl : UserControl
 
         _requestedStartUtc = requestedStartUtc;
         _requestedEndUtc = requestedEndUtc;
-        _bucketMinutes = requestedStartUtc.HasValue && requestedEndUtc.HasValue ? SlicerBuckets.MinutesFor(requestedStartUtc.Value, requestedEndUtc.Value) : 60;
+        _bucketMinutes = bucketMinutes;
         _data = FillEmptyBuckets(data, requestedStartUtc, requestedEndUtc, _bucketMinutes);
         _runs = StripGaps.RunsOverFilledBuckets(_data.Select(d => d.BucketTime).ToList(), data.Select(d => d.BucketTime).ToList());
         _emptyText = null;
