@@ -392,7 +392,7 @@ public sealed class McpAnalysisTools
                 return McpHelpers.Status(
                     "unavailable",
                     $"The collector observed none of the requested window for {resolved.DisplayName}, so no windowed fact (wait fractions, blocking or deadlock rates) exists to show. " +
-                    $"{facts.Count} point-in-time fact(s) (configuration and current state) could still be read; audit_config reports those. " +
+                    $"{CountText.Plural(facts.Count, "point-in-time fact")} (configuration and current state) could still be read; audit_config reports those. " +
                     "Check get_collection_health to see when each collector last succeeded." +
                     (collectionCaveat is null ? string.Empty : $" COLLECTION CAVEAT: {collectionCaveat}"),
                     collection.Attach(new { secondary_replica_note = secondaryReplicaNote, coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions));
@@ -1191,9 +1191,9 @@ public sealed class McpAnalysisTools
                     : "None needed: the mute was already in force and nothing was written.",
                 matched_now = matchedNow,
                 note = !registered
-                    ? $"This scope already mutes this story_path_hash; nothing was written and the existing mute stays in force ({matchedNow} stored finding(s) in this scope carry the hash). A reason passed on this call is not recorded."
+                    ? $"This scope already mutes this story_path_hash; nothing was written and the existing mute stays in force ({CountText.Plural(matchedNow, "stored finding")} in this scope {(matchedNow == 1 ? "carries" : "carry")} the hash). A reason passed on this call is not recorded."
                     : matchedNow > 0
-                        ? $"The mute is registered; {matchedNow} stored finding(s) in this scope carry the hash and the pattern will be dropped from future analysis runs."
+                        ? $"The mute is registered; {CountText.Plural(matchedNow, "stored finding")} in this scope {(matchedNow == 1 ? "carries" : "carry")} the hash and the pattern will be dropped from future analysis runs."
                         : "The mute is registered, but no stored finding in this scope carries this story_path_hash. If you copied it from analyze_server or get_analysis_findings it is still valid (the pattern will be dropped if it recurs); a hash from anywhere else may be mistyped and would mute nothing.",
             }, McpHelpers.JsonOptions);
         }
@@ -1257,7 +1257,7 @@ public sealed class McpAnalysisTools
                 }).ToList(),
                 undo = removed > 0 ? (object)new { tool = "mute_analysis_finding", arguments = undoArguments } : "None needed: nothing was removed.",
                 note = removed > 0
-                    ? $"Removed {removed} mute row(s) for this scope. The pattern is no longer skipped and is reported again when a later analysis pass finds it."
+                    ? $"Removed {CountText.Plural(removed, "mute row")} for this scope. The pattern is no longer skipped and is reported again when a later analysis pass finds it."
                     : "This scope holds no mute for this story_path_hash, so nothing changed. A mute registered for all servers is removed by omitting server_name; a per-server mute by naming that server.",
             }, McpHelpers.JsonOptions);
         }

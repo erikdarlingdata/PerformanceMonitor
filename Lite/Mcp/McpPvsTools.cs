@@ -69,7 +69,7 @@ public sealed class McpPvsTools
                 {
                     return McpHelpers.WithSecondaryReplicaNote(McpHelpers.StatusForDatabase("empty",
                         $"No PVS rows for {McpDatabaseSelection.Scope(names)} on {resolved.DisplayName} in the snapshot taken at "
-                        + $"{serverRows[0].CollectionTime:o}, though it holds {serverRows.Count:N0} other database(s). Check the database "
+                        + $"{serverRows[0].CollectionTime:o}, though it holds {CountText.Plural(serverRows.Count, "other database")}. Check the database "
                         + "name: the filter matches exactly, and a database with no row at that snapshot looks identical to one that does not exist.",
                         McpDatabaseSelection.Describe(names)),
                         secondaryNote)!;

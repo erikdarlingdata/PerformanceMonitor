@@ -1372,7 +1372,7 @@ public sealed partial class DarlingWorker
                 true,
                 skippedCount == 0
                     ? "snapshot complete"
-                    : $"snapshot complete; {skippedCount} collector(s) skipped",
+                    : $"snapshot complete; {CountText.Plural(skippedCount, "collector")} skipped",
                 json);
         }
         finally

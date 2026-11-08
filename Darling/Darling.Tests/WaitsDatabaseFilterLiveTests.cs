@@ -360,7 +360,7 @@ public sealed class WaitsDatabaseFilterLiveTests
             var farBack = JsonDocument.Parse(await DarlingMcpDataTools.GetBlockingStats(
                 postgres, ServerName, 1, DatabaseFilter.All, seed.End.AddDays(-30).ToString("o"), null, ct)).RootElement;
             Assert.Equal("empty", farBack.GetProperty("status").GetString());
-            Assert.StartsWith($"No blocking or deadlocks recorded for {ServerName} in the last 1 hour(s)", farBack.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.StartsWith($"No blocking or deadlocks recorded for {ServerName} in the last 1 hour", farBack.GetProperty("message").GetString(), StringComparison.Ordinal);
 
             bodySucceeded = true;
         }

@@ -244,7 +244,7 @@ public sealed class DarlingPgStaleStateLiveTests
             Assert.Equal(1, root.GetProperty("slot_count").GetInt32());
             Assert.Equal("kept", root.GetProperty("worst_slot").GetString());
             Assert.Equal(["abandoned"], root.GetProperty("omitted_slots").EnumerateArray().Select(e => e.GetString()!).ToArray());
-            Assert.Contains("1 slot(s)", root.GetProperty("omitted_slots_note").GetString(), StringComparison.Ordinal);
+            Assert.Contains("1 slot", root.GetProperty("omitted_slots_note").GetString(), StringComparison.Ordinal);
             Assert.Equal(0d, root.GetProperty("total_retained_wal_gb").GetDouble(), 1);
 
             /* The slot present in both captures is reported as before, from its newest sample. */
@@ -292,7 +292,7 @@ public sealed class DarlingPgStaleStateLiveTests
             Assert.Equal(["appdb"], Names(root, "databases", "database_name"));
             Assert.Equal("appdb", root.GetProperty("worst_database").GetString());
             Assert.Equal(["olddb"], root.GetProperty("omitted_databases").EnumerateArray().Select(e => e.GetString()!).ToArray());
-            Assert.Contains("1 database(s)", root.GetProperty("omitted_databases_note").GetString(), StringComparison.Ordinal);
+            Assert.Contains("1 database", root.GetProperty("omitted_databases_note").GetString(), StringComparison.Ordinal);
             Assert.Equal(end.AddMinutes(-5), root.GetProperty("databases").EnumerateArray().Single().GetProperty("measured_at").GetDateTime(), TimeSpan.FromSeconds(1));
         });
     }

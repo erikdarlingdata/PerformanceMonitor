@@ -318,7 +318,7 @@ public sealed class DarlingTlsStoreTests
             () => DarlingTlsStore.Select(certs, new WebTlsStoreConfig { Subject = Name }, Now, "mcp"));
 
         Assert.Equal(
-            $"mcp.network.tls.store.subject '{Name}' matches 4 certificate(s) in the LocalMachine\\My store but none can be served "
+            $"mcp.network.tls.store.subject '{Name}' matches 4 certificates in the LocalMachine\\My store but none can be served "
             + "(expired: 1, not yet valid: 1, no Server Authentication usage: 1, no private key: 1).",
             ex.Message);
     }
@@ -507,7 +507,7 @@ public sealed class DarlingTlsStoreTests
             new List<X509Certificate2> { bad }, new WebTlsStoreConfig { Subject = Name }, Now, "web"));
 
         Assert.Contains($"web.network.tls.store.subject '{Name}' matches no certificate", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("1 certificate(s) in the LocalMachine\\My store have a Subject Alternative Name that could not be read", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("1 certificate in the LocalMachine\\My store has a Subject Alternative Name that could not be read", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -519,8 +519,8 @@ public sealed class DarlingTlsStoreTests
         var ex = Assert.Throws<InvalidOperationException>(() => DarlingTlsStore.Select(
             new List<X509Certificate2> { bad, expired }, new WebTlsStoreConfig { Subject = Name }, Now, "web"));
 
-        Assert.Contains("matches 1 certificate(s) in the LocalMachine\\My store but none can be served (expired: 1,", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("1 certificate(s) in the LocalMachine\\My store have a Subject Alternative Name that could not be read", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("matches 1 certificate in the LocalMachine\\My store but none can be served (expired: 1,", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("1 certificate in the LocalMachine\\My store has a Subject Alternative Name that could not be read", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -538,7 +538,7 @@ public sealed class DarlingTlsStoreTests
         Assert.Equal(goodThumbprint, loaded.Leaf.Thumbprint);
         Assert.NotNull(loaded.FallbackNote);
         Assert.Equal(
-            "web.network.tls.store: 1 certificate(s) in the LocalMachine\\My store have a Subject Alternative Name that could not be read and were skipped.",
+            "web.network.tls.store: 1 certificate in the LocalMachine\\My store has a Subject Alternative Name that could not be read and was skipped.",
             loaded.FallbackNote);
     }
 
@@ -558,7 +558,7 @@ public sealed class DarlingTlsStoreTests
 
         Assert.Equal(olderThumbprint, loaded.Leaf.Thumbprint);
         Assert.Contains($"newer certificate {newerThumbprint}", loaded.FallbackNote, StringComparison.Ordinal);
-        Assert.Contains("1 certificate(s) in the LocalMachine\\My store have a Subject Alternative Name that could not be read", loaded.FallbackNote, StringComparison.Ordinal);
+        Assert.Contains("1 certificate in the LocalMachine\\My store has a Subject Alternative Name that could not be read", loaded.FallbackNote, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -574,7 +574,7 @@ public sealed class DarlingTlsStoreTests
             new WebTlsStoreConfig { Subject = Name }, "web", (_, _) => all,
             c => c.Thumbprint == older ? null : new CryptographicException("Keyset does not exist"), () => FallbackAccount, Now);
 
-        Assert.Contains(", and 1 other newer certificate(s) also could not be opened.", loaded.FallbackNote, StringComparison.Ordinal);
+        Assert.Contains(", and 1 other newer certificate also could not be opened.", loaded.FallbackNote, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -91,7 +91,7 @@ public sealed class ValidateConfigOldFormatPasswordLiveTests
 
             /* Without a pin the value cannot be opened here, and the verb says so: the control for the run below. */
             var unpinned = await RunVerbAsync(config, ct);
-            Assert.Contains("Validating connectivity to 1 server(s)", unpinned.Output, StringComparison.Ordinal);
+            Assert.Contains("Validating connectivity to 1 server", unpinned.Output, StringComparison.Ordinal);
             Assert.Contains("is in the old format", unpinned.Output, StringComparison.Ordinal);
 
             /* The pin the upgrade writes: the value's hash and the hash of the connection as the row holds it. */
@@ -108,7 +108,7 @@ public sealed class ValidateConfigOldFormatPasswordLiveTests
             }
 
             var pinned = await RunVerbAsync(config, ct);
-            Assert.Contains("Validating connectivity to 1 server(s)", pinned.Output, StringComparison.Ordinal);
+            Assert.Contains("Validating connectivity to 1 server", pinned.Output, StringComparison.Ordinal);
             Assert.DoesNotContain("could not be checked", pinned.Output, StringComparison.Ordinal);
             Assert.DoesNotContain("old format", pinned.Output, StringComparison.Ordinal);
             Assert.DoesNotContain("entered again", pinned.Output + pinned.Error, StringComparison.Ordinal);

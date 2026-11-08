@@ -342,7 +342,7 @@ public sealed class DarlingMcpServerTrendTools
         var notice = await NoticeAsync(postgres, resolved.ServerName, Describe(metric).Collector, start, end, emptyAnswer: false, cancellationToken);
         return McpHelpers.Status(
             "empty",
-            $"None of the named {kind.Noun} were recorded for {resolved.DisplayName} in the last {hoursBack} hour(s). {spelling} are matched exactly, so check the spelling and case. The window does hold others: {kind.HeaviestKey} lists the top of them.",
+            $"None of the named {kind.Noun} were recorded for {resolved.DisplayName} in the last {CountText.Plural(hoursBack, "hour")}. {spelling} are matched exactly, so check the spelling and case. The window does hold others: {kind.HeaviestKey} lists the top of them.",
             AddNotice(new Dictionary<string, object?> { [kind.Missing] = named, [kind.HeaviestKey] = heaviest }, notice));
     }
 
@@ -419,7 +419,7 @@ public sealed class DarlingMcpServerTrendTools
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice.WindowTruncated, notice.EffectiveStart,
-                    factual: $"No {what} recorded for {resolved.DisplayName} in the last {hoursBack} hour(s)",
+                    factual: $"No {what} recorded for {resolved.DisplayName} in the last {CountText.Plural(hoursBack, "hour")}",
                     coveredClaim: ". This server HAS collected them before, so this window is genuinely quiet rather than broken - widen hours_back to find the most recent samples."),
                 notice.AsHints()), notice)
             : McpHelpers.Status(

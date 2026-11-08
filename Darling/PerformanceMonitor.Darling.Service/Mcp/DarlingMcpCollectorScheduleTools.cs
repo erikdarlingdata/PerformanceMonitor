@@ -767,7 +767,7 @@ public sealed class DarlingMcpCollectorScheduleTools
                 ["scope"] = scopeText,
                 ["what_changed"] = scheduleRows + runTimeRows == 0
                     ? $"No schedule override or run time was stored {scopeText}; nothing was removed."
-                    : $"Removed {scheduleRows} schedule override row(s) and {runTimeRows} run time(s) {scopeText}; the {(scope.ServerId is null ? "shipped defaults" : "fleet-wide rows, else the shipped defaults,")} apply now.",
+                    : $"Removed {CountText.Plural(scheduleRows, "schedule override row")} and {CountText.Plural(runTimeRows, "run time")} {scopeText}; the {(scope.ServerId is null ? "shipped defaults" : "fleet-wide rows, else the shipped defaults,")} apply now.",
                 ["removed"] = new JsonObject { ["schedule_rows"] = scheduleRows, ["run_times"] = runTimeRows },
                 ["removed_overrides"] = new JsonArray(removedBefore.Select(EntryJson).ToArray<JsonNode?>()),
                 ["notes"] = new JsonArray(

@@ -5008,7 +5008,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     detail: StateRepeatNote(decision, refire) + "The SQL Server Agent alerts on this server have gaps. " + gapText +
                         " A server without these alerts says nothing when the engine reports corruption or a fatal error.",
                     severity: AlertSeverityLevel.Warning,
-                    shortMessage: $"SQL Server Agent alerts have {status.Gaps.Count} gap(s): {string.Join(", ", status.Gaps.Select(g => g.Code))}",
+                    shortMessage: $"SQL Server Agent alerts have {CountText.Plural(status.Gaps.Count, "gap")}: {string.Join(", ", status.Gaps.Select(g => g.Code))}",
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
                 if (IsStaleSweep(serverId, sweepGeneration))
@@ -5124,9 +5124,9 @@ internal sealed class DarlingSelfAlertEvaluator
                         : string.Empty);
                 var delivery = await FireAsync(
                     key, serverName, metric, string.Create(CultureInfo.InvariantCulture, $"{items.Count} overdue"), $"older than {threshold}",
-                    detail: StateRepeatNote(decision, refire) + $"The {factName} is older than {threshold} on {items.Count} database(s): {names}." + consequence,
+                    detail: StateRepeatNote(decision, refire) + $"The {factName} is older than {threshold} on {CountText.Plural(items.Count, "database")}: {names}." + consequence,
                     severity: AlertSeverityLevel.Warning,
-                    shortMessage: string.Create(CultureInfo.InvariantCulture, $"{metric}: {items.Count} database(s)") + " - " + string.Join(", ", items.Take(5).Select(i => i.Database)) +
+                    shortMessage: string.Create(CultureInfo.InvariantCulture, $"{metric}: {CountText.Plural(items.Count, "database")}") + " - " + string.Join(", ", items.Take(5).Select(i => i.Database)) +
                         (items.Count > 5 ? ", ..." : string.Empty),
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
@@ -5230,10 +5230,10 @@ internal sealed class DarlingSelfAlertEvaluator
                     $"{worst.Percent.ToString("F1", CultureInfo.InvariantCulture)}%",
                     $"{worstBar.ToString(CultureInfo.InvariantCulture)}%",
                     detail: StateRepeatNote(decision, refire) +
-                        $"{hits.Count} identity column(s) on this server are near the end of their type. An identity column that runs out stops every insert into its table. " +
+                        $"{CountText.Plural(hits.Count, "identity column")} on this server {(hits.Count == 1 ? "is" : "are")} near the end of {(hits.Count == 1 ? "its" : "their")} type. An identity column that runs out stops every insert into its table. " +
                         string.Join(" ", lines) + more,
                     severity: isCritical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
-                    shortMessage: $"{hits.Count} identity column(s) near the end of their type, fullest {worst.Column.DatabaseName}.{worst.Column.TableName}.{worst.Column.ColumnName} at {worst.Percent.ToString("F1", CultureInfo.InvariantCulture)}% used",
+                    shortMessage: $"{CountText.Plural(hits.Count, "identity column")} near the end of {(hits.Count == 1 ? "its" : "their")} type, fullest {worst.Column.DatabaseName}.{worst.Column.TableName}.{worst.Column.ColumnName} at {worst.Percent.ToString("F1", CultureInfo.InvariantCulture)}% used",
                     numericCurrentValue: worst.Percent,
                     numericThresholdValue: worstBar,
                     cancellationToken);

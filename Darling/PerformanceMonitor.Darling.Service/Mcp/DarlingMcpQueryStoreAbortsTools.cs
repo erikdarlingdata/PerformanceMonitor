@@ -131,7 +131,7 @@ public sealed class DarlingMcpQueryStoreAbortsTools
                 {
                     return McpHelpers.StatusForDatabase(
                         "empty",
-                        $"No Query Store query on {resolved.DisplayName} had an aborted or exception run in the last {hours_back} hour(s)"
+                        $"No Query Store query on {resolved.DisplayName} had an aborted or exception run in the last {CountText.Plural(hours_back, "hour")}"
                         + (scopeName is null ? "" : $" for {(databases.Names.Count > 1 ? DatabaseFilter.ManyDatabasesDescription : "database '" + scopeName + "'")}")
                         + ". Other runs were recorded in the window, so this is a measured zero"
                         + (truncated ? ", over the part of the window the store holds (see effective_start)." : "."),

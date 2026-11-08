@@ -131,7 +131,7 @@ public sealed class DarlingMcpPvsTools
                     {
                         return McpHelpers.WithSecondaryReplicaNote(McpHelpers.StatusForDatabase("empty",
                             $"No PVS rows for {DarlingMcpObjectStatsTools.DescribeScope(databaseFilter)} on {resolved.DisplayName} in the snapshot taken at "
-                            + $"{serverRows[0].CollectionTime:o}, though it holds {serverRows.Count:N0} other database(s). Check the database "
+                            + $"{serverRows[0].CollectionTime:o}, though it holds {CountText.Plural(serverRows.Count, "other database")}. Check the database "
                             + $"{(databaseFilter.Names.Count == 1 ? "name" : "names")}: the filter matches exactly, and a database with no row at that "
                             + "snapshot looks identical to one that does not exist.",
                             databaseFilter.Describe()),

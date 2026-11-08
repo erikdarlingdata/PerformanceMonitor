@@ -1024,9 +1024,9 @@ public partial class LiteAlertForwardingTests : IDisposable
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("THREADPOOL (900s in 10m), RESOURCE_SEMAPHORE (600s in 10m)", fired.CurrentValue);
-        Assert.Equal("600s accumulated over 10m (an average of 1 task(s) continuously waiting)", fired.ThresholdValue);
+        Assert.Equal("600s accumulated over 10m (an average of 1 task continuously waiting)", fired.ThresholdValue);
         Assert.Equal(
-            "[THREADPOOL] 900s of wait accumulated in the last 10 minutes across 30,000 waits — on average 1.5 task(s) continuously stuck",
+            "[THREADPOOL] 900s of wait accumulated in the last 10 minutes across 30,000 waits — on average 1.5 tasks continuously stuck",
             fired.ShortMessage);
         Assert.Equal(900_000d, fired.NumericCurrentValue);
         Assert.Equal(600_000d, fired.NumericThresholdValue);

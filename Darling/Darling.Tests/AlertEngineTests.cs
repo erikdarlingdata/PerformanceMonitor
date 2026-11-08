@@ -3243,12 +3243,12 @@ public sealed class AlertEngineTests
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("Poison Wait", fired.MetricName);
         Assert.Equal("THREADPOOL (600s in 10m)", fired.CurrentValue);
-        Assert.Equal("600s accumulated over 10m (an average of 1 task(s) continuously waiting)", fired.ThresholdValue);
+        Assert.Equal("600s accumulated over 10m (an average of 1 task continuously waiting)", fired.ThresholdValue);
         Assert.Equal(600_000d, fired.NumericCurrentValue);
         Assert.Equal(600_000d, fired.NumericThresholdValue);
         Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
         Assert.Equal(
-            "[THREADPOOL] 600s of wait accumulated in the last 10 minutes across 300,000 waits — on average 1.0 task(s) continuously stuck",
+            "[THREADPOOL] 600s of wait accumulated in the last 10 minutes across 300,000 waits — on average 1.0 task continuously stuck",
             fired.ShortMessage);
 
         Assert.NotNull(fired.Context);
@@ -3308,7 +3308,7 @@ public sealed class AlertEngineTests
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
         Assert.Equal(AlertSeverityLevel.Critical, fired.Context!.SeverityOverride);
-        Assert.Equal("6,000s accumulated over 10m (an average of 10 task(s) continuously waiting)", fired.ThresholdValue);
+        Assert.Equal("6,000s accumulated over 10m (an average of 10 tasks continuously waiting)", fired.ThresholdValue);
         Assert.Equal(6_000_000d, fired.NumericThresholdValue);
         Assert.Contains(fired.Context.Details.Single().Fields, f => f.Item1 == "Severity" && f.Item2 == "CRITICAL");
     }

@@ -149,12 +149,12 @@ public sealed class QueryStoreReadsDatabaseFilterLiveTests
             var noBaselineText = noBaseline.GetProperty("message").GetString()!;
             Assert.Contains("no Query Store capture of the chosen databases in the 7-day baseline window", noBaselineText, StringComparison.Ordinal);
             Assert.Contains("no baseline for those databases to compare against and no regression of their queries", noBaselineText, StringComparison.Ordinal);
-            Assert.Contains("Either those databases' whole collected history falls inside the last 24 hour(s), or they have none older", noBaselineText, StringComparison.Ordinal);
+            Assert.Contains("Either those databases' whole collected history falls inside the last 24 hours, or they have none older", noBaselineText, StringComparison.Ordinal);
 
             var noRecent = Root(await Regressions(postgres, Of(BaseOnlyF, BaseOnlyG)));
             Assert.Equal("empty", noRecent.GetProperty("status").GetString());
             var noRecentText = noRecent.GetProperty("message").GetString()!;
-            Assert.Contains("has Query Store history of the chosen databases from before this window but nothing of them collected IN the last 24 hour(s), so those databases' recent side is missing", noRecentText, StringComparison.Ordinal);
+            Assert.Contains("has Query Store history of the chosen databases from before this window but nothing of them collected IN the last 24 hours, so those databases' recent side is missing", noRecentText, StringComparison.Ordinal);
 
             // Both sides collected for every chosen database: the filtered answers fall through to the all-clear's own text.
             var quiet = Root(await Regressions(postgres, Of(QuietH, QuietI)));
@@ -167,9 +167,9 @@ public sealed class QueryStoreReadsDatabaseFilterLiveTests
             var oneNoBaseline = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24, RecentOnlyD));
             Assert.Equal("unavailable", oneNoBaseline.GetProperty("status").GetString());
             Assert.Contains($"no Query Store capture of database_name '{RecentOnlyD}' in the 7-day baseline window before this window, so there is no baseline for that database to compare against and no regression of its queries", oneNoBaseline.GetProperty("message").GetString()!, StringComparison.Ordinal);
-            Assert.Contains("Either that database's whole collected history falls inside the last 24 hour(s), or it has none older", oneNoBaseline.GetProperty("message").GetString()!, StringComparison.Ordinal);
+            Assert.Contains("Either that database's whole collected history falls inside the last 24 hours, or it has none older", oneNoBaseline.GetProperty("message").GetString()!, StringComparison.Ordinal);
             var oneNoRecent = Root(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, 24, BaseOnlyF));
-            Assert.Contains($"has Query Store history of database_name '{BaseOnlyF}' from before this window but nothing of it collected IN the last 24 hour(s), so that database's recent side is missing", oneNoRecent.GetProperty("message").GetString()!, StringComparison.Ordinal);
+            Assert.Contains($"has Query Store history of database_name '{BaseOnlyF}' from before this window but nothing of it collected IN the last 24 hours, so that database's recent side is missing", oneNoRecent.GetProperty("message").GetString()!, StringComparison.Ordinal);
             // ... and the overload with one name says the same thing.
             Assert.Equal(oneNoRecent.GetProperty("message").GetString(), Root(await Regressions(postgres, DatabaseFilter.One(BaseOnlyF))).GetProperty("message").GetString());
 

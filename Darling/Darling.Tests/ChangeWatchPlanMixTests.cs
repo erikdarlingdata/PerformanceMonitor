@@ -173,7 +173,7 @@ public sealed class ChangeWatchPlanMixTests
             (h, json, ct) =>
             {
                 Assert.Contains("query_avg_duration_ms:Sales:42", json, StringComparison.Ordinal);
-                Assert.Contains("2 plan(s) before, 2 after", json, StringComparison.Ordinal);
+                Assert.Contains("2 plans before, 2 after", json, StringComparison.Ordinal);
                 return Task.CompletedTask;
             });
         Assert.Equal("request_opened", result);

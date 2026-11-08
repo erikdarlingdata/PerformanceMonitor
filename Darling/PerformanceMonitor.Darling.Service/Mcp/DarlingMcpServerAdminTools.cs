@@ -490,7 +490,7 @@ public sealed partial class DarlingMcpServerAdminTools
                         matched_in = "servers",
                         matched_by = connectedOnly.MatchedBy,
                         candidates = connectedOnly.Candidates.Select(c => new { server = c.ServerName, display_name = c.DisplayName }),
-                        message = $"'{server_name}' matches {connectedOnly.Candidates.Count} server(s) in the connected-servers registry but none of the " +
+                        message = $"'{server_name}' matches {CountText.Plural(connectedOnly.Candidates.Count, "server")} in the connected-servers registry but none of the " +
                                   "monitored-server definitions in the central store, so there is nothing for this tool to delete: the server is " +
                                   "defined in darling.json (remove it there and restart the service), or its store definition was already removed. " +
                                   "Nothing was changed.",

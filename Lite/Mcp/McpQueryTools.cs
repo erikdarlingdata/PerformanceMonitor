@@ -93,7 +93,7 @@ public sealed class McpQueryTools
             {
                 if (tagScope.Active)
                 {
-                    return McpHelpers.Status("empty", $"No query-stats group on {resolved.DisplayName} in the last {hours_back} hour(s) carries query tag '{tagScope.Requested}'. The tag filter was applied in SQL before the top-{top} ranking.");
+                    return McpHelpers.Status("empty", $"No query-stats group on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} carries query tag '{tagScope.Requested}'. The tag filter was applied in SQL before the top-{top} ranking.");
                 }
 
                 /* A filtered miss is not a collection miss — same words as Darling's twin. */
@@ -101,7 +101,7 @@ public sealed class McpQueryTools
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No query-stats group on {resolved.DisplayName} in the last {hours_back} hour(s) has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the whole window, so this is the window's answer rather than a page artefact: drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism when Query Store is on: find the statement in get_query_store_top (filter by database_name, match on query_hash) and pass that row's database_name and plan_id to analyze_query_store_plan (Lite keeps no plans, so analyze_query_plan cannot answer).",
+                        $"No query-stats group on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the whole window, so this is the window's answer rather than a page artefact: drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism when Query Store is on: find the statement in get_query_store_top (filter by database_name, match on query_hash) and pass that row's database_name and plan_id to analyze_query_store_plan (Lite keeps no plans, so analyze_query_plan cannot answer).",
                         new { filter_applied = filterApplied });
                 }
 
@@ -324,7 +324,7 @@ public sealed class McpQueryTools
             var leftOut = DatabasesLeftOut.Distinct(droppedDatabases);
             if (rows.Count == 0 && tagScope.Active)
             {
-                return await OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.WithDatabasesLeftOut(McpHelpers.Status("empty", $"No procedure on {resolved.DisplayName} in the last {hours_back} hour(s) carries query tag '{tagScope.Requested}'. The tag filter was applied in SQL before the top-{top} ranking."), leftOut)!, requestedStart);
+                return await OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.WithDatabasesLeftOut(McpHelpers.Status("empty", $"No procedure on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} carries query tag '{tagScope.Requested}'. The tag filter was applied in SQL before the top-{top} ranking."), leftOut)!, requestedStart);
             }
 
             if (rows.Count == 0)
@@ -547,7 +547,7 @@ public sealed class McpQueryTools
             {
                 if (tagScope.Active)
                 {
-                    return McpHelpers.Status("empty", $"No Query Store query on {resolved.DisplayName} in the last {hours_back} hour(s) carries query tag '{tagScope.Requested}'. The tag filter was applied in SQL before the top-{top} ranking.");
+                    return McpHelpers.Status("empty", $"No Query Store query on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} carries query tag '{tagScope.Requested}'. The tag filter was applied in SQL before the top-{top} ranking.");
                 }
 
                 /* A filter that matched nothing is an answer, not a missing collection. Most queries never abort,
@@ -920,7 +920,7 @@ public sealed class McpQueryTools
         {
             return McpHelpers.Status(
                 "unavailable",
-                $"{serverName} has no Query Store capture in the {LocalDataService.BaselineLookbackDays}-day baseline window before this window, so there is no baseline to compare against and no regression can be detected however badly one regressed. This is NOT a clean bill of health. Either this server's whole collected history falls inside the last {hours_back} hour(s), or it has none older than the baseline lookback yet.",
+                $"{serverName} has no Query Store capture in the {LocalDataService.BaselineLookbackDays}-day baseline window before this window, so there is no baseline to compare against and no regression can be detected however badly one regressed. This is NOT a clean bill of health. Either this server's whole collected history falls inside the last {CountText.Plural(hours_back, "hour")}, or it has none older than the baseline lookback yet.",
                 notice.AsHints());
         }
 
@@ -928,7 +928,7 @@ public sealed class McpQueryTools
         {
             return McpHelpers.Status(
                 "empty",
-                $"{serverName} has Query Store history from before this window but nothing collected IN the last {hours_back} hour(s), so there is a recent side missing rather than nothing to report. Widen hours_back, or check get_collection_health: a collector that stopped looks exactly like this.",
+                $"{serverName} has Query Store history from before this window but nothing collected IN the last {CountText.Plural(hours_back, "hour")}, so there is a recent side missing rather than nothing to report. Widen hours_back, or check get_collection_health: a collector that stopped looks exactly like this.",
                 notice.AsHints());
         }
 
@@ -947,7 +947,7 @@ public sealed class McpQueryTools
             {
                 return McpHelpers.Status(
                     "empty",
-                    $"No Query Store capture on {serverName} in the last {hours_back} hour(s) or in the {LocalDataService.BaselineLookbackDays}-day baseline before it matched database_name '{databases[0]}', so the filter matched nothing and this is NOT the all-clear: no query in that database was compared. Check the database name, or drop the filter to read every database.",
+                    $"No Query Store capture on {serverName} in the last {CountText.Plural(hours_back, "hour")} or in the {LocalDataService.BaselineLookbackDays}-day baseline before it matched database_name '{databases[0]}', so the filter matched nothing and this is NOT the all-clear: no query in that database was compared. Check the database name, or drop the filter to read every database.",
                     notice.AsHints());
             }
 
@@ -955,7 +955,7 @@ public sealed class McpQueryTools
             {
                 return McpHelpers.Status(
                     "unavailable",
-                    $"{serverName} has no Query Store capture of database_name '{databases[0]}' in the {LocalDataService.BaselineLookbackDays}-day baseline window before this window, so there is no baseline for that database to compare against and no regression of its queries can be detected however badly one regressed. This is NOT a clean bill of health: no query in that database was compared. Either that database's whole collected history falls inside the last {hours_back} hour(s), or it has none older than the baseline lookback yet.",
+                    $"{serverName} has no Query Store capture of database_name '{databases[0]}' in the {LocalDataService.BaselineLookbackDays}-day baseline window before this window, so there is no baseline for that database to compare against and no regression of its queries can be detected however badly one regressed. This is NOT a clean bill of health: no query in that database was compared. Either that database's whole collected history falls inside the last {CountText.Plural(hours_back, "hour")}, or it has none older than the baseline lookback yet.",
                     notice.AsHints());
             }
 
@@ -963,7 +963,7 @@ public sealed class McpQueryTools
             {
                 return McpHelpers.Status(
                     "empty",
-                    $"{serverName} has Query Store history of database_name '{databases[0]}' from before this window but nothing of it collected IN the last {hours_back} hour(s), so that database's recent side is missing rather than nothing to report, and this is NOT the all-clear: no query in that database was compared. Widen hours_back, or check get_collection_health: a collector that stopped looks exactly like this.",
+                    $"{serverName} has Query Store history of database_name '{databases[0]}' from before this window but nothing of it collected IN the last {CountText.Plural(hours_back, "hour")}, so that database's recent side is missing rather than nothing to report, and this is NOT the all-clear: no query in that database was compared. Widen hours_back, or check get_collection_health: a collector that stopped looks exactly like this.",
                     notice.AsHints());
             }
         }
@@ -972,7 +972,7 @@ public sealed class McpQueryTools
             "empty",
             McpHelpers.QuietUnlessCut(
                 notice.WindowTruncated, notice.EffectiveStart,
-                factual: $"No query on {serverName} regressed in the last {hours_back} hour(s). Both a baseline and this window were collected and no query's Regular average CPU is more than 25% worse than its baseline with at least 1 s of added CPU, and none of their timeouts or errors rose",
+                factual: $"No query on {serverName} regressed in the last {CountText.Plural(hours_back, "hour")}. Both a baseline and this window were collected and no query's Regular average CPU is more than 25% worse than its baseline with at least 1 s of added CPU, and none of their timeouts or errors rose",
                 coveredClaim: ": this is the all-clear for this read."),
             notice.AsHints());
     }
@@ -1206,7 +1206,7 @@ public sealed class McpQueryTools
 
             return McpHelpers.Status(
                 "unavailable",
-                $"{serverName} has query stats from outside this window but nothing collected IN the last {hours_back} hour(s), so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health: a collector that stopped looks exactly like this.",
+                $"{serverName} has query stats from outside this window but nothing collected IN the last {CountText.Plural(hours_back, "hour")}, so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health: a collector that stopped looks exactly like this.",
                 notice.AsHints());
         }
 
@@ -1216,7 +1216,7 @@ public sealed class McpQueryTools
                 /* A database_name filter is exempt: the coverage probe is unfiltered, so a filtered empty grid may be the filter and
                    not the window, and the covered sentence is the one that says so. */
                 notice.WindowTruncated && !filtered, notice.EffectiveStart,
-                factual: $"Query stats WERE collected for {serverName} in the last {hours_back} hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid",
+                factual: $"Query stats WERE collected for {serverName} in the last {CountText.Plural(hours_back, "hour")}, but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid",
                 coveredClaim: ". A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected.",
                 tail: " Delta-based collection also needs a SECOND cycle before the first non-zero row exists."),
             notice.AsHints());
@@ -1283,7 +1283,7 @@ public sealed class McpQueryTools
                         "empty",
                         await QuietWindowMessageAsync(
                             dataService, QueryWindowRelation.QueryStats, resolved.ServerId, startUtc, windowEnd, "query_stats",
-                            $"No query samples recorded for {ScopedServer(resolved.DisplayName, database)} in the last {hours_back} hour(s)",
+                            $"No query samples recorded for {ScopedServer(resolved.DisplayName, database)} in the last {CountText.Plural(hours_back, "hour")}",
                             ". This server HAS collected query stats before, so this window is genuinely quiet rather than broken: widen hours_back to find the most recent samples."),
                         startUtc, windowEnd, grain, database)
                     : EmptyStatus(
@@ -2112,7 +2112,7 @@ public sealed class McpQueryTools
         envelope["unrated_collections"] = unratedCollections;
         envelope["unrated_note"] = unratedCollections == 0
             ? null
-            : $"{unratedCollections} collection(s) had no knowable rate: a rate is a collection's work divided by the seconds it accrued over, and that denominator is unknowable two ways, the collection's STORED sample interval is 0 (a restart or counter reset: the collector could not difference its two snapshots, so the zeros beside it were never measured), or the collection is rated against the PREVIOUS one and has none inside the window (the window's first collection where no interval was stored, or one landing in the same second as its predecessor). Unknowable is not 0: such a collection is left out of its point's rates rather than counted as zero, and a point that held nothing else carries null rates ({unrated} here).";
+            : $"{CountText.Plural(unratedCollections, "collection")} had no knowable rate: a rate is a collection's work divided by the seconds it accrued over, and that denominator is unknowable two ways, the collection's STORED sample interval is 0 (a restart or counter reset: the collector could not difference its two snapshots, so the zeros beside it were never measured), or the collection is rated against the PREVIOUS one and has none inside the window (the window's first collection where no interval was stored, or one landing in the same second as its predecessor). Unknowable is not 0: such a collection is left out of its point's rates rather than counted as zero, and a point that held nothing else carries null rates ({unrated} here).";
         envelope["trend"] = points.Select(p => new
         {
             time = p.CollectionTime.ToString("o"),
@@ -2194,7 +2194,7 @@ public sealed class McpQueryTools
                 "empty",
                 await QuietWindowMessageAsync(
                     dataService, relation, serverId, startUtc, windowEndUtc, table,
-                    $"No {what} samples were recorded for {ScopedServer(serverName, database)} in the last {hours_back} hour(s)",
+                    $"No {what} samples were recorded for {ScopedServer(serverName, database)} in the last {CountText.Plural(hours_back, "hour")}",
                     ". This server HAS been sampled before, so this window is genuinely quiet rather than broken: widen hours_back to find the most recent samples."),
                 startUtc, windowEndUtc, grain, database)
             : EmptyStatus(

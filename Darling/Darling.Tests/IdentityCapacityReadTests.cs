@@ -481,7 +481,7 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
             /* No scan in the window at all, but databases waiting: unavailable, naming them. */
             var none = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, "Fresh", 200, null, ct));
             Assert.Equal("unavailable", none.GetProperty("status").GetString());
-            Assert.Contains("1 database(s) not yet scanned (Fresh)", none.GetProperty("message").GetString());
+            Assert.Contains("1 database not yet scanned (Fresh)", none.GetProperty("message").GetString());
         });
     }
 
@@ -523,7 +523,7 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
             /* The tool agrees: Gamma is in neither list. */
             var root = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, null, 200, null, ct));
             Assert.Equal("unavailable", root.GetProperty("status").GetString());
-            Assert.Contains("2 database(s) not yet scanned (Alpha, Beta)", root.GetProperty("message").GetString());
+            Assert.Contains("2 databases not yet scanned (Alpha, Beta)", root.GetProperty("message").GetString());
             Assert.DoesNotContain("Gamma", root.GetProperty("message").GetString());
 
             /* An empty list on the server's row is "no scope at this level" and stops the fall-through to a fleet scope. */
