@@ -532,6 +532,11 @@ render --set mcp.enabled=true \
   --set 'configSubstitutions[0].placeholder=@@HOOK@@' --set 'configSubstitutions[0].secretKey=hook'
 assert_eq "$(secret_items)" "mcp-token=mcp-token,sql-a=sql-a,web-token=web-token" "mounted keys"
 assert_eq "$(dq '.spec.template.spec.initContainers[0].env[] | select(.name == "DARLING_SUBST_0_VALUE") | .valueFrom.secretKeyRef.key')" '"hook"' "hook still reaches the init container"
+# Only a whole string value that starts with file: counts, as Darling's own reference check reads it (an ordinal prefix,
+# the path trimmed): text before file:, a leading space, a deeper path, an escaped quote or an object key spelled like a
+# reference is not mounted; whitespace around the path and a value inside a list are.
+render --set-json 'config={"notes":"see xfile:/run/secrets/darling/zz","a":" file:/run/secrets/darling/lead","b":"file:/run/secrets/darling/sub/x","file:/run/secrets/darling/keyname":"v","e":"a\"file:/run/secrets/darling/esc\"","c":"file: /run/secrets/darling/sp ","d":["file:/run/secrets/darling/arr"]}'
+assert_eq "$(secret_items)" "arr=arr,sp=sp,web-token=web-token" "only whole file: values"
 render
 assert_eq "$(secret_items)" "web-token=web-token" "default: the web token only"
 render --set secrets.webTokenKey=dash

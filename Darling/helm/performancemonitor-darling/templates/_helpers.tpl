@@ -257,11 +257,16 @@ Arguments: dict "ctx" <root> "surface" "web"|"mcp" "field" "allowFrom"|"trustedP
 {{/* The keys of the chart Secret that darling.json references as file:/run/secrets/darling/<key> (the chart's token keys
 included), as a sorted JSON list without duplicates. The secrets volume mounts only these keys, so a key that only
 configSubstitutions uses never reaches the Darling container as a file: it would otherwise resolve as a server's password
-reference. Darling trims the path after file:, so whitespace there still counts. */}}
+reference. A match is a whole JSON string value, the way Darling recognises a reference: it starts with file: (an ordinal
+prefix, nothing before it), whitespace may surround the path (Darling trims it; in the JSON a tab or newline is escaped),
+and the path is exactly /run/secrets/darling/<key>. A value's closing quote is followed by a comma, a newline or the end;
+an object key's by a colon, so a key spelled like a reference does not count. */}}
 {{- define "performancemonitor-darling.referencedSecretKeys" -}}
 {{- $keys := list -}}
-{{- range regexFindAll `file:\s*/run/secrets/darling/[-._a-zA-Z0-9]+` (include "performancemonitor-darling.darlingJson" .) -1 -}}
-{{- $key := regexReplaceAll `^file:\s*/run/secrets/darling/` . "" -}}
+{{- $ws := `(?:\s|\p{Z}|\\[tnr]|\\u000[bc])*` -}}
+{{- $re := printf `(?:^|[^\\])"file:%s/run/secrets/darling/[-._a-zA-Z0-9]+%s"(?:,|\n|$)` $ws $ws -}}
+{{- range regexFindAll $re (include "performancemonitor-darling.darlingJson" .) -1 -}}
+{{- $key := regexReplaceAll `(?s)^.*?/run/secrets/darling/([-._a-zA-Z0-9]+).*$` . "${1}" -}}
 {{- if not (or (eq $key ".") (hasPrefix ".." $key)) -}}
 {{- $keys = append $keys $key -}}
 {{- end -}}
