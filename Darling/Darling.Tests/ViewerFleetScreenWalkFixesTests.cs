@@ -103,26 +103,26 @@ public sealed class ViewerFleetScreenWalkFixesTests : IDisposable
     [Fact]
     public void AlertCount_AtTheCap_SaysShowingTheNewest()
     {
-        Assert.Equal("500 alert(s) (showing the newest 500)", JobHistoryCap.CountText(500, 500, 500, "alert(s)"));
+        Assert.Equal("500 alerts (showing the newest 500)", JobHistoryCap.CountText(500, 500, 500, "alert"));
     }
 
     [Fact]
     public void AlertCount_ColumnFilterNarrowingTheGrid_KeepsTheReadsCapNote()
     {
-        Assert.Equal("120 alert(s) (showing the newest 500)", JobHistoryCap.CountText(120, 500, 500, "alert(s)"));
+        Assert.Equal("120 alerts (showing the newest 500)", JobHistoryCap.CountText(120, 500, 500, "alert"));
     }
 
     [Fact]
     public void AlertCount_BelowTheCap_HasNoNote_AndNothingShownIsBlank()
     {
-        Assert.Equal("37 alert(s)", JobHistoryCap.CountText(37, 37, 500, "alert(s)"));
-        Assert.Equal("", JobHistoryCap.CountText(0, 500, 500, "alert(s)"));
+        Assert.Equal("37 alerts", JobHistoryCap.CountText(37, 37, 500, "alert"));
+        Assert.Equal("", JobHistoryCap.CountText(0, 500, 500, "alert"));
     }
 
     [Fact]
     public void JobCount_WordingIsUnchanged()
     {
-        Assert.Equal("2000 run(s) (showing the newest 2,000)", JobHistoryCap.CountText(2000, 2000, 2000));
+        Assert.Equal("2000 runs (showing the newest 2,000)", JobHistoryCap.CountText(2000, 2000, 2000));
     }
 
     [Fact]

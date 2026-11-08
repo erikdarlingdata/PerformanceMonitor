@@ -736,6 +736,17 @@ ALTER TABLE IF EXISTS config.config_notification DROP COLUMN IF EXISTS slack_app
         // store that never had it.
         new(253, "hasSlackCards",
             @"DROP TABLE IF EXISTS config.investigation_slack_posts;"),
+        // V254 (#7659): the chat requests. The probe's sentinel is the message table, so the rewind drops it, the asker table, the thread reverse index
+        // and the link column (with its index), and a re-run of V254 makes them again. Safe on a store that never had them.
+        new(254, "hasChatRequests",
+            @"DROP TABLE IF EXISTS config.investigation_person_messages;
+DROP TABLE IF EXISTS config.investigation_request_askers;
+DROP INDEX IF EXISTS config.ix_investigation_request_threads_channel_ts;
+ALTER TABLE IF EXISTS config.investigation_requests DROP COLUMN IF EXISTS chat_thread_of;"),
+        // V255 (#8106): the cadence wait baseline supply. The probe's sentinel is the relation itself, a continuous aggregate or the plain
+        // fallback view, so the rewind drops whichever shape stands (the product's own discriminating drop), and a re-run of V255 or the
+        // ensure sweep creates it again. Safe on a store that never had it.
+        new(255, "hasWaitStatsCadenceBaseline", PerformanceMonitor.Darling.Storage.TimescaleSupport.DropRetiredBaselineRelationSql(PerformanceMonitor.Darling.Storage.TimescaleSupport.WaitStatsCadenceBaselineView)),
     ];
 
     /// <summary>

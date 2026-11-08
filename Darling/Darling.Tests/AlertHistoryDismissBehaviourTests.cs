@@ -106,7 +106,7 @@ public sealed class AlertHistoryDismissBehaviourTests
         Assert.False(r.GetProperty("allDisabled").GetBoolean());
         Assert.True(r.GetProperty("allDisabledWhenNoneShown").GetBoolean());
         var ask = Assert.Single(r.GetProperty("asks").EnumerateArray()).GetString();
-        Assert.StartsWith("Dismiss 2 alert(s)?", ask);
+        Assert.StartsWith("Dismiss 2 alerts?", ask);
         var post = Assert.Single(r.GetProperty("posts").EnumerateArray());
         Assert.Equal(new[] { "High CPU 1", "High CPU 3" }, post.EnumerateArray().Select(e => e.GetString()).ToArray());
     }
@@ -122,7 +122,7 @@ public sealed class AlertHistoryDismissBehaviourTests
         // The poll adds a live alert the filter shows (CPU 1) and one it hides (CPU 4).
         Assert.Equal(new[] { "High CPU 1", "High CPU 3" }, r.GetProperty("shownAfterPoll").EnumerateArray().Select(e => e.GetString()).ToArray());
         Assert.False(r.GetProperty("allDisabledAfterPoll").GetBoolean());
-        Assert.StartsWith("Dismiss 1 alert(s)?", Assert.Single(r.GetProperty("asks").EnumerateArray()).GetString());
+        Assert.StartsWith("Dismiss 1 alert?", Assert.Single(r.GetProperty("asks").EnumerateArray()).GetString());
         var post = Assert.Single(r.GetProperty("posts").EnumerateArray());
         Assert.Equal(new[] { "High CPU 1" }, post.EnumerateArray().Select(e => e.GetString()).ToArray());
     }

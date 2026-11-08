@@ -164,7 +164,7 @@ public sealed partial class DarlingWorker
     /// contains a throwing mute seam), matching the disk-pressure posture — this sweep-loop body has no catch-all
     /// of its own. Only called when both evaluators are non-null (guarded at the call site).
     /// </summary>
-    private async Task EvaluateCustomAlertRuleHealthAsync(List<ServerLoopState> servers, CancellationToken cancellationToken)
+    private async Task EvaluateCustomAlertRuleHealthAsync(IReadOnlyList<ServerLoopState> servers, CancellationToken cancellationToken)
     {
         // #3350: (server_id, storage name) pairs so the tag-scope 0-server case can be resolved by id (the tag
         // membership is keyed on server_id) while the 'servers' scope still matches on the storage name.
@@ -217,7 +217,7 @@ public sealed partial class DarlingWorker
     /// the fleet-global health cadence; the evaluator's method is failure-isolated per row so this never stops
     /// the sweep. Only called when the custom-alert evaluator is non-null (guarded at the call site).
     /// </summary>
-    private async Task ReconcileCustomAlertStateAsync(List<ServerLoopState> servers, CancellationToken cancellationToken)
+    private async Task ReconcileCustomAlertStateAsync(IReadOnlyList<ServerLoopState> servers, CancellationToken cancellationToken)
     {
         var monitored = servers
             .Where(s => !s.Retired)

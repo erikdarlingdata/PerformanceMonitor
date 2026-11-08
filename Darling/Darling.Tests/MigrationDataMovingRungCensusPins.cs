@@ -428,6 +428,14 @@ public sealed class MigrationDataMovingRungCensusPins
             + "writer's clock. The function body names an INSERT ... SELECT into collect.query_store_compose_stamp_built (created V173), which is the "
             + "function text and not a statement the rung runs. The rung is a function replace and two trigger creates: catalog work on the partitioned "
             + "parent, cloned onto each leaf without a scan, and it reads and rewrites no row. It spends none of the lock-wait budget, so the multiple stays 5."),
+        new(
+            254,
+            SetsTheFloor: false,
+            "Two CREATE INDEX statements over tables earlier rungs created (#7659): a partial index on config.investigation_requests (created V184) over "
+            + "chat_thread_of, a column the same rung adds, so every existing row is NULL and the partial index holds no entry; and an index on "
+            + "config.investigation_request_threads (created V252) over its two text columns, a table of one row per request thread that the Slack bot "
+            + "posted, at most the request count (tens of thousands on the largest store) and empty on a store that never posted. Both scans are "
+            + "sub-second, so the rung spends none of the lock-wait budget and the multiple stays 5."),
     ];
 
     /// <summary>
@@ -719,13 +727,19 @@ public sealed class MigrationDataMovingRungCensusPins
     /// one hourly rollup. That is rollup rows at hourly grain, not the raw collector hypertables V22 and V39 build over, and the build is bounded
     /// by the same <c>lock_timeout</c> V152 sets. It is not in <see cref="s_declared"/> because that register is derived from the scan, which cannot
     /// see a dynamic statement, so a declaration here would fail the census equality check.</para>
+    ///
+    /// <para>V255 (#8106) builds the cadence wait baseline supply inside a <c>DO $$ ... $$</c> because the statement differs by store: on a store
+    /// with the extension whose <c>wait_stats</c> is already a hypertable it creates the continuous aggregate <c>WITH NO DATA</c> (the ensure sweep
+    /// that follows on the same start materializes it), everywhere else the plain fallback view, and the hypertable read goes
+    /// through <c>EXECUTE</c> because <c>timescaledb_information</c> parses only where the extension exists. Both shapes are catalog-only: no
+    /// row is read or rewritten, so there is no data-moving cost to declare, only the scan blind spot to name.</para>
     /// </summary>
-    private static readonly int[] s_dynamicSqlExemptedRungs = [152, 204, 246];
+    private static readonly int[] s_dynamicSqlExemptedRungs = [152, 204, 246, 255];
 
     /// <summary>
     /// The scan is textual, so dynamic SQL would hide a data-moving statement from it completely. The
-    /// ladder has three exempted rungs today (V152, V204 and V246, named in <see cref="s_dynamicSqlExemptedRungs"/> because
-    /// each <c>DO $$ ... EXECUTE format(...)</c> drops a catalog index or constraint rather than moving data) and
+    /// ladder has four exempted rungs today (V152, V204, V246 and V255, named in <see cref="s_dynamicSqlExemptedRungs"/> because
+    /// each <c>DO $$ ... EXECUTE</c> drops a catalog index or constraint, or creates an empty aggregate or a view, rather than moving data) and
     /// otherwise none — the only other <c>EXECUTE</c> is <c>EXECUTE FUNCTION</c> in V17's trigger
     /// definitions. Pinned so the blind spot stays theoretical for every other rung: one that builds DDL
     /// with <c>format()</c> needs to be costed by hand, added either to this exemption list (if it moves

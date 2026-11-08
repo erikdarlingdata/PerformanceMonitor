@@ -76,7 +76,8 @@ internal static class ChartLayoutProbe
     public static string TabLabel(IEnumerable<TabItem> path) =>
         string.Join(" > ", path.Select(t => t.Header as string ?? t.Name)).Trim();
 
-    public static void Reveal(IEnumerable<TabItem> path)
+    /// <summary>Selects each tab of <paramref name="path"/> under the dispatcher's synchronization context, so the handlers the selections fire resume on the tab's thread (#8273).</summary>
+    public static void Reveal(IEnumerable<TabItem> path) => StaTestThread.WithDispatcherContext(() =>
     {
         foreach (var tab in path)
         {
@@ -85,14 +86,30 @@ internal static class ChartLayoutProbe
                 owner.SelectedItem = tab;
             }
         }
-    }
+    });
 
     public static void Layout(Window window)
     {
         for (var pass = 0; pass < 3; pass++)
         {
             window.UpdateLayout();
-            Dispatcher.CurrentDispatcher.Invoke(() => { }, DispatcherPriority.ContextIdle);
+            WaitForIdle();
+        }
+    }
+
+    /// <summary>
+    /// #8220: waits until the dispatcher has nothing queued above idle, and FAILS when it never does. A chart that re-decides its legend from a
+    /// size its own decision changes (a row minimum that follows the chrome, which follows the decision) queues a layout and a render after every
+    /// pass, so an unbounded idle wait never returned and the test sat until its 180 s guard. That is a frozen window in the app.
+    /// </summary>
+    public static void WaitForIdle()
+    {
+        var dispatcher = Dispatcher.CurrentDispatcher;
+        var idle = dispatcher.BeginInvoke(() => { }, DispatcherPriority.ContextIdle);
+        if (idle.Wait(TimeSpan.FromSeconds(10)) != DispatcherOperationStatus.Completed)
+        {
+            idle.Abort();
+            throw new InvalidOperationException("the layout never settled: the window kept laying out and rendering for 10 s (a size, legend placement and row minimum feedback loop)");
         }
     }
 
@@ -189,7 +206,11 @@ internal static class ChartLayoutProbe
         if (legend is not null && plot.PlottableList.Any(p => p.LegendItems.Any()) && last.Layout.PanelSizes.TryGetValue(legend, out var legendSize))
         {
             using var paint = ScottPlot.Paint.NewDisposablePaint();
-            var needed = plot.Legend.GetLayout(new PixelSize(data.Width, float.PositiveInfinity), paint).LegendRect.Height + legend.Padding.Vertical;
+            // #8220: a legend beside the plot is as WIDE as its panel; one under the plot is as TALL as its panel.
+            var beside = legend.Edge == ScottPlot.Edge.Right;
+            var needed = beside
+                ? plot.Legend.GetLayout(new PixelSize(float.PositiveInfinity, data.Height), paint).LegendRect.Width + legend.Padding.Horizontal
+                : plot.Legend.GetLayout(new PixelSize(data.Width, float.PositiveInfinity), paint).LegendRect.Height + legend.Padding.Vertical;
             if (legendSize < needed - 0.5f)
             {
                 problems.Add($"legend is cut off: its panel is {legendSize:0.#} px, the wrapped legend needs {needed:0.#} px");
@@ -237,6 +258,238 @@ internal static class ChartLayoutProbe
         }
 
         return problems;
+    }
+
+    /// <summary>#8220: the plot keeps at least this many DIPs of height whatever the legend does.</summary>
+    internal const double LegendRuleMinPlotHeight = 120;
+
+    /// <summary>#8220: a legend on the side leaves the plot at least this share of the chart's width.</summary>
+    internal const double LegendRuleMinSidePlotShare = 0.60;
+
+    /// <summary>#8220: no more than this share of the chart's width is left empty beside a side legend.</summary>
+    internal const double LegendRuleMaxDeadShare = 0.15;
+
+    /// <summary>What a chart's legend did, read from the render the control made: the chart's size, the plot rectangle, the side the legend
+    /// sits on, the width the legend drew and the width its panel was given.</summary>
+    public readonly record struct LegendReading(
+        string Chart, double FigureWidth, double FigureHeight, double PlotWidth, double PlotHeight, string Edge, int Entries, double PanelSize, double DrawnWidth)
+    {
+        /// <summary>Empty width beside a side legend, as a share of the chart's width. Zero for a legend under the plot.</summary>
+        public double DeadShare => Edge == "Right" ? Math.Max(0, PanelSize - DrawnWidth) / FigureWidth : 0;
+
+        public override string ToString() =>
+            $"{Chart}: chart {FigureWidth:0}x{FigureHeight:0}, plot {PlotWidth:0}x{PlotHeight:0} ({PlotWidth / FigureWidth:P0} wide), legend {Edge} ({Entries} entries, panel {PanelSize:0} px, drawn {DrawnWidth:0} px, dead {DeadShare:P0})";
+    }
+
+    /// <summary>Reads the legend rule's numbers from a settled chart, or null when it shows no legend.</summary>
+    public static LegendReading? ReadLegend(WpfPlot chart)
+    {
+        var plot = chart.Plot;
+        var last = plot.RenderManager.LastRender;
+        var legend = plot.Axes.GetPanels().OfType<ScottPlot.Panels.LegendPanel>().FirstOrDefault();
+        if (legend is null || !plot.PlottableList.Any(p => p.LegendItems.Any()) || !last.Layout.PanelSizes.TryGetValue(legend, out var panelSize))
+        {
+            return null;
+        }
+
+        return new LegendReading(
+            NameOf(chart), chart.ActualWidth, chart.ActualHeight, last.DataRect.Width, last.DataRect.Height, legend.Edge.ToString(),
+            plot.Legend.GetItems().Length, panelSize, plot.Legend.LastRenderSize.Width + legend.Padding.Horizontal);
+    }
+
+    /// <summary>The legend rule (#8220) for one settled chart: one line per defect.</summary>
+    public static List<string> MeasureLegendRule(WpfPlot chart)
+    {
+        var problems = new List<string>();
+        if (ReadLegend(chart) is not { } r)
+        {
+            return problems;
+        }
+
+        if (r.PlotHeight < LegendRuleMinPlotHeight - 0.5)
+        {
+            problems.Add($"plot is {r.PlotHeight:0.#} px tall, under the {LegendRuleMinPlotHeight} px floor ({r})");
+        }
+
+        if (r.Edge == "Right" && r.PlotWidth < LegendRuleMinSidePlotShare * r.FigureWidth - 0.5)
+        {
+            problems.Add($"a side legend leaves the plot {r.PlotWidth / r.FigureWidth:P0} of the width, under {LegendRuleMinSidePlotShare:P0} ({r})");
+        }
+
+        if (r.DeadShare > LegendRuleMaxDeadShare)
+        {
+            problems.Add($"{r.DeadShare:P0} of the width is empty beside the legend, over {LegendRuleMaxDeadShare:P0} ({r})");
+        }
+
+        // A legend never cuts an entry: what it drew fits the panel it was given and the chart it sits in.
+        var plot = chart.Plot;
+        var legend = plot.Axes.GetPanels().OfType<ScottPlot.Panels.LegendPanel>().First();
+        var drawn = plot.Legend.LastRenderSize;
+        var panelNeeds = r.Edge == "Right" ? drawn.Width + legend.Padding.Horizontal : drawn.Height + legend.Padding.Vertical;
+        if (r.PanelSize < panelNeeds - 0.5)
+        {
+            problems.Add($"the legend is cut: its panel is {r.PanelSize:0.#} px, what it drew needs {panelNeeds:0.#} px ({r})");
+        }
+
+        if (r.Edge == "Right" && drawn.Height + legend.Padding.Vertical > r.PlotHeight + 0.5)
+        {
+            problems.Add($"the side legend is {drawn.Height + legend.Padding.Vertical:0.#} px tall beside a {r.PlotHeight:0.#} px plot, so entries are cut ({r})");
+        }
+
+        return problems;
+    }
+
+    /// <summary>The charts named in #8220 whose legends are long or sit beside the plot, with the series each really lists: Wait Stats lists up to 20
+    /// wait types, Collection Health's Collector Duration lists 41 collectors.</summary>
+    public static readonly IReadOnlyDictionary<string, int> HeavyLegendCharts = new Dictionary<string, int>
+    {
+        ["WaitStatsChart"] = 20,
+        ["MemoryClerksChart"] = 12,
+        ["PlanCacheChart"] = 6,
+        ["PerfmonChart"] = 5,
+        ["LatchStatsChart"] = 5,
+        ["SpinlockStatsChart"] = 5,
+        ["CollectorDurationChart"] = 41,
+        ["SickSpinlocksChart"] = 6,
+        ["CpuComparisonChart"] = 2,
+    };
+
+    /// <summary>Fills a chart on the tab with <paramref name="series"/> made-up time series that have long names, and gives it the legend
+    /// the app does (<see cref="ChartRenderHelper.ShowChartLegend"/>), so a chart whose data cannot be fed through its own render method
+    /// (it reads a database) is still measured at its real place in the tab.</summary>
+    public static void FillLegendChart(WpfPlot chart, int series)
+    {
+        var helper = new ChartRenderHelper();
+        helper.ClearChart(chart);
+        ChartStyle.ApplyThemeToChart(chart);
+        var now = DateTime.UtcNow;
+        var xs = Enumerable.Range(0, 48).Select(k => now.AddMinutes(k - 48).ToOADate()).ToArray();
+        for (var s = 0; s < series; s++)
+        {
+            var ys = xs.Select((_, k) => 50 + (40 * Math.Sin((k / 6.0) + s))).ToArray();
+            var line = chart.Plot.Add.Scatter(xs, ys);
+            line.LegendText = $"MEMORYCLERK_SQLQUERY_{s + 1:00}";
+        }
+
+        chart.Plot.Axes.DateTimeTicksBottom();
+        chart.Plot.YLabel("ms/sec");
+        helper.ShowChartLegend(chart);
+        chart.Refresh();
+    }
+
+    /// <summary>True for a chart <paramref name="heavy"/> names. The Overview's stacked lanes reuse chart names (its own WaitStatsChart) but
+    /// never show a legend, so a chart inside a lanes control is not the chart the issue means.</summary>
+    private static bool IsHeavy(WpfPlot chart, IReadOnlyDictionary<string, int> heavy)
+    {
+        if (!heavy.ContainsKey(chart.Name))
+        {
+            return false;
+        }
+
+        for (var at = LogicalTreeHelper.GetParent(chart); at is not null; at = LogicalTreeHelper.GetParent(at))
+        {
+            if (at.GetType().Name.Contains("CorrelatedTimelineLanes", StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>The legend rule (#8220) for the charts <paramref name="heavy"/> names (x:Name to series count), each filled by
+    /// <see cref="FillLegendChart"/> and measured at its real place in the tab.</summary>
+    public static (List<string> Failures, List<string> Readings) MeasureHeavyLegends(
+        Window window, DependencyObject root, IReadOnlyDictionary<string, int> heavy, string product, string windowName)
+    {
+        var failures = new List<string>();
+        var readings = new List<string>();
+        var charts = Logical<WpfPlot>(root).ToList();
+        var seen = new HashSet<string>();
+        foreach (var page in charts.GroupBy(c => TabLabel(TabPath(c))))
+        {
+            Reveal(TabPath(page.First()));
+            Layout(window);
+            var shown = page.Where(IsShown).ToList();
+            foreach (var chart in shown.Where(c => IsHeavy(c, heavy)))
+            {
+                FillLegendChart(chart, heavy[chart.Name]);
+                seen.Add(chart.Name);
+            }
+
+            Settle(window, shown);
+            foreach (var chart in shown.Where(c => IsHeavy(c, heavy)))
+            {
+                if (ReadLegend(chart) is { } reading)
+                {
+                    readings.Add($"[{page.Key}] {reading}");
+                }
+                else
+                {
+                    failures.Add($"[{page.Key}] {NameOf(chart)}: the chart shows no legend after it was filled");
+                }
+
+                foreach (var problem in MeasureLegendRule(chart))
+                {
+                    failures.Add($"[{page.Key}] {NameOf(chart)}: {problem}");
+                }
+            }
+
+            MaybeSave(product, windowName, shown.Where(c => IsHeavy(c, heavy)));
+        }
+
+        foreach (var name in heavy.Keys.Where(n => !seen.Contains(n)))
+        {
+            failures.Add($"{name}: no such chart is shown on the tab, so the legend rule was not measured");
+        }
+
+        return (failures, readings);
+    }
+
+    /// <summary>Walks every chart under <paramref name="root"/> the way <see cref="MeasureAll"/> does and applies the legend rule (#8220) to each.
+    /// Returns one line per defect and one reading line per chart that shows a legend.</summary>
+    public static (List<string> Failures, List<string> Readings) MeasureAllLegends(Window window, DependencyObject root, string product, string windowName)
+    {
+        var failures = new List<string>();
+        var readings = new List<string>();
+        var charts = Logical<WpfPlot>(root).ToList();
+        foreach (var page in charts.GroupBy(c => TabLabel(TabPath(c))))
+        {
+            Reveal(TabPath(page.First()));
+            Layout(window);
+            var shown = page.Where(IsShown).ToList();
+            Settle(window, shown);
+            foreach (var chart in shown)
+            {
+                if (ReadLegend(chart) is { } reading)
+                {
+                    readings.Add($"[{page.Key}] {reading}");
+                }
+
+                foreach (var problem in MeasureLegendRule(chart))
+                {
+                    failures.Add($"[{page.Key}] {NameOf(chart)}: {problem}");
+                }
+            }
+
+            MaybeSave(product, windowName, shown);
+        }
+
+        return (failures, readings);
+    }
+
+    /// <summary>The main window around a server tab in both apps: a 280 DIP server list on the left and a status strip under the tab. The tests
+    /// host the tab in the same room so a chart gets the width and height a person sees at the minimum window, not the whole window.</summary>
+    public static Grid HostLikeMainWindow(UIElement tab, double statusHeight = 36)
+    {
+        var host = new Grid();
+        host.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(280) });
+        host.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        host.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        host.RowDefinitions.Add(new RowDefinition { Height = new GridLength(statusHeight) });
+        Grid.SetColumn(tab, 1);
+        host.Children.Add(tab);
+        return host;
     }
 
     /// <summary>Plots that share a group must share a data rectangle: the same left edge and width, and the same room taken by the
@@ -337,12 +590,86 @@ internal static class ChartLayoutProbe
         }
     }
 
+    /// <summary>Saves the whole hosted window for looking at it. Set CHART_LAYOUT_PNG_DIR to a folder.</summary>
+    public static void SaveWindow(Window window, string name)
+    {
+        var dir = Environment.GetEnvironmentVariable("CHART_LAYOUT_PNG_DIR");
+        if (string.IsNullOrEmpty(dir) || window.Content is not FrameworkElement content)
+        {
+            return;
+        }
+
+        Directory.CreateDirectory(dir);
+        var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap((int)content.ActualWidth, (int)content.ActualHeight, 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(content);
+        var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+        encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
+        using var stream = File.Create(Path.Combine(dir, $"window-{name}.png"));
+        encoder.Save(stream);
+    }
+
+    /// <summary>#8220: the Query Heatmap's labels on a settled chart that plots <paramref name="columns"/> time buckets and <paramref name="rows"/> value
+    /// buckets. An X label stays on one line and keeps 10 px clear of the next; a Y label keeps 4 px clear of the next. One line per defect.</summary>
+    public static List<string> MeasureHeatmapLabels(WpfPlot chart, int columns, int rows, out string reading)
+    {
+        var problems = new List<string>();
+        var plot = chart.Plot;
+        var rect = plot.RenderManager.LastRender.DataRect;
+        using var paint = Paint.NewDisposablePaint();
+
+        var xTicks = plot.Axes.Bottom.TickGenerator.Ticks.Where(t => t.IsMajor).OrderBy(t => t.Position).ToList();
+        var xStyle = plot.Axes.Bottom.TickLabelStyle;
+        var xPixels = rect.Width / columns;
+        var minGap = double.MaxValue;
+        for (var i = 0; i < xTicks.Count; i++)
+        {
+            if (xTicks[i].Label.Contains('\n', StringComparison.Ordinal))
+            {
+                problems.Add($"the X label '{xTicks[i].Label.Replace("\n", "\\n", StringComparison.Ordinal)}' is on more than one line");
+            }
+
+            if (i > 0)
+            {
+                var gap = ((xTicks[i].Position - xTicks[i - 1].Position) * xPixels)
+                    - ((xStyle.Measure(xTicks[i].Label, paint).Width + xStyle.Measure(xTicks[i - 1].Label, paint).Width) / 2);
+                minGap = Math.Min(minGap, gap);
+                if (gap < 10)
+                {
+                    problems.Add($"X labels '{xTicks[i - 1].Label}' and '{xTicks[i].Label}' are {gap:0.#} px apart, under 10");
+                }
+            }
+        }
+
+        var yTicks = plot.Axes.Left.TickGenerator.Ticks.Where(t => t.IsMajor).OrderBy(t => t.Position).ToList();
+        var yStyle = plot.Axes.Left.TickLabelStyle;
+        var yPixels = rect.Height / rows;
+        var minYGap = double.MaxValue;
+        for (var i = 1; i < yTicks.Count; i++)
+        {
+            var gap = ((yTicks[i].Position - yTicks[i - 1].Position) * yPixels)
+                - ((yStyle.Measure(yTicks[i].Label, paint).Height + yStyle.Measure(yTicks[i - 1].Label, paint).Height) / 2);
+            minYGap = Math.Min(minYGap, gap);
+            if (gap < 4)
+            {
+                problems.Add($"Y labels '{yTicks[i - 1].Label}' and '{yTicks[i].Label}' are {gap:0.#} px apart, under 4");
+            }
+        }
+
+        if (rect.Height < LegendRuleMinPlotHeight - 0.5)
+        {
+            problems.Add($"the plot is {rect.Height:0.#} px tall, under the {LegendRuleMinPlotHeight} px floor");
+        }
+
+        reading = $"plot {rect.Width:0}x{rect.Height:0}, {xTicks.Count} X labels (tightest gap {(minGap == double.MaxValue ? 0 : minGap):0} px), {yTicks.Count} Y labels (tightest gap {(minYGap == double.MaxValue ? 0 : minYGap):0} px)";
+        return problems;
+    }
+
     // ---- Feeding a chart through its own render method with a made-up reply ----
 
     /// <summary>Builds a list of made-up rows of <paramref name="rowType"/>: times ramp from <paramref name="from"/> to
     /// <paramref name="to"/>, numbers wave, and a text column makes three series. A row type is built through its longest
     /// constructor, and any settable property the constructor left alone is filled the same way. Null when the type cannot be built.</summary>
-    public static object? MakeRows(Type rowType, DateTime from, DateTime to)
+    public static object? MakeRows(Type rowType, DateTime from, DateTime to, int keyedSeries = 3)
     {
         var ctor = rowType.GetConstructors().OrderByDescending(c => c.GetParameters().Length).FirstOrDefault();
         if (ctor is null)
@@ -352,7 +679,7 @@ internal static class ChartLayoutProbe
 
         var parameters = ctor.GetParameters();
         var properties = rowType.GetProperties().Where(p => p.CanWrite && p.SetMethod!.IsPublic && p.GetIndexParameters().Length == 0).ToArray();
-        var series = parameters.Any(p => p.ParameterType == typeof(string)) || properties.Any(p => p.PropertyType == typeof(string)) ? 3 : 1;
+        var series = parameters.Any(p => p.ParameterType == typeof(string)) || properties.Any(p => p.PropertyType == typeof(string)) ? keyedSeries : 1;
         const int steps = 48;
         var list = (System.Collections.IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(rowType))!;
         for (var step = 0; step < steps; step++)

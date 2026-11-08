@@ -327,7 +327,7 @@ public partial class FinOpsTab
         /* Physical memory and the buffer pool's share of it come from memory_stats, which on an Azure SQL Database is the
            database's own (its memory limit, from committed_target_kb), not the host's RAM. So both are shown on every
            edition, and only the caption and the verdict's wording change there. */
-        FinOpsMemoryRatioText.Text = $"{bpPct:N0}%";
+        FinOpsMemoryRatioText.Text = $"{bpPct:N1}%";
         SetBar(FinOpsMemoryRatioBar, FinOpsMemRatioFilled, FinOpsMemRatioEmpty, bpPct);
 
         FinOpsPhysicalMemoryCaption.Text = ServerHardwareScope.PhysicalMemoryCaption(data.EngineEdition);
@@ -398,7 +398,7 @@ public partial class FinOpsTab
         var data = await _dataService.GetDatabaseResourceUsageAsync(_server.ServerId, hoursBack);
         _finopsDbResourcesFilterMgr!.UpdateData(data);
         FinOpsNoDatabaseResourcesMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        FinOpsDbResourcesCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";
+        FinOpsDbResourcesCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "database") : "";
     }
 
     // ── Database Sizes ──
@@ -448,7 +448,7 @@ public partial class FinOpsTab
         FinOpsPvsSecondaryNote.Visibility = secondaryNote is null ? Visibility.Collapsed : Visibility.Visible;
         _finopsPvsStatsFilterMgr!.UpdateData(data);
         FinOpsNoPvsStatsMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        FinOpsPvsCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";
+        FinOpsPvsCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "database") : "";
 
         /* #1984 stage 2: the trend beside the grid — "when did it start growing" on the same axis
            family as Storage Growth. Top-5 databases by current PVS size, 7 days of hourly points. */
@@ -507,7 +507,7 @@ public partial class FinOpsTab
         var data = await _dataService.GetApplicationConnectionsAsync(_server.ServerId);
         _finopsAppConnectionsFilterMgr!.UpdateData(data);
         FinOpsNoAppConnectionsMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        FinOpsAppConnectionsCountIndicator.Text = data.Count > 0 ? $"{data.Count} application(s)" : "";
+        FinOpsAppConnectionsCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "application") : "";
     }
 
     // ── High Impact ──
@@ -518,7 +518,7 @@ public partial class FinOpsTab
         var data = await _dataService.GetHighImpactQueriesAsync(_server.ServerId, hoursBack);
         _finopsHighImpactFilterMgr!.UpdateData(data);
         FinOpsHighImpactNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        FinOpsHighImpactCountIndicator.Text = data.Count > 0 ? $"{data.Count} high-impact query(s)" : "";
+        FinOpsHighImpactCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "high-impact query", "high-impact queries") : "";
     }
 
     // ── Optimization (idle DBs + tempdb + wait categories + expensive queries + memory grants) ──
@@ -541,7 +541,7 @@ public partial class FinOpsTab
         _finopsIdleDbsFilterMgr!.UpdateData(data);
         FinOpsIdleDatabasesNoDataMessage.Text = DarlingFinOpsOptimizationReader.IdleDatabasesEmptyText(covered);
         FinOpsIdleDatabasesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        FinOpsIdleDatabasesCountIndicator.Text = data.Count > 0 ? $"{data.Count} idle database(s)" : "";
+        FinOpsIdleDatabasesCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "idle database") : "";
     }
 
     private async Task LoadFinOpsTempdbSummaryAsync()
@@ -603,7 +603,7 @@ public partial class FinOpsTab
             : "";
 
         FinOpsExpensiveQueriesCountIndicator.Text = data.Count > 0
-            ? $"{data.Count} query(s){coverageNote}"
+            ? $"{PerformanceMonitor.Common.CountText.Plural(data.Count, "query", "queries")}{coverageNote}"
             : clamped ? coverageNote.TrimStart(' ', '—', ' ') : "";
     }
 
@@ -662,7 +662,7 @@ public partial class FinOpsTab
     private async void FinOpsRefreshHighImpact_Click(object sender, RoutedEventArgs e) => await RunFinOpsLoad(LoadFinOpsHighImpactAsync);
     private async void FinOpsRefreshServerInventory_Click(object sender, RoutedEventArgs e) => await RunFinOpsLoad(LoadFinOpsServerInventoryAsync);
 
-    /// <summary>Ticking or clearing "Show removed servers" reloads the list, and its "N server(s)" count follows the list it shows. Ignored until the tab is loaded, so the XAML's own initial state does not read.</summary>
+    /// <summary>Ticking or clearing "Show removed servers" reloads the list, and its "3 servers" count follows the list it shows. Ignored until the tab is loaded, so the XAML's own initial state does not read.</summary>
     private async void FinOpsShowRemoved_Changed(object sender, RoutedEventArgs e)
     {
         if (!IsLoaded) return;

@@ -225,7 +225,7 @@ ORDER BY s.d";
            so a day past it is gone from every table together and cannot ghost the way Darling's per-signal
            horizons let a day do; the state is stamped all the same so the two SKUs publish one vocabulary
            and the same day is judged the same way on both. */
-        var retentionHorizon = DailySummaryRetentionHorizon(DateTime.UtcNow);
+        var retentionHorizon = DailySummaryRetentionHorizon(ReaderUtcNow());
 
         var results = new List<DailySummaryRow>();
         using var reader = await command.ExecuteReaderAsync();
@@ -251,6 +251,14 @@ ORDER BY s.d";
     internal static DateTime DailySummaryRetentionHorizon(DateTime utcNow) =>
         RetentionService.OldestRetainedInstant(utcNow);
 
+    /// <summary>Test-only. The clock behind this reader's own wall-clock reads: the retention horizon and the default
+    /// summary date. Null reads <see cref="DateTime.UtcNow"/>. A test that seeds from one instant sets this to that
+    /// instant, so a midnight between its seeding and the read cannot move the horizon or today's row by a day. Per
+    /// instance, so a test's pin reaches only its own service while other classes read the same store in parallel.</summary>
+    internal Func<DateTime>? ClockForTests { get; set; }
+
+    private DateTime ReaderUtcNow() => ClockForTests?.Invoke() ?? DateTime.UtcNow;
+
     /// <summary>
     /// Gets the daily summary for a specific date (or today if null). Delegates to the range query for a
     /// single day so the single-day contract shares the one aggregate; returns a No-Data row when the day
@@ -258,7 +266,7 @@ ORDER BY s.d";
     /// </summary>
     public async Task<DailySummaryRow?> GetDailySummaryAsync(int serverId, DateTime? summaryDate = null)
     {
-        var targetDate = summaryDate?.Date ?? DateTime.UtcNow.Date;
+        var targetDate = summaryDate?.Date ?? ReaderUtcNow().Date;
         var rows = await GetDailySummaryRangeAsync(serverId, targetDate, targetDate.AddDays(1));
         if (rows.Count > 0)
         {
@@ -267,7 +275,7 @@ ORDER BY s.d";
 
         /* #3541 A9: a day the spine does not hold is not "collected" either — before the horizon it is purged
            like any other, inside it simply without a run record — so the single-day tool can say which. */
-        var horizon = DailySummaryRetentionHorizon(DateTime.UtcNow);
+        var horizon = DailySummaryRetentionHorizon(ReaderUtcNow());
         return new DailySummaryRow
         {
             SummaryDate = targetDate,

@@ -188,14 +188,17 @@ public sealed class AgentAlertGapsAlertTests
     /* ---------------- live: a seeded store ---------------- */
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+    /* Npgsql leaves the password out of the ConnectionString read back from a data source or an opened connection, so what the body opens by connection string comes from the scratch store's own string. */
+    private string _storeConnectionString = "";
 
-    private static async Task<T> WithStoreAsync<T>(Func<NpgsqlConnection, CancellationToken, Task> seed, Func<NpgsqlDataSource, CancellationToken, Task<T>> body)
+    private async Task<T> WithStoreAsync<T>(Func<NpgsqlConnection, CancellationToken, Task> seed, Func<NpgsqlDataSource, CancellationToken, Task<T>> body)
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live agent alert gap tests.");
         var ct = TestContext.Current.CancellationToken;
         /* #1776 own-store: a scratch database of its own. */
         await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        _storeConnectionString = scratch.ConnectionString;
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
@@ -291,7 +294,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
             Assert.Contains("No SQL Server Agent alert", gap.Message, StringComparison.Ordinal);
 
             /* The Viewer's Overview card reads the same gaps through the same reader. */
-            await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(postgres.ConnectionString);
+            await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(_storeConnectionString);
             var viewerGaps = await viewer.GetAgentAlertGapsAsync(ServerId, DateTime.UtcNow, ct);
             Assert.Equal(gaps[ServerId].Select(g => g.Code + "|" + g.Message), viewerGaps.Select(g => g.Code + "|" + g.Message));
             Assert.Contains(viewerGaps, g => g.Code == "no_alerts_defined");

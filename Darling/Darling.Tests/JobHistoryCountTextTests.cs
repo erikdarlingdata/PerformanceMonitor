@@ -36,16 +36,16 @@ public sealed class JobHistoryCountTextTests
     [Fact]
     public void ReadBelowTheCap_IsJustTheCount()
     {
-        Assert.Equal("12 run(s)", JobHistoryCap.CountText(12, 1500, Cap));
+        Assert.Equal("12 runs", JobHistoryCap.CountText(12, 1500, Cap));
     }
 
     [Fact]
     public void ReadAtTheCap_KeepsTheLabel_WhateverTheFiltersLeaveShown()
     {
         /* The load's own count, and what a column filter leaves of the same read: the label is about the read. */
-        Assert.Equal("2000 run(s) (showing the newest 2,000)", JobHistoryCap.CountText(2000, 2000, Cap));
-        Assert.Equal("7 run(s) (showing the newest 2,000)", JobHistoryCap.CountText(7, 2000, Cap));
-        Assert.Equal("1 run(s) (showing the newest 2,000)", JobHistoryCap.CountText(1, 2000, Cap));
+        Assert.Equal("2000 runs (showing the newest 2,000)", JobHistoryCap.CountText(2000, 2000, Cap));
+        Assert.Equal("7 runs (showing the newest 2,000)", JobHistoryCap.CountText(7, 2000, Cap));
+        Assert.Equal("1 run (showing the newest 2,000)", JobHistoryCap.CountText(1, 2000, Cap));
     }
 
     [Fact]

@@ -133,6 +133,8 @@ public partial class ViewerServerTab : UserControl
             }
         }
         InitializeComponent();
+        PerformanceMonitor.Ui.ChartPairLayout.Attach(CurrentWaitsScroll, CurrentWaitsGrid, CurrentWaitsFirstCard, CurrentWaitsSecondCard, CurrentWaitsGrid.RowDefinitions[2]); // #8219: side by side when the tab is too short for both stacked
+        DataGridNumberHeaders.Apply(this); // #8223: a number column's header on the same edge as its values
         ViewerChartCards.Attach(this); // #8151: "0 throughout" in a card whose chart plots only zeros
         ApplyTheme(WaitStatsChart);
         _chartHelper.RefreshEmptyChart(WaitStatsChart, "Wait Stats", ""); // #8086: not the default -10 to 10 axes before the first read
@@ -146,7 +148,7 @@ public partial class ViewerServerTab : UserControl
             BlockingDurationChart, BlockingTotalDurationChart, DeadlockWaitChart, DeadlockTotalWaitChart,
             CurrentWaitsDurationChart, CurrentWaitsBlockedChart, LatchStatsChart, SpinlockStatsChart,
             BadPagesChart, DumpRequestsChart, AccessViolationsChart, WriteAccessViolationsChart,
-            NonYieldingTasksChart, LatchWarningsChart, SickSpinlocksChart, CpuComparisonChart);
+            NonYieldingTasksChart, LatchWarningsChart, SickSpinlocksChart, CpuComparisonChart, CpuChart);
         /* #5565: every filtered grid below this tab keeps its column filters across a restart under this server. */
         ColumnFilterScope.SetServer(this, _server.ServerName);
 

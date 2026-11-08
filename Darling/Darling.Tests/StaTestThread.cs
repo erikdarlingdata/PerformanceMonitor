@@ -12,6 +12,7 @@ using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Threading;
 using Xunit;
 
@@ -75,6 +76,46 @@ internal static class StaTestThread
 
     /// <summary>Runs an async <paramref name="body"/> on the shared STA thread: its continuations come back to that thread's dispatcher.</summary>
     internal static void Run(Func<Task> body) => s_host.Run(body);
+
+    /// <summary>
+    /// #8273: runs <paramref name="body"/> on the shared STA thread with the dispatcher's own <see cref="SynchronizationContext"/> installed, as a
+    /// handler the app's UI thread runs has it. A synchronous body runs with no context (<see cref="StaHost"/>: a wait it makes on a task must not
+    /// deadlock the thread), so a tab selection it makes fires an <c>async void</c> <c>SelectionChanged</c> handler whose code after its first await
+    /// resumes on the thread pool and touches the control from the wrong thread; the exception escapes the handler and is printed as an unhandled
+    /// thread error that fails no test. Under this, that continuation is posted to the dispatcher and runs on this thread in the body's next pump
+    /// (<see cref="WaitForIdle(Dispatcher, TimeSpan)"/>, <see cref="Settle"/>) or the host's drain. The body must not wait on a task: a continuation
+    /// posted to this thread cannot run while it waits.
+    /// </summary>
+    internal static void WithDispatcherContext(Action body)
+    {
+        var dispatcher = Dispatcher.FromThread(Thread.CurrentThread)
+            ?? throw new InvalidOperationException("WithDispatcherContext runs inside a StaTestThread.Run body: this thread has no dispatcher.");
+        var prior = SynchronizationContext.Current;
+        SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(dispatcher));
+        try
+        {
+            body();
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(prior);
+        }
+    }
+
+    /// <summary>
+    /// Selects every tab between <paramref name="element"/> and the root, innermost first, as a click on each would, so the element is laid out
+    /// and visible. The selections run under <see cref="WithDispatcherContext"/>, so the handlers they fire resume on the tab's thread (#8273).
+    /// </summary>
+    internal static void Reveal(DependencyObject element) => WithDispatcherContext(() =>
+    {
+        for (var at = element; at is not null; at = LogicalTreeHelper.GetParent(at))
+        {
+            if (at is TabItem item && ItemsControl.ItemsControlFromItemContainer(item) is TabControl owner)
+            {
+                owner.SelectedItem = item;
+            }
+        }
+    });
 
     /// <summary>
     /// #6216: names the step the running body has reached ("tab 3, Alert rules"). Costs one field write. When the hang guard fires, its

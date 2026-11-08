@@ -33,6 +33,8 @@ namespace Darling.Tests;
 public sealed class AgentChangeUndoLiveTests
 {
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+    /* Npgsql leaves the password out of an opened connection's ConnectionString, so a data source the body builds comes from the scratch store's own string. */
+    private string _storeConnectionString = "";
 
     private const string Login = "erik";
 
@@ -403,7 +405,7 @@ SELECT now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Blocking', 9, 
             Assert.Equal("person:erik|false", await ScalarAsync(connection,
                 "SELECT actor || '|' || (detail->>'enabled')::boolean FROM config.investigation_journal WHERE event = 'agent_actions_switched' ORDER BY journal_id DESC LIMIT 1", ct));
 
-            var store = new InvestigationRequestStore(NpgsqlDataSource.Create(connection.ConnectionString), 30);
+            var store = new InvestigationRequestStore(NpgsqlDataSource.Create(_storeConnectionString), 30);
             var opened = await store.OpenOrJoinAsync(new InvestigationAlert(1, 7, "srv-7", "blocking", "Blocking", DateTime.UtcNow, Array.Empty<string>(), null,
                 20, 100, LeaseMinutes: 15, ExpiryMinutes: 240) { AutonomyLevel = 2 }, ct);
             var claim = await store.ClaimAsync(opened.RequestId!.Value, "agent-a", ct);
@@ -487,12 +489,13 @@ SELECT now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Blocking', 9, 
         return (long)(await command.ExecuteScalarAsync(ct))!;
     }
 
-    private static async Task RunAsync(Func<AgentChangeUndo, NpgsqlConnection, CancellationToken, Task> body)
+    private async Task RunAsync(Func<AgentChangeUndo, NpgsqlConnection, CancellationToken, Task> body)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the agent change undo live tests.");
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        _storeConnectionString = scratch.ConnectionString;
         var bodySucceeded = false;
         try
         {

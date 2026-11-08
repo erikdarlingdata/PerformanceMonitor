@@ -87,7 +87,7 @@ public partial class FinOpsTab : UserControl
             ApplyLockingHeat(data);
             _indexLockingFilterMgr!.UpdateData(data);
             NoIndexLockingMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            IndexLockingCountIndicator.Text = data.Count > 0 ? $"{data.Count} index(es)" : "";
+            IndexLockingCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "index", "indexes") : "";
 
             /* Writers on an optimized-locking database wait on transaction-ID locks the grid's counters do not count. */
             string? optimizedLockingNote = null;

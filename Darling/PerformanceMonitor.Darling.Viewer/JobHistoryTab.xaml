@@ -97,7 +97,7 @@
             </ComboBox>
             <Button Content="Refresh" Click="RefreshButton_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
             <TextBlock x:Name="JobCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"
-                       FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                       Style="{DynamicResource PanelSubtitleText}"/>
             <TextBlock x:Name="AgentStatusIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"
                        FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundMutedBrush}"/>
             <TextBlock x:Name="LastRefreshedIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"

@@ -171,6 +171,8 @@ internal static class DarlingMcpWritePolicy
     {
         "claim_investigation_request",
         "submit_investigation_report",
+        /* #7659: the agent's message to the request's chat thread, under its claim. */
+        "post_investigation_message",
     };
 
     /// <summary>

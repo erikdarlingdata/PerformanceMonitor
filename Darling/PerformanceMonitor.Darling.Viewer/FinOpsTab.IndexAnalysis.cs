@@ -62,7 +62,7 @@ public partial class FinOpsTab
 
         FinOpsIndexAnalysisNoDataMessage.Visibility = Visibility.Collapsed;
         FinOpsIndexAnalysisCountIndicator.Text = recs.Count > 0
-            ? $"{recs.Count} recommendation(s)"
+            ? PerformanceMonitor.Common.CountText.Plural(recs.Count, "recommendation")
             : "no cleanup recommendations — indexes look clean";
     }
 

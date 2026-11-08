@@ -38,6 +38,8 @@ public sealed class CollectorScheduleLimitsRungLiveTests
     private const int ObservedOnly = 8105;
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+    /* Npgsql leaves the password out of the ConnectionString read back from a data source or an opened connection, so what the body opens by connection string comes from the scratch store's own string. */
+    private string _storeConnectionString = "";
 
     private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
     {
@@ -55,12 +57,13 @@ public sealed class CollectorScheduleLimitsRungLiveTests
     private static async Task<long> CountAsync(NpgsqlConnection connection, string where, CancellationToken ct) =>
         (long)(await ScalarAsync(connection, "SELECT count(*) FROM config.config_collector_schedules WHERE " + where, ct))!;
 
-    private static async Task WithStoreAsync(Func<NpgsqlConnection, CancellationToken, Task> body, Func<NpgsqlConnection, CancellationToken, Task>? cleanup = null)
+    private async Task WithStoreAsync(Func<NpgsqlConnection, CancellationToken, Task> body, Func<NpgsqlConnection, CancellationToken, Task>? cleanup = null)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V206 collector schedule limit facts (each mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath }.ConnectionString;
+        _storeConnectionString = connectionString;
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(ct);
         var bodySucceeded = false;
@@ -304,7 +307,7 @@ INSERT INTO config.config_collector_schedules (server_id, collector_name, enable
             await SeedLegacyRowsAsync(connection, ct);
             await PgMigrations.MigrateAsync(connection, ct);
 
-            await using var viewer = new ViewerDataService(connection.ConnectionString);
+            await using var viewer = new ViewerDataService(_storeConnectionString);
             var rows = await viewer.GetCollectorSchedulesAsync(ct);
             var runTimes = await viewer.GetCollectorRunTimesAsync(ct);
             var items = CollectorScheduleOverlay.BuildEffectiveSchedule(rows, runTimes, ServerA);

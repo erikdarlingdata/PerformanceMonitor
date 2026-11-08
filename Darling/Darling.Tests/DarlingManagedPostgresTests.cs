@@ -4892,6 +4892,89 @@ public sealed class DarlingManagedPostgresTests
     }
 
     /// <summary>
+    /// The same runner, cancelled while its child is still running: the wait throws
+    /// <see cref="OperationCanceledException"/>, and the child is killed rather than left behind. The child writes
+    /// its own process id to a file and then holds for a minute, so the cancel is raised only once the file shows
+    /// the child is up, and the exit assert cannot be met by a child that never started. Without the tree kill in
+    /// the runner's catch the cancellation still propagates and the child keeps running, which is what this fails on.
+    /// </summary>
+    [Fact]
+    public async Task RunDetachingTool_ACancellationWhileTheChildRuns_ThrowsAndTheChildIsGone()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The child is a Windows PowerShell command line.");
+
+        var root = Directory.CreateTempSubdirectory("darling-detach-cancel-");
+        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
+        Process? child = null;
+        try
+        {
+            var pidFile = Path.Combine(root.FullName, "pid");
+            var pidFileInProgress = pidFile + ".tmp";
+            var powerShell = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe");
+
+            /* The id goes to a temporary name and is renamed into place, so the file is whole when it appears. */
+            var command =
+                $"Set-Content -LiteralPath '{pidFileInProgress}' -Value $PID; " +
+                $"Move-Item -LiteralPath '{pidFileInProgress}' -Destination '{pidFile}'; " +
+                "Start-Sleep -Seconds 60";
+
+            var run = DarlingManagedPostgres.RunDetachingToolAsync(
+                powerShell,
+                $"-NoProfile -NonInteractive -Command \"{command}\"",
+                TimeSpan.FromMinutes(5),
+                cts.Token);
+
+            while (!File.Exists(pidFile))
+            {
+                if (run.IsCompleted)
+                {
+                    await run;
+                    Assert.Fail("the child ended before it wrote its process id");
+                }
+
+                await Task.Delay(10, deadline.Token);
+            }
+
+            child = Process.GetProcessById(int.Parse(File.ReadAllText(pidFile).Trim(), CultureInfo.InvariantCulture));
+
+            cts.Cancel();
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+            Assert.True(child.WaitForExit(30_000), "the runner threw for the cancellation but left its child running");
+        }
+        finally
+        {
+            if (child is not null)
+            {
+                try
+                {
+                    if (!child.HasExited)
+                    {
+                        child.Kill(entireProcessTree: true);
+                    }
+                }
+                catch (InvalidOperationException)
+                {
+                    /* Exited between the check and the kill. */
+                }
+
+                child.Dispose();
+            }
+
+            try
+            {
+                root.Delete(recursive: true);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                /* A leftover temp tree is not a test failure. */
+            }
+        }
+    }
+
+    /// <summary>
     /// The same for the PowerShell runner. A real powershell.exe is slow enough that a wait on it sees the
     /// cancellation anyway, so the order pin below is what fails if the early check is removed.
     /// </summary>

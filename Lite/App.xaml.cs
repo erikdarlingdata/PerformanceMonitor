@@ -574,6 +574,26 @@ public partial class App : Application
         }
     }
 
+    private static bool s_keyboardFocusCueInstalled;
+
+    /// <summary>
+    /// #8222: makes the themed keyboard focus cue (the theme's KeyboardFocusVisualStyle, a 1 px accent outline) the default
+    /// FocusVisualStyle of every control, so charts, combo boxes, buttons and check boxes stop drawing the stock dotted box.
+    /// WPF shows a focus visual only when focus arrived by keyboard, so a mouse click shows nothing and Tab still shows the cue.
+    /// One call per process: a type's metadata can be overridden once. The brush inside the style is a DynamicResource, so
+    /// the one instance follows a theme switch.
+    /// </summary>
+    public static void InstallKeyboardFocusCue()
+    {
+        if (s_keyboardFocusCueInstalled || Current?.TryFindResource("KeyboardFocusVisualStyle") is not Style cue)
+        {
+            return;
+        }
+
+        FrameworkElement.FocusVisualStyleProperty.OverrideMetadata(typeof(System.Windows.Controls.Control), new FrameworkPropertyMetadata(cue));
+        s_keyboardFocusCueInstalled = true;
+    }
+
     protected override void OnStartup(StartupEventArgs e)
     {
         SetCurrentProcessExplicitAppUserModelID("DarlingData.PerformanceMonitor.Lite");
@@ -701,6 +721,7 @@ public partial class App : Application
 
         // Apply saved color theme before the main window is shown
         ThemeManager.Apply(ColorTheme);
+        InstallKeyboardFocusCue();
 
         // Initialize logging
         var logDirectory = Path.Combine(appDataRoot, "logs");

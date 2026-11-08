@@ -766,7 +766,11 @@ public class ServerSummaryItem
     /* The border ranks the same states the status word names, so it reads the SAME discriminant rather than
        the flags behind it — see ServerCardStatus for the pair the raw reads disagreed on. The precedence is
        unchanged: a dark server first, then the metric rows worst-first, then failing collectors. */
-    public SolidColorBrush CardBorderBrush => MakeBrush(
+    public SolidColorBrush CardBorderBrush
+    {
+        get
+        {
+            var band =
         CardStatus == ServerCardStatus.Offline ? "#E57373" :
         DeadlocksAreElevated ? "#E57373" :
         BlockingIsElevated ? "#FFB74D" :
@@ -783,7 +787,27 @@ public class ServerSummaryItem
            contradiction on the card; the row underneath carries the severity in its own colour and its own
            word. */
         CollectionIsNotFresh ? "#FFD54F" :
-        "#2a2d35");
+        null;
+
+            /* #8221: a healthy card (and one with no verdict yet) gets the current theme's quiet card border, not a colour. The old
+               fixed #2a2d35 was a Dark hex shown in every theme: near-black on Light and Cool Breeze. Colour stays for the bands above. */
+            return band is null ? ThemeNeutralBorderBrush() : MakeBrush(band);
+        }
+    }
+
+    /// <summary>The current theme's card border (the CardBorderBrush resource), as a frozen copy. The Dark value when there is no
+    /// running application to ask, as in a unit test.</summary>
+    private static SolidColorBrush ThemeNeutralBorderBrush()
+    {
+        if (System.Windows.Application.Current?.TryFindResource("CardBorderBrush") is SolidColorBrush themed)
+        {
+            var copy = new SolidColorBrush(themed.Color);
+            copy.Freeze();
+            return copy;
+        }
+
+        return MakeBrush("#3A3D45");
+    }
 
     /* ── The card explains itself (#2437 / #2422) ────────────────────────────────────────────────────
        Reported against the Darling viewer and fixed there in #2429; Lite's card had the identical bare
@@ -890,8 +914,16 @@ public class ServerSummaryItem
     /// between the two apps is told the same thing in the same words.</summary>
     private const string CardTooltipAction = "Double-click the card to open this server's tab";
 
+    /* #8221: the band colours are the Dark theme's pale tones, which are 1.4:1 to 2.5:1 on a Light or Cool Breeze card ("Online" and the
+       CPU value read pale green on white). On those themes each band takes the theme's own status colour (4.5:1 or better on the card,
+       #3609), so a card follows the theme it is drawn in. The cards are bound again on a theme change (MainWindow). */
     private static SolidColorBrush MakeBrush(string hex)
     {
+        if (ThemedBandBrush.ForLightTheme(hex) is { } themedBrush)
+        {
+            return themedBrush;
+        }
+
         var color = (Color)ColorConverter.ConvertFromString(hex);
         var brush = new SolidColorBrush(color);
         brush.Freeze();

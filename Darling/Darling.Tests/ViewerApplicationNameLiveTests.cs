@@ -50,17 +50,17 @@ public sealed class ViewerApplicationNameLiveTests
 
         try
         {
-            await using (var setup = new NpgsqlConnection(scratch.ConnectionString))
+            /* Unpooled, so this connection's backend is gone once it closes: the probe below reads the ONE other client
+               backend in the database, and a pooled setup connection would sit idle there under the base string's name. */
+            await using (var setup = new NpgsqlConnection(new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Pooling = false }.ConnectionString))
             {
                 await setup.OpenAsync(ct);
                 await PgMigrations.MigrateAsync(setup, ct);
             }
 
-            /* ScratchPostgres disables pooling on its own connection string so a stray in-process pooled
-               connection can never pin the scratch database; that leaves nothing idle in pg_stat_activity
-               by the time a SECOND connection could look for it. This test's own claim is about naming, not
-               about pooling, so it re-enables pooling (min size 1) on the SAME scratch string — the Viewer's
-               real constructor is still what wires the name onto whatever pool settings the string carries. */
+            /* Pooled with a minimum of one, so the Viewer's backend stays idle in pg_stat_activity for the probe to
+               find after the read. This test's claim is about naming, not pooling: the Viewer's real constructor is
+               still what wires the name onto whatever pool settings the string carries. */
             var pooledConnectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
             {
                 Pooling = true,
@@ -111,15 +111,14 @@ public sealed class ViewerApplicationNameLiveTests
 
         try
         {
-            await using (var setup = new NpgsqlConnection(scratch.ConnectionString))
+            /* Unpooled, for the reason the sibling test gives: nothing of this test's own is left idle for the probe. */
+            await using (var setup = new NpgsqlConnection(new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Pooling = false }.ConnectionString))
             {
                 await setup.OpenAsync(ct);
                 await PgMigrations.MigrateAsync(setup, ct);
             }
 
-            /* Re-enable pooling on the scratch string for the same reason the sibling test does — the
-               scratch fixture disables it so a stray pooled connection can never pin the scratch database,
-               which would otherwise also leave nothing idle for this test's pg_stat_activity probe. */
+            /* Pooled with a minimum of one, for the reason the sibling test gives. */
             var operatorConnectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
             {
                 Pooling = true,

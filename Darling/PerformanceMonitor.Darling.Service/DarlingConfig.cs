@@ -484,8 +484,8 @@ public sealed class DarlingConfig
     internal List<string> SecretReferencesAsWritten { get; set; } = new();
 
     /// <summary>#5307: the paths (never the values) of keys under <c>web.network</c> and <c>mcp.network</c>, their
-    /// <c>tls</c> blocks, <c>web.network.oidc</c> and each <c>mcp.tokens</c> entry (#7023) that no config class declares, e.g. <c>mcp.network.ssl</c>,
-    /// found by <see cref="DarlingUnknownKeys"/> in <see cref="Parse"/>. Internal and <c>[JsonIgnore]</c>, so a
+    /// <c>tls</c> blocks, <c>web.network.oidc</c>, each <c>mcp.tokens</c> entry (#7023) and each <c>servers</c> entry (#8239) that no config class declares, e.g. <c>mcp.network.ssl</c>
+    /// or <c>servers[0].displayName</c>, found by <see cref="DarlingUnknownKeys"/> in <see cref="Parse"/>. Internal and <c>[JsonIgnore]</c>, so a
     /// serialized config (the diagnostics bundle) never carries it.</summary>
     [JsonIgnore]
     internal List<string> UnknownNetworkKeys { get; set; } = new();

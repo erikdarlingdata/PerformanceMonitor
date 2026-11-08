@@ -95,7 +95,7 @@ public sealed class ViewerFillColumnTests
                     typeof(ViewerServerTab).GetField("_suppressDrillDownAutoRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(tab, true);
                     var inner = (TabItem)tab.FindName(tabName);
                     inner.Visibility = Visibility.Visible;
-                    ((TabControl)tab.FindName("InnerTabs")).SelectedItem = inner;
+                    StaTestThread.Reveal(inner);
                     ClippedTextProbe.Settle(window);
                     return body(tab, window, grid, declared);
                 }

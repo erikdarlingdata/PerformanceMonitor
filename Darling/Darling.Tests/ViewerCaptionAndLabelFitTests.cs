@@ -71,18 +71,6 @@ public sealed class ViewerCaptionAndLabelFitTests
         }
     }
 
-    /// <summary>Selects every tab between the element and the root, so the element is laid out and visible.</summary>
-    private static void Reveal(FrameworkElement element)
-    {
-        for (DependencyObject? at = element; at is not null; at = LogicalTreeHelper.GetParent(at))
-        {
-            if (at is TabItem tab && ItemsControl.ItemsControlFromItemContainer(tab) is TabControl owner)
-            {
-                owner.SelectedItem = tab;
-            }
-        }
-    }
-
     // ---- 1. The Performance Trends source caption wraps, and carries no em dash ----
 
     private static QueryTrendSeries TruncatedSeries()
@@ -144,7 +132,7 @@ public sealed class ViewerCaptionAndLabelFitTests
                 banner.Text = "Showing since 2026-10-26 10:03: this server's Query Store history starts after the baseline window does, so a regression that can come only from a run before the window that is not held here cannot be listed.";
                 banner.Visibility = Visibility.Visible;
                 var caption = Logical<TextBlock>(tab).Single(b => b.Text.StartsWith("Queries whose Query Store performance regressed", StringComparison.Ordinal));
-                Reveal(caption);
+                StaTestThread.Reveal(caption);
                 ClippedTextProbe.Settle(window);
 
                 var found = ClippedTextProbe.Clipped((DependencyObject)caption.Parent, tab);
@@ -180,7 +168,7 @@ public sealed class ViewerCaptionAndLabelFitTests
                     .Where(b => b.Text is ViewerLabels.AvgSqlServerCpu or ViewerLabels.P95SqlServerCpu or ViewerLabels.MaxSqlServerCpu)
                     .ToList();
                 Assert.Equal(3, labels.Count);
-                Reveal(labels[0]);
+                StaTestThread.Reveal(labels[0]);
                 ClippedTextProbe.Settle(window);
 
                 var found = ClippedTextProbe.Clipped((DependencyObject)labels[0].Parent, tab);

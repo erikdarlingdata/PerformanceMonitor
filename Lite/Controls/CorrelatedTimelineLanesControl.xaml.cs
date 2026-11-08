@@ -46,6 +46,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
            ChartLayout guard applies to the chart tabs' grids, so the scroll viewer's extent holds every lane and scrolls when
            the viewport is shorter, instead of clipping the last lane under the window with no scrollbar. */
         LanesGrid.MinHeight = LanesGrid.RowDefinitions.Sum(r => r.MinHeight);
+        BackCaptions();
         /* No Unloaded → Dispose() handler: WPF fires Unloaded for transient
            reasons (tab virtualization, layout rebuilds) and Dispose() clears
            the crosshair manager's lane list, permanently breaking the crosshair
@@ -525,6 +526,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         BlockingChart.Plot.YLabel("");
         BlockingChart.Plot.Legend.IsVisible = false;
         BlockingChart.Plot.Axes.Margins(bottom: 0);
+        ChartStyle.UseCountAxis(BlockingChart); // #8224: events are counted, so the lane labels whole numbers only
         BlockingChart.Plot.Axes.SetLimitsY(0, Math.Max(maxCount * 1.3, 2));
 
         BlockingChart.Refresh();
@@ -640,7 +642,9 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         {
             _crosshairManager?.SetLaneBaselineSteps(chart, bands, minAnomalyValue);
 
-            PerformanceMonitor.Ui.BaselineBand.AddBand(chart.Plot, bands, colorHex);
+            /* #8224: the Wait lane's amber at the stock opacity is a brown block on Dark and beige on Cool Breeze, so it takes the lighter tint. */
+            PerformanceMonitor.Ui.BaselineBand.AddBand(chart.Plot, bands, colorHex,
+                chart == WaitStatsChart ? PerformanceMonitor.Ui.BaselineBand.LightFillAlpha : PerformanceMonitor.Ui.BaselineBand.FillAlpha);
 
             // Highlight anomalous points (outside ± 2σ band AND above absolute minimum), each judged against its own hour's band (#7644)
             var anomalyIndices = new List<int>();
@@ -822,6 +826,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         chart.Plot.YLabel("");
         chart.Plot.Legend.IsVisible = false;
         chart.Plot.Axes.Margins(bottom: 0);
+        if (chart == BlockingChart) ChartStyle.UseCountAxis(chart); // #8224: an empty count lane still labels whole numbers
         chart.Plot.Axes.SetLimitsY(0, 1);
 
         chart.Refresh();
@@ -838,6 +843,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             ApplyTheme(chart);
             chart.Refresh();
         }
+        BackCaptions();
     }
 
     /// <summary>
@@ -850,6 +856,19 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         var margin = new Thickness(gutter + 6, 3, 0, 0);
         foreach (var caption in new[] { CpuCaption, WaitStatsCaption, BlockingCaption, MemoryCaption, FileIoCaption })
             caption.Margin = margin;
+    }
+
+    /// <summary>#8224: a caption sits over the plot's top edge, where the top Y tick's gridline ran through its letters; it is drawn on the plot's own background, so the line stops at the text.</summary>
+    private void BackCaptions()
+    {
+        var c = ChartStyle.GetThemeColors().DataBackground;
+        var brush = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(c.R, c.G, c.B));
+        brush.Freeze();
+        foreach (var caption in new[] { CpuCaption, WaitStatsCaption, BlockingCaption, MemoryCaption, FileIoCaption })
+        {
+            caption.Background = brush;
+            caption.Padding = new Thickness(4, 0, 4, 0);
+        }
     }
 
     /// <summary>#8162: the height a lane that shows no X labels keeps under its plot: its tick marks.</summary>
