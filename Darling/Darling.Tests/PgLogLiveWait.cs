@@ -32,12 +32,17 @@ internal static class PgLogLiveWait
     /// The newest log file ending in <paramref name="extension"/>, by the rule the wait and the collectors' tail share
     /// (<c>modification DESC, name DESC</c>), or null when the log directory holds none.
     /// </summary>
-    public static async Task<string?> NewestFileAsync(NpgsqlConnection connection, string extension, CancellationToken ct)
+    public static async Task<string?> NewestFileAsync(NpgsqlConnection connection, string extension, CancellationToken ct) =>
+        (await NewestFileAndSizeAsync(connection, extension, ct)).Name;
+
+    /// <summary>The newest file by the same rule, with its size, so a wait can look only at what the file gains after a write.</summary>
+    private static async Task<(string? Name, long Size)> NewestFileAndSizeAsync(NpgsqlConnection connection, string extension, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(
-            "SELECT name FROM pg_catalog.pg_ls_logdir() WHERE name ~* @ext ORDER BY modification DESC, name DESC LIMIT 1", connection);
+            "SELECT name, size FROM pg_catalog.pg_ls_logdir() WHERE name ~* @ext ORDER BY modification DESC, name DESC LIMIT 1", connection);
         command.Parameters.AddWithValue("ext", "\\." + extension + "$");
-        return await command.ExecuteScalarAsync(ct) as string;
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        return await reader.ReadAsync(ct) ? (reader.GetString(0), reader.GetInt64(1)) : (null, 0L);
     }
 
     /// <summary>
@@ -66,7 +71,7 @@ internal static class PgLogLiveWait
     }
 
     public static async Task WaitForTextAsync(NpgsqlConnection connection, string extension, CancellationToken ct, params string[] markers) =>
-        await WaitForTextCoreAsync(connection, extension, null, ct, markers);
+        await WaitForTextCoreAsync(connection, extension, null, 0, ct, markers);
 
     /* The most times a record is written again because the log rotated after the write. */
     private const int RotationRetries = 2;
@@ -79,14 +84,23 @@ internal static class PgLogLiveWait
     /// read did not hold it, the record is written again, up to <see cref="RotationRetries"/> more times. A read that misses
     /// the record with no rotation after the write fails here, naming the file.
     /// </summary>
+    public static Task ReadOwnRecordAcrossRotationAsync(
+        NpgsqlConnection connection, string extension, string marker, Func<Task> write, Func<Task<bool>> read, CancellationToken ct) =>
+        ReadOwnRecordAcrossRotationAsync(connection, extension, async () => { await write(); return new[] { marker }; }, read, ct);
+
+    /// <summary>
+    /// The same, for a write whose markers are known only once it has run (a deadlock's victim pid, say): <paramref name="write"/>
+    /// returns the markers to wait for. The wait looks only at what the newest file gained after the write, so an identical
+    /// record an earlier run left on a reused target does not stand in for this run's own.
+    /// </summary>
     public static async Task ReadOwnRecordAcrossRotationAsync(
-        NpgsqlConnection connection, string extension, string marker, Func<Task> write, Func<Task<bool>> read, CancellationToken ct)
+        NpgsqlConnection connection, string extension, Func<Task<string[]>> write, Func<Task<bool>> read, CancellationToken ct)
     {
         for (var attempt = 0; ; attempt++)
         {
-            var fileAtWrite = await NewestFileAsync(connection, extension, ct);
-            await write();
-            var landed = await WaitForTextCoreAsync(connection, extension, fileAtWrite, ct, marker);
+            var (fileAtWrite, sizeAtWrite) = await NewestFileAndSizeAsync(connection, extension, ct);
+            var markers = await write();
+            var landed = await WaitForTextCoreAsync(connection, extension, fileAtWrite, sizeAtWrite, ct, markers);
             if (landed && await read())
             {
                 return;
@@ -94,17 +108,19 @@ internal static class PgLogLiveWait
 
             var newest = await NewestFileAsync(connection, extension, ct);
             Assert.True(newest != fileAtWrite,
-                "the collector's read of " + newest + " did not hold " + marker + ", and the log did not rotate after the write.");
+                "the collector's read of " + newest + " did not hold " + string.Join(" and ", markers) + ", and the log did not rotate after the write.");
             Assert.True(attempt < RotationRetries,
-                "the log rotated after each of " + (RotationRetries + 1) + " writes of " + marker + ".");
+                "the log rotated after each of " + (RotationRetries + 1) + " writes of " + string.Join(" and ", markers) + ".");
         }
     }
 
     /// <summary>
     /// The wait itself. With <paramref name="fileAtWrite"/> given, it returns false instead of failing once the newest file
-    /// is no longer that one: the log rotated after the write, and the record is in the file before.
+    /// is no longer that one: the log rotated after the write, and the record is in the file before. It reads the file from
+    /// <paramref name="sizeAtWrite"/> on (within the same 4 MB tail), so only what landed after the write counts.
     /// </summary>
-    private static async Task<bool> WaitForTextCoreAsync(NpgsqlConnection connection, string extension, string? fileAtWrite, CancellationToken ct, params string[] markers)
+    private static async Task<bool> WaitForTextCoreAsync(
+        NpgsqlConnection connection, string extension, string? fileAtWrite, long sizeAtWrite, CancellationToken ct, params string[] markers)
     {
         var deadline = DateTime.UtcNow + Budget;
         while (true)
@@ -113,12 +129,13 @@ internal static class PgLogLiveWait
                 "WITH f AS (SELECT name, size FROM pg_catalog.pg_ls_logdir() WHERE name ~* @ext "
                 + "ORDER BY modification DESC, name DESC LIMIT 1), "
                 + "b AS (SELECT pg_catalog.pg_read_binary_file(pg_catalog.current_setting('log_directory') || '/' || f.name, "
-                + "greatest(f.size - " + TailBytes + ", 0), " + TailBytes + ") AS body FROM f) "
+                + "least(greatest(f.size - " + TailBytes + ", @from), f.size), " + TailBytes + ") AS body FROM f) "
                 + "SELECT (SELECT name FROM f), coalesce(pg_catalog.bool_and(position(pg_catalog.convert_to(m, 'UTF8') IN b.body) > 0), false) "
                 + "FROM b CROSS JOIN pg_catalog.unnest(@markers) AS m",
                 connection))
             {
                 command.Parameters.AddWithValue("ext", "\\." + extension + "$");
+                command.Parameters.Add(new NpgsqlParameter("from", NpgsqlDbType.Bigint) { Value = sizeAtWrite });
                 command.Parameters.Add(new NpgsqlParameter("markers", NpgsqlDbType.Array | NpgsqlDbType.Text) { Value = markers });
                 await using var reader = await command.ExecuteReaderAsync(ct);
                 Assert.True(await reader.ReadAsync(ct));
