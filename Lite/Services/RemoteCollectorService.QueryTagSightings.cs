@@ -69,14 +69,23 @@ public partial class RemoteCollectorService
 
     /// <summary>
     /// #5990: the shutdown drain. A round cancelled before its map pass never flushes, so the loop calls this once it has
-    /// stopped. Writes nothing when the limit passes before the lock is free; the sightings are derived data.
+    /// stopped. Writes nothing when <see cref="ShutdownFlushLimit"/> passes before the lock is free; the sightings are
+    /// derived data.
     /// </summary>
-    internal void FlushQueryTagSightingsAtShutdown(CancellationToken cancellationToken = default)
+    internal void FlushQueryTagSightingsAtShutdown(CancellationToken cancellationToken = default) =>
+        FlushQueryTagSightingsAtShutdown(ShutdownFlushLimit, cancellationToken);
+
+    /// <summary>
+    /// The drain with its lock wait stated. The app passes <see cref="ShutdownFlushLimit"/>; a test host, whose write lock
+    /// is one for the whole process and can be held by a neighbouring class for longer than the app's limit, passes its
+    /// own budget so the drain it checks is not timed against that neighbour.
+    /// </summary>
+    internal void FlushQueryTagSightingsAtShutdown(TimeSpan lockBudget, CancellationToken cancellationToken)
     {
         try
         {
             var buffer = QueryTagSightingBufferForTests;
-            buffer.Flush(_duckDb, ShutdownFlushLimit, cancellationToken);
+            buffer.Flush(_duckDb, lockBudget, cancellationToken);
             if (buffer.Count > 0)
             {
                 AppLogger.Warn("QueryTags", $"The shutdown query-tag sightings flush did not finish; {buffer.Count} buffered sightings are lost (derived data, re-sighted after the next start)");
