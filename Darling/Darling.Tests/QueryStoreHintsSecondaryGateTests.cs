@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Reflection;
 using System.Threading.Tasks;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
@@ -41,24 +40,10 @@ public sealed class QueryStoreHintsSecondaryGateTests
             runs[collector] = runs.GetValueOrDefault(collector) + 1;
             return Task.FromResult(1);
         };
-        SetRoleSeam(worker, id => id == serverId && secondary[0]);
+        /* The seam the worker reads the server's last known role through, standing in for the store's facts: true means every
+           Query Store database on the server is a readable secondary. */
+        worker.QueryStoreReadableSecondaryOverride = id => id == serverId && secondary[0];
         return new Rig(worker, server, runs, secondary);
-    }
-
-    /// <summary>
-    /// The seam the worker reads the server's last known role through in a test, standing in for the store's facts: true means
-    /// every Query Store database on the server is a readable secondary.
-    /// </summary>
-    private static void SetRoleSeam(DarlingWorker worker, Func<int, bool> answer)
-    {
-        var seam = typeof(DarlingWorker).GetProperty(
-            "QueryStoreReadableSecondaryOverride", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-        if (seam is null)
-        {
-            Assert.Fail("DarlingWorker has no QueryStoreReadableSecondaryOverride seam: the scheduler does not gate query_store_hints on the server's role.");
-        }
-
-        seam.SetValue(worker, answer);
     }
 
     /// <summary>One scheduler pass with the named collectors due, as they are every interval.</summary>

@@ -632,6 +632,13 @@ public sealed partial class DarlingWorker : BackgroundService
     internal Func<string, string?>? RunOneRefusalOverride { get; set; }
 
     /// <summary>
+    /// Test seam (#8361): the answer to whether the server with this id is a readable secondary for every Query Store database,
+    /// which decides whether a <c>query_store_hints</c> slot runs. Null in production, which asks the store
+    /// (<see cref="IsQueryStoreReadableSecondaryAsync"/>).
+    /// </summary>
+    internal Func<int, bool>? QueryStoreReadableSecondaryOverride { get; set; }
+
+    /// <summary>
     /// The fleet sweep gate (#5941), set once the collection loop builds it. A <c>snapshot_now</c> takes a permit from it
     /// like a scheduled pass does. Null before the loop starts (and in tests that do not stand one in): no permit is taken.
     /// </summary>

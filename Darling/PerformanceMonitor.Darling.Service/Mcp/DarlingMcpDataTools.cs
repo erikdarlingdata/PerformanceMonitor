@@ -2233,6 +2233,15 @@ ORDER BY server_name";
                 ? DarlingGatedCollectorRows.RowsShownWhenAlwaysOnOff(runningRows)
                 : runningRows;
 
+            /* #8361: on a server whose every Query Store database is a readable secondary the scheduler does not run
+               query_store_hints (nothing it could read), so its row reads HEALTHY with zero rows while its last run is recent and
+               STOPPED once the gate has held it off past the cutoff. Shown as not_collected with the readable-secondary sentence
+               instead, the way the Always On rows are, exactly when the store's newest health capture says so; a failing or denied
+               row keeps its own. Only the listing changes: the rows still feed the sweep arithmetic below. */
+            var queryStoreSecondary = await DarlingGatedCollectorRows.QueryStoreSecondaryMessageAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken);
+            if (queryStoreSecondary is not null)
+                shownRows = DarlingGatedCollectorRows.RowsShownWhenQueryStoreSecondary(shownRows);
+
             var compactCount = full_detail ? 0 : shownRows.Count(IsCollectionHealthCompactEligible);
             /* #4198's second cut: a row that fails the predicate above used to keep the full ~30-field shape
                below regardless of full_detail. Measured on both SKUs' #4198 fixtures that alone could not clear
@@ -2252,6 +2261,8 @@ ORDER BY server_name";
             result = result.Concat(await DarlingGatedCollectorRows.AppendAsync(postgres, resolved.ServerId, resolved.DisplayName, rows, cancellationToken));
             if (alwaysOnOff)
                 result = result.Concat(DarlingGatedCollectorRows.AlwaysOnOffRows(runningRows));
+            if (queryStoreSecondary is not null)
+                result = result.Concat(DarlingGatedCollectorRows.QueryStoreSecondaryRows(runningRows, queryStoreSecondary));
             if (engineGate is not null)
                 result = result.Concat(engineGate.NotCollectedRows(rows));
 

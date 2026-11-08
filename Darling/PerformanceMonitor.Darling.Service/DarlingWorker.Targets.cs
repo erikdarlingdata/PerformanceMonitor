@@ -841,6 +841,30 @@ public sealed partial class DarlingWorker
     }
 
     /// <summary>
+    /// #8361: whether the server's last known role leaves <c>query_store_hints</c> nothing to read: every database in its newest
+    /// <c>query_store_health</c> capture that Query Store is on for is a readable secondary, or, with no such database, its newest
+    /// <c>ag_replica_role</c> reads Secondary; never when a <c>query_store_replica</c> is set for it. The same store facts the Query
+    /// Store reads' <c>not_collected</c> answer is built from (<see cref="DarlingQueryStoreReadableSecondary"/>), read on each call.
+    /// False when the store cannot answer, so the collector runs.
+    /// </summary>
+    internal async Task<bool> IsQueryStoreReadableSecondaryAsync(ServerLoopState server, ServerRuntime runtime, CancellationToken cancellationToken)
+    {
+        if (QueryStoreReadableSecondaryOverride is { } answer)
+        {
+            return answer(runtime.ServerId);
+        }
+
+        if (_postgres is null)
+        {
+            return false;
+        }
+
+        var message = await DarlingQueryStoreReadableSecondary.MessageAsync(
+            _postgres, runtime.ServerId, server.Config.DisplayName, McpCommandDeadlines.ReadSeconds, cancellationToken);
+        return message is not null;
+    }
+
+    /// <summary>
     /// One server's scheduled collector pass: runs, or detaches, every collector that has come due. Internal
     /// (#4938) so a test can drive the pass with <see cref="RunOneBodyOverride"/> standing in for the collector
     /// runs; production calls it only from the per-server body.
@@ -1066,6 +1090,25 @@ public sealed partial class DarlingWorker
                         _logger.LogDebug(
                             "  [{Server}] {Collector} not run this slot: the server has refused it {Streak} times in a row, so it is tried less often until that changes (#6186)",
                             server.Config.DisplayName, name, server.RefusedBackoff.Streak(name));
+                        continue;
+                    }
+
+                    /* #8361: query_store_hints on a server whose every Query Store database is a readable secondary. The collector's
+                       statement skips such a database (readonly_reason & 8), so a run there reads the database list, collects
+                       nothing and logs a success with zero rows every slot, which get_collection_health reads as a run that needs
+                       a look. The slot is served like the backoff's above (counted, the stamp moved on) and the run is skipped, so
+                       no collection_log row is written. The role is the server's last known one in the store, the facts the Query
+                       Store reads' not_collected answer is built from: the newest query_store_health capture, and ag_replica_role
+                       when that capture has no database Query Store is read for. It is asked again at every slot, so a server that
+                       becomes the primary runs the collector at its next slot and one that becomes a secondary stops at its next.
+                       A store that cannot answer runs the collector. get_collection_health lists the collector as not_collected
+                       with the same sentence. */
+                    if (string.Equals(name, QueryStoreHintsCollector.Instance.Name, StringComparison.Ordinal)
+                        && await IsQueryStoreReadableSecondaryAsync(server, runtime, cancellationToken))
+                    {
+                        _logger.LogDebug(
+                            "  [{Server}] {Collector} not run this slot: every Query Store database on the server is a readable secondary, so there is nothing for it to read (#8361)",
+                            server.Config.DisplayName, name);
                         continue;
                     }
                 }
