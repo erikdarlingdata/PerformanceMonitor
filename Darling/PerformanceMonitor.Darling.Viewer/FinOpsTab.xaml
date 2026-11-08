@@ -947,7 +947,7 @@
                             <TextBlock x:Name="FinOpsHighImpactCountIndicator" VerticalAlignment="Center" Margin="12,0,0,0" Style="{DynamicResource PanelSubtitleText}"/>
                         </StackPanel>
                         <!-- In the grid's own row, so the grid shows this one sentence and not its generic one as well. -->
-                        <TextBlock x:Name="FinOpsHighImpactNoDataMessage" Grid.Row="2" Text="No high-impact queries found for this time range." Margin="10,36,10,0" Visibility="Collapsed" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                        <TextBlock x:Name="FinOpsHighImpactNoDataMessage" Grid.Row="2" Panel.ZIndex="1" Text="No high-impact queries found for this time range." Margin="10,36,10,0" Visibility="Collapsed" Foreground="{DynamicResource ForegroundMutedBrush}"/>
                         <DataGrid x:Name="FinOpsHighImpactDataGrid" Grid.Row="2" Margin="10,4,10,10" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsQueryPlanRowStyle}" HorizontalScrollBarVisibility="Auto">
                             <DataGrid.Columns>
                                 <DataGridTextColumn Binding="{Binding ImpactScore}" Width="60">
