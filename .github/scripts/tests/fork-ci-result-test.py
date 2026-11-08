@@ -81,7 +81,9 @@ class Stub:
 JOBS = f"repos/{REPO}/actions/runs/{RUN_ID}/jobs"
 RUN = f"repos/{REPO}/actions/runs/{RUN_ID}"
 PULLS = f"repos/{REPO}/pulls"
+PULL = f"repos/{REPO}/pulls/7"
 FILES = f"repos/{REPO}/pulls/7/files"
+OMIT = object()  # answers(changed_files=OMIT): the pull request object carries no changed_files
 RUNS = f"repos/{REPO}/actions/workflows/pr.yml/runs"
 REVIEWS = f"repos/{REPO}/pulls/7/reviews"
 
@@ -118,11 +120,18 @@ PERMS = {"maint": perm("write"), "admin": perm("admin"), "lead": perm("write", "
          "triager": perm("read", "triage")}
 
 
-def answers(verdict="success", pulls=None, files=(), newer=(), reviews=None, perms=PERMS):
+def answers(verdict="success", pulls=None, files=(), entries=None, changed_files=None, newer=(), reviews=None, perms=PERMS):
+    """files are plain names (one modified entry each); entries are whole files-API entries, for a rename or a removal. The pull
+    request object reports changed_files, the list's length unless given (OMIT leaves the field out)."""
+    listed = [{"filename": f, "status": "modified"} for f in files] if entries is None else list(entries)
+    pr_object = {"number": 7, "head": {"sha": SHA, "repo": {"full_name": FORK}}}
+    if changed_files is not OMIT:
+        pr_object["changed_files"] = len(listed) if changed_files is None else changed_files
     out = {
         JOBS: jobs(verdict),
         PULLS: [pull()] if pulls is None else pulls,
-        FILES: [{"filename": f} for f in files],
+        PULL: pr_object,
+        FILES: listed,
         RUNS: runs(*newer),
         REVIEWS: MAINTAINER if reviews is None else reviews,
     }
@@ -143,8 +152,8 @@ check("green: state", d.state, "success")
 check("green: description", d.description, "CI passed")
 check("green: sha", d.sha, SHA)
 check("green: run id", getattr(d, "run_id", None), str(RUN_ID))
-check("green: reads the jobs, the pulls, the files, the runs, the reviews and the reviewer's permission",
-      sorted(stub.asked), sorted([JOBS, PULLS, FILES, RUNS, REVIEWS, PERM("maint")]))
+check("green: reads the jobs, the pulls, the pull request, the files, the runs, the reviews and the reviewer's permission",
+      sorted(stub.asked), sorted([JOBS, PULLS, PULL, FILES, RUNS, REVIEWS, PERM("maint")]))
 
 # --- a red verdict writes failure, names the conclusion, and reads no reviews ---------------------------------------------------
 d, stub = decide(verdict="failure")
@@ -275,6 +284,56 @@ check("paths that only contain a guarded name: writes", d.write, True)
 names, exts = getattr(fr, "NOT_RELAYED_NAMES", None), getattr(fr, "NOT_RELAYED_EXTENSIONS", None)
 check("the guarded names and extensions are listed once",
       (isinstance(names, tuple), isinstance(exts, tuple), ".csproj" in (exts or ()), "global.json" in (names or ())), (True, True, True, True))
+# the Windows legs check out onto a case-insensitive file system, where Darling/Tools/x.ps1 lands on Darling/tools/x.ps1, so a
+# guarded tree is guarded in any case too
+d, _ = decide(files=["Darling/Tools/fetch-pg-runtime.ps1"])
+check("a guarded tree in another case: no write", d.write, False)
+d, _ = decide(files=[".GitHub/scripts/ci-plan.py"])
+check("the .github tree in another case: no write", d.write, False)
+# the test host reads xunit.runner.json from the test project's folder, and it decides which tests run
+d, _ = decide(files=["Lite.Tests/xunit.runner.json"])
+check("a test runner settings file: no write", d.write, False)
+
+# --- a rename is a change to the old path too: renaming a guarded file to an unguarded name does not escape the guard ----------------
+def renamed(old, new):
+    return {"filename": new, "previous_filename": old, "status": "renamed"}
+
+
+d, stub = decide(entries=[renamed("global.json", "build/sdk.json")])
+check("global.json renamed away: no write", d.write, False)
+check("global.json renamed away: reason names the old path", "global.json" in d.reason, True)
+check("global.json renamed away: stops before the runs", RUNS in stub.asked, False)
+d, _ = decide(entries=[renamed("Directory.Build.props", "Darling/build/notes.txt")])
+check("Directory.Build.props renamed away: no write", d.write, False)
+d, _ = decide(entries=[renamed("Lite/NuGet.Config", "Lite/feeds.txt")])
+check("a nuget.config renamed away: no write", d.write, False)
+d, _ = decide(entries=[renamed(".github/scripts/ci-plan.py", "tools/plan.py")])
+check("a CI script renamed out of .github: no write", d.write, False)
+d, _ = decide(entries=[renamed("Darling/tools/fetch-pg-runtime.ps1", "Darling/fetch.ps1")])
+check("a fetch script renamed out of Darling/tools: no write", d.write, False)
+d, _ = decide(entries=[renamed("Lite/Services/A.cs", "Lite/Services/B.cs"), {"filename": "docs/README.md", "status": "modified"}])
+check("a rename between unguarded names: writes", d.write, True)
+d, _ = decide(entries=[renamed("notes/props.txt", "Directory.Build.props")])
+check("a rename into a guarded name: no write", d.write, False)
+d, _ = decide(entries=[{"filename": "tools/plan.py", "previous_filename": ".github/scripts/ci-plan.py", "status": "copied"}])
+check("a copy out of a guarded tree: no write", d.write, False)
+d, _ = decide(entries=[{"filename": "global.json", "status": "removed"}])
+check("a guarded file removed: no write", d.write, False)
+
+# --- the files endpoint lists at most 3000 files, so a list that may be incomplete fails closed: too large to relay ------------------
+d, stub = decide(files=["Lite/Services/A.cs"], changed_files=2)
+check("more changed files than listed: no write", d.write, False)
+check("more changed files than listed: reason says too large and merged by hand",
+      "too large" in d.reason and "merged by hand" in d.reason, True)
+check("more changed files than listed: stops before the runs and the reviews", RUNS in stub.asked or REVIEWS in stub.asked, False)
+d, _ = decide(files=[f"Lite/Generated/File{i}.cs" for i in range(3000)])
+check("a list that reached the 3000-file limit: no write", d.write, False)
+check("a list that reached the 3000-file limit: reason says too large", "too large" in d.reason, True)
+d, _ = decide(files=[f"Lite/Generated/File{i}.cs" for i in range(2999)])
+check("a list of 2999 files the pull request reports as 2999: writes", d.write, True)
+d, _ = decide(files=["Lite/Services/A.cs"], changed_files=OMIT)
+check("a pull request that reports no changed-file count: no write", d.write, False)
+check("a pull request that reports no changed-file count: reason says merged by hand", "merged by hand" in d.reason, True)
 
 # --- a newer PR CI run on the same pull request writes CI result instead ------------------------------------------------------------
 d, stub = decide(newer=[(RUN_ID + 1, FORK)])
@@ -385,7 +444,7 @@ check("the HTTP status is read from gh's message",
        parse("dial tcp: connection refused") if parse else "missing"), (404, 403, None))
 
 # --- a read that fails writes nothing and is reported, never guessed --------------------------------------------------------------------
-for path in (JOBS, PULLS, FILES, RUNS, REVIEWS, PERM("maint")):
+for path in (JOBS, PULLS, PULL, FILES, RUNS, REVIEWS, PERM("maint")):
     a = answers()
     a[path] = fr.FetchError("boom")
     try:
