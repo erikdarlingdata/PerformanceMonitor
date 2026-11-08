@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -198,6 +199,59 @@ public sealed class ViewerChartTextRefreshTests
 
         Assert.Contains("252", labels);
         Assert.True(overlaps.Count == 0, $"colour bar labels touch at {width}x{height} in {theme}: " + string.Join("; ", overlaps));
+    }
+
+    [Theory]
+    [MemberData(nameof(ThemesAndWindows))]
+    public void TheSlicersLabels_FallOnRoundWallClockSteps_InEveryDisplayZone(string theme, int width, int height)
+    {
+        var mode = ViewerTimeHelper.CurrentDisplayMode;
+        try
+        {
+            var readings = StaTestThread.Run(() => WithTheme(theme, () =>
+            {
+                var slicer = new TimeRangeSlicerControl();
+                var window = new Window { Content = slicer, Width = width, Height = 220, Left = 0, Top = 0 };
+                window.Show();
+                try
+                {
+                    var end = new DateTime(2026, 3, 10, 18, 0, 0, DateTimeKind.Utc);
+                    var buckets = Enumerable.Range(0, 24 * 12)
+                        .Select(i => new TimeSliceBucket { BucketTime = end.AddMinutes(-5 * (24 * 12 - 1 - i)), TotalCpu = 100 + (i % 7) * 40, SessionCount = 1 })
+                        .ToList();
+                    slicer.LoadData(buckets, "Total CPU (ms)");
+                    var result = new List<(string Zone, List<string> Labels)>();
+                    foreach (var (zone, name) in new[] { (TimeDisplayMode.UTC, "UTC"), (TimeDisplayMode.LocalTime, "local time") })
+                    {
+                        ViewerTimeHelper.CurrentDisplayMode = zone;
+                        slicer.Redraw();
+                        ClippedTextProbe.Settle(window);
+                        if (zone == TimeDisplayMode.UTC) Shot(window, $"slicer-{theme}-{width}x{height}");
+                        var canvas = (Canvas)slicer.FindName("SlicerCanvas");
+                        result.Add((name, canvas.Children.OfType<TextBlock>().Where(t => t.Text.Contains(':')).OrderBy(Canvas.GetLeft).Select(t => t.Text).ToList()));
+                    }
+
+                    return result;
+                }
+                finally
+                {
+                    window.Close();
+                }
+            }));
+
+            foreach (var (zone, labels) in readings)
+            {
+                Assert.True(labels.Count >= 2, $"{zone}: {labels.Count} labels at {width} px wide");
+                var times = labels.Select(l => DateTime.ParseExact("2026/" + l, "yyyy/MM/dd HH:mm", CultureInfo.InvariantCulture)).ToList();
+                Assert.All(times, t => Assert.True(t.Minute == 0, $"{zone}: a label reads {t:MM/dd HH:mm}, not a whole hour"));
+                var steps = times.Zip(times.Skip(1), (a, b) => (b - a).TotalHours).Distinct().ToList();
+                Assert.True(steps.Count == 1 && new[] { 1.0, 2, 3, 4, 6, 12 }.Contains(steps[0]), $"{zone}: the labels step by {string.Join(", ", steps)} h: {string.Join(" ", labels)}");
+            }
+        }
+        finally
+        {
+            ViewerTimeHelper.CurrentDisplayMode = mode;
+        }
     }
 
     [Fact]
