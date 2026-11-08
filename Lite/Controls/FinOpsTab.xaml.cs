@@ -437,7 +437,8 @@ public partial class FinOpsTab : UserControl
         {
             AppLogger.Error("FinOps", $"Failed to load recommendations: {ex.Message}", ex);
             /* A load that never claimed painted nothing, and a superseded load's failure must not overwrite the newest load's caption. */
-            if (gen == 0 || _loads.Superseded(nameof(LoadRecommendationsAsync), gen)) return;
+            if (gen == 0) return;
+            if (_loads.Superseded(nameof(LoadRecommendationsAsync), gen)) return;
             /* Whatever ended the load, the caption must not keep saying it is loading: the grid under it already shows the last rows it was given. */
             if (RecommendationsCountIndicator.Text == RecommendationsLoadingText)
             {

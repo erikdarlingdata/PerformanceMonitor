@@ -2406,11 +2406,11 @@
                                       SelectionMode="Extended"
                                       RowStyle="{StaticResource ExpensiveQueryRowStyle}">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Binding="{Binding DatabaseName}" Width="130" ElementStyle="{StaticResource TrimmedCell}">
+                                    <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120" ElementStyle="{StaticResource TrimmedCell}">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <!-- The preview takes the width the numeric columns leave, so the grid fits its card and the last header keeps its name. -->
-                                    <DataGridTemplateColumn Header="Query Preview" Width="*" MinWidth="120">
+                                    <DataGridTemplateColumn Header="Query Preview" Width="*" MinWidth="100">
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
                                                 <TextBlock Text="{Binding QueryPreview, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" Margin="5,2" ToolTip="{Binding FullQueryText}"/>

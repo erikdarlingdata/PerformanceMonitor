@@ -435,7 +435,8 @@ public sealed class FinOpsPagesReadabilityTests
             }
             else if (!Whole(name) || Bounds(name, grid).Right > grid.ActualWidth + 0.5)
             {
-                yield return $"{gridName}: the header '{name.Text}' ends at {Bounds(name, grid).Right:0.#} px in a {grid.ActualWidth:0.#} px wide grid";
+                yield return $"{gridName}: the header '{name.Text}' ends at {Bounds(name, grid).Right:0.#} px in a {grid.ActualWidth:0.#} px wide grid "
+                    + $"(row headers {grid.HeadersVisibility}, {grid.RowHeaderWidth:0.#} px; columns {string.Join(", ", grid.Columns.Select(c => $"{PathOf(c)}={c.ActualWidth:0}"))})";
             }
         }
     }
