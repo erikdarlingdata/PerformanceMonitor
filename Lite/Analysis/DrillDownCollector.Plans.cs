@@ -34,7 +34,8 @@ public partial class DrillDownCollector
         var queryHash = finding.RootFactKey.Replace("BAD_ACTOR_", "");
         if (string.IsNullOrEmpty(queryHash)) return;
 
-        // Look up plan_handle from DuckDB for this query_hash
+        // Look up plan_handle from DuckDB for this query_hash in the finding's database (#8317). Byte-identical
+        // to Darling's PlanHandleLookupSql.
         string? planHandle = null;
         try
         {
@@ -48,12 +49,14 @@ SELECT plan_handle
 FROM v_query_stats
 WHERE server_id = $1
 AND   query_hash = $2
+AND   ($3 = '' OR database_name = $3)
 AND   plan_handle IS NOT NULL AND plan_handle != ''
 ORDER BY collection_time DESC
 LIMIT 1";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = queryHash });
+            cmd.Parameters.Add(new DuckDBParameter { Value = finding.DatabaseName ?? "" });
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (await reader.ReadAsync(context.CancellationToken) && !reader.IsDBNull(0))
