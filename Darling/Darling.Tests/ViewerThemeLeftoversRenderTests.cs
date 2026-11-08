@@ -205,6 +205,37 @@ public sealed class ViewerThemeLeftoversRenderTests
         return Colors.Magenta;
     }
 
+    /// <summary>
+    /// Every fill <paramref name="text"/> can be drawn on. A grid row's own background is a hover fill while the mouse is over it, so
+    /// reading it off the tree gave a different answer depending on where the mouse was. A row's text is measured on each fill a
+    /// row can show (its row, alternating row and hover fills, read from the grid and the row style); anything else has the one
+    /// fill behind it.
+    /// </summary>
+    private static List<(string Surface, Color Fill)> SurfacesBehind(TextBlock text)
+    {
+        DataGridRow? row = null;
+        for (var at = VisualTreeHelper.GetParent(text); at is not null && row is null; at = VisualTreeHelper.GetParent(at))
+        {
+            row = at as DataGridRow;
+        }
+
+        if (row is null)
+        {
+            return new() { ("card", BackgroundBehind(text)) };
+        }
+
+        var grid = (DataGrid)ItemsControl.ItemsControlFromItemContainer(row);
+        var hover = row.Style.Triggers.OfType<Trigger>()
+            .First(t => t.Property == UIElement.IsMouseOverProperty).Setters.OfType<Setter>()
+            .First(s => s.Property == Control.BackgroundProperty).Value;
+        return new()
+        {
+            ("row", ColorOf(grid.RowBackground)),
+            ("alternating row", ColorOf(grid.AlternatingRowBackground)),
+            ("hovered row", ColorOf(hover as Brush)),
+        };
+    }
+
     [Theory]
     [InlineData("Light")]
     [InlineData("CoolBreeze")]
@@ -223,7 +254,7 @@ public sealed class ViewerThemeLeftoversRenderTests
                 ClippedTextProbe.Settle(window);
                 var found = Visuals<TextBlock>(tab)
                     .Where(t => t.Text is "Healthy" or "SYNCHRONIZED")
-                    .Select(t => (t.Text, Ratio: WcagContrast.Ratio(ColorOf(t.Foreground), BackgroundBehind(t))))
+                    .SelectMany(t => SurfacesBehind(t).Select(s => (t.Text, s.Surface, Ratio: WcagContrast.Ratio(ColorOf(t.Foreground), s.Fill))))
                     .ToList();
                 return found;
             }
@@ -234,10 +265,11 @@ public sealed class ViewerThemeLeftoversRenderTests
         });
 
         /* The group's "Healthy" badge and the sync state "SYNCHRONIZED" take a severity color. */
-        Assert.True(texts.Count >= 2, $"found {texts.Count} severity texts in {theme}: {string.Join(", ", texts.Select(t => t.Text))}");
-        foreach (var (text, ratio) in texts)
+        Assert.True(texts.Select(t => t.Text).Distinct().Count() == 2, $"found {texts.Count} severity texts in {theme}: {string.Join(", ", texts.Select(t => t.Text))}");
+        Assert.Contains(texts, t => t.Text == "SYNCHRONIZED" && t.Surface == "hovered row");
+        foreach (var (text, surface, ratio) in texts)
         {
-            Assert.True(ratio >= 4.5, $"'{text}' is {ratio:0.00}:1 on its card in {theme}");
+            Assert.True(ratio >= 4.5, $"'{text}' is {ratio:0.00}:1 on its {surface} in {theme}");
         }
     }
 

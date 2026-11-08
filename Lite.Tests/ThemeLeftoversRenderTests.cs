@@ -317,9 +317,24 @@ public sealed class ThemeLeftoversRenderTests
     private static double Distance(Color a, Color b) =>
         Math.Sqrt(Math.Pow(a.R - b.R, 2) + Math.Pow(a.G - b.G, 2) + Math.Pow(a.B - b.B, 2));
 
+    /// <summary>The color's hue in degrees, 0 to 360 (0 is red, 30 orange, 60 yellow).</summary>
+    private static double Hue(Color c)
+    {
+        double r = c.R / 255.0, g = c.G / 255.0, b = c.B / 255.0;
+        var max = Math.Max(r, Math.Max(g, b));
+        var delta = max - Math.Min(r, Math.Min(g, b));
+        var hue = delta == 0 ? 0
+            : max == r ? 60 * (((g - b) / delta) % 6)
+            : max == g ? 60 * (((b - r) / delta) + 2)
+            : 60 * (((r - g) / delta) + 4);
+        return hue < 0 ? hue + 360 : hue;
+    }
+
     /// <summary>
-    /// A blocking card (orange) and a stale one (amber) stay apart in every theme. Light and Cool Breeze once mapped both to the theme's
-    /// Warning brush. Dark keeps them 30 apart in RGB, so the two light themes may not be closer than 25.
+    /// A blocking card and a stale one stay apart in every theme, in Dark's order: blocking is the orange and stale the yellow, so
+    /// blocking's hue is lower (toward orange or red) than stale's. Light and Cool Breeze once mapped both to the theme's Warning brush,
+    /// then gave blocking a gold-brown and stale the Warning orange, which reversed the order and left the two borders near alike.
+    /// Dark keeps them 30 apart in RGB, so the two light themes may not be closer than 25.
     /// </summary>
     [Theory]
     [InlineData("Dark")]
@@ -331,6 +346,7 @@ public sealed class ThemeLeftoversRenderTests
         var (stale, _, _, _, _) = RenderedCard(theme, FleetCard(0, 0, ServerFreshness.Stale));
 
         Assert.NotEqual(blocking, stale);
+        Assert.True(Hue(blocking) < Hue(stale), $"blocking {blocking} (hue {Hue(blocking):0}) is not toward orange of stale {stale} (hue {Hue(stale):0}) in {theme}");
         Assert.True(Distance(blocking, stale) >= 25, $"blocking {blocking} and stale {stale} are {Distance(blocking, stale):0} apart in {theme}");
     }
 
@@ -579,6 +595,37 @@ public sealed class ThemeLeftoversRenderTests
         return Colors.Magenta;
     }
 
+    /// <summary>
+    /// Every fill <paramref name="text"/> can be drawn on. A grid row's own background is a hover fill while the mouse is over it, so
+    /// reading it off the tree gave a different answer depending on where the mouse was. A row's text is measured on each fill a
+    /// row can show (its row, alternating row and hover fills, read from the grid and the row style); anything else has the one
+    /// fill behind it.
+    /// </summary>
+    private static List<(string Surface, Color Fill)> SurfacesBehind(TextBlock text)
+    {
+        DataGridRow? row = null;
+        for (var at = VisualTreeHelper.GetParent(text); at is not null && row is null; at = VisualTreeHelper.GetParent(at))
+        {
+            row = at as DataGridRow;
+        }
+
+        if (row is null)
+        {
+            return new() { ("card", BackgroundBehind(text)) };
+        }
+
+        var grid = (DataGrid)ItemsControl.ItemsControlFromItemContainer(row);
+        var hover = row.Style.Triggers.OfType<Trigger>()
+            .First(t => t.Property == UIElement.IsMouseOverProperty).Setters.OfType<Setter>()
+            .First(s => s.Property == Control.BackgroundProperty).Value;
+        return new()
+        {
+            ("row", ColorOf(grid.RowBackground)),
+            ("alternating row", ColorOf(grid.AlternatingRowBackground)),
+            ("hovered row", ColorOf(hover as Brush)),
+        };
+    }
+
     private static List<AgTopologyCard> OneGroup()
     {
         var at = new DateTime(2026, 9, 25, 12, 0, 0);
@@ -621,7 +668,7 @@ public sealed class ThemeLeftoversRenderTests
                 Settle(window);
                 return Visuals<TextBlock>(tab)
                     .Where(t => t.Text is "Healthy" or "SYNCHRONIZED")
-                    .Select(t => (t.Text, Ratio: WcagContrast.Ratio(ColorOf(t.Foreground), BackgroundBehind(t))))
+                    .SelectMany(t => SurfacesBehind(t).Select(s => (t.Text, s.Surface, Ratio: WcagContrast.Ratio(ColorOf(t.Foreground), s.Fill))))
                     .ToList();
             }
             finally
@@ -631,10 +678,11 @@ public sealed class ThemeLeftoversRenderTests
         });
 
         /* The group's "Healthy" badge and the sync state "SYNCHRONIZED" take a severity color. */
-        Assert.True(texts.Count >= 2,$"found {texts.Count} severity texts in {theme}: {string.Join(", ", texts.Select(t => t.Text))}");
-        foreach (var (text, ratio) in texts)
+        Assert.True(texts.Select(t => t.Text).Distinct().Count() == 2, $"found {texts.Count} severity texts in {theme}: {string.Join(", ", texts.Select(t => t.Text))}");
+        Assert.Contains(texts, t => t.Text == "SYNCHRONIZED" && t.Surface == "hovered row");
+        foreach (var (text, surface, ratio) in texts)
         {
-            Assert.True(ratio >= 4.5, $"'{text}' is {ratio:0.00}:1 on its card in {theme}");
+            Assert.True(ratio >= 4.5, $"'{text}' is {ratio:0.00}:1 on its {surface} in {theme}");
         }
     }
 
