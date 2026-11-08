@@ -78,8 +78,8 @@ public sealed class LiteOverviewCardExplainsItselfTests
 
         foreach (var card in EveryState())
         {
-            /* Offline is the documented exception and is checked on its own below: the card draws a dimming
-               overlay over those rows because the numbers under it are pre-blackout. */
+            /* Offline is the documented exception and is checked on its own below: the card's Blocking and
+               Deadlocks rows read "--" in grey there, because the numbers behind them are pre-blackout. */
             if (card.IsOffline)
             {
                 continue;
@@ -145,9 +145,10 @@ public sealed class LiteOverviewCardExplainsItselfTests
     }
 
     /// <summary>
-    /// An offline card is not told to act on the numbers behind its own blackout overlay. Those are the last
-    /// values collected before the server went dark; the card dims them for that reason, and a tooltip
-    /// demanding attention for them would contradict the card while the reader is looking at it.
+    /// An offline card is not told to act on the numbers from before its own blackout. Those are the last
+    /// values collected before the server went dark; its Blocking and Deadlocks rows read "--" for that reason
+    /// (#8304), and a tooltip demanding attention for them would contradict the card while the reader is
+    /// looking at it.
     /// </summary>
     [Fact]
     public void TheTooltip_OnAnOfflineCard_DoesNotDemandActionOnPreBlackoutNumbers()
@@ -161,8 +162,10 @@ public sealed class LiteOverviewCardExplainsItselfTests
         Assert.DoesNotContain("CPU", tooltip, StringComparison.Ordinal);
 
         /* The reason itself is still computed — the omission is a tooltip decision, made in one place, not a
-           hole in what the card knows. */
-        Assert.Equal("SQL CPU 96%, Deadlocks 2", card.StatusReason);
+           hole in what the card knows. It quotes the rows as they read: the Deadlocks row shows "--" on a dark
+           server (#8304), so the reason does not name it. */
+        Assert.Equal("--", card.DeadlockDisplay);
+        Assert.Equal("SQL CPU 96%", card.StatusReason);
     }
 
     /// <summary>"Unknown" is the one word with nothing behind it: no connection check has run. Not knowing
