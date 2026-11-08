@@ -444,7 +444,13 @@ VALUES ({_nextId++}, {Ts(Whole(NowUtc.AddDays(-10)))}, {ServerId}, 'TestSrv', 'D
             }
         });
 
-        Assert.True(writeLockTaken.Wait(waitBudget, TestContext.Current.CancellationToken), "the write lock was not taken");
+        if (!writeLockTaken.Wait(waitBudget, TestContext.Current.CancellationToken))
+        {
+            /* The holder's budget is this wait's, so its StoreLockTimeoutException, which names who held the lock and for how long
+               from the holder registry, is due a moment later. Surface that instead of a bare "not taken". */
+            await holder.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            Assert.Fail("the write lock was not taken, and the holder thread did not say why");
+        }
         run = Task.Run(() => Collect(facts), TestContext.Current.CancellationToken);
         startReader.Set();
         var holderResult = await holder.WaitAsync(waitBudget + waitBudget, TestContext.Current.CancellationToken);
