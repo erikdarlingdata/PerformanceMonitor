@@ -438,7 +438,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
             {
                 using var readLock = initializer.AcquireReadLock();
                 readerReady.Set();
-                releaseReader.Wait();
+                releaseReader.Wait(TimeSpan.FromSeconds(30));
             });
             Assert.True(readerReady.Wait(TimeSpan.FromSeconds(5)), "The reader never took the read lock");
 
