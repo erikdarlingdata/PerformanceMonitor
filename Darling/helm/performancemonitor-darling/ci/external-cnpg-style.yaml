@@ -65,16 +65,16 @@ resources:
 persistence:
   existingClaim: darling-state
 
-network:
-  allowFrom: [10.244.0.0/16]
-
 web:
   publicBaseUrl: https://darling.example.com
   network:
+    # The dashboard judges the client address the controller forwards: the operators' network.
+    allowFrom: [192.0.2.0/24]
+    # The ingress controller pods.
     trustedProxies: [10.244.0.0/16]
   ingress:
     enabled: true
-    className: nginx
+    className: example-ingress
     hosts: [darling.example.com]
     tls:
       - secretName: darling-web-tls
@@ -84,9 +84,12 @@ web:
 
 mcp:
   enabled: true
+  network:
+    # The MCP endpoint judges the connection: the ingress controller pods.
+    allowFrom: [10.244.0.0/16]
   ingress:
     enabled: true
-    className: nginx
+    className: example-ingress
     hosts: [darling-mcp.example.com]
     tls:
       - secretName: darling-mcp-tls

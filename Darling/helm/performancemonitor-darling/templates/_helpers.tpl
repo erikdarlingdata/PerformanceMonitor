@@ -75,31 +75,35 @@ because Darling reads darling.json case-insensitively. Arguments: dict "cfg" <ma
 {{- if $ok -}}true{{- end -}}
 {{- end -}}
 
-{{/* The chart owns these keys of darling.json. Setting one inside `config` fails the render and names the value to use. */}}
+{{/* The chart owns these keys of darling.json. Setting one inside `config` fails the render and names the value to use;
+an empty value name means the chart sets the key itself and nothing overrides it. */}}
 {{- define "performancemonitor-darling.checkOwnedKeys" -}}
 {{- $owned := list
-  (list (list "postgres" "managed") "nothing: the chart sets the store mode")
+  (list (list "postgres" "managed") "")
   (list (list "postgres" "connectionString") "store.*")
   (list (list "web" "enabled") "web.enabled")
   (list (list "web" "port") "web.port")
   (list (list "web" "network" "listen") "web.* or network.*")
-  (list (list "web" "network" "allowFrom") "web.* or network.*")
-  (list (list "web" "network" "trustedProxies") "web.* or network.*")
+  (list (list "web" "network" "allowFrom") "web.network.allowFrom or network.allowFrom")
+  (list (list "web" "network" "trustedProxies") "web.network.trustedProxies or network.trustedProxies")
   (list (list "web" "network" "token") "web.* or network.* (the token comes from the chart Secret)")
   (list (list "web" "publicBaseUrl") "web.publicBaseUrl")
   (list (list "mcp" "enabled") "mcp.enabled")
   (list (list "mcp" "port") "mcp.port")
   (list (list "mcp" "network" "listen") "mcp.* or network.*")
-  (list (list "mcp" "network" "allowFrom") "mcp.* or network.*")
-  (list (list "mcp" "network" "trustedProxies") "mcp.* or network.*")
+  (list (list "mcp" "network" "allowFrom") "mcp.network.allowFrom or network.allowFrom")
   (list (list "mcp" "network" "token") "mcp.* or network.* (the token comes from the chart Secret)")
-  (list (list "health") "nothing: the chart sets it from the probes")
+  (list (list "health") "")
   (list (list "passwordKey") "passwordKey.*")
 -}}
 {{- range $owned -}}
 {{- $path := index . 0 -}}
 {{- if include "performancemonitor-darling.pathPresent" (dict "cfg" $.Values.config "path" $path) -}}
+{{- if index . 1 -}}
 {{- fail (printf "config.%s is owned by the chart and cannot be set inside config; use the value %s instead" (join "." $path) (index . 1)) -}}
+{{- else -}}
+{{- fail (printf "config.%s is owned by the chart and cannot be set inside config: the chart sets it, and it cannot be overridden" (join "." $path)) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -125,11 +129,15 @@ Arguments: dict "ctx" <root> "surface" "web"|"mcp" "field" "allowFrom"|"trustedP
 {{- end -}}
 {{- if eq $s "web" -}}
 {{- if not (fromJsonArray (include "performancemonitor-darling.netList" (dict "ctx" .ctx "surface" "web" "field" "trustedProxies"))) -}}
-{{- fail "web.ingress.enabled needs network.trustedProxies (or web.network.trustedProxies): the CIDRs of the ingress controller pods, so the dashboard trusts the forwarded client address and scheme. Without them the dashboard refuses every request that arrives through the Ingress." -}}
+{{- fail "web.ingress.enabled needs web.network.trustedProxies (or network.trustedProxies): the CIDRs of the ingress controller pods. With them the dashboard takes the client address from the controller's X-Forwarded-For (the address allowFrom and the sign-in throttle judge) and the scheme from X-Forwarded-Proto (the Secure session cookie, and an https OIDC redirect)." -}}
 {{- end -}}
+{{- if not (fromJsonArray (include "performancemonitor-darling.netList" (dict "ctx" .ctx "surface" "web" "field" "allowFrom"))) -}}
+{{- fail "web.ingress.enabled needs web.network.allowFrom (or network.allowFrom): the client addresses the ingress controller forwards, that is your operators' addresses. Behind the trusted proxies the dashboard judges allowFrom on the forwarded client, not on the controller." -}}
 {{- end -}}
-{{- if not (fromJsonArray (include "performancemonitor-darling.netList" (dict "ctx" .ctx "surface" $s "field" "allowFrom"))) -}}
-{{- fail (printf "%s.ingress.enabled needs network.allowFrom (or %s.network.allowFrom): the CIDRs of the ingress controller pods. Without them every request that arrives through the Ingress is refused." $s $s) -}}
+{{- else -}}
+{{- if not (fromJsonArray (include "performancemonitor-darling.netList" (dict "ctx" .ctx "surface" "mcp" "field" "allowFrom"))) -}}
+{{- fail "mcp.ingress.enabled needs mcp.network.allowFrom (or network.allowFrom): the CIDRs of the ingress controller pods. The MCP endpoint never reads X-Forwarded-For, so it judges the connection, which comes from the controller." -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 

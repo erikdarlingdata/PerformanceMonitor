@@ -143,15 +143,23 @@ store:
       name: ""
       key: ca.crt
 
-# Network settings shared by the web dashboard and the MCP endpoint. Both listen on 0.0.0.0 inside the pod; who may connect
-# is decided by allowFrom (Darling refuses clients outside the list; loopback is always admitted).
+# Network settings shared by the web dashboard and the MCP endpoint. Both listen on 0.0.0.0 inside the pod (IPv4: IPv6-only
+# clusters are not supported), and allowFrom decides who is served (Darling refuses clients outside the list; a loopback
+# connection is always admitted).
 network:
   # CIDRs allowed to connect (one /32 per single address). Empty admits loopback only (the chart renders 127.0.0.1/32,
-  # because Darling refuses an empty list with a Critical log line). Required when an Ingress is enabled: the CIDRs of the
-  # ingress controller pods. A surface's own network.allowFrom wins over this.
+  # because Darling refuses an empty list with a Critical log line). An enabled Ingress needs it, and the two surfaces judge
+  # different addresses behind one, so set the per-surface lists rather than this shared one:
+  # - web.network.allowFrom: the dashboard trusts X-Forwarded-For from trustedProxies, so it judges the client address the
+  #   ingress controller forwards. List your operators' addresses.
+  # - mcp.network.allowFrom: the MCP endpoint never reads X-Forwarded-For, so it judges the connection itself. List the
+  #   ingress controller pods' CIDR.
+  # A surface's own network.allowFrom wins over this.
   allowFrom: []
-  # CIDRs of the proxies in front of the dashboard whose X-Forwarded-* headers it may trust. Required when web.ingress is
-  # enabled. Applies to the web dashboard only (the MCP endpoint has no such setting). web.network.trustedProxies wins over this.
+  # CIDRs of the proxies (the ingress controller pods) whose X-Forwarded-For, -Proto and -Host the dashboard trusts: the
+  # forwarded client is then what allowFrom and the sign-in throttle judge, the session cookie gets Secure, and an OIDC
+  # redirect uses https. Required when web.ingress is enabled. Applies to the web dashboard only (the MCP endpoint has no
+  # such setting). web.network.trustedProxies wins over this.
   trustedProxies: []
 
 web:
@@ -163,12 +171,13 @@ web:
   # (https when a tls entry covers that host); with no Ingress it stays unset.
   publicBaseUrl: ""
   network:
-    # Overrides network.allowFrom for the dashboard when non-empty.
+    # Overrides network.allowFrom for the dashboard when non-empty. Behind an Ingress: the client addresses the controller
+    # forwards (your operators' addresses), not the controller.
     allowFrom: []
     # Overrides network.trustedProxies for the dashboard when non-empty.
     trustedProxies: []
   ingress:
-    # Create an Ingress for the dashboard. Needs hosts, network.trustedProxies and network.allowFrom.
+    # Create an Ingress for the dashboard. Needs hosts, trustedProxies and allowFrom (see network above).
     enabled: false
     # IngressClass name. Empty uses the cluster default.
     className: ""
@@ -185,10 +194,10 @@ mcp:
   # Port of the MCP endpoint inside the pod, and of its Service.
   port: 5152
   network:
-    # Overrides network.allowFrom for the MCP endpoint when non-empty.
+    # Overrides network.allowFrom for the MCP endpoint when non-empty. Behind an Ingress: the ingress controller pods' CIDR.
     allowFrom: []
   ingress:
-    # Create an Ingress for the MCP endpoint. Needs hosts and network.allowFrom. The first host becomes the one DNS name
+    # Create an Ingress for the MCP endpoint. Needs hosts and allowFrom (see network above). The first host becomes the one DNS name
     # the endpoint admits in the Host header (mcp.network.hostName), unless config sets it.
     enabled: false
     # IngressClass name. Empty uses the cluster default.

@@ -98,7 +98,7 @@ The bundled store runs custom alerts. An external store does not, by design, and
 | `store.mode` | `bundled` | `bundled` or `external`. |
 | `store.bundled.image`, `.persistence`, `.auth.existingSecret`, `.resources` | the image above, `10Gi`, none, requests 2Gi and limit 4Gi memory | The bundled store. |
 | `store.external.*` | empty | The external store (above). |
-| `network.allowFrom` | `[]` | Client CIDRs the dashboard and MCP endpoint admit. Empty renders `127.0.0.1/32`. |
+| `network.allowFrom` | `[]` | Client CIDRs the dashboard and MCP endpoint admit, unless a surface sets its own. Empty renders `127.0.0.1/32`. |
 | `network.trustedProxies` | `[]` | Proxy CIDRs the dashboard trusts `X-Forwarded-*` from. |
 | `web.enabled`, `web.port`, `web.publicBaseUrl` | `true`, `5153`, derived | The dashboard. |
 | `web.network.*`, `web.ingress.*` | empty, disabled | Per-surface overrides, and the dashboard Ingress. |
@@ -115,9 +115,10 @@ The chart sets `postgres`, `health`, `passwordKey`, `web.enabled`, `web.port`, `
 
 Darling listens on `0.0.0.0` inside the pod, and `allowFrom` decides who it serves. The default is `["127.0.0.1/32"]` (Darling refuses an empty list), so only a port-forward reaches it. For an Ingress:
 
-- `network.allowFrom` is required: it must cover the addresses Darling sees the client as. Behind an Ingress, that is judged on the forwarded client address, so list the operators' addresses (and, for a surface with no trusted proxy, the controller pods).
-- For the dashboard, `network.trustedProxies` is required too: the CIDRs of the ingress controller pods, so the dashboard trusts the forwarded address and scheme.
-- Rendering fails with a message naming the missing value otherwise, rather than producing a dashboard that refuses every request.
+- For the dashboard, `web.network.trustedProxies` (or `network.trustedProxies`) is required: the CIDRs of the ingress controller pods. The dashboard then takes the client address from the controller's `X-Forwarded-For` (the address `allowFrom` and the sign-in throttle judge) and the scheme from `X-Forwarded-Proto` (the `Secure` session cookie, and an `https` OIDC redirect).
+- `allowFrom` is required, and the two surfaces judge different addresses, so set it per surface. `web.network.allowFrom` is judged on the forwarded client: list your operators' addresses, not the controller. `mcp.network.allowFrom` is judged on the connection, because the MCP endpoint never reads `X-Forwarded-For`: list the ingress controller pods' CIDR. The shared `network.allowFrom` applies to a surface that sets none.
+- What the controller writes into `X-Forwarded-For` depends on how traffic reaches it: behind a LoadBalancer Service with `externalTrafficPolicy: Cluster` it is often a node address, not the operator's. Check the controller's own log before you write the web list.
+- Rendering fails with a message naming the missing value otherwise.
 - `web.publicBaseUrl` defaults to `https://<first web ingress host>` when a TLS entry covers it, and `http://` when none does.
 - For MCP, Darling's Host guard admits one DNS name. The chart sets `mcp.network.hostName` to the first MCP Ingress host (set it in `config` to use another), so only that host works.
 

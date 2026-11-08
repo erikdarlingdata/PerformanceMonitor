@@ -330,8 +330,8 @@ assert_eq "$(doc Ingress "${DEPLOY}-web" | yq -o=json -I=0 '.spec.rules[0].http.
   '{"path":"/","pathType":"Prefix","backend":{"service":{"name":"'"${DEPLOY}-web"'","port":{"number":5153}}}}' "ingress backend"
 
 t mcp_ingress
-render --set mcp.enabled=true --set mcp.ingress.enabled=true --set 'mcp.ingress.hosts={m.example.com}' --set 'network.allowFrom={10.1.0.0/16}' --set mcp.ingress.className=nginx
-assert_eq "$(doc Ingress "${DEPLOY}-mcp" | yq '.spec.ingressClassName')" "nginx" "mcp class"
+render --set mcp.enabled=true --set mcp.ingress.enabled=true --set 'mcp.ingress.hosts={m.example.com}' --set 'network.allowFrom={10.1.0.0/16}' --set mcp.ingress.className=example-ingress
+assert_eq "$(doc Ingress "${DEPLOY}-mcp" | yq '.spec.ingressClassName')" "example-ingress" "mcp class"
 assert_eq "$(config_json '.mcp.network.hostName')" '"m.example.com"' "mcp hostName from the Ingress host"
 
 t fail_ingress_without_trusted_proxies
@@ -340,6 +340,27 @@ assert_fails "network.trustedProxies" --set web.ingress.enabled=true --set 'web.
 t fail_ingress_without_allow_from
 assert_fails "network.allowFrom" --set web.ingress.enabled=true --set 'web.ingress.hosts={d.example.com}' --set 'network.trustedProxies={10.1.0.0/16}'
 assert_fails "network.allowFrom" --set mcp.enabled=true --set mcp.ingress.enabled=true --set 'mcp.ingress.hosts={m.example.com}'
+
+t fail_ingress_allow_from_names_what_each_surface_judges
+# The dashboard judges the forwarded client (operators), the MCP endpoint the connection (the controller pods).
+assert_fails "web.network.allowFrom (or network.allowFrom): the client addresses the ingress controller forwards" \
+  --set web.ingress.enabled=true --set 'web.ingress.hosts={d.example.com}' --set 'network.trustedProxies={10.1.0.0/16}'
+assert_fails "mcp.network.allowFrom (or network.allowFrom): the CIDRs of the ingress controller pods" \
+  --set mcp.enabled=true --set mcp.ingress.enabled=true --set 'mcp.ingress.hosts={m.example.com}'
+assert_fails "X-Forwarded-For" --set web.ingress.enabled=true --set 'web.ingress.hosts={d.example.com}' --set 'network.allowFrom={10.1.0.0/16}'
+if helm template "${RELEASE}" "${CHART_DIR}" --set web.ingress.enabled=true --set 'web.ingress.hosts={d.example.com}' \
+  --set 'network.allowFrom={10.1.0.0/16}' 2>&1 | grep -qF "refuses every request"; then
+  echo "the trustedProxies message still says the dashboard refuses every request" >&2; exit 1
+fi
+
+t owned_key_messages
+assert_fails "config.postgres.managed is owned by the chart and cannot be set inside config: the chart sets it, and it cannot be overridden" --set config.postgres.managed=true
+assert_fails "config.health is owned by the chart and cannot be set inside config: the chart sets it, and it cannot be overridden" --set config.health.port=1
+if helm template "${RELEASE}" "${CHART_DIR}" --set config.postgres.managed=true 2>&1 | grep -qF "use the value nothing"; then
+  echo "the owned-key message still says 'use the value nothing'" >&2; exit 1
+fi
+# Darling has no mcp.network.trustedProxies, so the chart does not own (or refuse) it.
+render --set mcp.enabled=true --set 'config.mcp.network.trustedProxies={10.0.0.0/8}'
 
 t fail_ingress_misconfigured
 assert_fails "web.ingress.hosts" --set web.ingress.enabled=true --set 'network.trustedProxies={10.1.0.0/16}' --set 'network.allowFrom={10.1.0.0/16}'
@@ -405,3 +426,6 @@ assert_eq "$(dq '.spec.template.spec.volumes[] | select(.name == "state") | .per
 assert_eq "$(config_json '.mcp.tokens | length')" "2" "two MCP tokens"
 assert_eq "$(config_json '.postgres.connectionString')" '"Host=sql.example.internal;Port=5432;Database=darling;Username=darling;SSL Mode=VerifyFull;Root Certificate=/etc/darling/store-ca/ca.crt"' "external connection string"
 assert_eq "$(yq 'select(.kind == "Ingress") | .metadata.name' "${OUT}" | grep -v -- '---' | sort | tr '\n' ' ')" "t-performancemonitor-darling-mcp t-performancemonitor-darling-web " "both Ingresses"
+assert_eq "$(config_json '.web.network.allowFrom')" '["192.0.2.0/24"]' "web allowFrom: the operators' network"
+assert_eq "$(config_json '.web.network.trustedProxies')" '["10.244.0.0/16"]' "web trustedProxies: the controller pods"
+assert_eq "$(config_json '.mcp.network.allowFrom')" '["10.244.0.0/16"]' "mcp allowFrom: the controller pods"

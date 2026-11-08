@@ -19,6 +19,6 @@ The chart README is the reference. It covers:
 - [readiness](../../Darling/helm/performancemonitor-darling/README.md#readiness), which follows the collector (see [the health port](network-endpoints.md#the-health-port));
 - [upgrades](../../Darling/helm/performancemonitor-darling/README.md#upgrades).
 
-Out of the box only `kubectl port-forward` reaches the dashboard. An Ingress needs `network.allowFrom` and, for the dashboard, `network.trustedProxies`; see [Opt-in Network Endpoints](network-endpoints.md).
+Out of the box only `kubectl port-forward` reaches the dashboard. An Ingress needs `allowFrom` per surface (the dashboard judges the client address the controller forwards, the MCP endpoint the controller's own connection) and, for the dashboard, `trustedProxies`; see [reaching it from outside the cluster](../../Darling/helm/performancemonitor-darling/README.md#reaching-it-from-outside-the-cluster) and [Opt-in Network Endpoints](network-endpoints.md).
 
 If you write the manifests yourself instead, the pod needs the `securityContext` and the volume ownership steps in [Container user](security.md#container-user).
