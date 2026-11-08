@@ -120,11 +120,29 @@ public sealed class DarlingMcpOversizedPlanBacklogTools
                 ? await DarlingOversizedPlanBacklogReader.GetRowsAsync(postgres, id, limit, cancellationToken)
                 : null;
 
-            return JsonSerializer.Serialize(
+            /* The fleet answer is one by_server row per registered server, with no limit on the server count, so it is fitted to
+               the shared response target worst-first (the most pending rows, then the most rows): the servers left out are the
+               ones with the least to look at, and servers_returned / truncated / cut_note say they were. */
+            var ordered = servers
+                .OrderByDescending(r => r.PendingRows)
+                .ThenByDescending(r => r.TotalRows)
+                .ThenBy(r => r.ServerId)
+                .ToList();
+            return ordered.Count == 0
+                ? Answer(0)
+                : McpResponseBudget.FitPrefix(ordered.Count, Answer).Json;
+
+            string Answer(int shown) => JsonSerializer.Serialize(
                 new
                 {
                     scope,
                     capture_cap_bytes = QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes,
+                    servers_in_scope = ordered.Count,
+                    servers_returned = shown,
+                    truncated = shown < ordered.Count,
+                    cut_note = shown < ordered.Count
+                        ? McpResponseBudget.PageCutNote(ordered.Count, shown, "pending_rows desc, total_rows desc", "servers")
+                        : null,
                     note = "A worklist, not a series: these rows are updated in place, so there is no window "
                         + "and no trend. last_captured_at and last_expired_at are stamped by the out-of-band "
                         + "sweep and by nothing else, so they are how you tell a sweep that is working from one "
@@ -153,7 +171,7 @@ public sealed class DarlingMcpOversizedPlanBacklogTools
                         median_observed_bytes = c.MedianObservedBytes,
                         max_observed_bytes = c.MaxObservedBytes,
                     }),
-                    by_server = servers.Select(r => new
+                    by_server = ordered.Take(shown).Select(r => new
                     {
                         server_id = r.ServerId,
                         server_name = r.ServerName,

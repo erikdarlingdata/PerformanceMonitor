@@ -111,7 +111,7 @@ public sealed class DarlingMcpCustomAlertTools
         "here is accepted there too. A count-aggregate predicate that can fire when the count is 0 is always rejected: it " +
         "cannot tell zero events from a stalled collector. " +
         "<<GUIDE>> " +
-        "Dry-run: validates a custom-alert-rule definition WITHOUT persisting anything. Returns {valid:true} or " +
+        "Dry-run: validates a custom-alert-rule definition WITHOUT persisting anything. A servers scope is checked against the registry: an entry that is not an enabled server's registry name (a display name, a partial name, a typo) answers valid:false with unmatched_servers naming each entry and the registry name it resolves to, because the sweep matches registry names only and such a rule would never fire. Returns {valid:true} or " +
         "{valid:false, error:\"...\"} naming the first problem. This is the exact authority " +
         "create_custom_alert_rule / update_custom_alert_rule run before saving AND the evaluator applies when " +
         "it loads a rule, so use it to iterate on a generated definition until it is valid. The definition is a " +
@@ -133,19 +133,84 @@ public sealed class DarlingMcpCustomAlertTools
         "rejected because it cannot tell zero events from a stalled collector: a scalar '<'/'<=' (use '>=' " +
         "instead), or a 'between'/'outside' band whose firing region includes 0 (set the bounds so a count of 0 " +
         "does not fire).")]
-    public static Task<string> ValidateCustomAlertRule(
-        [Description("The rule definition JSON to validate (NOT persisted).")] string definition)
+    public static async Task<string> ValidateCustomAlertRule(
+        NpgsqlDataSource postgres,
+        [Description("The rule definition JSON to validate (NOT persisted).")] string definition,
+        CancellationToken cancellationToken = default)
     {
         try
         {
             var (parsed, error) = CustomAlertRuleDefinition.TryParse(definition);
-            return Task.FromResult(JsonSerializer.Serialize(
-                new { valid = parsed is not null && error is null, error }, McpHelpers.JsonOptions));
+            if (parsed is null || error is not null || parsed.ScopeMode != CustomAlertScopeMode.Servers)
+            {
+                return ValidationAnswer(parsed, error, registry: null);
+            }
+
+            /* A servers-scoped rule is matched against registry names at sweep time, so its list is checked against the registry
+               here. A registry read that fails makes no claim: the rule validates on its shape alone, as it did before the check. */
+            var (servers, fault) = await DarlingServerResolver.LoadEnabledOrFaultAsync(postgres, cancellationToken);
+            return ValidationAnswer(parsed, error, fault is null ? servers : null);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return Task.FromResult(McpHelpers.FormatError("validate_custom_alert_rule", ex));
+            return McpHelpers.FormatError("validate_custom_alert_rule", ex);
         }
+    }
+
+    /// <summary>The validation over an in-memory registry (null: no scope check), so the answer's shape and words test without a store.</summary>
+    internal static Task<string> ValidateCustomAlertRule(string definition, IReadOnlyList<RegisteredServer>? registry = null)
+    {
+        var (parsed, error) = CustomAlertRuleDefinition.TryParse(definition);
+        return Task.FromResult(ValidationAnswer(parsed, error, registry));
+    }
+
+    private static string ValidationAnswer(CustomAlertRuleDefinition? parsed, string? error, IReadOnlyList<RegisteredServer>? registry)
+    {
+        var unmatched = parsed is not null && error is null && registry is not null ? UnmatchedScopeServers(parsed, registry) : [];
+        if (unmatched.Count > 0)
+        {
+            return JsonSerializer.Serialize(new
+            {
+                valid = false,
+                error = UnmatchedScopeSentence(unmatched),
+                unmatched_servers = unmatched.Select(u => new { entry = u.Entry, registry_name = u.RegistryName }),
+            }, McpHelpers.JsonOptions);
+        }
+
+        return JsonSerializer.Serialize(new { valid = parsed is not null && error is null, error }, McpHelpers.JsonOptions);
+    }
+
+    /// <summary>A <c>scope.servers</c> entry no enabled server carries as its registry name, with the registry name it points at when
+    /// it resolves the way <c>server_name</c> does (exact, then partial, display names included), or null when it matches nothing.</summary>
+    internal sealed record UnmatchedScopeServer(string Entry, string? RegistryName);
+
+    /// <summary>
+    /// The <c>scope.servers</c> entries of a servers-scoped rule that the sweep would never match. The sweep compares each entry to
+    /// the registry name alone (<see cref="CustomAlertRuleDefinition.AppliesTo"/>), so a display name or a partial name validates,
+    /// saves, and never fires. Each miss is resolved as a <c>server_name</c> argument would be, so the answer can name the
+    /// registry name to use. Empty for a rule that is not servers-scoped.
+    /// </summary>
+    internal static List<UnmatchedScopeServer> UnmatchedScopeServers(CustomAlertRuleDefinition definition, IReadOnlyList<RegisteredServer> registry)
+    {
+        var misses = new List<UnmatchedScopeServer>();
+        if (definition.ScopeMode != CustomAlertScopeMode.Servers) return misses;
+        foreach (var entry in definition.ScopeServers)
+        {
+            if (registry.Any(s => string.Equals(s.ServerName, entry, StringComparison.OrdinalIgnoreCase))) continue;
+            var (resolved, resolveError) = DarlingServerResolver.ResolveOrError(registry, entry);
+            misses.Add(new UnmatchedScopeServer(entry, resolveError is null ? resolved.ServerName : null));
+        }
+        return misses;
+    }
+
+    private static string UnmatchedScopeSentence(IReadOnlyList<UnmatchedScopeServer> unmatched)
+    {
+        var parts = unmatched.Select(u => u.RegistryName is null
+            ? $"'{u.Entry}' matches no monitored server"
+            : $"'{u.Entry}' is not a registry name (it resolves to '{u.RegistryName}': use that)");
+        return "scope.servers names servers the rule would never evaluate: " + string.Join("; ", parts)
+            + ". The sweep matches each entry against the registry name alone (not a display name or a partial name), so saved as "
+            + "written this rule would never fire. unmatched_servers lists each entry with the registry name it points at.";
     }
 
     [McpServerTool(Name = "create_custom_alert_rule"), Description(
@@ -487,12 +552,15 @@ public sealed class DarlingMcpCustomAlertTools
                 .ToList();
             if (inScope.Count == 0)
             {
+                /* A servers list that matched none says which entries missed, and the registry name each one points at. */
+                var unmatched = UnmatchedScopeServers(def, servers);
                 return JsonSerializer.Serialize(new
                 {
                     status = "no_in_scope_servers",
                     rule_id = resolvedId,
                     name = ruleName,
-                    note = HysteresisNote,
+                    note = unmatched.Count > 0 ? UnmatchedScopeSentence(unmatched) + " " + HysteresisNote : HysteresisNote,
+                    unmatched_servers = unmatched.Count > 0 ? unmatched.Select(u => new { entry = u.Entry, registry_name = u.RegistryName }) : null,
                     results = Array.Empty<object>(),
                 }, McpHelpers.JsonOptions);
             }
