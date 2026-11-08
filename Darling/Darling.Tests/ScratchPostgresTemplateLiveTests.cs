@@ -113,9 +113,11 @@ public sealed class ScratchPostgresTemplateLiveTests
 
     /// <summary>
     /// A template nobody can connect to: a session in the source fails every clone, and the launcher must not start a
-    /// scheduler there. A sweep in another process can drop it, and this process recovers. The base string carries its own
-    /// application name, so this test has a template of its own: dropping the one the tests running beside it clone would
-    /// prove nothing more and slow them down.
+    /// scheduler there. An autovacuum worker is the one backend <c>ALLOW_CONNECTIONS false</c> does not keep out, and a
+    /// freshly migrated database draws one soon; <c>CREATE DATABASE</c> ends it before it clones, so it is not counted,
+    /// while a client session or a scheduler still is. A sweep in another process can drop it, and this process recovers.
+    /// The base string carries its own application name, so this test has a template of its own: dropping the one the
+    /// tests running beside it clone would prove nothing more and slow them down.
     /// </summary>
     [Fact]
     public async Task TheTemplate_IsClosedAndSessionFree_AndALostTemplateIsRebuilt()
@@ -132,7 +134,7 @@ public sealed class ScratchPostgresTemplateLiveTests
 
         Assert.False(await ScalarAsync<bool>(admin, $"SELECT datallowconn FROM pg_database WHERE datname = '{template.Name}'", ct));
         Assert.False(await ScalarAsync<bool>(admin, $"SELECT datistemplate FROM pg_database WHERE datname = '{template.Name}'", ct));
-        Assert.Equal(0L, await ScalarAsync<long>(admin, $"SELECT count(*) FROM pg_stat_activity WHERE datname = '{template.Name}'", ct));
+        Assert.Equal(0L, await ScalarAsync<long>(admin, $"SELECT count(*) FROM pg_stat_activity WHERE datname = '{template.Name}' AND backend_type <> 'autovacuum worker'", ct));
 
         await ScratchPostgres.DropRememberedAsync(template.Name);
         Assert.False(ScratchPostgres.IsRemembered(template.Name));

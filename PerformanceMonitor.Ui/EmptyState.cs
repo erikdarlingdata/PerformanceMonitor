@@ -6,9 +6,11 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Media;
 
 namespace PerformanceMonitor.Ui;
@@ -50,13 +52,7 @@ public static class EmptyState
     /// </summary>
     public static void Show(FrameworkElement surface, bool isEmpty, string? text = null, bool clearOfBaseline = false)
     {
-        /* A chart is often wrapped in a Border for its margin; the text then sits in the Border's cell. */
-        FrameworkElement anchor = surface;
-        while (anchor.Parent is Border border)
-        {
-            anchor = border;
-        }
-
+        var anchor = Anchor(surface);
         if (anchor.Parent is not Grid parent)
         {
             return;
@@ -102,6 +98,77 @@ public static class EmptyState
 
         existing.Text = text ?? GetText(surface) ?? DefaultGridText;
         existing.Visibility = isEmpty ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>The name given to the filtered-out element, so it is found again and never doubled.</summary>
+    public const string FilteredOutElementName = "FilteredOutText";
+
+    /// <summary>What a grid says when its column filters hide every row it has (#8187).</summary>
+    public const string FilteredOutText = "No rows match the column filters.";
+
+    /// <summary>The link under that text that clears the filters.</summary>
+    public const string ClearFiltersLinkText = "Clear filters";
+
+    /// <summary>
+    /// #8187: shows <see cref="FilteredOutText"/> with a <see cref="ClearFiltersLinkText"/> link over <paramref name="surface"/> when
+    /// <paramref name="allHidden"/>, hides it otherwise. The link runs <paramref name="clearFilters"/>. The text sits in the surface's
+    /// cell as <see cref="Show"/>'s does, and unlike that text it takes the mouse, so the link can be clicked. A grid with no rows at
+    /// all is <see cref="Show"/>'s case, never this one, so the two texts are never drawn together.
+    /// </summary>
+    public static void ShowFilteredOut(FrameworkElement surface, bool allHidden, Action clearFilters)
+    {
+        var anchor = Anchor(surface);
+        if (anchor.Parent is not Grid parent)
+        {
+            return;
+        }
+
+        var name = FilteredOutElementName + "_" + SurfaceKey(surface);
+        var existing = parent.Children.OfType<TextBlock>().FirstOrDefault(t => t.Name == name);
+
+        if (existing is null)
+        {
+            if (!allHidden)
+            {
+                return;
+            }
+
+            var link = new Hyperlink(new Run(ClearFiltersLinkText));
+            link.Click += (_, _) => clearFilters();
+
+            existing = new TextBlock
+            {
+                Name = name,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextAlignment = TextAlignment.Center,
+                TextWrapping = TextWrapping.Wrap,
+                MaxWidth = 520,
+                FontStyle = FontStyles.Italic,
+            };
+            existing.SetResourceReference(TextBlock.ForegroundProperty, "ForegroundDimBrush");
+            existing.Inlines.Add(new Run(FilteredOutText + " "));
+            existing.Inlines.Add(link);
+            Grid.SetRow(existing, Grid.GetRow(anchor));
+            Grid.SetColumn(existing, Grid.GetColumn(anchor));
+            Grid.SetRowSpan(existing, Grid.GetRowSpan(anchor));
+            Grid.SetColumnSpan(existing, Grid.GetColumnSpan(anchor));
+            parent.Children.Add(existing);
+        }
+
+        existing.Visibility = allHidden ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>A chart is often wrapped in a Border for its margin; the text then sits in the Border's cell.</summary>
+    private static FrameworkElement Anchor(FrameworkElement surface)
+    {
+        FrameworkElement anchor = surface;
+        while (anchor.Parent is Border border)
+        {
+            anchor = border;
+        }
+
+        return anchor;
     }
 
     /// <summary>Two surfaces in one cell (the Memory Grants charts are stacked by row, but a cell can hold two) each get their own text.</summary>

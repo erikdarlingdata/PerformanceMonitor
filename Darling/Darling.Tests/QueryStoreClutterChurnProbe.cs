@@ -136,9 +136,9 @@ internal static partial class QueryStoreClutterChurnProbe
             await insert.ExecuteNonQueryAsync(ct);
         }
 
-        /* VACUUM sets the visibility map, which production's autovacuum keeps set and an index-only walk needs to skip the heap. */
-        await using var analyze = new NpgsqlCommand("VACUUM (ANALYZE) query_store_stats", connection);
-        await analyze.ExecuteNonQueryAsync(ct);
+        /* VACUUM sets the visibility map, which production's autovacuum keeps set and an index-only walk needs to skip the heap.
+           #8204: until every page is marked, since one pass cannot mark them while an older snapshot is open in the database. */
+        await LiveVisibilityMap.VacuumUntilAllVisibleAsync(connection, "query_store_stats", ct);
     }
 
     internal sealed record Run(List<DarlingQueryStoreClutterReader.PlanChurnRow> Rows, string PlanText);
