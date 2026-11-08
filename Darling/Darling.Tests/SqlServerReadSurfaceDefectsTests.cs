@@ -224,6 +224,33 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
     }
 
     [Fact]
+    public async Task AutomaticTuningStaleness_IsMeasuredAtTheWindowsEnd_NotNow()
+    {
+        await WithStoreAsync(async (c, postgres, ct) =>
+        {
+            const string name = "apc-as-of";
+            var id = ServerIdHelper.GetDeterministicHashCode(name);
+            await DarlingMcpTestData.RegisterServerAsync(c, id, name, ct);
+            var captured = new DateTime(2026, 5, 1, 12, 0, 0, DateTimeKind.Utc);
+            await DarlingMcpTestData.ExecAsync(c, ct,
+                "INSERT INTO plan_correction (collection_id, collection_time, server_id, server_name, database_name, force_last_good_plan_desired_state, force_last_good_plan_actual_state, force_last_good_plan_reason) " +
+                "VALUES ($1, $2, $3, $4, 'Sales', 'ON', 'ON', NULL)",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(captured), id, name);
+
+            /* Read as of an hour after the capture: the snapshot is fresh at that instant, whatever the present date says. */
+            var anHourLater = Root(await DarlingMcpPlanCorrectionTools.GetPlanCorrections(postgres, server_name: name, as_of: captured.AddHours(1).ToString("o"), cancellationToken: ct));
+            Assert.Equal("Sales", anHourLater.GetProperty("automatic_tuning")[0].GetProperty("database_name").GetString());
+            Assert.Null(StringOrNull(anHourLater, "automatic_tuning_note"));
+
+            /* Read as of a day after: now it is stale, and the note says so. */
+            var aDayLater = Root(await DarlingMcpPlanCorrectionTools.GetPlanCorrections(postgres, server_name: name, as_of: captured.AddDays(1).ToString("o"), cancellationToken: ct));
+            var note = StringOrNull(aDayLater, "automatic_tuning_note");
+            Assert.Contains("1 day", note, StringComparison.Ordinal);
+            Assert.Contains("plan_correction", note, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
     public async Task QueryStoreHealth_OnAReadableSecondary_WithASnapshotFromItsPrimaryDays_CarriesTheSecondaryAndStalenessNotes()
     {
         await WithStoreAsync(async (c, postgres, ct) =>
