@@ -1,0 +1,98 @@
+name: Darling Helm chart
+
+# #8017: the generic Helm chart in Darling/helm/performancemonitor-darling. The static job needs no cluster: it lints the
+# chart, renders it with the default values and with each ci/*.yaml values file, validates every render against the
+# Kubernetes schemas (the oldest version the chart supports and the newest one kubeconform has schemas for), and runs the
+# render tests in the chart's tests/ directory.
+#
+# Triggers: a manual dispatch, a reusable-workflow call, and a pull request that touches the chart or the files the chart
+# mirrors (the compose file's store flags, the Dockerfile's user and paths, the store image pin in the Linux store workflow).
+# Never add `pull_request_target`: the job runs the checked-out chart and scripts and must not get a write token or secrets.
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'Darling/helm/**'
+      - '.github/workflows/darling-helm.yml'
+      - 'Darling/compose/docker-compose.yml'
+      - 'Darling/Dockerfile'
+      - '.github/workflows/darling-linux-store.yml'
+
+permissions:
+  contents: read
+
+env:
+  CHART_DIR: Darling/helm/performancemonitor-darling
+  HELM_VERSION: v3.17.0
+  YQ_VERSION: v4.53.2
+  KUBECONFORM_VERSION: v0.6.7
+  # The oldest version the chart's kubeVersion allows, and the newest one kubeconform's schemas cover.
+  KUBE_VERSION_OLDEST: 1.27.0
+  KUBE_VERSION_NEWEST: 1.37.0
+
+concurrency:
+  group: darling-helm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: Darling Helm chart (static)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      # Pinned binaries, so a new release of a tool cannot turn this red on its own.
+      - name: Install helm, yq and kubeconform
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="${RUNNER_TEMP}/bin"
+          mkdir -p "${bin}"
+
+          curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" | tar -xz -C "${RUNNER_TEMP}" linux-amd64/helm
+          mv "${RUNNER_TEMP}/linux-amd64/helm" "${bin}/helm"
+
+          curl -fsSL -o "${bin}/yq" "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+          chmod +x "${bin}/yq"
+
+          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar -xz -C "${bin}" kubeconform
+
+          echo "${bin}" >> "$GITHUB_PATH"
+          "${bin}/helm" version --short
+          "${bin}/yq" --version
+          "${bin}/kubeconform" -v
+
+      # The default values, then each ci/*.yaml values file. A chart with no ci directory yet is a chart with the defaults only.
+      - name: Lint, render and validate the chart
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          values_files=("" "${CHART_DIR}"/ci/*.yaml)
+          for values in "${values_files[@]}"; do
+            args=()
+            label="default values"
+            if [ -n "${values}" ]; then
+              args=(-f "${values}")
+              label="${values}"
+            fi
+            echo "::group::${label}"
+            helm lint "${CHART_DIR}" "${args[@]}"
+            for version in "${KUBE_VERSION_OLDEST}" "${KUBE_VERSION_NEWEST}"; do
+              echo "kubeconform ${version}"
+              helm template t "${CHART_DIR}" "${args[@]}" \
+                | kubeconform -strict -summary -kubernetes-version "${version}" -
+            done
+            echo "::endgroup::"
+          done
+
+      - name: Run the render tests
+        shell: bash
+        run: bash "${CHART_DIR}/tests/render-tests.sh"

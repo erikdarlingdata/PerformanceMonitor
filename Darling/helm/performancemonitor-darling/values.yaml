@@ -1,0 +1,61 @@
+# Default values for the performancemonitor-darling chart. Every key is documented here.
+# The pod always runs one replica with a Recreate strategy and a fixed non-root security context
+# (UID/GID 1654, the image's user); none of those are values.
+
+image:
+  # Image repository of the Darling collector service.
+  repository: ghcr.io/erikdarlingdata/performancemonitor-darling
+  # Image tag. Empty means the chart's appVersion. Pin it to a release for any real install.
+  tag: ""
+  # Optional image digest (sha256:...). When set, the image is rendered as repository:tag@digest.
+  digest: ""
+  # Image pull policy.
+  pullPolicy: IfNotPresent
+
+# Secrets used to pull the image from a private registry: a list of { name: <secret> }.
+imagePullSecrets: []
+
+# Override the chart name used in resource names and labels.
+nameOverride: ""
+# Override the full resource name prefix.
+fullnameOverride: ""
+
+# Resources of the Darling container.
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    memory: 4Gi
+
+persistence:
+  # Size of the state volume mounted at /var/lib/darling.
+  size: 1Gi
+  # Storage class of the state volume. Empty uses the cluster default; "-" disables dynamic provisioning.
+  storageClass: ""
+  # Use an existing PersistentVolumeClaim instead of creating one. The volume must be writable by UID/GID 1654.
+  existingClaim: ""
+
+# Extra annotations on the pod.
+podAnnotations: {}
+# Extra labels on the pod.
+podLabels: {}
+# Node selector of the pod.
+nodeSelector: {}
+# Tolerations of the pod.
+tolerations: []
+# Affinity of the pod.
+affinity: {}
+# Priority class of the pod.
+priorityClassName: ""
+# Extra /etc/hosts entries of the pod: a list of { ip, hostnames }.
+hostAliases: []
+
+# Extra environment variables of the Darling container (a list of EnvVar objects).
+extraEnv: []
+# Extra envFrom sources of the Darling container (a list of EnvFromSource objects).
+extraEnvFrom: []
+# Extra volumes of the pod (a list of Volume objects).
+extraVolumes: []
+# Extra volume mounts of the Darling container (a list of VolumeMount objects).
+extraVolumeMounts: []
