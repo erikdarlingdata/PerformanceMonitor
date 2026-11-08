@@ -29,10 +29,17 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
 {
     private readonly List<LaneInfo> _lanes = new();
     private readonly Popup _tooltip;
+    private readonly Border _tooltipFrame;
     private readonly TextBlock _tooltipText;
+    private SolidColorBrush _defaultBrush = Frozen(0xE0, 0xE0, 0xE0);
+    private SolidColorBrush _dimBrush = Frozen(0x90, 0x96, 0xA0);
+    private SolidColorBrush _aboveBrush = Frozen(0xFF, 0x52, 0x52);
+    private SolidColorBrush _belowBrush = Frozen(0x69, 0xF0, 0x69);
     private DateTime _lastUpdate;
     private double _lastPixelX = double.NaN;
     private bool _needsReanchor = true;
+    private FrameworkElement? _themeHost;
+    private bool _listensToTheme;
 
     /// <summary>
     /// The display zone when the lanes' X is the UTC instant (#4766), else <c>null</c>: X is then the server-time
@@ -45,10 +52,14 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
 
     public CorrelatedCrosshairManager()
     {
-        _tooltipText = new TextBlock
+        _tooltipText = new TextBlock { FontSize = 13 };
+
+        _tooltipFrame = new Border
         {
-            Foreground = new SolidColorBrush(Color.FromRgb(0xE0, 0xE0, 0xE0)),
-            FontSize = 13
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(3),
+            Padding = new Thickness(8, 4, 8, 4),
+            Child = _tooltipText
         };
 
         _tooltip = new Popup
@@ -56,17 +67,74 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
             Placement = PlacementMode.Relative,
             IsHitTestVisible = false,
             AllowsTransparency = true,
-            Child = new Border
-            {
-                Background = new SolidColorBrush(Color.FromRgb(0x33, 0x33, 0x33)),
-                BorderBrush = new SolidColorBrush(Color.FromRgb(0x55, 0x55, 0x55)),
-                BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(3),
-                Padding = new Thickness(8, 4, 8, 4),
-                Child = _tooltipText
-            }
+            Child = _tooltipFrame
         };
+
+        PaintTooltip();
     }
+
+    /* #8306: the tooltip takes the theme's tooltip colours (the ToolTip style's background, border and text), and the arrows the
+       theme's error and success colours. Painted when the manager is built, when the host given to FollowThemeWhileLoaded loads, and
+       on every theme switch while that host stays loaded, so a theme picked while the app runs reaches a tooltip that already exists. */
+    private void PaintTooltip()
+    {
+        _tooltipFrame.Background = ThemeBrush("BackgroundLightBrush", 0x33, 0x33, 0x33);
+        _tooltipFrame.BorderBrush = ThemeBrush("BorderLightBrush", 0x55, 0x55, 0x55);
+        _defaultBrush = ThemeBrush("ForegroundBrush", 0xE0, 0xE0, 0xE0);
+        _dimBrush = ThemeBrush("ForegroundMutedBrush", 0x90, 0x96, 0xA0);
+        _aboveBrush = ThemeBrush("ErrorBrush", 0xFF, 0x52, 0x52);
+        _belowBrush = ThemeBrush("SuccessBrush", 0x69, 0xF0, 0x69);
+        _tooltipText.Foreground = _defaultBrush;
+    }
+
+    private void OnThemeChanged(string theme) => PaintTooltip();
+
+    /// <summary>
+    /// Keeps the tooltip in the theme's colours while <paramref name="host"/>, the control that owns the lanes, is loaded: the tooltip is
+    /// painted when the host loads, and again on every theme switch until it unloads. The <see cref="ThemeManager.ThemeChanged"/>
+    /// subscription is taken on Loaded and dropped on Unloaded, so the static event never holds a closed tab through its manager, its plots
+    /// and their data, and a theme switched while the host is unloaded reaches the tooltip when the host loads again.
+    /// </summary>
+    public void FollowThemeWhileLoaded(FrameworkElement host)
+    {
+        DropThemeHost();
+        _themeHost = host;
+        host.Loaded += OnHostLoaded;
+        host.Unloaded += OnHostUnloaded;
+        if (host.IsLoaded) ListenToTheme();
+    }
+
+    private void OnHostLoaded(object sender, RoutedEventArgs e) => ListenToTheme();
+    private void OnHostUnloaded(object sender, RoutedEventArgs e) => StopListeningToTheme();
+
+    /// <summary>Paints the tooltip for the theme in force and, once, subscribes to theme switches.</summary>
+    private void ListenToTheme()
+    {
+        PaintTooltip();
+        if (_listensToTheme) return;
+        _listensToTheme = true;
+        ThemeManager.ThemeChanged += OnThemeChanged;
+    }
+
+    private void StopListeningToTheme()
+    {
+        if (!_listensToTheme) return;
+        _listensToTheme = false;
+        ThemeManager.ThemeChanged -= OnThemeChanged;
+    }
+
+    private void DropThemeHost()
+    {
+        StopListeningToTheme();
+        if (_themeHost is null) return;
+        _themeHost.Loaded -= OnHostLoaded;
+        _themeHost.Unloaded -= OnHostUnloaded;
+        _themeHost = null;
+    }
+
+    /// <summary>The theme's brush under <paramref name="key"/>, or a frozen brush of the given colour when the app has no theme (a headless host).</summary>
+    private static SolidColorBrush ThemeBrush(string key, byte r, byte g, byte b) =>
+        Application.Current?.TryFindResource(key) as SolidColorBrush ?? Frozen(r, g, b);
 
     /// <summary>
     /// Registers a chart lane for crosshair synchronization.
@@ -319,7 +387,7 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         var time = DateTime.FromOADate(xValue);
         _tooltipText.Inlines.Add(new Run(FormatCrosshairTime(time, DisplayZoneProvider)));
         if (_comparisonLabel != null)
-            _tooltipText.Inlines.Add(new Run($"  (dashed = {_comparisonLabel})") { Foreground = DimBrush });
+            _tooltipText.Inlines.Add(new Run($"  (dashed = {_comparisonLabel})") { Foreground = _dimBrush });
 
         foreach (var lane in _lanes)
         {
@@ -335,7 +403,7 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
                 double? value = FindNearestValue(series, xValue);
 
                 // Tooltip: value, plus an arrow when the value is outside the lane's baseline band
-                _tooltipText.Inlines.Add(new Run("\n" + LaneLine(lane.Label, value, lane.Unit)) { Foreground = DefaultBrush });
+                _tooltipText.Inlines.Add(new Run("\n" + LaneLine(lane.Label, value, lane.Unit)) { Foreground = _defaultBrush });
                 if (value.HasValue)
                 {
                     var indicator = ToIndicator(SingleSeriesArrow(lane, series, value.Value, xValue));
@@ -351,7 +419,7 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
                 {
                     var series = lane.Series[seriesIndex];
                     double? value = FindNearestValue(series, xValue);
-                    _tooltipText.Inlines.Add(new Run("\n" + LaneLine(series.Name, value, series.Unit ?? lane.Unit)) { Foreground = DefaultBrush });
+                    _tooltipText.Inlines.Add(new Run("\n" + LaneLine(series.Name, value, series.Unit ?? lane.Unit)) { Foreground = _defaultBrush });
                     if (value.HasValue)
                     {
                         var indicator = GetBaselineIndicator(lane, value.Value, seriesIndex, xValue);
@@ -362,7 +430,7 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
             }
             else
             {
-                _tooltipText.Inlines.Add(new Run($"\n{lane.Label}: —") { Foreground = DefaultBrush });
+                _tooltipText.Inlines.Add(new Run($"\n{lane.Label}: —") { Foreground = _defaultBrush });
             }
 
             lane.Chart.Refresh();
@@ -460,13 +528,6 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
     private static double? FindNearestValue(DataSeries series, double targetX)
         => EventLaneGeometry.NearestValue(series.Times, series.Values, targetX, series.IsEventBased, series.HoverToleranceDays);
 
-    private static readonly SolidColorBrush RedBrush = Frozen(0xFF, 0x52, 0x52);
-    private static readonly SolidColorBrush GreenBrush = Frozen(0x69, 0xF0, 0x69);
-    private static readonly SolidColorBrush DimBrush = Frozen(0x90, 0x96, 0xA0);
-    /* Reused on every mouse-move; cached + frozen so each move doesn't allocate a brush and they
-       carry no dispatcher-affinity / change-notification overhead. */
-    private static readonly SolidColorBrush DefaultBrush = Frozen(0xE0, 0xE0, 0xE0);
-
     private static SolidColorBrush Frozen(byte r, byte g, byte b)
     {
         var brush = new SolidColorBrush(Color.FromRgb(r, g, b));
@@ -476,7 +537,7 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
 
     private record struct BaselineIndicator(string Symbol, SolidColorBrush Brush);
 
-    private static BaselineIndicator? GetBaselineIndicator(LaneInfo lane, double value, int seriesIndex, double xValue)
+    private BaselineIndicator? GetBaselineIndicator(LaneInfo lane, double value, int seriesIndex, double xValue)
         => ToIndicator(BandArrow(lane, xValue, seriesIndex, value));
 
     private static string? BandArrow(LaneInfo lane, double xValue, int seriesIndex, double value)
@@ -485,12 +546,12 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         return BaselineArrowSymbol(upper, lower, lane.MinAnomalyValue, lane.IsEventBased, seriesIndex, value);
     }
 
-    private static BaselineIndicator? ToIndicator(string? symbol)
+    private BaselineIndicator? ToIndicator(string? symbol)
     {
         return symbol switch
         {
-            "▲" => new BaselineIndicator(symbol, RedBrush),
-            "▼" => new BaselineIndicator(symbol, GreenBrush),
+            "▲" => new BaselineIndicator(symbol, _aboveBrush),
+            "▼" => new BaselineIndicator(symbol, _belowBrush),
             _ => null
         };
     }
@@ -550,6 +611,7 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
 
     public void Dispose()
     {
+        DropThemeHost();
         _tooltip.IsOpen = false;
         foreach (var lane in _lanes)
         {

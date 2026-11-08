@@ -185,9 +185,9 @@ public sealed class ViewerTimeRangeGapFixTests
         var show = ViewerTypedRangeTests.StripComments(ViewerTypedRangeTests.MemberText(ViewerFile("ViewerServerTab.EventDataStart.cs"), "ShowEventDataStartAsync"));
         Assert.Single(Regex.Matches(show, @"\bUpdateTruncationBanner\("));
 
-        /* The feed reaches the two tabs that own a picker and a banner, and sets the note from the floor with no query. */
+        /* The feed reaches the Job History tab's own picker and sets its note from the floor with no query; a server tab's
+           picker names the server's data start instead, so the feed stops at the tab. */
         var note = ViewerTypedRangeTests.StripComments(ViewerFile("ViewerDataStartNote.cs"));
-        Assert.Contains("serverTab.RecordDataStart(floor)", note, StringComparison.Ordinal);
         Assert.Contains("jobHistory.RecordDataStart(floor)", note, StringComparison.Ordinal);
         Assert.DoesNotContain("await", note, StringComparison.Ordinal);
         Assert.Contains("TimeRangePickerControl.DataStartUtc = floor", Code("JobHistoryTab.xaml.cs"), StringComparison.Ordinal);

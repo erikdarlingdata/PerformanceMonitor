@@ -70,8 +70,9 @@ public partial class CorrelatedTimelineLanesControl : UserControl
            reasons (tab virtualization, layout rebuilds) and Dispose() clears
            the crosshair manager's lane list, permanently breaking the crosshair
            until the ServerTab is rebuilt. The manager holds only managed state
-           (a Popup + lane references) — letting GC clean it up with the control
-           is fine. */
+           (a Popup + lane references) and listens to the theme only while this
+           control is loaded (FollowThemeWhileLoaded, in Initialize), so no static
+           event holds it — letting GC clean it up with the control is fine. */
     }
 
     /// <summary>
@@ -99,6 +100,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         }
 
         _crosshairManager = new CorrelatedCrosshairManager { DisplayZoneProvider = ViewerTimeHelper.CurrentDisplayZone };
+        _crosshairManager.FollowThemeWhileLoaded(this);
         _crosshairManager.AddLane(CpuChart, "SQL CPU", "%");
         _crosshairManager.AddLane(WaitStatsChart, "Wait Stats", "ms/sec");
         _crosshairManager.AddLane(BlockingChart, "Blocking", PerformanceMonitor.Ui.BlockingTrendLabels.ReportsUnit);
