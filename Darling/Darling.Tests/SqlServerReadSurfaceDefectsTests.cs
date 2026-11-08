@@ -135,6 +135,38 @@ public sealed class SqlServerReadSurfaceDefectsLiveTests
     }
 
     [Fact]
+    public async Task CreateAndUpdate_RefuseADisplayNameScope_AndAnExactRegistryNameScopeSaves()
+    {
+        await WithStoreAsync(async (c, postgres, ct) =>
+        {
+            const string registryName = "PRODSQL03\\CORE";
+            var id = ServerIdHelper.GetDeterministicHashCode(registryName);
+            await DarlingMcpTestData.RegisterServerAsync(c, id, registryName, ct);
+            await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET display_name = 'Prod Core' WHERE server_id = $1", id);
+
+            const string metric = "{\"metric\":{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"hours\":1},\"predicate\":{\"op\":\"ge\",\"warnThreshold\":1000},";
+            var displayScope = metric + "\"scope\":{\"mode\":\"servers\",\"servers\":[\"Prod Core\"]}}";
+            var registryScope = metric + "\"scope\":{\"mode\":\"servers\",\"servers\":[\"" + registryName.Replace("\\", "\\\\") + "\"]}}";
+
+            var refused = Root(await DarlingMcpCustomAlertTools.CreateCustomAlertRule(postgres, "scope-display-name", displayScope));
+            Assert.Equal("invalid", StringOrNull(refused, "status"));
+            var entry = Assert.Single(refused.GetProperty("unmatched_servers").EnumerateArray());
+            Assert.Equal("Prod Core", entry.GetProperty("entry").GetString());
+            Assert.Equal(registryName, entry.GetProperty("registry_name").GetString());
+
+            /* A saved rule answers as the rule node (rule_id, previous, undo) with no status word; a refusal carries status. */
+            var saved = Root(await DarlingMcpCustomAlertTools.CreateCustomAlertRule(postgres, "scope-registry-name", registryScope));
+            Assert.False(saved.TryGetProperty("status", out _), "a scope of the registry name was refused: " + saved);
+            var ruleId = saved.EnumerateObject().First(p => p.Name is "rule_id" or "id" && p.Value.ValueKind == JsonValueKind.Number).Value.GetInt64();
+            Assert.True(ruleId > 0);
+
+            var updateRefused = Root(await DarlingMcpCustomAlertTools.UpdateCustomAlertRule(postgres, ruleId, 1, definition: displayScope));
+            Assert.Equal("invalid", StringOrNull(updateRefused, "status"));
+            Assert.Equal(registryName, Assert.Single(updateRefused.GetProperty("unmatched_servers").EnumerateArray()).GetProperty("registry_name").GetString());
+        });
+    }
+
+    [Fact]
     public async Task TheFleetBacklogAnswer_FitsTheResponseBudget_WorstFirst_AndSaysWhatItCut()
     {
         await WithStoreAsync(async (c, postgres, ct) =>
@@ -168,6 +200,8 @@ public sealed class SqlServerReadSurfaceDefectsLiveTests
             Assert.Equal(60, answer.GetProperty("servers_in_scope").GetInt32());
             Assert.Equal("backlog-60", byServer[0].GetProperty("server_name").GetString());
             Assert.Contains("TRUNCATED", StringOrNull(answer, "cut_note"));
+            /* The one lever that shows a cut server is server_name; this read has no window, database or server limit to narrow. */
+            Assert.Contains("Pass server_name", StringOrNull(answer, "cut_note"), StringComparison.Ordinal);
             /* The census is the rollup over every server, cut or not. */
             Assert.Equal(60, answer.GetProperty("by_collector")[0].GetProperty("servers").GetInt32());
         });
@@ -288,4 +322,51 @@ internal static class DarlingMcpSessionToolsHost
 {
     public static Task<string> JobHistory(NpgsqlDataSource postgres, string serverName, CancellationToken ct) =>
         DarlingMcpJobTools.GetJobHistory(postgres, server_name: serverName, cancellationToken: ct);
+}
+
+/// <summary>
+/// The validate answer over an in-memory registry: a display name, a partial name that one server answers to, a name that matches
+/// nothing and a prefix two servers share are each named with the registry name (or names) they point at, and no registry means no
+/// scope check.
+/// </summary>
+public sealed class CustomAlertScopeValidationTests
+{
+    private const string Rule =
+        "{\"metric\":{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"hours\":1}," +
+        "\"predicate\":{\"op\":\"ge\",\"warnThreshold\":1000}," +
+        "\"scope\":{\"mode\":\"servers\",\"servers\":[\"Prod Core\",\"PRODSQL02\",\"nowhere\",\"PRODSQL\"]}}";
+
+    private static readonly RegisteredServer[] Registry =
+    [
+        new(1, "PRODSQL01\\CORE", "Prod Core"),
+        new(2, "PRODSQL02\\CORE", "Prod Reporting"),
+    ];
+
+    [Fact]
+    public async Task EachEntryThatIsNotARegistryName_IsNamedWithWhatItPointsAt()
+    {
+        var answer = JsonDocument.Parse(await DarlingMcpCustomAlertTools.ValidateCustomAlertRule(Rule, Registry)).RootElement;
+        Assert.False(answer.GetProperty("valid").GetBoolean());
+        var error = answer.GetProperty("error").GetString()!;
+        Assert.Contains("matches several servers", error, StringComparison.Ordinal);
+        Assert.Contains("matches no monitored server", error, StringComparison.Ordinal);
+
+        var entries = answer.GetProperty("unmatched_servers").EnumerateArray().ToDictionary(e => e.GetProperty("entry").GetString()!, e => e);
+        Assert.Equal(4, entries.Count);
+        Assert.Equal("PRODSQL01\\CORE", entries["Prod Core"].GetProperty("registry_name").GetString());
+        Assert.Equal("PRODSQL02\\CORE", entries["PRODSQL02"].GetProperty("registry_name").GetString());
+        Assert.Equal(JsonValueKind.Null, entries["nowhere"].GetProperty("registry_name").ValueKind);
+        Assert.Equal(JsonValueKind.Null, entries["nowhere"].GetProperty("registry_names").ValueKind);
+        Assert.Equal(JsonValueKind.Null, entries["PRODSQL"].GetProperty("registry_name").ValueKind);
+        Assert.Equal(
+            new[] { "PRODSQL01\\CORE", "PRODSQL02\\CORE" },
+            entries["PRODSQL"].GetProperty("registry_names").EnumerateArray().Select(x => x.GetString()).OrderBy(x => x, StringComparer.Ordinal).ToArray());
+    }
+
+    [Fact]
+    public async Task NoRegistry_MeansNoScopeCheck_AndTheRuleValidatesOnItsShape()
+    {
+        var answer = JsonDocument.Parse(await DarlingMcpCustomAlertTools.ValidateCustomAlertRule(Rule, registry: null)).RootElement;
+        Assert.True(answer.GetProperty("valid").GetBoolean());
+    }
 }
