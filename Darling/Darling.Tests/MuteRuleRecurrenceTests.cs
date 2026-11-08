@@ -92,6 +92,18 @@ public sealed class MuteRuleRecurrenceTests
         Assert.Null(new MuteRule().NextWindowStartUtc(Utc(11, 4, 12, 0)));
     }
 
+    /// <summary>The end time is exclusive, so a daily window written as 00:00 to 23:59 closes at 23:59 and leaves the day's last
+    /// minute open. A rule with no times is the one that covers every minute of the day.</summary>
+    [Fact]
+    public void AWindowEndingAt2359_ClosesAtThatMinute_AndARuleWithNoTimesCoversIt()
+    {
+        var rule = Rule(null, "00:00", "23:59");
+        Assert.True(rule.IsInWindowAt(Utc(11, 7, 23, 58)));
+        Assert.False(rule.IsInWindowAt(Utc(11, 7, 23, 59)));
+        Assert.True(rule.IsInWindowAt(Utc(11, 8, 0, 0)));
+        Assert.True(new MuteRule().IsInWindowAt(Utc(11, 7, 23, 59)));
+    }
+
     [Theory]
     [InlineData(10, 31, 3, 0, true)]    // Friday 23:00 EDT
     [InlineData(10, 31, 5, 59, true)]   // Saturday 01:59 EDT
