@@ -256,6 +256,33 @@ public sealed partial class DarlingWorker
     /// <summary>The fleet self-alert step in flight, for tests that wait for it to end.</summary>
     internal Task? FleetSelfAlertStepForTests => _fleetSelfAlertStep;
 
+    /// <summary>#8244: a copy of the server list taken under <c>_serversLock</c>, for a reader that runs off the launch loop
+    /// while the loop's reload adds and removes servers.</summary>
+    internal ServerLoopState[] SnapshotFleet(List<ServerLoopState> servers)
+    {
+        lock (_serversLock)
+        {
+            return servers.ToArray();
+        }
+    }
+
+    /// <summary>Test seam: stands in for the custom-rule health check and reconcile, and receives the fleet the step read.</summary>
+    internal Func<IReadOnlyList<ServerLoopState>, CancellationToken, Task>? CustomAlertHealthOverride { get; set; }
+
+    /// <summary>The custom-rule half of the fleet self-alert step over the fleet snapshot: the #3304 rule-health check, then the
+    /// #3305 state reconcile. Only reached when both evaluators are non-null (guarded at the call site).</summary>
+    internal async Task RunCustomAlertHealthAsync(IReadOnlyList<ServerLoopState> fleet, CancellationToken stoppingToken)
+    {
+        if (CustomAlertHealthOverride is { } evaluate)
+        {
+            await evaluate(fleet, stoppingToken);
+            return;
+        }
+
+        await EvaluateCustomAlertRuleHealthAsync(fleet, stoppingToken);
+        await ReconcileCustomAlertStateAsync(fleet, stoppingToken);
+    }
+
     /// <summary>
     /// The fleet self-alert step's body (#8244): the fleet-level evaluations the collection launch loop used to await
     /// inline, unchanged, each on its own due stamp. Runs off the loop through <see cref="TryStartFleetSelfAlertStep"/>.
@@ -270,6 +297,12 @@ public sealed partial class DarlingWorker
         ManagedConfMigrationOutcome? managedConfVerification,
         CancellationToken stoppingToken)
     {
+        /* #8244: the loop's reload adds and removes servers under _serversLock on every pass (ReconcileServers), and this
+           step runs off that thread, so it reads a copy taken under the lock, as the per-server pass does, and never the
+           live list: a reload during the step changes nothing the step is walking, and a server that is still monitored is
+           never read as gone. */
+        var fleet = SnapshotFleet(servers);
+
         /* Stage 4 fleet-level self-alert: the store disk-pressure backstop. The daily purge is the ONLY
            other maintenance cadence and it is purely time-based (no disk-free check), so on its own the
            store can still fill between purges — this edge-fired condition is the flagship-appropriate
@@ -304,12 +337,10 @@ public sealed partial class DarlingWorker
             && StampIsDue(_nextCustomAlertHealthCheckUtc, s_customAlertHealthInterval, DateTime.UtcNow))
         {
             _nextCustomAlertHealthCheckUtc = DateTime.UtcNow.Add(s_customAlertHealthInterval);
-            await EvaluateCustomAlertRuleHealthAsync(servers, stoppingToken);
-
-            /* #3305: on the same cadence, reconcile persisted state — force-resolve + clean the state of
+            /* #3305: on the same cadence, the persisted state is reconciled — force-resolve + clean the state of
                disabled rules (which the enabled-only sweep would orphan) and of servers that have left a
                rule's scope. Deleted rules are resolved on the delete path (their state cascades away). */
-            await ReconcileCustomAlertStateAsync(servers, stoppingToken);
+            await RunCustomAlertHealthAsync(fleet, stoppingToken);
         }
 
         /* #3306: a mute rule that has outlived its reason. A mute is a deliberate blind spot, and this is

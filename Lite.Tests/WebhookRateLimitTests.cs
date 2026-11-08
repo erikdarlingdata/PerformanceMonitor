@@ -270,7 +270,7 @@ public sealed class WebhookRateLimitTests
         /* Inside the hold, with more of it left than a post waits: the post fails without a request, so the endpoint is not hammered. */
         var held = await over.FireAsync();
         Assert.Equal(AlertChannelOutcome.Failed, held.Outcome);
-        Assert.Contains("HTTP 429", held.SendError, StringComparison.Ordinal);
+        Assert.Contains("not posted", held.SendError, StringComparison.Ordinal);
         Assert.Empty(over.Waits);
         Assert.Single(over.SlackRequestsAt);
 

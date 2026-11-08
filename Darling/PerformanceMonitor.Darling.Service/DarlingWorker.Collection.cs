@@ -1600,7 +1600,8 @@ public sealed partial class DarlingWorker
                can wait on the destination's pacing or on the hold an HTTP 429 left; nothing on this loop waits on either,
                so a held destination never delays a collection launch. Each evaluation keeps its own due stamp inside the
                step, so a tick that starts no step because the previous one is still running leaves what was due for the
-               next free tick. `servers`, `muteRuleService` and `externalAlertStore` are each built once above this loop. */
+               next free tick. `muteRuleService` and `externalAlertStore` are built once above this loop; `servers` changes on every
+               reload, so the step copies it under `_serversLock` before it reads it. */
             TryStartFleetSelfAlertStep(
                 token => RunFleetSelfAlertStepAsync(
                     config, servers, muteRuleService, externalAlertStore, managedConfWriteResult, managedUsedLastGoodConf,

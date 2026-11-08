@@ -9,7 +9,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Darling.Service;
@@ -118,47 +117,17 @@ public sealed class FleetSelfAlertStepTests
     private static bool TryStart(DarlingWorker worker, Func<CancellationToken, Task> step, CancellationToken ct) =>
         worker.TryStartFleetSelfAlertStep(step, ct);
 
-    /* The snapshot, the custom-rule half of the step and its seam are reached by name, so this class states what is missing
-       when the step still walks the live list rather than failing to compile against it. */
-    private const string Missing =
-        "DarlingWorker has no {0}, so the fleet self-alert step walks the live server list off the launch loop while the loop's reload changes it.";
+    private static IReadOnlyList<DarlingWorker.ServerLoopState> Snapshot(DarlingWorker worker, List<DarlingWorker.ServerLoopState> servers) =>
+        worker.SnapshotFleet(servers);
 
-    private static object Member(string name, Func<Type, object?> find)
-    {
-        var member = find(typeof(DarlingWorker));
-        if (member is null)
-        {
-            Assert.Fail(string.Format(System.Globalization.CultureInfo.InvariantCulture, Missing, name));
-        }
+    private static void SetCustomAlertHealth(DarlingWorker worker, Func<IReadOnlyList<DarlingWorker.ServerLoopState>, CancellationToken, Task> evaluate) =>
+        worker.CustomAlertHealthOverride = evaluate;
 
-        return member;
-    }
+    private static Task RunCustomAlertHealth(DarlingWorker worker, IReadOnlyList<DarlingWorker.ServerLoopState> fleet, CancellationToken ct) =>
+        worker.RunCustomAlertHealthAsync(fleet, ct);
 
-    private const BindingFlags Any = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-
-    private static IReadOnlyList<DarlingWorker.ServerLoopState> Snapshot(DarlingWorker worker, List<DarlingWorker.ServerLoopState> servers)
-    {
-        var method = (MethodInfo)Member("SnapshotFleet", t => t.GetMethod("SnapshotFleet", Any));
-        return (IReadOnlyList<DarlingWorker.ServerLoopState>)method.Invoke(worker, new object[] { servers })!;
-    }
-
-    private static void SetCustomAlertHealth(DarlingWorker worker, Func<IReadOnlyList<DarlingWorker.ServerLoopState>, CancellationToken, Task> evaluate)
-    {
-        var property = (PropertyInfo)Member("CustomAlertHealthOverride", t => t.GetProperty("CustomAlertHealthOverride", Any));
-        property.SetValue(worker, evaluate);
-    }
-
-    private static Task RunCustomAlertHealth(DarlingWorker worker, IReadOnlyList<DarlingWorker.ServerLoopState> fleet, CancellationToken ct)
-    {
-        var method = (MethodInfo)Member("RunCustomAlertHealthAsync", t => t.GetMethod("RunCustomAlertHealthAsync", Any));
-        return (Task)method.Invoke(worker, new object[] { fleet, ct })!;
-    }
-
-    private static void Reconcile(DarlingWorker worker, List<DarlingWorker.ServerLoopState> servers, IReadOnlyList<MonitoredServer> desired)
-    {
-        var method = (MethodInfo)Member("ReconcileServers", t => t.GetMethod("ReconcileServers", Any));
-        method.Invoke(worker, new object[] { servers, desired });
-    }
+    private static void Reconcile(DarlingWorker worker, List<DarlingWorker.ServerLoopState> servers, IReadOnlyList<MonitoredServer> desired) =>
+        worker.ReconcileServers(servers, desired);
 
     private static Task Step(DarlingWorker worker)
     {
