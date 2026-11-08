@@ -736,7 +736,9 @@ public sealed partial class DarlingWorker
             /* #4961: this install's id, made at start before any worker runs. */
             installId: () => _installId,
             /* #6211: live provider like its siblings, so a store change to query_store_fetch_top_n takes effect on the next cycle, no restart. */
-            queryStoreFetchTopN: () => StoreConfigProvider.ClampQueryStoreFetchTopN(config.QueryStoreFetchTopN));
+            queryStoreFetchTopN: () => StoreConfigProvider.ClampQueryStoreFetchTopN(config.QueryStoreFetchTopN),
+            /* #8146: clamped and logged once here, because darling.json is read once at start. */
+            xeRingBufferMaxEvents: StoreConfigProvider.ClampXeRingBufferMaxEvents(config.XeRingBufferMaxEvents, _logger));
         /* #7067: one gate, one clock, for the worker's and the runner's repeated warnings. */
         runner.RepeatLog = RepeatLog;
         _runner = runner;
@@ -2451,6 +2453,9 @@ public sealed partial class DarlingWorker
            cap is due. Otherwise, while the trace is on, the create side runs alone, so a session dropped from outside
            comes back: the read returns no rows for an absent session, the same as for a quiet one. The drop side
            runs once per connect, per change of the state key, or per attempt after the cap. */
+        /* #8146: a recreate in a collector run that left the session stopped or possibly missing asks for the create pass on this
+           sweep. Taken here, whatever pass runs: the whole pass and the attempt after the cap run the create side too. */
+        var createPassRequested = runner.TakeLongQueryCreatePassRequest(server.Runtime.ServerId);
         LongQueryTracePass pass;
         if (server.LongQueryTraceApplied != enabled
             || !string.Equals(server.LongQueryTraceAppliedKey, stateKey, StringComparison.Ordinal))
@@ -2462,8 +2467,8 @@ public sealed partial class DarlingWorker
             pass = LongQueryTracePass.RetryAfterCap;
         }
         else if (enabled
-                 && server.LongQueryTraceAppliedAtUtc is { } appliedAt
-                 && utcNow - appliedAt >= LongQueryTraceDatabases.RetryInterval)
+                 && (createPassRequested
+                     || (server.LongQueryTraceAppliedAtUtc is { } appliedAt && utcNow - appliedAt >= LongQueryTraceDatabases.RetryInterval)))
         {
             pass = LongQueryTracePass.CreateOnly;
         }
@@ -2482,14 +2487,21 @@ public sealed partial class DarlingWorker
             var partialNote = await DarlingXeSessions.ReconcileLongQueryCompletionsAsync(
                 server.Runtime, runner, enabled, pass, registrations, serverSeparatelyMonitored, createFailureWarned, logger, cancellationToken, instanceGuard, outcome);
 
-            /* #4961: a start the replica refused just after this reconcile created the definition (it does not show it yet) is
-               not applied: the latch stays where it was, so the next sweep tries again and starts the session, instead of the
-               retry waiting for the hourly create pass. */
+            /* #4961, #8146: a start the replica refused because it does not show the primary's definition yet (this reconcile's
+               or one already there), within an hour of the first such refusal, is not applied: the latch stays where it was, so
+               the next sweep tries again and starts the session, instead of the retry waiting for the hourly create pass. Past
+               the hour the refusal reaches the catch below as a failure. */
             if (!outcome.StartPending)
             {
                 server.LongQueryTraceApplied = enabled;
                 server.LongQueryTraceAppliedKey = stateKey;
                 server.LongQueryTraceAppliedAtUtc = utcNow;
+            }
+            else if (pass == LongQueryTracePass.CreateOnly)
+            {
+                /* #8146: a create pass a recreate asked for leaves the hourly clock where it was, so the unchanged latch alone would
+                   wait out the hour: ask again, and the next sweep tries the start once more. */
+                runner.RequestLongQueryCreatePass(server.Runtime.ServerId);
             }
 
             /* Only a pass that ran the cleanup ends its retries: the create side alone leaves the hourly attempt. */

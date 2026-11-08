@@ -119,9 +119,11 @@ export const MEASUREMENT_LABELS = [
   "job_history_identity_target_row", "json_records_discarded", "log_bytes_skipped", "log_files_skipped_by_rotation",
   "log_matches_limited", "log_resume_file_missing", "log_resume_file_recycled", "newest_visible_event_age_s",
   "postmaster_epoch_changes", "raise_shaped_deadlocks_skipped", "report_xml_empty", "report_xml_unparsed",
-  "ring_buffer_events_hidden", "ring_buffer_truncated", "shred_gated", "statement_scrub_ms",
+  "ring_buffer_events_hidden", "ring_buffer_events_limit", "ring_buffer_evicted", "ring_buffer_limit_below_setting",
+  "ring_buffer_loss_at_least", "ring_buffer_loss_unknown", "ring_buffer_loss_window_s", "ring_buffer_memory_capped",
+  "ring_buffer_truncated", "shred_gated", "statement_scrub_ms",
   "statement_scrub_named", "statement_scrub_timeouts", "statement_scrub_unjudged", "statements_dealloc",
-  "statements_epoch_changes",
+  "statements_epoch_changes", "xe_session_dropped",
 ];
 const LABEL_SET = new Set(MEASUREMENT_LABELS);
 

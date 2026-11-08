@@ -201,6 +201,53 @@ internal static class DarlingSystemHealthReader
         return RingBufferTruncationNote.TruncatedStretch.FromRuns(runs);
     }
 
+    /// <summary>
+    /// #8146: the candidate ring-buffer-loss runs of the collector that read one read's window [$3, $4], oldest first: the
+    /// same window rule as <see cref="TruncatedRunsInWindowSql"/> (SUCCESS runs inside the window plus the first SUCCESS run
+    /// after its end, because the loss a run measures is the span BEFORE it ran). The regex is only a pre-filter built from
+    /// the <see cref="RingBufferLossNote"/> labels (a substring with a value above zero), so
+    /// <see cref="RingBufferLossNote.LossWindow.FromRuns"/> decides every returned row by TryParse.
+    /// <para>$1 server_id, $2 collector_name, $3 window start, $4 window end.</para>
+    /// </summary>
+    public const string LossRunsInWindowSql = $$"""
+        SELECT collection_time,
+               error_message
+        FROM v_collection_log
+        WHERE server_id = $1
+        AND   collector_name = $2
+        AND   collection_time >= $3
+        AND   collection_time <= COALESCE(
+              (
+                  SELECT MIN(a.collection_time)
+                  FROM v_collection_log AS a
+                  WHERE a.server_id = $1
+                  AND   a.collector_name = $2
+                  AND   a.collection_time > $4
+                  AND   a.status = 'SUCCESS'
+              ), $4)
+        AND   status = 'SUCCESS'
+        AND   error_message ~ '({{RingBufferLossNote.EvictedLabel}}|{{RingBufferLossNote.DroppedLabel}}|{{RingBufferLossNote.UnknownLabel}})=0*[1-9]'
+        ORDER BY collection_time
+        """;
+
+    /// <summary>Runs <see cref="LossRunsInWindowSql"/>: null when no run that read the window logged lost events.</summary>
+    public static async Task<RingBufferLossNote.LossWindow?> GetLossRunsInWindowAsync(
+        NpgsqlDataSource postgres, int serverId, string collectorName, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(LossRunsInWindowSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        DarlingMcpReadParameters.AddText(command, collectorName);
+        DarlingMcpReadParameters.AddTimestamp(command, startUtc);
+        DarlingMcpReadParameters.AddTimestamp(command, endUtc);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var runs = new List<(DateTime CollectionTime, string? Note)>();
+        while (await reader.ReadAsync(cancellationToken))
+            runs.Add((reader.GetDateTime(0), reader.IsDBNull(1) ? null : reader.GetString(1)));
+        return RingBufferLossNote.LossWindow.FromRuns(runs);
+    }
+
     /// <summary>Runs <see cref="LatestRunNoteSql"/>: null when the collector never ran or its newest run left no note.</summary>
     public static async Task<string?> GetLatestRunNoteAsync(
         NpgsqlDataSource postgres, int serverId, string collectorName, CancellationToken cancellationToken = default)
