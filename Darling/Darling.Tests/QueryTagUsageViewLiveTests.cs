@@ -70,7 +70,8 @@ public sealed class QueryTagUsageViewLiveTests
             "INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, delta_execution_count, delta_elapsed_time, delta_worker_time, delta_logical_reads, delta_logical_writes) VALUES ($1, $2, $3, 'x', 'db1', $4, 1, $5, $5, 10, 1)",
             ct, CollectionIdGenerator.Next(), DateTime.UtcNow.AddMinutes(-30), server, hash, cpuUs);
 
-    private static async Task WithViewAsync(Func<NpgsqlConnection, ViewerDataService, CancellationToken, Task> body)
+    /* Npgsql leaves the password out of an opened connection's ConnectionString, so a data source the body builds comes from the scratch store's own string (here with the search_path the store and the viewer open with). */
+    private static async Task WithViewAsync(Func<NpgsqlConnection, ViewerDataService, string, CancellationToken, Task> body)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the viewer's by-tag pins.");
         var ct = TestContext.Current.CancellationToken;
@@ -88,7 +89,7 @@ public sealed class QueryTagUsageViewLiveTests
         try
         {
             await using var viewer = new ViewerDataService(connectionString);
-            await body(store, viewer, ct);
+            await body(store, viewer, connectionString, ct);
             bodySucceeded = true;
         }
         finally
@@ -103,7 +104,7 @@ public sealed class QueryTagUsageViewLiveTests
     [Fact]
     public async Task TheTagRowsPlusUntagged_EqualTheSectionTotal_AndASectionIsNeverAddedToAnother()
     {
-        await WithViewAsync(async (store, viewer, ct) =>
+        await WithViewAsync(async (store, viewer, _, ct) =>
         {
             var a = await TagAsync(store, ct, "A");
             var b = await TagAsync(store, ct, "B");
@@ -135,7 +136,7 @@ public sealed class QueryTagUsageViewLiveTests
     [Fact]
     public async Task TheFleetView_ListsEachServerAndAFleetTotal()
     {
-        await WithViewAsync(async (store, viewer, ct) =>
+        await WithViewAsync(async (store, viewer, _, ct) =>
         {
             var a = await TagAsync(store, ct, "A");
             await MapAsync(store, ct, ServerOne, "0xA1", a);
@@ -165,7 +166,7 @@ public sealed class QueryTagUsageViewLiveTests
     [Fact]
     public async Task AReadableSecondary_ReadsNotCollectedInQueryStore_WithTheToolsWords_InBothScopes()
     {
-        await WithViewAsync(async (store, viewer, ct) =>
+        await WithViewAsync(async (store, viewer, storeConnectionString, ct) =>
         {
             await ExecAsync(store,
                 "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition, ag_replica_role) " +
@@ -176,7 +177,7 @@ public sealed class QueryTagUsageViewLiveTests
             await PlanCacheAsync(store, ct, ServerTwo, "0xB1", 3_000_000);
 
             var servers = new[] { new DarlingServer(ServerOne, "srv-one", "srv-one", true, 15), new DarlingServer(ServerTwo, "srv-two", "srv-two", true, 15) };
-            await using var source = NpgsqlDataSource.Create(store.ConnectionString);
+            await using var source = NpgsqlDataSource.Create(storeConnectionString);
             var expected = await PerformanceMonitor.Darling.Service.Mcp.DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(
                 source, ServerTwo, "srv-two", ct);
             Assert.Contains("readable secondary", expected, StringComparison.Ordinal);
@@ -209,7 +210,7 @@ public sealed class QueryTagUsageViewLiveTests
     [Fact]
     public async Task EverySection_WithItsSourceMissing_IsSaidInWords_InTheViewerAndTheTool()
     {
-        await WithViewAsync(async (store, viewer, ct) =>
+        await WithViewAsync(async (store, viewer, storeConnectionString, ct) =>
         {
             /* #8083: the tool reads no section on a store that defines no tag, so one is defined; it maps nothing. */
             await TagAsync(store, ct, "A");
@@ -234,7 +235,7 @@ public sealed class QueryTagUsageViewLiveTests
 
             Assert.DoesNotContain("query_store_interval_wide", data.Unavailable[queryStore], StringComparison.Ordinal);
 
-            await using var source = NpgsqlDataSource.Create(store.ConnectionString);
+            await using var source = NpgsqlDataSource.Create(storeConnectionString);
             var tool = await PerformanceMonitor.Darling.Service.Mcp.DarlingMcpQueryTagRollupTools.GetResourceUseByTagCore(source, null, 24, null, 25, null, null, ct);
             foreach (var (section, sentence) in Expected.Where(e => e.Key != queryStore))
             {
