@@ -629,9 +629,12 @@ public partial class WebhookAlertService
     /// so nothing built from this can leak it. A destination that never failed, or that delivered since its last
     /// failure, reads 0. Names are the <see cref="NotificationRouter"/> channel names.
     ///
-    /// <para><b>One entry per destination.</b> The four channels' settings-row destinations are always listed
+    /// <para><b>One entry per destination.</b> The four webhook channels' settings-row destinations are always listed
     /// (<see cref="WebhookChannelFailureCount.RouteId"/> null), and a route's destination is listed once a send has
-    /// gone to it. Two routes can point one channel at two destinations, and a delivery to one says nothing about the
+    /// gone to it. #8245: the Email channel is listed with them, as one entry with no route, because every route's
+    /// email goes through the one relay the settings row names and <see cref="EmailSendCore"/> counts its sends
+    /// here (<see cref="RecordEmailFailure"/>, <see cref="RecordEmailDelivered"/>); it is Configured while
+    /// <see cref="EmailSendCore.SmtpConfigured"/> holds, so a host's one read covers every channel an alert can leave by. Two routes can point one channel at two destinations, and a delivery to one says nothing about the
     /// other, so each is counted and judged on its own, and a host keys its memory of what it announced by
     /// <see cref="WebhookChannelFailureCount.Key"/>.</para>
     ///
@@ -655,6 +658,7 @@ public partial class WebhookAlertService
             DestinationFailureCount(NotificationRouter.SlackChannel, null, SlackConfigured),
             DestinationFailureCount(NotificationRouter.GenericChannel, null, GenericConfigured),
             DestinationFailureCount(NotificationRouter.PagerDutyChannel, null, PagerDutyConfigured),
+            DestinationFailureCount(NotificationRouter.EmailChannel, null, EmailSendCore.SmtpConfigured(_settings)),
         };
 
         var routes = _settings.NotificationRoutes;
