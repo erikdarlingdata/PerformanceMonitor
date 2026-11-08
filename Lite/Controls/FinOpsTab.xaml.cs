@@ -66,6 +66,7 @@ public partial class FinOpsTab : UserControl
     private DataGridFilterManager<ExpensiveQueryRow>? _expensiveQueriesFilterMgr;
     private DataGridFilterManager<MemoryGrantEfficiencyRow>? _memoryGrantFilterMgr;
     private DataGridFilterManager<IndexLockingRow>? _indexLockingFilterMgr;
+    private DataGridFilterManager<RecommendationRow>? _recommendationsFilterMgr;
 
     /* #2933: this tab has no load guard, and every grid above is shared across servers — one
        server switch during the fourteen-way fan-out in LoadPerServerDataAsync, or a per-grid Refresh
@@ -80,6 +81,7 @@ public partial class FinOpsTab : UserControl
     public FinOpsTab()
     {
         InitializeComponent();
+        DataGridNumberHeaders.Apply(this); // #8223: a number column's header on the same edge as its values
         /* #5562: every list opened on the last 24 hours (1d); the heatmap on 30 days (1mo). */
         /* R5: the lists and the heatmap read "hours back from now", so each picker is rolling only (the heatmap in whole days). */
         LiteTimeRange.ConfigureFinOpsPicker(ResourceUsageTimeRangePicker, RollingUnitRule.Hour);
@@ -384,7 +386,7 @@ public partial class FinOpsTab : UserControl
                 System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
             }
             var (data, skippedNote) = read!.Value;
-            RecommendationsDataGrid.ItemsSource = data;
+            _recommendationsFilterMgr!.UpdateData(data);
             /* #5558: databases this server holds only as an Availability Group secondary copy are left to the primary's findings. */
             RecommendationsSecondaryNoteText.Text = skippedNote ?? "";
             RecommendationsSecondaryNoteText.Visibility = skippedNote is null ? Visibility.Collapsed : Visibility.Visible;
@@ -548,7 +550,7 @@ public partial class FinOpsTab : UserControl
            database's own (its memory limit, from committed_target_kb), not the host's RAM. So both are shown on every
            edition, and only the caption and the verdict's wording change there. */
         var azureSqlDb = ServerHardwareScope.HardwareIsTheHosts(data.EngineEdition);
-        MemoryRatioText.Text = $"{bpPct:N0}%";
+        MemoryRatioText.Text = $"{bpPct:N1}%";
         SetBar(MemoryRatioBar, MemRatioFilled, MemRatioEmpty, bpPct);
 
         PhysicalMemoryCaption.Text = ServerHardwareScope.PhysicalMemoryCaption(data.EngineEdition);
@@ -1171,6 +1173,7 @@ public partial class FinOpsTab : UserControl
         _expensiveQueriesFilterMgr?.UpdateData(new List<ExpensiveQueryRow>());
         _memoryGrantFilterMgr?.UpdateData(new List<MemoryGrantEfficiencyRow>());
         _highImpactFilterMgr?.UpdateData(new List<HighImpactQueryRow>());
+        _recommendationsFilterMgr?.UpdateData(new List<RecommendationRow>());
     }
 
     private async void RefreshRecommendations_Click(object sender, RoutedEventArgs e)
@@ -1437,6 +1440,7 @@ public partial class FinOpsTab : UserControl
         _expensiveQueriesFilterMgr = new DataGridFilterManager<ExpensiveQueryRow>(ExpensiveQueriesDataGrid);
         _memoryGrantFilterMgr = new DataGridFilterManager<MemoryGrantEfficiencyRow>(MemoryGrantEfficiencyDataGrid);
         _indexLockingFilterMgr = new DataGridFilterManager<IndexLockingRow>(IndexLockingDataGrid);
+        _recommendationsFilterMgr = new DataGridFilterManager<RecommendationRow>(RecommendationsDataGrid);
 
         _filterManagers[DatabaseResourcesDataGrid] = _dbResourcesFilterMgr;
         _filterManagers[StorageGrowthDataGrid] = _storageGrowthFilterMgr;
@@ -1453,6 +1457,7 @@ public partial class FinOpsTab : UserControl
         _filterManagers[ExpensiveQueriesDataGrid] = _expensiveQueriesFilterMgr;
         _filterManagers[MemoryGrantEfficiencyDataGrid] = _memoryGrantFilterMgr;
         _filterManagers[IndexLockingDataGrid] = _indexLockingFilterMgr;
+        _filterManagers[RecommendationsDataGrid] = _recommendationsFilterMgr;
     }
 
     /* Host/apply plumbing lives in the shared Ui controller. Lazy (a field initializer can't reference the

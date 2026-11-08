@@ -79,8 +79,6 @@ public sealed class PgDeadlocksCsvlogLiveTests
                 await setup.ExecuteNonQueryAsync(ct);
             }
 
-            var victimPid = await ProvokeDeadlockAsync(target!, ct);
-
             /* A SECOND session that fires an ordinary error whose message text carries the deadlock marker
                and a fake report inside a planted newline, in a quoted field — the same forgery technique
                PgLogEventsCsvlogLiveTests uses, through a failing statement rather than a raw startup packet. */
@@ -98,63 +96,81 @@ public sealed class PgDeadlocksCsvlogLiveTests
                 + "\"Process 1 waits for ShareLock on transaction 2; blocked by process 3."
                 + "\nProcess 1: SELECT 1\nProcess 3: SELECT 1\",,,,,,,\"\",\"client backend\",,0";
 
-            await using (var forgeInsert = new NpgsqlCommand(
-                "INSERT INTO deadlock_forge_check_4053b1 (v) VALUES ($1)", targetConnection))
-            {
-                forgeInsert.Parameters.AddWithValue(forgedMessage);
-                try
+            /* #8205: the deadlock, the forgery, the wait and the read go through the rotation-aware helper, so a log rotation
+               between the writes and the read (midnight, log_rotation_size) has both written again into the file the collector
+               tails. The victim pid is known only once the deadlock has run, so the write returns the markers. */
+            var victimPid = 0;
+            await PgLogLiveWait.ReadOwnRecordAcrossRotationAsync(targetConnection, "csv",
+                write: async () =>
                 {
-                    await forgeInsert.ExecuteNonQueryAsync(ct);
-                    Assert.Fail("Expected the CHECK constraint to reject the planted marker text.");
-                }
-                catch (PostgresException ex) when (ex.SqlState == "23514")
+                    victimPid = await ProvokeDeadlockAsync(target!, ct);
+
+                    await using var forgeInsert = new NpgsqlCommand(
+                        "INSERT INTO deadlock_forge_check_4053b1 (v) VALUES ($1)", targetConnection);
+                    forgeInsert.Parameters.AddWithValue(forgedMessage);
+                    try
+                    {
+                        await forgeInsert.ExecuteNonQueryAsync(ct);
+                        Assert.Fail("Expected the CHECK constraint to reject the planted marker text.");
+                    }
+                    catch (PostgresException ex) when (ex.SqlState == "23514")
+                    {
+                        /* Expected: the constraint violation's error message repeats the planted value
+                           verbatim, landing it — newline, fake CSV fields and all — inside ONE quoted field of
+                           the real ERROR record's own message text. */
+                    }
+
+                    return new[] { "deadlock_forge_check_4053b1", $"Process {victimPid}: UPDATE deadlocks_csvlog_live_4053b1 SET" };
+                },
+                read: async () =>
                 {
-                    /* Expected: the constraint violation's error message repeats the planted value
-                       verbatim, landing it — newline, fake CSV fields and all — inside ONE quoted field of
-                       the real ERROR record's own message text. */
-                }
-            }
+                    var context = new CollectorContext
+                    {
+                        LogHashKey = TestLogHashKeys.Fixed,
+                        ServerId = ServerId, ServerName = ServerName,
+                        CollectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
+                        Deltas = new CollectorDeltaCalculator(),
+                        Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
+                        PgLogUsesCsvlog = true,
+                    };
 
-            await PgLogLiveWait.WaitForTextAsync(targetConnection, "csv", ct,
-                "deadlock_forge_check_4053b1", $"Process {victimPid}: UPDATE deadlocks_csvlog_live_4053b1 SET");
+                    foreach (var binaryGranted in new[] { false, true })
+                    {
+                        context.PgReadBinaryFileGranted = binaryGranted;
 
-            var context = new CollectorContext
-            {
-                LogHashKey = TestLogHashKeys.Fixed,
-                ServerId = ServerId, ServerName = ServerName,
-                CollectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
-                Deltas = new CollectorDeltaCalculator(),
-                Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
-                PgLogUsesCsvlog = true,
-            };
+                        var definition = PgDeadlocksCollector.Instance;
+                        await using var command = PostgresTargetProvider.Instance.CreateCommand(definition.BuildQuery(context), targetConnection, 30);
+                        await using var reader = await command.ExecuteReaderAsync(ct);
+                        var rows = await definition.ReadAsync(reader, context, ct);
 
-            foreach (var binaryGranted in new[] { false, true })
-            {
-                context.PgReadBinaryFileGranted = binaryGranted;
+                        /* Exactly one row for THIS run's real deadlock, matched to the victim pid PostgreSQL's own
+                           detector picked, with the two-participant shape a two-session cycle always has, and a
+                           graph that is not empty. */
+                        /* The pid alone can match another live class's deadlock in the shared log (#7818): also require this
+                           test's own table name in the row's report text or victim statement. */
+                        var matching = rows.Where(r => r.VictimPid == victimPid
+                            && (r.GraphText.Contains("deadlocks_csvlog_live_4053b1", StringComparison.OrdinalIgnoreCase)
+                                || (r.VictimStatement?.Contains("deadlocks_csvlog_live_4053b1", StringComparison.OrdinalIgnoreCase) ?? false))).ToList();
 
-                var definition = PgDeadlocksCollector.Instance;
-                await using var command = PostgresTargetProvider.Instance.CreateCommand(definition.BuildQuery(context), targetConnection, 30);
-                await using var reader = await command.ExecuteReaderAsync(ct);
-                var rows = await definition.ReadAsync(reader, context, ct);
+                        /* No row for this run's victim means the read saw no deadlock of its own: the record is not in the file the read tailed. */
+                        if (matching.Count == 0)
+                        {
+                            return false;
+                        }
 
-                /* Exactly one row for THIS run's real deadlock, matched to the victim pid PostgreSQL's own
-                   detector picked, with the two-participant shape a two-session cycle always has, and a
-                   graph that is not empty. */
-                /* The pid alone can match another live class's deadlock in the shared log (#7818): also require this
-                   test's own table name in the row's report text or victim statement. */
-                var matching = rows.Where(r => r.VictimPid == victimPid
-                    && (r.GraphText.Contains("deadlocks_csvlog_live_4053b1", StringComparison.OrdinalIgnoreCase)
-                        || (r.VictimStatement?.Contains("deadlocks_csvlog_live_4053b1", StringComparison.OrdinalIgnoreCase) ?? false))).ToList();
-                var row = Assert.Single(matching);
-                Assert.Equal(2, row.ParticipantCount);
-                Assert.False(string.IsNullOrWhiteSpace(row.GraphText));
+                        var row = Assert.Single(matching);
+                        Assert.Equal(2, row.ParticipantCount);
+                        Assert.False(string.IsNullOrWhiteSpace(row.GraphText));
 
-                /* No row was forged OUT of the planted newline: pid 9999 never appears, either as its own
-                   report or folded into the real one. */
-                Assert.DoesNotContain(rows, r => r.VictimPid == 9999);
+                        /* No row was forged OUT of the planted newline: pid 9999 never appears, either as its own
+                           report or folded into the real one. */
+                        Assert.DoesNotContain(rows, r => r.VictimPid == 9999);
 
-                Assert.NotEmpty(rows);
-            }
+                        Assert.NotEmpty(rows);
+                    }
+
+                    return true;
+                }, ct);
 
             bodySucceeded = true;
         }

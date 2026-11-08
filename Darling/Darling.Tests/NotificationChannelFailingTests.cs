@@ -545,12 +545,13 @@ public sealed class NotificationChannelFailingTests
         await webhooks.TrySendWebhookAlertsAsync("High CPU", "SQL01", "97%", "90%");
         await webhooks.TrySendWebhookAlertsAsync("High CPU", "SQL02", "97%", "90%");
 
+        /* #8245: the Email entry is listed with the four webhook channels, so one read covers every channel. */
         var counts = webhooks.GetChannelFailureCounts().ToDictionary(c => c.Channel, c => c.ConsecutiveFailures);
         Assert.Equal(
             new[]
             {
                 NotificationRouter.TeamsChannel, NotificationRouter.SlackChannel,
-                NotificationRouter.GenericChannel, NotificationRouter.PagerDutyChannel,
+                NotificationRouter.GenericChannel, NotificationRouter.PagerDutyChannel, NotificationRouter.EmailChannel,
             }.OrderBy(n => n, StringComparer.Ordinal),
             counts.Keys.OrderBy(n => n, StringComparer.Ordinal));
         Assert.Equal(2, counts[NotificationRouter.SlackChannel]);
@@ -558,6 +559,7 @@ public sealed class NotificationChannelFailingTests
         Assert.Equal(0, counts[NotificationRouter.TeamsChannel]);
         Assert.Equal(0, counts[NotificationRouter.GenericChannel]);
         Assert.Equal(0, counts[NotificationRouter.PagerDutyChannel]);
+        Assert.Equal(0, counts[NotificationRouter.EmailChannel]);
     }
 
     /// <summary>
@@ -733,7 +735,7 @@ public sealed class NotificationChannelFailingTests
         Assert.Single(strayHealthy.Bodies);
 
         var counts = webhooks.GetChannelFailureCounts();
-        Assert.Equal(4, counts.Count);
+        Assert.Equal(5, counts.Count);
         Assert.All(counts, c => Assert.Null(c.RouteId));
         var slack = counts.Single(c => c.Channel == NotificationRouter.SlackChannel);
         Assert.True(slack.Configured);

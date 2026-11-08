@@ -40,13 +40,13 @@
 
             <!-- Legend -->
             <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
-                <Rectangle Width="12" Height="12" RadiusX="2" RadiusY="2" Fill="{DynamicResource SuccessBrush}"/>
+                <Rectangle Width="12" Height="12" RadiusX="2" RadiusY="2" Fill="{DynamicResource SuccessBrush}" Opacity="0.55"/>
                 <TextBlock Text="Healthy" Margin="4,0,12,0" VerticalAlignment="Center" FontSize="11"
                            Foreground="{DynamicResource ForegroundDimBrush}"/>
-                <Rectangle Width="12" Height="12" RadiusX="2" RadiusY="2" Fill="{DynamicResource WarningBrush}"/>
+                <Rectangle Width="12" Height="12" RadiusX="2" RadiusY="2" Fill="#FFD54F" Opacity="0.55"/>
                 <TextBlock Text="Warning" Margin="4,0,12,0" VerticalAlignment="Center" FontSize="11"
                            Foreground="{DynamicResource ForegroundDimBrush}"/>
-                <Rectangle Width="12" Height="12" RadiusX="2" RadiusY="2" Fill="{DynamicResource ErrorBrush}"/>
+                <Rectangle Width="12" Height="12" RadiusX="2" RadiusY="2" Fill="{DynamicResource ErrorBrush}" Opacity="0.55"/>
                 <TextBlock Text="Critical" Margin="4,0,12,0" VerticalAlignment="Center" FontSize="11"
                            Foreground="{DynamicResource ForegroundDimBrush}"/>
                 <Rectangle Width="12" Height="12" RadiusX="2" RadiusY="2" Fill="{DynamicResource ForegroundMutedBrush}" Opacity="0.4"/>
@@ -124,7 +124,7 @@
                                                 <Setter Property="Fill" Value="{DynamicResource SuccessBrush}"/>
                                             </DataTrigger>
                                             <DataTrigger Binding="{Binding Band}" Value="Warning">
-                                                <Setter Property="Fill" Value="{DynamicResource WarningBrush}"/>
+                                                <Setter Property="Fill" Value="#FFD54F"/>
                                             </DataTrigger>
                                             <DataTrigger Binding="{Binding Band}" Value="Critical">
                                                 <Setter Property="Fill" Value="{DynamicResource ErrorBrush}"/>

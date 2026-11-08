@@ -45,6 +45,13 @@ The shared alert engine's switches and thresholds. Every default mirrors Lite's 
 | `longRunningJobMultiplier` | `3` | Fires at 3x the job's historical average |
 | `failedJobEnabled` | `true` | Live msdb check for recently failed jobs |
 | `failedJobLookbackMinutes` | `60` | Clamped 1–1440 |
+| `agentAlertGapsEnabled` | `false` | The "Agent Alert Gaps" alert (#6874): fires when a server's SQL Server Agent alert setup has a gap (no alert for severities 19 to 25 or errors 823 to 825, an alert that tells no operator, a disabled alert, or a firing that told no one). SQL Server only. Off by default, like the other alerts that start firing on upgrade |
+| `backupOverdueEnabled` | `false` | The "Backup Overdue" alert (#6873): fires when a database's last full backup is older than `backupOverdueThresholdHours`. Off by default |
+| `logBackupOverdueEnabled` | `false` | The "Log Backup Overdue" alert (#6873): fires when a database's last log backup is older than `logBackupOverdueThresholdMinutes`. Off by default |
+| `checkDbOverdueEnabled` | `false` | The "CHECKDB Overdue" alert (#6873): fires when a database's last good CHECKDB is older than `checkDbOverdueThresholdHours`. Off by default |
+| `backupOverdueThresholdHours` | `168` | Hours since the last full backup before it is overdue (7 days). A per-server or per-database threshold override on `backup_overdue.threshold_hours` replaces it (#7611) |
+| `logBackupOverdueThresholdMinutes` | `60` | Minutes since the last log backup before it is overdue. The override is `log_backup_overdue.threshold_minutes` |
+| `checkDbOverdueThresholdHours` | `336` | Hours since the last good CHECKDB before it is overdue (14 days). The override is `checkdb_overdue.threshold_hours` |
 | `cooldownMinutes` | `5` | Minimum minutes between repeats of the same alert condition (clamped 1–120) |
 | `excludedDatabases` | `[]` | Excluded from blocking/deadlock/long-running-query **alert evaluation** (collection unaffected) |
 | `excludedVolumes` | `[]` | Mount points the Volume Free Space alert ignores on every server (#6098): the whole mount point, case-insensitive, a trailing `\` or `/` on either side ignored (`S:`, `S:\` and `s:\` are one volume; `/var/opt/mssql` equals `/var/opt/mssql/`); never a prefix match. Dropped before the breach test, so the worst volume, the severity and the card come from the volumes that remain, and a server whose only low volumes are excluded resolves. Seeded into the store on first run (migration V200); the store row wins afterwards, edited in the Viewer's Settings window, the web admin page or `update_alert_settings`. Collection is unaffected |
@@ -91,6 +98,12 @@ These keys are in the same `alerts` section and are first-run seeds like the tab
 | `dailyReportTitle` | `null` | The report's title. `null` or blank means `Daily Health Report`. At most 100 characters, no control characters |
 | `deadlockWarnPerHour` | `5` | The deadlock health band's Warning tier, in deadlocks per hour |
 | `deadlockCriticalPerHour` | `20` | The deadlock health band's Critical tier |
+| `blockingWarnPerHour` | `5` | The blocking health band's Warning tier, in blocked waits per hour over the window a card counted them in (#6927). Clamped on read |
+| `blockingCriticalPerHour` | `20` | The blocking health band's Critical tier, in blocked waits per hour |
+| `blockingWarnWaitSeconds` | `10` | The blocking band's Warning bar on the longest single block, in seconds |
+| `blockingCriticalWaitSeconds` | `60` | The blocking band's Critical bar on the longest single block, in seconds |
+| `blockingWarnSnapshotWaitSeconds` | `0` | The blocking band's Warning bar on the longest total blocked wait in one sampled snapshot, in seconds (#7028). `0` turns the tier off; valid values are `0` and `1` to `86400`. When both tiers are above `0`, critical is at least warn |
+| `blockingCriticalSnapshotWaitSeconds` | `0` | The blocking band's Critical bar on the longest total blocked wait in one sampled snapshot, in seconds. `0` turns the tier off |
 | `databaseStateEnabled` | `true` | The database-state alert (a database in a state other than its expected one) |
 | `deliveryMode` | `"Summary"` | How deadlock and blocking alerts are delivered: `"Summary"` is one batched card per cycle, `"PerEvent"` is one notification per incident. A server's `alertDeliveryModeOverride` wins over it |
 | `perEventMax` | `5` | In `"PerEvent"` mode, the most incidents sent one by one per cycle before a trailing "+N more" (clamped 1 to 100) |

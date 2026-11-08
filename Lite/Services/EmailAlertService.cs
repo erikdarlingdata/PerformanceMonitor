@@ -233,7 +233,9 @@ public class EmailAlertService : IFindingAlertSender
         catch (Exception ex)
         {
             _logger.LogError(ex, $"TrySendAlertEmailAsync outer error: {ex.Message}");
-            return null;
+            /* #8246: nothing is known to have reached anyone, so the deliverer and the engine read this as every channel
+               failed and try the alert again. Whether the row above was written is not known here, so none is written. */
+            return AlertDelivery.DelivererFailed(ex.Message);
         }
     }
 
@@ -253,7 +255,7 @@ public class EmailAlertService : IFindingAlertSender
     /// params — so no separate fallback row is needed.
     /// <para>The row persists <c>DetailText</c>; the channels render it only if the producer says
     /// to. Darling's <c>DarlingFindingAlertSender</c> reads the same declaration.</para>
-    /// <para>#3916: returns the delivery the row recorded; null only when the send path caught.</para>
+    /// <para>#3916: returns the delivery the row recorded; a failed delivery when the send path caught (#8246).</para>
     /// </summary>
     public Task<AlertDelivery?> SendFindingAlertAsync(FindingAlert alert)
     {
