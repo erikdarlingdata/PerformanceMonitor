@@ -62,4 +62,49 @@ AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
         _serverDataStarts[serverId] = (first, DateTime.UtcNow);
         return first;
     }
+
+    private readonly ConcurrentDictionary<int, (long Generation, DateTime? Oldest, DateTime ReadUtc)> _oldestRetained = new();
+
+    /// <summary>
+    /// The oldest instant the store holds data from for <paramref name="serverId"/>, for the time range picker's "Data starts"
+    /// note, or null when the server has no row yet. The archive's span (<see cref="GetArchiveSpanAsync"/>) covers every server's
+    /// rows, so when it holds none the answer is the server's first hot collection (<see cref="GetServerDataStartAsync"/>), the
+    /// cached read the charts already make. When the archive holds rows, the hot table's oldest row cannot say where this
+    /// server's data starts: an archive-and-reset leaves every server with a recent hot start, and a server added today has
+    /// nothing in the archive at all. That case reads <c>MIN(collection_time)</c> over <c>v_collection_log</c> for the server,
+    /// once per server per archive view generation and for at most <see cref="ServerDataStartMaxAge"/>, so a store whose archive
+    /// stands still costs one read per server, and an archive pass is followed by one more. The generation is sampled before
+    /// the read, so a rebuild that lands mid-read leaves an entry the next call reads again.
+    /// </summary>
+    public async Task<DateTime?> GetOldestRetainedAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        var span = await GetArchiveSpanAsync("collection_log", "collection_time", cancellationToken);
+        if (span is { Oldest: null })
+        {
+            return await GetServerDataStartAsync(serverId, DateTime.MinValue, cancellationToken);
+        }
+
+        var generation = _duckDb.ArchiveViewGeneration;
+        if (_oldestRetained.TryGetValue(serverId, out var cached)
+            && cached.Generation == generation
+            && DateTime.UtcNow - cached.ReadUtc < ServerDataStartMaxAge)
+        {
+            return cached.Oldest;
+        }
+
+        using var slot = await WaitForArchiveSlotAsync(timer: null, cancellationToken);
+        using var connection = await OpenConnectionAsync(timer: null, cancellationToken);
+        using var command = connection.CreateCommand();
+        command.CommandText = $@"
+SELECT MIN(collection_time)
+FROM v_collection_log
+WHERE server_id = $1
+AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+
+        var value = await command.ExecuteScalarAsync(cancellationToken);
+        DateTime? oldest = value is DateTime found ? DateTime.SpecifyKind(found, DateTimeKind.Utc) : null;
+        _oldestRetained[serverId] = (generation, oldest, DateTime.UtcNow);
+        return oldest;
+    }
 }

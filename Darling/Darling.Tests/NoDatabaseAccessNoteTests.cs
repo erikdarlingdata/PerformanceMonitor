@@ -47,12 +47,12 @@ public sealed class NoDatabaseAccessNoteTests
     }
 
     [Fact]
-    public void Note_OnRds_AlsoNamesTheCreateUserStatement()
+    public void Note_OnRds_AlsoSaysToGiveTheLoginAUserInEachDatabase()
     {
         var note = EnumeratedCollectorDriver.BuildNote(false, new[] { NoAccess("Sales") }, awsRds: true);
 
         Assert.NotNull(note);
-        Assert.Contains("CREATE USER [login] FOR LOGIN [login]", note);
+        Assert.Contains("give the monitoring login a user in each of them", note);
         Assert.Contains("1 online user database(s)", note);
     }
 
@@ -95,7 +95,7 @@ public sealed class NoDatabaseAccessNoteTests
         Assert.Equal(new[] { "Open" }, outcome.Items);
         Assert.Single(outcome.ProbeFailures);
         Assert.Contains("Locked", outcome.Note);
-        Assert.Contains("CREATE USER", outcome.Note);
+        Assert.Contains("give the monitoring login a user in each of them", outcome.Note);
     }
 
     [Fact]
@@ -131,17 +131,17 @@ public sealed class NoDatabaseAccessNoteTests
     }
 
     [Fact]
-    public void ConnectionTestWarning_GivesTheCountAndTheCreateUser()
+    public void ConnectionTestWarning_GivesTheCountAndTheUserToAdd()
     {
         Assert.Null(MonitoringGrantScript.DescribeNoUserDatabases(0, "pm", awsRds: true));
 
         var box = MonitoringGrantScript.DescribeNoUserDatabases(3, "pm", awsRds: false)!;
         Assert.Contains("3 online user database(s)", box);
-        Assert.Contains("CREATE USER [pm] FOR LOGIN [pm]", box);
+        Assert.Contains("give [pm] a user in each of them", box);
         Assert.Contains("CONNECT ANY DATABASE", box);
 
         var rds = MonitoringGrantScript.DescribeNoUserDatabases(3, "pm", awsRds: true)!;
-        Assert.Contains("CREATE USER [pm] FOR LOGIN [pm]", rds);
+        Assert.Contains("give [pm] a user in each of them", rds);
         Assert.Contains("Amazon RDS has no CONNECT ANY DATABASE", rds);
     }
 
