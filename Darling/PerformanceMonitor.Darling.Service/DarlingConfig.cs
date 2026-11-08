@@ -40,6 +40,10 @@ public sealed class DarlingConfig
         AllowTrailingCommas = true,
     };
 
+    /// <summary>#8184: the options <see cref="Parse"/> reads darling.json with (case-insensitive names, comments, trailing commas), for a
+    /// reader of one block that must accept the same file.</summary>
+    internal static JsonSerializerOptions JsonOptions => s_jsonOptions;
+
     [JsonPropertyName("postgres")]
     public PostgresConfig Postgres { get; set; } = new();
 
@@ -402,7 +406,15 @@ public sealed class DarlingConfig
     /// the control plane never writes it, and a change needs a restart. Optional; omit the section entirely.
     /// </summary>
     [JsonPropertyName("health")]
-    public HealthConfig Health { get; set; } = new();
+    public HealthConfig Health
+    {
+        get => _health;
+
+        /* "health": null means off, the same as an absent block (the #5460 heartbeat rule). */
+        set => _health = value ?? new();
+    }
+
+    private HealthConfig _health = new();
 
     /// <summary>
     /// Declared PEER STORES (#2339): what this store covers, and which sibling Darling stores cover the
@@ -652,29 +664,9 @@ public sealed class DarlingConfig
         /* #5450: the heartbeat block, for the same reason (a broken one is reported even with no servers yet). */
         problems.AddRange(HeartbeatConfig.Validate(Heartbeat));
 
-        /* #8184: the health checks run only when the port is on. The clash test compares against web.port and mcp.port
-           whether or not those surfaces are enabled: the control plane can turn either on later without a restart, and the
-           ports would then collide. It is refused here so it never fails at bind time. */
-        if (Health is { Enabled: true })
-        {
-            if (Health.Port is < 1 or > 65535)
-            {
-                problems.Add($"health.port must be between 1 and 65535 (got {Health.Port}).");
-            }
-            else if (Web is not null && Health.Port == Web.Port)
-            {
-                problems.Add($"health.port ({Health.Port}) is the same as web.port — give the health listener its own port.");
-            }
-            else if (Mcp is not null && Health.Port == Mcp.Port)
-            {
-                problems.Add($"health.port ({Health.Port}) is the same as mcp.port — give the health listener its own port.");
-            }
-
-            if (HealthConfig.ResolveListenAddress(Health.Listen, inContainer: false) is null)
-            {
-                problems.Add($"health.listen (\"{Health.Listen}\") is not an IP address.");
-            }
-        }
+        /* #8184: the health block is not checked here (D-validate). The health port is an optional, default-off endpoint, so a bad
+           value there must not stop collection: the health host refuses its own bad config with one Critical line and does not
+           listen. See HealthConfig.Problems. */
 
         /* #6468: no servers is a valid configuration. A first install starts with an empty list and the person adds the
            first server in the Viewer or the web dashboard, so an empty list is not a problem to report here. */
@@ -2189,6 +2181,43 @@ public sealed class HealthConfig
         }
 
         return IPAddress.TryParse(listen.Trim(), out var address) ? address : null;
+    }
+
+    /// <summary>
+    /// #8184: what makes the health host refuse to listen, empty when the block is usable or off. Not part of
+    /// <see cref="DarlingConfig.Validate"/> (D-validate): the port is an optional, default-off endpoint, so a bad value turns off only
+    /// the port, with one Critical line, and collection keeps running. The clash test compares against the <c>web.port</c> and
+    /// <c>mcp.port</c> the same file read gives (<paramref name="webPort"/> and <paramref name="mcpPort"/>, null when that block is
+    /// <c>null</c>), whether or not those surfaces are enabled: the control plane can turn either on later without a restart, and the
+    /// ports would then collide. A port the control plane later stores for web or MCP is not seen here.
+    /// </summary>
+    internal static IReadOnlyList<string> Problems(HealthConfig health, int? webPort, int? mcpPort)
+    {
+        var problems = new List<string>();
+        if (!health.Enabled)
+        {
+            return problems;
+        }
+
+        if (health.Port is < 1 or > 65535)
+        {
+            problems.Add($"health.port must be between 1 and 65535 (got {health.Port}).");
+        }
+        else if (health.Port == webPort)
+        {
+            problems.Add($"health.port ({health.Port}) is the same as web.port — give the health listener its own port.");
+        }
+        else if (health.Port == mcpPort)
+        {
+            problems.Add($"health.port ({health.Port}) is the same as mcp.port — give the health listener its own port.");
+        }
+
+        if (ResolveListenAddress(health.Listen, inContainer: false) is null)
+        {
+            problems.Add($"health.listen (\"{health.Listen}\") is not an IP address.");
+        }
+
+        return problems;
     }
 }
 

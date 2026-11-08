@@ -30,13 +30,15 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #8184: the health host's routes, its start order, and its behaviour for a missing, broken or unreadable config and a taken port.
-/// Touches no process-wide state (no statics, no environment variables, no files): every collaborator is a per-test instance and the
-/// real-port tests bind loopback on a port the test obtained, so the class does not join the statics census.
+/// #8184: the health host's routes, its start order, and its behaviour for a missing, broken or unreadable config, a bad health
+/// block, a store secret that does not resolve, and a taken port. Touches no process-wide state (no statics, no environment variables;
+/// the one file is a per-test temp file): every collaborator is a per-test instance and the real-port tests bind loopback on a port
+/// the test obtained, so the class does not join the statics census. The ambient-configuration test, which sets an environment
+/// variable, is <see cref="DarlingHealthHostAmbientConfigTests"/>.
 /// </summary>
 public sealed class DarlingHealthHostTests
 {
-    private sealed class EmptyDirectory : IFrontDoorDirectory
+    internal sealed class EmptyDirectory : IFrontDoorDirectory
     {
         public IReadOnlyList<FrontDoorStoreState> Stores { get; } = Array.Empty<FrontDoorStoreState>();
         public FrontDoorStore? Find(string name) => throw new NotSupportedException();
@@ -45,7 +47,7 @@ public sealed class DarlingHealthHostTests
         public void Hold(string store, TimeSpan span, string why) => throw new NotSupportedException();
     }
 
-    private sealed class CapturingLogger : ILogger<DarlingHealthHostService>
+    internal sealed class CapturingLogger : ILogger<DarlingHealthHostService>
     {
         public List<(LogLevel Level, string Text)> Lines { get; } = new();
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
@@ -74,7 +76,7 @@ public sealed class DarlingHealthHostTests
         return app;
     }
 
-    private static int FreePort()
+    internal static int FreePort()
     {
         var probe = new TcpListener(IPAddress.Loopback, 0);
         probe.Start();
@@ -88,14 +90,8 @@ public sealed class DarlingHealthHostTests
         }
     }
 
-    private static DarlingConfig EnabledOn(int port)
-    {
-        var config = new DarlingConfig();
-        config.Health.Enabled = true;
-        config.Health.Port = port;
-        config.Health.Listen = "127.0.0.1";
-        return config;
-    }
+    internal static string EnabledOn(int port, string listen = "127.0.0.1") =>
+        $"{{\"health\":{{\"enabled\":true,\"port\":{port},\"listen\":\"{listen}\"}}}}";
 
     [Fact]
     public async Task Livez_And_Readyz_AnswerTheWordOnly()
@@ -185,9 +181,8 @@ public sealed class DarlingHealthHostTests
     [Fact]
     public async Task Disabled_StartsNothing()
     {
-        var config = new DarlingConfig();
-        config.Health.Enabled = false;
-        await using var host = new DarlingHealthHostService(new CollectorRuntimeState(), new EmptyDirectory(), new CapturingLogger(), () => config);
+        await using var host = new DarlingHealthHostService(
+            new CollectorRuntimeState(), new EmptyDirectory(), new CapturingLogger(), () => "{\"health\":{\"enabled\":false}}");
 
         await host.StartAsync(TestContext.Current.CancellationToken);
 
@@ -200,13 +195,15 @@ public sealed class DarlingHealthHostTests
         var ct = TestContext.Current.CancellationToken;
         var port = FreePort();
         var collector = new CollectorRuntimeState();
-        var config = EnabledOn(port);
-        collector.PublishConfigurationProblems(config);
-        await using var host = new DarlingHealthHostService(collector, new EmptyDirectory(), new CapturingLogger(), () => config);
+        collector.PublishConfigurationProblems(new DarlingConfig());
+        var logger = new CapturingLogger();
+        await using var host = new DarlingHealthHostService(collector, new EmptyDirectory(), logger, () => EnabledOn(port));
 
         await host.StartAsync(ct);
 
         Assert.True(host.IsListening);
+        /* M1: the line names the address Kestrel bound, not only the configured one. */
+        Assert.Contains(logger.Lines, l => l.Level == LogLevel.Information && l.Text.Contains($"127.0.0.1:{port}", StringComparison.Ordinal));
         using var client = new HttpClient();
         using var live = await client.GetAsync($"http://127.0.0.1:{port}/livez", ct);
         using var ready = await client.GetAsync($"http://127.0.0.1:{port}/readyz", ct);
@@ -277,4 +274,101 @@ public sealed class DarlingHealthHostTests
             taken.Stop();
         }
     }
+
+    [Fact]
+    public Task AnyStartFailure_DoesNotThrow() =>
+        AssertConfigFailureDoesNotStart(new Exception("anything at all"));
+
+    /// <summary>#8184 I1: the host reads only its own blocks and resolves no secret, so a store secret that does not resolve (the
+    /// worker stops on it) leaves the port answering.</summary>
+    [Fact]
+    public async Task UnresolvableStoreSecret_StillServesHealth()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var port = FreePort();
+        var unset = $"DARLING_8184_UNSET_{Guid.NewGuid():N}";
+        Assert.Null(Environment.GetEnvironmentVariable(unset));
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"darling-health-{Guid.NewGuid():N}.json");
+        System.IO.File.WriteAllText(path, $$"""
+            {
+              // a comment and a trailing comma, as darling.json allows
+              "postgres": { "connectionString": "env:{{unset}}" },
+              "health": { "enabled": true, "port": {{port}}, "listen": "127.0.0.1" },
+            }
+            """);
+        try
+        {
+            Assert.ThrowsAny<Exception>(() => DarlingConfig.Parse(System.IO.File.ReadAllText(path)));
+
+            var logger = new CapturingLogger();
+            await using var host = new DarlingHealthHostService(
+                new CollectorRuntimeState(), new EmptyDirectory(), logger, () => System.IO.File.ReadAllText(path));
+
+            await host.StartAsync(ct);
+
+            Assert.True(host.IsListening);
+            Assert.DoesNotContain(logger.Lines, l => l.Level >= LogLevel.Error);
+            using var client = new HttpClient();
+            using var live = await client.GetAsync($"http://127.0.0.1:{port}/livez", ct);
+            Assert.Equal(HttpStatusCode.OK, live.StatusCode);
+            Assert.Equal("starting", await live.Content.ReadAsStringAsync(ct));
+            await host.StopAsync(ct);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    /// <summary>#8184 I2: <c>"health": null</c> is off, the same as an absent block, and never stops the start.</summary>
+    [Fact]
+    public async Task NullHealth_IsOff_AndDoesNotThrow()
+    {
+        var logger = new CapturingLogger();
+        await using var host = new DarlingHealthHostService(
+            new CollectorRuntimeState(), new EmptyDirectory(), logger, () => "{\"health\": null}");
+
+        await host.StartAsync(TestContext.Current.CancellationToken);
+
+        Assert.False(host.IsListening);
+        Assert.Empty(logger.Lines);
+    }
+
+    private static async Task AssertRefused(string json, params string[] named)
+    {
+        var logger = new CapturingLogger();
+        await using var host = new DarlingHealthHostService(new CollectorRuntimeState(), new EmptyDirectory(), logger, () => json);
+
+        await host.StartAsync(TestContext.Current.CancellationToken);
+
+        Assert.False(host.IsListening);
+        var line = Assert.Single(logger.Lines);
+        Assert.Equal(LogLevel.Critical, line.Level);
+        foreach (var setting in named)
+        {
+            Assert.Contains(setting, line.Text, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>#8184 I5 (ruling R9): a health port equal to web.port or mcp.port, set in the file or left at its default, is refused by
+    /// the host with one Critical line naming both settings; <c>Validate()</c> does not see it.</summary>
+    [Theory]
+    [InlineData("web", "{\"web\":{\"port\":6100},\"health\":{\"enabled\":true,\"port\":6100,\"listen\":\"127.0.0.1\"}}")]
+    [InlineData("mcp", "{\"mcp\":{\"port\":6101},\"health\":{\"enabled\":true,\"port\":6101,\"listen\":\"127.0.0.1\"}}")]
+    [InlineData("web", "{\"health\":{\"enabled\":true,\"port\":5153,\"listen\":\"127.0.0.1\"}}")]
+    [InlineData("mcp", "{\"health\":{\"enabled\":true,\"port\":5152,\"listen\":\"127.0.0.1\"}}")]
+    public Task HealthPortClash_IsRefusedByTheHost(string surface, string json) =>
+        AssertRefused(json, "health.port", $"{surface}.port");
+
+    /// <summary>#8184 I5 and M1: a port outside 1..65535 is refused, port 0 included, so the host never binds an ephemeral port.</summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(65536)]
+    public Task HealthPortOutOfRange_IsRefusedByTheHost(int port) =>
+        AssertRefused(EnabledOn(port), "health.port", "1 and 65535");
+
+    [Fact]
+    public Task HealthListenUnparsable_IsRefusedByTheHost() =>
+        AssertRefused(EnabledOn(6102, "nope"), "health.listen");
 }

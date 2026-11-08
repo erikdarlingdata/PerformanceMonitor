@@ -53,7 +53,7 @@ internal static class DarlingHealthEndpoints
         }
         else if (DarlingFrontDoorWebProxy.AllStoresUnusable(stores))
         {
-            word = "degraded";
+            word = DarlingFrontDoorWebProxy.DegradedWord;
             ready = false;
         }
         else

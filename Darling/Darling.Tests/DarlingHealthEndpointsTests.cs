@@ -47,12 +47,19 @@ public sealed class DarlingHealthEndpointsTests
         Assert.Equal(new HealthAnswer(readyStatus, readyWord), DarlingHealthEndpoints.Answer(HealthProbe.Ready, s));
     }
 
-    [Theory]
-    [MemberData(nameof(Table))]
-    public void Answer_WordAlwaysMatchesPing(int? phase, int liveStatus, string liveWord, int readyStatus, string readyWord)
+    public static IEnumerable<object?[]> Phases() => new[]
     {
-        Assert.NotEmpty(liveWord + readyWord);
-        Assert.NotEqual(0, liveStatus + readyStatus);
+        new object?[] { null },
+        new object?[] { Retrying },
+        new object?[] { Stopped },
+        new object?[] { Collecting },
+        new object?[] { 99 },
+    };
+
+    [Theory]
+    [MemberData(nameof(Phases))]
+    public void Answer_WordAlwaysMatchesPing(int? phase)
+    {
         var s = Snap(phase);
         var ping = DarlingWebEndpoints.DescribePing(s).Status;
         Assert.Equal(ping, DarlingHealthEndpoints.Answer(HealthProbe.Live, s).Word);

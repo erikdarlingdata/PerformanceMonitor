@@ -180,7 +180,7 @@ internal sealed class DarlingFrontDoorWebProxy
         {
             return WriteJsonAsync(context, StatusCodes.Status503ServiceUnavailable, new JsonObject
             {
-                ["status"] = "degraded",
+                ["status"] = DegradedWord,
                 ["front_door"] = true,
                 ["detail"] = "No store can be reached right now.",
             });
@@ -188,6 +188,9 @@ internal sealed class DarlingFrontDoorWebProxy
 
         return WriteJsonAsync(context, StatusCodes.Status200OK, new JsonObject { ["status"] = "ok", ["front_door"] = true });
     }
+
+    /// <summary>#8184: the word for <see cref="AllStoresUnusable"/>, in <c>/api/ping</c>'s <c>status</c> and the health port's <c>/readyz</c> body.</summary>
+    internal const string DegradedWord = "degraded";
 
     /// <summary>#8184: whether every store was tried and cannot be used, the front door's one degraded verdict. Shared by <c>/api/ping</c> and the
     /// health port's <c>/readyz</c>. A store that has not been tried yet (no error, not held) is not a failed one: right after start the front

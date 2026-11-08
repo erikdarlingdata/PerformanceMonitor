@@ -7,15 +7,14 @@
  */
 
 using System;
-using System.IO;
-using System.Linq;
 using System.Net;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
 
 namespace Darling.Tests;
 
-/// <summary>#8184: the health config block, its defaults, and its validation.</summary>
+/// <summary>#8184: the health config block, its defaults and its parse. Its refusals live in the host (ruling R9, D-validate):
+/// <see cref="DarlingHealthHostTests"/>.</summary>
 public class HealthConfigTests
 {
     private static DarlingConfig Valid()
@@ -36,20 +35,22 @@ public class HealthConfigTests
     [Fact]
     public void ParsesTheBlock()
     {
-        var path = Path.Combine(Path.GetTempPath(), $"darling-health-{Guid.NewGuid():N}.json");
-        File.WriteAllText(path, "{\"postgres\":{\"connectionString\":\"Host=x\"},\"health\":{\"enabled\":true,\"port\":6000,\"listen\":\"10.0.0.1\"}}");
-        try
-        {
-            var health = DarlingConfig.Load(path).Health;
+        var health = DarlingConfig.Parse("{\"postgres\":{\"connectionString\":\"Host=x\"},\"health\":{\"enabled\":true,\"port\":6000,\"listen\":\"10.0.0.1\"}}").Health;
 
-            Assert.True(health.Enabled);
-            Assert.Equal(6000, health.Port);
-            Assert.Equal("10.0.0.1", health.Listen);
-        }
-        finally
-        {
-            File.Delete(path);
-        }
+        Assert.True(health.Enabled);
+        Assert.Equal(6000, health.Port);
+        Assert.Equal("10.0.0.1", health.Listen);
+    }
+
+    /// <summary>#8184 I2: <c>"health": null</c> is the absent block (the #5460 rule), never a null that faults the start.</summary>
+    [Fact]
+    public void NullHealth_ParsesToTheDefaultOffBlock()
+    {
+        var health = DarlingConfig.Parse("{\"postgres\":{\"connectionString\":\"Host=x\"},\"health\":null}").Health;
+
+        Assert.NotNull(health);
+        Assert.False(health.Enabled);
+        Assert.Equal(5154, health.Port);
     }
 
     [Theory]
@@ -65,55 +66,18 @@ public class HealthConfigTests
         Assert.Equal(expected is null ? null : IPAddress.Parse(expected), address);
     }
 
-    [Theory]
-    [InlineData("web")]
-    [InlineData("mcp")]
-    public void HealthPortClash_IsAProblem(string surface)
-    {
-        var config = Valid();
-        config.Health.Enabled = true;
-        config.Health.Port = surface == "web" ? config.Web.Port : config.Mcp.Port;
-
-        var problem = Assert.Single(config.Validate());
-
-        Assert.Contains("health.port", problem);
-        Assert.Contains($"{surface}.port", problem);
-    }
-
-    [Theory]
-    [InlineData(0)]
-    [InlineData(65536)]
-    public void HealthPortOutOfRange_IsAProblem(int port)
-    {
-        var config = Valid();
-        config.Health.Enabled = true;
-        config.Health.Port = port;
-
-        var problem = Assert.Single(config.Validate());
-
-        Assert.Contains("health.port", problem);
-        Assert.Contains("1 and 65535", problem);
-    }
-
     [Fact]
-    public void HealthListenUnparsable_IsAProblem()
+    public void HealthBlock_IsNeverAValidateProblem()
     {
+        /* #8184 ruling R9: an optional, default-off endpoint never stops collection, so Validate() does not check the block, on or off. */
         var config = Valid();
         config.Health.Enabled = true;
+        config.Health.Port = config.Web.Port;
         config.Health.Listen = "nope";
 
-        var problem = Assert.Single(config.Validate());
-
-        Assert.Contains("health.listen", problem);
-    }
-
-    [Fact]
-    public void HealthDisabled_IsNeverAProblem()
-    {
-        var config = Valid();
+        Assert.DoesNotContain(config.Validate(), p => p.Contains("health.", StringComparison.Ordinal));
         config.Health.Enabled = false;
         config.Health.Port = 0;
-        config.Health.Listen = "nope";
 
         Assert.DoesNotContain(config.Validate(), p => p.Contains("health.", StringComparison.Ordinal));
     }
