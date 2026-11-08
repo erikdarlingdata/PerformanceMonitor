@@ -671,6 +671,80 @@ public sealed class DarlingStoreLoginsTests
     }
 
     /// <summary>
+    /// #8141's missed step: the credentials directory still belongs to root, the service runs as 1654, so collection
+    /// stood down and the verdict is "not provisioned". The hosts used to read the role credentials behind it as absent
+    /// and connect as the owner; now each surface stays down with the refusal sentence, and its supervisor retries.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ACredentialsDirectoryAnotherUserOwns_KeepsTheSurfaceDown_NeverTheOwner(bool web)
+    {
+        const string directory = "/var/lib/darling/credentials";
+        var previousContainer = Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER");
+        var modes = new StandInUnixModes { EffectiveUserId = 1654 };
+        modes.ReportOwner(directory, 0);
+        try
+        {
+            Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", "true");
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+            DarlingStoreLogins.PublishComposeStoreVerdict(
+                DarlingStoreLogins.ComposeStoreVerdict.NotProvisioned("collection stood down", directory));
+            var log = new CapturingTestLogger();
+
+            using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
+            {
+                var login = await DarlingStoreLogins.ResolveUnmanagedAsync(
+                    web ? DarlingStoreLogins.Surface.Web : DarlingStoreLogins.Surface.Mcp, new PostgresConfig { ConnectionString = Owner, Managed = false }, log, TestContext.Current.CancellationToken);
+
+                Assert.Null(login);
+            }
+
+            var refusal = new ComposeCredentialDirectoryRefusal(directory, 1654, 0);
+            Assert.Contains(refusal.Sentence, log.Joined, StringComparison.Ordinal);
+            Assert.Equal(1, log.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+            Assert.DoesNotContain("as the owner", log.Joined, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+            Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", previousContainer);
+        }
+    }
+
+    /// <summary>
+    /// #8141: an earlier credential behind a directory the service's user cannot list is not "missing": the reason
+    /// says the directory could not be read and gives the chown.
+    /// </summary>
+    [Fact]
+    public void AnEarlierCredential_InADirectoryTheServiceCannotList_IsNotCalledMissing()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-8141-earlier-");
+        try
+        {
+            var directory = Path.Combine(root.FullName, "credentials");
+            Directory.CreateDirectory(directory);
+            var modes = new StandInUnixModes { EffectiveUserId = 1654 };
+            modes.Report(directory, "700");
+            modes.Unlistable.Add(Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory)));
+
+            using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
+            {
+                var earlier = DarlingManagedRoles.ReadEarlierComposeCredential(directory, "web", NullLogger.Instance);
+
+                Assert.Null(earlier.Password);
+                Assert.Contains("could not be looked for: it cannot be read (permission denied)", earlier.MissingReason, StringComparison.Ordinal);
+                Assert.Contains("chown -R 1654:1654", earlier.MissingReason, StringComparison.Ordinal);
+                Assert.DoesNotContain("does not exist", earlier.MissingReason, StringComparison.Ordinal);
+            }
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
+    /// <summary>
     /// The Unix credentials-directory verdict (#3914 review, F4), pure because the test host is Windows. The service
     /// sets the directory to 0700 every start and reads the mode back: still reachable by others afterwards means
     /// nothing in it is read or written; writable by others BEFORE means a 0600 file could have been planted by
