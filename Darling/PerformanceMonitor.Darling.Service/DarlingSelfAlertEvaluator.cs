@@ -940,6 +940,25 @@ internal sealed class DarlingSelfAlertEvaluator
     /// other's alert row.</summary>
     private const string RetentionKeyPrefix = "retentionjob:";
 
+    /// <summary>#8302: the metric name a daily rollup fires under when its newest materialized bucket has fallen more
+    /// than <see cref="TimescaleSupport.DailyRollupStaleAfterSpanFor"/> behind its source's. Its own name, not
+    /// <see cref="RefreshJobStuckMetric"/>: the job is not hung or crashed, so the stuck-job machine's re-arm and
+    /// "re-hung" escalation do not apply, and it is a Warning where the refresh family is Critical, so one name per tier
+    /// holds (#3635).</summary>
+    internal const string DailyRollupStaleMetric = "Daily Rollup Stale";
+
+    /// <summary>#8302: the resolution title when the rollup is level with its source again. Carries the recognized
+    /// "Recovered" suffix so <c>AlertMetricClassifier.IsResolution</c> styles it green.</summary>
+    internal const string DailyRollupRecoveredMetric = "Daily Rollup Recovered";
+
+    /// <summary>Prefixes the stale-rollup alert serverKey: the rollup's refresh job id, under its own prefix so it never
+    /// shares a row with the same job's stuck-job alert.</summary>
+    private const string RollupStaleKeyPrefix = "rollupstale:";
+
+    /// <summary>#8302: the daily rollups currently reported behind their source, by refresh job id.</summary>
+    private readonly ConcurrentDictionary<string, bool> _staleRollupState = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTime> _lastStaleRollupAlert = new(StringComparer.Ordinal);
+
     /* #3816: the total_failures arm's baselines. The DELTA is what this arm judges, and nothing in the
        product persisted a per-pass copy of these counters where the evaluator could reach it, so the
        previous pass's value is held in memory here — one long per policy job, on an hourly cadence. The
@@ -9140,7 +9159,7 @@ WHERE c.is_enabled";
     /// one is NOT re-armed and NOT paged: it is logged at Information and remembered as
     /// <c>AwaitingSchedulerRetry</c>. If the same job is still on the arm an hour later — the scheduler's own
     /// retry has not cleared it, because the jittered backoff fell just past the check cadence or because the
-    /// job crashed AGAIN and its backoff doubled — it escalates: one Critical page naming a crash the operator
+    /// job crashed AGAIN and its backoff grew by another retry period — it escalates: one Critical page naming a crash the operator
     /// should read the PostgreSQL log for, no re-arm, and the cooldown re-fires of the escalated state. A job
     /// that clears while awaiting the retry is dropped silently, since nothing was paged for it to recover
     /// from. Stores below 2.26.4, and stores whose version could not be read, keep every #1581 semantic
@@ -9169,12 +9188,29 @@ WHERE c.is_enabled";
 
         var now = _utcNow();
         var stillStuck = new HashSet<string>(StringComparer.Ordinal);
+        var staleRollups = new HashSet<string>(StringComparer.Ordinal);
         var rearmed = 0;
         var fired = 0;
 
         foreach (var job in reading.Stuck)
         {
             var key = job.JobId.ToString(CultureInfo.InvariantCulture);
+
+            /* #8302: a daily rollup behind its source rides the same reading but is not a stuck job. Its refresh job is
+               neither hung nor crashed, so a re-arm would run a job that is not stuck and the "re-hung" escalation would
+               call a healthy job a product bug. It gets its own Warning, its own text, and a resolution when it catches
+               up, and it never enters the stuck-job machine's state. */
+            if (job.Arm == StuckPolicyJobArm.DailyRollupStale)
+            {
+                staleRollups.Add(key);
+                if (await ApplyStaleDailyRollupAsync(job, key, now, cancellationToken))
+                {
+                    fired++;
+                }
+
+                continue;
+            }
+
             stillStuck.Add(key);
 
             /* A family this vocabulary has no sentence for is NOT paged under another family's name (#3816).
@@ -9244,7 +9280,7 @@ WHERE c.is_enabled";
                        same argument for a refresh or a retention job. */
                     _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.AwaitingSchedulerRetry, job.Family);
                     _logger?.LogInformation(
-                        "TimescaleDB {Label} read {Reason}; the scheduler re-runs a crashed job by itself after its crash backoff (at least five minutes, about an hour for a policy's default retry period), and a re-arm would reset that backoff rather than shorten it — not re-armed, not alerted; escalates if still there next check (#3591)",
+                        "TimescaleDB {Label} read {Reason}; the scheduler re-runs a crashed job by itself max(5 minutes, retry_period x consecutive_crashes) after its last job-list reload (about fifteen minutes on this service's retry period), and a re-arm would restart that wait rather than shorten it — not re-armed, not alerted; escalates if still there next check (#3591, #8302)",
                         label, job.Reason);
                     continue;
                 }
@@ -9299,7 +9335,7 @@ WHERE c.is_enabled";
             else if (episode.State == PolicyJobHealth.AwaitingSchedulerRetry)
             {
                 /* #3591: an hour on and the scheduler's own retry has not cleared it. Either the jittered backoff
-                   landed just past this check, or the job crashed AGAIN and its backoff doubled — both are worth a
+                   landed just past this check, or the job crashed AGAIN and its backoff grew by another retry period — both are worth a
                    human reading the PostgreSQL log, and neither is helped by alter_job (which would reset the
                    backoff once more). Escalate: page once now (#5493: a repeat only per connection_refire_minutes), never re-arm. */
                 _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.Escalated, job.Family);
@@ -9309,12 +9345,15 @@ WHERE c.is_enabled";
                     StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
                     job.Reason, "running on schedule",
                     detail: $"TimescaleDB {label} has sat in the scheduler's crash backoff ({job.Reason}) since at least the previous " +
-                        "hourly check, and the scheduler's own retry has not cleared it. A crashed background worker means the " +
+                        "hourly check, and the scheduler has not re-run it. A crashed background worker means the " +
                         "PostgreSQL cluster crash-restarted, failed over, or the worker was killed mid-run — read the PostgreSQL log " +
-                        "around the job's last_run_started_at for the cause, and check whether it has crashed more than once (each " +
-                        "consecutive crash doubles the backoff). The service did NOT re-arm it: on TimescaleDB 2.26.4+ (upstream " +
-                        "#9360) alter_job(next_start => now()) against a job in crash backoff resets the backoff instead of " +
-                        $"shortening it. {band.Stalled}",
+                        "around the job's last_run_started_at for the cause. The scheduler re-runs a crashed job " +
+                        "max(5 minutes, retry_period x consecutive_crashes) after it last reloaded its job list, and every alter_job on " +
+                        "the store reloads that list, so a job whose retry_period is an hour or more is pushed out again by each hourly " +
+                        $"pass and never runs. Every job this service schedules carries a {TimescaleSupport.PolicyJobRetryPeriod} retry_period " +
+                        "and converges onto it at startup; a job still on a longer one runs again after SELECT alter_job(<job_id>, " +
+                        $"retry_period => INTERVAL '{TimescaleSupport.PolicyJobRetryPeriod}'). The service did NOT re-arm it: " +
+                        $"alter_job(next_start => now()) against a job in crash backoff restarts the wait instead of shortening it. {band.Stalled}",
                     severity: band.Severity,
                     shortMessage: $"{label} still in crash backoff an hour on — escalated",
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
@@ -9368,6 +9407,8 @@ WHERE c.is_enabled";
             }
         }
 
+        await ResolveCaughtUpDailyRollupsAsync(staleRollups, cancellationToken);
+        await CloseEndedStaleRollupEpisodesAsync(reading, staleRollups, cancellationToken);
         await CloseEndedPolicyJobEpisodesAsync(reading, stillStuck, cancellationToken);
 
         /* Recovery: any job we were tracking that is no longer stuck has recovered — drop its state and write
@@ -9553,7 +9594,7 @@ WHERE c.is_enabled";
     /// </summary>
     private void LogPolicyJobSummary(PolicyJobCensus census, int rearmed, int fired, bool alertsEnabled)
         => _logger?.LogInformation(
-            "Store job health: {Jobs} jobs read (compression {Compression}, refresh {Refresh}, retention {Retention}{Other}), {Dead} dead, {Hung} stuck, {Held} held, {Rearmed} re-armed, {Fired} alerted{Disabled} (#3816)",
+            "Store job health: {Jobs} jobs read (compression {Compression}, refresh {Refresh}, retention {Retention}{Other}), {Dead} dead, {Hung} stuck, {Stale} stale, {Held} held, {Rearmed} re-armed, {Fired} alerted{Disabled} (#3816)",
             census.Total,
             census.Compression,
             census.Refresh,
@@ -9561,6 +9602,7 @@ WHERE c.is_enabled";
             census.Other == 0 ? "" : ", other " + census.Other.ToString(CultureInfo.InvariantCulture),
             census.Dead,
             census.Hung,
+            census.Stale,
             census.Held,
             rearmed,
             fired,
@@ -9577,7 +9619,7 @@ WHERE c.is_enabled";
     /// edge depending on a second read five seconds later, and only the reader knows which.</para>
     /// </summary>
     internal readonly record struct PolicyJobCensus(
-        int Total, int Compression, int Refresh, int Retention, int Other, int Held, int Dead, int Hung)
+        int Total, int Compression, int Refresh, int Retention, int Other, int Held, int Dead, int Hung, int Stale)
     {
         /// <summary>Counts one pass. A reading with no census rows (the read failed) counts zeroes, which is
         /// how the summary line says "nothing was read" rather than "a store with no jobs".</summary>
@@ -9594,7 +9636,9 @@ WHERE c.is_enabled";
                 jobs.Count(j => j.Family == TimescaleSupport.StorePolicyJobFamily.Other),
                 jobs.Count(j => j.Held),
                 stuck.Count(j => j.Arm == StuckPolicyJobArm.NextStartNegativeInfinity),
-                stuck.Count(j => j.Arm == StuckPolicyJobArm.RunningPastBound));
+                stuck.Count(j => j.Arm == StuckPolicyJobArm.RunningPastBound),
+                /* #8302: a stale daily rollup is neither dead nor hung; counted so a pass that reports one never logs "0 dead, 0 stuck" alone. */
+                stuck.Count(j => j.Arm == StuckPolicyJobArm.DailyRollupStale));
         }
     }
 
@@ -10704,7 +10748,7 @@ ORDER BY ag_name, database_name, replica_server_name";
     private static readonly HashSet<string> KeyedFleetMetrics = new(StringComparer.Ordinal)
     {
         JobCadenceMetric, RetentionHoldMetric, RawPurgeOverHorizonMetric, ComposeHoursStuckMetric,
-        CompressionJobMetric, RefreshJobStuckMetric, RetentionJobStuckMetric,
+        CompressionJobMetric, RefreshJobStuckMetric, RetentionJobStuckMetric, DailyRollupStaleMetric,
     };
 
     /// <summary>
@@ -10714,6 +10758,170 @@ ORDER BY ag_name, database_name, replica_server_name";
     /// </summary>
     internal static string? StoredAlertKey(string serverKey, string firingMetric) =>
         KeyedFleetMetrics.Contains(firingMetric) && !string.IsNullOrEmpty(serverKey) ? serverKey : null;
+
+    /// <summary>
+    /// #8302: one daily rollup reported behind its source this pass. First sight fires one Warning under
+    /// <see cref="DailyRollupStaleMetric"/> with the rollup, its newest bucket, its source's newest bucket and the fix
+    /// (the reason text the read built); a rollup that stays behind repeats only per <c>connection_refire_minutes</c>,
+    /// like every standing store alert (#5493). Never re-arms: the job is not stuck, it has days to refresh that its
+    /// window has moved past or is about to. Returns whether anything was sent.
+    /// </summary>
+    private async Task<bool> ApplyStaleDailyRollupAsync(StuckPolicyJob job, string key, DateTime now, CancellationToken cancellationToken)
+    {
+        /* #7068 shape: on the first pass of this process, an open fire row for this rollup in the history means it was
+           already announced before the restart. Seeding the state from it keeps the restart from writing a second
+           first-sight row, and lets the pass where the rollup catches up resolve the row it finds open. */
+        if (!_policyJobFirstPassDone && !_staleRollupState.ContainsKey(key))
+        {
+            await SeedStandingStaleRollupAsync(key, cancellationToken);
+        }
+
+        var view = string.IsNullOrEmpty(job.HypertableName) ? "daily rollup" : job.HypertableName;
+        var detail = $"TimescaleDB daily rollup {view} (refresh job {key}) is behind its source: {job.Reason}. The refresh policy " +
+            "refreshes only the whole buckets inside its window, so a day the window has moved past is never refreshed by the " +
+            $"policy on its own; refresh the missed days by hand with CALL refresh_continuous_aggregate('collect.{view}', " +
+            "<its newest bucket end>, <its source's newest bucket end>), then check that the refresh job runs on schedule. " +
+            "The job itself is not stuck, and the service has not altered it. Until the rollup catches up, every reader of it " +
+            "is served answers that stop at its newest bucket.";
+
+        if (_staleRollupState.TryAdd(key, true))
+        {
+            _lastStaleRollupAlert[key] = now;
+            var delivery = await FireAsync(
+                StoreKey(RollupStaleKeyPrefix + key), _storeLabel, DailyRollupStaleMetric,
+                job.Reason, "level with its source",
+                detail: detail,
+                severity: AlertSeverityLevel.Warning,
+                shortMessage: $"daily rollup {view} is behind its source",
+                numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+                cancellationToken);
+            NoteStateSend(DailyRollupStaleMetric, key, delivery);
+            return true;
+        }
+
+        var decision = DecideStateAlert(_lastStaleRollupAlert, key, DailyRollupStaleMetric, key, now, out var refire);
+        if (decision is not (ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown))
+        {
+            return false;
+        }
+
+        _lastStaleRollupAlert[key] = now;
+        var repeat = await FireAsync(
+            StoreKey(RollupStaleKeyPrefix + key), _storeLabel, DailyRollupStaleMetric,
+            job.Reason, "level with its source",
+            detail: StateRepeatNote(decision, refire) + detail,
+            severity: AlertSeverityLevel.Warning,
+            shortMessage: $"daily rollup {view} is still behind its source",
+            numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+            cancellationToken);
+        NoteStateSend(DailyRollupStaleMetric, key, repeat);
+        return true;
+    }
+
+    /// <summary>#8302, the #7068 seed for a stale rollup: the open <see cref="DailyRollupStaleMetric"/> row for this key written
+    /// before this process started, if any, becomes the standing state, with its fire time as the last announcement.</summary>
+    private async Task SeedStandingStaleRollupAsync(string key, CancellationToken cancellationToken)
+    {
+        var historyKey = StoreKey(RollupStaleKeyPrefix + key);
+        var seedClock = Stopwatch.StartNew();
+        try
+        {
+            var rows = await _historyStore.GetKeyedStandingAsync(
+                historyKey, DailyRollupStaleMetric, new[] { DailyRollupRecoveredMetric }, null, _serviceStartUtc);
+            if (rows.OpenFor(_ => true, null) is { } standing)
+            {
+                _staleRollupState[key] = true;
+                _lastStaleRollupAlert[key] = standing.FireAtUtc;
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning("Could not read the open {Metric} incident for {Key} from alert history after {ElapsedMs} ms; a rollup still behind its source may be announced again after this restart: {Message}",
+                DailyRollupStaleMetric, historyKey, seedClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(null, "stale rollup standing seed self-alert", seedClock.ElapsedMilliseconds);
+        }
+    }
+
+    /// <summary>#8302: the daily refresh jobs whose stale-rollup row has been checked for an episode that ended while no process was watching.</summary>
+    private readonly ConcurrentDictionary<string, bool> _staleRollupEndedChecked = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// #8302, the #7076 close for a stale rollup: a daily refresh job that is not behind now, that no process tracks, and whose
+    /// last <see cref="DailyRollupStaleMetric"/> row is still open in the history (the rollup was refreshed by hand while the
+    /// service was down) gets its <see cref="DailyRollupRecoveredMetric"/> row here, once per job per process. A failed read is
+    /// logged and counted, and the jobs not yet checked are tried again on the next pass.
+    /// </summary>
+    private async Task CloseEndedStaleRollupEpisodesAsync(StorePolicyJobHealth reading, HashSet<string> staleNow, CancellationToken cancellationToken)
+    {
+        foreach (var job in reading.Jobs)
+        {
+            var key = job.JobId.ToString(CultureInfo.InvariantCulture);
+            if (job.Family != TimescaleSupport.StorePolicyJobFamily.Refresh || staleNow.Contains(key) || _staleRollupEndedChecked.ContainsKey(key))
+            {
+                continue;
+            }
+
+            if (_staleRollupState.ContainsKey(key))
+            {
+                _staleRollupEndedChecked[key] = true;
+                continue;
+            }
+
+            var historyKey = StoreKey(RollupStaleKeyPrefix + key);
+            bool episodeStillOpen;
+            var readClock = Stopwatch.StartNew();
+            try
+            {
+                var rows = await _historyStore.GetKeyedStandingAsync(
+                    historyKey, DailyRollupStaleMetric, new[] { DailyRollupRecoveredMetric }, null, _serviceStartUtc);
+                _staleRollupEndedChecked[key] = true;
+                episodeStillOpen = rows.OpenFor(_ => true, null) is not null;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Could not read the open {Metric} incident for {Key} from alert history after {ElapsedMs} ms; an ended incident may stay open until the next pass: {Message}",
+                    DailyRollupStaleMetric, historyKey, readClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(null, "stale rollup ended-episode close self-alert", readClock.ElapsedMilliseconds);
+                return;
+            }
+
+            if (episodeStillOpen)
+            {
+                await RecordResolutionAsync(new AlertResolution(
+                    StoreKey(RollupStaleKeyPrefix + key), _storeLabel, DailyRollupStaleMetric, DailyRollupRecoveredMetric,
+                    $"TimescaleDB daily rollup (refresh job {key}) is level with its source again"), cancellationToken);
+            }
+        }
+    }
+
+    /// <summary>#8302: every daily rollup reported behind its source on an earlier pass and not on this one has caught
+    /// up: its state is dropped and one <see cref="DailyRollupRecoveredMetric"/> row is written under the key its firing used.</summary>
+    private async Task ResolveCaughtUpDailyRollupsAsync(HashSet<string> staleNow, CancellationToken cancellationToken)
+    {
+        foreach (var key in _staleRollupState.Keys.ToList())
+        {
+            if (staleNow.Contains(key))
+            {
+                continue;
+            }
+
+            _staleRollupState.TryRemove(key, out _);
+            _lastStaleRollupAlert.TryRemove(key, out _);
+            _stateRetries.Clear(StateRetryKey(DailyRollupStaleMetric, key));
+            await RecordResolutionAsync(new AlertResolution(
+                StoreKey(RollupStaleKeyPrefix + key), _storeLabel, DailyRollupStaleMetric,
+                DailyRollupRecoveredMetric,
+                $"TimescaleDB daily rollup (refresh job {key}) is level with its source again"), cancellationToken);
+        }
+    }
 
     private Task RecordPolicyJobRecoveredAsync(PolicyJobBand band, string key, CancellationToken cancellationToken) =>
         RecordResolutionAsync(new AlertResolution(

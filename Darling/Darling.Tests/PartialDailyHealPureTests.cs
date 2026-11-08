@@ -193,19 +193,19 @@ public sealed class PartialDailyHealPureTests
         var oldest = Day;
         var now = Day.AddDays(12).AddHours(15);
 
-        /* Today is Day+12; its policy window starts at Day+9; the last day the heal may compare is Day+8. */
+        /* Today is Day+12; its policy window starts at Day+8; the last day the heal may compare is Day+7. */
         var days = TimescaleSupport.PartialDailyHealDays(oldest, now);
-        Assert.Equal(Day.AddDays(8), days[^1]);
-        Assert.Equal(Enumerable.Range(1, 8).Select(i => Day.AddDays(i)), days);
-        Assert.DoesNotContain(Day.AddDays(9), days);
+        Assert.Equal(Day.AddDays(7), days[^1]);
+        Assert.Equal(Enumerable.Range(1, 7).Select(i => Day.AddDays(i)), days);
+        Assert.DoesNotContain(Day.AddDays(8), days);
 
         /* One tick before midnight it is still the previous day's window: one fewer day. */
         var justBeforeMidnight = TimescaleSupport.PartialDailyHealDays(oldest, Day.AddDays(12).AddTicks(-1));
-        Assert.Equal(Day.AddDays(7), justBeforeMidnight[^1]);
+        Assert.Equal(Day.AddDays(6), justBeforeMidnight[^1]);
 
         /* At midnight exactly it is the new day's window: one more. */
         var atMidnight = TimescaleSupport.PartialDailyHealDays(oldest, Day.AddDays(13));
-        Assert.Equal(Day.AddDays(9), atMidnight[^1]);
+        Assert.Equal(Day.AddDays(8), atMidnight[^1]);
     }
 
     [Fact]
@@ -216,11 +216,11 @@ public sealed class PartialDailyHealPureTests
         Assert.Empty(TimescaleSupport.PartialDailyHealDays(null, now));
         Assert.Empty(TimescaleSupport.PartialDailyHealDays(now.AddHours(-1), now));
 
-        /* Oldest bucket on Day+8: the day after it, Day+9, is the first day of the policy window, so nothing is left. */
-        Assert.Empty(TimescaleSupport.PartialDailyHealDays(Day.AddDays(8).AddHours(6), now));
+        /* Oldest bucket on Day+7: the day after it, Day+8, is the first day of the policy window, so nothing is left. */
+        Assert.Empty(TimescaleSupport.PartialDailyHealDays(Day.AddDays(7).AddHours(6), now));
 
-        /* One day earlier leaves exactly one day to walk: Day+8. */
-        Assert.Equal(new[] { Day.AddDays(8) }, TimescaleSupport.PartialDailyHealDays(Day.AddDays(7).AddHours(6), now));
+        /* One day earlier leaves exactly one day to walk: Day+7. */
+        Assert.Equal(new[] { Day.AddDays(7) }, TimescaleSupport.PartialDailyHealDays(Day.AddDays(6).AddHours(6), now));
     }
 
     /* ─────────────── the comparison statement ─────────────── */
@@ -257,12 +257,12 @@ public sealed class PartialDailyHealPureTests
     [Fact]
     public void ChaseRangesAfterRefresh_DaysTheDependentRefreshAlreadyRefreshed_AreNotChasedAgain_AndEveryDayIsCountedOnce()
     {
-        /* A closed seam range over four old days, Day to Day+3. The chase is capped to the newest three of them,
-           Day+1 to Day+3. The daily held a bucket for Day, Day+1 and Day+3 but not Day+2, so the dependent refresh
-           forced those three (Day is older than the chase and outside it); only the chase can materialize Day+2. */
+        /* A closed seam range over four old days, Day to Day+3. The chase is capped to one policy window of buckets,
+           four, so it holds all of them. The daily held a bucket for Day, Day+1 and Day+3 but not Day+2, so the
+           dependent refresh forced those three; only the chase can materialize Day+2. */
         var now = Day.AddDays(30);
         var chase = ChaseRange(Day.AddHours(5), Day.AddDays(3).AddHours(7), now);
-        Assert.Equal((Day.AddDays(1), Day.AddDays(4)), chase);
+        Assert.Equal((Day, Day.AddDays(4)), chase);
 
         var refreshed = new[]
         {
@@ -317,11 +317,11 @@ public sealed class PartialDailyHealPureTests
     [Fact]
     public void ChaseRangesAfterRefresh_APairForAnotherDailyOrADayOutsideTheChase_ChangesNothing()
     {
-        /* The refresh has no clip to the daily policy's 3-day window, the chase does: a refreshed day newer than
+        /* The refresh has no clip to the daily policy's 4-day window, the chase does: a refreshed day newer than
            the window is not in the chase range at all, and a pair for another daily is not this daily's day. */
         var now = Day.AddDays(30);
-        var chase = ChaseRange(Day.AddDays(24).AddHours(5), Day.AddDays(28).AddHours(7), now);
-        Assert.Equal((Day.AddDays(24), Day.AddDays(27)), chase);
+        var chase = ChaseRange(Day.AddDays(23).AddHours(5), Day.AddDays(28).AddHours(7), now);
+        Assert.Equal((Day.AddDays(23), Day.AddDays(26)), chase);
 
         var refreshed = new[]
         {
