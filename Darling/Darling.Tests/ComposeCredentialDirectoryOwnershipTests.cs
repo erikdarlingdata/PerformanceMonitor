@@ -51,6 +51,34 @@ public sealed class ComposeCredentialDirectoryOwnershipTests
     }
 
     [Fact]
+    public void ImageOwned_ServiceIsAnotherUser_SaysMountAVolumeOrRunAs1654()
+    {
+        /* user: 1000 (or OpenShift's random uid) with nothing mounted: the directory is the image's, owned by 1654, and a
+           chown in a one-off container changes that container's layer only, so the next start refuses again. */
+        var modes = new StandInUnixModes { EffectiveUserId = 1000 };
+        modes.ReportOwner(Dir, 1654);
+        using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
+        {
+            var refusal = DarlingManagedRoles.ComposeCredentialDirectoryOwnershipRefusal(Dir);
+
+            Assert.NotNull(refusal);
+            var sentence = refusal.Sentence;
+            Assert.Contains("belongs to user 1654, but the service runs as user 1000", sentence, StringComparison.Ordinal);
+            Assert.Contains("collection is stopped", sentence, StringComparison.Ordinal);
+            Assert.Contains("mount a volume at /var/lib/darling (or /var/lib/darling/credentials)", sentence, StringComparison.Ordinal);
+            Assert.Contains("run the service as user 1654", sentence, StringComparison.Ordinal);
+            Assert.Contains("docker compose up -d", sentence, StringComparison.Ordinal);
+
+            /* The chown sticks only on a mounted volume, and a new named volume is seeded owned by 1654, so it follows the
+               mount, never stands alone. */
+            var chown = sentence.IndexOf("chown darling -R 1000:1000 /var/lib/darling", StringComparison.Ordinal);
+            Assert.Contains("a new named volume starts owned by user 1654", sentence, StringComparison.Ordinal);
+            Assert.True(chown > sentence.IndexOf("as for a volume already mounted there", StringComparison.Ordinal), sentence);
+            Assert.True(sentence.IndexOf("mount a volume", StringComparison.Ordinal) < chown, sentence);
+        }
+    }
+
+    [Fact]
     public void OwnedByTheService_EvenGroupOpen_IsNull()
     {
         var modes = new StandInUnixModes { EffectiveUserId = 1654 };

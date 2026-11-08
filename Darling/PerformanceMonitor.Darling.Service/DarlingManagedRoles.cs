@@ -4927,6 +4927,33 @@ WHERE t.tgrelid = 'config.investigation_journal'::regclass
         return $"docker compose run --rm --no-deps --user 0 --entrypoint chown darling -R {u}:{u} {ComposeCredentialVolumeRoot}";
     }
 
+    /// <summary>The image's own user, <c>$APP_UID</c> of the .NET base image, which owns the image's /var/lib/darling (#8141).</summary>
+    internal const uint ImageUserId = 1654;
+
+    /// <summary>
+    /// What to do instead of only the chown when a service that is neither root nor the image's user finds a compose
+    /// credential path owned by the image's user (#8141 review: <c>user:</c> set to another uid, or OpenShift's random
+    /// one). With nothing mounted at /var/lib/darling that is the image's own directory, and the one-off container's chown
+    /// changes only that container, so the next start refuses again: run as the image's user, or mount a volume. A new
+    /// named volume is seeded from the image, owned by 1654, so the chown still follows the mount; a mounted volume keeps
+    /// it. Null when it is not this case.
+    /// </summary>
+    internal static string? ImageOwnedCredentialAdvice(uint userId, string path, uint ownerUserId)
+    {
+        if (ownerUserId != ImageUserId || userId == ImageUserId || userId == 0
+            || (path != ComposeCredentialVolumeRoot && !path.StartsWith(ComposeCredentialVolumeRoot + "/", StringComparison.Ordinal)))
+        {
+            return null;
+        }
+
+        var image = ImageUserId.ToString(CultureInfo.InvariantCulture);
+        return $"if nothing is mounted at {ComposeCredentialVolumeRoot}, this is the image's own directory, which a chown in a "
+            + $"one-off container cannot change for this one, so run the service as user {image}, or mount a volume at "
+            + $"{ComposeCredentialVolumeRoot} (or {ComposeCredentialVolumeRoot}/credentials) and recreate the container "
+            + $"(docker compose up -d); a new named volume starts owned by user {image} like the image's directory, so then, "
+            + $"as for a volume already mounted there, run: {CredentialOwnershipFix(userId, path)}";
+    }
+
     /// <summary>The compose store's credential file for <paramref name="role"/>: the managed file's name without
     /// the <c>.dpapi</c> extension, because it holds the password itself (#3914).</summary>
     public static string ComposeStoreCredentialFileName(string role) => $"pg-{role}-credential";

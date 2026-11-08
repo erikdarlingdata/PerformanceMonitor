@@ -56,6 +56,24 @@ public sealed class CredentialOwnershipMessageTests
     }
 
     [Fact]
+    public void AnotherUser_OnAnImageOwnedKey_SaysMountAVolumeOrRunAs1654()
+    {
+        var modes = new StandInUnixModes { EffectiveUserId = 1000 };
+        modes.ReportOwner(ComposeKey, 1654);
+
+        using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
+        {
+            var reason = DarlingServiceKeyFile.UnexpectedOwnerReason(ComposeKey);
+
+            Assert.NotNull(reason);
+            Assert.Contains("owned by user 1654, not by user 1000", reason);
+            Assert.Contains("mount a volume at /var/lib/darling (or /var/lib/darling/credentials)", reason);
+            Assert.Contains("run the service as user 1654", reason);
+            Assert.Contains("already mounted there, run: docker compose run", reason);
+        }
+    }
+
+    [Fact]
     public void OutsideTheComposeVolume_GivesAPlainChownOfThePath()
     {
         const string path = "/opt/darling/darling-keys/password-key";

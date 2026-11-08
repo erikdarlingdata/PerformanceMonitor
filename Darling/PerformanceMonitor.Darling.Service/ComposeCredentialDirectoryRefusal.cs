@@ -27,7 +27,8 @@ internal sealed record ComposeCredentialDirectoryRefusal(string Directory, uint 
             return OwnerUserId is { } owner
                 ? $"The credentials directory {Directory} belongs to user {owner.ToString(CultureInfo.InvariantCulture)}, "
                     + $"but the service runs as user {euidText}, so collection is stopped and nothing in it was read or changed; "
-                    + $"to give it to the service's user, run: {fix}, then restart the service (docker compose restart darling)."
+                    + (DarlingManagedRoles.ImageOwnedCredentialAdvice(UserId, Directory, owner) ?? $"to give it to the service's user, run: {fix}")
+                    + ", then restart the service (docker compose restart darling)."
                 : $"The credentials directory {Directory} cannot be read by user {euidText}, which the service runs as, "
                     + "so collection is stopped and nothing in it was read or changed; "
                     + $"to give it to that user, run: {fix}, then restart the service (docker compose restart darling).";
