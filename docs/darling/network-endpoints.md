@@ -321,7 +321,7 @@ With `listen` empty, the port binds `0.0.0.0` inside a container and `127.0.0.1`
 
 The body is `text/plain; charset=utf-8` and holds only that word. The words are the `status` values of [`/api/ping`](web-dashboard.md). A front door (see [The front door](front-door.md)) runs no collector, so its `/readyz` answers what its `/api/ping` answers: 503 `stopped` when its own `darling.json` was refused, 503 `degraded` when every store is unusable, and 200 `ok` otherwise. Its `/livez` is still 200.
 
-The routes are matched the way ASP.NET Core routing matches every route: case-insensitively, with a trailing slash ignored and after percent-decoding, so `/LIVEZ`, `/livez/` and `/%6civez` answer the same as `/livez`. Any other path gets a 404 with an empty body. Any method other than GET on the two routes gets a 405 with an empty body.
+The routes are matched the way ASP.NET Core routing matches every route: case-insensitively, with a trailing slash and a query string ignored, after percent-decoding and after `..` segments are resolved. So `/LIVEZ`, `/livez/`, `/livez?x=1` and `/%6civez` answer the same as `/livez`, and `/livez/../readyz` answers as `/readyz`. Any other path gets a 404 with an empty body. Any method other than GET on the two routes gets a 405 with an empty body.
 
 ### What the port never returns
 
