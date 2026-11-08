@@ -10068,11 +10068,11 @@ CREATE INDEX IF NOT EXISTS idx_index_object_stats_latest ON collect.index_object
     /// <c>create_hypertable</c> emits the advisory use-TIMESTAMPTZ WARNING — expected, exactly like the
     /// collector hypertables.</para>
     ///
-    /// <para><b>Compression.</b> Enabled + policy added mirroring <see cref="TimescaleSupport"/> for this one
-    /// table: segment by <c>server_id</c> (every read filters it first) and compress chunks older than the same
-    /// <see cref="TimescaleSupport.CompressAfterDays"/>, with the same <see cref="TimescaleSupport.ChunkIntervalDays"/>
-    /// chunk width — the constants are interpolated so the two never drift. <c>if_not_exists</c> on the policy
-    /// keeps it idempotent. Explicitly <c>collect.</c>-qualified like V21/V22.</para>
+    /// <para><b>Compression.</b> Enabled mirroring <see cref="TimescaleSupport"/> for this one table: segment by
+    /// <c>server_id</c> (every read filters it first), with the same <see cref="TimescaleSupport.ChunkIntervalDays"/>
+    /// chunk width, interpolated so the two never drift. V23 adds no compression policy:
+    /// <see cref="TimescaleSupport.EnsureCollectionLogHypertableAsync"/> adds it at runtime, on the hourly cadence at its
+    /// phase minute. Explicitly <c>collect.</c>-qualified like V21/V22.</para>
     /// </summary>
     private static string V23Sql =>
         $@"
