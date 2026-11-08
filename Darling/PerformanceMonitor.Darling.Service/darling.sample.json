@@ -217,6 +217,12 @@
   // rendering on the same cycle. A file-only knob (not stored in the control plane): edit + restart.
   "procedureStatsPlanCycleInterval": 4,
 
+  // max_events_limit of the ring buffer in the deadlock, blocked-process and long-query Extended Events sessions (#8146).
+  // The engine's own default is 1000, and a session over it evicts its oldest events; a larger limit holds more between
+  // collections. Range 1000 to 10000, clamped (and logged) at start. A session keeps the limit it was created with, so
+  // a changed value applies to sessions created afterwards. A file-only knob: edit + restart.
+  "xeRingBufferMaxEvents": 1000,
+
   // query_stats plan fetching. true (the default) leaves plan XML out of query_stats' main query and renders it in
   // a second query for only the statement plans this service has not already stored; rows for plans it has stored
   // carry the existing digest, so every reader sees the same data. On one large store the inline capture rendered

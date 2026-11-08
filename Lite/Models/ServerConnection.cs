@@ -196,6 +196,12 @@ public class ServerConnection : INotifyPropertyChanged
     public string DisplayNameWithIntent => ReadOnlyIntent ? $"{DisplayName} (Read-Only)" : DisplayName;
 
     /// <summary>
+    /// The sidebar's second line: the server name, or nothing when it would only repeat the display name above it.
+    /// </summary>
+    [JsonIgnore]
+    public string SidebarDetail => string.Equals(ServerNameDisplay, DisplayNameWithIntent, StringComparison.OrdinalIgnoreCase) ? string.Empty : ServerNameDisplay;
+
+    /// <summary>
     /// What a screen reader announces for a server in a list or drop-down box (UI Automation names an item by its text):
     /// the name the box shows, not the type name "ServerConnection".
     /// </summary>

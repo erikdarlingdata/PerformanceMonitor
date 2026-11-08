@@ -256,8 +256,7 @@ internal static class DarlingPasswordKeyFileReader
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return new PasswordKeyFileRead(
-                null, $"{DarlingPasswordKeySource.SettingName}: secret file '{path}' could not be read: {ex.Message}", []);
+            return new PasswordKeyFileRead(null, CouldNotRead(path, ex), []);
         }
         finally
         {
@@ -376,6 +375,54 @@ internal static class DarlingPasswordKeyFileReader
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// The refusal for a key file that could not be opened or read, as <see cref="DarlingSecretSource.Resolve"/> words it.
+    /// When the read was denied on Unix and another user owns the file (#8141: a compose secret keeps its host owner, and
+    /// the service runs as 1654), it also names both users and the <c>chown</c> that gives the file to the service's
+    /// user, which for a compose secret runs on the host file the secret is made from.
+    /// </summary>
+    internal static string CouldNotRead(string path, Exception ex)
+    {
+        var refusal = $"{DarlingPasswordKeySource.SettingName}: secret file '{path}' could not be read: {ex.Message}";
+        if (ex is not UnauthorizedAccessException || ComposeCredentialDirectoryGuard.Current.UnixModes is not { } modes)
+        {
+            return refusal;
+        }
+
+        UnixFileOwner? owner;
+        try
+        {
+            owner = modes.OwnerOf(path);
+        }
+        catch (Exception lookup) when (lookup is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            return refusal;
+        }
+
+        var euid = modes.EffectiveUserId;
+        if (owner is not { } found || found.UserId == euid)
+        {
+            return refusal;
+        }
+
+        var users = $"{refusal.TrimEnd('.')}. It is owned by user {found.UserId.ToString(CultureInfo.InvariantCulture)}, "
+            + $"not by user {euid.ToString(CultureInfo.InvariantCulture)}, which the service runs as; to give it to that user, ";
+        return path.StartsWith(DarlingSecretSource.ComposeSecretsMount, StringComparison.Ordinal)
+            ? users + ComposeSecretOwnershipFix(euid, path[DarlingSecretSource.ComposeSecretsMount.Length..])
+            : users + $"run: {DarlingManagedRoles.CredentialOwnershipFix(euid, path)}";
+    }
+
+    /// <summary>
+    /// The host-side fix for a compose secret the service cannot read (#8141). The path under /run/secrets/ exists only
+    /// inside the container, so the command names the host file the way secrets/README.md does, after the secret's name.
+    /// </summary>
+    private static string ComposeSecretOwnershipFix(uint userId, string secret)
+    {
+        var u = userId.ToString(CultureInfo.InvariantCulture);
+        return $"run on the host, in the compose folder: sudo chown {u}:{u} secrets/{secret} (the file the {secret} secret "
+            + "names in docker-compose.yml; keep its mode 0400 or 0600; see Darling/compose/secrets/README.md)";
     }
 
     private static string NotRegular(string target) =>

@@ -173,6 +173,11 @@
   // Out of range is IGNORED here rather than clamped: the value is kept only if 5-60.
   "connection_timeout_seconds": 5,
 
+  // ---- Extended Events ring buffers ---------------------------------------------------------------
+  // max_events_limit of the deadlock, blocked-process and long-query sessions (#8146). Clamped to 1000-10000.
+  // A session keeps the limit it was created with, so a changed value applies to sessions created afterwards.
+  "xe_ring_buffer_max_events": 1000,
+
   // ---- CSV export --------------------------------------------------------------------------------
   // "," | ";" | "\t". Anything else is ignored. The default follows the machine's locale, so
   // it is "," on en-US and ";" where the list separator is a semicolon.

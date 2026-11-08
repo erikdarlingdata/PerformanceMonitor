@@ -116,7 +116,7 @@ public sealed class ViewerQueryHeatmapDataStartTests : IDisposable
         Assert.Contains("Visibility=\"Collapsed\"", banner.Value, StringComparison.Ordinal);
         Assert.Contains("Background=\"#22FFAA00\"", banner.Value, StringComparison.Ordinal);
         // #8151: the chart sits in its card, which takes the row.
-        Assert.Matches(@"<ui:ChartPanel Title=""Query heatmap"" Grid\.Row=""2"">\s*<scottplot:WpfPlot x:Name=""QueryHeatmapChart""", xaml);
+        Assert.Matches(@"<ui:ChartPanel Title=""Query Heatmap"" Grid\.Row=""2"">\s*<scottplot:WpfPlot x:Name=""QueryHeatmapChart""", xaml);
     }
 
     // ── What the banner shows ──

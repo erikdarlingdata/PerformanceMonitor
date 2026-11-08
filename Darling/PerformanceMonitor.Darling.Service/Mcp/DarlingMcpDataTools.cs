@@ -3959,6 +3959,8 @@ ORDER BY server_name";
                 var emptyNotice = everRan
                     ? await BlockingStatsNoticeAsync(postgres, resolved.ServerName, start, end, null, null, emptyAnswer: true, logger, cancellationToken)
                     : default;
+                /* #8146: this read spans the blocked-process reports and the deadlocks, so the ring-buffer loss of either collector counts. */
+                var emptyLoss = everRan ? await ReadBlockingStatsLossAsync(postgres, resolved.ServerId, start, end, cancellationToken) : null;
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, end, everRan
                     ? McpHelpers.Status(
                         "empty",
@@ -3970,8 +3972,11 @@ ORDER BY server_name";
                                 ? $"No blocking or deadlocks recorded for {resolved.DisplayName} in the last {hours_back} hour(s)"
                                 : $"No blocking{DarlingMcpBlockingTools.ForChosenDatabases(databases)} "
                                   + $"(and no deadlocks, which are not limited by database) recorded for {resolved.DisplayName} in the last {hours_back} hour(s)",
-                            coveredClaim: ". The blocking collectors have run successfully for this server, so there was no blocking or deadlock in this window."),
-                        emptyNotice.AsHints())
+                            /* #8146: a lossy window keeps the runs but not the all-clear; the lost events were never read. */
+                            coveredClaim: emptyLoss is null
+                                ? ". The blocking collectors have run successfully for this server, so there was no blocking or deadlock in this window."
+                                : ". The blocking collectors have run successfully for this server, but " + RingBufferLossAnswer.LostEventsClaim + "."),
+                        RingBufferLossAnswer.WithLoss(emptyNotice.AsHints(), emptyLoss))
                     : McpHelpers.Status(
                         "unavailable",
                         $"The blocking collectors have NEVER run successfully for {resolved.DisplayName}, so this is NOT a clean bill of health — nothing looked. Blocked-process reports need the XE session running, or the DMV blocking snapshot collector enabled; check those before concluding this server does not block."), cancellationToken, start);
@@ -4020,14 +4025,23 @@ ORDER BY server_name";
                 }),
             }, McpHelpers.JsonOptions);
 
-            /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
-            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
+            /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). #8146: the window's ring-buffer loss is a top-level key when there was any. */
+            return RingBufferLossAnswer.Attach(
+                notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json,
+                await ReadBlockingStatsLossAsync(postgres, resolved.ServerId, start, end, cancellationToken));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_blocking_stats", ex);
         }
     }
+
+    /// <summary>#8146: the ring-buffer loss over the window of the two collectors get_blocking_stats reads, summed.</summary>
+    private static async Task<RingBufferLossNote.LossWindow?> ReadBlockingStatsLossAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime start, DateTime end, CancellationToken cancellationToken) =>
+        RingBufferLossAnswer.Combine(
+            await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, serverId, BlockedProcessReportCollector.Instance.Name, start, end, cancellationToken),
+            await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, serverId, DeadlocksCollector.Instance.Name, start, end, cancellationToken));
 
     /// <summary>
     /// The window-floor notice of get_blocking_stats (#4966). The answer is two SEPARATE series, so each has its own floor and the

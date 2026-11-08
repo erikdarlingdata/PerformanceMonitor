@@ -40,10 +40,20 @@ public sealed class JobHistoryCountTextTests
     }
 
     [Fact]
+    public void ACountOfFourDigits_ReadsWithAThousandsSeparator_LikeTheCapLabel()
+    {
+        /* The cap label says "2,000", so the count beside it says "2,000" too, and so does every other count label. */
+        Assert.Equal("1,500 runs", JobHistoryCap.CountText(1500, 1500, Cap));
+        Assert.Equal("12,345 events", PerformanceMonitor.Common.CountText.Plural(12345, "event"));
+        Assert.Equal("1,000 queries", PerformanceMonitor.Common.CountText.Plural(1000, "query", "queries"));
+        Assert.Equal("999 alerts", PerformanceMonitor.Common.CountText.Plural(999, "alert"));
+    }
+
+    [Fact]
     public void ReadAtTheCap_KeepsTheLabel_WhateverTheFiltersLeaveShown()
     {
         /* The load's own count, and what a column filter leaves of the same read: the label is about the read. */
-        Assert.Equal("2000 runs (showing the newest 2,000)", JobHistoryCap.CountText(2000, 2000, Cap));
+        Assert.Equal("2,000 runs (showing the newest 2,000)", JobHistoryCap.CountText(2000, 2000, Cap));
         Assert.Equal("7 runs (showing the newest 2,000)", JobHistoryCap.CountText(7, 2000, Cap));
         Assert.Equal("1 run (showing the newest 2,000)", JobHistoryCap.CountText(1, 2000, Cap));
     }

@@ -131,11 +131,21 @@
                                    FontWeight="SemiBold"
                                    Foreground="{DynamicResource ForegroundBrush}"/>
 
-                        <!-- Server Details -->
+                        <!-- Server Details: the server name, shown only when it differs from the display name above it (#8226). -->
                         <TextBlock Grid.Column="1" Grid.Row="1"
-                                   Text="{Binding Server.Connection.ServerNameDisplay}"
+                                   Text="{Binding Server.Connection.SidebarDetail}"
                                    FontSize="11"
-                                   Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                   Foreground="{DynamicResource ForegroundMutedBrush}">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Style.Triggers>
+                                        <Trigger Property="Text" Value="">
+                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                        </Trigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
 
                         <!-- Favorite Star -->
                         <TextBlock Grid.Column="2" Grid.RowSpan="2"

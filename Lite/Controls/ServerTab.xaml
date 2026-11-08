@@ -1647,54 +1647,71 @@
                                 <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                             </Grid.RowDefinitions>
 
-                            <!-- Memory Summary Panel -->
-                            <Border Grid.Row="0" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12" Margin="0,0,0,8">
-                                <WrapPanel>
-                                    <StackPanel Margin="0,0,24,0">
-                                        <TextBlock x:Name="PhysicalMemoryLabel" Text="Physical Memory" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
-                                        <TextBlock x:Name="PhysicalMemoryText" Text="--" FontSize="18" FontWeight="SemiBold"/>
-                                    </StackPanel>
-                                    <StackPanel Margin="0,0,24,0">
-                                        <TextBlock Text="SQL Server Memory" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
-                                        <TextBlock x:Name="TotalServerMemoryText" Text="--" FontSize="18" FontWeight="SemiBold"/>
-                                    </StackPanel>
-                                    <StackPanel Margin="0,0,24,0">
-                                        <TextBlock Text="Target Memory" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
-                                        <TextBlock x:Name="TargetServerMemoryText" Text="--" FontSize="18" FontWeight="SemiBold"/>
-                                    </StackPanel>
-                                    <StackPanel Margin="0,0,24,0">
-                                        <TextBlock Text="Buffer Pool" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
-                                        <TextBlock x:Name="BufferPoolText" Text="--" FontSize="18" FontWeight="SemiBold"/>
-                                    </StackPanel>
-                                    <StackPanel Margin="0,0,24,0">
-                                        <TextBlock Text="Plan cache (all cache stores)" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
-                                        <TextBlock x:Name="PlanCacheText" Text="--" FontSize="18" FontWeight="SemiBold"/>
-                                    </StackPanel>
-                                    <StackPanel Margin="0,0,24,0">
-                                        <TextBlock x:Name="AvailablePhysicalMemoryLabel" Text="Available Physical" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
-                                        <TextBlock x:Name="AvailablePhysicalMemoryText" Text="--" FontSize="18" FontWeight="SemiBold"/>
-                                    </StackPanel>
-                                    <StackPanel Margin="0,0,24,0">
-                                        <TextBlock Text="Total Page File" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
-                                        <TextBlock x:Name="TotalPageFileText" Text="--" FontSize="18" FontWeight="SemiBold"/>
-                                    </StackPanel>
-                                    <StackPanel Margin="0,0,24,0">
-                                        <TextBlock Text="Available Page File" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
-                                        <TextBlock x:Name="AvailablePageFileText" Text="--" FontSize="18" FontWeight="SemiBold"/>
-                                    </StackPanel>
-                                    <StackPanel Margin="0,0,24,0">
-                                        <TextBlock Text="System Memory State" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
-                                        <TextBlock x:Name="MemoryStateText" Text="--" FontSize="18" FontWeight="SemiBold"/>
-                                    </StackPanel>
-                                    <StackPanel Margin="0,0,24,0">
-                                        <TextBlock Text="Memory Model" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
-                                        <TextBlock x:Name="SqlMemoryModelText" Text="--" FontSize="18" FontWeight="SemiBold"/>
-                                    </StackPanel>
-                                    <StackPanel Margin="0,0,24,0">
-                                        <TextBlock Text="Collected" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
-                                        <TextBlock x:Name="MemoryCollectedText" Text="--" FontSize="18" FontWeight="SemiBold"/>
-                                    </StackPanel>
-                                </WrapPanel>
+                            <!-- Memory Summary Panel. #8226: a card like the chart panels: a semibold title, a muted subtitle, the eight
+                                 figures in four columns at the metric size, and a third row (the memory state, the memory model and the
+                                 collection time) at the subtitle size, each under its column. -->
+                            <Border Grid.Row="0" x:Name="MemoryOverviewCard" Background="{DynamicResource BackgroundLightBrush}" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" CornerRadius="6" Padding="12" Margin="0,0,0,8">
+                                <StackPanel>
+                                    <TextBlock x:Name="MemoryOverviewTitle" Text="Memory Overview" Style="{DynamicResource PanelTitleText}"/>
+                                    <TextBlock x:Name="MemoryOverviewSubtitle" Text="At the newest collection" Style="{DynamicResource PanelSubtitleText}" Margin="0,4,0,12"/>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                        </Grid.RowDefinitions>
+                                        <StackPanel Grid.Row="0" Grid.Column="0" Margin="0,0,16,8">
+                                            <TextBlock x:Name="PhysicalMemoryLabel" Text="Physical Memory" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
+                                            <TextBlock x:Name="PhysicalMemoryText" Text="--" FontSize="18" FontWeight="SemiBold"/>
+                                        </StackPanel>
+                                        <StackPanel Grid.Row="0" Grid.Column="1" Margin="0,0,16,8">
+                                            <TextBlock Text="SQL Server Memory" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
+                                            <TextBlock x:Name="TotalServerMemoryText" Text="--" FontSize="18" FontWeight="SemiBold"/>
+                                        </StackPanel>
+                                        <StackPanel Grid.Row="0" Grid.Column="2" Margin="0,0,16,8">
+                                            <TextBlock Text="Target Memory" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
+                                            <TextBlock x:Name="TargetServerMemoryText" Text="--" FontSize="18" FontWeight="SemiBold"/>
+                                        </StackPanel>
+                                        <StackPanel Grid.Row="0" Grid.Column="3" Margin="0,0,16,8">
+                                            <TextBlock Text="Buffer Pool" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
+                                            <TextBlock x:Name="BufferPoolText" Text="--" FontSize="18" FontWeight="SemiBold"/>
+                                        </StackPanel>
+                                        <StackPanel Grid.Row="1" Grid.Column="0" Margin="0,0,16,8">
+                                            <TextBlock Text="Plan cache (all cache stores)" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
+                                            <TextBlock x:Name="PlanCacheText" Text="--" FontSize="18" FontWeight="SemiBold"/>
+                                        </StackPanel>
+                                        <StackPanel Grid.Row="1" Grid.Column="1" Margin="0,0,16,8">
+                                            <TextBlock x:Name="AvailablePhysicalMemoryLabel" Text="Available Physical" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
+                                            <TextBlock x:Name="AvailablePhysicalMemoryText" Text="--" FontSize="18" FontWeight="SemiBold"/>
+                                        </StackPanel>
+                                        <StackPanel Grid.Row="1" Grid.Column="2" Margin="0,0,16,8">
+                                            <TextBlock Text="Total Page File" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
+                                            <TextBlock x:Name="TotalPageFileText" Text="--" FontSize="18" FontWeight="SemiBold"/>
+                                        </StackPanel>
+                                        <StackPanel Grid.Row="1" Grid.Column="3" Margin="0,0,16,8">
+                                            <TextBlock Text="Available Page File" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
+                                            <TextBlock x:Name="AvailablePageFileText" Text="--" FontSize="18" FontWeight="SemiBold"/>
+                                        </StackPanel>
+                                        <StackPanel Grid.Row="2" Grid.Column="0" Margin="0,4,16,0">
+                                            <TextBlock Text="System Memory State" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
+                                            <TextBlock x:Name="MemoryStateText" Text="--" Style="{DynamicResource PanelSubtitleText}" TextWrapping="Wrap"/>
+                                        </StackPanel>
+                                        <StackPanel Grid.Row="2" Grid.Column="1" Margin="0,4,16,0">
+                                            <TextBlock Text="Memory Model" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
+                                            <TextBlock x:Name="SqlMemoryModelText" Text="--" Style="{DynamicResource PanelSubtitleText}" TextWrapping="Wrap"/>
+                                        </StackPanel>
+                                        <StackPanel Grid.Row="2" Grid.Column="2" Margin="0,4,16,0">
+                                            <TextBlock Text="Collected" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
+                                            <TextBlock x:Name="MemoryCollectedText" Text="--" Style="{DynamicResource PanelSubtitleText}" TextWrapping="Wrap"/>
+                                        </StackPanel>
+                                    </Grid>
+                                </StackPanel>
                             </Border>
 
                             <!-- Memory Trend Chart -->
@@ -1712,36 +1729,48 @@
                                 <ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
 
-                            <!-- Clerk Type Picker -->
-                            <Border Grid.Column="0" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="8" Margin="0,0,4,0">
+                            <!-- Clerk Type Picker. #8226: a card like the chart beside it; the search box shows a placeholder while it is empty. -->
+                            <ui:ChartPanel Grid.Column="0" x:Name="MemoryClerkPickerCard" Title="Clerks" Subtitle="Pick the memory clerks to plot" Margin="0,0,4,0">
                                 <Grid>
                                     <Grid.RowDefinitions>
                                         <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="*"/>
                                     </Grid.RowDefinitions>
-                                    <TextBlock Grid.Row="0" Text="Select Memory Clerks" FontWeight="SemiBold" Margin="0,0,0,4"/>
-                                    <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,4">
+                                    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,4">
                                         <Button Content="Top Clerks" Click="MemoryClerkSelectTop_Click" Padding="6,2" Margin="0,0,4,0" FontSize="11"/>
                                         <Button Content="Clear All" Click="MemoryClerkClearAll_Click" Padding="6,2" FontSize="11"/>
                                         <TextBlock x:Name="MemoryClerkCountText" Text="0 selected" FontSize="10" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
                                     </StackPanel>
-                                    <TextBox Grid.Row="2" x:Name="MemoryClerkSearchBox" TextChanged="MemoryClerkSearch_TextChanged"
-                                             Margin="0,0,0,4" Padding="4,2"/>
-                                    <ListBox Grid.Row="3" x:Name="MemoryClerksList" Background="Transparent" BorderThickness="0">
+                                    <Grid Grid.Row="1" Margin="0,0,0,4">
+                                        <TextBox x:Name="MemoryClerkSearchBox" TextChanged="MemoryClerkSearch_TextChanged" Padding="4,2"/>
+                                        <TextBlock x:Name="MemoryClerkSearchPlaceholder" Text="Search clerks" IsHitTestVisible="False" VerticalAlignment="Center" Margin="8,0,0,0"
+                                                   FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding Text, ElementName=MemoryClerkSearchBox}" Value="">
+                                                            <Setter Property="Visibility" Value="Visible"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                    </Grid>
+                                    <ListBox Grid.Row="2" x:Name="MemoryClerksList" Background="Transparent" BorderThickness="0" HorizontalContentAlignment="Stretch" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                                         <ListBox.ItemTemplate>
                                             <DataTemplate>
                                                 <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
                                                           Checked="MemoryClerk_CheckChanged" Unchecked="MemoryClerk_CheckChanged"
                                                           Foreground="{DynamicResource ForegroundBrush}" FontSize="11">
-                                                    <TextBlock Text="{Binding DisplayName}"/>
+                                                    <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" ToolTip="{Binding DisplayName}"/>
                                                 </CheckBox>
                                             </DataTemplate>
                                         </ListBox.ItemTemplate>
                                     </ListBox>
                                 </Grid>
-                            </Border>
+                            </ui:ChartPanel>
 
                             <!-- Chart + Summary -->
                             <Grid Grid.Column="1">
@@ -2344,26 +2373,39 @@
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
 
-                    <Border Grid.Column="0" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="8" Margin="0,0,4,0">
+                    <!-- #8226: the picker is a card like the chart beside it; the search box shows a placeholder while it is empty. -->
+                    <ui:ChartPanel Grid.Column="0" x:Name="PerfmonPickerCard" Title="Counters" Subtitle="Pick a pack, then the counters to plot" Margin="0,0,4,0">
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
-                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
-                            <TextBlock Grid.Row="0" Text="Select Counters" FontWeight="SemiBold" Margin="0,0,0,4"/>
-                            <ComboBox Grid.Row="1" x:Name="PerfmonPackCombo"
+                            <ComboBox Grid.Row="0" x:Name="PerfmonPackCombo"
                                       SelectionChanged="PerfmonPack_SelectionChanged"
                                       Margin="0,0,0,4" FontSize="11"/>
-                            <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,4">
+                            <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,4">
                                 <Button Content="Select All" Click="PerfmonSelectAll_Click" Padding="6,2" Margin="0,0,4,0" FontSize="11"/>
                                 <Button Content="Clear All" Click="PerfmonClearAll_Click" Padding="6,2" FontSize="11"/>
                             </StackPanel>
-                            <TextBox Grid.Row="3" x:Name="PerfmonSearchBox" TextChanged="PerfmonSearch_TextChanged"
-                                     Margin="0,0,0,4" Padding="4,2"/>
-                            <ListBox Grid.Row="4" x:Name="PerfmonCountersList" Background="Transparent" BorderThickness="0" HorizontalContentAlignment="Stretch" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                            <Grid Grid.Row="2" Margin="0,0,0,4">
+                                <TextBox x:Name="PerfmonSearchBox" TextChanged="PerfmonSearch_TextChanged" Padding="4,2"/>
+                                <TextBlock x:Name="PerfmonSearchPlaceholder" Text="Search counters" IsHitTestVisible="False" VerticalAlignment="Center" Margin="8,0,0,0"
+                                           FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding Text, ElementName=PerfmonSearchBox}" Value="">
+                                                    <Setter Property="Visibility" Value="Visible"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
+                            </Grid>
+                            <ListBox Grid.Row="3" x:Name="PerfmonCountersList" Background="Transparent" BorderThickness="0" HorizontalContentAlignment="Stretch" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                                 <ListBox.ItemTemplate>
                                     <DataTemplate>
                                         <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
@@ -2375,7 +2417,7 @@
                                 </ListBox.ItemTemplate>
                             </ListBox>
                         </Grid>
-                    </Border>
+                    </ui:ChartPanel>
 
                     <ui:ChartPanel Title="Performance Counters" Grid.Column="1">
                         <ScottPlot:WpfPlot x:Name="PerfmonChart"/>
@@ -2385,18 +2427,18 @@
 
             <!-- Running Jobs Tab -->
             <TabItem Header="Running Jobs">
-                <Grid Margin="8">
+                <!-- #8226: the grid sits in a card like the chart panels: a semibold title and a muted subtitle over the content. -->
+                <ui:ChartPanel x:Name="RunningJobsCard" Title="SQL Agent Jobs" Subtitle="Running now, read from msdb" Margin="8">
+                <Grid>
                     <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
-                    <TextBlock Grid.Row="0" Text="Currently Running SQL Agent Jobs" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8"/>
-                    <TextBlock Grid.Row="1" x:Name="RunningJobsMsdbWarning"
+                    <TextBlock Grid.Row="0" x:Name="RunningJobsMsdbWarning"
                                Text="Running Jobs requires msdb access. Grant the login access to msdb to enable this feature."
                                Foreground="{DynamicResource WarningTextBrush}" FontSize="12" Margin="0,0,0,8" Visibility="Collapsed"
                                TextWrapping="Wrap"/>
-                    <DataGrid Grid.Row="2" x:Name="RunningJobsGrid"
+                    <DataGrid Grid.Row="1" x:Name="RunningJobsGrid"
                               AutoGenerateColumns="False" IsReadOnly="True"
                               HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                               CanUserSortColumns="True">
@@ -2440,8 +2482,9 @@
                         </DataGrid.Columns>
                     </DataGrid>
                     <!-- Says no job is running when the grid has no rows; where the running_jobs collector does not collect for this server, or the login lacks msdb access, the not-collected note or the msdb warning replaces it. -->
-                    <TextBlock Style="{DynamicResource EmptyHint}" Grid.Row="2" x:Name="RunningJobsNoDataMessage" Text="No SQL Agent jobs are running." Visibility="Collapsed"/>
+                    <TextBlock Style="{DynamicResource EmptyHint}" Grid.Row="1" x:Name="RunningJobsNoDataMessage" Text="No SQL Agent jobs are running." Visibility="Collapsed"/>
                 </Grid>
+                </ui:ChartPanel>
             </TabItem>
 
             <!-- Configuration Tab -->
@@ -2870,21 +2913,25 @@
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
-                    <!-- Lite's own database after a fatal error: why collection stopped, or when it was reopened. -->
+                    <!-- Lite's own database after a fatal error: why collection stopped, or when it was reopened. Above the Collection Cycles card, since it is not a cycle. -->
                     <TextBlock Grid.Row="0" x:Name="LocalDatabaseBanner" Visibility="Collapsed" FontWeight="SemiBold" TextWrapping="Wrap"
                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,8"/>
-                    <!-- #5643: the late collection cycles of the last 24 h. Always shown, above the grids, so a reader sees at once whether
-                         the loop has been skipping slots; the all-clear says so plainly. -->
-                    <TextBlock Grid.Row="1" x:Name="SkippedCyclesSummary" TextWrapping="Wrap"
-                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,8"/>
-                    <!-- #8101: one connection failure that reached several collectors in one cycle, worded once: when, how many rows it
-                         explains, and whether each of them missed that run alone. Collapsed when the rows' newest errors hold none. -->
-                    <TextBlock Grid.Row="2" x:Name="ConnectionFailureSummary" Visibility="Collapsed" TextWrapping="Wrap"
-                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,8"/>
-                    <TabControl Grid.Row="3" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
+                    <!-- #8226: the two cycle summaries share one card over the grids, with a semibold title and a muted subtitle. -->
+                    <ui:ChartPanel Grid.Row="1" x:Name="CollectionHealthCard" Title="Collection Cycles" Subtitle="Skipped slots and connection failures in the last 24 hours" Margin="0,0,0,8">
+                        <StackPanel>
+                            <!-- #5643: the late collection cycles of the last 24 h. Always shown, above the grids, so a reader sees at once whether
+                                 the loop has been skipping slots; the all-clear says so plainly. -->
+                            <TextBlock x:Name="SkippedCyclesSummary" TextWrapping="Wrap"
+                                       Foreground="{DynamicResource ForegroundBrush}"/>
+                            <!-- #8101: one connection failure that reached several collectors in one cycle, worded once: when, how many rows it
+                                 explains, and whether each of them missed that run alone. Collapsed when the rows' newest errors hold none. -->
+                            <TextBlock x:Name="ConnectionFailureSummary" Visibility="Collapsed" TextWrapping="Wrap"
+                                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,8,0,0"/>
+                        </StackPanel>
+                    </ui:ChartPanel>
+                    <TabControl Grid.Row="2" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                         <TabItem Header="Health Summary">
                             <DataGrid x:Name="CollectionHealthGrid"
                                       AutoGenerateColumns="False" IsReadOnly="True"
@@ -3170,16 +3217,17 @@
 
                     <!-- Memory Broker Sub-Tab -->
                     <TabItem Header="Memory Broker">
-                        <Grid Margin="8">
-                            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-                            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,4,0,8">
-                                <!-- #8197: the tab is already named Memory Broker, so the panel keeps only what its tab cannot say. -->
-                                <TextBlock x:Name="MemoryBrokerSubtitle" Text="Target shrinks" Style="{DynamicResource PanelSubtitleText}" VerticalAlignment="Center"/>
-                                <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
-                                <TextBlock x:Name="MemoryBrokerCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
-                                <TextBlock x:Name="MemoryBrokerWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
-                            </StackPanel>
-                            <Grid Grid.Row="1">
+                        <!-- #8226: the grid sits in a card: the title says what the rows are, the subtitle what the tab cannot say (#8197),
+                             and the refresh button and count sit on the right of the header. -->
+                        <ui:ChartPanel x:Name="MemoryBrokerCard" Title="Broker Notifications" Subtitle="Target shrinks in the selected time window" Margin="8">
+                            <ui:ChartPanel.HeaderContent>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Content="Refresh" Click="SystemEventsRefresh_Click" Padding="12,4" MinWidth="70" Style="{DynamicResource AccentButton}"/>
+                                    <TextBlock x:Name="MemoryBrokerCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
+                                    <TextBlock x:Name="MemoryBrokerWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
+                                </StackPanel>
+                            </ui:ChartPanel.HeaderContent>
+                            <Grid>
                                 <DataGrid x:Name="MemoryBrokerGrid" AutoGenerateColumns="False" IsReadOnly="True" RowStyle="{StaticResource GridRowStyle}" HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                     <DataGrid.Columns>
                                         <DataGridTextColumn Binding="{Binding EventTimeLocal}" Width="145" SortMemberPath="EventTime"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EventTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Event Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -3199,7 +3247,7 @@
                                 </DataGrid>
                                 <TextBlock Style="{DynamicResource EmptyHint}" x:Name="MemoryBrokerNoDataMessage" Visibility="Collapsed" Text="No memory broker SHRINK notifications in the selected time window."/>
                             </Grid>
-                        </Grid>
+                        </ui:ChartPanel>
                     </TabItem>
 
                     <!-- Memory Node OOM Sub-Tab -->

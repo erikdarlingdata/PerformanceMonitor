@@ -9,7 +9,7 @@ This page says what the Darling service does on each SQL Server it monitors, whi
 On each successful connect, the service:
 
 1. **Probes the server** — one query against `sys.dm_os_sys_info` / `SERVERPROPERTY()` for version, engine edition (box / Managed Instance / Azure SQL DB), AWS RDS detection, and msdb access. It is the same detection query Lite runs, so both editions classify a server identically.
-2. **Ensures three Extended Events sessions** (created if missing, started if stopped; a ring buffer of at most 4 MB each, no files written on the server):
+2. **Ensures three Extended Events sessions** (created if missing, started if stopped; the deadlock and blocked-process ring buffers hold at most 1,000 events by default ([`xeRingBufferMaxEvents`](configuration.md#xeringbuffermaxevents-integer-optional)) or 4 MB, whichever fills first; no files written on the server):
    - `PerformanceMonitor_Deadlock` — `xml_deadlock_report`, server-scoped on on-prem/Managed Instance/RDS; `database_xml_deadlock_report`, database-scoped on Azure SQL Database.
    - `PerformanceMonitor_BlockedProcess` — `blocked_process_report`, server-scoped (database-scoped on Azure SQL Database).
    - `PerformanceMonitor_Attention` — `attention`, the event a client sends when a query times out or is cancelled (#5640). Server-scoped, or database-scoped on Azure SQL Database. It has an `event_counter` target (the exact count) and a 1 MB ring buffer (the detail of recent events: application, host, database, session and statement text).

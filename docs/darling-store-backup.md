@@ -199,8 +199,11 @@ Then restore the credentials volume from its backup and start the service. The s
 
 ```
 docker run --rm -v performancemonitor-darling_darling-credentials:/data -v "$PWD":/backup alpine tar xzf /backup/darling-credentials.tgz -C /data
+docker run --rm --user 0 --entrypoint chown -v performancemonitor-darling_darling-credentials:/var/lib/darling/credentials ghcr.io/erikdarlingdata/performancemonitor-darling:latest -R 1654:1654 /var/lib/darling/credentials
 docker compose up -d
 ```
+
+The service runs as user 1654, so the `chown` is needed: a backup taken before the upgrade restores root-owned.
 
 The store container runs PostgreSQL 17 (`timescale/timescaledb:latest-pg17`). Do not restore a dump from a newer major version into it.
 

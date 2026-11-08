@@ -93,6 +93,48 @@ public sealed partial class DarlingCollectorRunner
     /// </summary>
     internal ILegacyLongQueryRecords? LegacyLongQueryRecordsForTests { get; set; }
 
+    /// <summary>#8146: when this install's own long-query session may be recreated: once per server, database and setting value for the life of the process, and again an hour after a failed attempt.</summary>
+    internal LongQuerySessionRecreateThrottle LongQuerySessionRecreateThrottle { get; } = new();
+
+    /// <summary>
+    /// #8146: replaces the clock the long-query recreate's throttle and the read-only-intent start's grace window
+    /// (<see cref="LongQueryStartRefusalWithinGrace"/>) read. Null in production.
+    /// </summary>
+    internal Func<DateTime>? LongQueryUtcNowForTests { get; set; }
+
+    internal DateTime LongQueryUtcNow() => LongQueryUtcNowForTests?.Invoke() ?? DateTime.UtcNow;
+
+    /* #8146: per server and database, when a replica first refused the start of this install's long-query session because it
+       did not show the definition the primary holds. Kept until a start succeeds or the replica shows the definition. In
+       memory: the reconcile's latch is too, and a restart begins a fresh window. */
+    private readonly ConcurrentDictionary<(int ServerId, string Database), DateTime> _longQueryStartRefusedSince = new();
+
+    /// <summary>
+    /// #8146: records a start the replica refused for a definition it does not show yet, and answers whether that refusal is
+    /// still the replica's lag: true while the first such refusal is at most <see cref="LongQueryTraceDatabases.RetryInterval"/>
+    /// old. Past it the refusal is a fault like any other, so a replica that never shows the definition is reported.
+    /// </summary>
+    internal bool LongQueryStartRefusalWithinGrace(int serverId, string databaseName, DateTime utcNow)
+    {
+        var first = _longQueryStartRefusedSince.GetOrAdd((serverId, databaseName.ToUpperInvariant()), utcNow);
+        return utcNow - first <= LongQueryTraceDatabases.RetryInterval;
+    }
+
+    /// <summary>#8146: ends the grace window: the start succeeded, or the replica shows the definition.</summary>
+    internal void ClearLongQueryStartRefusal(int serverId, string databaseName) =>
+        _longQueryStartRefusedSince.TryRemove((serverId, databaseName.ToUpperInvariant()), out _);
+
+    /* #8146: the servers whose own long-query session a recreate left stopped (a start the replica refused) or possibly
+       missing (a failed attempt). The recreate runs in a collector run, outside the worker's reconcile latch, so this is how
+       it tells the worker that the create pass is due on the next sweep and not only on the hour. */
+    private readonly ConcurrentDictionary<int, byte> _longQueryCreatePassDue = new();
+
+    /// <summary>#8146: asks the worker's next long-query reconcile for this server to run at least the create pass.</summary>
+    internal void RequestLongQueryCreatePass(int serverId) => _longQueryCreatePassDue[serverId] = 0;
+
+    /// <summary>#8146: true once per <see cref="RequestLongQueryCreatePass"/>: reading the request clears it.</summary>
+    internal bool TakeLongQueryCreatePassRequest(int serverId) => _longQueryCreatePassDue.TryRemove(serverId, out _);
+
     private DarlingLegacyLongQuerySession? _legacyLongQuery;
 
     /// <summary>
@@ -130,6 +172,14 @@ public sealed partial class DarlingCollectorRunner
     /// (the empty name for the server's own scope) and the session name. Null in production.
     /// </summary>
     internal Func<ServerRuntime, string, string, CancellationToken, Task>? SchemaSessionDropForTests { get; set; }
+
+    /// <summary>
+    /// #8146: replaces what the read-only-intent ensure finds on the primary when its replica shows no definition, with
+    /// <see cref="LongQueryTraceStepOverrideForTests"/> set: called with the server and the database, answers whether the
+    /// primary already holds the definition. True, the ensure sends no <see cref="LongQueryTraceStep.CreateDefinition"/>, as the
+    /// production create finds it and creates nothing. Unset, the primary holds none. Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, string, bool>? LongQueryTraceDefinitionOnPrimaryForTests { get; set; }
 
     /// <summary>
     /// The databases the long-query trace works in on Azure SQL Database. With <paramref name="allDatabases"/>, every

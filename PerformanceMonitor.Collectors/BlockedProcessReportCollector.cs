@@ -144,7 +144,7 @@ public sealed class BlockedProcessReportCollector : CollectorDefinitionBase<Bloc
     /// for the "did anything arrive?" fact no MAX() over the collected rows can answer when the answer is
     /// no. See <see cref="XeShredGate"/> for why the counter is exact and which shapes always shred.
     /// </summary>
-    public override IReadOnlyList<string> StateKeys { get; } = new[] { XeShredGate.StateKey };
+    public override IReadOnlyList<string> StateKeys { get; } = new[] { XeShredGate.StateKey, RingBufferLossAccounting.StateKey };
 
     /// <summary>
     /// This collector's object-resolution cursors return, after the payload, the per-database lookups
@@ -207,6 +207,10 @@ JOIN sys.dm_xe_sessions AS xes
         var planApply = context.CapturePlanXml
             ? BuildPlanResolutionApply("blocked-process", "bqp") + BuildPlanResolutionApply("blocking-process", "kqp")
             : "";
+
+        var sessionPositionSql = context.Target.IsAzureSqlDb
+            ? RingBufferXml.SessionPositionDatabaseSql
+            : RingBufferXml.SessionPositionServerSql;
 
         string query = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -289,6 +293,12 @@ SET @shred_needed =
         ELSE 0
     END;
 
+/* #8146: the position fragments. The session row (created, dropped, limit) is read on EVERY run, gated or not, so a
+   run that skips the shred still measures what the session dropped; the header comes from the shredded target below. */
+{RingBufferXml.PositionDeclareSql}
+
+SET @ring_position_session = N'{XeSessionName}';
+
 IF @shred_needed = 1
 BEGIN
     {RingBufferXml.DeclareSql}
@@ -305,6 +315,8 @@ BEGIN
 
     {RingBufferXml.TruncationSql}
 
+    {RingBufferXml.HeaderSql}
+
     INSERT
         @PerformanceMonitor_BlockedProcess
     (
@@ -314,6 +326,8 @@ BEGIN
         ring_xml = @ring_xml
     WHERE @ring_xml IS NOT NULL;
 END;
+
+{sessionPositionSql}
 
 SELECT
     x.event_time,
@@ -771,7 +785,9 @@ SELECT
     execution_count = @execution_count,
     gated = CASE WHEN @shred_needed = 1 THEN CONVERT(bit, 0) ELSE CONVERT(bit, 1) END,
     /* #6441: whether SQL Server truncated the ring buffer's XML (all NULL when the gate skipped the read). */
-    {RingBufferXml.TruncationColumnsSql};
+    {RingBufferXml.TruncationColumnsSql},
+    /* #8146: the target header, the session row and the limit, for ReadAsync's loss accounting. */
+    {RingBufferXml.PositionColumnsSql};
 
 /* Trailing result set = the payload path's probe-failure contract (#1851/#1865,
    EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync). Always returned, and empty on both of
@@ -1009,6 +1025,10 @@ OUTER APPLY
 
             /* #6441: SQL Server cuts a ring buffer's XML at about 4 MB and keeps the OLDEST events. */
             RingBufferXml.MeasureTruncation(reader, 2, context);
+
+            /* #8146: what the ring buffer evicted and the session dropped since the last run, gated run included. */
+            var truncated = reader.FieldCount > 2 && !reader.IsDBNull(2) && reader.GetBoolean(2);
+            RingBufferLossAccounting.Apply(context, RingBufferObservation.Read(reader, 5), truncated);
         }
 
         /* Measure() ACCUMULATES a repeated label, which is what makes this correct on the per-database
