@@ -8060,4 +8060,56 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         Assert.Contains("retry_period", fired.DetailText, StringComparison.Ordinal);
         Assert.Contains("consecutive_crashes", fired.DetailText, StringComparison.Ordinal);
     }
+
+    /* ---------------- #8302: a stale daily rollup is its own condition, not a stuck job ---------------- */
+
+    private static StorePolicyJobHealth StaleRollup(params long[] jobIds) => Reading(jobIds.Select(id => new StuckPolicyJob(
+        id, "query_store_stats_interval_daily", "newest materialized bucket ended 4.0 days behind its source's", SchedulerRetries: false,
+        Family: TimescaleSupport.StorePolicyJobFamily.Refresh, Arm: StuckPolicyJobArm.DailyRollupStale)).ToList());
+
+    [Fact]
+    public async Task StaleDailyRollup_WarnsUnderItsOwnName_NeverRearms_AndResolvesWhenItCatchesUp()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(StaleRollup(7001), rearm.Delegate, Ct);
+
+        /* A rollup behind its source is not a hung job: no re-arm, a Warning under its own name, its own text. */
+        Assert.Empty(rearm.Calls);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Daily Rollup Stale", fired.MetricName);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
+        Assert.Equal("rollupstale:7001", fired.ServerKey);
+        Assert.Contains("query_store_stats_interval_daily", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("refresh_continuous_aggregate", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("re-armed", fired.DetailText, StringComparison.Ordinal);
+
+        /* Still behind an hour on: no escalation, no re-arm, and nothing more sent while refire is off. */
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(StaleRollup(7001), rearm.Delegate, Ct);
+        Assert.Empty(rearm.Calls);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Caught up: one resolution row under its own recovered name. */
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(), rearm.Delegate, Ct);
+        Assert.Empty(rearm.Calls);
+        var resolved = Assert.Single(h.History.Records);
+        Assert.Equal("Daily Rollup Recovered", resolved.MetricName);
+        Assert.Equal("rollupstale:7001", resolved.ServerId);
+    }
+
+    [Fact]
+    public async Task StaleDailyRollup_IsCountedInThePassSummary()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyPolicyJobsStuckAsync(StaleRollup(7002), new RearmRecorder().Delegate, Ct);
+
+        var summary = Assert.Single(h.Log.Entries, x => x.Message.StartsWith("Store job health:", StringComparison.Ordinal));
+        Assert.Contains("1 stale", summary.Message, StringComparison.Ordinal);
+    }
 }

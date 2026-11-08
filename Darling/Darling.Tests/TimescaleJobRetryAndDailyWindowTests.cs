@@ -288,19 +288,33 @@ VALUES ($1, now() - INTERVAL '2 hours', '-infinity', now() + INTERVAL '1 day', n
         await RefreshAsync(connection, Daily, D0, D0.AddDays(2), ct);
 
         var jobId = await RefreshJobIdAsync(connection, Daily, ct);
-        var newestBucketEnd = D0.AddDays(2);
+        var farLater = D0.AddDays(30);
 
-        /* The healthy worst case: a daily run that lands just before 00:00 UTC leaves the newest bucket's end
-           end_offset + one bucket + one schedule interval old, three days, until the next run. Nothing to report. */
-        var current = await TimescaleSupport.ReadStuckPolicyJobsAsync(connection, newestBucketEnd + HealthyDailyEndAgeMaximum, null, ct);
-        Assert.Empty(current.Stuck);
+        /* A frozen source: the hourly the daily is built on has nothing newer either (collection off, every server
+           offline). However long ago that was, the daily is not behind its source, so nothing is reported. */
+        var frozen = await TimescaleSupport.ReadStuckPolicyJobsAsync(connection, farLater, null, ct);
+        Assert.Empty(frozen.Stuck);
 
-        // Past the threshold, half a day inside the window: a daily run was missed, and the rollup is reported under its refresh job.
-        var stale = await TimescaleSupport.ReadStuckPolicyJobsAsync(connection, newestBucketEnd + StaleDailyThreshold + TimeSpan.FromHours(1), null, ct);
+        // The source moves on without the daily: four more days of raw, rolled up hourly, while the daily's job never ran.
+        for (var day = D0.AddDays(2); day < D0.AddDays(6); day = day.AddDays(1))
+        {
+            await InsertDayAsync(connection, day, ct);
+        }
+
+        await RefreshAsync(connection, Hourly, D0, D0.AddDays(6), ct);
+
+        var stale = await TimescaleSupport.ReadStuckPolicyJobsAsync(connection, farLater, null, ct);
         var reported = Assert.Single(stale.Stuck);
         Assert.Equal(jobId, reported.JobId);
         Assert.Equal(TimescaleSupport.StorePolicyJobFamily.Refresh, reported.Family);
-        Assert.Contains("newest materialized bucket", reported.Reason, StringComparison.Ordinal);
+        Assert.Equal(Daily, reported.HypertableName);
+        Assert.Contains("source", reported.Reason, StringComparison.Ordinal);
+        Assert.Contains("refresh_continuous_aggregate", reported.Reason, StringComparison.Ordinal);
+
+        // The daily catches up: nothing to report again.
+        await RefreshAsync(connection, Daily, D0, D0.AddDays(6), ct);
+        var caughtUp = await TimescaleSupport.ReadStuckPolicyJobsAsync(connection, farLater, null, ct);
+        Assert.Empty(caughtUp.Stuck);
     }
 
     /// <summary>The threshold sits half a day under each daily's own window: 3.5 days, 4.5 for the daily-parented child.</summary>
@@ -318,8 +332,9 @@ VALUES ($1, now() - INTERVAL '2 hours', '-infinity', now() + INTERVAL '1 day', n
     }
 
     /// <summary>
-    /// The boundary on each side, for a daily and for the daily-parented child: the healthy maximum end-age is silent,
-    /// the threshold itself is silent, one tick past it fires, and the window (a day already lost) fires.
+    /// The boundary on each side, for a daily and for the daily-parented child, measured as the daily's lag behind its
+    /// source's newest bucket: a frozen source is silent, the healthy maximum lag is silent, the threshold itself is
+    /// silent, one tick past it fires, and a lag of the whole window (a day already lost) fires.
     /// </summary>
     [Fact]
     public void TheStaleBoundary_IsSilentAtTheHealthyMaximumAndAtTheThreshold_AndFiresOneTickPast()
@@ -327,6 +342,7 @@ VALUES ($1, now() - INTERVAL '2 hours', '-infinity', now() + INTERVAL '1 day', n
         var end = new DateTime(2026, 3, 4, 0, 0, 0, DateTimeKind.Unspecified);
         var child = TimescaleSupport.QueryStoreStatsDayGrainDailyView;
 
+        Assert.False(TimescaleSupport.IsDailyRollupStale(Daily, end, end));
         Assert.False(TimescaleSupport.IsDailyRollupStale(Daily, end, end + HealthyDailyEndAgeMaximum));
         Assert.False(TimescaleSupport.IsDailyRollupStale(Daily, end, end + StaleDailyThreshold));
         Assert.True(TimescaleSupport.IsDailyRollupStale(Daily, end, end + StaleDailyThreshold + TimeSpan.FromTicks(1)));
