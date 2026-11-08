@@ -378,4 +378,47 @@ public sealed class PageLayoutLooksWrongTests
 
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
     }
+
+    /// <summary>
+    /// The CPU Scheduler page writes its least height from the grid's size, which is layout written from a layout event. At each size
+    /// and row count the page must settle: the dispatcher reaches idle inside the settle budget, the grid raises no further size change
+    /// once it has, and the page's minimum is the chart floor plus the grid's height plus the gap.
+    /// </summary>
+    [Theory]
+    [InlineData(900, 600, 3)]
+    [InlineData(900, 600, 8)]
+    [InlineData(1280, 800, 3)]
+    [InlineData(1280, 800, 8)]
+    public void TheCpuSchedulerPage_SettlesAfterItsMinimumFollowsTheGrid(int width, int height, int rows)
+    {
+        var problems = WithServerTab("DarkTheme", PaneWidth(width), height, Credentials(), (tab, window, _) =>
+        {
+            var found = new List<string>();
+            var grid = Find<DataGrid>(tab, "CpuSchedulerGrid");
+            Reveal(grid);
+            Settle(window);
+            grid.ItemsSource = Enumerable.Range(1, rows)
+                .Select(i => new { Metric = $"Metric {i}", Value = $"{i * 10}", CollectionTimeLocal = "2026-11-07 10:00:00", IsWarning = i == 3, Hint = $"hint {i}" })
+                .ToList();
+            ClippedTextProbe.Settle(window);
+            var changes = 0;
+            grid.SizeChanged += (_, _) => changes++;
+            ClippedTextProbe.Settle(window);
+            if (changes != 0)
+            {
+                found.Add($"the grid's size changed {changes} more times after the page had settled");
+            }
+
+            var page = Find<Grid>(tab, "CpuSchedulerPage");
+            var expected = ChartLayout.MinPlotHeight + grid.ActualHeight + PageScroll.ChartOverGridGap;
+            if (Math.Abs(page.MinHeight - expected) > 1)
+            {
+                found.Add($"the page's minimum is {page.MinHeight:F0} px where the chart floor and the {grid.ActualHeight:F0} px grid need {expected:F0}");
+            }
+
+            return found;
+        });
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
 }
