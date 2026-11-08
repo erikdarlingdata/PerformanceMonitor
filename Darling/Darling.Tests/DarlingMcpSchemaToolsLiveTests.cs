@@ -731,6 +731,75 @@ public sealed class DarlingMcpSchemaToolsLiveTests
     }
 
     [Fact]
+    public async Task OnAPostgreSqlTarget_EveryToolAnswersNotCollected_WithoutSendingAnyoneToEnableTheCollector()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            await DarlingMcpTestData.ExecAsync(s.Connection, ct, "UPDATE collect.servers SET engine_kind = 'postgres' WHERE server_id = $1", s_serverId);
+            foreach (var json in new[]
+            {
+                await Definition(s, ct, "dbo.Orders"),
+                await Changes(s, ct),
+                await Find(s, ct, prefix: "Ord"),
+            })
+            {
+                using var doc = JsonDocument.Parse(json);
+                Assert.Equal("not_collected", doc.RootElement.GetProperty("status").GetString());
+                Assert.DoesNotContain("enable_collector", doc.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+            }
+        });
+    }
+
+    /// <summary>A database no pass ever stored a state row for (read-only, excluded, out of scope) is not a true negative: nothing is collected for it.</summary>
+    [Fact]
+    public async Task ADatabaseWithNoStateRow_AnswersNotCollected_NotEmpty()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            await Baseline(s, ct, Table(10, "Orders", new[] { "Id" }));
+            foreach (var json in new[]
+            {
+                await Definition(s, ct, "dbo.Orders", database: "ArchiveDb"),
+                await Changes(s, ct, database: "ArchiveDb"),
+                await Find(s, ct, database: "ArchiveDb", prefix: "Ord"),
+            })
+            {
+                using var doc = JsonDocument.Parse(json);
+                Assert.Equal("not_collected", doc.RootElement.GetProperty("status").GetString());
+                Assert.Contains("ArchiveDb", doc.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+            }
+
+            /* The tracked database still answers empty for an object it does not hold. */
+            using var tracked = JsonDocument.Parse(await Definition(s, ct, "dbo.Missing"));
+            Assert.Equal("empty", tracked.RootElement.GetProperty("status").GetString());
+        });
+    }
+
+    /// <summary>The server row of a finished pass shows no running session (a refused permission): an empty change list is a precondition, not a true negative.</summary>
+    [Fact]
+    public async Task GetSchemaChanges_WithNoRunningSession_AnswersPrecondition()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            await Baseline(s, ct, Table(10, "Orders", new[] { "Id" }));
+            await SchemaCaptureStateStore.SaveAsync(s.Connection, new SchemaCaptureStateRow { ServerId = s_serverId, LastSeenInScopeAt = DateTime.UtcNow }, ct);
+
+            using (var doc = JsonDocument.Parse(await Changes(s, ct)))
+            {
+                Assert.Equal("precondition", doc.RootElement.GetProperty("status").GetString());
+            }
+
+            /* With the session's position stored, the same empty window is a true negative. */
+            await SchemaCaptureStateStore.SaveAsync(
+                s.Connection, new SchemaCaptureStateRow { ServerId = s_serverId, LastSeenInScopeAt = DateTime.UtcNow, SessionCreateTime = s_t0 }, ct);
+            using (var doc = JsonDocument.Parse(await Changes(s, ct)))
+            {
+                Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+            }
+        });
+    }
+
+    [Fact]
     public async Task NeverCollected_ReturnsNotCollected()
     {
         await WithStoreAsync(async (s, ct) =>

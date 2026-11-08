@@ -93,8 +93,47 @@ public sealed class DarlingMcpSchemaTools
         "Schema history has not been collected for this server: the schema_objects collector has never run for it. It is off by default; " +
         "turn it on with enable_collector (collector schema_objects) and read again after its first pass.";
 
+    /// <summary>
+    /// The answer to a read that found nothing, before it says <c>empty</c> (#7643 review): <c>not_collected</c> for a PostgreSQL target
+    /// (the collector never runs there, so nobody is sent to turn it on), then the plain "never ran" answer when no state row exists, then
+    /// <c>not_collected</c> for a named database no pass ever read, then, for a change list, <c>precondition</c> while the server row shows no
+    /// running session. Null when none applies, and the read's own <c>empty</c> stands.
+    /// </summary>
+    private static async Task<string?> MissStatusAsync(
+        NpgsqlDataSource postgres, int serverId, string serverName, SchemaHistoryResolution resolution, bool changeList, CancellationToken cancellationToken)
+    {
+        if (await DarlingEngineCapability.NotCollectedStatusAsync(postgres, serverId, serverName, SchemaObjectsCollector.Instance.Name, cancellationToken) is { } engine)
+        {
+            return engine;
+        }
+
+        if (!resolution.Collected)
+        {
+            return McpHelpers.Status("not_collected", NotCollectedMessage);
+        }
+
+        if (resolution.DatabaseUntracked)
+        {
+            return McpHelpers.Status(
+                "not_collected",
+                $"No schema pass has read {resolution.Database} on {serverName}: only writable databases in the schema_objects collector's database scope are "
+                + "tracked, so a secondary, read-only, restoring, standby or snapshot database, an excluded one, one outside the scope, or one not reached yet has no history.");
+        }
+
+        if (changeList && resolution.SessionNotRunning)
+        {
+            return McpHelpers.Status(
+                "precondition",
+                $"The schema-changes session was not running when the last schema pass ran on {serverName}, so changes are seen only by a full read "
+                + "(run_collectors_now) and this list can be empty though objects changed. The collector's note in get_collection_health says why, "
+                + "for example a missing ALTER ANY EVENT SESSION grant.");
+        }
+
+        return null;
+    }
+
     [McpServerTool(Name = "get_object_definition"), Description(
-        "Gets the stored definition of one table or view of a database, from the schema history: its columns, indexes, constraints and triggers, the times of the version shown, versions_kept and history_starts_at. object_name is 'schema.name', or a bare name when only one object has it. Without as_of it is the current version (a dropped object answers with its last definition and dropped_at); with as_of it is the version that held at that instant, and an as_of before the history starts answers with the oldest version and a note (status empty when the oldest kept version is its creation). Columns are paged (column_offset, column_limit) and cut to the response budget; columns_returned and next_column_offset say what is left. A view's text past 8 KB of JSON is cut on a character boundary, with view_definition_truncated and view_definition_length. A database of an availability group answers from the group's history whichever replica server_name names (resolved_from_ag). Expression text (check_definition, computed_definition, default_definition, filter_definition, view_definition) is masked by mcp.dataDetail; names, types and structure are not. status not_collected: the schema_objects collector has never run for the server.")]
+        "Gets the stored definition of one table or view of a database, from the schema history: its columns, indexes, constraints and triggers, the times of the version shown, versions_kept and history_starts_at. object_name is 'schema.name', or a bare name when only one object has it. Without as_of it is the current version (a dropped object answers with its last definition and dropped_at); with as_of it is the version that held at that instant, and an as_of before the history starts answers with the oldest version and a note (status empty when the oldest kept version is its creation). Columns are paged (column_offset, column_limit) and cut to the response budget; columns_returned and next_column_offset say what is left. A view's text past 8 KB of JSON is cut on a character boundary, with view_definition_truncated and view_definition_length. A database of an availability group answers from the group's history whichever replica server_name names (resolved_from_ag). Expression text (check_definition, computed_definition, default_definition, filter_definition, view_definition) is masked by mcp.dataDetail; names, types and structure are not. status not_collected: the schema_objects collector has never run for the server, cannot run on its engine, or never read the named database.")]
     public static Task<string> GetObjectDefinition(
         NpgsqlDataSource postgres,
         [Description("Database name.")] string database_name,
@@ -141,7 +180,7 @@ public sealed class DarlingMcpSchemaTools
             var resolution = await SchemaHistoryKeyResolver.ResolveAsync(connection, resolved.ServerId, database_name.Trim(), windowEnd, cancellationToken);
             if (!resolution.Collected)
             {
-                return McpHelpers.Status("not_collected", NotCollectedMessage);
+                return (await MissStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, resolution, false, cancellationToken))!;
             }
 
             var key = resolution.Keys[0];
@@ -157,7 +196,8 @@ public sealed class DarlingMcpSchemaTools
             var lines = candidates.GroupBy(c => (c.Schema.ToUpperInvariant(), c.Name.ToUpperInvariant())).ToList();
             if (lines.Count == 0)
             {
-                return McpHelpers.Status("empty", $"The schema history of {database} holds no table or view named {object_name!.Trim()}. Only user tables and views of a tracked database are kept, and a version older than the retention is gone.");
+                return await MissStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, resolution, false, cancellationToken)
+                    ?? McpHelpers.Status("empty", $"The schema history of {database} holds no table or view named {object_name!.Trim()}. Only user tables and views of a tracked database are kept, and a version older than the retention is gone.");
             }
 
             if (lines.Count > 1)
@@ -313,7 +353,7 @@ public sealed class DarlingMcpSchemaTools
     }
 
     [McpServerTool(Name = "get_schema_changes"), Description(
-        "Lists the table and view changes the schema history recorded in a window, newest first: change_kind (created, altered, renamed, dropped; baseline only with include_baseline), detected_by (xe_event, reconcile, run_now), valid_from (when the change was detected), the login, application and host the change session recorded when it named one, and the diff against the previous version (columns, indexes, constraints and triggers added, removed or changed, a rename, view text changed). The window is hours_back (1 to 168) ending at as_of or now; an out-of-range value is refused. Optionally one database and one object (object_name 'schema.name' or bare). Paged with limit (1 to 100) and offset; has_more and next_offset say whether there is more. valid_from is the detection time, not the change time: a reconcile finds a change up to its interval after it happened. status not_collected: the schema_objects collector has never run for the server.")]
+        "Lists the table and view changes the schema history recorded in a window, newest first: change_kind (created, altered, renamed, dropped; baseline only with include_baseline), detected_by (xe_event, reconcile, run_now), valid_from (when the change was detected), the login, application and host the change session recorded when it named one, and the diff against the previous version (columns, indexes, constraints and triggers added, removed or changed, a rename, view text changed). The window is hours_back (1 to 168) ending at as_of or now; an out-of-range value is refused. Optionally one database and one object (object_name 'schema.name' or bare). Paged with limit (1 to 100) and offset; has_more and next_offset say whether there is more. valid_from is the detection time, not the change time: a reconcile finds a change up to its interval after it happened. status not_collected: the schema_objects collector has never run for the server, cannot run on its engine, or never read the named database. status precondition: the change-tracking session was not running, so the list can miss changes.")]
     public static Task<string> GetSchemaChanges(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -359,18 +399,19 @@ public sealed class DarlingMcpSchemaTools
             var resolution = await SchemaHistoryKeyResolver.ResolveAsync(connection, resolved.ServerId, database, windowEnd, cancellationToken);
             if (!resolution.Collected)
             {
-                return McpHelpers.Status("not_collected", NotCollectedMessage);
+                return (await MissStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, resolution, true, cancellationToken))!;
             }
 
             var fetched = await SchemaHistoryReader.ReadChangesAsync(
                 connection, resolution.Keys, resolution.Database, schema, name, windowStart, windowEnd, include_baseline, limit + 1, offset, cancellationToken);
             if (fetched.Count == 0)
             {
-                return McpHelpers.Status(
-                    "empty",
-                    $"No schema change was recorded in the {hours_back} hours ending {Utc(windowEnd)}"
-                    + (database is null ? string.Empty : " for " + database)
-                    + (include_baseline ? "." : ", apart from baseline versions (include_baseline lists them)."));
+                return await MissStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, resolution, true, cancellationToken)
+                    ?? McpHelpers.Status(
+                        "empty",
+                        $"No schema change was recorded in the {hours_back} hours ending {Utc(windowEnd)}"
+                        + (database is null ? string.Empty : " for " + database)
+                        + (include_baseline ? "." : ", apart from baseline versions (include_baseline lists them)."));
             }
 
             var (rows, hasMore) = McpHelpers.BoundPage(fetched, limit);
@@ -413,7 +454,7 @@ public sealed class DarlingMcpSchemaTools
     }
 
     [McpServerTool(Name = "find_schema_objects"), Description(
-        "Finds the current tables and views of a server's schema history by name, column, foreign key or definition text. name_prefix and name_contains match the object name; column_name matches a column exactly; references_table finds the objects with a foreign key to a table ('schema.table' or bare); definition_contains searches the text of view definitions, computed columns, column defaults, check constraints and index filters, needs database_name, runs under a 4 second budget (a run that exceeds it is status stopped), and is refused when mcp.dataDetail masks or hides statement text because a search on hidden text would reveal it. All texts are matched ignoring case, a literal substring for the contains filters; give at least one filter. Current objects only: use get_schema_changes for what an object was. Rows carry database, schema, name, type, object_id and since when the current version holds. status not_collected: the schema_objects collector has never run for the server.")]
+        "Finds the current tables and views of a server's schema history by name, column, foreign key or definition text. name_prefix and name_contains match the object name; column_name matches a column exactly; references_table finds the objects with a foreign key to a table ('schema.table' or bare); definition_contains searches the text of view definitions, computed columns, column defaults, check constraints and index filters, needs database_name, runs under a 4 second budget (a run that exceeds it is status stopped), and is refused when mcp.dataDetail masks or hides statement text because a search on hidden text would reveal it. All texts are matched ignoring case, a literal substring for the contains filters; give at least one filter. Current objects only: use get_schema_changes for what an object was. Rows carry database, schema, name, type, object_id and since when the current version holds. status not_collected: the schema_objects collector has never run for the server, cannot run on its engine, or never read the named database.")]
     public static Task<string> FindSchemaObjects(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -481,7 +522,7 @@ public sealed class DarlingMcpSchemaTools
             var resolution = await SchemaHistoryKeyResolver.ResolveAsync(connection, resolved.ServerId, Blank(database_name), nowUtc, cancellationToken);
             if (!resolution.Collected)
             {
-                return McpHelpers.Status("not_collected", NotCollectedMessage);
+                return (await MissStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, resolution, false, cancellationToken))!;
             }
 
             var search = new SchemaObjectSearch(
@@ -517,7 +558,8 @@ public sealed class DarlingMcpSchemaTools
             var (rows, hasMore) = McpHelpers.BoundPage(fetched, limit);
             if (rows.Count == 0)
             {
-                return McpHelpers.Status("empty", "No current table or view matches. Only the objects of tracked databases that exist now are searched.");
+                return await MissStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, resolution, false, cancellationToken)
+                    ?? McpHelpers.Status("empty", "No current table or view matches. Only the objects of tracked databases that exist now are searched.");
             }
 
             return JsonSerializer.Serialize(new
