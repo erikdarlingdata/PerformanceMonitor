@@ -214,15 +214,21 @@ public sealed class ChartTextRefreshTests
         Assert.All(ticks, p => Assert.True(Math.Abs(p - Math.Round(p)) < 1e-9, $"the blocking lane labels {p}"));
     }
 
+    public static TheoryData<string, int, int> ThemesAndWindows => new()
+    {
+        { "Dark", 1280, 800 }, { "Light", 1280, 800 }, { "CoolBreeze", 1280, 800 },
+        { "Dark", 900, 600 }, { "Light", 900, 600 }, { "CoolBreeze", 900, 600 },
+    };
+
     [Theory]
-    [MemberData(nameof(Themes))]
-    public void TheOverviewLanes_FitA1280x800WindowAtThePlotFloor_AndTheirCaptionsHideTheGridline(string theme)
+    [MemberData(nameof(ThemesAndWindows))]
+    public void TheOverviewLanes_KeepThePlotFloor_FitA1280x800Window_AndTheirCaptionsHideTheGridline(string theme, int width, int height)
     {
         var (scrollable, plotHeights, captionsOffBackground, waitBandAlpha) = StaTestThread.Run(() => WithTheme(theme, () =>
         {
             var control = new CorrelatedTimelineLanesControl();
             control.Initialize(null!, 1, () => TimeZoneInfo.Utc);
-            var window = new Window { Content = control, Width = 1280, Height = 800, Left = 0, Top = 0 };
+            var window = new Window { Content = control, Width = width, Height = height, Left = 0, Top = 0 };
             window.Show();
             try
             {
@@ -237,7 +243,7 @@ public sealed class ChartTextRefreshTests
                 control.SyncXAxes(24, null, null);
                 var lanes = new[] { control.CpuChart, control.WaitStatsChart, control.BlockingChart, control.MemoryChart, control.FileIoChart };
                 ChartLayoutProbe.Settle(window, lanes);
-                Shot(window, $"overview-lanes-{theme}");
+                Shot(window, $"overview-lanes-{theme}-{width}x{height}");
 
                 var scroll = Descendants<ScrollViewer>(control).First();
                 var dataBackground = ChartStyle.GetThemeColors().DataBackground;
@@ -256,8 +262,9 @@ public sealed class ChartTextRefreshTests
             }
         }));
 
-        Assert.True(scrollable < 0.5, $"the lanes scroll by {scrollable:F0} px in a 1280x800 window (plots {string.Join(", ", plotHeights.Select(h => h.ToString("F0")))} px)");
-        /* The shared floor every chart on the tab keeps so its ticks can draw; a lane at its minimum still keeps it. */
+        if (height >= 800)
+            Assert.True(scrollable < 0.5, $"the lanes scroll by {scrollable:F0} px in a {width}x{height} window (plots {string.Join(", ", plotHeights.Select(h => h.ToString("F0")))} px)");
+        /* The shared floor every chart on the tab keeps so its ticks can draw; a lane at its minimum, scrolling or not, still keeps it. */
         Assert.All(plotHeights, h => Assert.True(h >= ChartLayout.MinPlotAreaHeight, $"a lane's plot is {h:F0} px tall, under the {ChartLayout.MinPlotAreaHeight} px floor"));
         Assert.True(captionsOffBackground.Count == 0, "these captions let the gridline through: " + string.Join(", ", captionsOffBackground));
         /* 24 of 255: a tint the amber band reads as, not a brown block, on the dark and the Cool Breeze data backgrounds. */
