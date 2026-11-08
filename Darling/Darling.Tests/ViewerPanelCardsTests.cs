@@ -18,7 +18,6 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using PerformanceMonitor.Analysis;
-using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using PerformanceMonitor.Ui;
@@ -58,7 +57,7 @@ public sealed class ViewerPanelCardsTests
         ("MemoryBrokerGrid", "memory-broker"),
     };
 
-    /* The Utilization and Optimization grids, each in a card, each given rows so a grid that scrolls on its own shows it. */
+    /* The Utilization and Optimization grids, each in a card, each given fewer rows than the shared cap holds, so a grid that scrolls on its own shows it. */
     private static readonly string[] UtilizationGrids = { "FinOpsTopTotalGrid", "FinOpsTopAvgGrid", "FinOpsProvisioningTrendGrid" };
     private static readonly string[] OptimizationGrids =
     {
@@ -540,17 +539,17 @@ public sealed class ViewerPanelCardsTests
     private static List<string> Headers(FinOpsTab tab) =>
         ChartLayoutProbe.Logical<TabControl>(tab).First().Items.OfType<TabItem>().Select(t => t.Header?.ToString() ?? "").ToList();
 
-    /// <summary>Twelve rows in each Utilization and Optimization grid, so a grid capped in height scrolls on its own and a grid that sizes to its rows does not.</summary>
+    /// <summary>Eight rows in each Utilization and Optimization grid: fewer than the shared cap (<see cref="PageScroll.GridMaxHeight"/>) holds, so a grid that sizes to its rows shows no scroll bar of its own, and a grid still capped at a fixed small height does.</summary>
     private static void FillGrids(FinOpsTab tab)
     {
-        Find<DataGrid>(tab, "FinOpsTopTotalGrid").ItemsSource = Enumerable.Range(1, 12).Select(i => new { DatabaseDisplay = $"db{i}", DatabaseName = $"db{i}", PctCpu = 1.0 * i, PctIo = 1.0, CpuTimeMs = 100L * i, ExecutionCount = 10L * i }).ToList();
-        Find<DataGrid>(tab, "FinOpsTopAvgGrid").ItemsSource = Enumerable.Range(1, 12).Select(i => new { DatabaseDisplay = $"db{i}", DatabaseName = $"db{i}", AvgCpuMs = 1.0 * i, AvgIoMb = 1.0, ExecutionCount = 10L * i }).ToList();
-        Find<DataGrid>(tab, "FinOpsProvisioningTrendGrid").ItemsSource = Enumerable.Range(1, 12).Select(i => new { DayDisplay = $"day {i}", Status = "RIGHT_SIZED", StatusDisplay = "Right sized", AvgCpuPct = 1.0, P95CpuPct = 2.0, MaxCpuPct = 3.0, MemoryRatio = 1.0 }).ToList();
-        Find<DataGrid>(tab, "FinOpsIdleDatabasesDataGrid").ItemsSource = Enumerable.Range(1, 12).Select(i => new { DatabaseName = $"db{i}", TotalSizeMb = 1.0 * i }).ToList();
-        Find<DataGrid>(tab, "FinOpsTempdbPressureDataGrid").ItemsSource = Enumerable.Range(1, 12).Select(i => new { Metric = $"metric {i}", CurrentMb = 1.0, PeakMb = 2.0 }).ToList();
-        Find<DataGrid>(tab, "FinOpsWaitCategorySummaryDataGrid").ItemsSource = Enumerable.Range(1, 12).Select(i => new { Category = $"category {i}", TotalWaitTimeMs = 1000L * i, WaitingTasks = 10L * i }).ToList();
-        Find<DataGrid>(tab, "FinOpsExpensiveQueriesDataGrid").ItemsSource = Enumerable.Range(1, 12).Select(i => new { DatabaseName = $"db{i}", QueryText = $"select {i}", TotalCpuMs = 100L * i }).ToList();
-        Find<DataGrid>(tab, "FinOpsMemoryGrantEfficiencyDataGrid").ItemsSource = Enumerable.Range(1, 12).Select(i => new { DayDisplay = $"day {i}", Day = new DateTime(2026, 1, i), AvgGrantedMb = 1.0, AvgUsedMb = 0.5 }).ToList();
+        Find<DataGrid>(tab, "FinOpsTopTotalGrid").ItemsSource = Enumerable.Range(1, 8).Select(i => new { DatabaseDisplay = $"db{i}", DatabaseName = $"db{i}", PctCpu = 1.0 * i, PctIo = 1.0, CpuTimeMs = 100L * i, ExecutionCount = 10L * i }).ToList();
+        Find<DataGrid>(tab, "FinOpsTopAvgGrid").ItemsSource = Enumerable.Range(1, 8).Select(i => new { DatabaseDisplay = $"db{i}", DatabaseName = $"db{i}", AvgCpuMs = 1.0 * i, AvgIoMb = 1.0, ExecutionCount = 10L * i }).ToList();
+        Find<DataGrid>(tab, "FinOpsProvisioningTrendGrid").ItemsSource = Enumerable.Range(1, 8).Select(i => new { DayDisplay = $"day {i}", Status = "RIGHT_SIZED", StatusDisplay = "Right sized", AvgCpuPct = 1.0, P95CpuPct = 2.0, MaxCpuPct = 3.0, MemoryRatio = 1.0 }).ToList();
+        Find<DataGrid>(tab, "FinOpsIdleDatabasesDataGrid").ItemsSource = Enumerable.Range(1, 8).Select(i => new { DatabaseName = $"db{i}", TotalSizeMb = 1.0 * i }).ToList();
+        Find<DataGrid>(tab, "FinOpsTempdbPressureDataGrid").ItemsSource = Enumerable.Range(1, 8).Select(i => new { Metric = $"metric {i}", CurrentMb = 1.0, PeakMb = 2.0 }).ToList();
+        Find<DataGrid>(tab, "FinOpsWaitCategorySummaryDataGrid").ItemsSource = Enumerable.Range(1, 8).Select(i => new { Category = $"category {i}", TotalWaitTimeMs = 1000L * i, WaitingTasks = 10L * i }).ToList();
+        Find<DataGrid>(tab, "FinOpsExpensiveQueriesDataGrid").ItemsSource = Enumerable.Range(1, 8).Select(i => new { DatabaseName = $"db{i}", QueryText = $"select {i}", TotalCpuMs = 100L * i }).ToList();
+        Find<DataGrid>(tab, "FinOpsMemoryGrantEfficiencyDataGrid").ItemsSource = Enumerable.Range(1, 8).Select(i => new { DayDisplay = $"day {i}", Day = new DateTime(2026, 1, i), AvgGrantedMb = 1.0, AvgUsedMb = 0.5 }).ToList();
     }
 
     /// <summary>Builds the real server tab under <paramref name="theme"/>, shows it, and runs <paramref name="body"/> with the theme's muted colour.</summary>

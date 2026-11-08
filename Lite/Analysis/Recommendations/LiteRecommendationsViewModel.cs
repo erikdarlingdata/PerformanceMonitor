@@ -10,7 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Analysis.Baselines;
-using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Analysis.Recommendations;

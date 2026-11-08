@@ -276,8 +276,8 @@
                     </Border>
                 </StackPanel>
 
-                <!-- #8226: one scroll area for the page; each block below is a card, and each grid sizes to its rows. -->
-                <ScrollViewer Grid.Row="1" x:Name="UtilizationScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <!-- #8226: one scroll area for the page; each block below is a card, and each grid sizes to its rows up to the shared cap, then scrolls inside. -->
+                <ScrollViewer Grid.Row="1" x:Name="UtilizationScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" PreviewMouseWheel="PageScroll_PreviewMouseWheel">
                 <StackPanel>
                 <!-- Utilization Summary — compact, top-aligned -->
                 <Grid Margin="10,0,10,0" x:Name="UtilizationContent">
@@ -484,7 +484,7 @@
 
                 <!-- Provisioning Trend (7-day) -->
                 <ui:ChartPanel x:Name="ProvisioningTrendCard" Title="7-Day Provisioning Trend" Subtitle="Each day's status against its CPU and memory" Margin="10,8,10,0">
-                    <DataGrid x:Name="ProvisioningTrendGrid"
+                    <DataGrid x:Name="ProvisioningTrendGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}"
                               AutoGenerateColumns="False" IsReadOnly="True"
                               CanUserSortColumns="False" HeadersVisibility="Column"
                               GridLinesVisibility="Horizontal" SelectionMode="Single"
@@ -547,7 +547,7 @@
 
                             <!-- Top 5 by Total CPU -->
                             <ui:ChartPanel Grid.Column="0" x:Name="TopTotalCard" Title="Top Databases by Total CPU" Subtitle="The databases that used the most CPU time" Margin="0,0,4,0">
-                                <DataGrid x:Name="TopTotalGrid"
+                                <DataGrid x:Name="TopTotalGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}"
                                           AutoGenerateColumns="False" IsReadOnly="True"
                                           CanUserSortColumns="True" HeadersVisibility="Column"
                                           GridLinesVisibility="Horizontal" SelectionMode="Single"
@@ -581,7 +581,7 @@
 
                             <!-- Top 5 by Avg CPU per Execution -->
                             <ui:ChartPanel Grid.Column="1" x:Name="TopAvgCard" Title="Top Databases by Avg CPU / Execution" Subtitle="The databases that cost the most CPU per execution" Margin="4,0,0,0">
-                                <DataGrid x:Name="TopAvgGrid"
+                                <DataGrid x:Name="TopAvgGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}"
                                           AutoGenerateColumns="False" IsReadOnly="True"
                                           CanUserSortColumns="True" HeadersVisibility="Column"
                                           GridLinesVisibility="Horizontal" SelectionMode="Single"
@@ -2161,8 +2161,8 @@
                             Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
                 </StackPanel>
 
-            <!-- #8226: one scroll area for the page; each block is a card, and each grid sizes to its rows. -->
-            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="10,0,10,10">
+            <!-- #8226: one scroll area for the page; each block is a card, and each grid sizes to its rows up to the shared cap, then scrolls inside. -->
+            <ScrollViewer Grid.Row="1" x:Name="OptimizationScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="10,0,10,10" PreviewMouseWheel="PageScroll_PreviewMouseWheel">
                 <StackPanel>
                     <!-- Idle Databases -->
                     <ui:ChartPanel x:Name="IdleDatabasesCard" Title="Idle Databases" Subtitle="Databases with no recent executions, and what they hold" Margin="0,0,0,8">
@@ -2171,7 +2171,7 @@
                         </ui:ChartPanel.HeaderContent>
                         <StackPanel>
                             <Grid MinHeight="96"><!-- the header, and room for the one sentence the grid shows when it is empty -->
-                            <DataGrid x:Name="IdleDatabasesDataGrid"
+                            <DataGrid x:Name="IdleDatabasesDataGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}"
                                       AutoGenerateColumns="False"
                                       IsReadOnly="True"
                                       CanUserSortColumns="True"
@@ -2233,7 +2233,7 @@
                     <ui:ChartPanel x:Name="TempdbPressureCard" Title="tempdb Pressure" Subtitle="Current and 24-hour peak use, by metric" Margin="0,0,0,8">
                         <StackPanel>
                             <Grid MinHeight="96"><!-- the header, and room for the one sentence the grid shows when it is empty -->
-                            <DataGrid x:Name="TempdbPressureDataGrid"
+                            <DataGrid x:Name="TempdbPressureDataGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}"
                                       AutoGenerateColumns="False"
                                       IsReadOnly="True"
                                       CanUserSortColumns="True"
@@ -2301,7 +2301,7 @@
                         </ui:ChartPanel.HeaderContent>
                         <StackPanel>
                             <Grid MinHeight="96"><!-- the header, and room for the one sentence the grid shows when it is empty -->
-                            <DataGrid x:Name="WaitCategorySummaryDataGrid"
+                            <DataGrid x:Name="WaitCategorySummaryDataGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}"
                                       AutoGenerateColumns="False"
                                       IsReadOnly="True"
                                       CanUserSortColumns="True"
@@ -2359,7 +2359,7 @@
                         </ui:ChartPanel.HeaderContent>
                         <StackPanel>
                             <Grid MinHeight="96"><!-- the header, and room for the one sentence the grid shows when it is empty -->
-                            <DataGrid x:Name="ExpensiveQueriesDataGrid"
+                            <DataGrid x:Name="ExpensiveQueriesDataGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}"
                               LoadingRow="MarkedGrid_LoadingRow"
                                       AutoGenerateColumns="False"
                                       IsReadOnly="True"
@@ -2417,7 +2417,7 @@
                     <ui:ChartPanel x:Name="MemoryGrantEfficiencyCard" Title="Memory Grant Efficiency" Subtitle="Granted against used, by day" Margin="0,0,0,8">
                         <StackPanel>
                             <Grid MinHeight="96"><!-- the header, and room for the one sentence the grid shows when it is empty -->
-                            <DataGrid x:Name="MemoryGrantEfficiencyDataGrid"
+                            <DataGrid x:Name="MemoryGrantEfficiencyDataGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}"
                                       AutoGenerateColumns="False"
                                       IsReadOnly="True"
                                       CanUserSortColumns="True"

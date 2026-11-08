@@ -19,7 +19,6 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Darling.Tests;
-using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Analysis.Recommendations;
 using PerformanceMonitorLite.Controls;
@@ -61,7 +60,7 @@ public sealed class LitePanelCardsTests
         ("MemoryBrokerGrid", "memory-broker"),
     };
 
-    /* The Utilization and Optimization grids, each in a card, each given rows so a grid that scrolls on its own shows it. */
+    /* The Utilization and Optimization grids, each in a card, each given fewer rows than the shared cap holds, so a grid that scrolls on its own shows it. */
     private static readonly string[] UtilizationGrids = { "TopTotalGrid", "TopAvgGrid", "ProvisioningTrendGrid" };
     private static readonly string[] OptimizationGrids =
     {
@@ -543,17 +542,17 @@ public sealed class LitePanelCardsTests
     private static List<string> Headers(FinOpsTab tab) =>
         ChartLayoutProbe.Logical<TabControl>(tab).First().Items.OfType<TabItem>().Select(t => t.Header?.ToString() ?? "").ToList();
 
-    /// <summary>Twelve rows in each Utilization and Optimization grid, so a grid capped in height scrolls on its own and a grid that sizes to its rows does not.</summary>
+    /// <summary>Eight rows in each Utilization and Optimization grid: fewer than the shared cap (<see cref="PageScroll.GridMaxHeight"/>) holds, so a grid that sizes to its rows shows no scroll bar of its own, and a grid still capped at a fixed small height does.</summary>
     private static void FillGrids(FinOpsTab tab)
     {
-        Find<DataGrid>(tab, "TopTotalGrid").ItemsSource = Enumerable.Range(1, 12).Select(i => new { DatabaseDisplay = $"db{i}", DatabaseName = $"db{i}", PctCpu = 1.0 * i, PctIo = 1.0, CpuTimeMs = 100L * i, ExecutionCount = 10L * i }).ToList();
-        Find<DataGrid>(tab, "TopAvgGrid").ItemsSource = Enumerable.Range(1, 12).Select(i => new { DatabaseDisplay = $"db{i}", DatabaseName = $"db{i}", AvgCpuMs = 1.0 * i, AvgIoMb = 1.0, ExecutionCount = 10L * i }).ToList();
-        Find<DataGrid>(tab, "ProvisioningTrendGrid").ItemsSource = Enumerable.Range(1, 12).Select(i => new { DayDisplay = $"day {i}", Status = "RIGHT_SIZED", StatusDisplay = "Right sized", AvgCpuPct = 1.0, P95CpuPct = 2.0, MaxCpuPct = 3.0, MemoryRatio = 1.0 }).ToList();
-        Find<DataGrid>(tab, "IdleDatabasesDataGrid").ItemsSource = Enumerable.Range(1, 12).Select(i => new { DatabaseName = $"db{i}", TotalSizeMb = 1.0 * i }).ToList();
-        Find<DataGrid>(tab, "TempdbPressureDataGrid").ItemsSource = Enumerable.Range(1, 12).Select(i => new { Metric = $"metric {i}", CurrentMb = 1.0, PeakMb = 2.0 }).ToList();
-        Find<DataGrid>(tab, "WaitCategorySummaryDataGrid").ItemsSource = Enumerable.Range(1, 12).Select(i => new { Category = $"category {i}", TotalWaitMs = 1000L * i }).ToList();
-        Find<DataGrid>(tab, "ExpensiveQueriesDataGrid").ItemsSource = Enumerable.Range(1, 12).Select(i => new { Database = $"db{i}", QueryText = $"select {i}", TotalCpuMs = 100L * i }).ToList();
-        Find<DataGrid>(tab, "MemoryGrantEfficiencyDataGrid").ItemsSource = Enumerable.Range(1, 12).Select(i => new { Day = $"day {i}", AvgGrantedMb = 1.0, AvgUsedMb = 0.5 }).ToList();
+        Find<DataGrid>(tab, "TopTotalGrid").ItemsSource = Enumerable.Range(1, 8).Select(i => new { DatabaseDisplay = $"db{i}", DatabaseName = $"db{i}", PctCpu = 1.0 * i, PctIo = 1.0, CpuTimeMs = 100L * i, ExecutionCount = 10L * i }).ToList();
+        Find<DataGrid>(tab, "TopAvgGrid").ItemsSource = Enumerable.Range(1, 8).Select(i => new { DatabaseDisplay = $"db{i}", DatabaseName = $"db{i}", AvgCpuMs = 1.0 * i, AvgIoMb = 1.0, ExecutionCount = 10L * i }).ToList();
+        Find<DataGrid>(tab, "ProvisioningTrendGrid").ItemsSource = Enumerable.Range(1, 8).Select(i => new { DayDisplay = $"day {i}", Status = "RIGHT_SIZED", StatusDisplay = "Right sized", AvgCpuPct = 1.0, P95CpuPct = 2.0, MaxCpuPct = 3.0, MemoryRatio = 1.0 }).ToList();
+        Find<DataGrid>(tab, "IdleDatabasesDataGrid").ItemsSource = Enumerable.Range(1, 8).Select(i => new { DatabaseName = $"db{i}", TotalSizeMb = 1.0 * i }).ToList();
+        Find<DataGrid>(tab, "TempdbPressureDataGrid").ItemsSource = Enumerable.Range(1, 8).Select(i => new { Metric = $"metric {i}", CurrentMb = 1.0, PeakMb = 2.0 }).ToList();
+        Find<DataGrid>(tab, "WaitCategorySummaryDataGrid").ItemsSource = Enumerable.Range(1, 8).Select(i => new { Category = $"category {i}", TotalWaitMs = 1000L * i }).ToList();
+        Find<DataGrid>(tab, "ExpensiveQueriesDataGrid").ItemsSource = Enumerable.Range(1, 8).Select(i => new { Database = $"db{i}", QueryText = $"select {i}", TotalCpuMs = 100L * i }).ToList();
+        Find<DataGrid>(tab, "MemoryGrantEfficiencyDataGrid").ItemsSource = Enumerable.Range(1, 8).Select(i => new { Day = $"day {i}", AvgGrantedMb = 1.0, AvgUsedMb = 0.5 }).ToList();
     }
 
     private static List<string> WithServerTab(string theme, Func<ServerTab, Window, Color, List<string>> body)

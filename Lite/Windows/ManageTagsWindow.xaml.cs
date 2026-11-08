@@ -639,7 +639,7 @@ public partial class ManageTagsWindow : Window
         var descendants = CountDescendants(_selectedNode);
         var assignments = CountAssignedServers(_selectedNode);
         var childNote = descendants > 0 ? $" and its {PerformanceMonitor.Common.CountText.Plural(descendants, "child tag")}" : string.Empty;
-        var assignNote = assignments > 0 ? $" This removes {assignments} server assignment(s)." : string.Empty;
+        var assignNote = assignments > 0 ? $" This removes {PerformanceMonitor.Common.CountText.Plural(assignments, "server assignment")}." : string.Empty;
 
         var confirm = MessageBox.Show(this,
             $"Delete ‘{_selectedNode.Tag.Name}’{childNote}?{assignNote} Collected data is not affected.",

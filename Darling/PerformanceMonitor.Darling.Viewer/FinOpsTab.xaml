@@ -314,8 +314,8 @@
                             </Border>
                         </StackPanel>
 
-                        <!-- #8226: one scroll area for the page; each block below is a card, and each grid sizes to its rows. -->
-                        <ScrollViewer Grid.Row="1" x:Name="FinOpsUtilizationScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <!-- #8226: one scroll area for the page; each block below is a card, and each grid sizes to its rows up to the shared cap, then scrolls inside. -->
+                        <ScrollViewer Grid.Row="1" x:Name="FinOpsUtilizationScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" PreviewMouseWheel="FinOpsPageScroll_PreviewMouseWheel">
                         <StackPanel>
                         <Grid Margin="10,0,10,0" x:Name="FinOpsUtilizationContent">
                             <Grid.ColumnDefinitions>
@@ -416,7 +416,7 @@
                                    TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
                         <ui:ChartPanel x:Name="FinOpsProvisioningTrendCard" Title="7-Day Provisioning Trend" Subtitle="Each day's status against its CPU and memory" Margin="10,8,10,0">
-                            <DataGrid x:Name="FinOpsProvisioningTrendGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}"
+                            <DataGrid x:Name="FinOpsProvisioningTrendGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}"
                                       CanUserSortColumns="False">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="Day" Binding="{Binding DayDisplay}" Width="100" SortMemberPath="Day"/>
@@ -444,7 +444,7 @@
                                 <Grid Grid.Row="0" Margin="10,4,10,0">
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                     <ui:ChartPanel Grid.Column="0" x:Name="FinOpsTopTotalCard" Title="Top Databases by Total CPU" Subtitle="The databases that used the most CPU time" Margin="0,0,4,0">
-                                        <DataGrid x:Name="FinOpsTopTotalGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}">
+                                        <DataGrid x:Name="FinOpsTopTotalGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}">
                                             <DataGrid.Columns>
                                                 <DataGridTextColumn Header="Database" Binding="{Binding DatabaseDisplay}" SortMemberPath="DatabaseName" Width="*"/>
                                                 <DataGridTextColumn Header="CPU %" Binding="{Binding PctCpu, StringFormat=N1}" Width="60" ElementStyle="{StaticResource NumericCell}"/>
@@ -455,7 +455,7 @@
                                         </DataGrid>
                                     </ui:ChartPanel>
                                     <ui:ChartPanel Grid.Column="1" x:Name="FinOpsTopAvgCard" Title="Top Databases by Avg CPU / Execution" Subtitle="The databases that cost the most CPU per execution" Margin="4,0,0,0">
-                                        <DataGrid x:Name="FinOpsTopAvgGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}">
+                                        <DataGrid x:Name="FinOpsTopAvgGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}">
                                             <DataGrid.Columns>
                                                 <DataGridTextColumn Header="Database" Binding="{Binding DatabaseDisplay}" SortMemberPath="DatabaseName" Width="*"/>
                                                 <DataGridTextColumn Header="Avg CPU (ms)" Binding="{Binding AvgCpuMs, StringFormat=N2}" Width="Auto" MinWidth="95" ElementStyle="{StaticResource NumericCell}"/>
@@ -793,8 +793,8 @@
                             <TextBlock Text="Optimization" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                             <Button Content="Refresh" Click="FinOpsOptimizationRefresh_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
                         </StackPanel>
-                        <!-- #8226: one scroll area for the page; each block is a card, and each grid sizes to its rows. -->
-                        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="10,0,10,10">
+                        <!-- #8226: one scroll area for the page; each block is a card, and each grid sizes to its rows up to the shared cap, then scrolls inside. -->
+                        <ScrollViewer Grid.Row="1" x:Name="FinOpsOptimizationScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="10,0,10,10" PreviewMouseWheel="FinOpsPageScroll_PreviewMouseWheel">
                             <StackPanel>
                                 <ui:ChartPanel x:Name="FinOpsIdleDatabasesCard" Title="Idle Databases" Subtitle="Databases with no recent executions, and what they hold" Margin="0,0,0,8">
                                     <ui:ChartPanel.HeaderContent>
@@ -802,7 +802,7 @@
                                     </ui:ChartPanel.HeaderContent>
                                     <StackPanel>
                                         <Grid MinHeight="96"><!-- the header, and room for the one sentence the grid shows when it is empty -->
-                                        <DataGrid x:Name="FinOpsIdleDatabasesDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}">
+                                        <DataGrid x:Name="FinOpsIdleDatabasesDataGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}">
                                             <DataGrid.Columns>
                                                 <DataGridTextColumn Binding="{Binding DatabaseName}" Width="180"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                                 <DataGridTextColumn Binding="{Binding TotalSizeMb, StringFormat=N2}" Width="120" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalSizeMb" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Total Size MB" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -818,7 +818,7 @@
                                 <ui:ChartPanel x:Name="FinOpsTempdbPressureCard" Title="tempdb Pressure" Subtitle="Current and 24-hour peak use, by metric" Margin="0,0,0,8">
                                     <StackPanel>
                                         <Grid MinHeight="96"><!-- the header, and room for the one sentence the grid shows when it is empty -->
-                                        <DataGrid x:Name="FinOpsTempdbPressureDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}">
+                                        <DataGrid x:Name="FinOpsTempdbPressureDataGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}">
                                             <DataGrid.Columns>
                                                 <DataGridTextColumn Binding="{Binding Metric}" Width="180"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Metric" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Metric" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                                 <DataGridTextColumn Binding="{Binding CurrentMb, StringFormat=N2}" Width="110" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CurrentMb" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Current MB" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -840,7 +840,7 @@
                                     </ui:ChartPanel.HeaderContent>
                                     <StackPanel>
                                         <Grid MinHeight="96"><!-- the header, and room for the one sentence the grid shows when it is empty -->
-                                        <DataGrid x:Name="FinOpsWaitCategorySummaryDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}">
+                                        <DataGrid x:Name="FinOpsWaitCategorySummaryDataGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}">
                                             <DataGrid.Columns>
                                                 <DataGridTextColumn Binding="{Binding Category}" Width="100"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Category" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Category" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                                 <DataGridTextColumn Binding="{Binding TotalWaitTimeMs, StringFormat=N0}" Width="120" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalWaitTimeMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Total Wait ms" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -867,7 +867,7 @@
                                     </ui:ChartPanel.HeaderContent>
                                     <StackPanel>
                                         <Grid MinHeight="96"><!-- the header, and room for the one sentence the grid shows when it is empty -->
-                                        <DataGrid x:Name="FinOpsExpensiveQueriesDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsQueryPlanRowStyle}">
+                                        <DataGrid x:Name="FinOpsExpensiveQueriesDataGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsQueryPlanRowStyle}">
                                             <DataGrid.Columns>
                                                 <DataGridTextColumn Binding="{Binding DatabaseName}" Width="140"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                                 <DataGridTemplateColumn Header="Query Preview" Width="400"><DataGridTemplateColumn.CellTemplate><DataTemplate><TextBlock Text="{Binding QueryPreview, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" Margin="5,2" ToolTip="{Binding FullQueryText}"/></DataTemplate></DataGridTemplateColumn.CellTemplate></DataGridTemplateColumn>
@@ -888,7 +888,7 @@
                                 <ui:ChartPanel x:Name="FinOpsMemoryGrantEfficiencyCard" Title="Memory Grant Efficiency" Subtitle="Granted against used, by day" Margin="0,0,0,8">
                                     <StackPanel>
                                         <Grid MinHeight="96"><!-- the header, and room for the one sentence the grid shows when it is empty -->
-                                        <DataGrid x:Name="FinOpsMemoryGrantEfficiencyDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}">
+                                        <DataGrid x:Name="FinOpsMemoryGrantEfficiencyDataGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}">
                                             <DataGrid.Columns>
                                                 <DataGridTextColumn Binding="{Binding DayDisplay}" Width="100" SortMemberPath="Day"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DayDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Day" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                                 <DataGridTextColumn Binding="{Binding AvgGrantedMb, StringFormat='{}{0:#,##0.0###}'}" Width="120" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgGrantedMb" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Avg Granted MB" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>

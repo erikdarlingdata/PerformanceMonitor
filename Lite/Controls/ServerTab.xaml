@@ -2912,14 +2912,15 @@
                 <Grid Margin="8">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
-                    <!-- #8226: the three summaries share one card over the grids, with a semibold title and a muted subtitle. -->
-                    <ui:ChartPanel Grid.Row="0" x:Name="CollectionHealthCard" Title="Collection Cycles" Subtitle="Skipped slots and connection failures in the last 24 hours" Margin="0,0,0,8">
+                    <!-- Lite's own database after a fatal error: why collection stopped, or when it was reopened. Above the Collection Cycles card, since it is not a cycle. -->
+                    <TextBlock Grid.Row="0" x:Name="LocalDatabaseBanner" Visibility="Collapsed" FontWeight="SemiBold" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,8"/>
+                    <!-- #8226: the two cycle summaries share one card over the grids, with a semibold title and a muted subtitle. -->
+                    <ui:ChartPanel Grid.Row="1" x:Name="CollectionHealthCard" Title="Collection Cycles" Subtitle="Skipped slots and connection failures in the last 24 hours" Margin="0,0,0,8">
                         <StackPanel>
-                            <!-- Lite's own database after a fatal error: why collection stopped, or when it was reopened. -->
-                            <TextBlock x:Name="LocalDatabaseBanner" Visibility="Collapsed" FontWeight="SemiBold" TextWrapping="Wrap"
-                                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,8"/>
                             <!-- #5643: the late collection cycles of the last 24 h. Always shown, above the grids, so a reader sees at once whether
                                  the loop has been skipping slots; the all-clear says so plainly. -->
                             <TextBlock x:Name="SkippedCyclesSummary" TextWrapping="Wrap"
@@ -2930,7 +2931,7 @@
                                        Foreground="{DynamicResource ForegroundBrush}" Margin="0,8,0,0"/>
                         </StackPanel>
                     </ui:ChartPanel>
-                    <TabControl Grid.Row="1" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
+                    <TabControl Grid.Row="2" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                         <TabItem Header="Health Summary">
                             <DataGrid x:Name="CollectionHealthGrid"
                                       AutoGenerateColumns="False" IsReadOnly="True"
