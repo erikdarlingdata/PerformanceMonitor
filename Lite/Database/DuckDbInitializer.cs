@@ -79,6 +79,15 @@ public partial class DuckDbInitializer : IDisposable
     /// </summary>
     internal int CompletedTrimCycleCount;
 
+    /// <summary>
+    /// How long <see cref="RunMemoryTrimCycle"/>'s two lock tries wait. <see cref="TimeSpan.Zero"/> in production:
+    /// a trim cycle never blocks a real caller, so a busy lock is a skipped cycle and the next tick gets another
+    /// try. The store lock is process-wide, so a test that must see one cycle complete sets this to a hang guard,
+    /// and the cycle then defers to whatever else in the process holds the lock at that instant instead of
+    /// skipping. Instance state, like <see cref="CompletedTrimCycleCount"/>, so there is nothing to restore.
+    /// </summary>
+    internal TimeSpan TrimLockWaitForTests = TimeSpan.Zero;
+
     /* #5650: a busy-skipped trim cycle used to log only at Debug. RecordTrimSkip counts both skip paths and writes
        one Information line at most an hour, counted from the first skip; the line resets the count and the hour. */
     private static readonly TimeSpan TrimSkipLogInterval = TimeSpan.FromHours(1);
@@ -657,8 +666,9 @@ public partial class DuckDbInitializer : IDisposable
            connection can take the whole process down, not just throw a catchable exception. Never wait
            (same "a trim cycle must never block a real caller" rule as the write lock below): if the read
            lock is busy, skip this cycle and try again in TrimInterval. Released before the write-lock
-           attempt below so the trim never holds both locks at once. */
-        if (!s_dbLock.TryEnterReadLock(0))
+           attempt below so the trim never holds both locks at once. The wait is TrimLockWaitForTests: zero
+           outside tests. */
+        if (!s_dbLock.TryEnterReadLock(TrimLockWaitForTests))
         {
             RecordTrimSkip();
             return;
@@ -685,8 +695,9 @@ public partial class DuckDbInitializer : IDisposable
             return;
 
         /* Never wait — a reader must never block behind the trim (#4262 round 1 finding 1). If the write
-           lock is busy, skip this cycle; the next one TrimInterval later gets another try. */
-        if (!s_dbLock.TryEnterWriteLock(0))
+           lock is busy, skip this cycle; the next one TrimInterval later gets another try. The wait is
+           TrimLockWaitForTests: zero outside tests. */
+        if (!s_dbLock.TryEnterWriteLock(TrimLockWaitForTests))
         {
             RecordTrimSkip();
             _logger?.LogDebug(
