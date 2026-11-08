@@ -378,6 +378,66 @@ public sealed class WebhookRateLimitTests
     }
 
     [Fact]
+    public async Task PerEventSlotsQueuedPastTheBound_FailWithoutARequest_AndNoWaitIsOverTheBound()
+    {
+        var bench = new Bench().Slack(Ok());
+
+        /* The delay records each wait and leaves the clock where it is, which is what concurrent Per-event callers to one
+           URL look like to the slot table: every post reserves the next second while none of them has passed yet. */
+        bench.Webhooks.Delay = (wait, _) =>
+        {
+            bench.Waits.Add(wait);
+            return Task.CompletedTask;
+        };
+
+        /* Eleven posts take the slots at 0 through 10 s: the eleventh waits exactly the bound, and goes. */
+        for (var i = 0; i < 11; i++)
+        {
+            Assert.True((await bench.FireAsync(AlertNotificationMode.PerEvent)).Sent);
+        }
+
+        Assert.Equal(11, bench.SlackRequestsAt.Count);
+        Assert.Equal(Enumerable.Range(1, 10).Select(s => TimeSpan.FromSeconds(s)), bench.Waits);
+
+        /* The twelfth would start at 11 s, over the bound: it is not posted, and it waits for nothing. */
+        var twelfth = await bench.FireAsync(AlertNotificationMode.PerEvent);
+        Assert.Equal(AlertChannelOutcome.Failed, twelfth.Outcome);
+        Assert.Contains("not posted", twelfth.SendError, StringComparison.Ordinal);
+        Assert.Equal(11, bench.SlackRequestsAt.Count);
+        Assert.Equal(10, bench.Waits.Count);
+        Assert.All(bench.Waits, wait => Assert.True(wait <= TimeSpan.FromSeconds(10)));
+    }
+
+    [Fact]
+    public async Task AHeldSend_ToldToWaitAgainByA429_DoesNotWaitPastTheBoundInAll()
+    {
+        var bench = new Bench().Slack(TooManyRequests(After(6)));
+
+        /* The first firing waits its 6 s, posts again, is told 6 s again and fails; that second answer holds the destination
+           until 12 s. */
+        Assert.Equal(AlertChannelOutcome.Failed, (await bench.FireAsync()).Outcome);
+        Assert.Equal(new[] { TimeSpan.FromSeconds(6) }, bench.Waits);
+        Assert.Equal(2, bench.SlackRequestsAt.Count);
+
+        /* The second firing, at 6 s, waits the 6 s of hold that are left and posts at 12 s. Its 429 asks for 6 s more, which
+           would make 12 s for one send: it does not wait again. The post fails, with the body logged, and the hold moves on. */
+        var second = await bench.FireAsync();
+
+        Assert.Equal(AlertChannelOutcome.Failed, second.Outcome);
+        Assert.Contains("HTTP 429 Too Many Requests", second.SendError, StringComparison.Ordinal);
+        Assert.Equal(new[] { TimeSpan.FromSeconds(6), TimeSpan.FromSeconds(6) }, bench.Waits);
+        Assert.Equal(3, bench.SlackRequestsAt.Count);
+        Assert.Equal(bench.Start.AddSeconds(12), bench.SlackRequestsAt[^1]);
+        AssertBodyLogged(bench);
+
+        /* Still at 12 s with the new 6 s hold: a send that would wait 6 s goes, which shows the bound is per send, not per destination. */
+        var third = await bench.FireAsync();
+        Assert.Equal(AlertChannelOutcome.Failed, third.Outcome);
+        Assert.Equal(4, bench.SlackRequestsAt.Count);
+        Assert.Equal(bench.Start.AddSeconds(18), bench.SlackRequestsAt[^1]);
+    }
+
+    [Fact]
     public async Task TheChannelsOfOneFiring_PostConcurrently_SoAHeldChannelDoesNotDelayAnother()
     {
         var bench = new Bench(teams: true).Teams(TooManyRequests(After(5)), Ok()).Slack(Ok());
