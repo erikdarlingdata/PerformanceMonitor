@@ -393,6 +393,16 @@ public class ServerPropertyRow
     /// (<c>(ms_ticks - sqlserver_start_time_ms_ticks) / 1000</c>), so neither the client's zone nor a daylight saving change enters it (#7176). Null when unknown.</summary>
     public DateTime? SqlServerStartUtc { get; set; }
     public DateTime? LastUpdated { get; set; }
+
+    /// <summary>True when the row was built from the newest collected <c>server_properties</c> row because the server could not be
+    /// reached (<see cref="FinOpsServerInventory.FromCollected"/>); <see cref="LastUpdated"/> is then that row's collection time.</summary>
+    public bool IsLastKnown { get; set; }
+
+    /// <summary>The Last Updated cell: the time a live row was read, or "last known, " and the collection time of a row built from the
+    /// store. The column sorts on <see cref="LastUpdated"/>.</summary>
+    public string LastUpdatedDisplay => LastUpdated is { } at
+        ? (IsLastKnown ? $"last known, {at:yyyy-MM-dd HH:mm}" : at.ToString("yyyy-MM-dd HH:mm"))
+        : "";
     public bool? IsHadrEnabled { get; set; }
     public bool? IsClustered { get; set; }
     public string AgReplicaRole { get; set; } = "Standalone";
