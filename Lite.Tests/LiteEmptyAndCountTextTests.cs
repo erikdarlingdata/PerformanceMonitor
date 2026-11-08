@@ -95,6 +95,8 @@ public sealed class LiteEmptyAndCountTextTests
                     found.AddRange(Muted(label, tab, muted, $"{at}: {name}"));
                 }
 
+                Reveal(Find<TextBlock>(tab, "MemoryBrokerCountIndicator"));
+                Settle(window);
                 Shoot(window, $"MemoryBroker-{theme}-{width}x{height}.png");
 
                 var advice = Find<TextBlock>(tab, "PlanCacheRecommendationText");
@@ -269,7 +271,7 @@ public sealed class LiteEmptyAndCountTextTests
                         Reveal(grid);
                         message.Visibility = Visibility.Visible;
                         Settle(window);
-                        found.AddRange(Muted(message, tab, muted, $"{at}: {messageName}", weight: false));
+                        found.AddRange(Muted(message, tab, muted, $"{at}: {messageName}", weight: false, insideTab: false));
                         found.AddRange(Inside(message, grid, tab, $"{at}: {messageName}"));
                     }
 
@@ -326,6 +328,12 @@ public sealed class LiteEmptyAndCountTextTests
 
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
     }
+
+    [Theory]
+    [InlineData(1, "1 index")]
+    [InlineData(3, "3 indexes")]
+    public void ACountWithAnIrregularPlural_ReadsAsAPersonSaysIt(int count, string expected) =>
+        Assert.Equal(expected, PerformanceMonitor.Common.CountText.Plural(count, "index", "indexes"));
 
     // ── helpers ──────────────────────────────────────────────────────────────────────────────────
 
@@ -437,9 +445,10 @@ public sealed class LiteEmptyAndCountTextTests
 
     /// <summary>
     /// The realized look of <paramref name="label"/>: visible, upright, in the theme's muted foreground, normal weight when
-    /// <paramref name="weight"/> is asked, and wholly inside <paramref name="tab"/>.
+    /// <paramref name="weight"/> is asked, and wholly inside <paramref name="tab"/> unless <paramref name="insideTab"/> is off (a
+    /// sub-tab that scrolls keeps its lower content below the fold).
     /// </summary>
-    private static List<string> Muted(TextBlock label, FrameworkElement tab, Color muted, string what, bool weight = true)
+    private static List<string> Muted(TextBlock label, FrameworkElement tab, Color muted, string what, bool weight = true, bool insideTab = true)
     {
         var problems = new List<string>();
         if (!label.IsVisible)
@@ -464,7 +473,7 @@ public sealed class LiteEmptyAndCountTextTests
         }
 
         var bounds = Bounds(label, tab);
-        if (bounds.Left < -0.5 || bounds.Top < -0.5 || bounds.Right > tab.ActualWidth + 0.5 || bounds.Bottom > tab.ActualHeight + 0.5)
+        if (insideTab && (bounds.Left < -0.5 || bounds.Top < -0.5 || bounds.Right > tab.ActualWidth + 0.5 || bounds.Bottom > tab.ActualHeight + 0.5))
         {
             problems.Add($"{what} spans {bounds.Left:0},{bounds.Top:0}..{bounds.Right:0},{bounds.Bottom:0} in a {tab.ActualWidth:0}x{tab.ActualHeight:0} tab");
         }
