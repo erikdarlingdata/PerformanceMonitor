@@ -129,10 +129,26 @@ public sealed class ReadAdmission
     /// the fastest collector, but a reload or a second user more than a minute after the read finished would pay the cold read again,
     /// and the page itself re-renders every 60 s, so the entry would expire about as each poll arrives. A write (the tag map, a rule)
     /// moves the cache's generation and drops the entry at once.</para>
+    ///
+    /// <para><b><c>get_finops_inventory</c> (#8323)</b> is the FinOps Server Inventory grid: one row per server from fixed
+    /// windows inside the read (a 24-hour CPU percentile and 24 hours of memory grants per server, 7 days of idle
+    /// databases), scanned over the whole fleet on every call. It takes no window and no server, so it is a fleet read
+    /// every time (<see cref="WindowlessFleetRoutes"/>), and the same 5 minutes apply for the same reasons: the grid
+    /// changes once per collection, a 24-hour figure moves by under 1/288th in 5 minutes, and a write (a registry edit,
+    /// a rule) moves the generation and drops the entry at once.</para>
     /// </summary>
     internal static readonly IReadOnlyDictionary<string, TimeSpan> FleetCachedRoutes = new Dictionary<string, TimeSpan>(StringComparer.Ordinal)
     {
         ["get_resource_use_by_tag"] = TimeSpan.FromMinutes(5),
+        ["get_finops_inventory"] = TimeSpan.FromMinutes(5),
+    };
+
+    /// <summary>#8323: the routes in <see cref="FleetCachedRoutes"/> whose window is fixed inside the read and so take no
+    /// hours argument at all. There is nothing to measure against <see cref="FleetMinWindowHours"/>, and a call that names no
+    /// server is the fleet form whatever else it sends.</summary>
+    internal static readonly IReadOnlySet<string> WindowlessFleetRoutes = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "get_finops_inventory",
     };
 
     /// <summary>The shortest window, in hours, whose whole-fleet read takes the route's own TTL (#6800). A window under it keeps the
@@ -149,9 +165,11 @@ public sealed class ReadAdmission
     /// <summary>Whether a read of <paramref name="route"/> is the whole-fleet form of a route in <see cref="FleetCachedRoutes"/> over a
     /// window of at least <see cref="FleetMinWindowHours"/>: no server named (null, empty or blank), and <paramref name="hours"/>, the
     /// window the read asks for or its declared default (<see cref="ReadWindowBand.HoursOf"/>), at least <see cref="FleetMinWindowHours"/>. No window, or one that is
-    /// not a number, is not long enough.</summary>
+    /// not a number, is not long enough, except on a route in <see cref="WindowlessFleetRoutes"/>, which has no window to send.</summary>
     internal static bool IsFleetRead(string route, string? server, double? hours) =>
-        FleetCachedRoutes.ContainsKey(route) && string.IsNullOrWhiteSpace(server) && hours >= FleetMinWindowHours;
+        FleetCachedRoutes.ContainsKey(route)
+        && string.IsNullOrWhiteSpace(server)
+        && (hours >= FleetMinWindowHours || WindowlessFleetRoutes.Contains(route));
 
     /// <summary>Whether a tool or web read goes through admission: not a health read (<see cref="SkippedRoutes"/>) and not
     /// an MCP write tool (writes never wait).</summary>
