@@ -2,7 +2,7 @@
 
 A Helm chart for Darling, the collector service of PerformanceMonitor. It runs the service as one pod with a state volume, a Service for the web dashboard (and, when you turn it on, the MCP endpoint), optional Ingresses, and either a single bundled TimescaleDB pod or a connection to a PostgreSQL server you run.
 
-Requires Kubernetes 1.27 or later, Helm 3, and a Darling image newer than 3.12.0: the first release after 3.12.0, or an image built from this checkout. The probes use the health port, which 3.12.0 lacks, and until that release `latest` still points at 3.12.0, so pin a newer tag or build the image (the chart refuses a plain release tag of 3.12.0 or older). The chart is not published to a registry yet, so you install it from a checkout of this repository.
+Requires Kubernetes 1.27 or later, Helm 3, and a Darling image newer than 3.12.0: the probes use the health port, which first shipped in the release after 3.12.0, so 3.12.0 and older do not work (the chart refuses a plain release tag of 3.12.0 or older). `latest` moves with each release; pin `image.tag` to a release you have tested. The chart is not published to a registry yet, so you install it from a checkout of this repository.
 
 Every value is documented in [`values.yaml`](values.yaml) and checked by [`values.schema.json`](values.schema.json). This page covers what the values do together.
 

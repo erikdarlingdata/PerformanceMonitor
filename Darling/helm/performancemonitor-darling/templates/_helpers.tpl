@@ -35,7 +35,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- define "performancemonitor-darling.image" -}}
 {{- $tag := toString (default .Chart.AppVersion .Values.image.tag) -}}
 {{- if and (regexMatch "^v?[0-9]+[.][0-9]+[.][0-9]+$" $tag) (semverCompare "<=3.12.0" $tag) -}}
-{{- fail (printf "image.tag %s is too old: the chart needs a Darling image newer than 3.12.0. The probes use the health port (#8184), which ships in the first release after 3.12.0; on 3.12.0 or older the startup probe fails and the kubelet restarts the pod in a loop. Pin a newer tag, or build the image from this checkout." $tag) -}}
+{{- fail (printf "image.tag %s is too old: the chart needs a Darling image newer than 3.12.0. The probes use the health port, which ships in the first release after 3.12.0; on 3.12.0 or older the startup probe fails and the kubelet restarts the pod in a loop. Pin a newer tag, or build the image from this checkout." $tag) -}}
 {{- end -}}
 {{- if .Values.image.digest -}}
 {{- printf "%s:%s@%s" .Values.image.repository $tag .Values.image.digest -}}
