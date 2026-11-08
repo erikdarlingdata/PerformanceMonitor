@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
@@ -315,6 +316,28 @@ public partial class TimeRangeSlicerControl : UserControl
         return Math.Clamp((double)(utc.Ticks - DataStartUtc.Ticks) / span, 0, 1);
     }
 
+    /// <summary>
+    /// The labels along the time axis (#4766, #8224): one at every whole wall-clock multiple of a step in <paramref name="zone"/>
+    /// between the two instants (both ends inclusive), each as the instant it sits at and its wall time as "MM/dd HH:mm". The step
+    /// is the finest one the chart axes use that leaves at most <paramref name="widthPx"/> / <paramref name="minSpacingPx"/> labels
+    /// across the span (two at the least), so the labels sit on whole hours of the zone rather than at even fractions of a span that
+    /// starts wherever the data does. The same rule as Lite's slicer. Pure: it reads no control state.
+    /// </summary>
+    internal static IReadOnlyList<(DateTime Utc, string Text)> SlicerLabels(
+        DateTime startUtc, DateTime endUtc, double widthPx, double minSpacingPx, TimeZoneInfo zone)
+    {
+        if (endUtc <= startUtc || widthPx <= 0 || minSpacingPx <= 0)
+            return Array.Empty<(DateTime Utc, string Text)>();
+
+        var target = Math.Max(2, (int)(widthPx / minSpacingPx));
+        var step = DisplayZoneTickGenerator.ChooseStep(endUtc - startUtc, target);
+        var ticks = DisplayZone.WallTicks(startUtc, endUtc, step, zone);
+        var labels = new List<(DateTime Utc, string Text)>(ticks.Count);
+        foreach (var (utc, wall) in ticks)
+            labels.Add((utc, wall.ToString("MM/dd HH:mm", CultureInfo.InvariantCulture)));
+        return labels;
+    }
+
     // ── Drawing ──
 
     public void Redraw()
@@ -376,23 +399,19 @@ public partial class TimeRangeSlicerControl : UserControl
         }
         SlicerCanvas.Children.Add(new Path { Data = lineGeo, Stroke = lineBrush, StrokeThickness = 1.5 });
 
-        // X-axis labels — evenly spaced by TIME, skip if too close
+        // X-axis labels — whole wall-clock multiples of a round step in the display zone (#4766), as Lite's slicer labels them; skip if too close
         var labelBrush = FindBrush("SlicerLabelBrush", "#E4E6EB");
         const double minLabelSpacingPx = 90;
         const double labelHalfWidth = 25;
         double lastLabelX = -minLabelSpacingPx;
-        int targetLabels = Math.Max(2, (int)(w / minLabelSpacingPx));
-        var timeStep = (DataEndUtc - DataStartUtc).TotalHours / targetLabels;
-        for (int tick = 0; tick <= targetLabels; tick++)
+        foreach (var (tickUtc, text) in SlicerLabels(DataStartUtc, DataEndUtc, w, minLabelSpacingPx, ViewerTimeHelper.CurrentDisplayZone()))
         {
-            var tickTime = DataStartUtc.AddHours(tick * timeStep);
-            var x = NormAtUtc(tickTime) * w;
+            var x = NormAtUtc(tickUtc) * w;
             if (x - lastLabelX < minLabelSpacingPx) continue;
             /* #8224: a label is centred on its instant, so one whose left edge would sit under the start handle at rest (the
                handle's width from the left edge) is left out rather than cut; the right edge keeps the same room. */
             if (x - labelHalfWidth < HandleWidthPx + 2 || x > w - 40) continue;
-            var dt = ViewerTimeHelper.ForDisplay(tickTime).ToString("MM/dd HH:mm");
-            var tb = new TextBlock { Text = dt, FontSize = 9, Foreground = labelBrush };
+            var tb = new TextBlock { Text = text, FontSize = 9, Foreground = labelBrush };
             Canvas.SetLeft(tb, x - labelHalfWidth);
             Canvas.SetTop(tb, chartBottom + 2);
             SlicerCanvas.Children.Add(tb);
