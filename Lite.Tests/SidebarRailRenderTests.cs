@@ -103,6 +103,20 @@ public sealed class SidebarRailRenderTests
         Assert.Equal(40, column.ActualWidth);
     }
 
+    /* The window shows the rail below MainWindow's auto-collapse width, and the screen can hold the host narrower than the width
+       asked for, so the sidebar is opened with its button, the way a user opens it. */
+    private static void Open(MainWindow w, Window host)
+    {
+        var column = (ColumnDefinition)w.FindName("SidebarColumn");
+        if (column.Width.Value < 280)
+        {
+            ((Button)w.FindName("SidebarToggleButton")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+        }
+
+        ClippedTextProbe.Settle(host);
+        Assert.Equal(280, column.ActualWidth);
+    }
+
     private static List<FleetRow> Rows(int count) =>
         Enumerable.Range(1, count)
             .Select(i => (FleetRow)new FleetServerRow(new FleetServer(i, $"server-{i:00}", false, new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = $"server-{i:00}", DisplayName = $"server-{i:00}", IsEnabled = true }), 0))
@@ -194,8 +208,7 @@ public sealed class SidebarRailRenderTests
     {
         var (natural, width, height, fontSize) = WithWindow("Dark", 1200, (w, host) =>
         {
-            var column = (ColumnDefinition)w.FindName("SidebarColumn");
-            Assert.Equal(280, column.ActualWidth);
+            Open(w, host);
             var subtitle = (TextBlock)w.FindName("SidebarSubtitle");
             return (ClippedTextProbe.NaturalWidth(subtitle), subtitle.ActualWidth, subtitle.ActualHeight, subtitle.FontSize);
         });
