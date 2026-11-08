@@ -77,6 +77,7 @@ public sealed class LastCollectCountsSuccessOnlyTests : IDisposable
             await LogAsync(connection, "wait_stats", failedAttempt, "ERROR");
             await LogAsync(connection, "query_store", failedAttempt, "PERMISSIONS");
             await LogAsync(connection, "deadlocks", failedAttempt, "SKIPPED");
+            await LogAsync(connection, "blocking", failedAttempt, "CANCELLED");
         }
 
         await initializer.CreateArchiveViewsAsync();
