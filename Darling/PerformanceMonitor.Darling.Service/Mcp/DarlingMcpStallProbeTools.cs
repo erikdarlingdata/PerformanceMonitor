@@ -98,7 +98,7 @@ public sealed class DarlingMcpStallProbeTools
                    rarely triggered. */
                 return McpHelpers.Status(
                     "empty",
-                    $"No stall probes in the last {days_back} day(s) for {scope}, so this window makes no claim "
+                    $"No stall probes in the last {CountText.Plural(days_back, "day")} for {scope}, so this window makes no claim "
                     + "about what any monitored instance was doing during a collector stall. That is the EXPECTED "
                     + "answer on a healthy fleet: a probe is only taken when a server-scoped collector that "
                     + "declares a wall-clock budget is a quarter of the way through it and still delivering under "

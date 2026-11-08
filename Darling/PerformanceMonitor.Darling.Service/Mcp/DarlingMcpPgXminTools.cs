@@ -125,7 +125,7 @@ public sealed class DarlingMcpPgXminTools
                         hours_back,
                         status = "unavailable",
                         captures_in_window = 0,
-                        message = $"No holder rows and no successful pg_xmin_horizon captures are logged for {resolved.DisplayName} in the last {hours_back} hour(s), so this is not a report that nothing holds the horizon: the collector did not look (or its collection_log rows are missing). Check get_collection_health for this server before reading the absence as clear.",
+                        message = $"No holder rows and no successful pg_xmin_horizon captures are logged for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}, so this is not a report that nothing holds the horizon: the collector did not look (or its collection_log rows are missing). Check get_collection_health for this server before reading the absence as clear.",
                     }, McpHelpers.JsonOptions), postgres, resolved.ServerId, resolved.DisplayName, cancellationToken);
                 }
 
@@ -148,7 +148,7 @@ public sealed class DarlingMcpPgXminTools
                             : (emptyNotice.WindowTruncated
                                 ? "Nothing is holding back the xmin horizon in the captures the store holds"
                                 : "Nothing is holding back the xmin horizon in this window")
-                                + $": the collector captured {capturesInWindow} time(s) and recorded no holder",
+                                + $": the collector captured {CountText.Plural(capturesInWindow, "time")} and recorded no holder",
                         coveredClaim: ". Vacuum is free to "
                             + "reclaim dead rows, so bloat growth has a different cause: look at whether "
                             + "autovacuum is being triggered at all (per-table thresholds and dead-tuple "

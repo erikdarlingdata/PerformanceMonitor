@@ -213,7 +213,7 @@ public sealed class DarlingMcpPgPlanTools
 
         return await DarlingServerOfflineNote.EmptyAsync(postgres, serverId, serverName, windowEnd, McpHelpers.Status(
             "empty",
-            $"No plan-capture readiness state for {serverName} in the last {hoursBack} hour(s). This is NOT "
+            $"No plan-capture readiness state for {serverName} in the last {CountText.Plural(hoursBack, "hour")}. This is NOT "
             + "the healthy case for this read: the collector writes one row per facet on every run whatever "
             + "it finds, so an absence means nothing was collected rather than that nothing was wrong. It "
             + "runs HOURLY, so widen hours_back before concluding anything: a window shorter than the "
@@ -360,14 +360,14 @@ public sealed class DarlingMcpPgPlanTools
     /// it collapses three different causes into the most reassuring one.</para>
     /// </summary>
     internal static string NoPlanCapturedMessage(long? wantedQueryId, int hoursBack) => wantedQueryId is null
-        ? $"Capture is configured on this server and nothing was captured in the last {hoursBack} hour(s): "
+        ? $"Capture is configured on this server and nothing was captured in the last {CountText.Plural(hoursBack, "hour")}: "
           + "this read has no filter, so that is a fact about every statement, not about a page of them. "
           + "Two things produce it and they are different: no statement ran longer than "
           + "auto_explain.log_min_duration, which is the healthy answer on a server whose statements are "
           + "all fast; or plans were captured earlier and have aged out, which plan_content_retention_days "
           + "governs, widen hours_back to tell those apart, because a plan that exists further back will "
           + "reappear and one that never existed will not."
-        : $"Every capture in the last {hoursBack} hour(s) was searched for this query_id: the whole "
+        : $"Every capture in the last {CountText.Plural(hoursBack, "hour")} was searched for this query_id: the whole "
           + "window, in the store, not a top-N page, and none matches, so no plan for this statement was "
           + "captured in this window. That has three different causes with three different remedies: the "
           + "statement did not run in this window at all, which get_pg_top_queries can confirm from its "

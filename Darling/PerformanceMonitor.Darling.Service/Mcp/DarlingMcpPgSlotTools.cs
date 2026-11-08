@@ -101,7 +101,7 @@ public sealed class DarlingMcpPgSlotTools
             var omittedSlots = allRows.Where(r => !r.IsCurrent).Select(r => r.SlotName).OrderBy(n => n, StringComparer.Ordinal).ToList();
             var omittedNote = omittedSlots.Count == 0
                 ? null
-                : $"{omittedSlots.Count} slot(s) had a stored sample in the window but are absent from the collector's newest run "
+                : $"{CountText.Plural(omittedSlots.Count, "slot")} had a stored sample in the window but are absent from the collector's newest run "
                   + $"({allRows[0].LatestCaptureAt:yyyy-MM-dd HH:mm:ss} UTC), so they were dropped since and are not reported as "
                   + "current. Their last sample is older than that run.";
 

@@ -80,12 +80,12 @@ public sealed class DarlingMcpPgTrendTools
                     ?? EmptyStatus((await WindowNoticeAsync(emptyAnswer: true)).AsHints(),
                         "empty",
                         engineCounters
-                            ? $"No wait event accrued time on {resolved.DisplayName} in the last {hours_back} hour(s) on the engine's "
+                            ? $"No wait event accrued time on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} on the engine's "
                               + "cumulative wait counters, so there is nothing to follow: nothing waited, or the window holds only "
                               + "each event's first collection (the collector measures an interval from the second one on). "
                               + "get_pg_wait_stats lists the events this server does record."
-                            : $"No wait event gained samples on {resolved.DisplayName} in the last {hours_back} "
-                              + "hour(s), so there is nothing to follow: none was sampled, or the window holds a "
+                            : $"No wait event gained samples on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} "
+                              + ", so there is nothing to follow: none was sampled, or the window holds a "
                               + "single collection (a trend needs at least two to difference)."
                               + DarlingMcpPgWaitSamplingTools.DescribeInstrumentForEmpty(
                                   await DarlingPgWaitSamplingReader.GetWaitInstrumentAsync(postgres, resolved.ServerId, cancellationToken))
@@ -101,12 +101,12 @@ public sealed class DarlingMcpPgTrendTools
                     ?? EmptyStatus((await WindowNoticeAsync(emptyAnswer: true)).AsHints(),
                         "empty",
                         engineCounters
-                            ? $"No wait time for wait event '{chosen}' on {resolved.DisplayName} in the last {hours_back} hour(s) on "
+                            ? $"No wait time for wait event '{chosen}' on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} on "
                               + "the engine's cumulative wait counters. A point needs a collection with a measured interval, so a "
                               + "window holding only the event's first collection is legitimately empty here even when the event "
                               + "is being counted. get_pg_wait_stats lists the events this server does record."
                             : $"No samples for wait event '{chosen}' on {resolved.DisplayName} in the last "
-                              + $"{hours_back} hour(s). A trend needs at least TWO snapshots to difference, so a "
+                              + $"{CountText.Plural(hours_back, "hour")}. A trend needs at least TWO snapshots to difference, so a "
                               + "window holding one collection is legitimately empty here even when the event is "
                               + "being sampled. get_pg_wait_sampling lists the events this server does record."), cancellationToken, start);
             }
@@ -176,7 +176,7 @@ public sealed class DarlingMcpPgTrendTools
                       + "pg_wait_sampling extension, a running total that only rises until a reset and is NOT how many waited in "
                       + "the interval, and in the last window on the service's own sampler."
                       + (resets > 0
-                          ? $"  {resets} interval(s) span a profile RESET - pg_wait_sampling_reset_profile() "
+                          ? $"  {CountText.Plural(resets, "interval")} {(resets == 1 ? "spans" : "span")} a profile RESET - pg_wait_sampling_reset_profile() "
                             + "or a server restart - and report everything since the reset rather than a "
                             + "quiet interval, which is what clamping the difference at zero would have shown."
                           : string.Empty),
@@ -259,7 +259,7 @@ public sealed class DarlingMcpPgTrendTools
                         ?? EmptyStatus(await EmptyHintsAsync(postgres, "get_pg_query_duration_trend", resolved.ServerName, start, windowEnd, logger, cancellationToken),
                             "empty",
                             $"No statement recorded execution time on {resolved.DisplayName} in the last "
-                            + $"{hours_back} hour(s), so there is nothing to follow."), cancellationToken, start);
+                            + $"{CountText.Plural(hours_back, "hour")}, so there is nothing to follow."), cancellationToken, start);
                 }
 
                 parsedQueryId = top.Value;
@@ -279,7 +279,7 @@ public sealed class DarlingMcpPgTrendTools
                     ?? EmptyStatus(await EmptyHintsAsync(postgres, "get_pg_query_duration_trend", resolved.ServerName, start, windowEnd, logger, cancellationToken),
                         "empty",
                         $"No samples for queryid {parsedQueryId} on {resolved.DisplayName} in the last "
-                        + $"{hours_back} hour(s). pg_stat_statements evicts statements under memory "
+                        + $"{CountText.Plural(hours_back, "hour")}. pg_stat_statements evicts statements under memory "
                         + "pressure, so a queryid that was there yesterday can be gone rather than idle - "
                         + "get_pg_top_queries shows what the server currently tracks."), cancellationToken, start);
             }
@@ -406,14 +406,14 @@ public sealed class DarlingMcpPgTrendTools
                             "empty",
                             (askedBackend ?? askedContext) is null
                                 ? $"No backend type recorded any I/O or buffer activity on "
-                                  + $"{resolved.DisplayName} in the last {hours_back} hour(s), so there is "
+                                  + $"{resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}, so there is "
                                   + "nothing to follow. Buffer HITS count here, not only physical reads and "
                                   + "writes, so this is a genuinely idle window rather than a fully cached "
                                   + "one. pg_stat_io also needs PostgreSQL 16 or later - on an older major "
                                   + "the collector never runs, which get_collection_health reports."
                                 : $"Nothing matching {(askedBackend is not null ? $"backend type '{askedBackend}'" : $"context '{askedContext}'")} "
                                   + $"recorded any I/O or buffer activity on {resolved.DisplayName} in the "
-                                  + $"last {hours_back} hour(s). get_pg_io_stats lists the combinations "
+                                  + $"last {CountText.Plural(hours_back, "hour")}. get_pg_io_stats lists the combinations "
                                   + "this server reports; omit both parameters to follow whichever pair is "
                                   + "busiest."), cancellationToken, start);
                 }
@@ -432,7 +432,7 @@ public sealed class DarlingMcpPgTrendTools
                     ?? EmptyStatus(await EmptyHintsAsync(postgres, "get_pg_io_trend", resolved.ServerName, start, windowEnd, logger, cancellationToken),
                         "empty",
                         $"No I/O samples for '{chosenBackend}' in the '{chosenContext}' context on "
-                        + $"{resolved.DisplayName} in the last {hours_back} hour(s). A trend needs at least "
+                        + $"{resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}. A trend needs at least "
                         + "TWO snapshots to difference, so a window holding one collection is legitimately "
                         + "empty here even while the combination is being collected. get_pg_io_stats lists "
                         + "the combinations this server actually reports."), cancellationToken, start);
@@ -524,7 +524,7 @@ public sealed class DarlingMcpPgTrendTools
                            + "backends do not write data files and the storage layer does. The write fields "
                            + "are null rather than zero, because absent here means unmeasured.")
                      + (resets > 0
-                         ? $"  {resets} interval(s) span a statistics RESET - pg_stat_reset_shared('io') or "
+                         ? $"  {CountText.Plural(resets, "interval")} {(resets == 1 ? "spans" : "span")} a statistics RESET - pg_stat_reset_shared('io') or "
                            + "a restart - and report everything since the reset rather than the quiet "
                            + "interval that clamping the difference at zero would have shown."
                          : string.Empty),
@@ -667,7 +667,7 @@ public sealed class DarlingMcpPgTrendTools
                         ?? EmptyStatus(await EmptyHintsAsync(postgres, "get_pg_database_trend", resolved.ServerName, start, windowEnd, logger, cancellationToken),
                             "empty",
                             $"No database recorded block accesses or temp files on {resolved.DisplayName} in "
-                            + $"the last {hours_back} hour(s), so there is nothing to follow."), cancellationToken, start);
+                            + $"the last {CountText.Plural(hours_back, "hour")}, so there is nothing to follow."), cancellationToken, start);
                 }
             }
 
@@ -696,7 +696,7 @@ public sealed class DarlingMcpPgTrendTools
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, EmptyStatus(await EmptyHintsAsync(postgres, "get_pg_database_trend", resolved.ServerName, start, windowEnd, logger, cancellationToken),
                     "empty",
                     $"No differenced intervals for database '{label}' on {resolved.DisplayName} in the last "
-                    + $"{hours_back} hour(s). "
+                    + $"{CountText.Plural(hours_back, "hour")}. "
                     + (samplesInWindow >= 2
                         ? "The collector has samples in this window, so this database is either not one of "
                           + "the ones it reports or its name is spelled differently - get_pg_database_stats "
@@ -787,7 +787,7 @@ public sealed class DarlingMcpPgTrendTools
                      + "COUNT for the point, not a rate: they are discrete events, and per-second would "
                      + "render every real one as four leading zeros."
                      + (resets > 0
-                         ? $"  {resets} interval(s) span a statistics RESET - pg_stat_reset(), or a crash "
+                         ? $"  {CountText.Plural(resets, "interval")} {(resets == 1 ? "spans" : "span")} a statistics RESET - pg_stat_reset(), or a crash "
                            + "restart discarding the statistics - and report everything since the reset "
                            + "rather than the quiet interval that clamping at zero would have shown."
                          : string.Empty),

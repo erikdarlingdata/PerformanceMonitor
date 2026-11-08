@@ -85,8 +85,8 @@ public sealed class DarlingMcpPgReplicationStatsTools
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                            factual: $"No replica was connected to {resolved.DisplayName} in the last {hours_back} "
-                                + "hour(s)",
+                            factual: $"No replica was connected to {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} "
+                                + "",
                             coveredClaim: ". On a server with no replicas that is the expected answer.",
                             tail: " If a "
                                 + "replica is supposed to be attached, check get_pg_replication_slots: a slot "

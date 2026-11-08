@@ -122,7 +122,7 @@ public sealed class DarlingMcpPgIndexTools
                     return McpHelpers.Status(
                         "no_answers",
                         $"answered_only excluded every row: {resolved.DisplayName} has "
-                        + $"{coverage.Candidates.IndexCount:N0} candidate btree index(es) in this window and "
+                        + $"{CountText.Plural(coverage.Candidates.IndexCount, "candidate btree index", "candidate btree indexes")} in this window and "
                         + "NOT ONE of them has a trusted bloat answer. This is not a clean bill of health "
                         + "and it is not an empty server - the suppression breakdown below says why each "
                         + "index has no answer and which reasons are remediable. Re-run without "
@@ -147,8 +147,8 @@ public sealed class DarlingMcpPgIndexTools
 
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status(
                     "empty",
-                    $"No index bloat rows for {resolved.DisplayName} in the last {hours_back} "
-                    + "hour(s). This collector runs DAILY, so a window shorter than a day can be empty "
+                    $"No index bloat rows for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} "
+                    + ". This collector runs DAILY, so a window shorter than a day can be empty "
                     + "on a perfectly healthy server: widen it before concluding anything. "
                     + coverage.Message), cancellationToken, windowEnd.AddHours(-hours_back));
             }
@@ -348,16 +348,16 @@ public sealed class DarlingMcpPgIndexTools
                      + "than get_pg_index_usage, which floors at 64 kB: the difference is that floor and "
                      + "nothing else."
                      + (measured > 0
-                         ? $" {measured} of the {rows.Count} row(s) returned are older pgstatindex "
+                         ? $" {measured} of the {CountText.Plural(rows.Count, "row")} returned {(measured == 1 ? "is" : "are")} older pgstatindex "
                            + "MEASUREMENTS rather than estimates, still inside the retention window; read "
                            + "measurement_kind per row, and measured_at for their age."
                          : string.Empty)
                      + (rows.Count - answered > 0
-                         ? $" {rows.Count - answered} of the {rows.Count} row(s) returned carry a reason "
+                         ? $" {rows.Count - answered} of the {CountText.Plural(rows.Count, "row")} returned {(rows.Count - answered == 1 ? "carries" : "carry")} a reason "
                            + "instead of an answer."
                          : string.Empty)
                      + (empty > 0
-                         ? $" {empty} row(s) have NO skipped_reason and a null avg_leaf_density: those "
+                         ? $" {CountText.Plural(empty, "row")} {(empty == 1 ? "has" : "have")} NO skipped_reason and a null avg_leaf_density: those "
                            + "indexes are EMPTY. pgstatindex has no leaf pages to derive a density from, so "
                            + "there is no density to report: the measurement succeeded and found nothing, "
                            + "which is why estimated_reclaimable_bytes is 0 rather than null."
@@ -396,7 +396,7 @@ public sealed class DarlingMcpPgIndexTools
     internal static string EmptyColumnStatsReply(string displayName, int hoursBack, PgColumnStatsCoverageVerdict coverage) =>
         McpHelpers.Status(
             "empty",
-            $"No column statistics for {displayName} in the last {hoursBack} hour(s). "
+            $"No column statistics for {displayName} in the last {CountText.Plural(hoursBack, "hour")}. "
             + "This collector runs DAILY, so a window shorter than a day can be empty on a "
             + "perfectly healthy server - widen it before concluding anything. " + coverage.Message,
             /* #7548: the web panel says one sentence and the grant for a login that cannot read pg_stats, built from this field and not from the message. */

@@ -770,7 +770,7 @@ public sealed class DarlingMcpStoreMetricsTools
                         : "");
 
             case DarlingStoreMetricsReader.StoreMetricsView.List:
-                return $"{Invariant(matched)} object(s) matched "
+                return $"{CountText.Plural(matched, "object")} matched "
                     + (kind is null ? "" : $"object_kind '{kind}'")
                     + (kind is not null && name is not null ? " and " : "")
                     + (name is null ? "" : $"object_name containing '{name}'")
@@ -985,8 +985,8 @@ public sealed class DarlingMcpStoreMetricsTools
         if (inventory.UnenumeratedBytes is { } otherBytes)
         {
             sb.Append(' ').Append(Gib(otherBytes)).Append(" sits in ")
-              .Append(Invariant(inventory.UnenumeratedRelationCount ?? 0))
-              .Append(" un-enumerated user-schema relation(s) (object_kind other)");
+              .Append(CountText.Plural(inventory.UnenumeratedRelationCount ?? 0, "un-enumerated user-schema relation"))
+              .Append(" (object_kind other)");
             if (largestUnenumerated is { Count: > 0 })
             {
                 sb.Append(", the largest being ")
@@ -1007,7 +1007,7 @@ public sealed class DarlingMcpStoreMetricsTools
         if (inventory.SystemBytes is { } systemBytes)
         {
             sb.Append(Gib(systemBytes)).Append(" is PostgreSQL catalog and TimescaleDB bookkeeping in ")
-              .Append(Invariant(inventory.SystemRelationCount ?? 0)).Append(" relation(s) (object_kind system).");
+              .Append(CountText.Plural(inventory.SystemRelationCount ?? 0, "relation")).Append(" (object_kind system).");
         }
         else
         {
@@ -1044,8 +1044,8 @@ public sealed class DarlingMcpStoreMetricsTools
            / the worker's start-path fallback (both say "plain-PostgreSQL mode"). */
         if (inventory.StaleRowCount > 0)
         {
-            sb.Append(' ').Append(Invariant(inventory.StaleRowCount))
-              .Append(" object row(s) are for objects that still exist but are not from the store row's sweep, so the newest ")
+            sb.Append(' ').Append(CountText.Plural(inventory.StaleRowCount, "object row"))
+              .Append(inventory.StaleRowCount == 1 ? " is" : " are").Append(" for objects that still exist but are not from the store row's sweep, so the newest ")
               .Append("sweep did not reach them; they are excluded from these sums. The Darling service log (darling-service_yyyyMMdd.log) ")
               .Append("says which of two causes it is: a sweep that fails logs an Error starting 'Store self-metrics sweep', and a ")
               .Append("service running in plain-PostgreSQL mode skips the hypertable, continuous-aggregate, background-job and ")
@@ -1054,8 +1054,8 @@ public sealed class DarlingMcpStoreMetricsTools
 
         if (inventory.DroppedObjects.Count > 0)
         {
-            sb.Append(' ').Append(Invariant(inventory.DroppedObjects.Count))
-              .Append(" object row(s) are for objects that no longer exist (dropped or retired since their last row) ")
+            sb.Append(' ').Append(CountText.Plural(inventory.DroppedObjects.Count, "object row"))
+              .Append(inventory.DroppedObjects.Count == 1 ? " is" : " are").Append(" for objects that no longer exist (dropped or retired since their last row) ")
               .Append("and are excluded from these sums. That is history, not a sweep failure: the series is append-only, so a ")
               .Append("retired object's last row stays its newest for ").Append(Invariant(StoreSelfMetrics.RetentionDays))
               .Append(" days. The most recent: ")
@@ -1066,8 +1066,8 @@ public sealed class DarlingMcpStoreMetricsTools
 
         if (inventory.UncheckedRowCount > 0)
         {
-            sb.Append(' ').Append(Invariant(inventory.UncheckedRowCount))
-              .Append(" object row(s) are not from the store row's sweep and are excluded from these sums, with no verdict on ")
+            sb.Append(' ').Append(CountText.Plural(inventory.UncheckedRowCount, "object row"))
+              .Append(inventory.UncheckedRowCount == 1 ? " is" : " are").Append(" not from the store row's sweep and are excluded from these sums, with no verdict on ")
               .Append("whether their objects still exist: ")
               .Append(existenceRead
                   ? "their kind has no existence check on this store (the hypertable, continuous-aggregate and background-job checks read TimescaleDB's catalogs)."
@@ -1103,8 +1103,8 @@ public sealed class DarlingMcpStoreMetricsTools
                 .Sum(r => r.TotalBytes ?? 0);
             if (uncompressed.Count > 0)
             {
-                sb.Append(' ').Append(Invariant(uncompressed.Count)).Append(" of ").Append(Invariant(aggregateStates.Count))
-                  .Append(" continuous aggregate(s) have compression DISABLED and hold ").Append(Gib(uncompressedBytes))
+                sb.Append(' ').Append(Invariant(uncompressed.Count)).Append(" of ").Append(CountText.Plural(aggregateStates.Count, "continuous aggregate"))
+                  .Append(uncompressed.Count == 1 ? " has" : " have").Append(" compression DISABLED and hold ").Append(Gib(uncompressedBytes))
                   .Append(" between them (compression_enabled on each continuous_aggregate object; the policy job ids beside it)")
                   .Append(byDesign.Count > 0 ? ", not counting the one uncompressed by design below." : ".");
             }
@@ -1291,6 +1291,8 @@ public sealed class DarlingMcpStoreMetricsTools
         var window = Invariant(DarlingStoreMetricsReader.JobHistoryEvidenceWindowHours);
         var rows = Invariant(evidence.RowsObserved ?? 0);
         var ran = Invariant(evidence.JobsRunInWindow ?? 0);
+        var rowsCount = evidence.RowsObserved ?? 0;
+        var ranCount = evidence.JobsRunInWindow ?? 0;
         var newestRow = evidence.NewestRowAt is { } nr ? nr.ToString("o", CultureInfo.InvariantCulture) : null;
         var newestRun = evidence.NewestRunStartedAt is { } ns ? ns.ToString("o", CultureInfo.InvariantCulture) : null;
 
@@ -1302,7 +1304,7 @@ public sealed class DarlingMcpStoreMetricsTools
                     + $"NOTHING by construction: rows_observed = {rows} here is the filter, not the table, and says "
                     + "nothing about whether recording works. The service's owner role (the role that created the "
                     + "jobs) sees the rows; read job_history as that role before concluding anything from an empty "
-                    + $"result. Meanwhile job_stats, which is not filtered, says {ran} job(s) started a run in the "
+                    + $"result. Meanwhile job_stats, which is not filtered, says {CountText.Plural(ranCount, "job")} started a run in the "
                     + $"last {window} hours"
                     + (newestRun is null ? "." : $" (newest start {newestRun}).");
 
@@ -1311,7 +1313,7 @@ public sealed class DarlingMcpStoreMetricsTools
                     + $" This block read as '{role}', which is a member of the owner of "
                     + $"{Invariant(evidence.HistoryVisibleJobCount ?? 0)} of {Invariant(evidence.JobCount ?? 0)} jobs "
                     + "and not of the database owner, so the count is a census of THOSE jobs only: "
-                    + $"{rows} row(s) with a start in the last {window} hours"
+                    + $"{CountText.Plural(rowsCount, "row")} with a start in the last {window} hours"
                     + (newestRow is null ? ", none ever." : $", newest {newestRow}.")
                     + " A job outside that set shows this role nothing, whatever it recorded.";
 
@@ -1321,10 +1323,10 @@ public sealed class DarlingMcpStoreMetricsTools
                     ? "a member of the database owner"
                     : "a member of every job's owner";
                 var census =
-                    $" This block read as '{role}', which is {standing}, so the count is a census: {rows} row(s) with a "
+                    $" This block read as '{role}', which is {standing}, so the count is a census: {CountText.Plural(rowsCount, "row")} with a "
                     + $"start in the last {window} hours"
                     + (newestRow is null ? ", none ever" : $", newest {newestRow}")
-                    + $"; job_stats says {ran} job(s) started a run in the same window"
+                    + $"; job_stats says {CountText.Plural(ranCount, "job")} started a run in the same window"
                     + (newestRun is null ? "." : $" (newest start {newestRun}).");
 
                 if (evidence.ContradictsRecording(reading.Recording))
@@ -1423,17 +1425,19 @@ public sealed class DarlingMcpStoreMetricsTools
                     + $"{Stamp(owner.ObservedAt)}, so it recorded no count: the service's own connection string names a role "
                     + "outside the owner memberships, and that, not recording, is the thing to fix"
                     + (owner.JobsRunInWindow is { } filteredRan
-                        ? $"; the unfiltered job_stats saw {Invariant(filteredRan)} job(s) start a run in the {Window(owner)}-hour window before it."
+                        ? $"; the unfiltered job_stats saw {CountText.Plural(filteredRan, "job")} start a run in the {Window(owner)}-hour window before it."
                         : ".");
         }
 
         var rows = Invariant(owner.RowsObserved ?? 0);
         var ran = Invariant(owner.JobsRunInWindow ?? 0);
+        var rowsCount = owner.RowsObserved ?? 0;
+        var ranCount = owner.JobsRunInWindow ?? 0;
         var census =
-            $" Reading as '{owner.ReaderRole}' at {Stamp(owner.ObservedAt)}, the sweep saw {rows} row(s) with a start in the "
+            $" Reading as '{owner.ReaderRole}' at {Stamp(owner.ObservedAt)}, the sweep saw {CountText.Plural(rowsCount, "row")} with a start in the "
             + $"{Window(owner)} hours before that instant"
             + (owner.NewestRowAt is { } newest ? $" (newest {Stamp(newest)})" : ", none ever")
-            + $", while job_stats says {ran} job(s) started a run in the same window.";
+            + $", while job_stats says {CountText.Plural(ranCount, "job")} started a run in the same window.";
 
         if (owner.Status == DarlingStoreMetricsReader.OwnerJobHistoryEvidenceStatus.Stale)
         {

@@ -12,6 +12,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Threading;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Alerting;
 
@@ -727,10 +728,10 @@ public sealed class AlertReadFailureCounter
 
         return string.Format(
             CultureInfo.InvariantCulture,
-            "{0} alerting-side store read(s) for this server failed and were logged but reached no health "
-            + "surface{1}, over {2} alert pass(es) since {3:yyyy-MM-dd HH:mm}Z. Each one is a condition this "
+            "{9} for this server failed and were logged but reached no health "
+            + "surface{1}, over {10} since {3:yyyy-MM-dd HH:mm}Z. Each one is a condition this "
             + "server was not judged on for that pass — not a fired alert that was lost, and not a collector "
-            + "failure.{4} Across this whole service {5} alerting-side read(s) failed: {0} here, {6} on "
+            + "failure.{4} Across this whole service {11} failed: {0} here, {6} on "
             + "store self-alerts that belong to no server, and {7} on other servers.{8}",
             reading.ServerReadFailures,
             stamp,
@@ -740,7 +741,10 @@ public sealed class AlertReadFailureCounter
             reading.InstanceReadFailures,
             reading.FleetReadFailures,
             otherServers,
-            FleetSentence(reading));
+            FleetSentence(reading),
+            CountText.Plural(reading.ServerReadFailures, "alerting-side store read"),
+            CountText.Plural(reading.ServerAlertPasses, "alert pass", "alert passes"),
+            CountText.Plural(reading.InstanceReadFailures, "alerting-side read"));
     }
 
     /// <summary>

@@ -404,7 +404,7 @@ LIMIT $2";
 
         if (hiddenText > 0)
         {
-            parts.Add($"{hiddenText.ToString(CultureInfo.InvariantCulture)} statement(s) read as {InsufficientPrivilegeText}, with no query_id: the store owner, whose rights the reader runs with, is neither a superuser nor a member of pg_read_all_stats. Granting pg_read_all_stats to the owner role shows their text, and also lets that login read every session's query text and every database's statements on the cluster, and a bring-your-own store's web viewer and MCP tools run as that login unless they have logins of their own (#3914), so on a cluster shared with other applications leave it hidden.");
+            parts.Add($"{CountText.Plural(hiddenText, "statement")} {(hiddenText == 1 ? "reads" : "read")} as {InsufficientPrivilegeText}, with no query_id: the store owner, whose rights the reader runs with, is neither a superuser nor a member of pg_read_all_stats. Granting pg_read_all_stats to the owner role shows their text, and also lets that login read every session's query text and every database's statements on the cluster, and a bring-your-own store's web viewer and MCP tools run as that login unless they have logins of their own (#3914), so on a cluster shared with other applications leave it hidden.");
         }
 
         if (state.ExtensionVersion is { } version

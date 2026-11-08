@@ -20,6 +20,7 @@ using NpgsqlTypes;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -1583,8 +1584,8 @@ public static class DarlingRetention
     {
         var status = tablesFailed == 0 ? "SUCCESS" : "WARNING";
         var message = tablesFailed == 0
-            ? $"Purged {tablesPurged.ToString(CultureInfo.InvariantCulture)} table(s): {totalRowsDeleted.ToString(CultureInfo.InvariantCulture)} row(s) deleted, {totalChunksDropped.ToString(CultureInfo.InvariantCulture)} chunk(s) dropped"
-            : $"Purged {tablesPurged.ToString(CultureInfo.InvariantCulture)} table(s), {tablesFailed.ToString(CultureInfo.InvariantCulture)} failed (see prior warnings): {totalRowsDeleted.ToString(CultureInfo.InvariantCulture)} row(s) deleted, {totalChunksDropped.ToString(CultureInfo.InvariantCulture)} chunk(s) dropped";
+            ? $"Purged {CountText.Plural(tablesPurged, "table")}: {CountText.Plural(totalRowsDeleted, "row")} deleted, {CountText.Plural(totalChunksDropped, "chunk")} dropped"
+            : $"Purged {CountText.Plural(tablesPurged, "table")}, {tablesFailed.ToString(CultureInfo.InvariantCulture)} failed (see prior warnings): {CountText.Plural(totalRowsDeleted, "row")} deleted, {CountText.Plural(totalChunksDropped, "chunk")} dropped";
 
         /* #4823: a paced run says how much WAL the store wrote during its batches and how long it waited, so a
            long purge reads as pacing rather than as a stall. The figure is the WHOLE store's WAL across those
@@ -1617,7 +1618,7 @@ public static class DarlingRetention
     /// </summary>
     internal static string BuildManualPurgeLabel(int? customRetentionDays)
         => customRetentionDays is int days
-            ? $"Manual purge (purge_now, custom retention {days.ToString(CultureInfo.InvariantCulture)} day(s))"
+            ? $"Manual purge (purge_now, custom retention {CountText.Plural(days, "day")})"
             : "Manual purge (purge_now)";
 
     /// <summary>

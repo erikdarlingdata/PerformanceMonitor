@@ -17,6 +17,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service.ChangeWatch;
 
@@ -354,7 +355,7 @@ HAVING sum(delta_execution_count) > 0";
         if (Math.Max(beforePlans.Count, afterPlans.Count) > 1)
         {
             note = string.Create(CultureInfo.InvariantCulture,
-                $"{beforePlans.Count} plan(s) before, {afterPlans.Count} after; the average moves with the plan mix, so it is compared at the before-window's mix: {adjusted / 1000:0.##} ms there against {afterAvgUs / 1000:0.##} ms as measured; {PlanBreakdown(beforePlans, afterPlans)}");
+                $"{CountText.Plural(beforePlans.Count, "plan")} before, {afterPlans.Count} after; the average moves with the plan mix, so it is compared at the before-window's mix: {adjusted / 1000:0.##} ms there against {afterAvgUs / 1000:0.##} ms as measured; {PlanBreakdown(beforePlans, afterPlans)}");
         }
 
         return movedBefore && movedWeek;

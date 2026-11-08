@@ -43,8 +43,8 @@ public sealed class DarlingMcpPgDeadlockTools
 
     /// <summary>The empty-status text (was "no_deadlocks", #6130): why an empty window is not proof of a quiet server.</summary>
     internal static string NoDeadlocksText(string serverName, int hoursBack) =>
-        $"No deadlock was reported on {serverName} in the last {hoursBack} "
-        + "hour(s). FOUR different things produce that and they are worth telling apart: "
+        $"No deadlock was reported on {serverName} in the last {CountText.Plural(hoursBack, "hour")} "
+        + ". FOUR different things produce that and they are worth telling apart: "
         + "the server had no deadlocks, which is the healthy answer; the log could not be "
         + "read; the log was read and PostgreSQL did not write it in English; or, on a target "
         + "that logs in the stderr format, the log was read but its line prefix is one the "

@@ -950,7 +950,7 @@ public sealed class DarlingMcpHealthParserTools
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice.WindowTruncated, notice.EffectiveStart,
-                    factual: $"{c.RawEventCount.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)} {eventType} event(s) were captured for {c.DisplayName} in the last {hoursBack} hour(s) and {noneQualifiedBecause}",
+                    factual: $"{CountText.Plural(c.RawEventCount, $"{eventType} event")} {(c.RawEventCount == 1 ? "was" : "were")} captured for {c.DisplayName} in the last {CountText.Plural(hoursBack, "hour")} and {noneQualifiedBecause}",
                     coveredClaim: ". Events ARE being captured, so this is the healthy answer for this read rather than missing data."),
                 sourceObserved: true, c.LastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: c.RawEventCount, hints: notice.AsHints(), notificationCounts: c.NotificationCounts);
         }
@@ -963,7 +963,7 @@ public sealed class DarlingMcpHealthParserTools
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice.WindowTruncated, notice.EffectiveStart,
-                    factual: $"No {eventType} events were captured for {c.DisplayName} in the last {hoursBack} hour(s). This server has captured them before (the newest was stored at {Stamp(seen)})",
+                    factual: $"No {eventType} events were captured for {c.DisplayName} in the last {CountText.Plural(hoursBack, "hour")}. This server has captured them before (the newest was stored at {Stamp(seen)})",
                     coveredClaim: ", so nothing happened in this window: widen hours_back to reach the most recent events."),
                 sourceObserved: true, c.LastCapturedAt, lastCapturedOfTypeAt: seen, eventsInWindow: 0,
                 hints: notice.AsHints()), cancellationToken, c.WindowEnd.AddHours(-hoursBack));

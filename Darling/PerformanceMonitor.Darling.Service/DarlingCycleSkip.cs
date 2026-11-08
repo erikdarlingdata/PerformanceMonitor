@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -243,7 +244,7 @@ internal static class DarlingCycleSkip
         {
             var holders = causes.GateWaitAnalysisHolders > 0
                 ? string.Create(CultureInfo.InvariantCulture,
-                    $" ({causes.GateWaitAnalysisHolders} slot(s) were held by scheduled analysis passes when it got one)")
+                    $" ({CountText.Plural(causes.GateWaitAnalysisHolders, "slot")} {(causes.GateWaitAnalysisHolders == 1 ? "was" : "were")} held by scheduled analysis passes when it got one)")
                 : string.Empty;
             candidates.Add((
                 string.Create(CultureInfo.InvariantCulture, $"this pass waited {Format(causes.GateWaitMs)} for a fleet collection slot{holders}"),
@@ -253,7 +254,7 @@ internal static class DarlingCycleSkip
         if (heldSlots > 0)
         {
             candidates.Add((
-                string.Create(CultureInfo.InvariantCulture, $"the memory launch guard held collection off for {heldSlots} slot(s)"),
+                string.Create(CultureInfo.InvariantCulture, $"the memory launch guard held collection off for {CountText.Plural(heldSlots, "slot")}"),
                 gapMs, LaunchGuardHoldName, gapMs));
         }
 
@@ -268,7 +269,7 @@ internal static class DarlingCycleSkip
                     $", daily permits: {causes.DailyRunsWaiting} waiting, oldest {DailyRunLimiter.DescribeWait(TimeSpan.FromMilliseconds(causes.OldestDailyWaitMs))}")
                 : string.Empty;
             candidates.Add((
-                string.Create(CultureInfo.InvariantCulture, $"{dailySlots} daily collector slot(s) lost their day ({lost}){backlog}"),
+                string.Create(CultureInfo.InvariantCulture, $"{CountText.Plural(dailySlots, "daily collector slot")} lost their day ({lost}){backlog}"),
                 null, snapshot.DailyLostSlots.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).First(), 0));
         }
 
@@ -298,7 +299,7 @@ internal static class DarlingCycleSkip
         var gap = string.Create(CultureInfo.InvariantCulture,
             $" The gap ran from {snapshot.EarliestUtc:yyyy-MM-dd HH:mm:ss} UTC to {stampUtc:yyyy-MM-dd HH:mm:ss} UTC.");
         var message = string.Create(CultureInfo.InvariantCulture,
-            $"Collection fell behind on this server: {total} slot(s) skipped across {perCollector.Count} collector(s) ({top}). Cause: {cause}.{gap}");
+            $"Collection fell behind on this server: {CountText.Plural(total, "slot")} skipped across {CountText.Plural(perCollector.Count, "collector")} ({top}). Cause: {cause}.{gap}");
 
         return new CycleSkipReport(
             (int)Math.Min(int.MaxValue, total), durationMs is { } d ? ClampMs(d) : null, item, ClampMs(itemMs), message);
@@ -318,14 +319,14 @@ internal static class DarlingCycleSkip
             .ToList();
         if (ranked.Count > 1 && ranked[0].Value == ranked[^1].Value)
         {
-            return string.Create(CultureInfo.InvariantCulture, $"every collector that lost a slot, {ranked[0].Value} slot(s) each");
+            return string.Create(CultureInfo.InvariantCulture, $"every collector that lost a slot, {CountText.Plural(ranked[0].Value, "slot")} each");
         }
 
         if (ranked.Count > 3 && ranked[2].Value == ranked[3].Value)
         {
             var groups = ranked.GroupBy(p => p.Value).Select(g => g.Count() == 1
                 ? string.Create(CultureInfo.InvariantCulture, $"{g.First().Key} {g.Key}")
-                : string.Create(CultureInfo.InvariantCulture, $"{g.Count()} collectors at {g.Key} slot(s) each")).ToList();
+                : string.Create(CultureInfo.InvariantCulture, $"{g.Count()} collectors at {CountText.Plural(g.Key, "slot")} each")).ToList();
             return "by count: " + string.Join(", ", groups.Take(3)) + (groups.Count > 3 ? ", fewer on the rest" : string.Empty);
         }
 

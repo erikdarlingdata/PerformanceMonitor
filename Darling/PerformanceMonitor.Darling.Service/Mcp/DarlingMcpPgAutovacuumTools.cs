@@ -124,7 +124,7 @@ public sealed class DarlingMcpPgAutovacuumTools
             }).ToList();
             var clearedNote = cleared.Count == 0
                 ? null
-                : $"{cleared.Count} table(s) had a stored sample in the window but are not in the collector's newest complete capture "
+                : $"{CountText.Plural(cleared.Count, "table")} had a stored sample in the window but are not in the collector's newest complete capture "
                   + $"(its last capture was {allFetched[0].LatestCaptureAt:yyyy-MM-dd HH:mm:ss} UTC), which stores a table only "
                   + "while it has pending work. They may have been vacuumed or analyzed clean, dropped, or fallen out of scope; "
                   + "the store cannot tell which. They are not graded, ranked or counted. last_measured_at is the sample they were last seen in; the list holds only the tables "

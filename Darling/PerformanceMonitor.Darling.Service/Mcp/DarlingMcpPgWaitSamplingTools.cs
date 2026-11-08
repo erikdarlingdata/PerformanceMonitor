@@ -122,7 +122,7 @@ public sealed class DarlingMcpPgWaitSamplingTools
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                            factual: $"No sampled waits for {resolved.DisplayName} in the last {hours_back} hour(s). The "
+                            factual: $"No sampled waits for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}. The "
                                 + "figures here are per-interval deltas, so a single collection has nothing to "
                                 + "difference against and the window fills on the second one",
                             coveredClaim: ". On a genuinely idle "

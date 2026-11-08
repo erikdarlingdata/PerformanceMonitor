@@ -122,7 +122,7 @@ public sealed class DarlingMcpReadLatencyTools
             var rows = await DarlingReadLatencyReader.GetSummaryAsync(postgres, since, surface, route, cancellationToken);
             if (rows.Count == 0)
             {
-                var emptyMessage = $"No read recorded in the last {hours} hour(s)" +
+                var emptyMessage = $"No read recorded in the last {CountText.Plural(hours, "hour")}" +
                     (string.IsNullOrWhiteSpace(surface) && string.IsNullOrWhiteSpace(route) ? "" : " for that filter") +
                     ". The service records an hourly histogram per (surface, route, outcome, window band); a store before " +
                     "schema V148, or a quiet window, has no row.";

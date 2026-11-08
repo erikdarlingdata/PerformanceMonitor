@@ -19,6 +19,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -1307,7 +1308,7 @@ WHERE NOT is_compressed";
     private static void AppendHostLines(StringBuilder sb, HostProfile profile)
     {
         sb.Append("Host: ").Append(profile.Platform).Append(profile.IsContainerized ? " (containerized)" : "")
-          .Append(", ").Append(profile.ProcessorCount).Append(" CPU(s)").Append('\n');
+          .Append(", ").Append(CountText.Plural(profile.ProcessorCount, "CPU")).Append('\n');
         sb.Append("RAM: ").Append(FormatBytes(profile.Memory.EffectiveBytes))
           .Append(profile.Memory.IsAuthoritative ? "" : " (unauthoritative reading)")
           .Append(" [").Append(profile.Memory.SourceDescription).Append(']').Append('\n');
@@ -1360,7 +1361,7 @@ WHERE NOT is_compressed";
                 ? 100.0 * uncompressedBytes / profile.Memory.EffectiveBytes
                 : 0.0;
             sb.Append("  uncompressed chunks: ").Append(FormatBytes(uncompressedBytes)).Append(" in ")
-              .Append(uncompressedCount).Append(" chunk(s), ")
+              .Append(CountText.Plural(uncompressedCount, "chunk")).Append(", ")
               .Append(ramPercent.ToString("0.0", CultureInfo.InvariantCulture)).Append("% of RAM").Append('\n');
         }
         else
