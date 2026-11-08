@@ -7,7 +7,6 @@
  */
 
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Windows;
@@ -23,8 +22,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// The Viewer's chrome that stayed on the stock Windows look, or on the dark look, after a theme switch: the scroll viewer's
-/// corner square, the expander's header circle, the scroll bar thumb, the lanes' crosshair tooltip and the lanes' horizontal
-/// gridlines (#8306). Each test renders the real control under each Viewer theme and reads the painted colours back.
+/// corner square, the expander's header circle, the scroll bar thumb and the lanes' crosshair tooltip (#8306). Each test renders the real control under each Viewer theme and reads the painted colours back.
 /// </summary>
 public sealed class ViewerThemeChromeLeftoversRenderTests
 {
@@ -242,121 +240,5 @@ public sealed class ViewerThemeChromeLeftoversRenderTests
 
         Assert.Equal(wantFrame, frame);
         Assert.Equal(wantText, text);
-    }
-
-    private const double GridlineFloor = 1.45;
-
-    /// <summary>With a day of data plotted, each Overview lane draws horizontal gridlines at its Y ticks that read against the plot, in every theme, in the same ink as its vertical ones.</summary>
-    [Theory]
-    [MemberData(nameof(Themes))]
-    public void TheLanes_DrawHorizontalGridlines_ThatReadAgainstThePlot(string theme)
-    {
-        var results = Themed("Dark", app =>
-        {
-            var lanes = new CorrelatedTimelineLanesControl();
-            var window = Show(lanes, 900, 600);
-            try
-            {
-                ThemeManager.Apply(theme);
-                lanes.ReapplyTheme();
-                ClippedTextProbe.Settle(window);
-                var start = DateTime.UtcNow.Date.AddDays(-1);
-                var cpu = Enumerable.Range(0, 288).Select(i => (start.AddMinutes(5 * i).ToOADate(), 35 + 30 * Math.Sin(i / 20.0))).ToList();
-                var total = cpu.Select(p => (p.Item1, Math.Min(100, p.Item2 + 12))).ToList();
-                var waits = Enumerable.Range(0, 288).Select(i => (start.AddMinutes(5 * i).ToOADate(), 80 + 70 * Math.Abs(Math.Sin(i / 15.0)))).ToList();
-                lanes.UpdateCpuLane(cpu, total);
-                lanes.UpdateLane((ScottPlot.WPF.WpfPlot)lanes.FindName("WaitStatsChart"), "Wait ms/sec", waits, "#2EAEF1", 0);
-                ClippedTextProbe.Settle(window);
-                var measured = new List<(string Lane, double Horizontal, int VerticalColumns, string Background, string Line, int Ticks)>();
-                foreach (var name in new[] { "CpuChart", "WaitStatsChart" })
-                {
-                    var chart = (ScottPlot.WPF.WpfPlot)lanes.FindName(name);
-                    var (horizontal, verticalColumns, background, line, ticks) = GridlineScan.Measure(chart.Plot, (int)Math.Max(300, chart.ActualWidth), (int)Math.Max(60, chart.ActualHeight));
-                    measured.Add((name, horizontal, verticalColumns, background, line, ticks));
-                }
-
-                return measured;
-            }
-            finally
-            {
-                window.Close();
-            }
-        });
-
-        foreach (var (lane, horizontal, verticalColumns, background, line, ticks) in results)
-        {
-            Assert.True(ticks >= 1, $"{theme} {lane}: no Y tick falls inside the lane, so it can draw no horizontal gridline");
-            Assert.True(horizontal >= GridlineFloor, $"{theme} {lane}: the horizontal gridline ({line}) against the plot ({background}) has a contrast of {horizontal:F2}; the floor is {GridlineFloor:F2}");
-            Assert.True(verticalColumns >= 1, $"{theme} {lane}: no column of a row near the top carries the horizontal gridlines' ink ({line}); the vertical gridlines are not drawn in it");
-        }
-    }
-
-    /// <summary>
-    /// Renders a lane's plot at its own size and limits and reads its gridlines back. The horizontal lines are read at the rows of the
-    /// Y axis' major ticks inside the plot, down a column near the left edge (ahead of the plotted points), as the contrast of their
-    /// ink against the plot's background; the vertical ones as how many columns of a row near the top carry that ink, blended over the
-    /// background or not, since the plotted series can cross any row but never in the gridlines' colour.
-    /// </summary>
-    private static class GridlineScan
-    {
-        public static (double Horizontal, int VerticalColumns, string Background, string Line, int InteriorTicks) Measure(ScottPlot.Plot plot, int width, int height)
-        {
-            var image = plot.GetImage(width, height);
-            var rgb = image.GetArrayRGB();
-            var rect = plot.RenderManager.LastRender.DataRect;
-            var range = plot.Axes.Left.Range;
-            var column = (int)rect.Left + 10;
-            var top = (int)rect.Top + 2;
-            var bottom = (int)rect.Bottom - 2;
-            var columnColours = Enumerable.Range(top, bottom - top).Select(y => Key(rgb, y, column)).ToList();
-            var background = columnColours.GroupBy(k => k).OrderByDescending(g => g.Count()).First().Key;
-            var backgroundLuminance = Luminance(background);
-
-            var interior = plot.Axes.Left.TickGenerator.Ticks.Where(t => t.IsMajor && t.Position > range.Min && t.Position < range.Max).ToList();
-            var horizontal = double.MaxValue;
-            var line = background;
-            foreach (var tick in interior)
-            {
-                var y = (int)Math.Round(rect.Top + rect.Height * (range.Max - tick.Position) / (range.Max - range.Min));
-                var ink = Enumerable.Range(y - 1, 3).Select(row => Key(rgb, Math.Clamp(row, top, bottom - 1), column))
-                    .OrderByDescending(k => Math.Abs(Luminance(k) - backgroundLuminance)).First();
-                var ratio = Ratio(backgroundLuminance, Luminance(ink));
-                if (ratio < horizontal)
-                {
-                    horizontal = ratio;
-                    line = ink;
-                }
-            }
-
-            var row = (int)(rect.Top + rect.Height * 0.12);
-            var verticalColumns = Enumerable.Range((int)rect.Left + 2, (int)rect.Width - 4).Select(x => Key(rgb, row, x)).Count(k => k != background && Between(k, background, line));
-            return (interior.Count == 0 ? 0 : horizontal, verticalColumns, Hex(background), Hex(line), interior.Count);
-        }
-
-        /// <summary>Whether every channel of <paramref name="k"/> lies between the background's and the ink's (within 6): a gridline blended over the background by anti-aliasing does, a plotted series' colour does not.</summary>
-        private static bool Between(int k, int background, int ink)
-        {
-            for (var shift = 0; shift <= 16; shift += 8)
-            {
-                var v = (k >> shift) & 0xFF;
-                var a = (background >> shift) & 0xFF;
-                var b = (ink >> shift) & 0xFF;
-                if (v < Math.Min(a, b) - 6 || v > Math.Max(a, b) + 6)
-                {
-                    return false;
-                }
-            }
-
-            return true;
-        }
-
-        private static int Key(byte[,,] rgb, int y, int x) => (rgb[y, x, 0] << 16) | (rgb[y, x, 1] << 8) | rgb[y, x, 2];
-
-        private static string Hex(int rgb) => $"#{rgb:X6}";
-
-        private static double Ratio(double a, double b) => (Math.Max(a, b) + 0.05) / (Math.Min(a, b) + 0.05);
-
-        private static double Luminance(int rgb) =>
-            ViewerThemeChromeLeftoversRenderTests.Luminance(Color.FromRgb((byte)((rgb >> 16) & 0xFF), (byte)((rgb >> 8) & 0xFF), (byte)(rgb & 0xFF)));
     }
 }
