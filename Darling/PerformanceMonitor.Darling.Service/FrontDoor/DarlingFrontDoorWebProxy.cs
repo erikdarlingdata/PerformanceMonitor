@@ -176,12 +176,7 @@ internal sealed class DarlingFrontDoorWebProxy
             return WriteJsonAsync(context, report.HttpStatus, body);
         }
 
-        /* A store that has not been tried yet (no error, not held) is not a failed one: right after start the front door is not degraded. */
-        var states = _directory.Stores;
-        var unusable = states.Count > 0 && states.All(s =>
-            s.Health == FrontDoorStoreHealth.AuthFailed
-            || (s.Health == FrontDoorStoreHealth.Unreachable && s.Error is not null));
-        if (unusable)
+        if (AllStoresUnusable(_directory.Stores))
         {
             return WriteJsonAsync(context, StatusCodes.Status503ServiceUnavailable, new JsonObject
             {
@@ -193,6 +188,14 @@ internal sealed class DarlingFrontDoorWebProxy
 
         return WriteJsonAsync(context, StatusCodes.Status200OK, new JsonObject { ["status"] = "ok", ["front_door"] = true });
     }
+
+    /// <summary>#8184: whether every store was tried and cannot be used, the front door's one degraded verdict. Shared by <c>/api/ping</c> and the
+    /// health port's <c>/readyz</c>. A store that has not been tried yet (no error, not held) is not a failed one: right after start the front
+    /// door is not degraded.</summary>
+    internal static bool AllStoresUnusable(IReadOnlyList<FrontDoorStoreState> states) =>
+        states.Count > 0 && states.All(s =>
+            s.Health == FrontDoorStoreHealth.AuthFailed
+            || (s.Health == FrontDoorStoreHealth.Unreachable && s.Error is not null));
 
     /// <summary>The front door's own role. It is the seat the front door's gate gave this request, not a store's: a store sees only the
     /// front door's shared-token session, so personal views are off here (<c>can_own</c>) and the stores answer their own refusals.</summary>
