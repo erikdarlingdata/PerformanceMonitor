@@ -165,7 +165,9 @@ public sealed class SlackChatStoreLiveTests
             var thread = await store.FindChatThreadAsync(Channel, ThreadTs, ct);
             Assert.NotNull(thread);
             Assert.Equal((s_parent, seed.RouteId, ServerId, Channel, ThreadTs), (thread.ThreadRequestId, thread.RouteId, thread.ServerId, thread.ChannelId, thread.ThreadTs));
-            Assert.InRange(thread.OpenedAtUtc, DateTime.UtcNow.AddMinutes(-61), DateTime.UtcNow.AddMinutes(-59));
+            /* The parent was seeded an hour before the store's clock, so its window is read against the store's clock, not the test runner's. */
+            var now = await StoreNowAsync(connection, ct);
+            Assert.InRange(thread.OpenedAtUtc, now.AddMinutes(-61), now.AddMinutes(-59));
             Assert.Null(await store.FindChatThreadAsync(Channel, "1700000000.000999", ct));
             Assert.Null(await store.FindChatThreadAsync("C0OTHER", ThreadTs, ct));
 
@@ -274,8 +276,15 @@ public sealed class SlackChatStoreLiveTests
         await WithStoreAsync(async (connection, _, store, seed, ct) =>
         {
             /* One instant for the whole fact, read from the store's clock and set five seconds behind it, as a test runner whose clock lags the
-               store's sees it. Every open, count and window below takes this instant, so the counts cannot depend on how the two clocks differ. */
+               store's sees it. The parent is seeded at exactly the hour's edge from this same instant, and every open, count and window below
+               takes it, so no second clock can move the parent inside the hour the counts read. */
             var now = (await StoreNowAsync(connection, ct)).AddSeconds(-5);
+            await using (var edge = new NpgsqlCommand($"UPDATE config.investigation_requests SET opened_at = $1 - interval '1 hour' WHERE request_id = '{s_parent}'", connection))
+            {
+                edge.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = now, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz });
+                Assert.Equal(1, await edge.ExecuteNonQueryAsync(ct));
+            }
+
             var thread = new SlackChatThread(s_parent, seed.RouteId, ServerId, Channel, ThreadTs, now.AddHours(-1));
             for (var i = 0; i < 6; i++)
                 Assert.Equal(SlackChatOpenOutcome.Opened, (await store.OpenChatRequestAsync(thread, s_parent, [], [], 100, now, RoutesAt(2), ct)).Outcome);
