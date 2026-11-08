@@ -64,7 +64,8 @@ public sealed record NotificationRoute(
     /// because a destination the route set could not be read (#5366). Not a stored column: the reader that could not open
     /// a saved value sets it. A channel that is off here sends nothing for this route's alerts, and does not fall back
     /// to the settings row or a less specific route, because the alert would then go somewhere it was not configured to
-    /// go. Null or empty means no channel is off.</summary>
+    /// go. Null or empty means no channel is off. Email is not among them from either store, because a recipient list is
+    /// not a secret that can fail to be read; the email path still honours the name if a writer sets it (#8246).</summary>
     public IReadOnlyCollection<string>? OffChannels { get; init; }
 
     /// <summary>The signing keys of this route's own generic URL (#5998, decision D2): sealed as the store holds them, opened

@@ -75,6 +75,8 @@
     <!-- #6136: finds the text a laid-out window cuts off, shared so both apps are held to the one rule. -->
     <Compile Include="..\Darling\Darling.Tests\ClippedTextProbe.cs" Link="ClippedTextProbe.cs" />
     <Compile Include="..\Darling\Darling.Tests\GridColumnLayoutProbe.cs" Link="GridColumnLayoutProbe.cs" />
+    <!-- #8223: reads a rendered grid's columns, headers, cells and filter buttons, shared so both apps are held to the one rule. -->
+    <Compile Include="..\Darling\Darling.Tests\GridPolishProbe.cs" Link="GridPolishProbe.cs" />
     <!-- #6138: finds the Settings inputs a screen reader cannot name, shared so both apps are held to the one rule. -->
     <Compile Include="..\Darling\Darling.Tests\InputNamesProbe.cs" Link="InputNamesProbe.cs" />
     <!-- #7478: finds every chart of a laid-out tab and measures its plot, legend, tick labels, axis start and group, shared so both apps are held to the one rule. -->

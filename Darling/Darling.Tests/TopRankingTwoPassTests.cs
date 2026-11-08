@@ -161,9 +161,9 @@ public sealed class TopRankingTwoPassTests
             /* once per pass; the queries' one latest-text lookup (#5309) scopes by server and reads the window too, and for
                TopQueriesSql that read is now the orphan fallback (#8139: the lookup itself reads the ranked rows and the dimension) */
             var lookup = name != "TopProceduresSql" && (filter == "server_id = $1" || filter.StartsWith("collection_time", StringComparison.Ordinal));
-            if (name == "TopQueriesSql" && filter.StartsWith("{TimescaleSupport", StringComparison.Ordinal))
+            if ((name is "TopQueriesSql" or "TopQueriesByHostObjectSql") && filter.StartsWith("{TimescaleSupport", StringComparison.Ordinal))
             {
-                /* #8139: TopQueriesSql's pass 2 carries the interval filter on each measure aggregate, not on the pass, so a plain count is one per pass plus one per measure; at least one per pass is the exact part. */
+                /* #8139, #8138: TopQueriesSql's and TopQueriesByHostObjectSql's pass 2 carry the interval filter on each measure aggregate, not on the pass, so a plain count is one per pass plus one per measure; at least one per pass is the exact part. */
                 Assert.True(Regex.Matches(sql, Regex.Escape(text)).Count >= 2, $"{name}: the interval filter is not in both passes");
                 continue;
             }

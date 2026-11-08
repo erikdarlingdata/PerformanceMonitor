@@ -244,7 +244,7 @@ public sealed class PurgeNowBackgroundTests
         Assert.True(Reply(worker.TryStartPurgeNow(_ => gate.Task, null, CancellationToken.None)).GetProperty("started").GetBoolean());
 
         gate.SetResult();
-        await Task.Delay(TimeSpan.FromMilliseconds(50), TestContext.Current.CancellationToken);
+        await worker.PurgeTaskForTests!.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
         var secondCalled = false;
         var second = worker.TryStartPurgeNow(
@@ -270,7 +270,7 @@ public sealed class PurgeNowBackgroundTests
         Assert.True(Reply(outcome).GetProperty("started").GetBoolean());
         Assert.Contains(log.Lines, line => line.StartsWith("Error:", StringComparison.Ordinal));
 
-        await Task.Delay(TimeSpan.FromMilliseconds(50), TestContext.Current.CancellationToken);
+        await worker.PurgeTaskForTests!.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         var again = worker.TryStartPurgeNow(_ => Task.CompletedTask, null, CancellationToken.None);
         Assert.True(Reply(again).GetProperty("started").GetBoolean());
     }
@@ -316,10 +316,10 @@ public sealed class PurgeNowBackgroundTests
         var worker = MakeWorker();
         var start = DateTime.UtcNow;
         Assert.True(worker.TryStartScheduledPurge(start, _ => Task.CompletedTask, CancellationToken.None));
-        await Task.Delay(TimeSpan.FromMilliseconds(50), TestContext.Current.CancellationToken);
+        await worker.PurgeTaskForTests!.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
         Assert.True(Reply(worker.TryStartPurgeNow(_ => Task.CompletedTask, null, CancellationToken.None)).GetProperty("started").GetBoolean());
-        await Task.Delay(TimeSpan.FromMilliseconds(50), TestContext.Current.CancellationToken);
+        await worker.PurgeTaskForTests!.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
         /* 24h after the daily launch is still when the next daily purge is due: not earlier, not a day after the
            manual one. */
@@ -333,7 +333,7 @@ public sealed class PurgeNowBackgroundTests
         var worker = MakeWorker();
         var start = DateTime.UtcNow;
         Assert.True(worker.TryStartScheduledPurge(start, _ => Task.CompletedTask, CancellationToken.None));
-        await Task.Delay(TimeSpan.FromMilliseconds(50), TestContext.Current.CancellationToken);
+        await worker.PurgeTaskForTests!.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
         /* The stamp is start + 24h. An hour later it is still a normal wait. A clock that stepped back to before the
            launch leaves the stamp more than the day it was written with ahead of now, which can only be the step
@@ -362,7 +362,7 @@ public sealed class PurgeNowBackgroundTests
         Assert.False(dailyCalled);
 
         gate.SetResult();
-        await Task.Delay(TimeSpan.FromMilliseconds(50), TestContext.Current.CancellationToken);
+        await worker.PurgeTaskForTests!.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
         /* The skip left the daily stamp alone, so the very next tick launches it. */
         Assert.True(worker.TryStartScheduledPurge(DateTime.UtcNow, _ => Task.CompletedTask, CancellationToken.None));
