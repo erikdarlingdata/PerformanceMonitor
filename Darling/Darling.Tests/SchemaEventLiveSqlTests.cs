@@ -104,7 +104,8 @@ public sealed class SchemaEventLiveSqlTests
             var state = await DarlingSchemaXeSession.EnsureAsync(connection, name, databaseScoped: false, logger: null, CancellationToken.None);
             Assert.True(state.Running, state.FaultMessage);
 
-            var before = DateTime.UtcNow.AddSeconds(-5);
+            /* Every cutoff is on SQL Server's clock, not the test host's: DARLING_TEST_SQL can name another host whose clock is off. */
+            var before = (await ServerUtcNowAsync(master!)).AddSeconds(-5);
             await ExecuteAsync(ConnectionString(database)!, @"
 CREATE TABLE dbo.Orders (OrderId int NOT NULL CONSTRAINT PK_Orders PRIMARY KEY, Customer nvarchar(50) NULL);
 EXEC(N'CREATE INDEX IX_Orders_Customer ON dbo.Orders (Customer);');
@@ -156,7 +157,7 @@ ALTER SCHEMA Staging TRANSFER dbo.Moved;");
             /* The total counts what the buffer took, so with nothing aged out it equals the events read. */
             Assert.Equal(batch.Events.Count, batch.TotalEventsProcessed);
 
-            var after = await ReadEventsAsync(connection, name, DateTime.UtcNow.AddMinutes(5));
+            var after = await ReadEventsAsync(connection, name, (await ServerUtcNowAsync(master!)).AddMinutes(5));
             Assert.Empty(after.Events);
             AssertSameSession(state.CreateTimeUtc, after.SessionCreateTimeUtc);
             Assert.Equal(batch.TotalEventsProcessed, after.TotalEventsProcessed);
@@ -176,7 +177,7 @@ ALTER SCHEMA Staging TRANSFER dbo.Moved;");
         await using var connection = new SqlConnection(master);
         await connection.OpenAsync();
 
-        var batch = await ReadEventsAsync(connection, SchemaChangesXeSession.NameFor(Guid.NewGuid().ToString("N")[..8]), DateTime.UtcNow.AddMinutes(-1));
+        var batch = await ReadEventsAsync(connection, SchemaChangesXeSession.NameFor(Guid.NewGuid().ToString("N")[..8]), (await ServerUtcNowAsync(master!)).AddMinutes(-1));
 
         Assert.Null(batch.SessionCreateTimeUtc);
         Assert.Empty(batch.Events);
@@ -223,6 +224,9 @@ ALTER SCHEMA Staging TRANSFER dbo.Moved;");
         Assert.NotNull(actual);
         Assert.True((expected.Value - actual.Value).Duration() < TimeSpan.FromSeconds(1), $"{expected:o} and {actual:o} are not the same session");
     }
+
+    private static async Task<DateTime> ServerUtcNowAsync(string connectionString) =>
+        DateTime.SpecifyKind((DateTime)(await ScalarAsync(connectionString, "SELECT SYSUTCDATETIME();"))!, DateTimeKind.Utc);
 
     private static async Task<object?> ScalarAsync(string connectionString, string sql)
     {
