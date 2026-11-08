@@ -7510,7 +7510,7 @@ AND   j.retry_period IS DISTINCT FROM INTERVAL '{PolicyJobRetryPeriod}'";
 
     /// <summary>
     /// Retention horizon for the interval-grain DAILY dedup layer (#1869): keep
-    /// <see cref="QueryStoreStatsIntervalDailyView"/> 10 days.
+    /// <see cref="QueryStoreStatsIntervalDailyView"/> 12 days.
     ///
     /// <para>Picked by the same rule that picked <see cref="IntervalRetentionInterval"/>, one tier up, and it
     /// is the OPPOSITE direction from the one instinct suggests. This layer is downstream of L1, so it is L1's
@@ -8917,7 +8917,7 @@ AND   j.scheduled";
 
     /// <summary>
     /// #7114: the clause the ARMED line adds when the horizon rule decided coverage for one or more consumers,
-    /// for example <c>, checked within query_store_stats_interval_daily's 10-day retention</c>. Empty when every
+    /// for example <c>, checked within query_store_stats_interval_daily's 12-day retention</c>. Empty when every
     /// consumer reached the source's oldest row.
     /// </summary>
     internal static string DescribeHorizonCoverage(IReadOnlyList<HorizonCoveredConsumer> horizonCovered)
