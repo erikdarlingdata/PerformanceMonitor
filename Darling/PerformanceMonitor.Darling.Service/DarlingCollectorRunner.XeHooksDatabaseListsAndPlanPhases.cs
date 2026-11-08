@@ -96,8 +96,33 @@ public sealed partial class DarlingCollectorRunner
     /// <summary>#8146: when this install's own long-query session may be recreated: once per server, database and setting value for the life of the process, and again an hour after a failed attempt.</summary>
     internal LongQuerySessionRecreateThrottle LongQuerySessionRecreateThrottle { get; } = new();
 
-    /// <summary>#8146: replaces the clock the long-query recreate's throttle reads. Null in production.</summary>
-    internal Func<DateTime>? LongQuerySessionRecreateUtcNowForTests { get; set; }
+    /// <summary>
+    /// #8146: replaces the clock the long-query recreate's throttle and the read-only-intent start's grace window
+    /// (<see cref="LongQueryStartRefusalWithinGrace"/>) read. Null in production.
+    /// </summary>
+    internal Func<DateTime>? LongQueryUtcNowForTests { get; set; }
+
+    internal DateTime LongQueryUtcNow() => LongQueryUtcNowForTests?.Invoke() ?? DateTime.UtcNow;
+
+    /* #8146: per server and database, when a replica first refused the start of this install's long-query session because it
+       did not show the definition the primary holds. Kept until a start succeeds or the replica shows the definition. In
+       memory: the reconcile's latch is too, and a restart begins a fresh window. */
+    private readonly ConcurrentDictionary<(int ServerId, string Database), DateTime> _longQueryStartRefusedSince = new();
+
+    /// <summary>
+    /// #8146: records a start the replica refused for a definition it does not show yet, and answers whether that refusal is
+    /// still the replica's lag: true while the first such refusal is at most <see cref="LongQueryTraceDatabases.RetryInterval"/>
+    /// old. Past it the refusal is a fault like any other, so a replica that never shows the definition is reported.
+    /// </summary>
+    internal bool LongQueryStartRefusalWithinGrace(int serverId, string databaseName, DateTime utcNow)
+    {
+        var first = _longQueryStartRefusedSince.GetOrAdd((serverId, databaseName.ToUpperInvariant()), utcNow);
+        return utcNow - first <= LongQueryTraceDatabases.RetryInterval;
+    }
+
+    /// <summary>#8146: ends the grace window: the start succeeded, or the replica shows the definition.</summary>
+    internal void ClearLongQueryStartRefusal(int serverId, string databaseName) =>
+        _longQueryStartRefusedSince.TryRemove((serverId, databaseName.ToUpperInvariant()), out _);
 
     /* #8146: the servers whose own long-query session a recreate left stopped (a start the replica refused) or possibly
        missing (a failed attempt). The recreate runs in a collector run, outside the worker's reconcile latch, so this is how

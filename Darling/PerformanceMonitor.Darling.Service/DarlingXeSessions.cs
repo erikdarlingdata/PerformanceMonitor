@@ -986,8 +986,10 @@ WHERE ses.name = @session_name;", connection))
     /// <para>The replica may not show the primary's definition yet, one this cycle created or one already there (#8146: the
     /// recreate's, before its follow-up create pass). A start it then refuses with
     /// <see cref="LongQueryTraceDatabases.EventSessionNotVisibleErrorNumber"/> is logged at Debug and records no fault: the
-    /// next sweep checks again and starts the session. Any other refusal, and the same refusal after a definition the replica
-    /// already showed, is a failure like any other.</para>
+    /// next sweep checks again and starts the session. That grace lasts <see cref="LongQueryTraceDatabases.RetryInterval"/> from
+    /// the first such refusal (<see cref="DarlingCollectorRunner.LongQueryStartRefusalWithinGrace"/>); after it the refusal is a
+    /// failure, and a start that succeeds or a replica that shows the definition ends it. Any other refusal, and the same
+    /// refusal after a definition the replica already showed, is a failure like any other.</para>
     /// </summary>
     /// <returns>True when that start was refused and left for the next sweep.</returns>
     private static async Task<bool> EnsureLongQueryCompletionsReadOnlyIntentAsync(
@@ -1013,6 +1015,12 @@ WHERE ses.name = @session_name;", connection))
         {
             await ownConnection.OpenAsync(cancellationToken);
             replica = await CheckLongQueryCompletionsReplicaAsync(ownConnection, server, databaseName, sessionName, runner.LegacyLongQuery, logger, cancellationToken);
+        }
+
+        /* #8146: the replica shows the definition, so a lag it had is over; a refusal from here on is a failure at once. */
+        if (replica.DefinitionExists)
+        {
+            runner.ClearLongQueryStartRefusal(server.ServerId, databaseName);
         }
 
         if (!replica.DefinitionExists)
@@ -1060,15 +1068,24 @@ WHERE ses.name = @session_name;", connection))
             /* Already started per the engine: the reader tolerates it (#1251). */
         }
         /* #4961, #8146: the replica showed no definition, and the primary holds one now, whether this pass created it or found it
-           (a recreate's, or an earlier pass's, that the replica has not caught up with). The refusal is the replica's lag, so the
-           start waits for the next sweep. A refusal after a definition the replica already showed is a failure like any other. */
+           (a recreate's, or an earlier pass's, that the replica has not caught up with). For up to an hour from the first such
+           refusal it is taken for the replica's lag, and the start waits for the next sweep. Past that it is rethrown, a failure
+           like any other, so a replica that never shows the definition is reported. A refusal after a definition the replica
+           already showed is a failure at once. */
         catch (Exception ex) when (!replica.DefinitionExists && ex is not OperationCanceledException && IsEventSessionNotVisible(ex))
         {
+            if (!runner.LongQueryStartRefusalWithinGrace(server.ServerId, databaseName, runner.LongQueryUtcNow()))
+            {
+                throw;
+            }
+
             logger?.LogDebug("[{Server}] [{Database}] The replica does not show the long-query completion XE session's definition yet, so the start waits for the next sweep: {Message}",
                 server.Config.DisplayName, databaseName, ex.Message);
             return true;
         }
 
+        /* #8146: the session started, or runs already: the replica's lag, if it had one, is over. */
+        runner.ClearLongQueryStartRefusal(server.ServerId, databaseName);
         return false;
     }
 
@@ -1768,8 +1785,9 @@ END;", connection);
     }
 
     /// <summary>
-    /// Ensures the session in one Azure SQL Database database. Returns true when a registration with read-only intent created
-    /// the definition and its replica refused the start (<see cref="LongQueryTraceReconcileOutcome.StartPending"/>). The
+    /// Ensures the session in one Azure SQL Database database. Returns true when, for a registration with read-only intent, the
+    /// primary holds the definition and the replica, which does not show it yet, refused the start within the grace window
+    /// (<see cref="LongQueryTraceReconcileOutcome.StartPending"/>). The
     /// reconcile's per-database create and the #8146 recreate both run it.
     /// </summary>
     private static async Task<bool> EnsureLongQueryCompletionsInDatabaseAsync(
@@ -1788,7 +1806,8 @@ END;", connection);
 
         /* #4961: a registration with read-only intent checks over its own connection, creates the definition over a
            connection without the intent only when its replica shows none, and starts the session over its own. A start the
-           replica refuses just after the create is left for the next sweep: the outcome tells the worker not to latch. */
+           replica refuses because it does not show the primary's definition yet is left for the next sweep, for up to an hour
+           from the first refusal (#8146): the outcome tells the worker not to latch. */
         if (HasReadOnlyIntent(LongQueryTraceConnectionString(server, databaseName)))
         {
             return await EnsureLongQueryCompletionsReadOnlyIntentAsync(server, runner, databaseName, sessionName, logger, cancellationToken);
@@ -1861,7 +1880,7 @@ END;", connection);
                 continue;
             }
 
-            var utcNow = runner.LongQuerySessionRecreateUtcNowForTests?.Invoke() ?? DateTime.UtcNow;
+            var utcNow = runner.LongQueryUtcNow();
             if (!runner.LongQuerySessionRecreateThrottle.TryBegin(serverKey, request.DatabaseName, limit, utcNow))
             {
                 continue;
@@ -1951,13 +1970,14 @@ END;", connection);
 
 /// <summary>
 /// What one long-query reconcile leaves for the worker beyond its note (<see cref="DarlingXeSessions.ReconcileLongQueryCompletionsAsync"/>, #4961).
-/// <see cref="StartPending"/> is set when a registration with read-only intent created the session's definition and its replica
-/// refused the start because it does not show the definition yet. The worker then leaves its latch where it was, so the next
-/// sweep tries again instead of waiting for the hourly create pass.
+/// <see cref="StartPending"/> is set when, for a registration with read-only intent, the primary holds the session's definition
+/// (this reconcile created it, or it was already there) and the replica refused the start because it does not show it yet,
+/// within an hour of the first such refusal (#8146). The worker then leaves its latch where it was, so the next sweep tries
+/// again instead of waiting for the hourly create pass.
 /// </summary>
 public sealed class LongQueryTraceReconcileOutcome
 {
-    /// <summary>A start was refused because the replica does not show the definition this reconcile created yet.</summary>
+    /// <summary>A start was refused, within the grace window, because the replica does not show the primary's definition yet.</summary>
     public bool StartPending { get; set; }
 }
 

@@ -2487,9 +2487,10 @@ public sealed partial class DarlingWorker
             var partialNote = await DarlingXeSessions.ReconcileLongQueryCompletionsAsync(
                 server.Runtime, runner, enabled, pass, registrations, serverSeparatelyMonitored, createFailureWarned, logger, cancellationToken, instanceGuard, outcome);
 
-            /* #4961: a start the replica refused just after this reconcile created the definition (it does not show it yet) is
-               not applied: the latch stays where it was, so the next sweep tries again and starts the session, instead of the
-               retry waiting for the hourly create pass. */
+            /* #4961, #8146: a start the replica refused because it does not show the primary's definition yet (this reconcile's
+               or one already there), within an hour of the first such refusal, is not applied: the latch stays where it was, so
+               the next sweep tries again and starts the session, instead of the retry waiting for the hourly create pass. Past
+               the hour the refusal reaches the catch below as a failure. */
             if (!outcome.StartPending)
             {
                 server.LongQueryTraceApplied = enabled;

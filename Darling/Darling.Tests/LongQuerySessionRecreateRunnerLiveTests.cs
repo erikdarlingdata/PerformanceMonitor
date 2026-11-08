@@ -442,7 +442,7 @@ public sealed class LongQuerySessionRecreateRunnerLiveTests
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator(), logger: logger, installId: () => InstallId, xeRingBufferMaxEvents: 5000);
         var rig = new Rig(runner, new List<(string, LongQueryTraceStep, string)>(), logger);
         runner.TargetProviderOverrideForTests = _ => new FakeTargetProvider();
-        runner.LongQuerySessionRecreateUtcNowForTests = () => rig.Clock;
+        runner.LongQueryUtcNowForTests = () => rig.Clock;
         runner.LongQueryTraceStepOverrideForTests = (_, database, _, step, session, _) =>
         {
             rig.Steps.Add((database, step, session));
