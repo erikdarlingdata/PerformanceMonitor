@@ -2541,7 +2541,7 @@
                                      report.plan_cache_bloat parity): a client-side CASE on single-use/total plans. -->
                                 <TextBlock Text="Bloat Level:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                                 <TextBlock x:Name="PlanCacheBloatLevelText" Text="--" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,20,0"/>
-                                <TextBlock x:Name="PlanCacheRecommendationText" Text="" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,20,0"/>
+                                <TextBlock x:Name="PlanCacheRecommendationText" Text="" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,20,0"/>
                                 <TextBlock Text="Collected:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                                 <TextBlock x:Name="PlanCacheCollectedText" Text="--" VerticalAlignment="Center"/>
                             </WrapPanel>
@@ -2818,15 +2818,16 @@
                         </Grid></ScrollViewer>
                     </TabItem>
                     <TabItem Header="Current Waits">
+                        <Grid>
+                        <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                         <ScrollViewer x:Name="CurrentWaitsScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #7385: scrolls when the charts cannot all keep their minimum height -->
-                        <!-- #8219: two columns so the charts sit side by side (ChartPairLayout) when the tab cannot give both a stacked row. MinHeight is one chart row with the banner and note; the stacked layout adds the second row's MinHeight to it. -->
+                        <!-- #8219: two columns so the charts sit side by side (ChartPairLayout) when the tab cannot give both a stacked row. MinHeight is one chart row with the banner; the stacked layout adds the second row's MinHeight to it. -->
                             <Grid x:Name="CurrentWaitsGrid" ui:ChartGroup.IsAligned="True" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="260">
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                                 <RowDefinition x:Name="CurrentWaitsSecondRow" Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
-                                <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
                             <!-- "Showing since <start>" when this server's waiting_tasks rows start after the range
                                  does (DataWindowFloor via LoadBlockingAsync). Both charts read waiting_tasks. -->
@@ -2844,11 +2845,13 @@
                                     <scottplot:WpfPlot x:Name="CurrentWaitsBlockedChart"/>
                                 </ui:ChartPanel>
                             </Border>
-                            <!-- Both charts read waiting_tasks, which stores a row only when a collection found a task waiting or blocked, so a quiet server draws few points and a gap means nothing was waiting. -->
-                            <TextBlock Grid.Row="3" Grid.ColumnSpan="2" x:Name="CurrentWaitsSparseNote" Padding="8,4" FontStyle="Italic" TextWrapping="Wrap"
-                                       Foreground="{DynamicResource ForegroundDimBrush}"
-                                       Text="Points appear only when a collection found waiting or blocked tasks. A gap means nothing was waiting at that time."/>
                         </Grid></ScrollViewer>
+                        <!-- Both charts read waiting_tasks, which stores a row only when a collection found a task waiting or blocked, so a quiet server draws few points and a gap means nothing was waiting.
+                             The note sits under the scroll area, outside it, so it is read at every tab height, whatever the charts' layout does. -->
+                        <TextBlock Grid.Row="1" x:Name="CurrentWaitsSparseNote" Padding="8,4" TextWrapping="Wrap"
+                                   Foreground="{DynamicResource ForegroundMutedBrush}"
+                                   Text="Points appear only when a collection found waiting or blocked tasks. A gap means nothing was waiting at that time."/>
+                        </Grid>
                     </TabItem>
                     <!-- Blocked Process Reports — widened to Lite's full grid (W1e): UTC slicer + ~25 filterable
                          columns (Source badge, per-column filter headers, per-row XML Save gated on HasReportXml,
@@ -3622,8 +3625,8 @@
                 <!-- Toolbar -->
                 <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,6">
                     <Button Content="Refresh" Click="DailySummaryRefresh_Click" Margin="0,0,10,0" Padding="8,4" MinWidth="60"/>
-                    <TextBlock Text="Composite daily health - click a day for detail and drill-in (times in UTC)" VerticalAlignment="Center"
-                               FontStyle="Italic" Foreground="{DynamicResource InfoTextBrush}" FontWeight="SemiBold"/>
+                    <TextBlock x:Name="DailySummaryHintText" Text="Composite daily health - click a day for detail and drill-in (times in UTC)" VerticalAlignment="Center"
+                               Style="{DynamicResource PanelSubtitleText}"/>
                 </StackPanel>
 
                 <!-- Month heatmap + the shared day-detail panel (click a day: band header, why-this-day
@@ -3745,7 +3748,7 @@
                         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="8,8" Height="36">
                             <TextBlock Text="Scheduler Issues" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                             <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
-                            <TextBlock x:Name="SchedulerIssuesCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                            <TextBlock x:Name="SchedulerIssuesCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                         </StackPanel>
                         <Grid Grid.Row="1" Margin="8,0,8,8">
                             <DataGrid x:Name="SchedulerIssuesGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" IsReadOnly="True" AutoGenerateColumns="False">
@@ -3771,7 +3774,7 @@
                         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="8,8" Height="36">
                             <TextBlock Text="Severe Errors (severity ≥ 19)" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                             <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
-                            <TextBlock x:Name="SevereErrorsCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                            <TextBlock x:Name="SevereErrorsCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                         </StackPanel>
                         <Grid Grid.Row="1" Margin="8,0,8,8">
                             <DataGrid x:Name="SevereErrorsGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" IsReadOnly="True" AutoGenerateColumns="False">
@@ -3800,7 +3803,7 @@
                         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="8,8" Height="36">
                             <TextBlock Text="Memory Conditions (low physical memory)" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                             <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
-                            <TextBlock x:Name="MemoryConditionsCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                            <TextBlock x:Name="MemoryConditionsCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                         </StackPanel>
                         <Grid Grid.Row="1" Margin="8,0,8,8">
                             <DataGrid x:Name="MemoryConditionsGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" IsReadOnly="True" AutoGenerateColumns="False">
@@ -3852,7 +3855,7 @@
                             <!-- #8197: the tab is already named Memory Broker, so the panel keeps only what its tab cannot say. -->
                             <TextBlock x:Name="MemoryBrokerSubtitle" Text="Target shrinks" Style="{DynamicResource PanelSubtitleText}" VerticalAlignment="Center"/>
                             <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
-                            <TextBlock x:Name="MemoryBrokerCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                            <TextBlock x:Name="MemoryBrokerCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                         </StackPanel>
                         <Grid Grid.Row="1" Margin="8,0,8,8">
                             <DataGrid x:Name="MemoryBrokerGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" IsReadOnly="True" AutoGenerateColumns="False">
@@ -3884,7 +3887,7 @@
                         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="8,8" Height="36">
                             <TextBlock Text="Memory Node OOM" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                             <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
-                            <TextBlock x:Name="MemoryNodeOomCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                            <TextBlock x:Name="MemoryNodeOomCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                         </StackPanel>
                         <Grid Grid.Row="1" Margin="8,0,8,8">
                             <DataGrid x:Name="MemoryNodeOomGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" IsReadOnly="True" AutoGenerateColumns="False">
@@ -3931,7 +3934,7 @@
                         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="8,8" Height="36">
                             <TextBlock Text="Significant Waits (duration ≥ 500 ms)" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                             <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
-                            <TextBlock x:Name="SignificantWaitsCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                            <TextBlock x:Name="SignificantWaitsCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                         </StackPanel>
                         <Grid Grid.Row="1" Margin="8,0,8,8">
                             <DataGrid x:Name="SignificantWaitsGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" IsReadOnly="True" AutoGenerateColumns="False">
@@ -3960,7 +3963,7 @@
                         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="8,8" Height="36">
                             <TextBlock Text="CPU Tasks (WARNING with 10+ pending tasks)" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                             <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
-                            <TextBlock x:Name="CpuTasksCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                            <TextBlock x:Name="CpuTasksCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                         </StackPanel>
                         <Grid Grid.Row="1" Margin="8,0,8,8">
                             <DataGrid x:Name="CpuTasksGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" IsReadOnly="True" AutoGenerateColumns="False">
@@ -3990,7 +3993,7 @@
                         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="8,8" Height="36">
                             <TextBlock Text="I/O Issues (WARNING with pending I/O)" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                             <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
-                            <TextBlock x:Name="IoIssuesCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                            <TextBlock x:Name="IoIssuesCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                         </StackPanel>
                         <Grid Grid.Row="1" Margin="8,0,8,8">
                             <DataGrid x:Name="IoIssuesGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" IsReadOnly="True" AutoGenerateColumns="False">
@@ -4013,11 +4016,12 @@
                 <TabItem Header="Default Trace">
                     <Grid>
                         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-                        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="8,8" Height="36">
-                            <TextBlock Text="Default Trace (auto-grow/shrink stalls, severe ErrorLog, schema DDL, security audits, memory change)" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
+                        <!-- The long title wraps, and the toolbar wraps onto a second line beside the sidebar, so the count stays in view at every tab width. -->
+                        <WrapPanel Grid.Row="0" Orientation="Horizontal" Margin="8,8">
+                            <TextBlock Text="Default Trace (auto-grow/shrink stalls, severe ErrorLog, schema DDL, security audits, memory change)" VerticalAlignment="Center" Margin="0,0,10,0" TextWrapping="Wrap" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                             <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
-                            <TextBlock x:Name="DefaultTraceCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
-                        </StackPanel>
+                            <TextBlock x:Name="DefaultTraceCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
+                        </WrapPanel>
                         <Grid Grid.Row="1" Margin="8,0,8,8">
                             <DataGrid x:Name="DefaultTraceGrid" Style="{StaticResource DarkGrid}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" IsReadOnly="True" AutoGenerateColumns="False">
                                 <DataGrid.Columns>
