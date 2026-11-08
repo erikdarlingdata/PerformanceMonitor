@@ -822,6 +822,36 @@ public sealed class DarlingMcpSchemaToolsLiveTests
         });
     }
 
+    private static async Task SetScheduleEnabledAsync(Store s, bool enabled, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            "INSERT INTO config.config_collector_schedules (server_id, collector_name, enabled) VALUES ($1, 'schema_objects', $2)", s.Connection);
+        command.Parameters.AddWithValue(s_serverId);
+        command.Parameters.AddWithValue(enabled);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>The collector was turned off on purpose: its session record is cleared by the disabled-collector drop, and an empty change list answers as a collector that is off, not as a missing grant.</summary>
+    [Fact]
+    public async Task GetSchemaChanges_AfterTheCollectorWasTurnedOff_AnswersNotCollectedAsOff()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            await Baseline(s, ct, Table(10, "Orders", new[] { "Id" }));
+            await SetScheduleEnabledAsync(s, false, ct);
+            await SchemaCaptureStateStore.SaveAsync(
+                s.Connection, new SchemaCaptureStateRow { ServerId = s_serverId, LastSeenInScopeAt = DateTime.UtcNow, SessionCreateTime = s_t0 }, ct);
+            await SchemaCaptureStateStore.ClearSessionAsync(s.Connection, s_serverId, DateTime.UtcNow, ct);
+
+            using var doc = JsonDocument.Parse(await Changes(s, ct));
+
+            Assert.Equal("not_collected", doc.RootElement.GetProperty("status").GetString());
+            var message = doc.RootElement.GetProperty("message").GetString();
+            Assert.Contains("switched off", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("grant", message, StringComparison.OrdinalIgnoreCase);
+        });
+    }
+
     /// <summary>A database no pass ever stored a state row for (read-only, excluded, out of scope) is not a true negative: nothing is collected for it.</summary>
     [Fact]
     public async Task ADatabaseWithNoStateRow_AnswersNotCollected_NotEmpty()
@@ -854,6 +884,7 @@ public sealed class DarlingMcpSchemaToolsLiveTests
         await WithStoreAsync(async (s, ct) =>
         {
             await Baseline(s, ct, Table(10, "Orders", new[] { "Id" }));
+            await SetScheduleEnabledAsync(s, true, ct);
             await SchemaCaptureStateStore.SaveAsync(s.Connection, new SchemaCaptureStateRow { ServerId = s_serverId, LastSeenInScopeAt = DateTime.UtcNow }, ct);
 
             using (var doc = JsonDocument.Parse(await Changes(s, ct)))

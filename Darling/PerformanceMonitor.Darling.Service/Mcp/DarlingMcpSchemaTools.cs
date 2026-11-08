@@ -96,8 +96,8 @@ public sealed class DarlingMcpSchemaTools
     /// <summary>
     /// The answer to a read that found nothing, before it says <c>empty</c> (#7643 review): <c>not_collected</c> for a PostgreSQL target
     /// (the collector never runs there, so nobody is sent to turn it on), then the plain "never ran" answer when no state row exists, then
-    /// <c>not_collected</c> for a named database no pass ever read, then, for a change list, <c>precondition</c> while the server row shows no
-    /// running session. Null when none applies, and the read's own <c>empty</c> stands.
+    /// <c>not_collected</c> for a named database no pass ever read, then, for a change list while the server row shows no running session, <c>not_collected</c> when the
+    /// collector is switched off in the schedule (the session record was cleared on purpose), else <c>precondition</c>. Null when none applies, and the read's own <c>empty</c> stands.
     /// </summary>
     private static async Task<string?> MissStatusAsync(
         NpgsqlDataSource postgres, int serverId, string serverName, SchemaHistoryResolution resolution, bool changeList, CancellationToken cancellationToken)
@@ -122,6 +122,17 @@ public sealed class DarlingMcpSchemaTools
 
         if (changeList && resolution.SessionNotRunning)
         {
+            /* The disabled-collector drop clears the session record, which reads the same as a session that could not start. A collector
+               the schedule has switched off is not a missing grant: it is off. */
+            var schedule = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, serverId, cancellationToken);
+            if (!StoreConfigProvider.ResolveSchedule(SchemaObjectsCollector.Instance.Name, serverId, schedule).Enabled)
+            {
+                return McpHelpers.Status(
+                    "not_collected",
+                    $"The schema_objects collector is switched off in {serverName}'s collector schedule (get_collector_schedules shows it), so schema history "
+                    + "is no longer recorded and an empty list says nothing about recent changes. Turn it on with enable_collector (collector schema_objects).");
+            }
+
             return McpHelpers.Status(
                 "precondition",
                 $"The schema-changes session was not running when the last schema pass ran on {serverName}, so changes are seen only by a full read "
@@ -366,7 +377,7 @@ public sealed class DarlingMcpSchemaTools
     }
 
     [McpServerTool(Name = "get_schema_changes"), Description(
-        "Lists the table and view changes the schema history recorded in a window, newest first: change_kind (created, altered, renamed, dropped; baseline only with include_baseline), detected_by (xe_event, reconcile, run_now), valid_from (when the change was detected), the login, application and host the change session recorded when it named one, and the diff against the previous version (columns, indexes, constraints and triggers added, removed or changed, a rename, view text changed). The window is hours_back (1 to 168) ending at as_of or now; an out-of-range value is refused. Optionally one database and one object (object_name 'schema.name' or bare). Paged with limit (1 to 100) and offset; has_more and next_offset say whether there is more. valid_from is the detection time, not the change time: a reconcile finds a change up to its interval after it happened. status not_collected: the schema_objects collector has never run for the server, cannot run on its engine, or never read the named database. status precondition: the change-tracking session was not running, so the list can miss changes.")]
+        "Lists the table and view changes the schema history recorded in a window, newest first: change_kind (created, altered, renamed, dropped; baseline only with include_baseline), detected_by (xe_event, reconcile, run_now), valid_from (when the change was detected), the login, application and host the change session recorded when it named one, and the diff against the previous version (columns, indexes, constraints and triggers added, removed or changed, a rename, view text changed). The window is hours_back (1 to 168) ending at as_of or now; an out-of-range value is refused. Optionally one database and one object (object_name 'schema.name' or bare). Paged with limit (1 to 100) and offset; has_more and next_offset say whether there is more. valid_from is the detection time, not the change time: a reconcile finds a change up to its interval after it happened. status not_collected: the schema_objects collector has never run for the server, is switched off, cannot run on its engine, or never read the named database. status precondition: the collector is on but the change-tracking session was not running, so the list can miss changes.")]
     public static Task<string> GetSchemaChanges(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
