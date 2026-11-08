@@ -31,6 +31,19 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgServerStateTools
 {
+    /// <summary>What the database_overrides rows are, attached to the answer only when the cluster has any. Prose
+    /// the statement filter (#4348) must pass through, so it names the scoped SET without spelling the role form.</summary>
+    internal const string DatabaseOverridesNote =
+        "database_overrides are values one DATABASE or one ROLE was given with a scoped SET "
+        + "(ALTER DATABASE ... SET, or the same statement for a role), read from pg_db_role_setting. A session connecting to that "
+        + "database, or as that role, runs with the override rather than with the server-wide "
+        + "value listed above - so a setting that appears in both places has TWO answers and "
+        + "which one applies depends on who is connecting. The stored text is what was SET, "
+        + "not a resolved value: PostgreSQL resolves database, role and session scopes per "
+        + "connection at connect time, and the catalog records only the instruction. No unit, "
+        + "default or context is carried on these rows because the catalog does not hold them "
+        + "- read those off the server-wide row for the same setting name.";
+
     /// <summary>The collector table get_pg_extensions reads, named in its window notice (#7010).</summary>
     private const string ExtensionsTable = "pg_extension_availability";
 
@@ -885,15 +898,7 @@ public sealed class DarlingMcpPgServerStateTools
                     name = o.Name,
                     setting = o.Setting,
                 }).ToList(), McpHelpers.JsonOptions);
-                node["database_overrides_note"] = "database_overrides are values one DATABASE or one ROLE was given with ALTER DATABASE "
-                    + "/ ALTER ROLE ... SET, read from pg_db_role_setting. A session connecting to that "
-                    + "database, or as that role, runs with the override rather than with the server-wide "
-                    + "value listed above - so a setting that appears in both places has TWO answers and "
-                    + "which one applies depends on who is connecting. The stored text is what was SET, "
-                    + "not a resolved value: PostgreSQL resolves database, role and session scopes per "
-                    + "connection at connect time, and the catalog records only the instruction. No unit, "
-                    + "default or context is carried on these rows because the catalog does not hold them "
-                    + "- read those off the server-wide row for the same setting name.";
+                node["database_overrides_note"] = DatabaseOverridesNote;
             }
 
             /* #4251: ATTACHED like database_overrides_note just above, and for the same reason — present only
