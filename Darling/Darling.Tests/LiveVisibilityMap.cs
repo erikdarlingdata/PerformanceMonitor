@@ -27,6 +27,11 @@ internal static class LiveVisibilityMap
     /// <summary>The most VACUUM passes spent on getting every page marked before the premise fails.</summary>
     public const int Passes = 10;
 
+    /// <summary>The pause before each pass after the first. A small table's VACUUM takes tens of milliseconds, so passes
+    /// run back to back would all fall inside one autoanalyze or scheduler snapshot that stays open for a second or two;
+    /// with the pause, the ten passes span a few seconds.</summary>
+    public static readonly TimeSpan PassPause = TimeSpan.FromMilliseconds(250);
+
     /// <summary>
     /// Vacuums <paramref name="table"/> until every page is all-visible, and asserts that it got there. The pages are
     /// summed over the table and everything that inherits from it, so a plain table, a partitioned table and a hypertable
@@ -40,6 +45,11 @@ internal static class LiveVisibilityMap
         long allVisible = -1;
         for (var pass = 0; pass < Passes && allVisible != pages; pass++)
         {
+            if (pass > 0)
+            {
+                await Task.Delay(PassPause, ct);
+            }
+
             await using (var vacuum = new NpgsqlCommand($"VACUUM (ANALYZE) {table}", connection))
             {
                 await vacuum.ExecuteNonQueryAsync(ct);
