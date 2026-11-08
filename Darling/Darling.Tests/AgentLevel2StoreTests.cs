@@ -13,6 +13,7 @@ using System.Reflection;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
@@ -77,7 +78,7 @@ public sealed class AgentLevel2StoreRungTests
     [Fact]
     public async Task ANewStore_HoldsTheWholeRung()
     {
-        await WithStoreAsync(async (store, ct) =>
+        await WithStoreAsync(async (store, _, ct) =>
         {
             /* The switch reads on on a new store. */
             Assert.Equal("True", await ScalarAsync(store, "SELECT agent_actions_enabled FROM config.config_service", ct));
@@ -200,7 +201,7 @@ public sealed class AgentLevel2StoreRungTests
     [Fact]
     public async Task AnUpgradedStore_KeepsItsRows_ReadsTheSwitchOn_AndASecondRunChangesNothing()
     {
-        await WithStoreAsync(async (store, ct) =>
+        await WithStoreAsync(async (store, _, ct) =>
         {
             await RungRewindArtifacts.DropSentinelsAboveAsync(store, Rung.Version - 1, ct);
             await ExecAsync(store, "DELETE FROM darling_schema_version WHERE version >= " + Rung.Version.ToString(CultureInfo.InvariantCulture), ct);
@@ -246,7 +247,7 @@ public sealed class AgentLevel2StoreRungTests
     [Fact]
     public async Task Retention_AgesFeedbackWithItsRequest_AndNeverAgesOverrides()
     {
-        await WithStoreAsync(async (store, ct) =>
+        await WithStoreAsync(async (store, storeConnectionString, ct) =>
         {
             await ExecAsync(store, "INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES (5909, 'srv-a', 'host-a')", ct);
             await ExecAsync(store, "INSERT INTO config.config_threshold_overrides (server_id, database_name, threshold_key, value, set_by, created_at, updated_at) "
@@ -263,8 +264,13 @@ public sealed class AgentLevel2StoreRungTests
                 await ExecAsync(store, $"INSERT INTO config.investigation_feedback (request_id, verdict, author) VALUES ('{request}', 'right', 'erik')", ct);
             }
 
-            await using var dataSource = NpgsqlDataSource.Create(store.ConnectionString);
-            await DarlingRetention.PurgeAsync(dataSource, timescaleAvailable: false, logger: null, TestContext.Current.CancellationToken);
+            await using var dataSource = NpgsqlDataSource.Create(storeConnectionString);
+            var logger = new CapturingTestLogger();
+            await DarlingRetention.PurgeAsync(dataSource, timescaleAvailable: false, logger, ct);
+            /* A purge that cannot reach the store isolates every table's failure and returns as if it had run; only its log
+               says so. A clean purge logs no warning or error. */
+            Assert.True(logger.CountAtLevel(LogLevel.Warning) + logger.CountAtLevel(LogLevel.Error) == 0,
+                "the purge isolated a failure instead of deleting: " + logger.Joined);
 
             Assert.Equal(Young, await ScalarAsync(store, "SELECT string_agg(request_id::text, ',' ORDER BY request_id) FROM config.investigation_requests", ct));
             Assert.Equal(Young, await ScalarAsync(store, "SELECT string_agg(request_id::text, ',' ORDER BY request_id) FROM config.investigation_feedback", ct));
@@ -272,7 +278,8 @@ public sealed class AgentLevel2StoreRungTests
         });
     }
 
-    private static async Task WithStoreAsync(Func<NpgsqlConnection, CancellationToken, Task> body)
+    /* Npgsql leaves the password out of an opened connection's ConnectionString, so a data source the body builds comes from the scratch store's own string. */
+    private static async Task WithStoreAsync(Func<NpgsqlConnection, string, CancellationToken, Task> body)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the Level 2 store pins.");
         var ct = TestContext.Current.CancellationToken;
@@ -286,7 +293,7 @@ public sealed class AgentLevel2StoreRungTests
         var bodySucceeded = false;
         try
         {
-            await body(store, ct);
+            await body(store, scratch.ConnectionString, ct);
             bodySucceeded = true;
         }
         finally

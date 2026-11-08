@@ -217,7 +217,7 @@ public sealed class IoHourlyRollupLiveTests
 
     [Fact]
     public Task AfterARefresh_IoSharedColumnsEqualTheIntervalSibling_AndTheSumsEqualRawsPerBucket() =>
-        WithStoreAsync(async (connection, ct) =>
+        WithStoreAsync(async (connection, _, ct) =>
         {
             await IoRollupOracleSeed.PlantAsync(connection, ct, ServerId, ServerName, WindowStart);
             var to = WindowStart.AddHours(IoRollupOracleSeed.Hours + 1);
@@ -274,22 +274,22 @@ public sealed class IoHourlyRollupLiveTests
 
     [Fact]
     public Task AStoreMissingOneIoView_ReportsItMissingPerView_TheNextSweepBuildsIt_AndARerunBuildsNothing() =>
-        WithStoreAsync(async (connection, ct) =>
+        WithStoreAsync(async (connection, storeConnectionString, ct) =>
         {
-            Assert.True((await DetectAsync(connection, ct)).AllPresent);
+            Assert.True((await DetectAsync(storeConnectionString, ct)).AllPresent);
 
             await using (var drop = new NpgsqlCommand($"DROP MATERIALIZED VIEW collect.{TimescaleSupport.ProcedureStatsIoHourlyView}", connection))
             {
                 await drop.ExecuteNonQueryAsync(ct);
             }
 
-            var missing = await DetectAsync(connection, ct);
+            var missing = await DetectAsync(storeConnectionString, ct);
             Assert.True(missing.QueryGrainIoHourly);
             Assert.False(missing.ProcedureGrainIoHourly);
             Assert.False(missing.AllPresent);
 
             await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
-            Assert.True((await DetectAsync(connection, ct)).AllPresent);
+            Assert.True((await DetectAsync(storeConnectionString, ct)).AllPresent);
 
             var before = await ScalarAsync(connection, ct,
                 "SELECT count(*) FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect'");
@@ -298,9 +298,9 @@ public sealed class IoHourlyRollupLiveTests
                 "SELECT count(*) FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect'"));
         });
 
-    private static async Task<RollupAvailability> DetectAsync(NpgsqlConnection connection, CancellationToken ct)
+    private static async Task<RollupAvailability> DetectAsync(string storeConnectionString, CancellationToken ct)
     {
-        await using var source = NpgsqlDataSource.Create(connection.ConnectionString);
+        await using var source = NpgsqlDataSource.Create(storeConnectionString);
         return await TimescaleSupport.DetectRollupsAsync(source, ct);
     }
 
@@ -310,7 +310,8 @@ public sealed class IoHourlyRollupLiveTests
         return Convert.ToInt64(await command.ExecuteScalarAsync(ct));
     }
 
-    private static async Task WithStoreAsync(Func<NpgsqlConnection, CancellationToken, Task> body)
+    /* Npgsql leaves the password out of an opened connection's ConnectionString, so a data source the body builds comes from the scratch store's own string. */
+    private static async Task WithStoreAsync(Func<NpgsqlConnection, string, CancellationToken, Task> body)
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -339,7 +340,7 @@ public sealed class IoHourlyRollupLiveTests
         var bodySucceeded = false;
         try
         {
-            await body(connection, ct);
+            await body(connection, scratch.ConnectionString, ct);
             bodySucceeded = true;
         }
         finally
