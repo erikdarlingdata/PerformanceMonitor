@@ -1219,16 +1219,8 @@
                                                     <TextBlock Grid.Row="10" Grid.Column="2" Text="{Binding LastCollectionDisplay}" FontSize="11" Foreground="{DynamicResource ForegroundBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
                                                 </Grid>
                                             </StackPanel>
-                                            <!-- Offline overlay -->
-                                            <Border Background="#80000000" CornerRadius="6"
-                                                    Visibility="{Binding IsOffline, Converter={StaticResource BoolToVisibility}}">
-                                                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
-                                                    <TextBlock Text="&#x2717;" FontSize="28" Foreground="{DynamicResource ErrorBrush}"
-                                                               HorizontalAlignment="Center"/>
-                                                    <TextBlock Text="Offline" FontSize="13" Foreground="{DynamicResource ErrorBrush}"
-                                                               FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,4,0,0"/>
-                                                </StackPanel>
-                                            </Border>
+                                            <!-- An offline card carries no overlay (#8304): the status line under the name already says Offline, the
+                                                 border is red, and the metric rows read a dash with the unknown dot, so they stay readable. -->
                                         </Grid>
                                     </Border>
                                 </DataTemplate>
