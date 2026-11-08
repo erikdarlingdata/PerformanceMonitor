@@ -263,8 +263,10 @@ public sealed class LongQuerySessionRecreateRunnerLiveTests
     }
 
     /// <summary>
-    /// The create pass that follows a pending start can meet the same refusal: the replica still does not show the definition.
-    /// The sweep after it tries again, and stops once the session starts.
+    /// The create pass that follows a pending start can meet the same refusal: the replica still does not show the definition
+    /// the recreate put on the primary. That pass finds the definition already there and creates nothing, and its refused start
+    /// is still pending, not a failure: no warning, no fault, and the sweep after it asks again. Each refusal asks once more,
+    /// and the sweep where the replica shows the definition starts the session; the one after it sends nothing.
     /// </summary>
     [Fact]
     public async Task Azure_ReadOnlyIntent_AFollowUpPassWhoseStartIsRefusedAgain_RunsAgainOnTheNextSweep()
@@ -274,23 +276,44 @@ public sealed class LongQuerySessionRecreateRunnerLiveTests
             var server = ReadOnlyIntentServer();
             var state = await LatchedAsync(rig, server, ct);
 
+            /* The primary's definition, as the drop and the create leave it. */
+            var onPrimary = true;
             var refuseStart = true;
+            rig.Runner.LongQueryTraceDefinitionOnPrimaryForTests = (_, _) => onPrimary;
             rig.Runner.LongQueryTraceStepOverrideForTests = (_, database, _, step, session, _) =>
             {
                 rig.Steps.Add((database, step, session));
+                if (step == LongQueryTraceStep.Drop)
+                {
+                    onPrimary = false;
+                }
+                else if (step == LongQueryTraceStep.CreateDefinition)
+                {
+                    onPrimary = true;
+                }
+
                 return refuseStart && step == LongQueryTraceStep.Start ? Task.FromException(StartNotVisible()) : Task.CompletedTask;
             };
 
             await rig.Runner.RunAsync(LongQueryCompletionsCollector.Instance, server, ct);
+            Assert.Contains(("alpha", LongQueryTraceStep.CreateDefinition, OwnSession), rig.Steps);
 
-            rig.Clock = ReadAt.AddMinutes(1);
-            Assert.Contains(("alpha", LongQueryTraceStep.Start, OwnSession), await SweepAsync(rig, state, ct));
+            var refusedStart = new[] { ("alpha", LongQueryTraceStep.Check, OwnSession), ("alpha", LongQueryTraceStep.Start, OwnSession) };
+            foreach (var minutes in new[] { 1, 2 })
+            {
+                rig.Clock = ReadAt.AddMinutes(minutes);
+                Assert.Equal(refusedStart, await SweepAsync(rig, state, ct));
+                Assert.Null(state.LongQueryTraceFault);
+                Assert.Equal(0, rig.Logger.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+            }
 
+            /* The replica now shows the definition, stopped, and takes the start. */
             refuseStart = false;
-            rig.Clock = ReadAt.AddMinutes(2);
-            Assert.Contains(("alpha", LongQueryTraceStep.Start, OwnSession), await SweepAsync(rig, state, ct));
-
+            rig.Runner.LongQueryTraceReplicaStateForTests = (_, _) => new LongQueryTraceReplicaState(DefinitionExists: true, Running: false);
             rig.Clock = ReadAt.AddMinutes(3);
+            Assert.Equal(refusedStart, await SweepAsync(rig, state, ct));
+
+            rig.Clock = ReadAt.AddMinutes(4);
             Assert.Empty(await SweepAsync(rig, state, ct));
         });
     }

@@ -143,6 +143,14 @@ public sealed partial class DarlingCollectorRunner
     internal Func<ServerRuntime, string, LongQueryTraceReplicaState>? LongQueryTraceReplicaStateForTests { get; set; }
 
     /// <summary>
+    /// #8146: replaces what the read-only-intent ensure finds on the primary when its replica shows no definition, with
+    /// <see cref="LongQueryTraceStepOverrideForTests"/> set: called with the server and the database, answers whether the
+    /// primary already holds the definition. True, the ensure sends no <see cref="LongQueryTraceStep.CreateDefinition"/>, as the
+    /// production create finds it and creates nothing. Unset, the primary holds none. Null in production.
+    /// </summary>
+    internal Func<ServerRuntime, string, bool>? LongQueryTraceDefinitionOnPrimaryForTests { get; set; }
+
+    /// <summary>
     /// The databases the long-query trace works in on Azure SQL Database. With <paramref name="allDatabases"/>, every
     /// online database with no exclusions and no scope; otherwise the monitored ones, narrowed by
     /// <paramref name="databaseScope"/>. A registration that names a database gets that database either way.

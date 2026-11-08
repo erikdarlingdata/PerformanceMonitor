@@ -983,7 +983,8 @@ WHERE ses.name = @session_name;", connection))
     /// started over the registration's own connection when it does not run there, because run state is per replica. So a
     /// cycle where the definition exists and the session runs opens only the registration's own connection. A test replaces
     /// each step's open and work, and what the check reads (<see cref="DarlingCollectorRunner.LongQueryTraceReplicaStateForTests"/>).
-    /// <para>The replica may not show a definition this cycle created yet. A start it then refuses with
+    /// <para>The replica may not show the primary's definition yet, one this cycle created or one already there (#8146: the
+    /// recreate's, before its follow-up create pass). A start it then refuses with
     /// <see cref="LongQueryTraceDatabases.EventSessionNotVisibleErrorNumber"/> is logged at Debug and records no fault: the
     /// next sweep checks again and starts the session. Any other refusal, and the same refusal after a definition the replica
     /// already showed, is a failure like any other.</para>
@@ -1014,7 +1015,6 @@ WHERE ses.name = @session_name;", connection))
             replica = await CheckLongQueryCompletionsReplicaAsync(ownConnection, server, databaseName, sessionName, runner.LegacyLongQuery, logger, cancellationToken);
         }
 
-        var created = false;
         if (!replica.DefinitionExists)
         {
             var withoutIntent = WithoutReadOnlyIntent(own);
@@ -1022,14 +1022,16 @@ WHERE ses.name = @session_name;", connection))
             {
                 if (ownConnection is null)
                 {
-                    await RunLongQueryTraceStepAsync(stepOverride!, server, databaseName, withoutIntent, LongQueryTraceStep.CreateDefinition, sessionName, cancellationToken);
-                    created = true;
+                    if (runner.LongQueryTraceDefinitionOnPrimaryForTests?.Invoke(server, databaseName) != true)
+                    {
+                        await RunLongQueryTraceStepAsync(stepOverride!, server, databaseName, withoutIntent, LongQueryTraceStep.CreateDefinition, sessionName, cancellationToken);
+                    }
                 }
                 else
                 {
                     using var definition = new SqlConnection(withoutIntent);
                     await definition.OpenAsync(cancellationToken);
-                    created = await CreateLongQueryCompletionsDefinitionAzureAsync(definition, server, databaseName, sessionName, runner.RingBufferMaxEvents, logger, cancellationToken);
+                    await CreateLongQueryCompletionsDefinitionAzureAsync(definition, server, databaseName, sessionName, runner.RingBufferMaxEvents, logger, cancellationToken);
                 }
             }
             catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))
@@ -1057,7 +1059,10 @@ WHERE ses.name = @session_name;", connection))
         {
             /* Already started per the engine: the reader tolerates it (#1251). */
         }
-        catch (Exception ex) when (created && ex is not OperationCanceledException && IsEventSessionNotVisible(ex))
+        /* #4961, #8146: the replica showed no definition, and the primary holds one now, whether this pass created it or found it
+           (a recreate's, or an earlier pass's, that the replica has not caught up with). The refusal is the replica's lag, so the
+           start waits for the next sweep. A refusal after a definition the replica already showed is a failure like any other. */
+        catch (Exception ex) when (!replica.DefinitionExists && ex is not OperationCanceledException && IsEventSessionNotVisible(ex))
         {
             logger?.LogDebug("[{Server}] [{Database}] The replica does not show the long-query completion XE session's definition yet, so the start waits for the next sweep: {Message}",
                 server.Config.DisplayName, databaseName, ex.Message);
