@@ -202,15 +202,18 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
        log_bytes_used = @log_bytes, rollback_command = @command, percent_complete = @percent, rollback_read = @rollback_read,
        database_id = @database_id, database_name = @database_name;";
 
-    /// <summary>Query Store plan rows: the plan asked about, and any plan of the query that is forced now.</summary>
+    /// <summary>
+    /// Query Store plan rows: the plan asked about, and any plan of the query that is forced now, each with the query's <c>query_hash</c> as <c>0x</c> text
+    /// (the form the store keeps it in), so a caller can tell whether the query behind this query_id is the one whose rows it collected.
+    /// </summary>
     internal const string PlanFactsSql =
-        "SELECT p.plan_id, is_forced_plan = CONVERT(bit, p.is_forced_plan), p.force_failure_count, p.last_force_failure_reason_desc " +
-        "FROM sys.query_store_plan AS p WHERE p.query_id = @query_id AND (p.plan_id = @plan_id OR p.is_forced_plan = 1) OPTION(RECOMPILE);";
+        "SELECT p.plan_id, is_forced_plan = CONVERT(bit, p.is_forced_plan), p.force_failure_count, p.last_force_failure_reason_desc, query_hash = CONVERT(varchar(18), q.query_hash, 1) " +
+        "FROM sys.query_store_plan AS p JOIN sys.query_store_query AS q ON q.query_id = p.query_id WHERE p.query_id = @query_id AND (p.plan_id = @plan_id OR p.is_forced_plan = 1) OPTION(RECOMPILE);";
 
     /// <summary><see cref="PlanFactsSql"/> with the forcing type, for SQL Server 2022 and later.</summary>
     internal const string PlanFactsWithTypeSql =
-        "SELECT p.plan_id, is_forced_plan = CONVERT(bit, p.is_forced_plan), p.force_failure_count, p.last_force_failure_reason_desc, p.plan_forcing_type_desc " +
-        "FROM sys.query_store_plan AS p WHERE p.query_id = @query_id AND (p.plan_id = @plan_id OR p.is_forced_plan = 1) OPTION(RECOMPILE);";
+        "SELECT p.plan_id, is_forced_plan = CONVERT(bit, p.is_forced_plan), p.force_failure_count, p.last_force_failure_reason_desc, p.plan_forcing_type_desc, query_hash = CONVERT(varchar(18), q.query_hash, 1) " +
+        "FROM sys.query_store_plan AS p JOIN sys.query_store_query AS q ON q.query_id = p.query_id WHERE p.query_id = @query_id AND (p.plan_id = @plan_id OR p.is_forced_plan = 1) OPTION(RECOMPILE);";
 
     /// <summary>SQL Server 2022 and later say how a plan was forced (<c>plan_forcing_type_desc</c>: MANUAL or AUTO); earlier versions have no such column.</summary>
     internal const string ForcingTypeColumnSql =
@@ -241,10 +244,12 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
 
             PlanRow? requested = null;
             PlanRow? forced = null;
+            string? queryHash = null;
             await using (var read = Command(connection, hasType ? PlanFactsWithTypeSql : PlanFactsSql))
             {
                 read.Parameters.Add(new SqlParameter("@plan_id", SqlDbType.BigInt) { Value = planId });
                 read.Parameters.Add(new SqlParameter("@query_id", SqlDbType.BigInt) { Value = queryId });
+                var hashOrdinal = hasType ? 5 : 4;
                 await using var reader = await read.ExecuteReaderAsync(ct);
                 while (await reader.ReadAsync(ct))
                 {
@@ -255,12 +260,15 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
                         requested = row;
                     if (row.IsForced)
                         forced = row;
+                    /* Every row is a plan of the one query, so each carries the same hash. */
+                    queryHash ??= reader.IsDBNull(hashOrdinal) ? null : reader.GetString(hashOrdinal);
                 }
             }
 
             state = new PlanForceState(database, queryId, planId,
                 requested is null ? null : new RequestedPlanState(requested.PlanId, requested.IsForced, requested.FailureCount, requested.FailureReason),
-                forced is null ? null : new ForcedPlanState(forced.PlanId, forced.ForcingType, forced.FailureCount, forced.FailureReason));
+                forced is null ? null : new ForcedPlanState(forced.PlanId, forced.ForcingType, forced.FailureCount, forced.FailureReason),
+                queryHash);
             return RemediationResult.Done(name, true, wrote: false, "Read the Query Store state of the query. Nothing was written.");
         }, ct);
         return PlanStateRead.From(result, state);
@@ -794,13 +802,16 @@ public sealed record ForcedPlanState(
 /// <summary>
 /// The server's own Query Store state for one query (#5632, step 7), the before and after image a force or an unforce journals. A null
 /// <see cref="ForcedPlan"/> means no plan of the query is forced; a null <see cref="RequestedPlan"/> means the plan is not among the query's rows.
+/// <see cref="QueryHash"/> is the query's <c>query_hash</c> as <c>0x</c> text, the same form the store's collected rows keep, so the journal shows which
+/// query the ids named when the change was made; null when the query has no Query Store rows.
 /// </summary>
 public sealed record PlanForceState(
     [property: JsonPropertyName("database")] string Database,
     [property: JsonPropertyName("query_id")] long QueryId,
     [property: JsonPropertyName("plan_id")] long PlanId,
     [property: JsonPropertyName("requested_plan")] RequestedPlanState? RequestedPlan,
-    [property: JsonPropertyName("forced_plan")] ForcedPlanState? ForcedPlan);
+    [property: JsonPropertyName("forced_plan")] ForcedPlanState? ForcedPlan,
+    [property: JsonPropertyName("query_hash")] string? QueryHash = null);
 
 /// <summary>What <see cref="SqlServerRemediationExecutor.ReadPlanStateAsync"/> found: the state, or the refusal or failure that stopped the read.</summary>
 public sealed record PlanStateRead(RemediationOutcome Outcome, string? Reason, string Message, PlanForceState? State)
