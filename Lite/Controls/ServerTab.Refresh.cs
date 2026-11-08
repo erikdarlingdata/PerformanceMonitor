@@ -106,8 +106,9 @@ public partial class ServerTab : UserControl
     internal DateTime? ServerDataStartUtc { get; set; }
 
     /// <summary>The oldest instant the store holds data from for this server (<see cref="LocalDataService.GetOldestRetainedAsync"/>):
-    /// what the time range picker's "Data starts" note names. Null until the first read, or when the server has no row yet, and
-    /// the note then falls back to the archive's static retention edge.</summary>
+    /// its oldest <c>collection_log</c> row, archived or hot, which is what the time range picker's "Data starts" note names. Null
+    /// until the first read, or when the server has no row yet, and the note then falls back to the archive's static retention
+    /// edge.</summary>
     internal DateTime? OldestRetainedUtc { get; set; }
 
     /// <summary>Reads the server's data start for the charts (#7386), once for the whole tab, with the refresh that is about to
