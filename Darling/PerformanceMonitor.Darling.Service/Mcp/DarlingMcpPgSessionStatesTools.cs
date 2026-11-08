@@ -191,16 +191,16 @@ public sealed class DarlingMcpPgSessionStatesTools
     /// <summary>The note's sentence about sessions that were idle in transaction yet pinned nothing, or nothing when there were none.</summary>
     internal static string IdleWithoutHorizonSentence(int count) => count == 0
         ? string.Empty
-        : $" {CountText.Plural(count, "session")} here were idle in transaction and pinned "
-          + "NOTHING - they held no snapshot and no transaction id, so terminating them "
+        : $" {CountText.Plural(count, "session")} here {(count == 1 ? "was" : "were")} idle in transaction and pinned "
+          + $"NOTHING - {(count == 1 ? "it" : "they")} held no snapshot and no transaction id, so terminating {(count == 1 ? "it" : "them")} "
           + "would not reclaim a single dead row.";
 
     /// <summary>The note's sentence about rows PostgreSQL returned with every state column NULL, or nothing when there were none.</summary>
     internal static string RedactedSentence(int count) => count == 0
         ? string.Empty
-        : $" {CountText.Plural(count, "row")} are REDACTED: the monitoring login lacks pg_monitor on this "
+        : $" {CountText.Plural(count, "row")} {(count == 1 ? "is" : "are")} REDACTED: the monitoring login lacks pg_monitor on this "
           + "target, so PostgreSQL returned the rows with every state column NULL rather "
-          + "than refusing the read. Those rows say nothing about session state and their "
+          + $"than refusing the read. {(count == 1 ? "That row says" : "Those rows say")} nothing about session state and {(count == 1 ? "its" : "their")} "
           + "severity is reported as unknown.";
 
     /// <summary>

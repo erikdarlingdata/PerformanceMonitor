@@ -5951,7 +5951,7 @@ public static partial class DarlingCliCommands
            #2442 fixed one branch up, and the per-surface lines above already carry the real reason. */
         output.WriteLine(toOpen == 0
             ? "Done. No endpoint wants an open port, so no port was opened."
-            : $"Done. {CountText.Plural(toOpen, "endpoint")} exposed on the LAN; their scoped rules are in place.");
+            : $"Done. {CountText.Plural(toOpen, "endpoint")} exposed on the LAN; {(toOpen == 1 ? "its scoped rule is" : "their scoped rules are")} in place.");
         return 0;
     }
 
@@ -6904,7 +6904,7 @@ public static partial class DarlingCliCommands
 
         if (after.Total > 0 && after.Pending > 0)
         {
-            output.WriteLine(Inv($"  {CountText.Plural(after.Pending, "row")} arrived mid-run and are still text — re-run to convert them;"));
+            output.WriteLine(Inv($"  {CountText.Plural(after.Pending, "row")} arrived mid-run and {(after.Pending == 1 ? "is" : "are")} still text — re-run to convert {(after.Pending == 1 ? "it" : "them")};"));
             output.WriteLine("  compaction will run when the conversion converges.");
             return 0;
         }

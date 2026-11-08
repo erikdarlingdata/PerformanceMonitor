@@ -511,7 +511,7 @@ public static class FleetSweepEngine
         if (readFaults.Count > 0)
         {
             alive = false;
-            notes.Add($"{CountText.Plural(readFaults.Count, "server signal read")} failed — those servers are unreadable, not quiet.");
+            notes.Add($"{CountText.Plural(readFaults.Count, "server signal read")} failed — {(readFaults.Count == 1 ? "that server is" : "those servers are")} unreadable, not quiet.");
         }
 
         if (serversExpected > 0 && serversReported == 0)

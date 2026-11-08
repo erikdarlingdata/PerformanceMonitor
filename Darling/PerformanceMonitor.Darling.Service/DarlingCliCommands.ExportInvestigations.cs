@@ -276,7 +276,7 @@ public static partial class DarlingCliCommands
 
             if (outcome.HeldBack > 0)
             {
-                output.WriteLine($"{CountText.Plural(outcome.HeldBack, "case")} a live practice request replays were held back.");
+                output.WriteLine($"{CountText.Plural(outcome.HeldBack, "case")} a live practice request replays {(outcome.HeldBack == 1 ? "was" : "were")} held back.");
             }
 
             if (outcome.Truncated)

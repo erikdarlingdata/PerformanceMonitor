@@ -1104,7 +1104,7 @@ public sealed class DarlingMcpStoreMetricsTools
             if (uncompressed.Count > 0)
             {
                 sb.Append(' ').Append(Invariant(uncompressed.Count)).Append(" of ").Append(CountText.Plural(aggregateStates.Count, "continuous aggregate"))
-                  .Append(uncompressed.Count == 1 ? " has" : " have").Append(" compression DISABLED and hold ").Append(Gib(uncompressedBytes))
+                  .Append(uncompressed.Count == 1 ? " has" : " have").Append(" compression DISABLED and ").Append(uncompressed.Count == 1 ? "holds " : "hold ").Append(Gib(uncompressedBytes))
                   .Append(" between them (compression_enabled on each continuous_aggregate object; the policy job ids beside it)")
                   .Append(byDesign.Count > 0 ? ", not counting the one uncompressed by design below." : ".");
             }

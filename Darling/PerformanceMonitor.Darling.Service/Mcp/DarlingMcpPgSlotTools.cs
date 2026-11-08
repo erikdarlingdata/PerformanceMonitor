@@ -101,9 +101,9 @@ public sealed class DarlingMcpPgSlotTools
             var omittedSlots = allRows.Where(r => !r.IsCurrent).Select(r => r.SlotName).OrderBy(n => n, StringComparer.Ordinal).ToList();
             var omittedNote = omittedSlots.Count == 0
                 ? null
-                : $"{CountText.Plural(omittedSlots.Count, "slot")} had a stored sample in the window but are absent from the collector's newest run "
-                  + $"({allRows[0].LatestCaptureAt:yyyy-MM-dd HH:mm:ss} UTC), so they were dropped since and are not reported as "
-                  + "current. Their last sample is older than that run.";
+                : $"{CountText.Plural(omittedSlots.Count, "slot")} had a stored sample in the window but {(omittedSlots.Count == 1 ? "is" : "are")} absent from the collector's newest run "
+                  + $"({allRows[0].LatestCaptureAt:yyyy-MM-dd HH:mm:ss} UTC), so {(omittedSlots.Count == 1 ? "it was dropped since and is" : "they were dropped since and are")} not reported as "
+                  + $"current. {(omittedSlots.Count == 1 ? "Its" : "Their")} last sample is older than that run.";
 
             /* No slots is the common, healthy case on most servers — say so rather than returning an
                "unavailable" envelope that reads like a collection problem.

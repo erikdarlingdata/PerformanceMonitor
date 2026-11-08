@@ -128,6 +128,6 @@ ORDER BY s.server_name";
     }
     /// <summary>The empty answer when the newest database lists were searched and none names the database asked for.</summary>
     internal static string NoMatchMessage(string requested, int searched, int days) =>
-        $"No monitored server's newest database list names '{requested}' (searched {CountText.Plural(searched, "server")} that have a list in the last {days} days). A database that was dropped, renamed, or created since the last list looks the same; servers with no list in that time (Azure SQL Database targets, or a stopped collector) were not searched.";
+        $"No monitored server's newest database list names '{requested}' (searched {CountText.Plural(searched, "server")} that {(searched == 1 ? "has" : "have")} a list in the last {days} days). A database that was dropped, renamed, or created since the last list looks the same; servers with no list in that time (Azure SQL Database targets, or a stopped collector) were not searched.";
 
 }

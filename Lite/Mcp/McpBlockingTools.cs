@@ -472,7 +472,7 @@ public sealed class McpBlockingTools
                     r.event_time, r.database_name, r.blocked_spid, r.blocking_spid, r.wait_time_ms
                 }).ToList(),
                 size_note = leftOut > 0
-                    ? $"{leftOut} of the {CountText.Plural(allReports.Count, "report")} this page selected were left out so the answer stays within about 32 KB; a report is never cut mid-way, so each one returned is whole. left_out_reports lists the ones left out (first 20). Fetch one by calling again with as_of set to its event_time (hours_back wide enough to reach it) and limit 1, or narrow with database_name."
+                    ? $"{leftOut} of the {CountText.Plural(allReports.Count, "report")} this page selected {(leftOut == 1 ? "was" : "were")} left out so the answer stays within about 32 KB; a report is never cut mid-way, so each one returned is whole. left_out_reports lists the ones left out (first 20). Fetch one by calling again with as_of set to its event_time (hours_back wide enough to reach it) and limit 1, or narrow with database_name."
                     : null,
                 reports = allReports.Take(fitCount)
             }, McpHelpers.JsonOptions);

@@ -728,7 +728,7 @@ public sealed class AlertReadFailureCounter
 
         return string.Format(
             CultureInfo.InvariantCulture,
-            "{9} for this server failed and were logged but reached no health "
+            "{9} for this server failed and {12} logged but reached no health "
             + "surface{1}, over {10} since {3:yyyy-MM-dd HH:mm}Z. Each one is a condition this "
             + "server was not judged on for that pass — not a fired alert that was lost, and not a collector "
             + "failure.{4} Across this whole service {11} failed: {0} here, {6} on "
@@ -744,7 +744,8 @@ public sealed class AlertReadFailureCounter
             FleetSentence(reading),
             CountText.Plural(reading.ServerReadFailures, "alerting-side store read"),
             CountText.Plural(reading.ServerAlertPasses, "alert pass", "alert passes"),
-            CountText.Plural(reading.InstanceReadFailures, "alerting-side read"));
+            CountText.Plural(reading.InstanceReadFailures, "alerting-side read"),
+            reading.ServerReadFailures == 1 ? "was" : "were");
     }
 
     /// <summary>

@@ -5230,10 +5230,10 @@ internal sealed class DarlingSelfAlertEvaluator
                     $"{worst.Percent.ToString("F1", CultureInfo.InvariantCulture)}%",
                     $"{worstBar.ToString(CultureInfo.InvariantCulture)}%",
                     detail: StateRepeatNote(decision, refire) +
-                        $"{CountText.Plural(hits.Count, "identity column")} on this server {(hits.Count == 1 ? "is" : "are")} near the end of their type. An identity column that runs out stops every insert into its table. " +
+                        $"{CountText.Plural(hits.Count, "identity column")} on this server {(hits.Count == 1 ? "is" : "are")} near the end of {(hits.Count == 1 ? "its" : "their")} type. An identity column that runs out stops every insert into its table. " +
                         string.Join(" ", lines) + more,
                     severity: isCritical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
-                    shortMessage: $"{CountText.Plural(hits.Count, "identity column")} near the end of their type, fullest {worst.Column.DatabaseName}.{worst.Column.TableName}.{worst.Column.ColumnName} at {worst.Percent.ToString("F1", CultureInfo.InvariantCulture)}% used",
+                    shortMessage: $"{CountText.Plural(hits.Count, "identity column")} near the end of {(hits.Count == 1 ? "its" : "their")} type, fullest {worst.Column.DatabaseName}.{worst.Column.TableName}.{worst.Column.ColumnName} at {worst.Percent.ToString("F1", CultureInfo.InvariantCulture)}% used",
                     numericCurrentValue: worst.Percent,
                     numericThresholdValue: worstBar,
                     cancellationToken);
