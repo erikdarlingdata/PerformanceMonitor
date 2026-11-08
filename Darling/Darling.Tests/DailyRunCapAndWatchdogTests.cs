@@ -849,7 +849,7 @@ public sealed class DailyRunWatchdogTests
 }
 
 /// <summary>
-/// #4999: the hang watchdog watches the three collectors detached by name (query_store, plan_correction,
+/// #4999: the hang watchdog watches the four collectors detached by name (query_store, plan_correction,
 /// pg_wait_sampling) as it watches a daily run: one that has been executing for 15 minutes gets ONE Warning naming
 /// its server and collector. They were left out at first, on the reasoning that query_store runs 100 to 230 seconds
 /// on a healthy server and would warn on every run, which held only for the sweep's 60-second line; a healthy run is
@@ -875,7 +875,7 @@ public sealed class DetachedByNameWatchdogTests
     [InlineData("pg_wait_sampling")]
     public async Task ARunDetachedByName_ExecutingPastTheThreshold_IsReportedOnce_NamingTheServerAndTheCollector(string collector)
     {
-        Assert.True(DarlingWorker.IsDetachedByName(collector), "the collector under test is one of the three detached by name");
+        Assert.True(DarlingWorker.IsDetachedByName(collector), "the collector under test is one of those detached by name");
         var logger = new DailyRunLogger();
         var worker = DailyRunKit.MakeWorker(logger);
         var runs = new HeldRuns(worker, collector);
@@ -911,6 +911,34 @@ public sealed class DetachedByNameWatchdogTests
                     && e.Message.Contains("run completed", StringComparison.Ordinal)
                     && e.Message.Contains(collector, StringComparison.Ordinal));
             Assert.Equal(0, worker.WatchDailyRuns(startedBy.AddSeconds(DarlingWorker.DailyRunWatchdogSeconds + 3600)));
+        }
+        finally
+        {
+            runs.ReleaseAll();
+        }
+    }
+
+    /// <summary>
+    /// #7643: the schema pass runs detached from its server's sequential pass, as query_store and plan_correction do (#2700): a first
+    /// baseline, a reconcile after a restart or a run_collectors_now can take minutes, and the server's one-minute collectors do not wait
+    /// for it. The pass returns while the schema run is still going.
+    /// </summary>
+    [Fact]
+    public async Task TheSchemaPass_RunsDetached_SoTheServersPassDoesNotWaitForIt()
+    {
+        var logger = new DailyRunLogger();
+        var worker = DailyRunKit.MakeWorker(logger);
+        worker.ScheduleOverridesForTest = [new ScheduleOverride(null, "schema_objects", null, null, Enabled: true)];
+        var runs = new HeldRuns(worker, "schema_objects");
+        var server = DailyRunKit.MakeServer(7420, "schema_objects");
+        var ct = TestContext.Current.CancellationToken;
+
+        try
+        {
+            var body = worker.RunDueCollectorsAsync(server, null!, ct);
+            Assert.True(await DailyRunKit.BecomesTrueAsync(() => runs.Started == 1, Patience), "the schema run starts");
+            Assert.True(await DailyRunKit.BecomesTrueAsync(() => body.IsCompleted, Patience), "the server's pass ends while the schema run is still going");
+            Assert.Single(worker.InFlightDetachedRuns);
         }
         finally
         {
@@ -1007,10 +1035,12 @@ public sealed class DetachedByNameWatchdogTests
     [InlineData("query_store")]
     [InlineData("plan_correction")]
     [InlineData("pg_wait_sampling")]
+    [InlineData("schema_objects")]
     public async Task ASecondRunOfTheSameCollectorOnTheServer_IsSkippedBeforeItIsWatched_SoTheFirstRunsWatchStands(string collector)
     {
         var logger = new DailyRunLogger();
         var worker = DailyRunKit.MakeWorker(logger);
+        worker.ScheduleOverridesForTest = [new ScheduleOverride(null, collector, null, null, Enabled: true)];
         var runs = new HeldRuns(worker, collector);
         var server = DailyRunKit.MakeServer(7414, collector, TargetFor(collector));
         var ct = TestContext.Current.CancellationToken;
@@ -1040,7 +1070,7 @@ public sealed class DetachedByNameWatchdogTests
 }
 
 /// <summary>
-/// #4999: the three collectors detached by name (query_store, plan_correction, pg_wait_sampling) used to run
+/// #4999: the four collectors detached by name (query_store, plan_correction, pg_wait_sampling, schema_objects) used to run
 /// untracked, so the shutdown drain that waits for the other detached runs did not wait for them. They are tracked the
 /// same way now, and a shutdown waits for one that is still going.
 /// </summary>
@@ -1053,7 +1083,7 @@ public sealed class DetachedByNameShutdownDrainTests
     [InlineData("plan_correction")]
     public async Task TheShutdownDrain_WaitsForARunDetachedByName_ThatIsStillGoing(string collector)
     {
-        Assert.True(DarlingWorker.IsDetachedByName(collector), "the collector under test is one of the three detached by name");
+        Assert.True(DarlingWorker.IsDetachedByName(collector), "the collector under test is one of those detached by name");
         var logger = new DailyRunLogger();
         var worker = DailyRunKit.MakeWorker(logger);
         var runs = new HeldRuns(worker, collector);

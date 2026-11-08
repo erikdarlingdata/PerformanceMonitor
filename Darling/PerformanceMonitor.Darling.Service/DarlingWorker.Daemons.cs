@@ -466,7 +466,7 @@ public sealed partial class DarlingWorker
     /// <summary>
     /// #4938, #4999: the detached runs that have not finished, so a shutdown can wait for them the way it waits for
     /// the per-server bodies. They used to run inside those bodies and so inside that wait; detached, nothing else
-    /// holds on to them. That is every daily run and, since #4999, the three collectors detached by name. A run
+    /// holds on to them. That is every daily run and, since #4999, the four collectors detached by name. A run
     /// removes itself when it ends.
     /// </summary>
     private readonly ConcurrentDictionary<Task, byte> _detachedRuns = new();
@@ -476,8 +476,8 @@ public sealed partial class DarlingWorker
 
     /// <summary>
     /// #4999: the detached runs that are executing right now, one per (server, collector), which the hang watchdog
-    /// (<see cref="WatchDailyRuns"/>) reads each sweep tick: the daily runs, and the three runs detached by name
-    /// (query_store, plan_correction, pg_wait_sampling). A daily run is added once it holds its permit, so a run that
+    /// (<see cref="WatchDailyRuns"/>) reads each sweep tick: the daily runs, and the four runs detached by name
+    /// (query_store, plan_correction, pg_wait_sampling, schema_objects). A daily run is added once it holds its permit, so a run that
     /// is only waiting for one is never in it: queue time is capacity pressure, not a hang, the same split the
     /// sweep watchdog makes (<see cref="ClassifySweepEpisode"/>). A run detached by name takes no permit and is added
     /// as it starts executing. One run per key holds because every run is added AFTER the single-flight gate that
@@ -530,12 +530,12 @@ public sealed partial class DarlingWorker
 
     /// <summary>
     /// #4999: seconds a detached run may execute before the hang watchdog (<see cref="WatchDailyRuns"/>) reports
-    /// it: 15 minutes, for a daily run and for each of the three runs detached by name alike. It is its own number
+    /// it: 15 minutes, for a daily run and for each of the four runs detached by name alike. It is its own number
     /// and not <see cref="SweepWatchdogSeconds"/>'s 60 s, because a detached run is the slow end of the catalog and a
     /// minute is not a stall there. database_config reads every database on its server, so on a server with many
     /// databases a healthy daily run takes minutes, and a 60 s line warned once a day, on every such server, for no
     /// fault; query_store takes 100 to 230 s on a healthy server, so at 60 s it would have warned on every run, which
-    /// is why the three detached by name were first left out and are watched now that the line is 15 minutes. A
+    /// is why the four detached by name were first left out and are watched now that the line is 15 minutes. A
     /// command deadline cannot be the measure either: a run issues many commands (database_config issues a set per
     /// database), each bounded by its own deadline, so no single deadline bounds a whole run. A run still going after
     /// 15 minutes is long enough past a healthy one to be worth saying so, and while it goes its server's next run
@@ -546,7 +546,7 @@ public sealed partial class DarlingWorker
 
     /// <summary>
     /// #4999: the hang watchdog for detached runs, called once per sweep tick with the current time: the daily
-    /// runs and the three runs detached by name (query_store, plan_correction, pg_wait_sampling). A run that has
+    /// runs and the four runs detached by name (query_store, plan_correction, pg_wait_sampling, schema_objects). A run that has
     /// been executing for <see cref="DailyRunWatchdogSeconds"/> or more gets ONE Warning that names its server and
     /// collector, the same action the sweep watchdog takes for a body that has not finished
     /// (<see cref="ClassifySweepEpisode"/>), on a threshold of its own. Before this a stuck detached run showed only
@@ -626,7 +626,7 @@ public sealed partial class DarlingWorker
     }
 
     /// <summary>
-    /// #4938, #4999: keeps a detached run, a daily run or one of the three detached by name, in
+    /// #4938, #4999: keeps a detached run, a daily run or one of those detached by name, in
     /// <see cref="InFlightDetachedRuns"/> until it ends. The removal is attached after the add, so a run that finished
     /// in between is still removed.
     /// </summary>
@@ -777,6 +777,15 @@ public sealed partial class DarlingWorker
     internal static bool IsPlanCorrectionCollector(string collectorName) =>
         string.Equals(collectorName, PlanCorrectionCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// #7643: whether a dispatched collector name is schema_objects, detached from the sequential body for the bimodal-cost reason of
+    /// #2700: a quiet pass reads only the session's events, but a first baseline, a reconcile after a restart or lost events, or
+    /// run_collectors_now reads every database's catalog for minutes. A skipped tick is safe: the next pass reads the events from the
+    /// stored position, so it defers and drops nothing.
+    /// </summary>
+    internal static bool IsSchemaObjectsCollector(string collectorName) =>
+        string.Equals(collectorName, SchemaObjectsCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
+
     /// <summary>#5640 (H2): the permission fault the attention run records as PERMISSIONS, or null for any other collector and when the ensure was not denied.</summary>
     internal static string? AttentionPermissionFaultFor(string collectorName, ServerLoopState server) =>
         IsAttentionCollector(collectorName) ? server.AttentionXePermissionFault : null;
@@ -885,7 +894,7 @@ public sealed partial class DarlingWorker
     /// holds for as long as it is going or queued for a permit, so an inline run never starts beside it. Returns the
     /// lease; <c>null</c> when the slot is held, which the caller reads as "that collector's scheduled run is already
     /// going: leave this one out"; and <see cref="DetachedCollectorGate.NotGated"/> for a collector this does not
-    /// cover, which is one that does not run detached and one of the three detached by name, whose slot
+    /// cover, which is one that does not run detached and one of those detached by name, whose slot
     /// <see cref="RunOneAsync"/> takes itself (taking it here too would make that run find it held).
     /// </summary>
     private IDisposable? TryTakeInlineDailySlot(int serverId, string collectorName, EffectiveSchedule effective) =>

@@ -1105,7 +1105,7 @@ public sealed partial class DarlingWorker
                 var peerMaxAtDispatchMs = PeerMaxOrNull(server);
                 /* #3604: pg_wait_sampling is the third, and the reason is different in kind — see
                    IsPgWaitSamplingCollector: a deliberate 30 s sampling window, not a bimodal tail. */
-                /* #4999: ONE test decides whether a collector leaves this pass, RunsDetached: the three above by
+                /* #4999: ONE test decides whether a collector leaves this pass, RunsDetached: the four above by
                    name and every daily collector by cadence. get_collection_health asks the same test to leave
                    those collectors out of its sweep-body roll-up, so the dispatch and the reading cannot
                    disagree about what runs in the body. */
@@ -1328,7 +1328,7 @@ public sealed partial class DarlingWorker
                    the same slot: held means the scheduled run is still going, and the snapshot leaves that
                    collector out and says so. Free means the snapshot runs it inline, as before, holds the slot for
                    that run only, and gives it back after, so a snapshot that is over never makes the next scheduled
-                   run skip. The three collectors detached by name take their own slot inside RunOneAsync. */
+                   run skip. The four collectors detached by name take their own slot inside RunOneAsync. */
                 var snapshotSlot = TryTakeInlineDailySlot(runtime.ServerId, name, effective);
                 if (snapshotSlot is null)
                 {
@@ -2833,7 +2833,8 @@ LIMIT 1";
            NotGated (mirroring QueryStoreServerGate's) collapses this to a single null check below — a
            future third collector needs only its own IsXCollector check added to this one condition,
            never a second one to keep in sync. */
-        using var detachedGate = IsPlanCorrectionCollector(collectorName) || IsPgWaitSamplingCollector(collectorName) || detachedDaily
+        using var detachedGate = IsPlanCorrectionCollector(collectorName) || IsPgWaitSamplingCollector(collectorName)
+            || IsSchemaObjectsCollector(collectorName) || detachedDaily
             ? _detachedCollectorGates.GetOrAdd((runtime.ServerId, collectorName), static _ => new DetachedCollectorGate()).TryAcquire()
             : DetachedCollectorGate.NotGated;
 

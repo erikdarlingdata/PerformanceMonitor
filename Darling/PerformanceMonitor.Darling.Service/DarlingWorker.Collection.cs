@@ -1512,7 +1512,7 @@ public sealed partial class DarlingWorker
 
             /* #4999: the hang watchdog above reads only the per-server bodies, and a daily run no longer runs in
                one: it is detached and can go for hours, so a stuck one showed up only as stale data. The same goes
-               for the three runs detached by name (query_store, plan_correction, pg_wait_sampling). Same tick, the
+               for the four runs detached by name (query_store, plan_correction, pg_wait_sampling, schema_objects). Same tick, the
                same kind of Warning, one per run, naming the server and collector; the threshold is its own, 15
                minutes (DailyRunWatchdogSeconds), where the bodies' is 60 seconds. After the launch loop and outside
                it, because a detached run belongs to no single body and the loop may leave early. */

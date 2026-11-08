@@ -185,6 +185,7 @@ Each pass writes one row per database to `collect.schema_capture_passes` (what w
 
 Limits worth knowing:
 
+- The pass runs detached from the server's other collectors, as `query_store` does, so a long baseline or full read does not hold up the one-minute collectors. A pass that is still going when the next one comes due skips that tick, and the next pass reads the events from where the last one stopped.
 - Only writable databases are tracked: a standalone database, an Availability Group primary or an Azure SQL Database. Secondaries, standby, restoring, read-only and snapshot databases are skipped. An Availability Group database keeps one history under the group, not one per replica.
 - Trigger DDL reconciles its database, because the event names the trigger and not the table it belongs to. A rename reconciles its database too, so the old name is closed and the new one opened in one pass.
 - The Azure SQL Database path (one session and one history per database) is covered by fakes only and has not been run against a real Azure instance.
