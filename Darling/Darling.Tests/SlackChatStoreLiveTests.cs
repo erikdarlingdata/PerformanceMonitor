@@ -57,6 +57,14 @@ public sealed class SlackChatStoreLiveTests
 
     internal static Task<string?> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct) => SlackCardStoreLiveTests.ScalarAsync(connection, sql, ct);
 
+    /// <summary>The store's clock, read once: the one instant a fact passes everywhere it needs a now, so nothing in it compares the store's
+    /// clock with the test runner's.</summary>
+    internal static async Task<DateTime> StoreNowAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT now()", connection);
+        return (DateTime)(await command.ExecuteScalarAsync(ct))!;
+    }
+
     /// <summary>A request on the route and the server, with its alert rows. <paramref name="state"/> and <paramref name="openedAgo"/> shape the one rule.</summary>
     internal static async Task AddRequestAsync(NpgsqlConnection connection, Guid id, int routeId, string state, TimeSpan openedAgo, int level = 3, string kind = "alert",
         Guid? chatThreadOf = null, CancellationToken ct = default)
@@ -157,7 +165,9 @@ public sealed class SlackChatStoreLiveTests
             var thread = await store.FindChatThreadAsync(Channel, ThreadTs, ct);
             Assert.NotNull(thread);
             Assert.Equal((s_parent, seed.RouteId, ServerId, Channel, ThreadTs), (thread.ThreadRequestId, thread.RouteId, thread.ServerId, thread.ChannelId, thread.ThreadTs));
-            Assert.InRange(thread.OpenedAtUtc, DateTime.UtcNow.AddMinutes(-61), DateTime.UtcNow.AddMinutes(-59));
+            /* The parent was seeded an hour before the store's clock, so its window is read against the store's clock, not the test runner's. */
+            var now = await StoreNowAsync(connection, ct);
+            Assert.InRange(thread.OpenedAtUtc, now.AddMinutes(-61), now.AddMinutes(-59));
             Assert.Null(await store.FindChatThreadAsync(Channel, "1700000000.000999", ct));
             Assert.Null(await store.FindChatThreadAsync("C0OTHER", ThreadTs, ct));
 
@@ -265,35 +275,45 @@ public sealed class SlackChatStoreLiveTests
     {
         await WithStoreAsync(async (connection, _, store, seed, ct) =>
         {
-            var thread = Thread(seed.RouteId);
+            /* One instant for the whole fact, read from the store's clock and set five seconds behind it, as a test runner whose clock lags the
+               store's sees it. The parent is seeded at exactly the hour's edge from this same instant, and every open, count and window below
+               takes it, so no second clock can move the parent inside the hour the counts read. */
+            var now = (await StoreNowAsync(connection, ct)).AddSeconds(-5);
+            await using (var edge = new NpgsqlCommand($"UPDATE config.investigation_requests SET opened_at = $1 - interval '1 hour' WHERE request_id = '{s_parent}'", connection))
+            {
+                edge.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = now, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz });
+                Assert.Equal(1, await edge.ExecuteNonQueryAsync(ct));
+            }
+
+            var thread = new SlackChatThread(s_parent, seed.RouteId, ServerId, Channel, ThreadTs, now.AddHours(-1));
             for (var i = 0; i < 6; i++)
-                Assert.Equal(SlackChatOpenOutcome.Opened, (await store.OpenChatRequestAsync(thread, s_parent, [], [], 100, DateTime.UtcNow, RoutesAt(2), ct)).Outcome);
-            Assert.Equal(new SlackChatCounts(6, 6), await store.ChatCountsAsync(s_parent, seed.RouteId, DateTime.UtcNow, ct));
-            Assert.Equal(SlackChatOpenOutcome.ThreadCap, (await store.OpenChatRequestAsync(thread, s_parent, [], [], 100, DateTime.UtcNow, RoutesAt(2), ct)).Outcome);
+                Assert.Equal(SlackChatOpenOutcome.Opened, (await store.OpenChatRequestAsync(thread, s_parent, [], [], 100, now, RoutesAt(2), ct)).Outcome);
+            Assert.Equal(new SlackChatCounts(6, 6), await store.ChatCountsAsync(s_parent, seed.RouteId, now, ct));
+            Assert.Equal(SlackChatOpenOutcome.ThreadCap, (await store.OpenChatRequestAsync(thread, s_parent, [], [], 100, now, RoutesAt(2), ct)).Outcome);
             Assert.Equal("6", await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_requests WHERE trigger_kind = 'chat'", ct));
 
             /* Another thread on the same route: under its own thread cap, over the route's. */
             var other = Guid.NewGuid();
             await AddRequestAsync(connection, other, seed.RouteId, "reported", TimeSpan.FromMinutes(30), ct: ct);
             await ExecAsync(connection, $"INSERT INTO config.investigation_request_threads (request_id, channel_id, thread_ts) VALUES ('{other}', '{Channel}', '1700000000.000500')", ct);
-            var otherThread = new SlackChatThread(other, seed.RouteId, ServerId, Channel, "1700000000.000500", DateTime.UtcNow.AddMinutes(-30));
-            Assert.Equal(SlackChatOpenOutcome.RouteCap, (await store.OpenChatRequestAsync(otherThread, other, [], [], 6, DateTime.UtcNow, RoutesAt(2), ct)).Outcome);
-            Assert.Equal(SlackChatOpenOutcome.Opened, (await store.OpenChatRequestAsync(otherThread, other, [], [], 7, DateTime.UtcNow, RoutesAt(2), ct)).Outcome);
+            var otherThread = new SlackChatThread(other, seed.RouteId, ServerId, Channel, "1700000000.000500", now.AddMinutes(-30));
+            Assert.Equal(SlackChatOpenOutcome.RouteCap, (await store.OpenChatRequestAsync(otherThread, other, [], [], 6, now, RoutesAt(2), ct)).Outcome);
+            Assert.Equal(SlackChatOpenOutcome.Opened, (await store.OpenChatRequestAsync(otherThread, other, [], [], 7, now, RoutesAt(2), ct)).Outcome);
 
             /* CountRouteSql, the alert limit, leaves every chat request out; the chat count is apart. */
             await using (var count = new NpgsqlCommand(InvestigationRequestStore.CountRouteSql, connection))
             {
                 count.Parameters.Add(new NpgsqlParameter<int> { TypedValue = seed.RouteId });
-                count.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.UtcNow, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz });
+                count.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = now, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz });
                 await using var reader = await count.ExecuteReaderAsync(ct);
                 Assert.True(await reader.ReadAsync(ct));
                 /* The parent opened an hour ago, at the hourly window's edge; the other thread's request half an hour ago. Neither chat request counts. */
                 Assert.Equal((1L, 2L), (reader.GetInt64(0), reader.GetInt64(1)));
             }
 
-            Assert.Equal(new SlackChatCounts(1, 7), await store.ChatCountsAsync(other, seed.RouteId, DateTime.UtcNow, ct));
+            Assert.Equal(new SlackChatCounts(1, 7), await store.ChatCountsAsync(other, seed.RouteId, now, ct));
             /* An hour on, the hour's count is empty. */
-            Assert.Equal(new SlackChatCounts(0, 0), await store.ChatCountsAsync(s_parent, seed.RouteId, DateTime.UtcNow.AddMinutes(61), ct));
+            Assert.Equal(new SlackChatCounts(0, 0), await store.ChatCountsAsync(s_parent, seed.RouteId, now.AddMinutes(61), ct));
         });
     }
 

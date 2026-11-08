@@ -122,8 +122,8 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ServerId, ServerName);
         await PgMigrations.MigrateAsync(connection, ct);
         if (scratch.TimescaleEnabled)
         {
-            /* V23 made collection_log a hypertable with a compression policy (compress_after 1 day), and every
-               seeded chunk is older than that. TimescaleDB's scheduler runs the policy on its own clock, so a run
+            /* V23 made collection_log a hypertable, its compression policy (compress_after 1 day) comes from the
+               startup ensure, and every seeded chunk is older than that. TimescaleDB's scheduler runs a policy on its own clock, so a run
                landing between the seed and the plan compressed a chunk, and a compressed chunk is read through its
                own "compressed_server_id__ts_meta_v2_first_col_idx" instead of idx_collection_log_watermark (dev run
                40987085936, #6944). The plan is not the thing under test there, so no policy job runs here. */
