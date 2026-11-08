@@ -22,9 +22,26 @@ public partial class ViewerServerTab
     /// <summary>#8307: the CPU Scheduler page scrolls as one: a wheel over its grid that is at its end moves the page (<see cref="PageScroll.ForwardWheel"/>).</summary>
     private void PageScroll_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e) => PageScroll.ForwardWheel(sender, e);
 
-    /// <summary>#8307: the page's least height follows the grid: the chart's floor over the rows the grid takes (<see cref="PageScroll.ChartOverGridMinHeight"/>), so the page scrolls only when the two do not fit.</summary>
-    private void CpuSchedulerGrid_SizeChanged(object sender, SizeChangedEventArgs e) =>
-        CpuSchedulerPage.MinHeight = PageScroll.ChartOverGridMinHeight(CpuSchedulerGrid.ActualHeight);
+    /// <summary>
+    /// #8307: the page's least height follows the grid: the chart's floor over the rows the grid takes
+    /// (<see cref="PageScroll.ChartOverGridMinHeight"/>), so the page scrolls only when the two do not fit. The handler writes layout from
+    /// a layout event, so it acts only on a change in the grid's height (a width change alone, such as the page's scroll bar
+    /// appearing, changes nothing it reads) and only when the value it would set differs from the one the page has, so the page's
+    /// minimum cannot feed back into the grid's size without end.
+    /// </summary>
+    private void CpuSchedulerGrid_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (!e.HeightChanged)
+        {
+            return;
+        }
+
+        var minHeight = PageScroll.ChartOverGridMinHeight(e.NewSize.Height);
+        if (Math.Abs(CpuSchedulerPage.MinHeight - minHeight) > 0.5)
+        {
+            CpuSchedulerPage.MinHeight = minHeight;
+        }
+    }
 }
 
 /// <summary>
