@@ -15,6 +15,7 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Remediation;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -46,8 +47,11 @@ public sealed partial class PlanForceToolLiveTests
     private static async Task<long> LastCalledIdAsync(Ctx c) =>
         long.Parse(await PgScalarAsync(c.Connection, "SELECT max(journal_id) FROM config.investigation_journal WHERE event = 'action_called'", c.Ct) ?? "0", CultureInfo.InvariantCulture);
 
-    /// <summary>Journals a call by hand, as the tool would, with the state the agent read before it wrote. <paramref name="result"/> is done, failed or none (unknown).</summary>
-    private static async Task<long> SeedCallAsync(Ctx c, string kind, long queryId, long planId, long? beforePlan, string beforeType, string result)
+    /// <summary>
+    /// Journals a call by hand, as the tool would, with the state the agent read before it wrote. <paramref name="result"/> is done, failed or none (unknown).
+    /// <paramref name="queryHash"/> is the query's hash in that before image; null leaves it out, as a row journaled before the image carried one.
+    /// </summary>
+    private static async Task<long> SeedCallAsync(Ctx c, string kind, long queryId, long planId, long? beforePlan, string beforeType, string result, string? queryHash = null)
     {
         var request = await PgScalarAsync(c.Connection, "SELECT request_id FROM config.investigation_requests LIMIT 1", c.Ct);
         var before = new JsonObject
@@ -55,6 +59,8 @@ public sealed partial class PlanForceToolLiveTests
             ["database"] = c.Sql.Database, ["query_id"] = queryId, ["plan_id"] = planId,
             ["forced_plan"] = beforePlan is null ? null : new JsonObject { ["plan_id"] = beforePlan, ["forcing_type"] = beforeType },
         };
+        if (queryHash is not null)
+            before["query_hash"] = queryHash;
         var detail = new JsonObject
         {
             ["tool"] = kind == ForceKind ? "force_query_store_plan" : "unforce_query_store_plan", ["kind"] = kind,
@@ -391,5 +397,60 @@ public sealed partial class PlanForceToolLiveTests
         Assert.Equal("nothing_to_undo", DarlingMcpPlanForceTools.PlanUndoDecision.Decide(facts, State(30)).Refusal!.Reason);
         Assert.Equal("changed_since", DarlingMcpPlanForceTools.PlanUndoDecision.Decide(facts, State(99)).Refusal!.Reason);
         Assert.Equal("changed_since", DarlingMcpPlanForceTools.PlanUndoDecision.Decide(facts with { Result = AgentChangeResult.Done }, State(null)).Refusal!.Reason);
+    }
+
+    /// <summary>
+    /// The journaled before image carries the hash of the query the agent's force acted on, and the server now has another query behind the same query_id (a database
+    /// restored or re-created since restarted its Query Store ids). The undo is refused as plan_query_changed at the first step and on a confirm, the refusal is
+    /// journaled, and the plan the server has forced stays as it is: the undo never unforces another query's plan.
+    /// </summary>
+    [Fact]
+    public async Task UndoOfAForce_WhoseJournaledQueryHashIsNotTheServers_IsRefusedAsPlanQueryChanged_AndWritesNothing()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var (query, planA, _) = await c.Sql.TwoPlansAsync("pu9", c.Ct);
+            await c.Sql.ForceDirectlyAsync(query, planA, c.Ct);
+            var serverHash = await c.Sql.QueryHashAsync(query, c.Ct);
+            Assert.NotNull(serverHash);
+            var called = await SeedCallAsync(c, ForceKind, query, planA, null, "", "done", OtherQueryHash);
+
+            var shown = await UndoAsync(c, called, confirm: false);
+            Assert.Equal(PlanUndoAnswer.RefusedStatus, shown.Status);
+            Assert.Equal(PlanQueryChanged, shown.Code);
+            Assert.Contains(serverHash, shown.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(OtherQueryHash, shown.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Null(shown.Statement);
+
+            var confirmed = await RawUndoAsync(c, called, confirm: true, "alice", PlanForceStatement.For(c.Sql.Database, query, planA, force: false));
+            Assert.Equal(PlanUndoAnswer.RefusedStatus, confirmed.Status);
+            Assert.Equal(PlanQueryChanged, confirmed.Code);
+            Assert.Equal(planA, await c.Sql.ForcedPlanAsync(query, c.Ct));
+            Assert.Empty(await RowsAsync(c, "action_undone"));
+            /* A person's refusal is journaled once per call, code and hour, so the two attempts leave one row. */
+            Assert.Equal("1", await RefusedRowsAsync(c, PlanQueryChanged));
+        });
+    }
+
+    /// <summary>
+    /// A before image journaled with the server's own hash, or one journaled with no hash at all, goes on to the confirm step: the check refuses on a mismatch only.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task UndoOfAForce_WhoseJournaledImageCarriesTheServersHashOrNone_GoesOnToTheConfirmStep(bool hashRecorded)
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var (query, planA, _) = await c.Sql.TwoPlansAsync("pu10", c.Ct);
+            await c.Sql.ForceDirectlyAsync(query, planA, c.Ct);
+            var serverHash = await c.Sql.QueryHashAsync(query, c.Ct);
+            var called = await SeedCallAsync(c, ForceKind, query, planA, null, "", "done", hashRecorded ? serverHash : null);
+
+            var shown = await UndoAsync(c, called, confirm: false);
+            Assert.Equal(PlanUndoAnswer.Confirm, shown.Status);
+            Assert.Equal(PlanForceStatement.For(c.Sql.Database, query, planA, force: false), shown.Statement);
+            Assert.Equal("0", await RefusedRowsAsync(c, PlanQueryChanged));
+        });
     }
 }

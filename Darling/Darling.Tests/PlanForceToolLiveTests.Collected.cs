@@ -257,16 +257,34 @@ VALUES (7, $2, $1, 1, 7, 5, 'PRIMARY', $2, 'Regular')", c.Connection) { CommandT
 
     /// <summary>
     /// The store holds the pair in rows from before and after the query behind the ids changed: the server's hash is among the collected ones, so the pair is
-    /// one the store collected for this query and the check passes. A collected row with no hash at all says nothing about the query and does not refuse either.
+    /// one the store collected for this query and the check passes.
     /// </summary>
     [Fact]
-    public async Task AForceOfAPairWhoseCollectedRowsIncludeTheServersHash_OrCarryNone_PassesTheQueryCheck()
+    public async Task AForceOfAPairWhoseCollectedRowsIncludeTheServersHash_PassesTheQueryCheck()
     {
         await RunAsync(Without.Nothing, async c =>
         {
             var (query, planA, _) = await c.Sql.TwoPlansAsync("pfh3", c.Ct);
             await SeedCollectedPlanAsync(c, c.Sql.Database, query, planA, OtherQueryHash);
             await SeedCollectedPlanAsync(c, c.Sql.Database, query, planA);
+
+            var json = Parse(await CallForceAsync(c, force: true, query, planA, dryRun: true));
+            Assert.Equal("dry_run", (string?)json["status"]);
+            Assert.Equal("0", await RefusedRowsAsync(c, PlanQueryChanged));
+        });
+    }
+
+    /// <summary>
+    /// Every collected row for the pair carries no <c>query_hash</c> (an interval row written without one), while the server has a hash: the store says nothing about
+    /// which query the pair belonged to, so the check has nothing to compare and does not refuse. The pair is still a collected one, so the call goes on.
+    /// </summary>
+    [Fact]
+    public async Task AForceOfAPairWhoseCollectedRowsCarryNoQueryHash_PassesTheQueryCheck()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var (query, planA, _) = await c.Sql.TwoPlansAsync("pfh4", c.Ct);
+            Assert.NotNull(await c.Sql.QueryHashAsync(query, c.Ct));
             await using (var insert = new NpgsqlCommand(@"
 INSERT INTO collect.query_store_interval_wide (server_id, collection_time, database_name, runtime_stats_interval_id, plan_id, query_id, replica_role, first_execution_time, execution_type_desc)
 VALUES (7, $2, $1, 1, $4, $3, 'PRIMARY', $2, 'Regular')", c.Connection) { CommandTimeout = 60 })
