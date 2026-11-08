@@ -221,12 +221,14 @@ def commit_line(c):
     return f"- {c['sha'][:9]} {pr or '(no PR)'} {title.replace('@', '(at)')}"
 
 
-def dev_red_body(repo, red_sha, run_url, failed, fetcher):
-    head = [f"The dev push CI failed at {red_sha}.", "", f"Run: {run_url}", f"Failed:{failed or ' see the run'}", ""]
+def dev_red_body(repo, red_sha, run_url, failed, fetcher, kind="push", context="CI result"):
+    """kind and context name the run: a push stops at the last green `CI result`, a full run (#7819) at the last green `CI full suite`."""
+    last_green = "the last green dev run" if context == "CI result" else f"the last dev commit with a green {context}"
+    head = [f"The dev {kind} CI failed at {red_sha}.", "", f"Run: {run_url}", f"Failed:{failed or ' see the run'}", ""]
     try:
         commits = paged(fetcher, f"repos/{repo}/commits?sha={red_sha}", max_pages=(MAX_COMMITS + PAGE - 1) // PAGE)
     except FetchError as e:
-        return "\n".join(head + [f"Commits since the last green dev run: the list could not be read ({e})."]) + "\n"
+        return "\n".join(head + [f"Commits since {last_green}: the list could not be read ({e})."]) + "\n"
     commits = commits[:MAX_COMMITS]
 
     def is_green(sha):
@@ -234,15 +236,15 @@ def dev_red_body(repo, red_sha, run_url, failed, fetcher):
             statuses = paged(fetcher, f"repos/{repo}/commits/{sha}/statuses", max_pages=1)
         except FetchError:
             return False
-        return any(s.get("context") == "CI result" and s.get("state") == "success" for s in statuses)
+        return any(s.get("context") == context and s.get("state") == "success" for s in statuses)
 
     swept, stop = swept_commits(commits, is_green)
-    lines = head + [f"Commits since the last green dev run (newest first), {len(swept)} swept:"]
+    lines = head + [f"Commits since {last_green} (newest first), {len(swept)} swept:"]
     lines += [commit_line(c) for c in swept]
     if stop:
-        lines.append(f"(stopped at {stop[:9]}, the last dev commit with a green CI result)")
+        lines.append(f"(stopped at {stop[:9]}, the last dev commit with a green {context})")
     else:
-        lines.append(f"(no dev commit with a green CI result among the {len(commits)} looked at)")
+        lines.append(f"(no dev commit with a green {context} among the {len(commits)} looked at)")
     return "\n".join(lines) + "\n"
 
 
@@ -267,6 +269,8 @@ def parse(argv):
     d.add_argument("--run-url", required=True)
     d.add_argument("--failed", default="")
     d.add_argument("--out", required=True)
+    d.add_argument("--kind", default="push")
+    d.add_argument("--context", default="CI result")
     return p.parse_args(argv)
 
 
@@ -279,7 +283,7 @@ def run(argv, fetcher=None, write=gh_write):
         except Exception as e:  # noqa: BLE001 - this step reports and never fails the pull request
             print(f"::warning title=Rerun report not written::{type(e).__name__}: {e}")
         return 0
-    body = dev_red_body(args.repo, args.red_sha, args.run_url, args.failed, fetcher)
+    body = dev_red_body(args.repo, args.red_sha, args.run_url, args.failed, fetcher, args.kind, args.context)
     with open(args.out, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(body)
     return 0

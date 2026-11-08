@@ -334,14 +334,16 @@ VALUES ($1, 702, 'S702', $2, 1, 1, TRUE, 'tray')";
     [Fact]
     public void EveryBannerSite_FeedsThePickersDataStart()
     {
-        /* The call sites of ApplyWindowFloorToBanner outside its definition, by file. A new site must either feed the picker
-           (ServerTab.FeedDataStart / the Job History tab's onFloor) or be added here with the reason it cannot. */
+        /* The call sites of ApplyWindowFloorToBanner outside its definition, by file. A new site must either feed its own
+           picker (the Job History tab's onFloor) or be added here with the reason it does not. The server tab's sites do not
+           feed: its picker's note names the server's oldest data (ServerTab.OldestRetainedUtc), which a window-floor probe,
+           bounded to the window it was asked about, cannot give. */
         var expected = new[]
         {
             ("Controls/JobHistoryTab.xaml.cs", 1, "onFloor?.Invoke(floor)"),                       /* the tab's own picker */
-            ("Controls/LiteBlockingLaneDataStart.cs", 1, "onStartChosen?.Invoke(start)"),          /* Overview lanes, fed by the tab */
-            ("Controls/ServerTab.BlockingChartsDataStart.cs", 1, "FeedDataStart("),
-            ("Controls/ServerTab.Refresh.cs", 1, "FeedDataStart(LiteTimeRange.CollectorOfRelation(relation), floor)"),
+            ("Controls/LiteBlockingLaneDataStart.cs", 1, "onStartChosen?.Invoke(start)"),          /* Overview lanes' own note */
+            ("Controls/ServerTab.BlockingChartsDataStart.cs", 1, null),                            /* the server tab: see above */
+            ("Controls/ServerTab.Refresh.cs", 1, null),                                            /* the server tab: see above */
             ("Windows/CollectionLogWindow.xaml.cs", 1, null),                                      /* its own window: no picker */
         };
 
@@ -365,11 +367,10 @@ VALUES ($1, 702, 'S702', $2, 1, 1, TRUE, 'tray')";
             }
         }
 
-        /* The central funnel feeds for every relation, and the tab points the picker at the page on screen. */
+        /* No banner site writes the server tab's picker note directly. */
         var refresh = LiteFile(Path.Combine("Controls", "ServerTab.Refresh.cs"));
         Assert.DoesNotContain("if (relation == QueryWindowRelation.QueryStats)\n        {\n            RangePicker.DataStartUtc", refresh, StringComparison.Ordinal);
         Assert.Contains("RangePicker.SetLongestChoice(LiteTimeRange.AlertHistoryLongestChoice, ", LiteFile(Path.Combine("Controls", "AlertsHistoryTab.xaml.cs")), StringComparison.Ordinal);
-        Assert.Contains("CorrelatedLanes.DataStartFound +=", LiteFile(Path.Combine("Controls", "ServerTab.xaml.cs")), StringComparison.Ordinal);
     }
 
     private static string ThisFile([CallerFilePath] string path = "") => path;

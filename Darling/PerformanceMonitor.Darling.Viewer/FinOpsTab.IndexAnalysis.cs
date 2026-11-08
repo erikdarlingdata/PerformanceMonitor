@@ -34,6 +34,17 @@ public partial class FinOpsTab
     /// banners. When no index statistics have been collected yet (no rollups), shows the empty hint and clears
     /// the grids/banners.
     /// </summary>
+    /// <summary>
+    /// The two Index Analysis grids are wider than the page, so a horizontal scroll bar is right only while they hold rows: on an empty
+    /// grid it would scroll a header row and nothing else.
+    /// </summary>
+    private void IndexAnalysisGridsHoldRows(bool hasRows)
+    {
+        var visibility = hasRows ? ScrollBarVisibility.Auto : ScrollBarVisibility.Hidden;
+        FinOpsIndexAnalysisRollupGrid.HorizontalScrollBarVisibility = visibility;
+        FinOpsIndexAnalysisDetailGrid.HorizontalScrollBarVisibility = visibility;
+    }
+
     private async Task LoadFinOpsIndexAnalysisAsync()
     {
         var read = await _dataService.GetIndexAnalysisWithSnapshotTimesAsync(_server.ServerId);
@@ -45,6 +56,7 @@ public partial class FinOpsTab
         {
             _finopsIndexAnalysisRollupFilterMgr!.UpdateData(new List<IndexCleanupRollupRow>());
             _finopsIndexAnalysisFilterMgr!.UpdateData(new List<IndexCleanupRecommendationRow>());
+            IndexAnalysisGridsHoldRows(false);
             FinOpsIndexAnalysisBannerPanel.Children.Clear();
             FinOpsIndexAnalysisBannerScroller.Visibility = Visibility.Collapsed;
             FinOpsIndexAnalysisNoDataMessage.Visibility = Visibility.Visible;
@@ -57,6 +69,7 @@ public partial class FinOpsTab
 
         _finopsIndexAnalysisRollupFilterMgr!.UpdateData(rollups);
         _finopsIndexAnalysisFilterMgr!.UpdateData(recs);
+        IndexAnalysisGridsHoldRows(rollups.Count > 0 || recs.Count > 0);
 
         BuildIndexAnalysisBanners(result);
 

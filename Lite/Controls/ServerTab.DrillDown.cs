@@ -260,7 +260,6 @@ public partial class ServerTab : UserControl
     {
         /* The drill's window is held as the instants it names (#4766, #5562): a fixed range, which the picker shows in the
            display zone. It is held exactly as handed and never widened (R3): every drill caller passes 15 minutes or more. */
-        _probedFloors.Clear();
 
         // Hold it without triggering a refresh (Value raises no RangeChanged; the flag covers a handler that might)
         _suppressRangeRefresh = true;
