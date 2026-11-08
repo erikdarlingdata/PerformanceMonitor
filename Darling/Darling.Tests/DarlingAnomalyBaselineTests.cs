@@ -349,9 +349,19 @@ public sealed class DarlingAnomalyBaselineTests
             var legacy = PgBaselineProvider.GetLegacyBaselineQuery(gated[i].Metric)!;
 
             Assert.Contains(gated[i].Predicate, successor, StringComparison.Ordinal);
-            Assert.DoesNotContain(gated[i].Predicate, legacy, StringComparison.Ordinal);
-            Assert.Contains(ungated[i].Predicate, legacy, StringComparison.Ordinal);
             Assert.DoesNotContain(ungated[i].Predicate, successor, StringComparison.Ordinal);
+            if (gated[i].Metric == MetricNames.BatchRequests)
+            {
+                /* The pre-#3653 legacy text has no interval to gate on. */
+                Assert.DoesNotContain(gated[i].Predicate, legacy, StringComparison.Ordinal);
+                Assert.Contains(ungated[i].Predicate, legacy, StringComparison.Ordinal);
+            }
+            else
+            {
+                /* #8106: the wait pair's legacy supply is #3653's interval-honest aggregate, so its legacy text carries the gate too. */
+                Assert.Contains(gated[i].Predicate, legacy, StringComparison.Ordinal);
+                Assert.DoesNotContain(ungated[i].Predicate, legacy, StringComparison.Ordinal);
+            }
 
             /* The successor reads the successor relation and never the legacy one; the legacy text the reverse.
                The legacy name is a PREFIX of the successor's source line only in the other direction
@@ -375,9 +385,13 @@ public sealed class DarlingAnomalyBaselineTests
             }
         }
 
-        /* The rate arms read the STORED interval first and derive one from LAG only where it is NULL. */
+        /* The rate arms read the STORED interval first and derive one from LAG only where it is NULL; since #8106 the stored interval the
+           successor carries is the collection's cadence, so the successor and legacy texts differ only in the relation they read. */
         Assert.Contains("CASE WHEN sample_interval_seconds IS NULL", PgBaselineProvider.GetBaselineQuery(MetricNames.WaitMsPerSec)!, StringComparison.Ordinal);
-        Assert.DoesNotContain("sample_interval_seconds", PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitMsPerSec)!, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN sample_interval_seconds IS NULL", PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitMsPerSec)!, StringComparison.Ordinal);
+        Assert.Equal(
+            PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitMsPerSec)!.Replace(TimescaleSupport.WaitStatsIntervalBaselineView, TimescaleSupport.WaitStatsCadenceBaselineView, StringComparison.Ordinal),
+            PgBaselineProvider.GetBaselineQuery(MetricNames.WaitMsPerSec)!);
         Assert.DoesNotContain("sample_interval_seconds", PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.BatchRequests)!, StringComparison.Ordinal);
     }
 
@@ -570,10 +584,12 @@ public sealed class DarlingAnomalyBaselineTests
         var sql = PgAnomalyDetector.WaitRateTileWindowSql;
         var expectedColumns = new[]
         {
-            "MAX(CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END) AS peak_ms_per_sec",
-            "AVG(CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END) AS avg_ms_per_sec",
+            /* #8106: the per-collection rate is computed in the CTE (the collection's positive-interval deltas over its cadence), so the
+               outer aggregates read ms_per_sec; a collection with no rate is NULL to all three and is not a sample. */
+            "MAX(ms_per_sec) AS peak_ms_per_sec",
+            "AVG(ms_per_sec) AS avg_ms_per_sec",
             "SUM(total_wait_ms) AS total_wait_ms",
-            "COUNT(*) FILTER (WHERE interval_sec IS NOT NULL) AS sample_count",
+            "COUNT(*) FILTER (WHERE ms_per_sec IS NOT NULL) AS sample_count",
         };
         foreach (var column in expectedColumns)
             Assert.Contains(column, sql, StringComparison.Ordinal);
@@ -860,8 +876,8 @@ public sealed class DarlingAnomalyBaselineTests
            itself); the shape pinned here holds for both the successor and the legacy text. */
         foreach (var (sql, supply) in new[]
         {
-            (PgBaselineProvider.GetBaselineQuery(MetricNames.WaitStats)!, "FROM wait_stats_interval_baseline"),
-            (PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitStats)!, "FROM wait_stats_baseline"),
+            (PgBaselineProvider.GetBaselineQuery(MetricNames.WaitStats)!, "FROM wait_stats_cadence_baseline"),
+            (PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitStats)!, "FROM wait_stats_interval_baseline"),
         })
         {
             Assert.DoesNotContain("QUALIFY", sql, StringComparison.OrdinalIgnoreCase);

@@ -579,6 +579,15 @@ public static partial class TimescaleSupport
     public const string PerfmonIntervalBaselineView = "perfmon_interval_baseline";
     public const string WaitStatsIntervalBaselineView = "wait_stats_interval_baseline";
 
+    /// <summary>The CADENCE wait-stats baseline supply (#8106): <see cref="WaitStatsIntervalBaselineView"/>'s successor. Its
+    /// <c>sample_interval_seconds</c> is the collection's cadence, the SHORTEST interval any of its rows measured, where the interval
+    /// supply carried the longest; so the WaitMsPerSec arm rates the collection's summed delta over the seconds its steady rows
+    /// covered, a wait type that returns after missing some passes (its own interval several cadences long) no longer divides its
+    /// siblings' deltas, and the baseline's total equals the sum of its parts. A continuous aggregate's query cannot change in place, so this is a new relation under a new name, registered in the
+    /// interval supply's position, backfilled from raw, with the interval supply retiring through
+    /// <see cref="SupersededBaselineRelations"/> once this one covers the tier.</summary>
+    public const string WaitStatsCadenceBaselineView = "wait_stats_cadence_baseline";
+
     /// <summary>
     /// The SUPERSEDED perfmon and wait-stats baseline supplies (#1757 shape, replaced by #3653's interval-honest
     /// pair). Not registered: they are no longer in <see cref="BaselineAggregates"/>, so the ensure sweep never
@@ -675,6 +684,11 @@ public static partial class TimescaleSupport
     {
         (LegacyPerfmonBaselineView,   PerfmonIntervalBaselineView),
         (LegacyWaitStatsBaselineView, WaitStatsIntervalBaselineView),
+        /* #8106: the interval-honest wait supply is itself superseded by the cadence supply. The chain is walked in this order on
+           every start, so a store that still carries wait_stats_baseline judges it against wait_stats_interval_baseline while that
+           relation stands; once it is gone and no longer registered, the legacy is judged against the cadence supply, the newest
+           registered successor (SuccessorToJudgeAgainstAsync), so it retires on coverage rather than waiting for a relation never made. */
+        (WaitStatsIntervalBaselineView, WaitStatsCadenceBaselineView),
     };
 
     /// <summary>BatchRequests baseline supply (#3653, A6/A10) -- the counter_name and non-negative filters bake in,
@@ -707,7 +721,10 @@ AND   sample_interval_seconds IS DISTINCT FROM 0
 GROUP BY server_id, bucket, collection_time
 WITH NO DATA";
 
-    /// <summary>WaitStats AND WaitMsPerSec baseline supply (#3653, A6/A10). Both families share this source and
+    /// <summary>The SUPERSEDED (#8106) WaitStats AND WaitMsPerSec baseline supply (#3653, A6/A10), as every store that ran a build
+    /// between #3698 and #8106 carries it. Retained, not registered, the way <see cref="LegacyCreateWaitStatsBaselineSql"/> is: the
+    /// record of what <see cref="WaitStatsIntervalBaselineView"/> computes, the text the live retirement test builds its fixture from,
+    /// and what <c>PgBaselineProvider</c>'s legacy wait arms are written against. Both families share this source and
     /// share the identical row-level filter (delta_wait_time_ms >= 0 AND sample_interval_seconds IS DISTINCT
     /// FROM 0), which is what lets one aggregate serve both; Darling.Tests pins that sharing so a future
     /// family-specific filter cannot silently poison its sibling's supply.
@@ -727,6 +744,29 @@ SELECT
     collection_time,
     sum(delta_wait_time_ms) AS total_wait_ms,
     max(sample_interval_seconds) AS sample_interval_seconds
+FROM collect.wait_stats
+WHERE delta_wait_time_ms >= 0
+AND   sample_interval_seconds IS DISTINCT FROM 0
+GROUP BY server_id, bucket, collection_time
+WITH NO DATA";
+
+    /// <summary>WaitStats AND WaitMsPerSec baseline supply (#8106): <see cref="CreateWaitStatsIntervalBaselineSql"/>'s shape, the same
+    /// row-level filter (<c>delta_wait_time_ms >= 0 AND sample_interval_seconds IS DISTINCT FROM 0</c>, which Darling.Tests pins the two
+    /// families to share) and the same (server_id, bucket, collection_time) grain and columns. The one difference is the interval:
+    /// <c>sample_interval_seconds</c> stays a per-collection figure with the three-state meaning the provider's interval-NULL gate keys
+    /// on (NULL only when no row of the collection recorded one), but is the collection's CADENCE, the shortest interval any of its rows
+    /// measured, rather than the longest. A wait type that returns after missing some passes stores the seconds since its own previous
+    /// sighting, several cadences, and taking that as the collection's interval divided every sibling's delta by it, which is the
+    /// deflation #8106 records; over the cadence the collection's summed delta credits the returning row whole, so the baseline's total
+    /// equals the sum of its parts. The WHERE already drops the interval-0 rows, so the summed delta is the positive-interval sum.</summary>
+    public const string CreateWaitStatsCadenceBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.wait_stats_cadence_baseline
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+SELECT
+    server_id,
+    time_bucket('1 hour', collection_time) AS bucket,
+    collection_time,
+    sum(delta_wait_time_ms) AS total_wait_ms,
+    min(sample_interval_seconds) AS sample_interval_seconds
 FROM collect.wait_stats
 WHERE delta_wait_time_ms >= 0
 AND   sample_interval_seconds IS DISTINCT FROM 0
@@ -1479,6 +1519,40 @@ $do$";
     /// this pass, and if the drop fails its jobs are scheduled again. A plain-PostgreSQL store and a plain view have
     /// no jobs, so this changes nothing for them.
     /// </summary>
+    /// <summary>
+    /// The relation a superseded legacy is judged against: its named successor while that relation stands on the store, and
+    /// otherwise, where the named successor is itself superseded and no longer registered (so the ensure sweep never makes it),
+    /// the chain followed forward to the newest registered successor. A store whose last build predates the interval supply then
+    /// retires <c>wait_stats_baseline</c> once <c>wait_stats_cadence_baseline</c> covers the tier, and a legacy whose successor
+    /// dropped on sight as an empty aggregate (#4289) retires the same way. The chain's order and the interval-to-cadence path are
+    /// unchanged: a successor that stands is judged as named.
+    /// </summary>
+    internal static async Task<string> SuccessorToJudgeAgainstAsync(NpgsqlConnection connection, string successor, CancellationToken cancellationToken)
+    {
+        var registered = BaselineAggregates.Select(a => a.View).ToHashSet(StringComparer.Ordinal);
+        var current = successor;
+        while (!registered.Contains(current))
+        {
+            using (var probe = new NpgsqlCommand(BaselineRelationExistsSql(current), connection) { CommandTimeout = SetupTimeoutSeconds })
+            {
+                if (await probe.ExecuteScalarAsync(cancellationToken) is true)
+                {
+                    return current;
+                }
+            }
+
+            var next = SupersededBaselineRelations.FirstOrDefault(pair => pair.Legacy == current).Successor;
+            if (next is null)
+            {
+                return current;
+            }
+
+            current = next;
+        }
+
+        return current;
+    }
+
     public static async Task<int> DropRetiredBaselineAggregatesAsync(
         NpgsqlConnection connection, ILogger? logger, DateTime utcNow, AggregateJobQuiesceOptions quiesce,
         CancellationToken cancellationToken = default)
@@ -1500,14 +1574,15 @@ $do$";
             var hold = AggregateJobHold.None;
             try
             {
-                var verdict = await JudgeSupersededBaselineRelationAsync(connection, legacy, successor, utcNow, cancellationToken);
+                var judgedAgainst = await SuccessorToJudgeAgainstAsync(connection, successor, cancellationToken);
+                var verdict = await JudgeSupersededBaselineRelationAsync(connection, legacy, judgedAgainst, utcNow, cancellationToken);
                 if (verdict.Decision != SupersededBaselineDecision.Drop)
                 {
                     if (verdict.Decision == SupersededBaselineDecision.SuccessorShort)
                     {
                         logger?.LogInformation(
                             "Superseded baseline relation {Legacy} stays for now (#3653): its successor {Successor} covers from {SuccessorOldest} and the baseline tier's horizon is {Horizon} — the legacy aggregate still holds history the successor has not yet materialized, and this start's read of it is what the provider falls back on for that part of its window. Re-judged on every start; expected to drop about five days after the first start that carried the successor.",
-                            legacy, successor, verdict.SuccessorOldest, verdict.Horizon);
+                            legacy, judgedAgainst, verdict.SuccessorOldest, verdict.Horizon);
                     }
 
                     continue;
@@ -2184,6 +2259,7 @@ AND   EXISTS (SELECT 1 FROM unnest($1::integer[]) AS id WHERE a.backend_type LIK
     public static string SourceTableFor(string view) => view switch
     {
         PerfmonIntervalBaselineView => "perfmon_stats",
+        WaitStatsCadenceBaselineView => "wait_stats",
         WaitStatsIntervalBaselineView => "wait_stats",
         /* The superseded pair reads the same raw tables; named so the retirement fixture and any coverage probe
            over a legacy relation resolve without a second map. */
@@ -2527,7 +2603,7 @@ AND   EXISTS (SELECT 1 FROM unnest($1::integer[]) AS id WHERE a.backend_type LIK
     public static readonly (string CreateSql, string View)[] BaselineAggregates =
     {
         (CreatePerfmonIntervalBaselineSql,   PerfmonIntervalBaselineView),
-        (CreateWaitStatsIntervalBaselineSql, WaitStatsIntervalBaselineView),
+        (CreateWaitStatsCadenceBaselineSql,     WaitStatsCadenceBaselineView),
         (CreateSessionStatsBaselineSql,   SessionStatsBaselineView),
         (CreateQueryStatsBaselineSql,     QueryStatsBaselineView),
         (CreateBlockedProcessBaselineSql, BlockedProcessBaselineView),

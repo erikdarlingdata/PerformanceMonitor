@@ -53,7 +53,7 @@ public sealed class PgTargetWaitTests
         /* Stored → NULLIF; NULL → LAG; never ELSE 0. */
         Assert.Contains("CASE WHEN MAX(sample_interval_seconds) IS NULL", aurora, StringComparison.Ordinal);
         Assert.Contains("LAG(collection_time) OVER (ORDER BY collection_time)", aurora, StringComparison.Ordinal);
-        Assert.Contains("ELSE NULLIF(MAX(sample_interval_seconds), 0)", aurora, StringComparison.Ordinal);
+        Assert.Contains("ELSE MIN(NULLIF(sample_interval_seconds, 0))", aurora, StringComparison.Ordinal);
         Assert.DoesNotContain("ELSE 0", aurora, StringComparison.Ordinal);
         /* A restart collection (every row's stored interval 0) is counted and excluded, and the deltas of a
            collection with no countable interval are excluded by the JOIN, not just their time. */
