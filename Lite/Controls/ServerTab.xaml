@@ -2726,7 +2726,7 @@
                  the RefreshVisibleTabAsync switch (index 13), mirroring the tempdb tab. -->
             <TabItem Header="Latches &amp; Spinlocks">
                 <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8"><!-- #7385: scrolls when the charts cannot all keep their minimum height -->
-                <Grid ui:ChartGroup.IsAligned="True" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="500">
+                <Grid ui:ChartGroup.IsAligned="True" MinHeight="500"><!-- The page sizes to its rows and the scroll viewer stretches it to the viewport: the charts fill a tall window, and an opened snapshot expander makes the page taller, so the page scrolls to what is under it. -->
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
@@ -2746,9 +2746,9 @@
                                   AutoGenerateColumns="False" IsReadOnly="True"
                                   RowStyle="{StaticResource GridRowStyle}"
                                   HeadersVisibility="Column" GridLinesVisibility="Horizontal"
-                                  MaxHeight="220" Margin="0,4,0,0">
+                                  MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}" Margin="0,4,0,0" PreviewMouseWheel="SnapshotGrid_PreviewMouseWheel">
                             <DataGrid.Columns>
-                                <DataGridTextColumn Binding="{Binding LatchClass}" Width="*">
+                                <DataGridTextColumn Binding="{Binding LatchClass}" Width="*" MinWidth="300" ElementStyle="{StaticResource TrimmedCell}">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LatchClass" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Latch Class" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                                 <!-- #3653 A7: the two deltas are null on a restart / first-sample row (stored interval 0 — the
@@ -2789,9 +2789,9 @@
                                   AutoGenerateColumns="False" IsReadOnly="True"
                                   RowStyle="{StaticResource GridRowStyle}"
                                   HeadersVisibility="Column" GridLinesVisibility="Horizontal"
-                                  MaxHeight="220" Margin="0,4,0,0">
+                                  MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}" Margin="0,4,0,0" PreviewMouseWheel="SnapshotGrid_PreviewMouseWheel">
                             <DataGrid.Columns>
-                                <DataGridTextColumn Binding="{Binding SpinlockName}" Width="*">
+                                <DataGridTextColumn Binding="{Binding SpinlockName}" Width="*" MinWidth="220" ElementStyle="{StaticResource TrimmedCell}">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SpinlockName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Spinlock" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                                 <!-- #3653 A7: null deltas on the restart marker row render "—"; see the latch grid above. -->
@@ -3169,25 +3169,25 @@
                         </Grid>
                     </TabItem>
 
-                    <!-- Memory Broker Sub-Tab -->
+                    <!-- Memory Broker Sub-Tab: the same shape as the other System Events sub-tabs, a title row with Refresh over a full-width grid. -->
                     <TabItem Header="Memory Broker">
-                        <!-- #8226: the grid sits in a card: the title says what the rows are, the subtitle what the tab cannot say (#8197),
-                             and the refresh button and count sit on the right of the header. -->
-                        <ui:ChartPanel x:Name="MemoryBrokerCard" Title="Broker Notifications" Subtitle="Target shrinks in the selected time window" Margin="8">
-                            <ui:ChartPanel.HeaderContent>
-                                <StackPanel Orientation="Horizontal">
-                                    <Button Content="Refresh" Click="SystemEventsRefresh_Click" Padding="12,4" MinWidth="70" Style="{DynamicResource AccentButton}"/>
-                                    <TextBlock x:Name="MemoryBrokerCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
-                                    <TextBlock x:Name="MemoryBrokerWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
-                                </StackPanel>
-                            </ui:ChartPanel.HeaderContent>
-                            <Grid>
+                        <Grid Margin="8">
+                            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,4,0,8">
+                                <!-- #8197: the tab is already named Memory Broker, so the title says what the rows are and the subtitle what the tab cannot say. -->
+                                <TextBlock Text="Broker Notifications" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
+                                <TextBlock Text="Target shrinks in the selected time window" Margin="8,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
+                                <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70" Style="{DynamicResource AccentButton}"/>
+                                <TextBlock x:Name="MemoryBrokerCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
+                                <TextBlock x:Name="MemoryBrokerWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
+                            </StackPanel>
+                            <Grid Grid.Row="1">
                                 <DataGrid x:Name="MemoryBrokerGrid" AutoGenerateColumns="False" IsReadOnly="True" RowStyle="{StaticResource GridRowStyle}" HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                     <DataGrid.Columns>
                                         <DataGridTextColumn Binding="{Binding EventTimeLocal}" Width="145" SortMemberPath="EventTime"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EventTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Event Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding BrokerId}" Width="80" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BrokerId" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Broker ID" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
-                                        <DataGridTextColumn Binding="{Binding Broker}" ElementStyle="{StaticResource TrimmedCell}" Width="210"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Broker" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Broker" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
-                                        <DataGridTextColumn Binding="{Binding Notification}" ElementStyle="{StaticResource TrimmedCell}" Width="210"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Notification" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Notification" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
+                                        <DataGridTextColumn Binding="{Binding Broker}" ElementStyle="{StaticResource TrimmedCell}" Width="*" MinWidth="230"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Broker" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Broker" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
+                                        <DataGridTextColumn Binding="{Binding Notification}" ElementStyle="{StaticResource TrimmedCell}" Width="Auto"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Notification" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Notification" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding PoolMetadataId}" Width="105" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PoolMetadataId" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Pool Meta ID" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding DeltaTime, StringFormat=N0}" Width="100" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DeltaTime" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Delta Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding MemoryRatio, StringFormat=N0}" Width="90" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MemoryRatio" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Mem Ratio" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -3201,7 +3201,7 @@
                                 </DataGrid>
                                 <TextBlock Style="{DynamicResource EmptyHint}" x:Name="MemoryBrokerNoDataMessage" Visibility="Collapsed" Text="No memory broker SHRINK notifications in the selected time window."/>
                             </Grid>
-                        </ui:ChartPanel>
+                        </Grid>
                     </TabItem>
 
                     <!-- Memory Node OOM Sub-Tab -->
