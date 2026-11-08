@@ -149,18 +149,32 @@ public sealed partial class ViewerDataService
     /// the only one of the three snapshot reads that caps; <c>session_id, request_id</c> break ties so the
     /// cap is deterministic. The trailing <c>total_count</c> column is the pre-cap match count, read by
     /// <see cref="ReadQuerySnapshotsWithTotalAsync"/>. $1 server_id, $2 window start, $3 window end (naive UTC).
+    /// A <c>WAITFOR</c> row stays when another row of the SAME capture names it as its blocker: the classic head
+    /// blocker is a session sitting in <c>WAITFOR</c> with an open transaction, and the grid keeps it so the row a
+    /// victim's blocking session id points at is on the grid. Same capture, not same window, because session ids are reused.
     /// </summary>
     public static readonly string LatestQuerySnapshotsSql = $"""
         SELECT
         {QuerySnapshotColumns},
             COUNT(*) OVER () AS total_count
         FROM query_snapshots
+        LEFT JOIN (
+            SELECT DISTINCT collection_time AS head_time, blocking_session_id AS head_session
+            FROM query_snapshots
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   blocking_session_id > 0
+            AND   blocking_session_id <> session_id
+        ) AS h
+          ON  h.head_time = query_snapshots.collection_time
+          AND h.head_session = query_snapshots.session_id
         WHERE server_id = $1
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   ($4::text[] IS NULL OR database_name = ANY($4))
         AND   ($5::boolean OR {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate})
-        AND   query_text NOT LIKE 'WAITFOR%'
+        AND   (query_text NOT LIKE 'WAITFOR%' OR h.head_session IS NOT NULL)
         ORDER BY collection_time DESC, cpu_time_ms DESC, session_id, request_id
         LIMIT {MaxLatestQuerySnapshotRows}
         """;
@@ -400,13 +414,14 @@ public sealed partial class ViewerDataService
 
     /// <summary>
     /// Hourly Active-Queries buckets for the slicer — Lite's <c>GetActiveQuerySlicerDataAsync</c>
-    /// (Blocking.cs:72) ported. Buckets by <c>date_trunc('hour', collection_time)</c>; the default
+    /// (Blocking.cs:72) ported. Buckets at the width <see cref="SlicerBuckets"/> picks for the window ($6 minutes, on the grid every
+    /// width of it divides: a minute over a short window, an hour over a day); the default
     /// metric is session count (Value = SessionCount), matching Lite's "Sessions" slicer label.
     /// $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
     public static readonly string ActiveQuerySlicerSql = $"""
         SELECT
-            date_trunc('hour', collection_time) AS bucket,
+            date_bin(CAST($6 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}) AS bucket,
             COUNT(*) AS session_count,
             COALESCE(SUM(cpu_time_ms), 0) AS total_cpu,
             COALESCE(SUM(total_elapsed_time_ms), 0) AS total_elapsed,
@@ -419,7 +434,7 @@ public sealed partial class ViewerDataService
         AND   collection_time <= $3
         AND   ($4::text[] IS NULL OR database_name = ANY($4))
         AND   ($5::boolean OR {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate})
-        GROUP BY date_trunc('hour', collection_time)
+        GROUP BY 1
         ORDER BY bucket
         """;
 
@@ -449,6 +464,7 @@ public sealed partial class ViewerDataService
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = includeMonitor });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = SlicerBuckets.MinutesFor(startUtc, endUtc) });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

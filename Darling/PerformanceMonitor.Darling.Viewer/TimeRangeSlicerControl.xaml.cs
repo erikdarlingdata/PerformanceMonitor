@@ -41,6 +41,9 @@ public partial class TimeRangeSlicerControl : UserControl
 
     private DateTime? _requestedStartUtc;
     private DateTime? _requestedEndUtc;
+    /// <summary>The width of the strip's buckets, from <see cref="SlicerBuckets.MinutesFor(DateTime, DateTime)"/> over the requested window: the read that
+    /// grouped the rows took the same width over the same window, so the fill, the end of the span and the selection's snap all land on its stamps.</summary>
+    private int _bucketMinutes = 60;
     private string _metricLabel = "Sessions";
     private bool _isExpanded = true;
     private string? _emptyText;
@@ -135,7 +138,8 @@ public partial class TimeRangeSlicerControl : UserControl
 
         _requestedStartUtc = requestedStartUtc;
         _requestedEndUtc = requestedEndUtc;
-        _data = FillEmptyBuckets(data, requestedStartUtc, requestedEndUtc);
+        _bucketMinutes = requestedStartUtc.HasValue && requestedEndUtc.HasValue ? SlicerBuckets.MinutesFor(requestedStartUtc.Value, requestedEndUtc.Value) : 60;
+        _data = FillEmptyBuckets(data, requestedStartUtc, requestedEndUtc, _bucketMinutes);
         _runs = StripGaps.RunsOverFilledBuckets(_data.Select(d => d.BucketTime).ToList(), data.Select(d => d.BucketTime).ToList());
         _emptyText = null;
         ShowSlicer();
@@ -270,28 +274,28 @@ public partial class TimeRangeSlicerControl : UserControl
     // ── Time mapping ──
 
     private DateTime DataStartUtc => _requestedStartUtc ?? _data[0].BucketTime;
-    private DateTime DataEndUtc => _requestedEndUtc ?? _data[^1].BucketTime.AddHours(1);
+    private DateTime DataEndUtc => _requestedEndUtc ?? _data[^1].BucketTime.AddMinutes(_bucketMinutes);
 
     /// <summary>
-    /// Fills in zero-value buckets for hours with no data so the slicer
+    /// Fills in zero-value buckets for the buckets with no data so the slicer
     /// spans the full requested time range.
     /// </summary>
     private static List<TimeSliceBucket> FillEmptyBuckets(
-        List<TimeSliceBucket> data, DateTime? requestedStart, DateTime? requestedEnd)
+        List<TimeSliceBucket> data, DateTime? requestedStart, DateTime? requestedEnd, int bucketMinutes)
     {
         if (data.Count == 0 || !requestedStart.HasValue || !requestedEnd.HasValue)
             return data;
 
-        var floorStart = FloorToHour(requestedStart.Value);
-        // Floor the end too — we don't want a bucket for the current partial hour extending into the future
-        var floorEnd = FloorToHour(requestedEnd.Value);
+        var floorStart = SlicerBuckets.Floor(requestedStart.Value, bucketMinutes);
+        // Floor the end too — we don't want a bucket for the current partial bucket extending into the future
+        var floorEnd = SlicerBuckets.Floor(requestedEnd.Value, bucketMinutes);
 
         var existing = new Dictionary<long, TimeSliceBucket>();
         foreach (var b in data)
-            existing[FloorToHour(b.BucketTime).Ticks] = b;
+            existing[SlicerBuckets.Floor(b.BucketTime, bucketMinutes).Ticks] = b;
 
         var result = new List<TimeSliceBucket>();
-        for (var t = floorStart; t <= floorEnd; t = t.AddHours(1))
+        for (var t = floorStart; t <= floorEnd; t = t.AddMinutes(bucketMinutes))
         {
             if (existing.TryGetValue(t.Ticks, out var bucket))
                 result.Add(bucket);
@@ -682,19 +686,10 @@ public partial class TimeRangeSlicerControl : UserControl
     private void FireRangeChanged()
     {
         if (_data.Count == 0) return;
-        // Snap to hour boundaries so slider positions align with the hourly buckets shown in the graph
-        var startUtc = FloorToHour(UtcAtNorm(_rangeStart));
-        var endUtc = CeilToHour(UtcAtNorm(_rangeEnd));
+        // Snap to bucket boundaries so slider positions align with the buckets shown in the graph
+        var startUtc = SlicerBuckets.Floor(UtcAtNorm(_rangeStart), _bucketMinutes);
+        var endUtc = SlicerBuckets.Ceiling(UtcAtNorm(_rangeEnd), _bucketMinutes);
         RangeChanged?.Invoke(this, new SlicerRangeEventArgs(startUtc, endUtc));
-    }
-
-    private static DateTime FloorToHour(DateTime dt) =>
-        new DateTime(dt.Year, dt.Month, dt.Day, dt.Hour, 0, 0, dt.Kind);
-
-    private static DateTime CeilToHour(DateTime dt)
-    {
-        var floored = FloorToHour(dt);
-        return floored == dt ? dt : floored.AddHours(1);
     }
 }
 
