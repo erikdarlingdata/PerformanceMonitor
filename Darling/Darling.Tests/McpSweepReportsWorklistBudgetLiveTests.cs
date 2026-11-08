@@ -78,12 +78,14 @@ public sealed class McpSweepReportsWorklistBudgetLiveTests
         Assert.Contains("response budget", note, StringComparison.Ordinal);
 
         /* The survivors: every one open (the newer carried items were cut first), and the newest of the open ones, which
-           the seed numbers 1..32 newest first - so the kept set is exactly servers 1..returned. */
+           the seed numbers 1..32 newest first - so the items are exactly servers 1..returned, and they ride in the store's
+           order (last seen first), which for these items is that same order. */
         var items = worklist.GetProperty("items").EnumerateArray().ToList();
         Assert.All(items, item => Assert.Equal(FleetSweepWatchStateMachine.Open, item.GetProperty("state").GetString()));
         Assert.Equal(
             Enumerable.Range(1, returned),
-            items.Select(item => item.GetProperty("server_id").GetInt32()).OrderBy(id => id));
+            items.Select(item => item.GetProperty("server_id").GetInt32()));
+        Assert.False(root.GetProperty("over_budget").GetBoolean(), "a reply brought under the budget says over_budget: false");
     }
 
     /// <summary>Two sweeps in the window, each with a 150-server document, so <c>latest</c> alone is over the budget, and
@@ -107,7 +109,8 @@ public sealed class McpSweepReportsWorklistBudgetLiveTests
 
         Assert.True(Encoding.UTF8.GetByteCount(json) > McpResponseBudget.DefaultBytes,
             $"the seed must leave the floor reply over the budget; it is {Encoding.UTF8.GetByteCount(json):#,0} bytes");
-        Assert.True(root.GetProperty("truncated").GetBoolean(), "a reply over the budget says truncated: true");
+        Assert.True(root.GetProperty("truncated").GetBoolean(), "a reply whose timeline and worklist were cut says truncated: true");
+        Assert.True(root.GetProperty("over_budget").GetBoolean(), "a reply still over the budget at its floor says over_budget: true");
         Assert.Equal(2, root.GetProperty("count").GetInt32());
         Assert.Equal(1, root.GetProperty("sweeps_returned").GetInt32());
 
@@ -119,6 +122,40 @@ public sealed class McpSweepReportsWorklistBudgetLiveTests
 
         Assert.Equal(JsonValueKind.Object, root.GetProperty("latest").GetProperty("report").ValueKind);
         Assert.Equal(150, root.GetProperty("latest").GetProperty("report").GetProperty("servers").GetArrayLength());
+    }
+
+    /// <summary>One sweep in the window with a 150-server document and one open item: nothing can be cut (one sweep, one
+    /// item, both at their floors) and the reply is still over the budget because <c>latest</c> alone is. <c>truncated</c> is
+    /// false, because nothing was left out; <c>over_budget</c> is true and the note says OVER BUDGET.</summary>
+    [Fact]
+    public async Task GetSweepReports_ALatestOverTheBudgetWithNothingToCut_SaysOverBudget_AndTruncatedIsFalse()
+    {
+        var cs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live sweep-report over-budget flag test.");
+        var ct = Ct;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        await using var postgres = NpgsqlDataSource.Create(WithSearchPath(scratch));
+
+        await SeedSweepsAsync(postgres, sweepCount: 1, serversPerReport: 150, openItems: 1, carriedItems: 0, ct);
+
+        var json = await DarlingMcpFleetSweepTools.GetSweepReports(postgres, NullLogger.Instance, cancellationToken: ct);
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        Assert.True(Encoding.UTF8.GetByteCount(json) > McpResponseBudget.DefaultBytes,
+            $"the seed must leave the reply over the budget; it is {Encoding.UTF8.GetByteCount(json):#,0} bytes");
+        Assert.Equal(1, root.GetProperty("count").GetInt32());
+        Assert.Equal(1, root.GetProperty("sweeps_returned").GetInt32());
+        Assert.Equal(1, root.GetProperty("watch_items").GetProperty("count").GetInt32());
+        Assert.Equal(1, root.GetProperty("watch_items_returned").GetInt32());
+
+        Assert.False(root.GetProperty("truncated").GetBoolean(), "nothing was cut, so truncated is false");
+        Assert.True(root.GetProperty("over_budget").GetBoolean(), "the reply is over the budget, so over_budget is true");
+        var note = root.GetProperty("budget_note").GetString();
+        Assert.NotNull(note);
+        Assert.StartsWith("OVER BUDGET", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("fit", note, StringComparison.OrdinalIgnoreCase);
     }
 
     /* ---------------- seeding ---------------- */
