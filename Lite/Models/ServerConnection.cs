@@ -285,7 +285,7 @@ public class ServerConnection : INotifyPropertyChanged
     public ServerCardStatus CardStatus => ServerCardStatusRules.Classify(IsOnline, HasCollectorErrors == true);
 
     /// <summary>
-    /// Computed dot status for the sidebar indicator. One of: "Unknown", "Online", "Warning", "Offline".
+    /// Computed dot status for the sidebar indicator. One of: "Connecting", "Online", "Warning", "Offline".
     /// Drives the Ellipse fill via DataTrigger in MainWindow.xaml.
     /// </summary>
     [JsonIgnore]

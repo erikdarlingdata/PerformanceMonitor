@@ -175,7 +175,7 @@ public sealed class LiteOverviewCardExplainsItselfTests
     {
         var tooltip = NotYetChecked().StatusTooltip;
 
-        Assert.Contains("Unknown — this server has not been connection-checked yet", tooltip, StringComparison.Ordinal);
+        Assert.Contains("Connecting — the first connection check has not finished yet", tooltip, StringComparison.Ordinal);
         Assert.Contains("Needs attention: SQL CPU 62%", tooltip, StringComparison.Ordinal);
     }
 
@@ -262,7 +262,7 @@ public sealed class LiteOverviewCardExplainsItselfTests
         notChecked.HasCollectorErrors = true;
 
         Assert.Equal(ServerCardStatus.Unknown, notChecked.CardStatus);
-        Assert.Equal("Unknown", notChecked.StatusDisplay);
+        Assert.Equal("Connecting", notChecked.StatusDisplay);
         Assert.DoesNotContain("collectors", notChecked.StatusTooltip, StringComparison.Ordinal);
         Assert.Equal(neutral, notChecked.CardBorderBrush.Color);
 

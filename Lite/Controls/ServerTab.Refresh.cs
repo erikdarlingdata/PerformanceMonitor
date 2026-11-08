@@ -264,7 +264,7 @@ public partial class ServerTab : UserControl
                 LastRefreshText,
                 ct);
             if (status is not null)
-                ConnectionStatusText.Text = status;
+                ConnectionStatusText.Text = _awaitingFirstCollection && !status.StartsWith("Error", StringComparison.Ordinal) ? ConnectingStatusText : status;
         }
         catch (Exception ex)
         {
@@ -536,6 +536,7 @@ public partial class ServerTab : UserControl
                     case TopQueriesByDurationSubTabIndex: // Top Queries by Duration
                         var queryStats = await ReadTopQueriesAsync(hoursBack, fromDate, toDate);
                         _queryStatsFilterMgr!.UpdateData(queryStats);
+                        UpdateQueryStatsEmptyMessage(queryStats.Count);
                         SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
                         _ = LoadQueryStatsSlicerAsync();
                         {
@@ -630,6 +631,7 @@ public partial class ServerTab : UserControl
             }
 
             _queryStatsFilterMgr!.UpdateData(queryStatsTask.Result);
+            UpdateQueryStatsEmptyMessage(queryStatsTask.Result.Count);
             SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
             _ = LoadQueryStatsSlicerAsync();
             {

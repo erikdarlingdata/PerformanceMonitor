@@ -76,7 +76,7 @@ public sealed class LiteSidebarDotRendersTheCardStatusTests
         Assert.Equal("Online", Connection(true, false).DotStatus);
         Assert.Equal("Warning", Connection(true, true).DotStatus);
         Assert.Equal("Offline", Connection(false, false).DotStatus);
-        Assert.Equal("Unknown", Connection(null, false).DotStatus);
+        Assert.Equal("Connecting", Connection(null, false).DotStatus);
 
         /* An offline server's collector-error marker must not turn its dot amber — the flags resolve in order. */
         Assert.Equal("Offline", Connection(false, true).DotStatus);
@@ -106,7 +106,7 @@ public sealed class LiteSidebarDotRendersTheCardStatusTests
         Assert.StartsWith("Online — the last connection check succeeded", Connection(true, false).DotTooltip, StringComparison.Ordinal);
         Assert.StartsWith("Warning — one or more collectors are failing on this server", Connection(true, true).DotTooltip, StringComparison.Ordinal);
         Assert.StartsWith("Offline — the last connection check failed", Connection(false, false).DotTooltip, StringComparison.Ordinal);
-        Assert.StartsWith("Unknown — this server has not been connection-checked yet", Connection(null, false).DotTooltip, StringComparison.Ordinal);
+        Assert.StartsWith("Connecting — the first connection check has not finished yet", Connection(null, false).DotTooltip, StringComparison.Ordinal);
 
         /* And it ends on the gesture THIS surface supports. The card's line names the card; naming a single click
            on either would be naming a no-op, since both handlers act only on a double-click. */
@@ -187,7 +187,7 @@ public sealed class LiteSidebarDotRendersTheCardStatusTests
     {
         var sidebar = WithoutComments(ReadRepoFile(Path.Combine("Lite", "Models", "ServerConnection.cs")));
 
-        foreach (var word in new[] { "Online", "Warning", "Offline", "Unknown" })
+        foreach (var word in new[] { "Online", "Warning", "Offline", "Connecting" })
         {
             Assert.DoesNotContain("\"" + word + "\"", sidebar, StringComparison.Ordinal);
         }
