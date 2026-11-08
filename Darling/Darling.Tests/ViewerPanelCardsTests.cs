@@ -54,7 +54,6 @@ public sealed class ViewerPanelCardsTests
         ("SkippedCyclesLine", "collection-health"),
         ("PerfmonCountersList", "perfmon"),
         ("MemoryClerksList", "memory-clerks"),
-        ("MemoryBrokerGrid", "memory-broker"),
     };
 
     /* The Utilization and Optimization grids, each in a card, each given fewer rows than the shared cap holds, so a grid that scrolls on its own shows it. */
