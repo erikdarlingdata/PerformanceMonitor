@@ -67,6 +67,56 @@
         "mcpTokenKey": { "type": "string", "minLength": 1 }
       }
     },
+    "network": {
+      "type": "object",
+      "properties": {
+        "allowFrom": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "trustedProxies": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "web": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "publicBaseUrl": { "type": "string" },
+        "network": {
+          "type": "object",
+          "properties": { "allowFrom": { "type": "array", "items": { "type": "string", "minLength": 1 } }, "trustedProxies": { "type": "array", "items": { "type": "string", "minLength": 1 } } }
+        },
+        "ingress": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "className": { "type": "string" },
+            "hosts": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "tls": { "type": "array" },
+            "annotations": { "type": "object" }
+          }
+        }
+      }
+    },
+    "mcp": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "network": {
+          "type": "object",
+          "properties": { "allowFrom": { "type": "array", "items": { "type": "string", "minLength": 1 } } }
+        },
+        "ingress": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "className": { "type": "string" },
+            "hosts": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "tls": { "type": "array" },
+            "annotations": { "type": "object" }
+          }
+        }
+      }
+    },
     "store": {
       "type": "object",
       "properties": {

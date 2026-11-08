@@ -104,6 +104,85 @@ because Darling reads darling.json case-insensitively. Arguments: dict "cfg" <ma
 {{- end -}}
 {{- end -}}
 
+{{/* A surface's effective network list as JSON: the per-surface override (web.network.<field>) when non-empty, else network.<field>.
+Arguments: dict "ctx" <root> "surface" "web"|"mcp" "field" "allowFrom"|"trustedProxies". */}}
+{{- define "performancemonitor-darling.netList" -}}
+{{- $surface := get .ctx.Values .surface -}}
+{{- $own := dig "network" .field (list) $surface -}}
+{{- if $own -}}
+{{- toJson $own -}}
+{{- else -}}
+{{- toJson (dig .field (list) .ctx.Values.network) -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Fails the render when a surface's Ingress is enabled without what makes it work. Arguments: dict "ctx" <root> "surface" "web"|"mcp". */}}
+{{- define "performancemonitor-darling.checkIngress" -}}
+{{- $s := .surface -}}
+{{- $cfg := get .ctx.Values $s -}}
+{{- if not $cfg.ingress.hosts -}}
+{{- fail (printf "%s.ingress.enabled needs at least one entry in %s.ingress.hosts" $s $s) -}}
+{{- end -}}
+{{- if eq $s "web" -}}
+{{- if not (fromJsonArray (include "performancemonitor-darling.netList" (dict "ctx" .ctx "surface" "web" "field" "trustedProxies"))) -}}
+{{- fail "web.ingress.enabled needs network.trustedProxies (or web.network.trustedProxies): the CIDRs of the ingress controller pods, so the dashboard trusts the forwarded client address and scheme. Without them the dashboard refuses every request that arrives through the Ingress." -}}
+{{- end -}}
+{{- end -}}
+{{- if not (fromJsonArray (include "performancemonitor-darling.netList" (dict "ctx" .ctx "surface" $s "field" "allowFrom"))) -}}
+{{- fail (printf "%s.ingress.enabled needs network.allowFrom (or %s.network.allowFrom): the CIDRs of the ingress controller pods. Without them every request that arrives through the Ingress is refused." $s $s) -}}
+{{- end -}}
+{{- end -}}
+
+{{/* The https:// or http:// URL of the web Ingress's first host: https when a tls entry covers it. */}}
+{{- define "performancemonitor-darling.webIngressUrl" -}}
+{{- $host := first .Values.web.ingress.hosts -}}
+{{- $scheme := "http" -}}
+{{- range .Values.web.ingress.tls -}}
+{{- if or (not .hosts) (has $host .hosts) -}}
+{{- $scheme = "https" -}}
+{{- end -}}
+{{- end -}}
+{{- printf "%s://%s" $scheme $host -}}
+{{- end -}}
+
+{{/* The owned web or MCP block of darling.json. Arguments: dict "ctx" <root> "surface" "web"|"mcp". */}}
+{{- define "performancemonitor-darling.surfaceJson" -}}
+{{- $ctx := .ctx -}}
+{{- $s := .surface -}}
+{{- $cfg := get $ctx.Values $s -}}
+{{- $block := dict "enabled" $cfg.enabled "port" (int $cfg.port) -}}
+{{- if $cfg.enabled -}}
+{{- if $cfg.ingress.enabled -}}
+{{- include "performancemonitor-darling.checkIngress" (dict "ctx" $ctx "surface" $s) -}}
+{{- end -}}
+{{- $allow := fromJsonArray (include "performancemonitor-darling.netList" (dict "ctx" $ctx "surface" $s "field" "allowFrom")) -}}
+{{- if not $allow -}}
+{{- $allow = list "127.0.0.1/32" -}}
+{{- end -}}
+{{- $tokenKey := ternary $ctx.Values.secrets.webTokenKey $ctx.Values.secrets.mcpTokenKey (eq $s "web") -}}
+{{- $net := dict "listen" "0.0.0.0" "allowFrom" $allow "token" (printf "file:/run/secrets/darling/%s" $tokenKey) -}}
+{{- if eq $s "web" -}}
+{{- $proxies := fromJsonArray (include "performancemonitor-darling.netList" (dict "ctx" $ctx "surface" "web" "field" "trustedProxies")) -}}
+{{- if $proxies -}}
+{{- $_ := set $net "trustedProxies" $proxies -}}
+{{- end -}}
+{{- if $cfg.publicBaseUrl -}}
+{{- $_ := set $block "publicBaseUrl" $cfg.publicBaseUrl -}}
+{{- else if $cfg.ingress.enabled -}}
+{{- $_ := set $block "publicBaseUrl" (include "performancemonitor-darling.webIngressUrl" $ctx) -}}
+{{- end -}}
+{{- else if $cfg.ingress.enabled -}}
+{{- if not (include "performancemonitor-darling.pathPresent" (dict "cfg" $ctx.Values.config "path" (list "mcp" "network" "hostName"))) -}}
+{{- $_ := set $net "hostName" (first $cfg.ingress.hosts) -}}
+{{- end -}}
+{{- end -}}
+{{- $_ := set $block "network" $net -}}
+{{- else if $cfg.ingress.enabled -}}
+{{- fail (printf "%s.ingress.enabled needs %s.enabled=true" $s $s) -}}
+{{- end -}}
+{{- toJson $block -}}
+{{- end -}}
+
 {{/* darling.json: the operator's config with the chart-owned keys merged over it. */}}
 {{- define "performancemonitor-darling.darlingJson" -}}
 {{- include "performancemonitor-darling.checkOwnedKeys" . -}}
@@ -127,7 +206,7 @@ because Darling reads darling.json case-insensitively. Arguments: dict "cfg" <ma
 {{- $_ := set $postgres "connectionString" $cs -}}
 {{- end -}}
 {{- end -}}
-{{- $owned := dict "postgres" $postgres -}}
+{{- $owned := dict "postgres" $postgres "web" (include "performancemonitor-darling.surfaceJson" (dict "ctx" . "surface" "web") | fromJson) "mcp" (include "performancemonitor-darling.surfaceJson" (dict "ctx" . "surface" "mcp") | fromJson) -}}
 {{- mergeOverwrite (deepCopy .Values.config) $owned | toPrettyJson -}}
 {{- end -}}
 

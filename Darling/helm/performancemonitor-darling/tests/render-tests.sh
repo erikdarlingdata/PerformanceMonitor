@@ -234,7 +234,7 @@ EXT=(--set store.mode=external --set store.external.host=db.example --set store.
 t external_renders_no_statefulset
 render "${EXT[@]}"
 assert_eq "$(yq 'select(.kind == "StatefulSet") | .metadata.name' "${OUT}")" "" "no StatefulSet"
-assert_eq "$(yq 'select(.kind == "Service") | .metadata.name' "${OUT}")" "" "no store Services"
+assert_eq "$(yq 'select(.kind == "Service" and (.metadata.name | test("-store"))) | .metadata.name' "${OUT}")" "" "no store Services"
 assert_eq "$(yq "select(.kind == \"Secret\" and .metadata.name == \"${SS}\") | .metadata.name" "${OUT}")" "" "no store Secret"
 
 t external_pgpassword
@@ -278,3 +278,78 @@ grep -qF "bundled store's password" <<<"${n}" || { echo "NOTES do not warn about
 grep -qF 'GitOps' <<<"${n}" || { echo "NOTES lack GitOps for the generated store password" >&2; exit 1; }
 n="$(notes --set secrets.existingSecret=s --set store.bundled.auth.existingSecret=x --set image.tag=1)"
 if grep -qF 'generated' <<<"${n}"; then echo "NOTES warn with both Secrets given" >&2; exit 1; fi
+
+# ---- Task 5: network ----
+
+t services_per_surface
+render
+WS="${DEPLOY}-web"
+MS="${DEPLOY}-mcp"
+assert_eq "$(doc Service "${WS}" | yq -o=json -I=0 '.spec.ports | map(.port)')" "[5153]" "web Service port"
+assert_eq "$(yq 'select(.kind == "Service" and .metadata.name == "'"${MS}"'") | .metadata.name' "${OUT}")" "" "no MCP Service by default"
+render --set mcp.enabled=true
+assert_eq "$(doc Service "${MS}" | yq -o=json -I=0 '.spec.ports | map(.port)')" "[5152]" "MCP Service port"
+assert_eq "$(yq 'select(.kind == "Service") | .spec.ports[].port' "${OUT}" | grep -c '^5154$' || true)" "0" "no Service for 5154"
+assert_eq "$(doc Service "${WS}" | yq '.spec.selector."app.kubernetes.io/name"')" "performancemonitor-darling" "web Service selects the Darling pod"
+render --set web.enabled=false
+assert_eq "$(yq 'select(.kind == "Service" and .metadata.name == "'"${WS}"'") | .metadata.name' "${OUT}")" "" "no web Service when web is off"
+
+t default_exposure_loopback_only
+render
+assert_eq "$(config_json '.web.network.listen')" '"0.0.0.0"' "listen"
+assert_eq "$(config_json '.web.network.allowFrom')" '["127.0.0.1/32"]' "allowFrom admits loopback only"
+assert_eq "$(config_json '.web.network.token')" '"file:/run/secrets/darling/web-token"' "web token"
+assert_eq "$(config_json '.web.enabled')" "true" "web enabled"
+assert_eq "$(config_json '.web.port')" "5153" "web port"
+assert_eq "$(config_json '.mcp.enabled')" "false" "mcp off"
+assert_eq "$(config_json '.mcp.network')" "null" "no mcp network block while off"
+assert_eq "$(config_json '.web | has("publicBaseUrl")')" "false" "no publicBaseUrl"
+assert_eq "$(config_json '.web.network | has("trustedProxies")')" "false" "no trustedProxies"
+render --set mcp.enabled=true --set network.allowFrom='{10.0.0.0/8}' --set mcp.network.allowFrom='{192.168.0.0/16}'
+assert_eq "$(config_json '.web.network.allowFrom')" '["10.0.0.0/8"]' "shared allowFrom"
+assert_eq "$(config_json '.mcp.network.allowFrom')" '["192.168.0.0/16"]' "mcp override"
+assert_eq "$(config_json '.mcp.network.token')" '"file:/run/secrets/darling/mcp-token"' "mcp token"
+assert_eq "$(config_json '.mcp.network.listen')" '"0.0.0.0"' "mcp listen"
+
+t public_base_url_default
+ING=(--set web.ingress.enabled=true --set 'web.ingress.hosts={d.example.com}' --set 'network.trustedProxies={10.1.0.0/16}' --set 'network.allowFrom={10.1.0.0/16}')
+render "${ING[@]}" --set 'web.ingress.tls[0].secretName=d-tls' --set 'web.ingress.tls[0].hosts={d.example.com}'
+assert_eq "$(config_json '.web.publicBaseUrl')" '"https://d.example.com"' "https from tls"
+render "${ING[@]}"
+assert_eq "$(config_json '.web.publicBaseUrl')" '"http://d.example.com"' "http without tls"
+render "${ING[@]}" --set 'web.ingress.tls[0].secretName=d-tls' --set 'web.ingress.tls[0].hosts={d.example.com}' --set web.publicBaseUrl=https://override.example.com
+assert_eq "$(config_json '.web.publicBaseUrl')" '"https://override.example.com"' "explicit publicBaseUrl wins"
+assert_eq "$(config_json '.web.network.trustedProxies')" '["10.1.0.0/16"]' "trustedProxies"
+assert_eq "$(doc Ingress "${DEPLOY}-web" | yq -o=json -I=0 '.spec.rules[0].http.paths[0]')" \
+  '{"path":"/","pathType":"Prefix","backend":{"service":{"name":"'"${DEPLOY}-web"'","port":{"number":5153}}}}' "ingress backend"
+
+t mcp_ingress
+render --set mcp.enabled=true --set mcp.ingress.enabled=true --set 'mcp.ingress.hosts={m.example.com}' --set 'network.allowFrom={10.1.0.0/16}' --set mcp.ingress.className=nginx
+assert_eq "$(doc Ingress "${DEPLOY}-mcp" | yq '.spec.ingressClassName')" "nginx" "mcp class"
+assert_eq "$(config_json '.mcp.network.hostName')" '"m.example.com"' "mcp hostName from the Ingress host"
+
+t fail_ingress_without_trusted_proxies
+assert_fails "network.trustedProxies" --set web.ingress.enabled=true --set 'web.ingress.hosts={d.example.com}' --set 'network.allowFrom={10.1.0.0/16}'
+
+t fail_ingress_without_allow_from
+assert_fails "network.allowFrom" --set web.ingress.enabled=true --set 'web.ingress.hosts={d.example.com}' --set 'network.trustedProxies={10.1.0.0/16}'
+assert_fails "network.allowFrom" --set mcp.enabled=true --set mcp.ingress.enabled=true --set 'mcp.ingress.hosts={m.example.com}'
+
+t fail_ingress_misconfigured
+assert_fails "web.ingress.hosts" --set web.ingress.enabled=true --set 'network.trustedProxies={10.1.0.0/16}' --set 'network.allowFrom={10.1.0.0/16}'
+assert_fails "mcp.enabled" --set mcp.ingress.enabled=true --set 'mcp.ingress.hosts={m.example.com}' --set 'network.allowFrom={10.1.0.0/16}'
+assert_fails "web.port" --set web.port=0
+
+t acceptance_values_render
+for f in "${CHART_DIR}"/ci/*.yaml; do
+  helm lint "${CHART_DIR}" -f "${f}" > /dev/null
+  render -f "${f}"
+done
+render -f "${CHART_DIR}/ci/external-cnpg-style.yaml"
+assert_eq "$(dq '.spec.template.spec.hostAliases | length')" "2" "hostAliases"
+assert_eq "$(dq '.spec.template.spec.containers[0].resources.limits.memory')" '"4Gi"' "4Gi limit"
+assert_eq "$(dq '.spec.template.metadata.annotations."example.com/scrape"')" '"true"' "pod annotation"
+assert_eq "$(dq '.spec.template.spec.volumes[] | select(.name == "state") | .persistentVolumeClaim.claimName')" '"darling-state"' "existing claim"
+assert_eq "$(config_json '.mcp.tokens | length')" "2" "two MCP tokens"
+assert_eq "$(config_json '.postgres.connectionString')" '"Host=sql.example.internal;Port=5432;Database=darling;Username=darling;SSL Mode=VerifyFull;Root Certificate=/etc/darling/store-ca/ca.crt"' "external connection string"
+assert_eq "$(yq 'select(.kind == "Ingress") | .metadata.name' "${OUT}" | grep -v -- '---' | sort | tr '\n' ' ')" "t-performancemonitor-darling-mcp t-performancemonitor-darling-web " "both Ingresses"

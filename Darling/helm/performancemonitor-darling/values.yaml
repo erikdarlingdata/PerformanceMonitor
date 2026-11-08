@@ -131,3 +131,60 @@ store:
     caSecret:
       name: ""
       key: ca.crt
+
+# Network settings shared by the web dashboard and the MCP endpoint. Both listen on 0.0.0.0 inside the pod; who may connect
+# is decided by allowFrom (Darling refuses clients outside the list; loopback is always admitted).
+network:
+  # CIDRs allowed to connect (one /32 per single address). Empty admits loopback only (the chart renders 127.0.0.1/32,
+  # because Darling refuses an empty list with a Critical log line). Required when an Ingress is enabled: the CIDRs of the
+  # ingress controller pods. A surface's own network.allowFrom wins over this.
+  allowFrom: []
+  # CIDRs of the proxies in front of the dashboard whose X-Forwarded-* headers it may trust. Required when web.ingress is
+  # enabled. Applies to the web dashboard only (the MCP endpoint has no such setting). web.network.trustedProxies wins over this.
+  trustedProxies: []
+
+web:
+  # Serve the web dashboard.
+  enabled: true
+  # Port of the dashboard inside the pod, and of its Service.
+  port: 5153
+  # The URL users reach the dashboard by, for links in alert messages. Empty derives it from the first web.ingress host
+  # (https when a tls entry covers that host); with no Ingress it stays unset.
+  publicBaseUrl: ""
+  network:
+    # Overrides network.allowFrom for the dashboard when non-empty.
+    allowFrom: []
+    # Overrides network.trustedProxies for the dashboard when non-empty.
+    trustedProxies: []
+  ingress:
+    # Create an Ingress for the dashboard. Needs hosts, network.trustedProxies and network.allowFrom.
+    enabled: false
+    # IngressClass name. Empty uses the cluster default.
+    className: ""
+    # Host names of the Ingress (a list of strings). Every path of every host goes to the dashboard Service.
+    hosts: []
+    # TLS entries of the Ingress, as in the Kubernetes Ingress spec: a list of { hosts, secretName }.
+    tls: []
+    # Annotations of the Ingress.
+    annotations: {}
+
+mcp:
+  # Serve the MCP endpoint (a token-protected API for AI agents). Off by default.
+  enabled: false
+  # Port of the MCP endpoint inside the pod, and of its Service.
+  port: 5152
+  network:
+    # Overrides network.allowFrom for the MCP endpoint when non-empty.
+    allowFrom: []
+  ingress:
+    # Create an Ingress for the MCP endpoint. Needs hosts and network.allowFrom. The first host becomes the one DNS name
+    # the endpoint admits in the Host header (mcp.network.hostName), unless config sets it.
+    enabled: false
+    # IngressClass name. Empty uses the cluster default.
+    className: ""
+    # Host names of the Ingress (a list of strings).
+    hosts: []
+    # TLS entries of the Ingress, as in the Kubernetes Ingress spec.
+    tls: []
+    # Annotations of the Ingress.
+    annotations: {}

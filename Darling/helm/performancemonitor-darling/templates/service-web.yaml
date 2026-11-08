@@ -1,0 +1,16 @@
+{{- if .Values.web.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "performancemonitor-darling.fullname" . }}-web
+  labels:
+    {{- include "performancemonitor-darling.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "performancemonitor-darling.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: web
+      port: {{ .Values.web.port }}
+      targetPort: {{ .Values.web.port }}
+{{- end }}
