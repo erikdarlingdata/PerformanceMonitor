@@ -917,9 +917,13 @@ public partial class FinOpsTab : UserControl
                or merge is logged and leaves it blank while every live row still comes back
                (FinOpsServerInventory). Rows are built from the list above, so a server removed from the
                monitor never shows up even while its collected rows wait out retention. */
+            /* A server that cannot be reached keeps its place from the newest server_properties row the store holds for it, marked
+               last known with that row's collection time. One with no collected row either is left out, and the empty sentence says so. */
             var data = await FinOpsServerInventory.BuildAsync(
                 servers,
                 server => LocalDataService.GetServerPropertiesLiveAsync(_credentialResolver.GetConnectionString(server)),
+                server => Task.Run(() => _dataService!.GetLatestServerPropertiesAsync(
+                    RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server)))),
                 async () => await Task.Run(() => _dataService!.GetServerMetricsAsync()));
             if (_loads.Superseded(nameof(LoadServerInventoryAsync), gen)) return;
 
@@ -930,6 +934,7 @@ public partial class FinOpsTab : UserControl
             _serverInventoryCacheTime = DateTime.Now;
 
             _serverInventoryFilterMgr!.UpdateData(data);
+            NoServerInventoryMessage.Text = FinOpsServerInventory.EmptyText(servers.Count);
             NoServerInventoryMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             ServerInventoryCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "server") : "";
         }

@@ -30,6 +30,10 @@ namespace PerformanceMonitorLite.Tests;
 /// a server that was removed from the monitor — whose collected rows stay in the store until retention purges
 /// them, and so stay in the overlay's read — never shows up.</para>
 ///
+/// <para>And they pin what a server the live read cannot reach gets: its newest collected <c>server_properties</c>
+/// row, marked last known with that row's collection time and carrying its overlay, or no row at all when the
+/// store holds nothing for it. The sentence under an empty grid says which of those emptied it.</para>
+///
 /// <para>Collection <c>app-logger-statics</c>: the log assertions drain the process-wide buffer, which the
 /// other tests that do the same share.</para>
 /// </summary>
@@ -60,6 +64,29 @@ public sealed class FinOpsServerInventoryTests : IDisposable
     private static Task<ServerPropertyRow> Live(ServerConnection server) =>
         Task.FromResult(new ServerPropertyRow { Edition = "Enterprise Edition", CpuCount = 8 });
 
+    /// <summary>A store with no collected row for any server.</summary>
+    private static Task<ServerPropertiesRow?> NoCollected(ServerConnection server) =>
+        Task.FromResult<ServerPropertiesRow?>(null);
+
+    private static readonly DateTime CollectedAtUtc = new(2026, 11, 7, 9, 30, 0, DateTimeKind.Utc);
+
+    /// <summary>A collected row as <c>GetLatestServerPropertiesAsync</c> returns one, with every inventory column filled.</summary>
+    private static ServerPropertiesRow Collected() => new()
+    {
+        Edition = "Standard Edition (64-bit)",
+        ProductVersion = "15.0.4345.5",
+        ProductLevel = "RTM",
+        ProductUpdateLevel = "CU25",
+        EngineEdition = 2,
+        CpuCount = 4,
+        PhysicalMemoryMb = 32768,
+        SocketCount = 1,
+        CoresPerSocket = 4,
+        IsHadrEnabled = true,
+        IsClustered = false,
+        CollectionTime = CollectedAtUtc,
+    };
+
     private static void AssertOverlayBlank(ServerPropertyRow row)
     {
         Assert.Null(row.AvgCpuPct);
@@ -83,7 +110,7 @@ public sealed class FinOpsServerInventoryTests : IDisposable
             : () => throw new InvalidOperationException("planted overlay read failure");
 
         AppLogger.DrainBufferedLines();
-        var rows = await FinOpsServerInventory.BuildAsync(new[] { first, second }, Live, failingRead);
+        var rows = await FinOpsServerInventory.BuildAsync(new[] { first, second }, Live, NoCollected, failingRead);
         var log = AppLogger.DrainBufferedLines();
 
         Assert.Equal(new[] { first.DisplayName, second.DisplayName }, rows.Select(r => r.ServerName));
@@ -106,6 +133,7 @@ public sealed class FinOpsServerInventoryTests : IDisposable
         var rows = await FinOpsServerInventory.BuildAsync(
             new[] { first, second },
             Live,
+            NoCollected,
             () => Task.FromResult<IReadOnlyDictionary<int, LocalDataService.ServerMetricsRow>>(new MetricsThatThrowWhenLookedUp()));
         var log = AppLogger.DrainBufferedLines();
 
@@ -117,10 +145,10 @@ public sealed class FinOpsServerInventoryTests : IDisposable
         Assert.Contains(log, l => l.Contains("Failed to overlay collected metrics for " + second.DisplayName, StringComparison.Ordinal));
     }
 
-    /// <summary>The overlay lands on the right server by its storage-name id, and a server whose live read
-    /// fails is left out and logged exactly as before while the others keep their overlay.</summary>
+    /// <summary>The overlay lands on the right server by its storage-name id, and a server whose live read fails
+    /// with nothing collected for it is left out and logged while the others keep their overlay.</summary>
     [Fact]
-    public async Task TheOverlayLandsByStorageNameId_AndAServerWhoseLiveReadFailsIsLeftOut()
+    public async Task TheOverlayLandsByStorageNameId_AndAServerWhoseLiveReadFailsWithNothingCollectedIsLeftOut()
     {
         var healthy = Server("inv-healthy");
         var unreachable = Server("inv-unreachable");
@@ -137,6 +165,7 @@ public sealed class FinOpsServerInventoryTests : IDisposable
             server => server == unreachable
                 ? throw new InvalidOperationException("planted live failure")
                 : Live(server),
+            NoCollected,
             () => Task.FromResult<IReadOnlyDictionary<int, LocalDataService.ServerMetricsRow>>(metrics));
         var log = AppLogger.DrainBufferedLines();
 
@@ -147,6 +176,162 @@ public sealed class FinOpsServerInventoryTests : IDisposable
         Assert.Equal(3, only.IdleDbCount);
         Assert.Equal("right_sized", only.ProvisioningStatus);
         Assert.Contains(log, l => l.Contains("Failed to query " + unreachable.DisplayName, StringComparison.Ordinal));
+        Assert.Contains(log, l => l.Contains(unreachable.DisplayName + " has no collected server properties", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// A server whose live read fails keeps its place: its row is built from its collected properties, marked last known
+    /// with the collection time on the machine's clock, costed from the server's configuration, and given its own overlay,
+    /// while the reachable server's row is live as before.
+    /// </summary>
+    [Fact]
+    public async Task AServerWhoseLiveReadFails_IsBuiltFromItsCollectedRow_MarkedLastKnown_WithItsOverlay()
+    {
+        var healthy = Server("inv-live");
+        var offline = Server("inv-offline");
+
+        var metrics = new Dictionary<int, LocalDataService.ServerMetricsRow>
+        {
+            [IdOf(healthy)] = new(AvgCpuPct: 42m, StorageTotalGb: 7m, IdleDbCount: 3, ProvisioningStatus: "right_sized"),
+            [IdOf(offline)] = new(AvgCpuPct: 99m, StorageTotalGb: 1m, IdleDbCount: 0, ProvisioningStatus: "over_provisioned", HealthScore: 61),
+        };
+
+        AppLogger.DrainBufferedLines();
+        var rows = await FinOpsServerInventory.BuildAsync(
+            new[] { healthy, offline },
+            server => server == offline
+                ? throw new InvalidOperationException("planted live failure")
+                : Live(server),
+            server => Task.FromResult<ServerPropertiesRow?>(server == offline ? Collected() : null),
+            () => Task.FromResult<IReadOnlyDictionary<int, LocalDataService.ServerMetricsRow>>(metrics));
+        var log = AppLogger.DrainBufferedLines();
+
+        Assert.Equal(new[] { healthy.DisplayName, offline.DisplayName }, rows.Select(r => r.ServerName));
+
+        var live = rows[0];
+        Assert.False(live.IsLastKnown);
+        Assert.Equal("Enterprise Edition", live.Edition);
+        Assert.Equal(42m, live.AvgCpuPct);
+        Assert.Equal($"{live.LastUpdated:yyyy-MM-dd HH:mm}", live.LastUpdatedDisplay);
+
+        var lastKnown = rows[1];
+        Assert.True(lastKnown.IsLastKnown);
+        Assert.Equal("Standard Edition (64-bit)", lastKnown.Edition);
+        Assert.Equal("15.0.4345.5 - CU25", lastKnown.ProductVersion);
+        Assert.Equal(2, lastKnown.EngineEdition);
+        Assert.Equal(4, lastKnown.CpuCount);
+        Assert.Equal(32768L, lastKnown.PhysicalMemoryMb);
+        Assert.Equal(1, lastKnown.SocketCount);
+        Assert.Equal(4, lastKnown.CoresPerSocket);
+        Assert.True(lastKnown.IsHadrEnabled);
+        Assert.False(lastKnown.IsClustered);
+        Assert.Equal("", lastKnown.HostOsVersion);
+        Assert.Null(lastKnown.SqlServerStartTime);
+        Assert.Equal(CollectedAtUtc.ToLocalTime(), lastKnown.LastUpdated);
+        Assert.Equal($"last known, {CollectedAtUtc.ToLocalTime():yyyy-MM-dd HH:mm}", lastKnown.LastUpdatedDisplay);
+        Assert.Equal(100m, lastKnown.MonthlyCost);
+        Assert.Equal(99m, lastKnown.AvgCpuPct);
+        Assert.Equal(1m, lastKnown.StorageTotalGb);
+        Assert.Equal(0, lastKnown.IdleDbCount);
+        Assert.Equal("over_provisioned", lastKnown.ProvisioningStatus);
+        Assert.Equal(61, lastKnown.HealthScore);
+        Assert.Contains(log, l => l.Contains("Failed to query " + offline.DisplayName, StringComparison.Ordinal)
+            && l.Contains("planted live failure", StringComparison.Ordinal));
+    }
+
+    /// <summary>A collected row stored without a socket or core count reads as blank in those cells, as a live row whose
+    /// hardware read gave none does, and a version stored without a level reads as the version alone.</summary>
+    [Fact]
+    public void ACollectedRowWithoutHardwareCountsOrALevel_ReadsBlankThere()
+    {
+        var row = FinOpsServerInventory.FromCollected(new ServerPropertiesRow
+        {
+            Edition = "Developer Edition (64-bit)", ProductVersion = "16.0.4150.1", CpuCount = 8, PhysicalMemoryMb = 16384, CollectionTime = CollectedAtUtc,
+        });
+
+        Assert.True(row.IsLastKnown);
+        Assert.Equal("16.0.4150.1", row.ProductVersion);
+        Assert.Null(row.SocketCount);
+        Assert.Null(row.CoresPerSocket);
+        Assert.Equal("", row.AgReplicaRoleDisplay);
+    }
+
+    /// <summary>A collected read that throws leaves that server out and is logged, and costs no other server its row.</summary>
+    [Fact]
+    public async Task AFailingCollectedRead_LeavesThatServerOut_AndLogsIt()
+    {
+        var healthy = Server("inv-live-beside-a-failing-store-read");
+        var offline = Server("inv-offline-failing-store-read");
+
+        AppLogger.DrainBufferedLines();
+        var rows = await FinOpsServerInventory.BuildAsync(
+            new[] { healthy, offline },
+            server => server == offline
+                ? throw new InvalidOperationException("planted live failure")
+                : Live(server),
+            server => throw new InvalidOperationException("planted collected read failure"),
+            () => Task.FromResult<IReadOnlyDictionary<int, LocalDataService.ServerMetricsRow>>(new Dictionary<int, LocalDataService.ServerMetricsRow>()));
+        var log = AppLogger.DrainBufferedLines();
+
+        var only = Assert.Single(rows);
+        Assert.Equal(healthy.DisplayName, only.ServerName);
+        Assert.Contains(log, l => l.Contains("Failed to read the collected server properties for " + offline.DisplayName, StringComparison.Ordinal)
+            && l.Contains("planted collected read failure", StringComparison.Ordinal));
+    }
+
+    /// <summary>The sentence under an empty grid: nothing collected when no server is listed, and that the listed servers could
+    /// not be reached and have nothing collected when every one of them was left out for that reason.</summary>
+    [Fact]
+    public void TheEmptySentence_SaysNothingWasCollected_OnlyWhenNoServerIsListed()
+    {
+        Assert.Equal("No server property data collected yet", FinOpsServerInventory.EmptyText(0));
+        Assert.Equal("1 server could not be reached and has no collected properties yet", FinOpsServerInventory.EmptyText(1));
+        Assert.Equal("3 servers could not be reached and have no collected properties yet", FinOpsServerInventory.EmptyText(3));
+    }
+
+    /// <summary>
+    /// Through the real store read: a server with two collected rows and a failing live read is built from the newer row,
+    /// found in the hot table, while the server with none stays out and the sentence for an empty grid is not the one
+    /// shown over this grid.
+    /// </summary>
+    [Fact]
+    public async Task AServerWhoseLiveReadFails_IsBuiltFromTheStoresNewestRowForIt()
+    {
+        using var initializer = new DuckDbInitializer(Path.Combine(_tempDir, "inventory-last-known.duckdb"));
+        await initializer.InitializeFromTemplateAsync();
+
+        var offline = Server("inv-offline-two-rows");
+        var neverCollected = Server("inv-offline-no-rows");
+        var older = CollectedAtUtc.AddDays(-1);
+
+        using (var conn = new DuckDBConnection($"Data Source={Path.Combine(_tempDir, "inventory-last-known.duckdb")}"))
+        {
+            await conn.OpenAsync();
+            long nextId = -1;
+            foreach (var (at, cpu, edition) in new[] { (older, 8, "Standard Edition"), (CollectedAtUtc, 16, "Enterprise Edition") })
+            {
+                Exec(conn, @"INSERT INTO server_properties (collection_id, collection_time, server_id, server_name,
+                              edition, product_version, product_level, engine_edition, cpu_count, hyperthread_ratio, physical_memory_mb)
+                             VALUES ($1,$2,$3,$4,$5,'16.0.4150.1','RTM',3,$6,1,65536)",
+                    nextId--, at, IdOf(offline), offline.ServerName, edition, cpu);
+            }
+        }
+
+        var service = new LocalDataService(initializer);
+
+        var rows = await FinOpsServerInventory.BuildAsync(
+            new[] { offline, neverCollected },
+            server => throw new InvalidOperationException("planted live failure"),
+            server => service.GetLatestServerPropertiesAsync(IdOf(server)),
+            async () => await service.GetServerMetricsAsync());
+
+        var only = Assert.Single(rows);
+        Assert.Equal(offline.DisplayName, only.ServerName);
+        Assert.True(only.IsLastKnown);
+        Assert.Equal("Enterprise Edition", only.Edition);
+        Assert.Equal(16, only.CpuCount);
+        Assert.Equal("16.0.4150.1 - RTM", only.ProductVersion);
+        Assert.Equal(CollectedAtUtc.ToLocalTime(), only.LastUpdated);
     }
 
     /// <summary>
@@ -190,6 +375,7 @@ public sealed class FinOpsServerInventoryTests : IDisposable
         var rows = await FinOpsServerInventory.BuildAsync(
             new[] { listed },
             Live,
+            NoCollected,
             async () => await service.GetServerMetricsAsync());
 
         var only = Assert.Single(rows);

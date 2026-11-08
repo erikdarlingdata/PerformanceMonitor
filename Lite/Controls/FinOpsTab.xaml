@@ -3162,7 +3162,9 @@
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding LastUpdated, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="150">
+                            <!-- The time a live row was read, or "last known, <collection time>" for a row built from the store because
+                                 the server could not be reached. Sorted on the DateTime behind the text. -->
+                            <DataGridTextColumn Binding="{Binding LastUpdatedDisplay}" SortMemberPath="LastUpdated" Width="200">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastUpdated" Click="FilterButton_Click" Margin="0,0,4,0"/>
