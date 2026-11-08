@@ -389,16 +389,25 @@ public partial class WebhookAlertService
                next slot (WebhookAlertService.Pacing.cs). A Summary card is one post and takes no spacing. */
             var spacing = deliveryMode == AlertNotificationMode.PerEvent ? PerEventPostSpacing : TimeSpan.Zero;
 
+            /* #8244: the channels post together, and their answers are recorded afterwards in the fixed order Teams, Slack,
+               generic, PagerDuty. A post can wait on its destination's pacing or on the hold an HTTP 429 left, and one
+               channel's wait must not delay another's page for the same firing. The per-channel health tallies are
+               concurrent-safe, the pacing tables take one lock, and Record runs on this thread only once every post is in. */
+            Task<string?>? teamsSend = null;
+            Task<string?>? slackSend = null;
+            Task<string?>? genericSend = null;
+            Task<string?>? pagerDutySend = null;
+
             if (route.Teams.Destination is { } teamsUrl)
             {
                 attempted = true;
-                Record(NotificationRouter.TeamsChannel, await TrySendTeamsAlertAsync(delivery, teamsUrl, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName, postSpacing: spacing, cancellationToken: cancellationToken));
+                teamsSend = TrySendTeamsAlertAsync(delivery, teamsUrl, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName, postSpacing: spacing, cancellationToken: cancellationToken);
             }
 
             if (route.Slack.Destination is { } slackUrl)
             {
                 attempted = true;
-                Record(NotificationRouter.SlackChannel, await TrySendSlackAlertAsync(delivery, slackUrl, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName, postSpacing: spacing, cancellationToken: cancellationToken));
+                slackSend = TrySendSlackAlertAsync(delivery, slackUrl, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName, postSpacing: spacing, cancellationToken: cancellationToken);
             }
 
             if (route.Generic.Destination is { } genericUrl)
@@ -411,7 +420,7 @@ public partial class WebhookAlertService
                    this value. The deliverer records the same value, so a resolution closes the key the receiver opened even
                    when the filter dropped the alert's first incident (the key anchors on the first incident it keeps). */
                 genericDedupKey = DeriveGenericDedupKey(serverId, serverName, metricName, renderContext);
-                Record(NotificationRouter.GenericChannel, await TrySendGenericAlertAsync(delivery, genericUrl, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, investigationJson, GenericSigningFor(delivery, route.Generic.RouteId, genericUrl), dedupKeyOverride: genericDedupKey, cancellationToken: cancellationToken, postSpacing: spacing));
+                genericSend = TrySendGenericAlertAsync(delivery, genericUrl, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, investigationJson, GenericSigningFor(delivery, route.Generic.RouteId, genericUrl), dedupKeyOverride: genericDedupKey, cancellationToken: cancellationToken, postSpacing: spacing);
             }
 
             if (route.PagerDuty.Destination is { } pagerDutyKey)
@@ -422,7 +431,38 @@ public partial class WebhookAlertService
                    value. The deliverer records it, so the resolve closes the incident this trigger opened even when the
                    filter dropped the alert's first incident. */
                 pagerDutyDedupKey = DerivePagerDutyDedupKey(serverId, metricName, renderContext, autoResolveFlag);
-                var pagerDutyError = await TrySendPagerDutyAlertAsync(delivery, autoResolveFlag, pagerDutyKey, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName, dedupKeyOverride: pagerDutyDedupKey, cancellationToken: cancellationToken, postSpacing: spacing);
+                pagerDutySend = TrySendPagerDutyAlertAsync(delivery, autoResolveFlag, pagerDutyKey, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName, dedupKeyOverride: pagerDutyDedupKey, cancellationToken: cancellationToken, postSpacing: spacing);
+            }
+
+            var sends = new List<Task>(4);
+            foreach (var send in new[] { teamsSend, slackSend, genericSend, pagerDutySend })
+            {
+                if (send is not null)
+                {
+                    sends.Add(send);
+                }
+            }
+
+            await Task.WhenAll(sends);
+
+            if (teamsSend is not null)
+            {
+                Record(NotificationRouter.TeamsChannel, await teamsSend);
+            }
+
+            if (slackSend is not null)
+            {
+                Record(NotificationRouter.SlackChannel, await slackSend);
+            }
+
+            if (genericSend is not null)
+            {
+                Record(NotificationRouter.GenericChannel, await genericSend);
+            }
+
+            if (pagerDutySend is not null)
+            {
+                var pagerDutyError = await pagerDutySend;
                 Record(NotificationRouter.PagerDutyChannel, pagerDutyError);
 
                 /* With auto-resolve on, a DELIVERED close re-opens the lifecycle: the cooldown entry the

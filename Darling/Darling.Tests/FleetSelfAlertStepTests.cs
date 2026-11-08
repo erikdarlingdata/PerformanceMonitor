@@ -7,7 +7,6 @@
  */
 
 using System;
-using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Darling.Service;
@@ -63,34 +62,12 @@ public sealed class FleetSelfAlertStepTests
         await Step(worker);
     }
 
-    /* The launcher and its tracked task are reached by name, so this class states what is missing when the loop has no
-       such step rather than failing to compile against it. */
-    private const string Missing =
-        "DarlingWorker has no {0}, so the fleet self-alerts are awaited on the collection launch loop and a webhook destination that is held or paced delays every collection launch.";
-
-    private static bool TryStart(DarlingWorker worker, Func<CancellationToken, Task> step, CancellationToken ct)
-    {
-        var method = typeof(DarlingWorker).GetMethod(
-            "TryStartFleetSelfAlertStep", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
-            new[] { typeof(Func<CancellationToken, Task>), typeof(CancellationToken) });
-        if (method is null)
-        {
-            Assert.Fail(string.Format(System.Globalization.CultureInfo.InvariantCulture, Missing, "TryStartFleetSelfAlertStep"));
-        }
-
-        return (bool)method.Invoke(worker, new object[] { step, ct })!;
-    }
+    private static bool TryStart(DarlingWorker worker, Func<CancellationToken, Task> step, CancellationToken ct) =>
+        worker.TryStartFleetSelfAlertStep(step, ct);
 
     private static Task Step(DarlingWorker worker)
     {
-        var property = typeof(DarlingWorker).GetProperty(
-            "FleetSelfAlertStepForTests", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-        if (property is null)
-        {
-            Assert.Fail(string.Format(System.Globalization.CultureInfo.InvariantCulture, Missing, "FleetSelfAlertStepForTests"));
-        }
-
-        var step = (Task?)property.GetValue(worker);
+        var step = worker.FleetSelfAlertStepForTests;
         Assert.NotNull(step);
         return step;
     }

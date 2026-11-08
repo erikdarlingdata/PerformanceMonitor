@@ -14,7 +14,6 @@ using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
-using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -294,18 +293,22 @@ public partial class WebhookAlertService
     }
 
     /// <summary>
-    /// What one post came back with (#8244): the error text to record (null when delivered), and whether the endpoint
-    /// answered HTTP 429, with the <c>Retry-After</c> it sent when it sent one. A 429 is reported, not logged, so the
-    /// caller can hold the destination and post once more before it counts anything.
+    /// What one post came back with (#8244): the error text to record (null when delivered); whether the endpoint answered
+    /// HTTP 429; and, when it did, the wait its <c>Retry-After</c> asks for (<see cref="DefaultRetryAfter"/> when it sent
+    /// none). A 429 whose ask is within the caller's retry bound is reported with its body unread, so the caller can hold
+    /// the destination and post once more before anything is counted or logged; any other 429 is a failed post like the
+    /// rest, body read and logged, and the ask rides along so the caller can hold the destination.
     /// </summary>
-    private readonly record struct WebhookPostOutcome(string? Error, bool RateLimited, RetryConditionHeaderValue? RetryAfter);
+    private readonly record struct WebhookPostOutcome(string? Error, bool RateLimited, TimeSpan RetryAfter);
 
     /// <summary>
     /// One post, with the client stated: <paramref name="client"/> null picks the pooled client for the proxy and the
     /// redirect rule; a caller that holds its own client (the rate-limit test seam) passes it. Everything else is
     /// <see cref="PostWebhookAsync(string, string, string?, IReadOnlyDictionary{string, string}?, TimeSpan, WebhookSendSigning?, CancellationToken, ILogger?, bool)"/>'s
-    /// contract, except that an HTTP 429 comes back as <see cref="WebhookPostOutcome.RateLimited"/> with its status text
-    /// as the error and nothing logged.
+    /// contract, except for an HTTP 429 within <paramref name="retryBound"/>, which comes back as
+    /// <see cref="WebhookPostOutcome.RateLimited"/> with nothing read or logged. With no bound (the interactive Test
+    /// buttons, a retry's own answer) a 429 is a failed post like any other. <paramref name="clock"/> is what a
+    /// date-form <c>Retry-After</c> is read against; null reads the wall clock.
     /// </summary>
     private static async Task<WebhookPostOutcome> PostOnceAsync(
         HttpClient? client,
@@ -317,7 +320,9 @@ public partial class WebhookAlertService
         WebhookSendSigning? signing,
         ILogger? bodyLog,
         bool bodyInResult,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TimeSpan? retryBound = null,
+        Func<DateTime>? clock = null)
     {
         var sendsHeaders = headers is { Count: > 0 };
         /* #6003 review: a signed send is held to #5366's rule too. A followed 307/308 would carry the body and a valid
@@ -369,20 +374,24 @@ public partial class WebhookAlertService
             using var response = await client.SendAsync(request, timeout.Token);
 
             if (response.IsSuccessStatusCode)
-                return new WebhookPostOutcome(null, false, null);
+                return new WebhookPostOutcome(null, false, TimeSpan.Zero);
 
             /* #5366: a redirect is not followed on a send with headers or a signature. The message names no URL and no header. */
             if (noRedirects && (int)response.StatusCode is >= 300 and < 400)
             {
                 return new WebhookPostOutcome(string.Create(CultureInfo.InvariantCulture,
-                    $"HTTP {(int)response.StatusCode}: the endpoint answered with a redirect. Set the webhook URL to the final address."), false, null);
+                    $"HTTP {(int)response.StatusCode}: the endpoint answered with a redirect. Set the webhook URL to the final address."), false, TimeSpan.Zero);
             }
 
-            /* #8244: the endpoint is pacing the sender, not refusing the message. The body is not read: nothing from a
-               429 is stored or logged here, and the caller decides whether this attempt is the last. */
-            if (response.StatusCode == HttpStatusCode.TooManyRequests)
+            /* #8244: the endpoint is pacing the sender, not refusing the message. Within the caller's retry bound the body
+               is not read: nothing from this answer is stored or logged, and the caller holds the destination and posts
+               again. Over the bound, or with no bound, the 429 is a failed post like the rest below: the body goes to the
+               log or the Test result, and the ask rides the outcome so the caller can hold the destination. */
+            var rateLimited = response.StatusCode == HttpStatusCode.TooManyRequests;
+            var retryAfter = rateLimited ? RetryAfterWait(response.Headers.RetryAfter, clock is null ? DateTime.UtcNow : clock()) : TimeSpan.Zero;
+            if (rateLimited && retryBound is { } bound && retryAfter <= bound)
             {
-                return new WebhookPostOutcome(HttpStatusText(response.StatusCode), true, response.Headers.RetryAfter);
+                return new WebhookPostOutcome(HttpStatusText(response.StatusCode), true, retryAfter);
             }
 
             /* #6231: the text this returns is what the alert log's send_error and the channel health getter store and
@@ -397,7 +406,7 @@ public partial class WebhookAlertService
 
             var statusText = HttpStatusText(response.StatusCode);
             if (bodyInResult)
-                return new WebhookPostOutcome($"{statusText}: {body}", false, null);
+                return new WebhookPostOutcome($"{statusText}: {body}", rateLimited, retryAfter);
 
             if (bodyLog is not null)
             {
@@ -405,12 +414,12 @@ public partial class WebhookAlertService
                 bodyLog.LogError($"Webhook post failed with {statusText}; the endpoint's response: {oneLine}");
             }
 
-            return new WebhookPostOutcome(statusText, false, null);
+            return new WebhookPostOutcome(statusText, rateLimited, retryAfter);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             return new WebhookPostOutcome(
-                string.Create(CultureInfo.InvariantCulture, $"timed out after {postTimeout.TotalSeconds:0.###} seconds"), false, null);
+                string.Create(CultureInfo.InvariantCulture, $"timed out after {postTimeout.TotalSeconds:0.###} seconds"), false, TimeSpan.Zero);
         }
     }
 

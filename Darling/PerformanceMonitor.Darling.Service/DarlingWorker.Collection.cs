@@ -1595,153 +1595,17 @@ public sealed partial class DarlingWorker
                 _queryTagMapPass = _queryTagMapBuilder.RunMapPassAsync(mapServerIds, stoppingToken);
             }
 
-            /* Stage 4 fleet-level self-alert: the store disk-pressure backstop. The daily purge is the ONLY
-               other maintenance cadence and it is purely time-based (no disk-free check), so on its own the
-               store can still fill between purges — this edge-fired condition is the flagship-appropriate
-               backstop. Own slow cadence; the master alerts gate + edge-trigger live inside the evaluator. */
-            /* #4732: the stamp below is written as now + s_diskCheckInterval, so that is the span. */
-            if (StampIsDue(_nextDiskCheckUtc, s_diskCheckInterval, DateTime.UtcNow))
-            {
-                _nextDiskCheckUtc = DateTime.UtcNow.Add(s_diskCheckInterval);
-                await EvaluateStoreDiskPressureAsync(config, stoppingToken);
-            }
-
-            /* #7368: autovacuum falling behind on the service's own store. One statement against the store once an hour
-               (pg_stat_user_tables, pg_class, pg_stat_activity). The alert needs two true reads in a row, so this cadence is
-               the 2-hour hold. Failure-isolated inside EvaluateAutovacuumBehindAsync, which also gates on the master switch. */
-            /* #4732: the stamp below is written as now + s_autovacuumCheckInterval, so that is the span. */
-            if (_selfAlerts is not null && _postgres is not null
-                && StampIsDue(_nextAutovacuumCheckUtc, s_autovacuumCheckInterval, DateTime.UtcNow))
-            {
-                _nextAutovacuumCheckUtc = DateTime.UtcNow.Add(s_autovacuumCheckInterval);
-                await _selfAlerts.EvaluateAutovacuumBehindAsync(
-                    _postgres, config.Postgres.Managed && OperatingSystem.IsWindows(), stoppingToken);
-            }
-
-            /* #3304: the custom-alert-rule integrity check. A stored rule silently stops compiling when a
-               measure drifts out of the catalog (the incremental pg_* buildout), and a rule can compile yet
-               never fire (scope resolves to no monitored server, or its measure is always-NULL). Nobody
-               "opens" a rule, so a silent gap = an alert an operator believes is armed. Fleet-level, own slow
-               cadence; both evaluators are null on deployments without a viewer pool, and each Evaluate* half
-               is failure-isolated so a throw never stops the fleet loop. */
-            /* #4732: the stamp below is written as now + s_customAlertHealthInterval, so that is the span. */
-            if (_customAlertEvaluator is not null && _selfAlerts is not null
-                && StampIsDue(_nextCustomAlertHealthCheckUtc, s_customAlertHealthInterval, DateTime.UtcNow))
-            {
-                _nextCustomAlertHealthCheckUtc = DateTime.UtcNow.Add(s_customAlertHealthInterval);
-                await EvaluateCustomAlertRuleHealthAsync(servers, stoppingToken);
-
-                /* #3305: on the same cadence, reconcile persisted state — force-resolve + clean the state of
-                   disabled rules (which the enabled-only sweep would orphan) and of servers that have left a
-                   rule's scope. Deleted rules are resolved on the delete path (their state cascades away). */
-                await ReconcileCustomAlertStateAsync(servers, stoppingToken);
-            }
-
-            /* #3306: a mute rule that has outlived its reason. A mute is a deliberate blind spot, and this is
-               the only surface that reports one exists, how old it is, and whether it will ever expire —
-               otherwise the only way to find one is to already suspect it and call get_mute_rules. Without it
-               a rule created to stop a false-positive flood keeps suppressing the alert after the fix ships,
-               and the symptom is silence. Judged on the CONJUNCTION (still in force, no expiry, past every expiry the
-               product offers), never on permanence alone, which the dialog offers on purpose. Reads the live
-               MuteRuleService cache the engine matches against — so it sees exactly what is suppressing
-               alerts right now, and needs no store read of its own. Fleet-level, own slow cadence; the
-               Evaluate* wrapper is failure-isolated so a throw never stops the fleet loop. */
-            /* #4732: the stamp below is written as now + s_staleMuteCheckInterval, so that is the span. */
-            if (_selfAlerts is not null && StampIsDue(_nextStaleMuteCheckUtc, s_staleMuteCheckInterval, DateTime.UtcNow))
-            {
-                _nextStaleMuteCheckUtc = DateTime.UtcNow.Add(s_staleMuteCheckInterval);
-                await _selfAlerts.EvaluateStaleMuteRulesAsync(muteRuleService.GetRules(), stoppingToken);
-            }
-
-            /* #5654: external alerts the drain gave up on (expired, interrupted or failed every send). A source that queues
-               an alert believes it was delivered, and nothing else reports that it was not. The count is one store read per
-               tick; a failed read holds the standing alert rather than resolving it. Fleet-level, own slow cadence; the
-               Evaluate* wrapper is failure-isolated so a throw never stops the fleet loop. */
-            /* #4732: the stamp below is written as now + s_externalAlertsCheckInterval, so that is the span. */
-            if (_selfAlerts is not null && StampIsDue(_nextExternalAlertsCheckUtc, s_externalAlertsCheckInterval, DateTime.UtcNow))
-            {
-                _nextExternalAlertsCheckUtc = DateTime.UtcNow.Add(s_externalAlertsCheckInterval);
-                await EvaluateExternalAlertsAsync(externalAlertStore, stoppingToken);
-            }
-
-            /* #4750: a webhook channel that has failed three times in a row. A channel can fail for weeks while
-               another one delivers every alert, and nothing else reports it. The counts are the webhook
-               service's own in-memory tallies, so the read costs nothing and it rides every sweep tick with no
-               cadence of its own; the evaluator is an edge (one alert when a count reaches three, one
-               resolution when it is back at 0), so a channel that stays broken does not repeat. Fleet-level,
-               master-gated inside, and the Evaluate* wrapper is failure-isolated so a throw never stops the
-               fleet loop. */
-            if (_selfAlerts is not null)
-            {
-                await _selfAlerts.EvaluateNotificationChannelsAsync(stoppingToken);
-            }
-
-            /* #7041: the Daily Health Report's due check. Every 15-second tick pays one settings read and a clock compare; the report is
-               built only once it is due and not yet delivered today. A throw here must not stop the fleet loop. */
-            if (_selfAlerts is not null)
-            {
-                try
-                {
-                    await _selfAlerts.EvaluateDailyHealthReportAsync(stoppingToken);
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    _logger.LogWarning(ex, "Daily health report check failed; it will be tried again on the next tick");
-                }
-            }
-
-            /* #3514: the web-dashboard TLS certificate expiry self-alert. The web host loads the certificate
-               once at start and publishes its served expiry to WebTlsCertificateState; a headless service can
-               run for months without a restart, so the worker re-evaluates that fixed expiry against the clock
-               on its own slow cadence and the evaluator warns 30 days out / Critical once lapsed — and Critical
-               at once when the snapshot carries the host's not-yet-valid refusal (#3517: the dashboard is
-               loopback-only from the start, and the host does not re-decide when the date passes). A null
-               snapshot means no LAN TLS certificate to watch. Fleet-level, and the Evaluate* wrapper is
-               failure-isolated so a throw never stops the fleet loop. */
-            /* #5288: the MCP endpoint's certificate rides the same hourly gate (one stamp, no new field): the
-               MCP host publishes its served expiry to McpTlsCertificateState exactly as the web host does, and
-               the evaluator keeps the two alerts apart by key and metric, so the call sits right beside the web
-               one. Each Evaluate* wrapper is failure-isolated on its own, so a throw in the web half cannot
-               skip the MCP half. */
-            /* #4732: the stamp below is written as now + s_webTlsCheckInterval, so that is the span. */
-            if (_selfAlerts is not null && StampIsDue(_nextWebTlsCheckUtc, s_webTlsCheckInterval, DateTime.UtcNow))
-            {
-                _nextWebTlsCheckUtc = DateTime.UtcNow.Add(s_webTlsCheckInterval);
-                await _selfAlerts.EvaluateWebTlsCertificateAsync(
-                    BuildWebTlsCertReport(_webTlsCertState.Read()), stoppingToken);
-                if (_mcpTlsCertState is not null)
-                {
-                    await _selfAlerts.EvaluateMcpTlsCertificateAsync(
-                        BuildWebTlsCertReport(_mcpTlsCertState.Read()), stoppingToken);
-                }
-            }
-
-            /* #4732: the fleet gate's last-hour counts, once a minute: the "Collection Falling Behind" self-alert
-               (fleet-level, master-gated inside, failure-isolated inside) and the service log's hourly summary line,
-               which also runs with no alert engine. Before this a collector slot that came due while its run was
-               late was skipped with one Info line, and how long a body queued for a gate slot was never measured. */
-            /* #4732: the stamp below is written as now + s_fleetGateCheckInterval, so that is the span. */
-            if (StampIsDue(_nextFleetGateCheckUtc, s_fleetGateCheckInterval, DateTime.UtcNow))
-            {
-                _nextFleetGateCheckUtc = DateTime.UtcNow.Add(s_fleetGateCheckInterval);
-                await CheckFleetGateAsync(stoppingToken);
-            }
-
-            /* #4215: the managed-store settings self-alert — darling-managed.conf fell back to the
-               last-good copy, is hand-edited and kept in force, or PostgreSQL rejected one or more owned
-               settings outright. Every
-               fact but the rejected-setting list is this start's own in-process state, carried down from
-               ExecuteAsync exactly like managedConfWriteResult already is — never re-read, because the writer
-               runs on every start and the state is re-derived after a restart. The rejected list is the one
-               fact that is store-backed (collect.managed_conf_verdicts, V146), read fresh each tick so a value
-               fixed by a later start clears without this process restarting. Fleet-level, own slow cadence;
-               the Evaluate* wrapper is failure-isolated so a throw never stops the fleet loop. */
-            /* #4732: the stamp below is written as now + s_storeSettingsCheckInterval, so that is the span. */
-            if (_selfAlerts is not null && StampIsDue(_nextStoreSettingsCheckUtc, s_storeSettingsCheckInterval, DateTime.UtcNow))
-            {
-                _nextStoreSettingsCheckUtc = DateTime.UtcNow.Add(s_storeSettingsCheckInterval);
-                await EvaluateStoreSettingsAsync(config, managedConfWriteResult, managedUsedLastGoodConf, managedConfVerification, stoppingToken);
-            }
+            /* #8244: the fleet-level self-alert evaluations (RunFleetSelfAlertStepAsync) run as one tracked step off this
+               loop, one at a time (TryStartFleetSelfAlertStep). Several of them post a self-alert to a webhook, and a post
+               can wait on the destination's pacing or on the hold an HTTP 429 left; nothing on this loop waits on either,
+               so a held destination never delays a collection launch. Each evaluation keeps its own due stamp inside the
+               step, so a tick that starts no step because the previous one is still running leaves what was due for the
+               next free tick. `servers`, `muteRuleService` and `externalAlertStore` are each built once above this loop. */
+            TryStartFleetSelfAlertStep(
+                token => RunFleetSelfAlertStepAsync(
+                    config, servers, muteRuleService, externalAlertStore, managedConfWriteResult, managedUsedLastGoodConf,
+                    managedConfVerification, token),
+                stoppingToken);
 
             /* #1581: the compression-job self-heal backstop. TimescaleDB compression policy jobs can silently
                die (next_start = -infinity) or hang, halting the store's archival tier so uncompressed data grows
@@ -1913,6 +1777,12 @@ public sealed partial class DarlingWorker
         if (_selfAlertPass is { IsCompleted: false })
         {
             inFlightSweeps.Add(_selfAlertPass);
+        }
+
+        /* #8244: and so is the fleet self-alert step. */
+        if (_fleetSelfAlertStep is { IsCompleted: false })
+        {
+            inFlightSweeps.Add(_fleetSelfAlertStep);
         }
 
         /* #5642: and so is the engine pass. */
