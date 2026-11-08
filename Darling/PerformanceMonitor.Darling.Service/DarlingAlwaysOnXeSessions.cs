@@ -48,7 +48,7 @@ internal static class DarlingAlwaysOnXeSessions
         {
             var current = runner.AlwaysOnChoices.Get(ServerKey(server), databaseName, kind);
             var ownName = runner.AlwaysOnOwnSessionName(kind);
-            var result = await AlwaysOnXeAzureEnsure.RunAsync(database, kind, ownName, current, cancellationToken);
+            var result = await AlwaysOnXeAzureEnsure.RunAsync(database, kind, ownName, current, cancellationToken, ringBufferMaxEvents: runner.RingBufferMaxEvents);
             runner.AlwaysOnChoices.Set(ServerKey(server), databaseName, kind, result.Choice);
             runner.AlwaysOnChoices.ClearReadOnlyRefusal(ServerKey(server), databaseName, kind);
 

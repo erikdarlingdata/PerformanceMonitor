@@ -2984,6 +2984,14 @@ namespace PerformanceMonitor.Common
                 return Warning;
             }
 
+            /* #8146. A ring-buffer collector that lost events (evicted before the read, or dropped by the session)
+               still records SUCCESS, so the counts on the newest run's note are the only record. An unknown-only
+               loss (the session restarted, nothing countable) is explained in the note but does not band. */
+            if (RingBufferLossNote.TryParse(latestRunNote, out var loss) && (loss.Evicted > 0 || loss.Dropped > 0))
+            {
+                return Warning;
+            }
+
             return Healthy;
         }
 
@@ -3274,11 +3282,17 @@ namespace PerformanceMonitor.Common
             if (HasMeasurements(lastNote))
             {
                 /* #6441: a truncated ring buffer bands WARNING, and the counts alone do not say why. */
-                if (RingBufferTruncationNote.Describe(lastNote) is { } truncation)
+                /* #8146: the same for ring-buffer loss; when a note carries both, truncation reads first. */
+                var truncationSentence = RingBufferTruncationNote.Describe(lastNote);
+                var lossSentence = RingBufferLossNote.Describe(lastNote);
+                if (truncationSentence is not null || lossSentence is not null)
                 {
+                    var sentence = truncationSentence is not null && lossSentence is not null
+                        ? truncationSentence + "; " + lossSentence
+                        : truncationSentence ?? lossSentence;
                     return noteCount >= totalRuns && totalRuns > 0
-                        ? "latest run: " + truncation + " (" + lastNote + ")"
-                        : string.Format(CultureInfo.InvariantCulture, "latest noted run: {0} ({1}; {2} of {3} runs)", truncation, lastNote, noteCount, totalRuns);
+                        ? "latest run: " + sentence + " (" + lastNote + ")"
+                        : string.Format(CultureInfo.InvariantCulture, "latest noted run: {0} ({1}; {2} of {3} runs)", sentence, lastNote, noteCount, totalRuns);
                 }
 
                 /* The note is the newest run that CARRIED one, and some measurers write counts only when
