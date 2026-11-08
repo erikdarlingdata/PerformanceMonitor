@@ -242,9 +242,9 @@ public partial class MuteRuleEditDialog : Window
     }
 
     /// <summary>
-    /// #8350: the Metric list names every alert type the engines check mute rules for, read from the shared census
-    /// (<see cref="MuteRuleMetricList.Names"/>), after the entries the markup lists first. A type the list lacked left
-    /// "Mute This Alert" on "(any)", and that saved a rule muting every alert from the server.
+    /// The Metric list names every alert type the engines judge mute rules for, read from the shared census
+    /// (<see cref="MuteRuleMetricList.Names"/>, every family, since the service raises them all), after the entries the markup
+    /// lists first, so an alert of any censused type can be muted by type alone.
     /// </summary>
     private void AppendCensusMetrics()
     {
@@ -397,10 +397,11 @@ public partial class MuteRuleEditDialog : Window
 
         /* #1839's "Blocking Wait Time" carries the same blocked-process context as "Blocking Detected",
            so it offers the same database/query-text pattern fields. */
-        bool showDatabase = metric is null or "(any)" or "Blocking Detected" or "Blocking Wait Time" or "Deadlocks Detected" or "Long-Running Query" or AlertFamily.ClientTimeoutsMetric;
+        /* Database State carries the database whose state changed, so a rule from it is scoped to that database. */
+        bool showDatabase = metric is null or "(any)" or "Blocking Detected" or "Blocking Wait Time" or "Deadlocks Detected" or "Long-Running Query" or "Database State" or AlertFamily.ClientTimeoutsMetric;
         bool showWaitType = metric is null or "(any)" or "Poison Wait" or "Long-Running Query";
         bool showQueryText = metric is null or "(any)" or "Blocking Detected" or "Blocking Wait Time" or "Long-Running Query";
-        bool showJobName = metric is null or "(any)" or "Long-Running Job";
+        bool showJobName = metric is null or "(any)" or "Long-Running Job" or "Failed Agent Job";
         /* #5640: Client Timeouts offers Database AND Client Application, the two dimensions its alert carries, so the
            same "Mute this alert" click makes the same rule here, in Lite and on the web page. */
         bool showClientApp = metric is null or "(any)" or AlertFamily.ClientTimeoutsMetric;
