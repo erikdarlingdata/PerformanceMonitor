@@ -186,6 +186,47 @@ public sealed class ChartTextRefreshTests
         }
     }
 
+    [Theory]
+    [MemberData(nameof(ThemesAndWindows))]
+    public void TheQueryHeatmapColourBar_LabelsDoNotTouch_WhenTheMaximumSitsJustPastARoundValue(string theme, int width, int height)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "ChartTextRefresh_" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(dir);
+        try
+        {
+            using var duckDb = new DuckDbInitializer(Path.Combine(dir, "test.duckdb"));
+            var (labels, overlaps) = StaTestThread.Run(() => WithTheme(theme, () =>
+            {
+                var server = new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "heatmap-ticks", DisplayName = "heatmap-ticks", IsEnabled = true };
+                var tab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
+                typeof(ServerTab).GetField("_suppressActiveQueriesAutoRefresh", Instance)!.SetValue(tab, true);
+                var window = new Window { Content = tab, Width = width, Height = height, Left = 0, Top = 0 };
+                window.Show();
+                try
+                {
+                    var chart = (WpfPlot)tab.FindName("QueryHeatmapChart");
+                    SelectTabsAbove(chart);
+                    ClippedTextProbe.Settle(window);
+                    typeof(ServerTab).GetMethod("UpdateQueryHeatmapChart", Instance)!.Invoke(tab, [HeatmapToppingOutAt(252)]);
+                    ChartLayoutProbe.Settle(window, [chart]);
+                    Shot(window, $"colourbar-{theme}-{width}x{height}");
+                    return ColourBarLabels(chart);
+                }
+                finally
+                {
+                    window.Close();
+                }
+            }));
+
+            Assert.Contains("252", labels);
+            Assert.True(overlaps.Count == 0, $"colour bar labels touch at {width}x{height} in {theme}: " + string.Join("; ", overlaps));
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup */ }
+        }
+    }
+
     [Fact]
     public void TheOverviewBlockingLane_LabelsWholeCountsOnly()
     {
@@ -269,6 +310,53 @@ public sealed class ChartTextRefreshTests
         Assert.True(captionsOffBackground.Count == 0, "these captions let the gridline through: " + string.Join(", ", captionsOffBackground));
         /* 24 of 255: a tint the amber band reads as, not a brown block, on the dark and the Cool Breeze data backgrounds. */
         Assert.True(waitBandAlpha >= 0 && waitBandAlpha <= 24, $"the Wait lane's band is filled at alpha {waitBandAlpha}");
+    }
+
+    /// <summary>A 7x12 grid of counts from 1 to 40 with one cell at <paramref name="max"/>: a maximum just past the round 200 on the colour bar.</summary>
+    private static HeatmapResult HeatmapToppingOutAt(int max)
+    {
+        const int rows = 7, cols = 12;
+        var result = new HeatmapResult
+        {
+            Intensities = new double[rows, cols],
+            TimeBuckets = Enumerable.Range(0, cols).Select(i => new DateTime(2026, 3, 10, i, 0, 0, DateTimeKind.Utc)).ToArray(),
+            BucketLabels = ["0-1ms", "1-10ms", "10-100ms", "100ms-1s", "1-10s", "10-100s", ">100s"],
+            CellDetails = new HeatmapCell[rows, cols],
+        };
+        for (var r = 0; r < rows; r++)
+            for (var c = 0; c < cols; c++)
+                result.Intensities[r, c] = (r + c) % 3 == 0 ? 0 : 1 + (r * cols + c) % 40;
+        result.Intensities[rows - 1, cols - 1] = max;
+        return result;
+    }
+
+    /// <summary>Selects every tab on the way up from <paramref name="element"/>, so it is laid out and rendered.</summary>
+    private static void SelectTabsAbove(DependencyObject element)
+    {
+        for (var node = element; node is not null; node = LogicalTreeHelper.GetParent(node))
+            if (node is TabItem item && ItemsControl.ItemsControlFromItemContainer(item) is TabControl tabs)
+                tabs.SelectedItem = item;
+    }
+
+    /// <summary>The colour bar's realized major tick labels, bottom to top, and every neighbouring pair drawn closer along the bar than a
+    /// label's height (the tick label font size). The bar spans the plot's data area and maps the heatmap's colour range onto it.</summary>
+    private static (List<string> Labels, List<string> Overlaps) ColourBarLabels(WpfPlot chart)
+    {
+        var heatmap = chart.Plot.PlottableList.OfType<ScottPlot.Plottables.Heatmap>().Single();
+        var bar = chart.Plot.Axes.GetPanels().OfType<ScottPlot.Panels.ColorBar>().Single();
+        var values = heatmap.Intensities.Cast<double>().Where(v => !double.IsNaN(v)).ToList();
+        var range = heatmap.ManualRange ?? new ScottPlot.Range(values.Min(), values.Max());
+        var barHeight = (double)chart.Plot.RenderManager.LastRender.DataRect.Height;
+        var ticks = bar.Axis.TickGenerator.Ticks.Where(t => t.IsMajor).OrderBy(t => t.Position).ToList();
+        var labelHeight = (double)bar.Axis.TickLabelStyle.FontSize;
+        var overlaps = new List<string>();
+        for (var i = 1; i < ticks.Count; i++)
+        {
+            var px = (ticks[i].Position - ticks[i - 1].Position) / (range.Max - range.Min) * barHeight;
+            if (px < labelHeight) overlaps.Add($"\"{ticks[i - 1].Label}\" and \"{ticks[i].Label}\" are {px:F0} px apart on a {barHeight:F0} px bar");
+        }
+
+        return (ticks.Select(t => t.Label).ToList(), overlaps);
     }
 
     private static List<(double Time, double Value)> Series(DateTime from, DateTime to, double lo, double hi) =>
