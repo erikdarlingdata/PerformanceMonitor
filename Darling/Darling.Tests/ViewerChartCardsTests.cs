@@ -69,7 +69,7 @@ public sealed class ViewerChartCardsTests
                     new DarlingServer(1, "chart-cards-test", "chart-cards-test", true, null));
                 typeof(ViewerServerTab).GetField("_refreshInFlight", Instance)!.SetValue(tab, true);
                 var window = new Window { Content = tab, Width = 1280, Height = 800, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     // The overview's correlated lanes (CorrelatedTimelineLanesControl) are one stack of lane plots that share an axis, named by
@@ -118,7 +118,7 @@ public sealed class ViewerChartCardsTests
             {
                 var tab = new FinOpsTab();
                 var window = new Window { Content = tab, Width = 1280, Height = 800, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     var charts = ChartLayoutProbe.Logical<WpfPlot>(tab).ToList();
@@ -149,7 +149,7 @@ public sealed class ViewerChartCardsTests
                 host.Children.Add(card);
                 ViewerChartCards.Attach(host);
                 var window = new Window { Content = host, Width = 600, Height = 400, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     ChartLayoutProbe.Layout(window);
@@ -184,7 +184,7 @@ public sealed class ViewerChartCardsTests
                     new DarlingServer(1, "chart-cards-test", "chart-cards-test", true, null));
                 typeof(ViewerServerTab).GetField("_refreshInFlight", Instance)!.SetValue(tab, true);
                 var window = new Window { Content = tab, Width = 1280, Height = 800, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     var t0 = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -224,7 +224,7 @@ public sealed class ViewerChartCardsTests
                     new DarlingServer(1, "chart-cards-test", "chart-cards-test", true, null));
                 typeof(ViewerServerTab).GetField("_refreshInFlight", Instance)!.SetValue(tab, true);
                 var window = new Window { Content = tab, Width = 1280, Height = 800, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     var t0 = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);

@@ -62,7 +62,7 @@ public sealed class ViewerCollectionHealthSeatGateTests
                 var tab = new ViewerServerTab(dataService, new DarlingServer(1, "seat-gate-test", "seat-gate-test", true, null));
                 typeof(ViewerServerTab).GetField("_suppressDrillDownAutoRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(tab, true);
                 window = new Window { Content = tab, Width = 1800, Height = 1000 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 StaTestThread.Reveal((TabItem)tab.FindName("CollectionHealthTab"));
                 window.UpdateLayout();
 

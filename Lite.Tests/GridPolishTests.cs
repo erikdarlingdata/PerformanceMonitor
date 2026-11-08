@@ -158,7 +158,7 @@ public sealed class GridPolishTests
                 /* Switching to a tab would start that tab's load against a server that is not there. */
                 typeof(ServerTab).GetField("_suppressActiveQueriesAutoRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(tab, true);
                 var window = new Window { Content = tab, Width = width, Height = height, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     return body(tab, window);

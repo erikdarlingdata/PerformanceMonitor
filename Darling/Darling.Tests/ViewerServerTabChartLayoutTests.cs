@@ -76,7 +76,7 @@ public sealed class ViewerServerTabChartLayoutTests
                 // Switching to a tab would start that tab's load against a server that is not there: the refresh loop bounces instead.
                 typeof(ViewerServerTab).GetField("_refreshInFlight", Instance)!.SetValue(tab, true);
                 var window = new Window { Content = tab, Width = width, Height = height, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     var charts = ChartLayoutProbe.Logical<WpfPlot>(tab).ToList();
@@ -124,7 +124,7 @@ public sealed class ViewerServerTabChartLayoutTests
             {
                 var tab = NewTab();
                 var window = new Window { Content = ChartLayoutProbe.HostLikeMainWindow(tab), Width = width, Height = height, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     var window24 = (ValueTuple<DateTime, DateTime>)typeof(ViewerServerTab).GetMethod("GetWindowUtc", Instance)!.Invoke(tab, null)!;
@@ -167,7 +167,7 @@ public sealed class ViewerServerTabChartLayoutTests
             {
                 var tab = NewTab();
                 var window = new Window { Content = ChartLayoutProbe.HostLikeMainWindow(tab), Width = width, Height = height, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     var (found, readings) = ChartLayoutProbe.MeasureHeavyLegends(window, tab, ChartLayoutProbe.HeavyLegendCharts, "viewer-heavy", $"{width}x{height}");

@@ -124,7 +124,7 @@ public sealed class ViewerCaptionAndLabelFitTests
                 new DarlingServer(1, "caption-fit-test", "caption-fit-test", true, null));
             var window = new Window { Content = tab, Width = ScreenWidth, Height = ScreenHeight };
             window.Resources.MergedDictionaries.Add(Theme());
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 typeof(ViewerServerTab).GetField("_suppressDrillDownAutoRefresh", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(tab, true);
@@ -160,7 +160,7 @@ public sealed class ViewerCaptionAndLabelFitTests
             var tab = new FinOpsTab();
             var window = new Window { Content = tab, Width = ScreenWidth, Height = ScreenHeight };
             window.Resources.MergedDictionaries.Add(Theme());
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ((FrameworkElement)tab.FindName("FinOpsUtilizationContent")).Visibility = Visibility.Visible;
@@ -208,7 +208,7 @@ public sealed class ViewerCaptionAndLabelFitTests
             };
             var window = new Window { Content = picker, Width = ScreenWidth, Height = ScreenHeight };
             window.Resources.MergedDictionaries.Add(Theme());
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             var found = new List<string>();
             try
             {

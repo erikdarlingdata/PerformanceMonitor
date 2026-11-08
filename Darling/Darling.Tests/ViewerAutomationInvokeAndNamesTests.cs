@@ -59,7 +59,7 @@ public sealed class ViewerAutomationInvokeAndNamesTests
             list.ItemInvoked += (_, e) => ServerListKeyboard.HandleInvoke(list, e.Item, OpenSelected);
 
             var window = new Window { Content = list, Width = 300, Height = 300 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             Pump(window.Dispatcher);
             var peers = new List<AutomationPeer>();
             Walk(UIElementAutomationPeer.CreatePeerForElement(list), peers);
@@ -96,7 +96,7 @@ public sealed class ViewerAutomationInvokeAndNamesTests
             list.ItemInvoked += (_, e) => ServerListKeyboard.HandleInvoke(list, e.Item, () => opened++);
 
             var window = new Window { Content = list, Width = 300, Height = 300 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             Pump(window.Dispatcher);
             var peers = new List<AutomationPeer>();
             Walk(UIElementAutomationPeer.CreatePeerForElement(list), peers);
@@ -127,7 +127,7 @@ public sealed class ViewerAutomationInvokeAndNamesTests
             cards.ItemInvoked += (_, e) => invoked.Add(((ServerSummaryItem)e.Item).ServerId);
 
             var window = new Window { Content = cards, Width = 300, Height = 300 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             Pump(window.Dispatcher);
             var peers = new List<AutomationPeer>();
             Walk(UIElementAutomationPeer.CreatePeerForElement(cards), peers);
@@ -159,7 +159,7 @@ public sealed class ViewerAutomationInvokeAndNamesTests
             rows.ItemInvoked += (_, e) => invoked.Add(((FleetRankedServer)e.Item).ServerId);
 
             var window = new Window { Content = rows, Width = 300, Height = 300 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             Pump(window.Dispatcher);
             var peers = new List<AutomationPeer>();
             Walk(UIElementAutomationPeer.CreatePeerForElement(rows), peers);
@@ -213,7 +213,7 @@ public sealed class ViewerAutomationInvokeAndNamesTests
             var store = new ViewerAppSettingsStore(Path.Combine(Path.GetTempPath(), "input-names-" + Guid.NewGuid().ToString("N") + ".json"));
             var window = new SettingsWindow(new ViewerPreferences(), store, null);
             StaTestThread.Step("showing the Settings window");
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             var found = InputNamesProbe.Unnamed(window, (TabControl)window.FindName("SettingsTabs"));
 
             /* Closing an unsaved settings window re-applies the original theme, which needs the running app's pack resources; this window changed none. */

@@ -435,7 +435,7 @@ public sealed class LiteEmptyAndCountTextTests
     private static Window Open(FrameworkElement content, int width, int height)
     {
         var window = new Window { Content = content, Width = width, Height = height, Left = 0, Top = 0, WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize };
-        window.Show();
+        StaTestThread.ShowOffScreen(window);
         Settle(window);
         return window;
     }
