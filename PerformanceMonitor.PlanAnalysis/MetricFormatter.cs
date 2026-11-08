@@ -47,6 +47,16 @@ public static class MetricFormatter
     }
 
     /// <summary>
+    /// An estimated row count as the plan viewer prints it on every surface (#8187): one decimal
+    /// with thousands separators, so the node tooltip's Estimated Rows, the arrow tooltip's
+    /// Estimated Number of Rows Per Execution and the Properties panel's Est. Rows Per Exec read
+    /// the same figure for the same estimate. The optimizer's estimates are fractional, and the
+    /// one decimal keeps 1.1 from reading as 1 on one surface and 1.1 on the next.
+    /// </summary>
+    public static string FormatEstimatedRows(double rows, IFormatProvider? provider = null)
+        => rows.ToString("N1", provider ?? CultureInfo.CurrentCulture);
+
+    /// <summary>
     /// The same ladder the statements grid already uses (under a second stays in
     /// milliseconds like "847ms", under a minute scales to seconds with one decimal like
     /// "3.5s", and anything longer splits into minutes and seconds like "20m 35s"), for a

@@ -457,10 +457,10 @@ public partial class PlanViewerControl
         if (child.HasActualStats)
             AddRow("Actual Number of Rows for All Executions", $"{child.ActualRows:N0}");
 
-        AddRow("Estimated Number of Rows Per Execution", $"{child.EstimateRows:N0}");
+        AddRow("Estimated Number of Rows Per Execution", MetricFormatter.FormatEstimatedRows(child.EstimateRows));
 
         var estimatedRowsAllExec = child.EstimateRows * EstimatedExecutions(child);
-        AddRow("Estimated Number of Rows for All Executions", $"{estimatedRowsAllExec:N0}");
+        AddRow("Estimated Number of Rows for All Executions", MetricFormatter.FormatEstimatedRows(estimatedRowsAllExec));
 
         if (child.EstimatedRowSize > 0)
         {

@@ -39,8 +39,9 @@ public sealed partial class DarlingMcpPlanForceTools
 
     /// <summary>
     /// SQL Server and Azure kill: the session, its login time and <c>last_request_end_time</c> (UTC, with the server-local values the kill batch
-    /// compares), its status and open transaction count. A session that ran a new batch since the proposal has a new last end time, so the press
-    /// ends the proposal <c>superseded</c>. A batch between the confirming press and the write is refused by the kill batch itself.
+    /// compares), its status, open transaction count and the database it is in. A session that ran a new batch since the proposal has a new last end
+    /// time, and one that moved to another database has a new database id, so the press ends the proposal <c>superseded</c>. A batch or a move
+    /// between the confirming press and the write is refused by the kill batch itself.
     /// </summary>
     internal static JsonObject SqlKillBindingObject(SqlKillBinding binding) => BindingObject(new
     {
@@ -51,6 +52,7 @@ public sealed partial class DarlingMcpPlanForceTools
         last_request_end_time_server_local = binding.LastRequestEndTimeServerLocal,
         status = binding.Status,
         open_transaction_count = binding.OpenTransactionCount,
+        database_id = binding.DatabaseId,
     });
 
     /// <summary>PostgreSQL kill: the binding as <see cref="PgKillBindingImage"/> shapes it.</summary>

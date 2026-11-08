@@ -226,7 +226,7 @@ public sealed class ActionProposalPress
     {
         var queryId = target["query_id"]!.GetValue<long>();
         var planId = target["plan_id"]!.GetValue<long>();
-        var prepared = await DarlingMcpPlanForceTools.PrepareForcePlanAsync(_owner, _logger, permit, proposal.ServerId, permit.ServerName, force,
+        var prepared = await DarlingMcpPlanForceTools.PrepareForcePlanAsync(_owner, _owner, _logger, permit, proposal.ServerId, permit.ServerName, force,
             Text(target, "database"), queryId, planId, dryRun: true, NoRefusalRow, ct);
         if (prepared.Facts is not { } facts)
             return PlanStop(prepared.Answer, permit.ServerName);
@@ -343,8 +343,14 @@ public sealed class ActionProposalPress
         var prepared = await DarlingMcpPlanForceTools.PrepareKillSessionAsync(_owner, _owner, _logger, permit, proposal.ServerId, permit.ServerName, azure,
             sessionId, loginUtc, database, ct);
         if (prepared.FixedAnswer is not null)
+        {
+            /* A refusal about the session's database (excluded in the server's entry, or one the login cannot name) is the tool's own refused answer and
+               ends the proposal superseded. Any other fixed answer is a read that did not happen, and the proposal waits. */
+            if (prepared.RecordReason is DarlingMcpPlanForceTools.AzureDatabaseExcluded or DarlingMcpPlanForceTools.SessionDatabaseUnknown)
+                return PlanStop(prepared.FixedAnswer, permit.ServerName);
             return new Prepared(null, null, new ProposalPressResult("failed", prepared.RecordReason ?? "prepare_failed",
                 $"The facts could not be read from {permit.ServerName}. Nothing was run, and the proposal is still waiting."));
+        }
         if (prepared.NotDone is { } notDone)
             return new Prepared(null, null, new ProposalPressResult(notDone.Outcome == RemediationOutcome.Refused ? "refused" : "failed",
                 notDone.Reason ?? "dry_run_failed", notDone.Message + " Nothing was run."), Supersede: notDone.Outcome == RemediationOutcome.Refused);
