@@ -1410,22 +1410,17 @@ public partial class ServerTab : UserControl
         // X-axis: time labels at column positions. #1831: NumericManual labels bypass the shared
         // DateTime formatter, so this axis words each bucket's UTC instant in the display zone itself
         // (#4766) — the same zone this same chart's tooltip uses.
-        var xTicks = new ScottPlot.TickGenerators.NumericManual();
-        int xStep = Math.Max(1, numCols / 12); // ~12 labels max
-        for (int i = 0; i < numCols; i += xStep)
+        // #8220: one line per label, and as many labels as the axis has room for at the moment of each render (a fixed ~12 touched at 900x600).
+        var xTicks = new PerformanceMonitor.Ui.HeatmapLabelTicks(numCols, i =>
         {
             var t = DisplayZone.ToDisplay(result.TimeBuckets[i], GetPickerZone());
-            xTicks.AddMajor(i, t.ToString("M/d\nHH:mm"));
-        }
+            return t.ToString("M/d HH:mm");
+        }, horizontal: true);
         QueryHeatmapChart.Plot.Axes.Bottom.TickGenerator = xTicks;
         QueryHeatmapChart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = QueryHeatmapChart.Plot.Axes.Left.TickLabelStyle.ForeColor;
 
         // Y-axis: bucket labels
-        var yTicks = new ScottPlot.TickGenerators.NumericManual();
-        for (int i = 0; i < result.BucketLabels.Length; i++)
-        {
-            yTicks.AddMajor(i, result.BucketLabels[i]);
-        }
+        var yTicks = new PerformanceMonitor.Ui.HeatmapLabelTicks(result.BucketLabels.Length, i => result.BucketLabels[i], horizontal: false);
         QueryHeatmapChart.Plot.Axes.Left.TickGenerator = yTicks;
 
         // Axis limits match default heatmap extent

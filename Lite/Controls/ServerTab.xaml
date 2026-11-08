@@ -1496,7 +1496,10 @@
                             </Grid>
                         </TabItem>
                         <TabItem Header="Query Heatmap">
-                            <Grid>
+                            <!-- #8220: the tab scrolls when the chart card cannot keep a plot of 120 DIPs: the grid is as tall as the viewport but never under
+                                 MinHeight (the metric row, the banner and a 280 DIP card). -->
+                            <ScrollViewer x:Name="HeatmapScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                                <Grid Height="{Binding ViewportHeight, ElementName=HeatmapScroll}" MinHeight="360">
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
@@ -1523,6 +1526,7 @@
                                                         MouseLeave="HeatmapChart_MouseLeave"/>
                                 </ui:ChartPanel>
                             </Grid>
+                            </ScrollViewer>
                         </TabItem>
                     </TabControl>
                 </Grid>
@@ -1570,11 +1574,16 @@
             <TabItem Header="CPU">
                 <TabControl x:Name="CpuSubTabControl" Background="Transparent" BorderThickness="0" ui:TabStripOverflow.HeaderMargin="8,0,0,0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                     <TabItem Header="CPU Utilization">
-                        <Grid Margin="8">
-                            <ui:ChartPanel Title="CPU">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8"><!-- #8220: scrolls when the chart cannot keep its minimum height with its legend -->
+                        <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="300">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                            </Grid.RowDefinitions>
+                            <ui:ChartPanel Title="CPU" Grid.Row="0">
                                 <ScottPlot:WpfPlot x:Name="CpuChart"/>
                             </ui:ChartPanel>
                         </Grid>
+                        </ScrollViewer>
                     </TabItem>
 
                     <!-- CPU Scheduler sub-tab (#8169: under CPU, as in the Viewer) — the Lite port of Darling's CPU Scheduler surface
