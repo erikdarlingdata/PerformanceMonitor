@@ -46,6 +46,13 @@ public sealed class TimescaleJobRetryAndDailyWindowTests
     /// <summary>The scheduler's floor on a crashed job's wait: it never re-runs one sooner than this after a reload.</summary>
     private static readonly TimeSpan CrashWaitFloor = TimeSpan.FromMinutes(5);
 
+    /// <summary>A healthy daily's newest bucket end is at most this old: end offset (1 day) + one bucket + one schedule
+    /// interval, reached when a run lands just before 00:00 UTC and held until the next run.</summary>
+    private static readonly TimeSpan HealthyDailyEndAgeMaximum = TimeSpan.FromDays(3);
+
+    /// <summary>The daily's staleness threshold: its 4-day start offset less twelve hours.</summary>
+    private static readonly TimeSpan StaleDailyThreshold = TimeSpan.FromDays(3.5);
+
     /* ---------------- pure pins ---------------- */
 
     [Fact]
@@ -283,16 +290,56 @@ VALUES ($1, now() - INTERVAL '2 hours', '-infinity', now() + INTERVAL '1 day', n
         var jobId = await RefreshJobIdAsync(connection, Daily, ct);
         var newestBucketEnd = D0.AddDays(2);
 
-        // Inside the window a healthy daily's newest bucket can be this old just before its next run: nothing to report.
-        var current = await TimescaleSupport.ReadStuckPolicyJobsAsync(connection, newestBucketEnd.AddDays(3), null, ct);
+        /* The healthy worst case: a daily run that lands just before 00:00 UTC leaves the newest bucket's end
+           end_offset + one bucket + one schedule interval old, three days, until the next run. Nothing to report. */
+        var current = await TimescaleSupport.ReadStuckPolicyJobsAsync(connection, newestBucketEnd + HealthyDailyEndAgeMaximum, null, ct);
         Assert.Empty(current.Stuck);
 
-        // Older than the whole refresh window: a daily run was missed, and the rollup is reported under its refresh job.
-        var stale = await TimescaleSupport.ReadStuckPolicyJobsAsync(connection, newestBucketEnd + TimescaleSupport.DailyRefreshStartSpan + TimeSpan.FromHours(1), null, ct);
+        // Past the threshold, half a day inside the window: a daily run was missed, and the rollup is reported under its refresh job.
+        var stale = await TimescaleSupport.ReadStuckPolicyJobsAsync(connection, newestBucketEnd + StaleDailyThreshold + TimeSpan.FromHours(1), null, ct);
         var reported = Assert.Single(stale.Stuck);
         Assert.Equal(jobId, reported.JobId);
         Assert.Equal(TimescaleSupport.StorePolicyJobFamily.Refresh, reported.Family);
         Assert.Contains("newest materialized bucket", reported.Reason, StringComparison.Ordinal);
+    }
+
+    /// <summary>The threshold sits half a day under each daily's own window: 3.5 days, 4.5 for the daily-parented child.</summary>
+    [Fact]
+    public void TheStaleThreshold_IsEachDailysStartOffsetLessTwelveHours()
+    {
+        Assert.Equal(TimeSpan.FromHours(12), TimescaleSupport.DailyRollupStaleMarginSpan);
+        Assert.Equal(StaleDailyThreshold, TimescaleSupport.DailyRollupStaleAfterSpanFor(Daily));
+        Assert.Equal(TimeSpan.FromDays(4.5), TimescaleSupport.DailyRollupStaleAfterSpanFor(TimescaleSupport.QueryStoreStatsDayGrainDailyView));
+
+        foreach (var (_, view) in TimescaleSupport.DailyAggregates)
+        {
+            Assert.Equal(TimescaleSupport.DailyRefreshStartSpanFor(view) - TimeSpan.FromHours(12), TimescaleSupport.DailyRollupStaleAfterSpanFor(view));
+        }
+    }
+
+    /// <summary>
+    /// The boundary on each side, for a daily and for the daily-parented child: the healthy maximum end-age is silent,
+    /// the threshold itself is silent, one tick past it fires, and the window (a day already lost) fires.
+    /// </summary>
+    [Fact]
+    public void TheStaleBoundary_IsSilentAtTheHealthyMaximumAndAtTheThreshold_AndFiresOneTickPast()
+    {
+        var end = new DateTime(2026, 3, 4, 0, 0, 0, DateTimeKind.Unspecified);
+        var child = TimescaleSupport.QueryStoreStatsDayGrainDailyView;
+
+        Assert.False(TimescaleSupport.IsDailyRollupStale(Daily, end, end + HealthyDailyEndAgeMaximum));
+        Assert.False(TimescaleSupport.IsDailyRollupStale(Daily, end, end + StaleDailyThreshold));
+        Assert.True(TimescaleSupport.IsDailyRollupStale(Daily, end, end + StaleDailyThreshold + TimeSpan.FromTicks(1)));
+        Assert.True(TimescaleSupport.IsDailyRollupStale(Daily, end, end + TimescaleSupport.DailyRefreshStartSpan));
+
+        // The child refreshes a day on the run after its parent wrote it, so its healthy maximum and its threshold are a day later.
+        Assert.False(TimescaleSupport.IsDailyRollupStale(child, end, end + HealthyDailyEndAgeMaximum + TimeSpan.FromDays(1)));
+        Assert.False(TimescaleSupport.IsDailyRollupStale(child, end, end + TimeSpan.FromDays(4.5)));
+        Assert.True(TimescaleSupport.IsDailyRollupStale(child, end, end + TimeSpan.FromDays(4.5) + TimeSpan.FromTicks(1)));
+
+        // Twelve hours of margin on each side of the threshold: above the healthy maximum, and below the window.
+        Assert.Equal(TimeSpan.FromHours(12), StaleDailyThreshold - HealthyDailyEndAgeMaximum);
+        Assert.Equal(TimeSpan.FromHours(12), TimescaleSupport.DailyRefreshStartSpan - StaleDailyThreshold);
     }
 
     /* ---------------- helpers ---------------- */

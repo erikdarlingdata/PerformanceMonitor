@@ -15421,17 +15421,40 @@ WHERE cagg.user_view_schema = 'collect'
 AND   j.scheduled";
 
     /// <summary>
-    /// The daily rollups whose newest materialized bucket ended longer ago than their own refresh window
-    /// (<see cref="DailyRefreshStartSpanFor"/>), each as a <see cref="StuckPolicyJob"/> on
-    /// <see cref="StuckPolicyJobArm.DailyRollupStale"/> under its refresh job (#8302).
+    /// The margin a daily rollup's staleness threshold keeps below its own <c>start_offset</c> (#8302): the threshold
+    /// is <c>start_offset - 12 hours</c> on the newest materialized bucket's END (<see cref="DailyRollupStaleAfterSpanFor"/>).
     ///
-    /// <para><b>Why the window is the threshold.</b> A daily policy refreshes the whole buckets inside
-    /// <c>[now - window, now - 1 day]</c> once a day on finish-to-start scheduling, so on a healthy store the newest
-    /// bucket's end is between one and about three days old at any instant: a day old just after a run, and three days
-    /// plus the run's own length just before the next. Older than the window means at least one daily run did not happen
-    /// and the window has moved past a day the policy will not refresh on its own. A rollup with nothing materialized
-    /// yet is not stale (a fresh store), a rollup whose job is Running is not judged mid-run, and only the daily tier is
-    /// read: an hourly rollup that stops is caught within hours by the hourly arms.</para>
+    /// <para><b>Why below the window, and why twelve hours.</b> A daily policy refreshes the whole buckets inside
+    /// <c>[now - start_offset, now - 1 day]</c> once a day on finish-to-start scheduling. Just after a run the newest
+    /// bucket's end is <c>end_offset</c> plus the time of day old, and just before the next run a schedule interval
+    /// more, so a healthy daily's end-age peaks at about <c>end_offset + one bucket + one schedule interval</c>: three
+    /// days, when the run falls just before 00:00 UTC, plus the run's own length. A daily-parented daily refreshes a
+    /// day on the run after its parent wrote it (#6070), so it peaks a day later. At an end-age of <c>start_offset</c>
+    /// the next bucket has already fallen out of the window, so a threshold AT the window would report a day already
+    /// lost; half a day under it warns before the loss, with about twelve hours of margin above the healthy peak and
+    /// about twelve below the loss.</para>
+    /// </summary>
+    public static readonly TimeSpan DailyRollupStaleMarginSpan = TimeSpan.FromHours(12);
+
+    /// <summary>The end-age past which <paramref name="view"/>'s newest materialized bucket reads as stale:
+    /// <see cref="DailyRefreshStartSpanFor"/> less <see cref="DailyRollupStaleMarginSpan"/>, so 3.5 days for a daily and
+    /// 4.5 for a daily-parented daily (#8302).</summary>
+    public static TimeSpan DailyRollupStaleAfterSpanFor(string view)
+        => DailyRefreshStartSpanFor(view) - DailyRollupStaleMarginSpan;
+
+    /// <summary>Whether a daily rollup whose newest materialized bucket ended at <paramref name="newestBucketEndUtc"/>
+    /// is stale at <paramref name="nowUtc"/>: strictly older than <see cref="DailyRollupStaleAfterSpanFor"/>, so an
+    /// end-age exactly at the threshold is not yet stale (#8302). Pure, so the boundary pins on both sides.</summary>
+    public static bool IsDailyRollupStale(string view, DateTime newestBucketEndUtc, DateTime nowUtc)
+        => nowUtc - newestBucketEndUtc > DailyRollupStaleAfterSpanFor(view);
+
+    /// <summary>
+    /// The daily rollups whose newest materialized bucket ended longer ago than <see cref="DailyRollupStaleAfterSpanFor"/>
+    /// allows, each as a <see cref="StuckPolicyJob"/> on <see cref="StuckPolicyJobArm.DailyRollupStale"/> under its
+    /// refresh job (#8302). See <see cref="DailyRollupStaleMarginSpan"/> for the threshold and the healthy maximum it
+    /// sits above. A rollup with nothing materialized yet is not stale (a fresh store), a rollup whose job is Running
+    /// is not judged mid-run, and only the daily tier is read: an hourly rollup that stops is caught within hours by
+    /// the hourly arms.
     ///
     /// <para>Failure-isolated: a store without TimescaleDB, or a read that fails, yields an empty list and a Debug
     /// line, never a throw.</para>
@@ -15464,21 +15487,22 @@ AND   j.scheduled";
                 }
 
                 var watermark = reader.GetDateTime(2);
-                var window = DailyRefreshStartSpanFor(view);
-                var age = nowUtc - watermark;
-                if (age <= window)
+                if (!IsDailyRollupStale(view, watermark, nowUtc))
                 {
                     continue;
                 }
 
+                var age = nowUtc - watermark;
                 stale.Add(new StuckPolicyJob(
                     Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture),
                     view,
                     string.Format(
                         CultureInfo.InvariantCulture,
-                        "newest materialized bucket ended {0:F1} days ago, longer than the policy's {1} refresh window — a daily run was missed, and any day the window has moved past needs refresh_continuous_aggregate by hand",
+                        "newest materialized bucket ended {0:F1} days ago, past the {1:F1}-day mark for a policy with a {2} refresh window (a healthy daily's newest bucket is at most about {3:F0} days old) — a daily run was missed, and the window is half a day from moving past a day it will not refresh on its own; a day it has already moved past needs refresh_continuous_aggregate by hand",
                         age.TotalDays,
-                        DailyRefreshStartOffsetFor(view)),
+                        DailyRollupStaleAfterSpanFor(view).TotalDays,
+                        DailyRefreshStartOffsetFor(view),
+                        (DailyRefreshStartSpanFor(view) - DailyRollupStaleMarginSpan - TimeSpan.FromHours(12)).TotalDays),
                     SchedulerRetries: false,
                     Family: StorePolicyJobFamily.Refresh,
                     Scheduled: true,
@@ -16817,10 +16841,11 @@ public enum StuckPolicyJobArm
     /// arm.</summary>
     RunningPastBound,
 
-    /// <summary>A daily rollup whose newest materialized bucket ended longer ago than its refresh window
-    /// (<see cref="TimescaleSupport.DailyRefreshStartSpanFor"/>, #8302): a daily run was missed, and the days the
-    /// window has moved past are not refreshed by the policy on its own. Judged from the aggregate's watermark, not
-    /// from the job's stat row, and reported under the rollup's refresh job.</summary>
+    /// <summary>A daily rollup whose newest materialized bucket ended longer ago than
+    /// <see cref="TimescaleSupport.DailyRollupStaleAfterSpanFor"/> allows, half a day inside its refresh window (#8302):
+    /// a daily run was missed, and the window is about to move past a day the policy will not refresh on its own.
+    /// Judged from the aggregate's watermark, not from the job's stat row, and reported under the rollup's refresh
+    /// job.</summary>
     DailyRollupStale,
 }
 
