@@ -2702,7 +2702,7 @@
                     <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,6">
                         <Button Content="Refresh" Click="DailySummaryRefresh_Click" Margin="0,0,10,0" Padding="8,4" MinWidth="60"/>
                         <TextBlock Text="Composite daily health - click a day for detail and drill-in (times in UTC)" VerticalAlignment="Center"
-                                   FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                                   FontStyle="Italic" Foreground="{DynamicResource InfoTextBrush}" FontWeight="SemiBold"/>
                     </StackPanel>
 
                     <!-- Month heatmap + the shared day-detail panel (click a day: band header, why-this-day

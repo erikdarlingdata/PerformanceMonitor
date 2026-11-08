@@ -108,13 +108,9 @@
                        FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}"/>
             <ComboBox x:Name="ServerSelector" Width="260" DisplayMemberPath="DisplayNameWithIntent"
                       AutomationProperties.Name="Server"
+                      ItemContainerStyle="{DynamicResource ServerSelectorItemStyle}"
                       SelectionChanged="ServerSelector_SelectionChanged">
                 <!-- A screen reader announces each item (and the selection) by the server's name, not the model's type name. -->
-                <ComboBox.ItemContainerStyle>
-                    <Style TargetType="ComboBoxItem" BasedOn="{StaticResource {x:Type ComboBoxItem}}">
-                        <Setter Property="AutomationProperties.Name" Value="{Binding DisplayNameWithIntent, Mode=OneTime}"/>
-                    </Style>
-                </ComboBox.ItemContainerStyle>
             </ComboBox>
         </StackPanel>
 
@@ -160,8 +156,21 @@
                           Background="Transparent" BorderThickness="0"
                           RowBackground="Transparent">
                     <DataGrid.Columns>
-                        <DataGridTextColumn Header="Category" Binding="{Binding Category}" MinWidth="120" Width="Auto"/>
-                        <DataGridTextColumn Header="Severity" Binding="{Binding Severity}" MinWidth="80" Width="Auto" SortMemberPath="SeveritySort">
+                        <DataGridTextColumn Binding="{Binding Category}" MinWidth="120" Width="Auto">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Category" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Category" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding Severity}" MinWidth="80" Width="Auto" SortMemberPath="SeveritySort">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Severity" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Severity" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
                             <DataGridTextColumn.ElementStyle>
                                 <Style TargetType="TextBlock">
                                     <Style.Triggers>
@@ -183,15 +192,30 @@
                                 </Style>
                             </DataGridTextColumn.ElementStyle>
                         </DataGridTextColumn>
-                        <DataGridTextColumn Header="Confidence" Binding="{Binding Confidence}" MinWidth="90" Width="Auto"/>
-                        <DataGridTextColumn Header="Finding" Binding="{Binding Finding}" MinWidth="250" Width="Auto"/>
+                        <DataGridTextColumn Binding="{Binding Confidence}" MinWidth="90" Width="Auto">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Confidence" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Confidence" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding Finding}" MinWidth="250" Width="Auto">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Finding" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Finding" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
                         <!-- Detail wraps instead of running off the column edge, with the full text in a tooltip. -->
-                        <DataGridTextColumn Header="Detail" Binding="{Binding Detail}" MinWidth="400" Width="*">
-                                <DataGridTextColumn.HeaderStyle>
-                                    <Style TargetType="DataGridColumnHeader" BasedOn="{StaticResource {x:Type DataGridColumnHeader}}">
-                                        <Setter Property="ToolTip" Value="The full finding text: what was found and why it matters. Hover a row to read it in full."/>
-                                    </Style>
-                                </DataGridTextColumn.HeaderStyle>
+                        <DataGridTextColumn Binding="{Binding Detail}" MinWidth="400" Width="*">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal" Background="Transparent" ToolTip="The full finding text: what was found and why it matters. Hover a row to read it in full.">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Detail" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Detail" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
                             <DataGridTextColumn.ElementStyle>
                                 <Style TargetType="TextBlock">
                                     <Setter Property="TextWrapping" Value="Wrap"/>
@@ -200,12 +224,13 @@
                             </DataGridTextColumn.ElementStyle>
                         </DataGridTextColumn>
                         <!-- No savings estimate (no monthly cost set for the server) reads as a dash with a tooltip naming the setting. -->
-                        <DataGridTextColumn Header="Est. Savings ($/mo)" Binding="{Binding EstMonthlySavings, StringFormat='${0:N0}', TargetNullValue='-'}" MinWidth="110" Width="Auto" SortMemberPath="EstMonthlySavings">
-                                <DataGridTextColumn.HeaderStyle>
-                                    <Style TargetType="DataGridColumnHeader" BasedOn="{StaticResource {x:Type DataGridColumnHeader}}">
-                                        <Setter Property="ToolTip" Value="Estimated monthly savings in dollars if the finding is acted on, from this server's Monthly Cost. A dash means no estimate: no monthly cost is set."/>
-                                    </Style>
-                                </DataGridTextColumn.HeaderStyle>
+                        <DataGridTextColumn Binding="{Binding EstMonthlySavings, StringFormat='${0:N0}', TargetNullValue='-'}" MinWidth="110" Width="Auto" SortMemberPath="EstMonthlySavings">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal" Background="Transparent" ToolTip="Estimated monthly savings in dollars if the finding is acted on, from this server's Monthly Cost. A dash means no estimate: no monthly cost is set.">
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EstMonthlySavings" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Est. Savings ($/mo)" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
                             <DataGridTextColumn.ElementStyle>
                                 <Style TargetType="TextBlock">
                                     <Setter Property="HorizontalAlignment" Value="Right"/>
@@ -269,7 +294,7 @@
                                 <TextBlock Grid.Column="0" Text="Avg SQL Server CPU" Margin="0,0,8,0" FontWeight="SemiBold"
                                            Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
                                 <Grid Grid.Column="1" Margin="0,0,8,0">
-                                    <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
+                                    <Border Height="16" CornerRadius="3" Background="{DynamicResource BarTrackBrush}" BorderBrush="{DynamicResource ControlBorderBrush}" BorderThickness="1"/>
                                     <Grid>
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition x:Name="AvgCpuFilled" Width="0*"/>
@@ -293,7 +318,7 @@
                                 <TextBlock Grid.Column="0" Text="P95 SQL Server CPU" Margin="0,0,8,0" FontWeight="SemiBold"
                                            Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
                                 <Grid Grid.Column="1" Margin="0,0,8,0">
-                                    <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
+                                    <Border Height="16" CornerRadius="3" Background="{DynamicResource BarTrackBrush}" BorderBrush="{DynamicResource ControlBorderBrush}" BorderThickness="1"/>
                                     <Grid>
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition x:Name="P95CpuFilled" Width="0*"/>
@@ -317,7 +342,7 @@
                                 <TextBlock Grid.Column="0" Text="Max SQL Server CPU" Margin="0,0,8,0" FontWeight="SemiBold"
                                            Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
                                 <Grid Grid.Column="1" Margin="0,0,8,0">
-                                    <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
+                                    <Border Height="16" CornerRadius="3" Background="{DynamicResource BarTrackBrush}" BorderBrush="{DynamicResource ControlBorderBrush}" BorderThickness="1"/>
                                     <Grid>
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition x:Name="MaxCpuFilled" Width="0*"/>
@@ -358,7 +383,7 @@
                                            Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"
                                            ToolTip="(Total Server Memory - Buffer Pool) / Total Server Memory — memory used by plan cache, locks, grants, CLR, etc."/>
                                 <Grid Grid.Column="1" Margin="0,0,8,0">
-                                    <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
+                                    <Border Height="16" CornerRadius="3" Background="{DynamicResource BarTrackBrush}" BorderBrush="{DynamicResource ControlBorderBrush}" BorderThickness="1"/>
                                     <Grid>
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition x:Name="MemUtilFilled" Width="0*"/>
@@ -383,7 +408,7 @@
                                            Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"
                                            ToolTip="Buffer Pool / Physical Memory — how much of physical RAM is used by the buffer pool. On an Azure SQL Database it is the share of the database's memory limit."/>
                                 <Grid Grid.Column="1" Margin="0,0,8,0">
-                                    <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
+                                    <Border Height="16" CornerRadius="3" Background="{DynamicResource BarTrackBrush}" BorderBrush="{DynamicResource ControlBorderBrush}" BorderThickness="1"/>
                                     <Grid>
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition x:Name="MemRatioFilled" Width="0*"/>
@@ -612,7 +637,7 @@
                                                            TextTrimming="CharacterEllipsis"/>
                                                 <!-- Stacked bar: used (accent) + free (dim) -->
                                                 <Grid Grid.Column="1" Margin="4,2">
-                                                    <Border CornerRadius="3" Background="#1AFFFFFF"/>
+                                                    <Border CornerRadius="3" Background="{DynamicResource BarTrackBrush}" BorderBrush="{DynamicResource ControlBorderBrush}" BorderThickness="1"/>
                                                     <Grid>
                                                         <Grid.ColumnDefinitions>
                                                             <ColumnDefinition Width="{Binding UsedStarWidth}"/>

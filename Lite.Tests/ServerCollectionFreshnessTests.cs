@@ -67,7 +67,7 @@ public class ServerCollectionFreshnessTests
     private const string RowAmber = "#FFFFB74D";
     private const string Red = "#FFE57373";
     private const string StatusAmber = "#FFFFD54F";
-    private const string NeutralBorder = "#FF2A2D35";
+    private const string NeutralBorder = "#FF3A3D45";   // #8221: the Dark theme's card border, which is also what a test with no theme loaded gets
     private const string UnknownGrey = "#FF888888";
 
     // ── The band itself, off the shared thresholds ────────────────────────────────────────────────────
