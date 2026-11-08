@@ -46,10 +46,14 @@ public sealed class FinOpsServerInventoryLastKnownTests : IDisposable
 
     private readonly string _tempDir = Path.Combine(Path.GetTempPath(), "LiteFinOpsLastKnown_" + Guid.NewGuid().ToString("N")[..8]);
 
+    /* The test's store: xunit builds the class once per test, so each test has its own, closed in Dispose before its folder goes. */
+    private DuckDbInitializer? _store;
+
     public FinOpsServerInventoryLastKnownTests() => Directory.CreateDirectory(_tempDir);
 
     public void Dispose()
     {
+        _store?.Dispose();
         try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); } catch { }
     }
 
@@ -73,7 +77,7 @@ public sealed class FinOpsServerInventoryLastKnownTests : IDisposable
         var neverCollected = Unreachable("inv-offline-never-collected", 2);
         var expectedTime = CollectedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
 
-        using var initializer = await StoreAsync(collected);
+        var initializer = await StoreAsync(collected);
         var problems = OnTheInventory(new LocalDataService(initializer), new[] { collected, neverCollected }, (grid, message, count) =>
         {
             var found = new List<string>();
@@ -131,7 +135,7 @@ public sealed class FinOpsServerInventoryLastKnownTests : IDisposable
         var first = Unreachable("inv-offline-first", 1);
         var second = Unreachable("inv-offline-second", 2);
 
-        using var initializer = await StoreAsync();
+        var initializer = await StoreAsync();
         var problems = OnTheInventory(new LocalDataService(initializer), new[] { first, second }, (grid, message, count) =>
         {
             var found = new List<string>();
@@ -163,7 +167,7 @@ public sealed class FinOpsServerInventoryLastKnownTests : IDisposable
         var first = Unreachable("inv-offline-unreadable-first", 1);
         var second = Unreachable("inv-offline-unreadable-second", 2);
 
-        using var initializer = await StoreAsync();
+        var initializer = await StoreAsync();
         /* A store whose server_properties table is gone: every collected read throws, as on a store that cannot be read. */
         using (var conn = new DuckDBConnection($"Data Source={Path.Combine(_tempDir, "inventory.duckdb")}"))
         {
@@ -197,7 +201,7 @@ public sealed class FinOpsServerInventoryLastKnownTests : IDisposable
     [Fact]
     public async Task WithNoServerListed_TheEmptySentenceSaysNothingWasCollected()
     {
-        using var initializer = await StoreAsync();
+        var initializer = await StoreAsync();
         var problems = OnTheInventory(new LocalDataService(initializer), Array.Empty<ServerConnection>(), (grid, message, count) =>
         {
             var found = new List<string>();
@@ -223,7 +227,8 @@ public sealed class FinOpsServerInventoryLastKnownTests : IDisposable
     private async Task<DuckDbInitializer> StoreAsync(params ServerConnection[] withRows)
     {
         var dbPath = Path.Combine(_tempDir, "inventory.duckdb");
-        var initializer = new DuckDbInitializer(dbPath);
+        _store = new DuckDbInitializer(dbPath);
+        var initializer = _store;
         await initializer.InitializeFromTemplateAsync();
 
         if (withRows.Length == 0) return initializer;

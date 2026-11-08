@@ -822,8 +822,8 @@
         <Setter Property="Background" Value="Transparent"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundDimBrush}"/>
         <Setter Property="BorderThickness" Value="0"/>
-        <Setter Property="Padding" Value="10,6"/>
-        <Setter Property="Margin" Value="0,0,4,0"/>
+        <Setter Property="Padding" Value="6,6"/>
+        <Setter Property="Margin" Value="0,0,2,0"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="TabItem">
