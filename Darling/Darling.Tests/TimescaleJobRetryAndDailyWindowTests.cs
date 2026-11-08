@@ -282,17 +282,19 @@ VALUES ($1, now() - INTERVAL '2 hours', '-infinity', now() + INTERVAL '1 day', n
         await connection.OpenAsync(ct);
         Assert.SkipWhen(!await PrepareAsync(connection, scratch.ConnectionString, ct), "The live #8302 tests need TimescaleDB.");
 
+        var child = TimescaleSupport.QueryStoreStatsDayGrainDailyView;
         await InsertDayAsync(connection, D0, ct);
         await InsertDayAsync(connection, D0.AddDays(1), ct);
         await RefreshAsync(connection, Hourly, D0, D0.AddDays(2), ct);
         await RefreshAsync(connection, Daily, D0, D0.AddDays(2), ct);
+        await RefreshAsync(connection, child, D0, D0.AddDays(2), ct);
 
-        var jobId = await RefreshJobIdAsync(connection, Daily, ct);
-        var farLater = D0.AddDays(30);
+        var dailyJob = await RefreshJobIdAsync(connection, Daily, ct);
+        var childJob = await RefreshJobIdAsync(connection, child, ct);
 
         /* A frozen source: the hourly the daily is built on has nothing newer either (collection off, every server
-           offline). However long ago that was, the daily is not behind its source, so nothing is reported. */
-        var frozen = await TimescaleSupport.ReadStuckPolicyJobsAsync(connection, farLater, null, ct);
+           offline), and the child is level with the daily. However long ago that was, nothing is reported. */
+        var frozen = await TimescaleSupport.ReadStuckPolicyJobsAsync(connection, D0.AddDays(30), null, ct);
         Assert.Empty(frozen.Stuck);
 
         // The source moves on without the daily: four more days of raw, rolled up hourly, while the daily's job never ran.
@@ -303,17 +305,32 @@ VALUES ($1, now() - INTERVAL '2 hours', '-infinity', now() + INTERVAL '1 day', n
 
         await RefreshAsync(connection, Hourly, D0, D0.AddDays(6), ct);
 
-        var stale = await TimescaleSupport.ReadStuckPolicyJobsAsync(connection, farLater, null, ct);
+        /* The daily is four days old against the clock with its source ahead: reported. The child is as old, but its
+           source (the daily) has nothing newer than it has, so it is not. */
+        var stale = await TimescaleSupport.ReadStuckPolicyJobsAsync(connection, D0.AddDays(6), null, ct);
         var reported = Assert.Single(stale.Stuck);
-        Assert.Equal(jobId, reported.JobId);
+        Assert.Equal(dailyJob, reported.JobId);
         Assert.Equal(TimescaleSupport.StorePolicyJobFamily.Refresh, reported.Family);
         Assert.Equal(Daily, reported.HypertableName);
         Assert.Contains("source", reported.Reason, StringComparison.Ordinal);
         Assert.Contains("refresh_continuous_aggregate", reported.Reason, StringComparison.Ordinal);
 
-        // The daily catches up: nothing to report again.
+        /* The daily catches up and the child does not. The child's source now sits four days ahead of it; what decides
+           is the child's own age against the clock. Inside its 4.5-day threshold: nothing. An hour past it: reported,
+           while the daily, a few hours behind the clock, is not. */
         await RefreshAsync(connection, Daily, D0, D0.AddDays(6), ct);
-        var caughtUp = await TimescaleSupport.ReadStuckPolicyJobsAsync(connection, farLater, null, ct);
+        var childInside = await TimescaleSupport.ReadStuckPolicyJobsAsync(connection, D0.AddDays(2) + TimeSpan.FromDays(4.5), null, ct);
+        Assert.Empty(childInside.Stuck);
+
+        var childPast = await TimescaleSupport.ReadStuckPolicyJobsAsync(connection, D0.AddDays(2) + TimeSpan.FromDays(4.5) + TimeSpan.FromHours(1), null, ct);
+        var reportedChild = Assert.Single(childPast.Stuck);
+        Assert.Equal(childJob, reportedChild.JobId);
+        Assert.Equal(child, reportedChild.HypertableName);
+        Assert.Contains("source", reportedChild.Reason, StringComparison.Ordinal);
+
+        // The child catches up: nothing to report again.
+        await RefreshAsync(connection, child, D0, D0.AddDays(6), ct);
+        var caughtUp = await TimescaleSupport.ReadStuckPolicyJobsAsync(connection, D0.AddDays(2) + TimeSpan.FromDays(4.5) + TimeSpan.FromHours(1), null, ct);
         Assert.Empty(caughtUp.Stuck);
     }
 
@@ -331,27 +348,46 @@ VALUES ($1, now() - INTERVAL '2 hours', '-infinity', now() + INTERVAL '1 day', n
         }
     }
 
+    /// <summary>The staleness predicate: the rollup's watermark, its source's watermark, and the clock. The age against
+    /// the clock carries the loss arithmetic; the source only gates out a rollup that is level with a source that stopped.</summary>
+    private static bool Stale(string view, DateTime rollupWatermark, DateTime sourceWatermark, DateTime nowUtc)
+    {
+        var predicate = typeof(TimescaleSupport).GetMethod(
+            "IsDailyRollupStale", BindingFlags.Public | BindingFlags.Static, new[] { typeof(string), typeof(DateTime), typeof(DateTime), typeof(DateTime) });
+        Assert.True(predicate is not null, "TimescaleSupport.IsDailyRollupStale(string view, DateTime rollupWatermark, DateTime sourceWatermark, DateTime nowUtc): stale when the rollup's newest bucket is older than its threshold against the clock AND its source's newest bucket is past its own");
+        return (bool)predicate!.Invoke(null, new object[] { view, rollupWatermark, sourceWatermark, nowUtc })!;
+    }
+
     /// <summary>
-    /// The boundary on each side, for a daily and for the daily-parented child, measured as the daily's lag behind its
-    /// source's newest bucket: a frozen source is silent, the healthy maximum lag is silent, the threshold itself is
-    /// silent, one tick past it fires, and a lag of the whole window (a day already lost) fires.
+    /// The boundary on each side, for an hourly-parented daily and for the daily-parented child. The age is measured
+    /// against the clock, because a daily-parented daily's source sits one to three days behind the clock itself, so a
+    /// lag against the parent would only fire after the child's window had already lost a day. The source gates out a
+    /// frozen source: a rollup at or past its source's newest bucket is silent at any age.
     /// </summary>
     [Fact]
-    public void TheStaleBoundary_IsSilentAtTheHealthyMaximumAndAtTheThreshold_AndFiresOneTickPast()
+    public void TheStaleBoundary_IsAgainstTheClock_GatedByTheSourceBeingAhead()
     {
-        var end = new DateTime(2026, 3, 4, 0, 0, 0, DateTimeKind.Unspecified);
+        var now = new DateTime(2026, 3, 10, 9, 0, 0, DateTimeKind.Unspecified);
         var child = TimescaleSupport.QueryStoreStatsDayGrainDailyView;
+        var hourlySource = now - TimeSpan.FromHours(1);
+        var healthyParent = now - TimeSpan.FromDays(2);
 
-        Assert.False(TimescaleSupport.IsDailyRollupStale(Daily, end, end));
-        Assert.False(TimescaleSupport.IsDailyRollupStale(Daily, end, end + HealthyDailyEndAgeMaximum));
-        Assert.False(TimescaleSupport.IsDailyRollupStale(Daily, end, end + StaleDailyThreshold));
-        Assert.True(TimescaleSupport.IsDailyRollupStale(Daily, end, end + StaleDailyThreshold + TimeSpan.FromTicks(1)));
-        Assert.True(TimescaleSupport.IsDailyRollupStale(Daily, end, end + TimescaleSupport.DailyRefreshStartSpan));
+        // An hourly-parented daily: silent at the healthy maximum and at the threshold, firing one hour past it.
+        Assert.False(Stale(Daily, now - HealthyDailyEndAgeMaximum, hourlySource, now));
+        Assert.False(Stale(Daily, now - StaleDailyThreshold, hourlySource, now));
+        Assert.True(Stale(Daily, now - StaleDailyThreshold - TimeSpan.FromHours(1), hourlySource, now));
+        Assert.True(Stale(Daily, now - TimescaleSupport.DailyRefreshStartSpan, hourlySource, now));
 
-        // The child refreshes a day on the run after its parent wrote it, so its healthy maximum and its threshold are a day later.
-        Assert.False(TimescaleSupport.IsDailyRollupStale(child, end, end + HealthyDailyEndAgeMaximum + TimeSpan.FromDays(1)));
-        Assert.False(TimescaleSupport.IsDailyRollupStale(child, end, end + TimeSpan.FromDays(4.5)));
-        Assert.True(TimescaleSupport.IsDailyRollupStale(child, end, end + TimeSpan.FromDays(4.5) + TimeSpan.FromTicks(1)));
+        // The daily-parented child with a healthy parent: its own 4.5-day threshold against the clock, not against the parent.
+        Assert.True(Stale(child, now - TimeSpan.FromDays(4.5) - TimeSpan.FromHours(1), healthyParent, now));
+        Assert.False(Stale(child, now - TimeSpan.FromDays(4.5), healthyParent, now));
+        Assert.False(Stale(child, now - HealthyDailyEndAgeMaximum - TimeSpan.FromDays(1), healthyParent, now));
+
+        // A frozen source: a rollup level with it, or past it, is silent at any age.
+        var frozen = now - TimeSpan.FromDays(30);
+        Assert.False(Stale(Daily, frozen, frozen, now));
+        Assert.False(Stale(Daily, frozen + TimeSpan.FromDays(1), frozen, now));
+        Assert.False(Stale(child, frozen, frozen, now));
 
         // Twelve hours of margin on each side of the threshold: above the healthy maximum, and below the window.
         Assert.Equal(TimeSpan.FromHours(12), StaleDailyThreshold - HealthyDailyEndAgeMaximum);
