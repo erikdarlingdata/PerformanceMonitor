@@ -50,8 +50,15 @@ public sealed class ProvisioningTrendRow
         MaxCpuPct = dto.MaxCpuPct,
         P95CpuPct = dto.P95CpuPct,
         MemoryRatio = dto.MemoryRatio,
-        Status = dto.Status
+        Status = dto.Status,
+        StolenMemoryPct = dto.StolenMemoryPct,
+        StatusReason = dto.StatusReason
     };
+
+    /// <summary>Stolen memory as a share of total server memory over the day; null when the day has no memory sample.</summary>
+    public decimal? StolenMemoryPct { get; set; }
+    /// <summary>Why the day read UNDER PROVISIONED, in the badge's words; null for any other verdict.</summary>
+    public string? StatusReason { get; set; }
 
     public string DayDisplay => Day.ToString("ddd MM/dd");
     public string StatusDisplay => ProvisioningVerdict.StatusLabel(Status);
