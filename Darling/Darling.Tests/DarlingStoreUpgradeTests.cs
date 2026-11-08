@@ -1535,17 +1535,19 @@ public sealed class DarlingStoreUpgradeTests
     }
 
     /// <summary>
-    /// Item 0b, live: a cancellation raised while the trial's REAL cluster start is in flight must propagate
-    /// as <see cref="OperationCanceledException"/>. Before the fix, the trial's own catch swallowed it into
+    /// Item 0b, live: a cancellation that arrives at the trial's start must propagate as
+    /// <see cref="OperationCanceledException"/>. Before the fix, the trial's own catch swallowed it into
     /// <c>started = false</c> like any other failed start, driving the header-only retry — which fails the
     /// same way under the same already-cancelled token — and then threw the fixed "would not start even with
     /// an empty postgresql.auto.conf" message, wrong for a service stop unrelated to the carried settings. The
-    /// probe is faked (always exits 0) so the trial is reached without a real "postgres -C" call; the trial's
-    /// own start is real and live. The trial is held on <see cref="DarlingStoreUpgrade.BeforeTrialStartForTests"/>
-    /// between its marker write and its start, the cancel is raised while it is held, and only then is it
-    /// let go, so the cancellation always meets the start (#8193): polling for the marker instead left a
-    /// window in which a fast start, and the rest of the carry, finished before the cancel, and the task
-    /// then completed normally (#4280 round-2 part 2, item 0b).
+    /// probe is faked (always exits 0) so the trial is reached without a real "postgres -C" call. The trial is
+    /// held on <see cref="DarlingStoreUpgrade.BeforeTrialStartForTests"/> between its marker write and its
+    /// start, the cancel is raised while it is held, and only then is it let go: the start meets a token that
+    /// is already cancelled and throws before pg_ctl launches, so no trial server runs, and what is under test
+    /// is the catch filter that lets that cancellation through (#8193). Polling for the marker instead left a
+    /// window in which a fast start, and the rest of the carry, finished before the cancel, and the task then
+    /// completed normally (#4280 round-2 part 2, item 0b). Cancelling a start that is in flight is covered at
+    /// the runner, in <see cref="DarlingManagedPostgresTests"/>.
     /// </summary>
     [Fact]
     public async Task CarryAutoConfAsync_CancelledDuringTheTrialStart_PropagatesCancellation_NotTheFixedMessage()
@@ -1575,15 +1577,16 @@ public sealed class DarlingStoreUpgradeTests
                 TimeSpan.FromMinutes(3), timeout.Token);
             Assert.True(newInitExit == 0, $"initdb (new) failed: {newInitOutput}");
 
-            /* Never touches postgres.exe — only the trial's own real cluster start does. */
+            /* Never touches postgres.exe: the probe is faked, and the trial's start throws on the cancelled token
+               before pg_ctl launches. */
             Task<(int ExitCode, string Output)> Probe(string exePath, string arguments, TimeSpan probeTimeout, CancellationToken token)
                 => Task.FromResult((0, string.Empty));
 
             /* The trial signals here after it writes its marker and before it starts the cluster, then waits
-               on the gate. Cancelling while it waits puts the cancellation on the start itself, so the test
-               never races a start that has already finished (#8193). The carry task is awaited alongside the
-               signal so a carry that ends without reaching its trial fails at the assert below rather than
-               waiting out the timeout. */
+               on the gate. Cancelling while it waits means the start sees a token that is already cancelled and
+               throws before anything launches, so the test never races a start that has already finished (#8193).
+               The carry task is awaited alongside the signal so a carry that ends without reaching its trial
+               fails at the assert below rather than waiting out the timeout. */
             var trialStartEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var trialStartGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var upgrade = new DarlingStoreUpgrade(new CapturingLogger())
