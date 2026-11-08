@@ -24,8 +24,10 @@ The decision, in order; the first rule that answers wins:
   4. no open pull request from that head repository and branch has the run's head commit as its head: the head moved, and the
      run for the new head writes the status;
   5. such a pull request changes a file its run executes, or reads to decide what runs (NOT_RELAYED_PREFIXES, NOT_RELAYED_NAMES
-     and NOT_RELAYED_EXTENSIONS below): the run executed the pull request's own copies, so its verdict says only what those
-     copies chose to say, and this script does not vouch for it (merged by hand);
+     and NOT_RELAYED_EXTENSIONS below), under the file's new name or, for a rename, its old one: the run executed the pull
+     request's own copies, so its verdict says only what those copies chose to say, and this script does not vouch for it
+     (merged by hand). The files list the API gives stops at FILES_LIST_MAX entries, so a pull request that reports more changed
+     files than the list holds, or whose list reached that limit, is too large to relay and is merged by hand as well;
   6. a newer PR CI pull_request run exists for the same head repository, branch and head commit: it writes the status (the
      same rule the verdict job applies before it posts a failure);
   7. the `CI verdict` job's conclusion or the run's own conclusion is anything but success: failure;
@@ -60,9 +62,10 @@ MAINTAINER_PERMISSIONS = frozenset({"admin", "write"})
 MAINTAINER_ROLES = frozenset({"admin", "maintain", "write"})
 # The files a PR CI run executes, or reads to decide what runs. A pull_request run takes the pull request's own copies, so a fork
 # that changes one of these controls what its `CI verdict` job concludes or what the build does, and its run is not relayed. One
-# list, read by _not_relayed_file: a prefix guards a tree; a name or an extension is guarded anywhere in the tree (the build
+# list, read by _is_not_relayed: a prefix guards a tree; a name or an extension is guarded anywhere in the tree (the build
 # auto-imports Directory.Build.props, Directory.Build.targets and Directory.Packages.props from every folder on the way up to a
-# project, and the locked restore reads every packages.lock.json), compared without regard to case.
+# project, and the locked restore reads every packages.lock.json). Every comparison ignores case: the Windows legs check out
+# onto a case-insensitive file system, where Darling/Tools/x.ps1 lands on Darling/tools/x.ps1.
 NOT_RELAYED_PREFIXES = (
     ".github/",        # the workflows, the CI scripts and their tests, the path filters, the quarantine list and the CI history
     "Darling/tools/",  # fetch-pg-runtime.ps1 and fetch-pg-target.ps1, which the build and the test legs run
@@ -71,6 +74,7 @@ NOT_RELAYED_NAMES = (
     "global.json",              # the SDK version the build installs
     "nuget.config",             # the feeds the restore reads
     "packages.lock.json",       # the transitive closure the locked restore pins
+    "xunit.runner.json",        # test host settings the runner reads from the test project's folder, which decide what runs
     "directory.build.props",    # auto-imported by every build (the extensions below cover these three too; named for the reader)
     "directory.build.targets",
     "directory.packages.props",
@@ -82,6 +86,10 @@ NOT_RELAYED_EXTENSIONS = (
     ".rsp",          # response files the compiler and MSBuild read
     ".runsettings",  # test host settings
 )
+_NOT_RELAYED_PREFIXES_LOWER = tuple(prefix.lower() for prefix in NOT_RELAYED_PREFIXES)
+# The pulls files endpoint lists at most this many files, whatever the page size. A list this long may have been cut short, so a
+# guarded file could sit past its end, and the pull request is not relayed.
+FILES_LIST_MAX = 3000
 
 
 HTTP_STATUS_RE = re.compile(r"\(HTTP (\d{3})\)")
@@ -169,20 +177,34 @@ def _pulls_at_head(repo: str, owner: str, branch: str, head_repo: str, sha: str,
 
 def _is_not_relayed(path: str) -> bool:
     """True for a path the run executes or reads to decide what runs: a guarded tree by prefix, a guarded name or extension
-    anywhere in the tree, compared without regard to case."""
-    if path.startswith(NOT_RELAYED_PREFIXES):
+    anywhere in the tree, each compared without regard to case."""
+    lower = path.lower()
+    if lower.startswith(_NOT_RELAYED_PREFIXES_LOWER):
         return True
-    base = os.path.basename(path).lower()
+    base = os.path.basename(lower)
     return base in NOT_RELAYED_NAMES or os.path.splitext(base)[1] in NOT_RELAYED_EXTENSIONS
 
 
-def _not_relayed_file(repo: str, number, fetch) -> "str | None":
-    """The first changed file of the pull request that the run executes or reads to decide what runs, or None."""
+def _not_relayed_reason(repo: str, number, fetch) -> "str | None":
+    """Why the pull request's run is not relayed, or None. The pull request object's changed_files count is read first, then the
+    files list: a list shorter than the count, or one that reached FILES_LIST_MAX, may be missing a guarded file, and a pull
+    request that reports no count cannot be known to be listed in full, so each of those fails closed. Otherwise the first entry
+    the run executes or reads to decide what runs, under its name (filename: an added, modified or removed file, with or without
+    a patch) or its old name (previous_filename: a rename or a copy, where the old path is the one that leaves the build)."""
+    count = (fetch(f"repos/{repo}/pulls/{number}") or {}).get("changed_files")
     files = fetch(f"repos/{repo}/pulls/{number}/files", {"per_page": "100"}, paginate=True) or []
+    if not isinstance(count, int):
+        return (f"pull request #{number} reports no changed-file count, so its files list cannot be known to be complete; the run is "
+                "not relayed and the pull request is merged by hand")
+    if count > len(files) or len(files) >= FILES_LIST_MAX:
+        return (f"pull request #{number} changes {count} files and the files list holds {len(files)} (the API lists at most "
+                f"{FILES_LIST_MAX}), so a file its run executes could be unlisted; the pull request is too large to relay and is "
+                "merged by hand")
     for entry in files:
-        name = entry.get("filename") or ""
-        if _is_not_relayed(name):
-            return name
+        for name in (entry.get("filename"), entry.get("previous_filename")):
+            if name and _is_not_relayed(name):
+                return (f"pull request #{number} changes {name}, a file its run executes or reads to decide what runs, so the run's "
+                        "verdict is the pull request's own and is not relayed; such a pull request is merged by hand")
     return None
 
 
@@ -286,10 +308,9 @@ def decide(event: dict, fetch) -> Decision:
         return skip(f"no open pull request from {head_repo}:{branch} has {sha[:9]} as its head, so the head moved or the pull request closed")
 
     for number in numbers:
-        changed = _not_relayed_file(repo, number, fetch)
-        if changed:
-            return skip(f"pull request #{number} changes {changed}, a file its run executes or reads to decide what runs, so the "
-                        "run's verdict is the pull request's own and is not relayed; such a pull request is merged by hand")
+        why = _not_relayed_reason(repo, number, fetch)
+        if why:
+            return skip(why)
 
     newer = _newer_run(repo, branch, head_repo, sha, run_id, fetch)
     if newer is not None:
