@@ -1210,16 +1210,12 @@ public partial class LiteAlertForwardingTests : IDisposable
     }
 
     [Fact]
-    public async Task Deliverer_NonBlockingMetrics_SendOnce_WithNumerics()
+    public async Task Deliverer_NonBlockingMetrics_WithoutIncidents_SendOnce_WithNumerics()
     {
-        /* The old loop sent every non-blocking/deadlock metric directly (:312-322 poison,
-           :384-394 LRQ, ...) with its numeric values — never through the per-event split, even
-           when its context has incidents and the mode is PerEvent. */
+        /* A metric whose context carries no incidents is one direct send with its numeric values, in Per-event mode
+           too: the split is decided by the shared rule (#8246, PerEventNotification.Splits), which needs incidents. */
         App.AlertDeliveryMode = AlertNotificationMode.PerEvent;
-        var context = new AlertContext
-        {
-            Incidents = new List<AlertIncident> { new("a", new[] { "dbo.Users" }), new("b", new[] { "dbo.Posts" }) }
-        };
+        var context = new AlertContext();
         var (deliverer, _, sends) = BuildDeliverer();
 
         await deliverer.DeliverAsync(Outcome("Long-Running Query", current: "1 query, longest 45m", threshold: "30m", context: context, numCur: 45, numThr: 30));
@@ -1302,10 +1298,10 @@ public partial class LiteAlertForwardingTests : IDisposable
         Assert.Equal("3", sends[0].CurrentValue);   /* DescribeIncident = occurrence count */
         Assert.Equal("1", sends[1].CurrentValue);
         Assert.Equal("+1 more incident this cycle", sends[2].CurrentValue);
-        /* #1830: per-event sends carry per-incident numerics — occurrence counts, then the overflow
-           COUNT for the "+N more" trailer whose text is unparseable (it stored 0 before). The
-           threshold stays the outcome's on every send. */
-        Assert.Equal(new double?[] { 3, 1, 1 }, sends.Select(s => s.NumericCurrentValue).ToArray());
+        /* #8246: every per-event send carries the alert's measurement as its numeric (the engine reads the newest open row's
+           value back as the level it last announced), the overflow send included, so the "+N more" trailer whose text is
+           unparseable never stores 0 (#1830). The threshold stays the outcome's on every send. */
+        Assert.Equal(new double?[] { 6, 6, 6 }, sends.Select(s => s.NumericCurrentValue).ToArray());
         Assert.All(sends, s => Assert.Equal(1d, s.NumericThresholdValue));
         var overflowIncident = Assert.Single(sends[2].Context!.Incidents!);
         Assert.Equal("c", overflowIncident.DedupKey);

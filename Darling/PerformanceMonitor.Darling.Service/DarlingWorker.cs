@@ -1130,6 +1130,9 @@ public sealed partial class DarlingWorker : BackgroundService
 
     /// <summary>Test hook (#5592): whether the purge slot is held by a pass that has not completed.</summary>
     internal bool PurgeSlotBusyForTest { get { lock (_purgeTaskLock) { return _purgeTask is { IsCompleted: false }; } } }
+    /// <summary>Test-only: the purge slot's tracked task, null before the first launch. It completes once the purge body has
+    /// finished and any failure is logged, which is when the slot accepts the next launch; a test awaits it instead of waiting out a delay.</summary>
+    internal Task? PurgeTaskForTests { get { lock (_purgeTaskLock) { return _purgeTask; } } }
     private readonly object _purgeTaskLock = new();
 
     /* MinValue = the first sweep after startup evaluates the compression-job self-heal check (#1581), then
@@ -1156,6 +1159,11 @@ public sealed partial class DarlingWorker : BackgroundService
     /* #7762: the in-flight Query Store compose rollup tick and its next due time. MinValue = the first tick runs on the first pass after the start. Only
        the launch loop writes them. */
     private Task? _composeStampTick;
+    /// <summary>Test-only: the tracked tick tasks, null before each tick's first launch. A tracked task completes once the tick's
+    /// body has finished and any failure is logged, which is when the launcher accepts the next tick; a test awaits it instead of waiting out a delay.</summary>
+    internal Task? StoreMaintenanceTickForTests => _storeMaintenanceTick;
+    internal Task? StoreMetricsTickForTests => _storeMetricsTick;
+    internal Task? ComposeStampTickForTests => _composeStampTick;
     private DateTime _nextComposeStampUtc = DateTime.MinValue;
 
     /* MinValue = the first loop pass after startup runs the fleet sweep (#3466 lane 2), then on the

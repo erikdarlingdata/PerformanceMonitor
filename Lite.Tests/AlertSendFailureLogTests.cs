@@ -18,7 +18,7 @@ namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
 /// <see cref="EmailAlertService.TrySendAlertEmailAsync"/> never throws: a failure anywhere in the send is logged at
-/// Error and answered with null. The entry it logs carries the exception itself, not only the text its message
+/// Error and answered as a failed send. The entry it logs carries the exception itself, not only the text its message
 /// formats into the line, so Lite's log gets the type, the stack and the inner chain of the throw.
 /// </summary>
 public sealed class AlertSendFailureLogTests
@@ -33,7 +33,9 @@ public sealed class AlertSendFailureLogTests
 
         var delivery = await service.TrySendAlertEmailAsync("High CPU", "SQL01", "97%", "90%", serverId: 1);
 
-        Assert.Null(delivery);
+        Assert.NotNull(delivery);
+        Assert.False(delivery!.Sent);
+        Assert.Equal(AlertDelivery.ChannelFailed, delivery.Channel);
         Assert.Contains(
             log.Entries,
             x => x.Level == LogLevel.Error

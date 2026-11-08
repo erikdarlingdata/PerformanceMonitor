@@ -95,6 +95,9 @@ public static class DataGridHeaderFit
                 }
             }
         }
+
+        /* #8223: columns that grew to their headers change what an empty grid must scroll over, and what the fill column is left. */
+        DataGridFillColumn.Fit(grid);
     }
 
     private static double MeasureHeader(object? header, DataGrid grid)
