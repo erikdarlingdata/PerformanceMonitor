@@ -40,6 +40,9 @@ public sealed class LiteSidebarDotRendersTheCardStatusTests
     private static ServerConnection Connection(bool? isOnline, bool? hasCollectorErrors) =>
         new() { ServerName = "srv", IsOnline = isOnline, HasCollectorErrors = hasCollectorErrors };
 
+    /// <summary>The tooltip's headline: its second line, after the server's name.</summary>
+    private static string HeadlineLine(ServerConnection connection) => connection.DotTooltip.Split('\n')[1];
+
     private static ServerSummaryItem Card(bool? isOnline, bool hasCollectorErrors) =>
         new() { ServerName = "srv", IsOnline = isOnline, HasCollectorErrors = hasCollectorErrors };
 
@@ -103,14 +106,15 @@ public sealed class LiteSidebarDotRendersTheCardStatusTests
     [Fact]
     public void TheDotTooltip_OpensOnTheSentenceTheCardOpensOn()
     {
-        Assert.StartsWith("Online — the last connection check succeeded", Connection(true, false).DotTooltip, StringComparison.Ordinal);
-        Assert.StartsWith("Warning — one or more collectors are failing on this server", Connection(true, true).DotTooltip, StringComparison.Ordinal);
-        Assert.StartsWith("Offline — the last connection check failed", Connection(false, false).DotTooltip, StringComparison.Ordinal);
-        Assert.StartsWith("Connecting — the first connection check has not finished yet", Connection(null, false).DotTooltip, StringComparison.Ordinal);
+        /* The first line names the server, since the rail shows the dot with no name beside it; the sentence follows. */
+        Assert.StartsWith("Online — the last connection check succeeded", HeadlineLine(Connection(true, false)), StringComparison.Ordinal);
+        Assert.StartsWith("Warning — one or more collectors are failing on this server", HeadlineLine(Connection(true, true)), StringComparison.Ordinal);
+        Assert.StartsWith("Offline — the last connection check failed", HeadlineLine(Connection(false, false)), StringComparison.Ordinal);
+        Assert.StartsWith("Connecting — the first connection check has not finished yet", HeadlineLine(Connection(null, false)), StringComparison.Ordinal);
 
         /* And it ends on the gesture THIS surface supports. The card's line names the card; naming a single click
            on either would be naming a no-op, since both handlers act only on a double-click. */
-        Assert.EndsWith("Double-click the row to open this server's tab", Connection(true, false).DotTooltip, StringComparison.Ordinal);
+        Assert.EndsWith("Double-click to open this server's tab", Connection(true, false).DotTooltip, StringComparison.Ordinal);
         Assert.EndsWith("Double-click the card to open this server's tab", Card(true, false).StatusTooltip, StringComparison.Ordinal);
 
         var xaml = ReadRepoFile(Path.Combine("Lite", "MainWindow.xaml"));

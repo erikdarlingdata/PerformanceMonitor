@@ -309,6 +309,8 @@ public class ServerConnection : INotifyPropertyChanged
     public string DotTooltip => string.Join("\n",
         new[]
         {
+            /* The sidebar's rail shows dots with no names beside them, so the tooltip opens on the server's name. */
+            DisplayName,
             HostChangeNotice is { Length: > 0 } notice ? notice + "\n" + CardStatus.Headline() : CardStatus.Headline(),
             /* #7590: an unreachable server says since when and why, from the in-process connection check. */
             CardStatus == ServerCardStatus.Offline ? UnreachableReason : null,
@@ -316,11 +318,10 @@ public class ServerConnection : INotifyPropertyChanged
             DotTooltipAction,
         }.Where(line => !string.IsNullOrEmpty(line)));
 
-    /// <summary>The line the sidebar dot's tooltip ends on — the gesture the ROW actually supports.
+    /// <summary>The line the sidebar dot's tooltip ends on — the gesture the sidebar supports in both of its shapes.
     /// <c>ServerListView_MouseDoubleClick</c> connects; a single click only selects, so naming one would be
-    /// naming a no-op. Same sentence as the Overview card's closing line with the noun the reader is
-    /// pointing at, because the point of doing every surface is that they share a vocabulary.</summary>
-    private const string DotTooltipAction = "Double-click the row to open this server's tab";
+    /// naming a no-op. The rail shows the dot with no row beside it, so the sentence names no row.</summary>
+    private const string DotTooltipAction = "Double-click to open this server's tab";
 
     /// <summary>
     /// Display-only property for showing status in UI.

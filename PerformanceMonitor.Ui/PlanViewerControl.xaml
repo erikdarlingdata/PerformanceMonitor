@@ -58,12 +58,15 @@
                                FontWeight="SemiBold"
                                Foreground="{DynamicResource ForegroundBrush}"/>
                 </Expander.Header>
+                <!-- The cards size to their content, and a 900 px window is narrower than four of them with text: the strip scrolls
+                     sideways to the rest, and a card's column stops growing at a width its text wraps inside. -->
+                <ScrollViewer x:Name="InsightsStrip" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
                 <Grid MaxHeight="220">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition x:Name="ServerContextColumn" Width="Auto" MinWidth="180"/>
-                        <ColumnDefinition Width="Auto" MinWidth="180"/>
-                        <ColumnDefinition Width="Auto" MinWidth="200"/>
-                        <ColumnDefinition Width="Auto" MinWidth="200"/>
+                        <ColumnDefinition x:Name="ServerContextColumn" Width="Auto" MinWidth="180" MaxWidth="360"/>
+                        <ColumnDefinition Width="Auto" MinWidth="180" MaxWidth="360"/>
+                        <ColumnDefinition Width="Auto" MinWidth="200" MaxWidth="360"/>
+                        <ColumnDefinition Width="Auto" MinWidth="200" MaxWidth="360"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
 
@@ -199,6 +202,7 @@
                         </DockPanel>
                     </Border>
                 </Grid>
+                </ScrollViewer>
             </Expander>
         </Border>
 
@@ -348,7 +352,7 @@
             <StackPanel x:Name="EmptyState" Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Center">
                 <TextBlock x:Name="EmptyStateTitle" Text="No Plan Loaded" FontSize="20" FontWeight="Light"
                            Foreground="{DynamicResource ForegroundMutedBrush}" HorizontalAlignment="Center"/>
-                <TextBlock x:Name="EmptyStateDetail" Text="Right-click a query row and choose 'View Plan' to display an execution plan here"
+                <TextBlock x:Name="EmptyStateDetail" Text="Right-click a query row and choose 'View Stored Plan' or 'Get Actual Plan (re-run)' to display an execution plan here"
                            FontSize="13" Foreground="{DynamicResource ForegroundMutedBrush}"
                            HorizontalAlignment="Center" Margin="0,8,0,0"/>
             </StackPanel>

@@ -117,6 +117,7 @@ public partial class AlertsHistoryTab : UserControl
 
         var displayCount = AlertsDataGrid.ItemsSource is ICollection<AlertHistoryRow> coll ? coll.Count : alerts.Count;
         NoAlertsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
+        DismissAllButton.IsEnabled = displayCount > 0 && !_dismissInFlight;
         AlertTimeHeaderText.Text = TimeColumnTitle.For("Time", ServerTimeHelper.CurrentDisplayMode, alerts.Any(a => a.MixedServers)); // D5: the column names its clock
         DataGridHeaderFit.Apply(AlertsDataGrid); // #6136: the longer title widens its column
         /* D7: the cap applies to the READ (alerts.Count), not to what a column filter leaves on screen. */
@@ -398,7 +399,7 @@ public partial class AlertsHistoryTab : UserControl
     private void SetDismissInFlight(bool inFlight)
     {
         _dismissInFlight = inFlight;
-        DismissAllButton.IsEnabled = !inFlight;
+        DismissAllButton.IsEnabled = !inFlight && AlertsDataGrid.Items.Count > 0;
         DismissWaitIndicator.Visibility = inFlight ? Visibility.Visible : Visibility.Collapsed;
         if (inFlight)
         {

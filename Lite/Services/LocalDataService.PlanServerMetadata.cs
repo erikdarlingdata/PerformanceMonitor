@@ -95,7 +95,8 @@ SELECT p.edition, p.product_version, p.product_level, p.cpu_count, p.physical_me
         AND   d.capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1 AND database_name = $2)
         LIMIT 1) AS is_parameterization_forced,
        p.engine_edition,
-       p.vcore_count
+       p.vcore_count,
+       p.server_name
 FROM v_server_properties AS p
 WHERE p.server_id = $1
 ORDER BY p.collection_time DESC
@@ -132,6 +133,7 @@ LIMIT 1";
 
             return new ServerMetadata
             {
+                ServerName = reader.IsDBNull(18) ? null : reader.GetString(18),
                 Edition = reader.IsDBNull(0) ? null : reader.GetString(0),
                 ProductVersion = reader.IsDBNull(1) ? null : reader.GetString(1),
                 ProductLevel = reader.IsDBNull(2) ? null : reader.GetString(2),
