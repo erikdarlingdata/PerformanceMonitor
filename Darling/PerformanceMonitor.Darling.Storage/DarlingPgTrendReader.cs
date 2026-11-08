@@ -43,12 +43,20 @@ public static class DarlingPgTrendReader
     /// window's, and 0 on a window that did not see the event. A point with no samples claims no backends on either.</param>
     /// <param name="CounterReset">The profile was reset inside this interval, so the point covers only the
     /// time since the reset rather than the whole interval.</param>
+    /// <param name="PeakEstimatedWaitMsPerSecond">#8319: on a bucketed point, the highest single interval's rate inside the
+    /// bucket, so a spike survives the rollup; null where no interval could be rated.</param>
+    /// <param name="Intervals">#8319: how many rated intervals the bucket summarizes (1 on a per-collection point).</param>
+    /// <param name="CounterResets">#8319: how many of the bucket's intervals span a profile reset, what the tool's reset count
+    /// is counted from.</param>
     public readonly record struct PgWaitTrendPoint(
         DateTime CollectionTimeUtc,
         long SampleCount,
         double? EstimatedWaitMsPerSecond,
         int? BackendCount,
-        bool CounterReset);
+        bool CounterReset,
+        double? PeakEstimatedWaitMsPerSecond = null,
+        long Intervals = 1,
+        long CounterResets = 0);
 
     /// <summary>
     /// #8074: the stored source a wait trend is read from. The pg_wait_sampling extension and the service's own sampler both
@@ -205,6 +213,112 @@ public static class DarlingPgTrendReader
 
     /// <summary>#8074: the registry's engine kind, which picks the wait trend's arm. $1 server_id.</summary>
     public const string WaitTrendArmSql = "SELECT engine_kind FROM servers WHERE server_id = $1";
+
+    /// <summary>
+    /// #8319: <see cref="WaitTrendSql"/>'s intervals gathered into buckets of <c>$5</c> minutes, the shape the MCP tool and the web
+    /// read serve. <c>per_interval</c> is that statement's answer, one row per differenced snapshot; the final SELECT sums each
+    /// bucket's samples, and rates the bucket as its summed estimated wait time over the seconds the profiler watched in it, never
+    /// an average of the per-interval rates (which would weight a quiet interval the same as a busy one). The peak is the busiest
+    /// single interval, so a spike survives the bucket. <c>backend_count</c> is the highest figure among the bucket's intervals with
+    /// samples (the extension's is a running total, the service sampler's a per-window count, and neither sums); null when none had
+    /// any. A reset anywhere in the bucket flags the point, and <c>counter_resets</c> counts the intervals that span one. Each point
+    /// is stamped at its bucket's start, the first at the window's start.
+    /// <para>$1 server_id, $2 event, $3/$4 window (naive UTC), $5 bucket width in minutes.</para>
+    /// </summary>
+    public const string WaitTrendBucketedSql = $"""
+        WITH per_snapshot AS (
+            SELECT
+                collection_time,
+                SUM(sample_count)               AS samples,
+                MAX(profile_period_ms)          AS profile_period_ms,
+                MAX(backend_count)              AS backend_count,
+                MAX(sampled_ms)                 AS sampled_ms
+            FROM pg_wait_sampling
+            WHERE server_id = $1
+            AND   event = $2
+            AND   collection_time >= $3
+            AND   collection_time <= $4
+            GROUP BY collection_time
+        ),
+        differenced AS (
+            SELECT
+                collection_time,
+                samples,
+                profile_period_ms,
+                backend_count,
+                sampled_ms,
+                LAG(samples) OVER (ORDER BY collection_time) AS prev_samples,
+                extract(epoch FROM (collection_time - LAG(collection_time) OVER (ORDER BY collection_time))) AS interval_seconds
+            FROM per_snapshot
+        ),
+        per_interval AS (
+            SELECT
+                collection_time,
+                /* Across a reset the new value is taken WHOLE, as WaitTrendSql takes it. */
+                CASE WHEN samples < prev_samples THEN samples ELSE samples - prev_samples END AS delta_samples,
+                (CASE WHEN samples < prev_samples THEN samples ELSE samples - prev_samples END)
+                    * coalesce(profile_period_ms, 0)::double precision AS wait_ms,
+                /* The seconds the profiler WATCHED (#7876): the stored sampled_ms on the service sampler, the interval on the
+                   extension arm and every pre-V133 row. NULL, not 0, where there is nothing to rate over (#3653). */
+                CASE
+                    WHEN coalesce(sampled_ms / 1000.0, interval_seconds) > 0
+                    THEN CAST(coalesce(sampled_ms / 1000.0, interval_seconds) AS double precision)
+                END AS watched_seconds,
+                CASE WHEN (CASE WHEN samples < prev_samples THEN samples ELSE samples - prev_samples END) > 0
+                     THEN coalesce(backend_count, 0)
+                END                                 AS backend_count,
+                (samples < prev_samples)            AS counter_reset
+            FROM differenced
+            WHERE prev_samples IS NOT NULL
+        )
+        SELECT
+            GREATEST(date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $3) AS bucket_start,
+            CAST(SUM(delta_samples) AS bigint)      AS delta_samples,
+            CAST(SUM(wait_ms) FILTER (WHERE watched_seconds IS NOT NULL) / NULLIF(SUM(watched_seconds), 0) AS double precision) AS estimated_wait_ms_per_second,
+            CAST(MAX(backend_count) AS bigint)      AS backend_count,
+            bool_or(counter_reset)                  AS counter_reset,
+            COUNT(*) FILTER (WHERE counter_reset)   AS counter_resets,
+            COUNT(*)                                AS intervals,
+            CAST(MAX(wait_ms / watched_seconds) AS double precision) AS peak_estimated_wait_ms_per_second
+        FROM per_interval
+        GROUP BY 1
+        ORDER BY 1
+        """;
+
+    /// <summary>
+    /// #8319: <see cref="WaitTrendEngineSql"/>'s collections gathered into buckets of <c>$5</c> minutes. <c>per_collection</c> is that
+    /// statement's answer: each collection's summed deltas and its cadence (the shortest interval any of its rated rows measured,
+    /// for the reason WaitTrendEngineSql gives). The bucket sums the waits and the wait time of its collections and rates the sum
+    /// over their summed cadences, so a bucket of one collection equals the per-collection point and a bucket of many is the
+    /// time-weighted rate, never an average of rates; the peak is the busiest single collection. The counters carry no backend
+    /// count and the collector re-baselines at a reset, so no point here spans one.
+    /// <para>$1 server_id, $2 wait_event, $3/$4 window (naive UTC), $5 bucket width in minutes.</para>
+    /// </summary>
+    public const string WaitTrendEngineBucketedSql = $"""
+        WITH per_collection AS (
+            SELECT
+                collection_time,
+                SUM(delta_waits)                    AS delta_waits,
+                SUM(delta_wait_time_us) / 1000.0    AS wait_ms,
+                MIN(sample_interval_seconds)        AS cadence_seconds
+            FROM pg_wait_stats
+            WHERE server_id = $1
+            AND   wait_event = $2
+            AND   collection_time >= $3
+            AND   collection_time <= $4
+            AND   sample_interval_seconds > 0
+            GROUP BY collection_time
+        )
+        SELECT
+            GREATEST(date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $3) AS bucket_start,
+            CAST(SUM(delta_waits) AS bigint)        AS delta_waits,
+            CAST(SUM(wait_ms) / NULLIF(SUM(cadence_seconds), 0) AS double precision) AS estimated_wait_ms_per_second,
+            COUNT(*)                                AS intervals,
+            CAST(MAX(wait_ms / NULLIF(cadence_seconds, 0)) AS double precision) AS peak_estimated_wait_ms_per_second
+        FROM per_collection
+        GROUP BY 1
+        ORDER BY 1
+        """;
 
     /// <summary>
     /// One statement over time, by <c>queryid</c>.
@@ -603,6 +717,55 @@ public static class DarlingPgTrendReader
                 /* The native counters carry no backend count, and the collector re-baselines at a reset, so no point spans one. */
                 BackendCount: null,
                 CounterReset: false));
+        }
+
+        return points;
+    }
+
+    /// <summary>
+    /// #8319: the wait trend on <paramref name="arm"/> in buckets of <paramref name="bucketMinutes"/>: <see cref="WaitTrendBucketedSql"/>
+    /// over the sampler, <see cref="WaitTrendEngineBucketedSql"/> over the engine counters, in the one point shape. A bucket of
+    /// one collection is that collection's point, so a one-minute width over a one-minute collector answers what the
+    /// per-collection read answers.
+    /// </summary>
+    public static async Task<List<PgWaitTrendPoint>> GetWaitTrendBucketsAsync(
+        NpgsqlDataSource postgres, int serverId, string waitEvent, DateTime startUtc, DateTime endUtc, int bucketMinutes, PgWaitTrendArm arm,
+        CancellationToken cancellationToken = default)
+    {
+        var engineCounters = arm == PgWaitTrendArm.EngineCumulative;
+        var points = new List<PgWaitTrendPoint>();
+        await using var command = postgres.CreateCommand(engineCounters ? WaitTrendEngineBucketedSql : WaitTrendBucketedSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(waitEvent);
+        /* Kind-Unspecified at the BIND, per the store's naive-UTC discipline (see GetWaitTrendAsync). */
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(bucketMinutes);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            points.Add(engineCounters
+                ? new PgWaitTrendPoint(
+                    reader.GetDateTime(0),
+                    reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
+                    /* Null-preserving (#3653): a NULL rate had nothing to rate over, which is not a measured 0. */
+                    reader.IsDBNull(2) ? (double?)null : reader.GetDouble(2),
+                    /* The native counters carry no backend count, and the collector re-baselines at a reset, so no point spans one. */
+                    BackendCount: null,
+                    CounterReset: false,
+                    PeakEstimatedWaitMsPerSecond: reader.IsDBNull(4) ? (double?)null : reader.GetDouble(4),
+                    Intervals: reader.GetInt64(3),
+                    CounterResets: 0)
+                : new PgWaitTrendPoint(
+                    reader.GetDateTime(0),
+                    reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
+                    reader.IsDBNull(2) ? (double?)null : reader.GetDouble(2),
+                    reader.IsDBNull(3) ? (int?)null : (int)reader.GetInt64(3),
+                    !reader.IsDBNull(4) && reader.GetBoolean(4),
+                    PeakEstimatedWaitMsPerSecond: reader.IsDBNull(7) ? (double?)null : reader.GetDouble(7),
+                    Intervals: reader.GetInt64(6),
+                    CounterResets: reader.GetInt64(5)));
         }
 
         return points;

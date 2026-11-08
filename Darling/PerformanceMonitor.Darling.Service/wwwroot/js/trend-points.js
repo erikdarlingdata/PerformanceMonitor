@@ -23,6 +23,7 @@ export const TREND_POINT_READS = new Set([
   "get_pg_query_duration_trend", /* calls and exec time per second: rates */
   "get_pg_io_trend", /* reads, writes and bytes per second: rates */
   "get_pg_database_trend", /* transactions and temp bytes per second: rates */
+  "get_pg_wait_trend", /* wait ms per second: a rate */
   "get_wait_trend", /* wait ms per second: a rate */
   "get_file_io_trend", /* latency and MB/s from counter deltas: ratios of summed deltas */
   "get_procedure_duration_trend", /* executions and worker time per second: rates */

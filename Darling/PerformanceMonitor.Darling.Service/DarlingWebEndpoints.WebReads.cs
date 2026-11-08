@@ -303,7 +303,9 @@ public static partial class DarlingWebEndpoints
             ["get_pg_deadlocks"] = (c, pg, an) => DarlingMcpPgDeadlockTools.GetPgDeadlocks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 25), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_pg_deadlock_detail"] = (c, pg, an) => DarlingMcpPgDeadlockTools.GetPgDeadlockDetail(pg, Server(c), Str(c, "deadlock_hash"), Rows(c, "limit", 5), cancellationToken: c.RequestAborted),
             ["get_pg_log_events"] = (c, pg, an) => DarlingMcpPgLogEventTools.GetPgLogEvents(pg, Server(c), Hours(c, 24), Str(c, "family"), Str(c, "min_severity"), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
-            ["get_pg_wait_trend"] = (c, pg, an) => DarlingMcpPgTrendTools.GetPgWaitTrend(pg, Server(c), Str(c, "wait_event"), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_pg_wait_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
+                ? DarlingMcpPgTrendTools.GetPgWaitTrend(pg, Server(c), Str(c, "wait_event"), Hours(c, 24), AsOf(c), bucketMinutes, ChartBudget(c), cancellationToken: c.RequestAborted)
+                : UnparseableParam("bucket_minutes"),
             ["get_pg_query_duration_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                 ? DarlingMcpPgTrendTools.GetPgQueryDurationTrend(pg, Server(c), Str(c, "queryid"), Hours(c, 24), AsOf(c), bucketMinutes, ChartBudget(c), cancellationToken: c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),

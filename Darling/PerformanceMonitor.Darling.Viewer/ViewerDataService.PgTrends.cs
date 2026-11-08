@@ -28,7 +28,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed partial class ViewerDataService
 {
     /// <summary>One trend read: the subject that was followed (null when the window held nothing to follow), the
-    /// bucket width the read used (minutes; 0 for the wait trend, which the web reads per collection), and its points.</summary>
+    /// bucket width the read used (minutes; 0 for the wait trend, which the Viewer reads per collection), and its points.</summary>
     public sealed record PgTrend<TPoint>(string? Subject, int BucketMinutes, IReadOnlyList<TPoint> Points);
 
     /// <summary>A trend with nothing to follow in the window.</summary>

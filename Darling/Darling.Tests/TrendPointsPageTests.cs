@@ -122,7 +122,7 @@ public sealed class TrendPointsPageTests
         var meanOnly = run.GetProperty("meanOnlyReads").EnumerateArray().Select(e => e.GetString()!).ToArray();
         Assert.Empty(kept.Intersect(meanOnly));
         Assert.Equal(routes, kept.Concat(meanOnly).OrderBy(n => n, StringComparer.Ordinal).ToArray());
-        Assert.Equal(17, routes.Length);
+        Assert.Equal(18, routes.Length);
     }
 
     [Fact]

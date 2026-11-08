@@ -30,20 +30,35 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpPgTrendTools
 {
     [McpServerTool(Name = "get_pg_wait_trend"), Description("Gets a time series for ONE PostgreSQL wait event: how much the server waited on it in each collection interval, normalised per second. Served on every PostgreSQL target from the wait instrument that target collects, and instrument says which. On Amazon Aurora PostgreSQL that is engine_cumulative: the per-collection deltas of the engine's own cumulative wait counters (the pg_wait_stats collector), MEASURED wait time, with backend_count always null because the counters do not carry it. Elsewhere it is the sampled arm, extension_sampled or service_sampled: estimates from a sampling profiler (samples x profile period), not measured durations, so treat the SHAPE as the finding rather than the absolute number. Use get_pg_wait_stats (Aurora) or get_pg_wait_sampling (other targets) first to find which events dominate, then this to see whether one is growing. Summed across the queries that waited, because this answers a question about the SERVER - per-query attribution for a single window is what those two reads already give. On the sampled arm backend_count is null on a point with no samples, and where it is given it counts the distinct backends the profiler has recorded for the event: since the profile last started on the pg_wait_sampling extension (a running total that only rises until a reset, not the backends that waited in that interval), and in the last window on the service's own sampler. An interval where pg_wait_sampling's profile was reset - by pg_wait_sampling_reset_profile() or a server restart - is flagged, and reports everything since the reset rather than a misleadingly quiet interval; on engine_cumulative the collector re-baselines at a reset, so no point spans one.")]
-    public static async Task<string> GetPgWaitTrend(
+    public static Task<string> GetPgWaitTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("The exact wait event name, e.g. DataFileRead, WALWrite. Omit to follow whichever event dominates the window.")] string? wait_event = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
         ILogger? logger = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GetPgWaitTrend(postgres, server_name, wait_event, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PgWaitTrendMcpAutoPoints, TrendBuckets.PgWaitTrendMaxPoints), logger, cancellationToken);
+
+    /// <summary>
+    /// get_pg_wait_trend under an explicit <paramref name="budget"/> (#8319): the MCP tool passes its own, the web viewer's
+    /// <c>/api/read</c> mirror <see cref="TrendBudget.Chart"/>. One series, so the width is settled before any read runs; the
+    /// window figures are counted from the buckets' own interval and reset counts, so they are the numbers the per-collection
+    /// read produced.
+    /// </summary>
+    internal static async Task<string> GetPgWaitTrend(
+        NpgsqlDataSource postgres, string? server_name, string? wait_event, int hours_back, string? as_of, int? bucket_minutes,
+        TrendBudget budget, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
+
+        var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
+        if (bucketError != null) return bucketError;
 
         try
         {
@@ -92,8 +107,8 @@ public sealed class DarlingMcpPgTrendTools
                               + " get_pg_extensions reports whether the pg_wait_sampling extension is loaded."), cancellationToken, start);
             }
 
-            var points = await DarlingPgTrendReader.GetWaitTrendAsync(
-                postgres, resolved.ServerId, chosen, start, windowEnd, arm, cancellationToken);
+            var points = await DarlingPgTrendReader.GetWaitTrendBucketsAsync(
+                postgres, resolved.ServerId, chosen, start, windowEnd, bucketMinutes, arm, cancellationToken);
 
             if (points.Count == 0)
             {
@@ -111,7 +126,8 @@ public sealed class DarlingMcpPgTrendTools
                               + "being sampled. get_pg_wait_sampling lists the events this server does record."), cancellationToken, start);
             }
 
-            var resets = points.Count(p => p.CounterReset);
+            /* Counted from the buckets' own reset counts (#8319): the figure is intervals, as it always was. */
+            var resets = points.Sum(p => p.CounterResets);
 
             /* #7876: the instrument the NEWEST cycle recorded, on the data path as well as the empty one. The same recorded token
                get_pg_wait_sampling echoes. It is not derived from the rows: a NULL sampled_ms means either the extension arm or a
@@ -144,15 +160,20 @@ public sealed class DarlingMcpPgTrendTools
                           + "would answer the opposite of the question. Name it explicitly to follow it."
                     : "as requested",
                 hours_back,
+                bucket = TrendBuckets.Word(bucketMinutes),
+                bucket_minutes = bucketMinutes,
+                aggregate_note = TrendBuckets.AggregateNote(bucketMinutes, bucket_minutes is not null, budget.AutoPoints),
                 status = "wait_trend",
                 instrument,
                 point_count = points.Count,
+                /* The rated intervals the points summarize (#8319): one per collection, what point_count counted before bucketing. */
+                interval_count = points.Sum(p => p.Intervals),
                 counter_reset_count = resets,
                 note = engineCounters
                     ? "estimated_wait_ms_per_second keeps the sampled arm's key but is MEASURED here: the wait time the engine's "
                       + "cumulative wait counters (the pg_wait_stats collector) accrued for the event "
-                      + "between two collections, over the seconds between them, so the value is a duration rather than an estimate "
-                      + "from samples. sample_count is the number of waits that completed in the interval, not profiler samples. "
+                      + "in the point's collections, over the seconds their measured intervals covered, so the value is a duration rather than an estimate "
+                      + "from samples. sample_count is the number of waits that completed in those intervals, not profiler samples. "
                       + "backend_count is null on every point, because the native counters do not carry it. counter_reset is false "
                       + "on every point: the collector re-baselines at a counter reset or a restart and writes no interval for that "
                       + "collection, so that collection is not a point and no point spans a reset. A collection with no measured "
@@ -160,8 +181,8 @@ public sealed class DarlingMcpPgTrendTools
                       + "point. Per SECOND because collection intervals are not uniform: a restart or a slow cycle stretches one, "
                       + "and a per-interval total would render that as a spike. The instrument key is engine_cumulative because "
                       + "the registry says this target is Aurora PostgreSQL, the fact that gates the collector."
-                    : "estimated_wait_ms_per_second is samples x the profiler's period, over the time the "
-                      + "profiler was watching - the interval's length on the pg_wait_sampling extension, and on "
+                    : "estimated_wait_ms_per_second is samples x the profiler's period, summed over the point's intervals, over the time the "
+                      + "profiler was watching in them - each interval's length on the pg_wait_sampling extension, and on "
                       + "the service_sampled instrument the seconds each collection actually sampled (30 of every "
                       + "300), the same denominator analyze_server uses. An estimate from a sampling profiler, not "
                       + "a measured duration, so the shape over time is the finding rather than the absolute value. "
@@ -174,7 +195,8 @@ public sealed class DarlingMcpPgTrendTools
                       + "because no backend waited on the event in that interval. On a point with samples it is the number of "
                       + "distinct backends the profiler has recorded for this event: since the profile last started on the "
                       + "pg_wait_sampling extension, a running total that only rises until a reset and is NOT how many waited in "
-                      + "the interval, and in the last window on the service's own sampler."
+                      + "the interval, and in the last window on the service's own sampler. On a point holding several intervals it is "
+                      + "the highest such figure among those with samples."
                       + (resets > 0
                           ? $"  {CountText.Plural(resets, "interval")} {(resets == 1 ? "spans" : "span")} a profile RESET - pg_wait_sampling_reset_profile() "
                             + "or a server restart - and report everything since the reset rather than a "
@@ -188,6 +210,8 @@ public sealed class DarlingMcpPgTrendTools
                        statement's own guard keeps that unreachable today, and the key is nullable so the
                        day it is not, the point says unknowable rather than idle. */
                     estimated_wait_ms_per_second = p.EstimatedWaitMsPerSecond is { } wait ? Math.Round(wait, 3) : (double?)null,
+                    /* #8319: the bucket's busiest single interval, so a one-collection spike survives the bucket. */
+                    peak_estimated_wait_ms_per_second = p.PeakEstimatedWaitMsPerSecond is { } peak ? Math.Round(peak, 3) : (double?)null,
                     /* #7428: null on a point with no samples, never a count from an interval where nothing waited. */
                     backend_count = p.BackendCount,
                     counter_reset = p.CounterReset,

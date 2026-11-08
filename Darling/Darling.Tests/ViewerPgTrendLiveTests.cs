@@ -145,7 +145,8 @@ VALUES ($1, $2, $3, $4, 'appdb', $5, $6, $7, $8, $9, $10, $11, NULL)",
                     CollectionIdGenerator.Next(), T0.AddMinutes(i), ServerId, ServerName, 10L * i, 100L * i);
             }
 
-            var web = Root(await DarlingMcpPgTrendTools.GetPgWaitTrend(postgres, ServerName, null, Hours, AsOfText, cancellationToken: ct));
+            /* #8319: the tool buckets to its budget; one-minute buckets over one-minute collections are the per-collection points the Viewer reads. */
+            var web = Root(await DarlingMcpPgTrendTools.GetPgWaitTrend(postgres, ServerName, null, Hours, AsOfText, bucket_minutes: 1, cancellationToken: ct));
             var (start, end) = Window();
             var read = await viewer.GetPgWaitTrendAsync(ServerId, start, end, ct);
 
@@ -225,7 +226,8 @@ ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET state_value = E
             Assert.Equal(2_000d, points[0].EstimatedWaitMsPerSecond!.Value, 6);
             Assert.Equal(4_000d, points[1].EstimatedWaitMsPerSecond!.Value, 6);
 
-            var web = Root(await DarlingMcpPgTrendTools.GetPgWaitTrend(postgres, ServerName, null, Hours, AsOfText, cancellationToken: ct));
+            /* #8319: the tool buckets to its budget; one-minute buckets over one-minute collections are the per-collection points the Viewer reads. */
+            var web = Root(await DarlingMcpPgTrendTools.GetPgWaitTrend(postgres, ServerName, null, Hours, AsOfText, bucket_minutes: 1, cancellationToken: ct));
             Assert.Equal("service_sampled", web.GetProperty("instrument").GetString());
             var webPoints = web.GetProperty("points").EnumerateArray().ToArray();
             Assert.Equal(2, webPoints.Length);
@@ -253,7 +255,8 @@ ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET state_value = E
             Assert.Equal(2d, points[0].EstimatedWaitMsPerSecond!.Value, 6);
             Assert.Equal(4d, points[1].EstimatedWaitMsPerSecond!.Value, 6);
 
-            var web = Root(await DarlingMcpPgTrendTools.GetPgWaitTrend(postgres, ServerName, null, Hours, AsOfText, cancellationToken: ct));
+            /* #8319: the tool buckets to its budget; one-minute buckets over one-minute collections are the per-collection points the Viewer reads. */
+            var web = Root(await DarlingMcpPgTrendTools.GetPgWaitTrend(postgres, ServerName, null, Hours, AsOfText, bucket_minutes: 1, cancellationToken: ct));
             Assert.Equal("unknown", web.GetProperty("instrument").GetString());
         });
     }

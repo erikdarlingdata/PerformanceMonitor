@@ -110,7 +110,7 @@ public static partial class CustomViewValidation
             ["get_pg_deadlocks"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("limit", false), new("as_of", false) },
             ["get_pg_deadlock_detail"] = new ReadPanelParam[] { new("server", false), new("deadlock_hash", false), new("limit", false) },
             ["get_pg_log_events"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("family", false), new("min_severity", false), new("limit", false), new("as_of", false) },
-            ["get_pg_wait_trend"] = new ReadPanelParam[] { new("server", false), new("wait_event", false), new("hours", false), new("as_of", false) },
+            ["get_pg_wait_trend"] = new ReadPanelParam[] { new("server", false), new("wait_event", false), new("hours", false), new("as_of", false), new("bucket_minutes", false) },
             ["get_pg_query_duration_trend"] = new ReadPanelParam[] { new("server", false), new("queryid", false), new("hours", false), new("as_of", false), new("bucket_minutes", false) },
             ["get_pg_io_trend"] = new ReadPanelParam[] { new("server", false), new("backend_type", false), new("context", false), new("hours", false), new("as_of", false), new("bucket_minutes", false) },
             ["get_pg_database_trend"] = new ReadPanelParam[] { new("server", false), new("database", false), new("hours", false), new("as_of", false), new("bucket_minutes", false) },
