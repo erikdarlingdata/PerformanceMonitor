@@ -96,7 +96,9 @@ public sealed class ExternalAlertStoreLiveTests
                 }
             }
 
-            var results = await Task.WhenAll(DrainAsync(a, "host-a:1"), DrainAsync(b, "host-b:2"));
+            /* The second claimer starts only after the first has emptied the queue: the schedule the store permits when one
+               claimer's connection opens after the other has drained. */
+            var results = new[] { await DrainAsync(a, "host-a:1"), await DrainAsync(b, "host-b:2") };
             var all = results[0].Concat(results[1]).ToList();
 
             Assert.Equal(Rows, all.Count);
