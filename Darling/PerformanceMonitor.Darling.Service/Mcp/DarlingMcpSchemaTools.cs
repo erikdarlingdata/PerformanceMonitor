@@ -193,7 +193,20 @@ public sealed class DarlingMcpSchemaTools
                 candidates = await SchemaHistoryReader.FindByNameAsync(connection, key, database, schema, name, null, true, cancellationToken);
             }
 
-            var lines = candidates.GroupBy(c => (c.Schema.ToUpperInvariant(), c.Name.ToUpperInvariant())).ToList();
+            /* Matched ignoring case, as the history is searched; grouped by the exact names, because a case-sensitive database can hold
+               dbo.Orders and dbo.orders apart. More than one: the one spelled exactly as asked, else the ask is ambiguous. */
+            var lines = candidates.GroupBy(c => (c.Schema, c.Name)).ToList();
+            if (lines.Count > 1)
+            {
+                var exact = lines
+                    .Where(g => string.Equals(g.Key.Name, name, StringComparison.Ordinal) && (schema is null || string.Equals(g.Key.Schema, schema, StringComparison.Ordinal)))
+                    .ToList();
+                if (exact.Count == 1)
+                {
+                    lines = exact;
+                }
+            }
+
             if (lines.Count == 0)
             {
                 return await MissStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, resolution, false, cancellationToken)

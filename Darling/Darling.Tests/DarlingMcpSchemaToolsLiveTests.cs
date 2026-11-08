@@ -406,6 +406,49 @@ public sealed class DarlingMcpSchemaToolsLiveTests
         });
     }
 
+    /// <summary>An availability group dropped and recreated within the week leaves two group ids for one database: the newest sighting wins.</summary>
+    [Fact]
+    public async Task AgMemberships_NewestSightingFirst()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            var secondary = ServerIdHelper.GetDeterministicHashCode("schema-secondary");
+            var oldGroup = Guid.NewGuid();
+            var newGroup = Guid.NewGuid();
+            foreach (var (group, ago) in new[] { (oldGroup, TimeSpan.FromDays(3)), (newGroup, TimeSpan.FromMinutes(5)), (oldGroup, TimeSpan.FromDays(4)) })
+            {
+                await DarlingMcpTestData.ExecAsync(
+                    s.Connection, ct,
+                    "INSERT INTO ag_database_replica_states (collection_id, collection_time, server_id, server_name, ag_name, database_name, group_id) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+                    CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(DateTime.UtcNow - ago), secondary, "schema-secondary", "SalesAg", Db, group.ToString("D"));
+            }
+
+            for (var i = 0; i < 5; i++)
+            {
+                var memberships = await SchemaHistoryReader.ReadAgMembershipsAsync(s.Connection, secondary, Db, DateTime.UtcNow, ct);
+                Assert.Equal(new[] { newGroup, oldGroup }, memberships.Select(m => m.GroupId).ToArray());
+            }
+        });
+    }
+
+    /// <summary>In a case-sensitive database dbo.Orders and dbo.orders are two tables: the name as typed picks its own, and a spelling that
+    /// matches neither exactly is refused as ambiguous.</summary>
+    [Fact]
+    public async Task GetObjectDefinition_NamesDifferingOnlyByCase_PrefersTheExactCase()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            await Baseline(s, ct, Table(10, "Orders", new[] { "Id", "Total" }), Table(11, "orders", new[] { "Id" }, pk: "orders_lower"));
+
+            Assert.Equal(10, (await Parse(Definition(s, ct, "dbo.Orders"))).GetProperty("object").GetProperty("object_id").GetInt32());
+            Assert.Equal(11, (await Parse(Definition(s, ct, "dbo.orders"))).GetProperty("object").GetProperty("object_id").GetInt32());
+            Assert.Equal(11, (await Parse(Definition(s, ct, "orders"))).GetProperty("object").GetProperty("object_id").GetInt32());
+
+            using var ambiguous = JsonDocument.Parse(await Definition(s, ct, "dbo.ORDERS"));
+            Assert.Contains("more than one object", ambiguous.RootElement.ToString(), StringComparison.Ordinal);
+        });
+    }
+
     [Fact]
     public async Task GetSchemaChanges_ListsAlteredRenamedDroppedWithDiffAndLogin()
     {
@@ -458,6 +501,32 @@ public sealed class DarlingMcpSchemaToolsLiveTests
 
             var one = await Parse(Changes(s, ct, name: "dbo.orders"));
             Assert.Equal(new[] { "altered" }, Names(one.GetProperty("changes"), "change_kind"));
+        });
+    }
+
+    /// <summary>
+    /// sp_rename T, T_old and CREATE TABLE T inside one pass: the new T is created, and its change is not diffed against the old table
+    /// that held the name. The rename keeps its own line by object id.
+    /// </summary>
+    [Fact]
+    public async Task GetSchemaChanges_ANewTableTakingARenamedTablesName_IsNotDiffedAgainstIt()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            await Baseline(s, ct, Table(10, "Orders", new[] { "Id", "Total" }));
+            await SchemaVersionStore.ApplyAsync(
+                s.Connection,
+                Write(new[] { Table(10, "Orders_old", new[] { "Id", "Total" }, pk: "Orders"), Table(11, "Orders", new[] { "OrderId" }, pk: "Orders2") }, s_t0.AddHours(1)),
+                ct);
+
+            var rows = await SchemaHistoryReader.ReadChangesAsync(
+                s.Connection, [s_key], Db, null, null, s_t0.AddMinutes(30), s_t0.AddHours(2), false, 10, 0, ct);
+
+            var created = Assert.Single(rows, r => r.ChangeKind == "created");
+            Assert.Equal(11, created.ObjectId);
+            Assert.Null(created.PreviousVersionId);
+            var renamed = Assert.Single(rows, r => r.ChangeKind == "renamed");
+            Assert.NotNull(renamed.PreviousVersionId);
         });
     }
 

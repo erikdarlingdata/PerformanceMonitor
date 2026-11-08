@@ -111,7 +111,8 @@ public static class SchemaHistoryReader
             q.Text.Append(" AND lower(database_name) = lower(").Append(q.P(NpgsqlDbType.Text, database)).Append(')');
         }
 
-        q.Text.Append(" GROUP BY group_id, database_name");
+        /* An availability group dropped and recreated within the week leaves two group ids for one database: the newest sighting first. */
+        q.Text.Append(" GROUP BY group_id, database_name ORDER BY max(collection_time) DESC");
         var result = new List<SchemaAgMembership>();
         await using var cmd = q.Command(c, null);
         await using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -296,13 +297,7 @@ FROM collect.schema_objects WHERE version_id = ANY($1)", ids))
     {
         ArgumentNullException.ThrowIfNull(c);
         var q = new Sql();
-        q.Text.Append(@"SELECT o.version_id,
-       (SELECT p.version_id FROM collect.schema_objects p
-        WHERE ((o.server_id IS NOT NULL AND p.server_id = o.server_id AND p.ag_group_id IS NULL) OR (o.server_id IS NULL AND p.server_id IS NULL AND p.ag_group_id = o.ag_group_id))
-          AND p.database_name = o.database_name
-          AND p.version_id < o.version_id AND p.valid_to = o.valid_from
-          AND (p.object_id = o.object_id OR (p.schema_name = o.schema_name AND p.object_name = o.object_name))
-        ORDER BY p.version_id DESC LIMIT 1),
+        q.Text.Append("SELECT o.version_id, ").Append(PreviousVersionSql).Append(@",
        o.database_name, o.ag_name, o.object_id, o.schema_name, o.object_name, o.object_type, o.valid_from, o.valid_to, o.change_kind, o.detected_by,
        o.change_login, o.change_app, o.change_host
 FROM collect.schema_objects o WHERE ")
@@ -430,6 +425,37 @@ FROM collect.schema_objects o WHERE ")
 
         return result;
     }
+
+    /* The version a change row follows, for its diff. A baseline row has none, so it runs no lookup. Each lookup names the history key
+       as an index serves it (one arm for a server key, one for a group key, no OR across them) and is first by object id, which
+       idx_schema_objects_object_history serves. Only an altered row falls back to the schema and name: an object dropped and recreated
+       under a new object_id continues its line. A created row never does, so a new table that took a renamed table's name in the same
+       pass is not diffed against the old one. */
+    private const string PreviousVersionSql = @"CASE
+           WHEN o.change_kind = 'baseline' THEN NULL
+           WHEN o.server_id IS NOT NULL THEN COALESCE(
+               (SELECT p.version_id FROM collect.schema_objects p
+                WHERE p.server_id = o.server_id AND p.ag_group_id IS NULL AND p.database_name = o.database_name AND p.object_id = o.object_id
+                  AND p.valid_from <= o.valid_from AND p.version_id < o.version_id AND p.valid_to = o.valid_from
+                ORDER BY p.version_id DESC LIMIT 1),
+               CASE WHEN o.change_kind = 'altered' THEN
+               (SELECT p.version_id FROM collect.schema_objects p
+                WHERE p.server_id = o.server_id AND p.ag_group_id IS NULL AND p.database_name = o.database_name
+                  AND p.schema_name = o.schema_name AND p.object_name = o.object_name
+                  AND p.version_id < o.version_id AND p.valid_to = o.valid_from
+                ORDER BY p.version_id DESC LIMIT 1) END)
+           ELSE COALESCE(
+               (SELECT p.version_id FROM collect.schema_objects p
+                WHERE p.server_id IS NULL AND p.ag_group_id = o.ag_group_id AND p.database_name = o.database_name AND p.object_id = o.object_id
+                  AND p.valid_from <= o.valid_from AND p.version_id < o.version_id AND p.valid_to = o.valid_from
+                ORDER BY p.version_id DESC LIMIT 1),
+               CASE WHEN o.change_kind = 'altered' THEN
+               (SELECT p.version_id FROM collect.schema_objects p
+                WHERE p.server_id IS NULL AND p.ag_group_id = o.ag_group_id AND p.database_name = o.database_name
+                  AND p.schema_name = o.schema_name AND p.object_name = o.object_name
+                  AND p.version_id < o.version_id AND p.valid_to = o.valid_from
+                ORDER BY p.version_id DESC LIMIT 1) END)
+       END";
 
     /// <summary>Escapes the LIKE metacharacters (<c>\</c>, <c>%</c>, <c>_</c>) so the text matches as typed.</summary>
     public static string EscapeLike(string text) =>
