@@ -69,8 +69,13 @@ public static class SchemaCatalogQueries
             + ResultSets;
     }
 
+    /* LOCK_TIMEOUT as the other per-database catalog collectors set it (IdentityCapacityCollector, DatabaseProtectionCollector): DDL left
+       open in a transaction, or an offline rebuild of a large index, fails the read in five seconds with error 1222 instead of holding it
+       for the whole database budget, and the failed read is queued for the next pass. Never READ UNCOMMITTED: that would record an
+       uncommitted ALTER that may roll back, and no event would ever correct that version. */
     private const string Prologue =
         "SET NOCOUNT ON; /* PerformanceMonitorLite */\r\n"
+        + "SET LOCK_TIMEOUT 5000;\r\n"
         + "IF OBJECT_ID(N'tempdb..#pm_schema_ids') IS NOT NULL DROP TABLE #pm_schema_ids;\r\n"
         + "CREATE TABLE #pm_schema_ids (object_id int NOT NULL PRIMARY KEY);\r\n";
 

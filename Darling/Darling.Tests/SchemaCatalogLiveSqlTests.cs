@@ -337,6 +337,35 @@ public sealed class SchemaCatalogLiveSqlTests
         });
     }
 
+    /// <summary>
+    /// DDL left open in a transaction holds its table's schema lock. The read gives up on it after the five seconds of its LOCK_TIMEOUT with
+    /// error 1222, the way the other per-database catalog collectors do, instead of waiting out the whole command timeout.
+    /// </summary>
+    [Fact]
+    public async Task CatalogRead_BehindAnOpenDdlTransaction_GivesUpAfterItsLockTimeout()
+    {
+        await WithScratchDatabaseAsync(null, async (db, ct) =>
+        {
+            await CreateRichSchemaAsync(db, ct);
+            await using var holder = new SqlConnection(db);
+            await holder.OpenAsync(ct);
+            await using (var open = new SqlCommand("BEGIN TRANSACTION; ALTER TABLE dbo.Customers ADD Region int NULL;", holder) { CommandTimeout = 60 })
+            {
+                await open.ExecuteNonQueryAsync(ct);
+            }
+
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            var error = await Assert.ThrowsAsync<SqlException>(() => ReadAsync(db, SchemaCatalogQueries.BuildFullRead(), ct));
+            watch.Stop();
+
+            Assert.Equal(1222, error.Number);
+            Assert.True(watch.Elapsed < TimeSpan.FromSeconds(30), $"the read waited {watch.Elapsed.TotalSeconds:0} s");
+
+            await using var rollback = new SqlCommand("ROLLBACK TRANSACTION;", holder) { CommandTimeout = 60 };
+            await rollback.ExecuteNonQueryAsync(ct);
+        });
+    }
+
     [Fact]
     public async Task CatalogRead_OverCap_IsFlagged()
     {
