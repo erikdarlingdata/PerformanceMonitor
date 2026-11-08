@@ -452,6 +452,27 @@ public sealed class DarlingMcpSchemaToolsLiveTests
         });
     }
 
+    /// <summary>One object renamed only by case, then dropped, is one history line: asking for it by any case answers it, not "ambiguous".</summary>
+    [Fact]
+    public async Task GetObjectDefinition_ObjectRenamedByCaseThenDropped_AnswersItsOwnHistory()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            await Baseline(s, ct, Table(10, "Orders", new[] { "Id", "Total" }));
+            var renamed = new[] { new SchemaEvent("module_end", 1, s_t0.AddHours(1), Db, null, null, null, "sp_rename", "renamer", "RenameApp", "rename-host", null) };
+            await SchemaVersionStore.ApplyAsync(
+                s.Connection, Write(new[] { Table(10, "ORDERS", new[] { "Id", "Total" }, pk: "Orders") }, s_t0.AddHours(1), attribution: renamed), ct);
+            var dropped = new[] { new SchemaEvent("object_deleted", 2, s_t0.AddHours(2), Db, 10, 8277, null, null, "dropper", "DropApp", "drop-host", null) };
+            await SchemaVersionStore.ApplyAsync(s.Connection, Write(Array.Empty<SchemaObjectDefinition>(), s_t0.AddHours(2), attribution: dropped), ct);
+
+            var answer = await Parse(Definition(s, ct, "dbo.orders"));
+
+            Assert.Equal(10, answer.GetProperty("object").GetProperty("object_id").GetInt32());
+            Assert.Equal("dropped", answer.GetProperty("state").GetString());
+            Assert.Equal("ORDERS", answer.GetProperty("object").GetProperty("name").GetString());
+        });
+    }
+
     [Fact]
     public async Task GetSchemaChanges_ListsAlteredRenamedDroppedWithDiffAndLogin()
     {
