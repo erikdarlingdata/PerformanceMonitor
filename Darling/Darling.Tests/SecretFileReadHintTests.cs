@@ -33,11 +33,13 @@ public sealed class SecretFileReadHintTests
 
             Assert.StartsWith("postgres.connectionString: secret file '/run/secrets/store_connection' could not be read: denied", message);
             Assert.Contains("user 1654", message, StringComparison.Ordinal);
-            var chmod = message.IndexOf("chmod 700 secrets && chmod 644 darling.json secrets/*", StringComparison.Ordinal);
+            var chmod = message.IndexOf(DarlingSecretSource.ComposeSecretsModeFix, StringComparison.Ordinal);
             var chown = message.IndexOf("docker compose run --rm --no-deps --user 0 --entrypoint chown darling -R 1654:1654 /var/lib/darling", StringComparison.Ordinal);
             var restart = message.IndexOf("docker compose restart darling", StringComparison.Ordinal);
             Assert.True(chmod > 0, message);
             Assert.True(chown > chmod, message);
+            Assert.Contains("chmod 700 secrets && chmod 644 darling.json && find secrets -type f ! -name password_key -exec chmod 644 {} +", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("chmod 600", message, StringComparison.Ordinal);
             Assert.True(restart > chown, message);
             Assert.Contains("in the compose folder", message, StringComparison.Ordinal);
             Assert.DoesNotContain("Kubernetes", message, StringComparison.Ordinal);

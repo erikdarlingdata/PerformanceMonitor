@@ -195,6 +195,7 @@ public static class DarlingSecretSource
     internal const string ComposeSecretsMount = "/run/secrets/";
 
     /// <summary>The host command that lets the container's user read the compose folder's files while
-    /// <c>secrets/</c> stays closed to other host users (#8141); docs/darling/security.md gives the same line.</summary>
-    internal const string ComposeSecretsModeFix = "chmod 700 secrets && chmod 644 darling.json secrets/*";
+    /// <c>secrets/</c> stays closed to other host users (#8141) and a password key kept there is left alone (#8290);
+    /// docs/darling/security.md gives the same line.</summary>
+    internal const string ComposeSecretsModeFix = "chmod 700 secrets && chmod 644 darling.json && find secrets -type f ! -name password_key -exec chmod 644 {} +";
 }
