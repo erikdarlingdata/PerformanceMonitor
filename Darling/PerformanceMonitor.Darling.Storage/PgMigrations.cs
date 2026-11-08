@@ -10076,8 +10076,9 @@ CREATE INDEX IF NOT EXISTS idx_index_object_stats_latest ON collect.index_object
     /// </summary>
     private static string V23Sql =>
         $@"
-/* V23: best-effort UPGRADE fast-path that converts collect.collection_log to a TimescaleDB hypertable + compresses
-   it, mirroring the collector hypertables. GUARDED on the extension (plain PostgreSQL skips it, keeping the table a
+/* V23: best-effort UPGRADE fast-path that converts collect.collection_log to a TimescaleDB hypertable and enables
+   compression, mirroring the collector hypertables; the runtime path (EnsureCollectionLogHypertableAsync) adds the
+   phased compression policy. GUARDED on the extension (plain PostgreSQL skips it, keeping the table a
    heap with batched-DELETE retention) and wrapped in EXCEPTION WHEN OTHERS so it can NEVER abort the startup-critical
    migration. The AUTHORITATIVE conversion is TimescaleSupport.EnsureCollectionLogHypertableAsync at runtime (after
    CREATE EXTENSION), which is the proven-live path and self-heals a fresh store this guard skipped. collection_log is
