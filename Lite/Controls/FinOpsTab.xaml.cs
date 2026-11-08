@@ -388,6 +388,7 @@ public partial class FinOpsTab : UserControl
     {
         if (_dataService == null || _credentialResolver == null) return;
 
+        var gen = 0;
         try
         {
             var selectedServer = ServerSelector.SelectedItem as Models.ServerConnection;
@@ -398,7 +399,7 @@ public partial class FinOpsTab : UserControl
                above it would supersede an in-flight load and then leave without replacing its paint —
                switching from a credentialed server to one with no resolvable credentials would strand the
                grid on the first server's answer. Caught in review on this change. */
-            var gen = _loads.Claim(nameof(LoadRecommendationsAsync));
+            gen = _loads.Claim(nameof(LoadRecommendationsAsync));
 
             /* #8115: while the read runs the sub-tab says so; empty headers under the caption are otherwise the same picture as no findings. */
             RecommendationsCountIndicator.Text = RecommendationsLoadingText;
@@ -434,12 +435,14 @@ public partial class FinOpsTab : UserControl
         }
         catch (Exception ex)
         {
+            AppLogger.Error("FinOps", $"Failed to load recommendations: {ex.Message}", ex);
+            /* A load that never claimed painted nothing, and a superseded load's failure must not overwrite the newest load's caption. */
+            if (gen == 0 || _loads.Superseded(nameof(LoadRecommendationsAsync), gen)) return;
             /* Whatever ended the load, the caption must not keep saying it is loading: the grid under it already shows the last rows it was given. */
             if (RecommendationsCountIndicator.Text == RecommendationsLoadingText)
             {
                 RecommendationsCountIndicator.Text = RecommendationsFailedText;
             }
-            AppLogger.Error("FinOps", $"Failed to load recommendations: {ex.Message}", ex);
         }
     }
 
@@ -859,6 +862,8 @@ public partial class FinOpsTab : UserControl
             _pvsStatsFilterMgr!.UpdateData(data);
 
             NoPvsStatsMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            /* The grid has nothing to show under the message, so it does not hold a tall empty frame the page would scroll to. */
+            PvsStatsDataGrid.Visibility = data.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
             PvsCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "database") : "";
 
             /* #1984 stage 2: the trend beside the grid — "when did it start growing" on the same
