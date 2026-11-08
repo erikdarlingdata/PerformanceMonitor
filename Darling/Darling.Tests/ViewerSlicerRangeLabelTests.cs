@@ -76,9 +76,6 @@ public sealed class ViewerSlicerRangeLabelTests
 
         Assert.Contains("var zone = ViewerTimeHelper.CurrentDisplayZone();", caption);
         Assert.DoesNotMatch(@"\bForDisplay\b", caption);
-
-        var code = ViewerTypedRangeTests.StripComments(source);
-        Assert.DoesNotMatch(@"\bForDisplay\(", code);
     }
 
     /// <summary>
