@@ -169,17 +169,25 @@ public sealed class ExternalAlertStoreLiveTests
 
             Assert.Equal(pendingId, Assert.Single(claimed).PendingId);
 
-            /* The next run reaps with a grace: a claim younger than the grace is a live run's and is left alone. */
+            Assert.Equal("true", await ScalarAsync(seed, $"SELECT (claimed_at IS NOT NULL)::text FROM config.external_alert_pending WHERE pending_id = {pendingId}", ct));
+
+            /* The reap's cutoff comes from the run's clock, and the store stamped the claim from its own, so the fact stamps the
+               claim's instant from the run's clock before each reap: every comparison a reap makes is then on one clock,
+               however far apart the two clocks sit. */
             await using var secondRun = NpgsqlDataSource.Create(connectionString);
             var store = new ExternalAlertStore(secondRun, Deadline);
+
+            /* The next run reaps with a grace: a claim younger than the grace is a live run's and is left alone. */
+            await StampClaimAsync(seed, pendingId, DateTime.UtcNow, ct);
             Assert.Equal(0, await store.ReapAsync(TimeSpan.FromMinutes(5), ct));
             Assert.Equal("claimed", await ScalarAsync(seed, $"SELECT status FROM config.external_alert_pending WHERE pending_id = {pendingId}", ct));
 
             /* Past the grace it is interrupted, finished, and never claimed again. */
-            Assert.Equal(1, await store.ReapAsync(TimeSpan.Zero, ct));
+            await StampClaimAsync(seed, pendingId, DateTime.UtcNow.AddHours(-1), ct);
+            Assert.Equal(1, await store.ReapAsync(TimeSpan.FromMinutes(5), ct));
             Assert.Equal("interrupted", await ScalarAsync(seed, $"SELECT status FROM config.external_alert_pending WHERE pending_id = {pendingId}", ct));
             Assert.Equal("true", await ScalarAsync(seed, $"SELECT (completed_at IS NOT NULL)::text FROM config.external_alert_pending WHERE pending_id = {pendingId}", ct));
-            Assert.Equal(0, await store.ReapAsync(TimeSpan.Zero, ct));
+            Assert.Equal(0, await store.ReapAsync(TimeSpan.FromMinutes(5), ct));
 
             var next = await store.ClaimAsync("host:200", 50, ct);
             Assert.Equal(freshId, Assert.Single(next).PendingId);
@@ -527,6 +535,21 @@ public sealed class ExternalAlertStoreLiveTests
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = status });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = submittedDaysAgo });
         return Convert.ToInt64(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// Sets a claim's instant from the run's clock, the clock <see cref="ExternalAlertStore.ReapAsync"/> takes its cutoff
+    /// from, so a reap that follows compares two instants from one clock.
+    /// </summary>
+    private static async Task StampClaimAsync(NpgsqlConnection connection, long pendingId, DateTime claimedAtUtc, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("UPDATE config.external_alert_pending SET claimed_at = $1 WHERE pending_id = $2", connection)
+        {
+            CommandTimeout = Deadline,
+        };
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(claimedAtUtc, DateTimeKind.Utc) });
+        command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = pendingId });
+        await command.ExecuteNonQueryAsync(ct);
     }
 
     private static async Task<string?> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
