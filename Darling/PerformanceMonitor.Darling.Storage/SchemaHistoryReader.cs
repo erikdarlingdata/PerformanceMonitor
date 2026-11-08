@@ -77,7 +77,7 @@ public static class SchemaHistoryReader
 
         public NpgsqlCommand Command(NpgsqlConnection c, NpgsqlTransaction? tx)
         {
-            var cmd = new NpgsqlCommand(Text.ToString(), c, tx);
+            var cmd = new NpgsqlCommand(Text.ToString(), c, tx) { CommandTimeout = StorageCommandDeadlines.McpReadSeconds };
             foreach (var p in _parameters)
             {
                 cmd.Parameters.Add(p);
@@ -437,7 +437,7 @@ FROM collect.schema_objects o WHERE ")
 
     private static NpgsqlCommand ChildCommand(NpgsqlConnection c, string sql, long[] ids)
     {
-        var cmd = new NpgsqlCommand(sql, c);
+        var cmd = new NpgsqlCommand(sql, c) { CommandTimeout = StorageCommandDeadlines.McpReadSeconds };
         cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint, Value = ids });
         return cmd;
     }

@@ -53,6 +53,14 @@ public static class SchemaVersionStore
     private const string ModuleEnd = "module_end";
     private const int MaxParametersPerInsert = 30_000;
 
+    /// <summary>
+    /// The deadline of every statement the collector's schema writes run, and of <see cref="SchemaCaptureStateStore"/>'s (#2874: chosen,
+    /// not Npgsql's inherited 30 s). One database's write is one transaction of at most 10,000 objects and their children in multi-row
+    /// inserts; a measured baseline of 1,571 objects in 31 databases wrote in 4.4 s in all. 120 s, the per-database budget of the catalog
+    /// read that produced the rows, stays far above that work and still bounds a stalled store inside the pass.
+    /// </summary>
+    public const int WriteCommandTimeoutSeconds = 120;
+
     public static async Task<IReadOnlyDictionary<int, StoredSchemaObject>> LoadCurrentAsync(
         NpgsqlConnection c, SchemaHistoryKey key, string databaseName, CancellationToken ct)
     {
@@ -70,7 +78,7 @@ public static class SchemaVersionStore
         await using var cmd = new NpgsqlCommand($@"
 SELECT version_id, object_id, schema_name, object_name, definition_hash
 FROM collect.schema_objects
-WHERE {keyPredicate} AND database_name = $2 AND valid_to IS NULL", c, tx);
+WHERE {keyPredicate} AND database_name = $2 AND valid_to IS NULL", c, tx) { CommandTimeout = WriteCommandTimeoutSeconds };
         if (key.AgGroupId is { } group)
         {
             Param(cmd, NpgsqlDbType.Uuid, group);
@@ -128,7 +136,7 @@ WHERE {keyPredicate} AND database_name = $2 AND valid_to IS NULL", c, tx);
                 claimed.Add(stored.ObjectId);
                 if (stored.Hash.AsSpan().SequenceEqual(hash))
                 {
-                    await using var move = new NpgsqlCommand("UPDATE collect.schema_objects SET object_id = $1 WHERE version_id = $2", c, tx);
+                    await using var move = new NpgsqlCommand("UPDATE collect.schema_objects SET object_id = $1 WHERE version_id = $2", c, tx) { CommandTimeout = WriteCommandTimeoutSeconds };
                     Param(move, NpgsqlDbType.Integer, read.ObjectId);
                     Param(move, NpgsqlDbType.Bigint, stored.VersionId);
                     await move.ExecuteNonQueryAsync(ct);
@@ -191,7 +199,7 @@ WHERE {keyPredicate} AND database_name = $2 AND valid_to IS NULL", c, tx);
         var keyText = w.Key.AgGroupId is { } ag
             ? "ag:" + ag.ToString("D") + "|" + w.DatabaseName
             : "server:" + w.Key.ServerId?.ToString(System.Globalization.CultureInfo.InvariantCulture) + "|" + w.DatabaseName;
-        await using var cmd = new NpgsqlCommand("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", c, tx);
+        await using var cmd = new NpgsqlCommand("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", c, tx) { CommandTimeout = WriteCommandTimeoutSeconds };
         Param(cmd, NpgsqlDbType.Text, "schema_versions|" + keyText);
         await cmd.ExecuteNonQueryAsync(ct);
     }
@@ -231,7 +239,7 @@ WHERE {keyPredicate} AND database_name = $2 AND valid_to IS NULL", c, tx);
 
     private static async Task CloseAsync(NpgsqlConnection c, NpgsqlTransaction tx, long versionId, DateTime at, CancellationToken ct)
     {
-        await using (var close = new NpgsqlCommand("UPDATE collect.schema_objects SET valid_to = $1 WHERE version_id = $2", c, tx))
+        await using (var close = new NpgsqlCommand("UPDATE collect.schema_objects SET valid_to = $1 WHERE version_id = $2", c, tx) { CommandTimeout = WriteCommandTimeoutSeconds })
         {
             Param(close, NpgsqlDbType.Timestamp, Naive(at));
             Param(close, NpgsqlDbType.Bigint, versionId);
@@ -240,7 +248,7 @@ WHERE {keyPredicate} AND database_name = $2 AND valid_to IS NULL", c, tx);
 
         foreach (var table in new[] { "schema_columns", "schema_indexes", "schema_constraints", "schema_triggers" })
         {
-            await using var flag = new NpgsqlCommand($"UPDATE collect.{table} SET is_current = FALSE WHERE version_id = $1 AND is_current", c, tx);
+            await using var flag = new NpgsqlCommand($"UPDATE collect.{table} SET is_current = FALSE WHERE version_id = $1 AND is_current", c, tx) { CommandTimeout = WriteCommandTimeoutSeconds };
             Param(flag, NpgsqlDbType.Bigint, versionId);
             await flag.ExecuteNonQueryAsync(ct);
         }
@@ -258,7 +266,7 @@ INSERT INTO collect.schema_objects (
     temporal_type, history_table, is_memory_optimized, durability, partition_scheme, partition_column, lock_escalation,
     is_schema_bound, is_indexed, view_definition)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
-RETURNING version_id", c, tx))
+RETURNING version_id", c, tx) { CommandTimeout = WriteCommandTimeoutSeconds })
         {
             Param(cmd, NpgsqlDbType.Integer, w.Key.ServerId);
             Param(cmd, NpgsqlDbType.Uuid, w.Key.AgGroupId);
@@ -311,7 +319,7 @@ SELECT server_id, ag_group_id, ag_name, database_name, object_id, schema_name, o
     'dropped', $3, $4, modify_date, definition_hash, $5, $6, $7,
     temporal_type, history_table, is_memory_optimized, durability, partition_scheme, partition_column, lock_escalation,
     is_schema_bound, is_indexed, view_definition
-FROM collect.schema_objects WHERE version_id = $1", c, tx);
+FROM collect.schema_objects WHERE version_id = $1", c, tx) { CommandTimeout = WriteCommandTimeoutSeconds };
         Param(cmd, NpgsqlDbType.Bigint, last.VersionId);
         Param(cmd, NpgsqlDbType.Timestamp, Naive(w.DetectedAtUtc));
         Param(cmd, NpgsqlDbType.Text, w.DetectedBy);
@@ -424,7 +432,7 @@ FROM collect.schema_objects WHERE version_id = $1", c, tx);
         var perStatement = Math.Max(1, MaxParametersPerInsert / rows[0].Length);
         for (var start = 0; start < rows.Count; start += perStatement)
         {
-            await using var cmd = new NpgsqlCommand { Connection = c, Transaction = tx };
+            await using var cmd = new NpgsqlCommand { Connection = c, Transaction = tx, CommandTimeout = WriteCommandTimeoutSeconds };
             var text = new StringBuilder("INSERT INTO collect.").Append(tableAndColumns).Append(" VALUES ");
             for (var r = start; r < Math.Min(rows.Count, start + perStatement); r++)
             {
@@ -458,7 +466,7 @@ ON CONFLICT (server_id, database_name) DO UPDATE SET
     recovery_fork_guid = EXCLUDED.recovery_fork_guid, history_server_id = EXCLUDED.history_server_id,
     history_ag_group_id = EXCLUDED.history_ag_group_id, was_primary = EXCLUDED.was_primary, baseline_at = EXCLUDED.baseline_at,
     last_complete_read_at = EXCLUDED.last_complete_read_at, last_seen_in_scope_at = EXCLUDED.last_seen_in_scope_at,
-    last_reconcile_at = EXCLUDED.last_reconcile_at, last_reconcile_reason = EXCLUDED.last_reconcile_reason", c, tx);
+    last_reconcile_at = EXCLUDED.last_reconcile_at, last_reconcile_reason = EXCLUDED.last_reconcile_reason", c, tx) { CommandTimeout = WriteCommandTimeoutSeconds };
         Param(cmd, NpgsqlDbType.Integer, s.ServerId);
         Param(cmd, NpgsqlDbType.Text, s.DatabaseName);
         Param(cmd, NpgsqlDbType.Timestamp, NaiveOrNull(s.SessionCreateTime));

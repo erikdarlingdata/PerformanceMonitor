@@ -32,7 +32,7 @@ SELECT database_name, session_create_time, last_event_sequence, last_event_time,
        history_server_id, history_ag_group_id, was_primary, baseline_at, last_complete_read_at, last_seen_in_scope_at,
        last_reconcile_at, last_reconcile_reason, dropped_event_count
 FROM collect.schema_capture_state
-WHERE server_id = $1", c);
+WHERE server_id = $1", c) { CommandTimeout = SchemaVersionStore.WriteCommandTimeoutSeconds };
         Param(cmd, NpgsqlDbType.Integer, serverId);
 
         var rows = new List<SchemaCaptureStateRow>();
@@ -86,7 +86,7 @@ WHERE server_id = $1", c);
         }
 
         await using var cmd = new NpgsqlCommand(
-            "UPDATE collect.schema_capture_state SET last_seen_in_scope_at = $1 WHERE server_id = $2 AND database_name = ANY($3)", c);
+            "UPDATE collect.schema_capture_state SET last_seen_in_scope_at = $1 WHERE server_id = $2 AND database_name = ANY($3)", c) { CommandTimeout = SchemaVersionStore.WriteCommandTimeoutSeconds };
         Param(cmd, NpgsqlDbType.Timestamp, Naive(at));
         Param(cmd, NpgsqlDbType.Integer, serverId);
         cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = new List<string>(databases) });
@@ -98,7 +98,7 @@ WHERE server_id = $1", c);
     {
         ArgumentNullException.ThrowIfNull(c);
         await using var cmd = new NpgsqlCommand(
-            "SELECT EXISTS (SELECT 1 FROM collect.schema_capture_state WHERE server_id = $1 AND session_create_time IS NOT NULL)", c);
+            "SELECT EXISTS (SELECT 1 FROM collect.schema_capture_state WHERE server_id = $1 AND session_create_time IS NOT NULL)", c) { CommandTimeout = SchemaVersionStore.WriteCommandTimeoutSeconds };
         Param(cmd, NpgsqlDbType.Integer, serverId);
         return (bool)(await cmd.ExecuteScalarAsync(ct))!;
     }
@@ -114,7 +114,7 @@ WHERE server_id = $1", c);
         await using (var clear = new NpgsqlCommand(@"
 UPDATE collect.schema_capture_state
 SET session_create_time = NULL, last_event_sequence = NULL, last_event_time = NULL, total_events_processed = NULL, dropped_event_count = NULL
-WHERE server_id = $1", c))
+WHERE server_id = $1", c) { CommandTimeout = SchemaVersionStore.WriteCommandTimeoutSeconds })
         {
             Param(clear, NpgsqlDbType.Integer, serverId);
             await clear.ExecuteNonQueryAsync(ct);
@@ -123,7 +123,7 @@ WHERE server_id = $1", c))
         await using var stamp = new NpgsqlCommand(@"
 INSERT INTO collect.schema_capture_state (server_id, database_name, last_seen_in_scope_at)
 VALUES ($1, '', $2)
-ON CONFLICT (server_id, database_name) DO UPDATE SET last_seen_in_scope_at = EXCLUDED.last_seen_in_scope_at", c);
+ON CONFLICT (server_id, database_name) DO UPDATE SET last_seen_in_scope_at = EXCLUDED.last_seen_in_scope_at", c) { CommandTimeout = SchemaVersionStore.WriteCommandTimeoutSeconds };
         Param(stamp, NpgsqlDbType.Integer, serverId);
         Param(stamp, NpgsqlDbType.Timestamp, Naive(at));
         await stamp.ExecuteNonQueryAsync(ct);
