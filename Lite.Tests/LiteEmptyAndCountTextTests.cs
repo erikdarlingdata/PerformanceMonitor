@@ -220,6 +220,8 @@ public sealed class LiteEmptyAndCountTextTests
                         var label = Find<TextBlock>(tab, name);
                         label.Text = name == "IndexAnalysisStatusText" ? "4 indexes found" : "3 databases";
                         Reveal(label);
+                        /* Optimization scrolls as one page, so a count in a lower card is brought into view before it is measured. */
+                        label.BringIntoView();
                         Settle(window);
                         found.AddRange(Muted(label, tab, muted, $"{at}: {name}"));
                     }

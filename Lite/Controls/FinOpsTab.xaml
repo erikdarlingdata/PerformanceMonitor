@@ -123,7 +123,8 @@
         <TabControl Grid.Row="1" Background="Transparent" BorderThickness="0">
 
         <!-- Recommendations Sub-Tab -->
-        <TabItem Header="Recommendations">
+        <!-- #8226: named apart from the main window's Recommendations tab. -->
+        <TabItem Header="Cost Savings">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
@@ -258,10 +259,6 @@
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
 
@@ -279,17 +276,19 @@
                     </Border>
                 </StackPanel>
 
+                <!-- #8226: one scroll area for the page; each block below is a card, and each grid sizes to its rows up to the shared cap, then scrolls inside. -->
+                <ScrollViewer Grid.Row="1" x:Name="UtilizationScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" PreviewMouseWheel="PageScroll_PreviewMouseWheel">
+                <StackPanel>
                 <!-- Utilization Summary — compact, top-aligned -->
-                <Grid Grid.Row="1" Margin="10,0,10,0" x:Name="UtilizationContent">
+                <Grid Margin="10,0,10,0" x:Name="UtilizationContent">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
 
                     <!-- CPU Metrics -->
-                    <GroupBox Grid.Column="0" Header="CPU" Margin="0,0,5,0" VerticalAlignment="Top"
-                              Foreground="{DynamicResource ForegroundBrush}">
-                        <StackPanel Margin="10" Grid.IsSharedSizeScope="True">
+                    <ui:ChartPanel Grid.Column="0" x:Name="UtilizationCpuCard" Title="CPU" Subtitle="SQL Server CPU over the last 24 hours" Margin="0,0,4,0" VerticalAlignment="Top">
+                        <StackPanel Grid.IsSharedSizeScope="True">
                             <!-- Avg CPU -->
                             <Grid Margin="0,0,0,8">
                                 <Grid.ColumnDefinitions>
@@ -369,12 +368,11 @@
                                 <Run x:Name="CpuSamplesText" Text="-"/><Run Text=" samples (24h)"/>
                             </TextBlock>
                         </StackPanel>
-                    </GroupBox>
+                    </ui:ChartPanel>
 
                     <!-- Memory Metrics -->
-                    <GroupBox Grid.Column="1" Header="Memory" Margin="5,0,0,0" VerticalAlignment="Top"
-                              Foreground="{DynamicResource ForegroundBrush}">
-                        <StackPanel Margin="10">
+                    <ui:ChartPanel Grid.Column="1" x:Name="UtilizationMemoryCard" Title="Memory" Subtitle="Committed against target, buffer pool and stolen memory" Margin="4,0,0,0" VerticalAlignment="Top">
+                        <StackPanel>
                             <!-- Committed vs Target -->
                             <Grid Margin="0,0,0,8">
                                 <Grid.ColumnDefinitions>
@@ -453,11 +451,11 @@
                                 </StackPanel>
                             </Grid>
                         </StackPanel>
-                    </GroupBox>
+                    </ui:ChartPanel>
                 </Grid>
 
                 <!-- Cost Summary Cards (Increment 4) -->
-                <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="10,8,10,0">
+                <StackPanel Orientation="Horizontal" Margin="10,8,10,0">
                     <Border x:Name="HealthScoreBorder" CornerRadius="4" Padding="6,2" Margin="0,0,8,0"
                             VerticalAlignment="Center" Background="Gray" Visibility="Collapsed">
                         <TextBlock x:Name="HealthScoreText" Text="" FontWeight="Bold" Foreground="White" FontSize="12"/>
@@ -480,17 +478,17 @@
                 </StackPanel>
 
                 <!-- Classification Explanation -->
-                <TextBlock x:Name="ClassificationExplanation" Grid.Row="3" Margin="12,8,10,4"
+                <TextBlock x:Name="ClassificationExplanation" Margin="12,8,10,4"
                            VerticalAlignment="Top" TextWrapping="Wrap" FontSize="12"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
                 <!-- Provisioning Trend (7-day) -->
-                <Expander Header="7-Day Provisioning Trend" IsExpanded="False" Grid.Row="4" Margin="10,4,10,0">
-                    <DataGrid x:Name="ProvisioningTrendGrid"
+                <ui:ChartPanel x:Name="ProvisioningTrendCard" Title="7-Day Provisioning Trend" Subtitle="Each day's status against its CPU and memory" Margin="10,8,10,0">
+                    <DataGrid x:Name="ProvisioningTrendGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}"
                               AutoGenerateColumns="False" IsReadOnly="True"
                               CanUserSortColumns="False" HeadersVisibility="Column"
                               GridLinesVisibility="Horizontal" SelectionMode="Single"
-                              MaxHeight="200" RowStyle="{StaticResource DefaultRowStyle}"
+                              RowStyle="{StaticResource DefaultRowStyle}"
                               LoadingRow="MarkedGrid_LoadingRow">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Day" Binding="{Binding DayDisplay}" Width="100" SortMemberPath="Day"/>
@@ -531,10 +529,9 @@
                             </DataGridTextColumn>
                         </DataGrid.Columns>
                     </DataGrid>
-                </Expander>
+                </ui:ChartPanel>
 
                 <!-- Resource Summaries -->
-                <ScrollViewer Grid.Row="5" VerticalScrollBarVisibility="Auto" Margin="0,0,0,0">
                     <Grid x:Name="SummaryContent">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
@@ -549,13 +546,11 @@
                             </Grid.ColumnDefinitions>
 
                             <!-- Top 5 by Total CPU -->
-                            <GroupBox Grid.Column="0" Header="Top Databases by Total CPU" Margin="0,0,5,0"
-                                      Foreground="{DynamicResource ForegroundBrush}">
-                                <DataGrid x:Name="TopTotalGrid"
+                            <ui:ChartPanel Grid.Column="0" x:Name="TopTotalCard" Title="Top Databases by Total CPU" Subtitle="The databases that used the most CPU time" Margin="0,0,4,0">
+                                <DataGrid x:Name="TopTotalGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}"
                                           AutoGenerateColumns="False" IsReadOnly="True"
                                           CanUserSortColumns="True" HeadersVisibility="Column"
                                           GridLinesVisibility="Horizontal" SelectionMode="Single"
-                                          MinHeight="40" MaxHeight="200"
                                           RowStyle="{StaticResource DefaultRowStyle}"
                               LoadingRow="MarkedGrid_LoadingRow">
                                     <DataGrid.Columns>
@@ -582,16 +577,14 @@
                                         </DataGridTextColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
-                            </GroupBox>
+                            </ui:ChartPanel>
 
                             <!-- Top 5 by Avg CPU per Execution -->
-                            <GroupBox Grid.Column="1" Header="Top Databases by Avg CPU / Execution" Margin="5,0,0,0"
-                                      Foreground="{DynamicResource ForegroundBrush}">
-                                <DataGrid x:Name="TopAvgGrid"
+                            <ui:ChartPanel Grid.Column="1" x:Name="TopAvgCard" Title="Top Databases by Avg CPU / Execution" Subtitle="The databases that cost the most CPU per execution" Margin="4,0,0,0">
+                                <DataGrid x:Name="TopAvgGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}"
                                           AutoGenerateColumns="False" IsReadOnly="True"
                                           CanUserSortColumns="True" HeadersVisibility="Column"
                                           GridLinesVisibility="Horizontal" SelectionMode="Single"
-                                          MinHeight="40" MaxHeight="200"
                                           RowStyle="{StaticResource DefaultRowStyle}"
                               LoadingRow="MarkedGrid_LoadingRow">
                                     <DataGrid.Columns>
@@ -613,12 +606,11 @@
                                         </DataGridTextColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
-                            </GroupBox>
+                            </ui:ChartPanel>
                         </Grid>
 
                         <!-- Database Size Chart -->
-                        <GroupBox x:Name="DbSizeChartGroup" Grid.Row="1" Header="Database Sizes — Allocated vs Used" Margin="10,8,10,10"
-                                  Foreground="{DynamicResource ForegroundBrush}">
+                        <ui:ChartPanel x:Name="DbSizeChartGroup" Grid.Row="1" Title="Database Sizes" Subtitle="Allocated against used" Margin="10,8,10,10">
                             <DockPanel>
                                 <!-- Says which bars leave the log out and why; the loader shows it only when a bar needs it -->
                                 <TextBlock x:Name="DbSizeChartCaption" DockPanel.Dock="Bottom" Visibility="Collapsed"
@@ -659,13 +651,14 @@
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
                             </DockPanel>
-                        </GroupBox>
+                        </ui:ChartPanel>
                     </Grid>
+                </StackPanel>
                 </ScrollViewer>
 
                 <!-- Empty State -->
                 <TextBlock x:Name="NoUtilizationMessage"
-                           Grid.Row="1" Grid.RowSpan="4"
+                           Grid.Row="1"
                            Text="No utilization data collected yet. Select a server above."
                            FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
                            HorizontalAlignment="Center" VerticalAlignment="Top"
@@ -2168,16 +2161,17 @@
                             Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
                 </StackPanel>
 
-            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="10,0,10,10">
+            <!-- #8226: one scroll area for the page; each block is a card, and each grid sizes to its rows up to the shared cap, then scrolls inside. -->
+            <ScrollViewer Grid.Row="1" x:Name="OptimizationScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="10,0,10,10" PreviewMouseWheel="PageScroll_PreviewMouseWheel">
                 <StackPanel>
                     <!-- Idle Databases -->
-                    <Expander Header="Idle Databases" IsExpanded="True" Margin="0,0,0,8">
+                    <ui:ChartPanel x:Name="IdleDatabasesCard" Title="Idle Databases" Subtitle="Databases with no recent executions, and what they hold" Margin="0,0,0,8">
+                        <ui:ChartPanel.HeaderContent>
+                            <TextBlock x:Name="IdleDatabasesCountIndicator" Text="" Style="{DynamicResource PanelSubtitleText}"/>
+                        </ui:ChartPanel.HeaderContent>
                         <StackPanel>
-                            <StackPanel Orientation="Horizontal" Margin="0,4,0,4">
-                                <TextBlock x:Name="IdleDatabasesCountIndicator" Text="" Style="{DynamicResource PanelSubtitleText}"/>
-                            </StackPanel>
                             <Grid MinHeight="96"><!-- the header, and room for the one sentence the grid shows when it is empty -->
-                            <DataGrid x:Name="IdleDatabasesDataGrid"
+                            <DataGrid x:Name="IdleDatabasesDataGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}"
                                       AutoGenerateColumns="False"
                                       IsReadOnly="True"
                                       CanUserSortColumns="True"
@@ -2185,7 +2179,6 @@
                                       CanUserResizeColumns="True"
                                       HeadersVisibility="Column"
                                       SelectionMode="Extended"
-                                      MaxHeight="250"
                                       RowStyle="{StaticResource DefaultRowStyle}"
                               LoadingRow="MarkedGrid_LoadingRow">
                                 <DataGrid.Columns>
@@ -2234,13 +2227,13 @@
                                        Visibility="Collapsed"/>
                             </Grid>
                         </StackPanel>
-                    </Expander>
+                    </ui:ChartPanel>
 
                     <!-- Tempdb Pressure -->
-                    <Expander Header="tempdb Pressure" IsExpanded="True" Margin="0,0,0,8">
+                    <ui:ChartPanel x:Name="TempdbPressureCard" Title="tempdb Pressure" Subtitle="Current and 24-hour peak use, by metric" Margin="0,0,0,8">
                         <StackPanel>
                             <Grid MinHeight="96"><!-- the header, and room for the one sentence the grid shows when it is empty -->
-                            <DataGrid x:Name="TempdbPressureDataGrid"
+                            <DataGrid x:Name="TempdbPressureDataGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}"
                                       AutoGenerateColumns="False"
                                       IsReadOnly="True"
                                       CanUserSortColumns="True"
@@ -2248,7 +2241,6 @@
                                       CanUserResizeColumns="True"
                                       HeadersVisibility="Column"
                                       SelectionMode="Extended"
-                                      MaxHeight="200"
                                       RowStyle="{StaticResource DefaultRowStyle}"
                               LoadingRow="MarkedGrid_LoadingRow">
                                 <DataGrid.Columns>
@@ -2297,20 +2289,19 @@
                                        Visibility="Collapsed"/>
                             </Grid>
                         </StackPanel>
-                    </Expander>
+                    </ui:ChartPanel>
 
                     <!-- Wait Stats Summary -->
-                    <Expander IsExpanded="True" Margin="0,0,0,8">
-                        <Expander.Header>
+                    <ui:ChartPanel x:Name="WaitStatsSummaryCard" Title="Wait Stats Summary" Subtitle="Wait time by category over the chosen range" Margin="0,0,0,8">
+                        <ui:ChartPanel.HeaderContent>
                             <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="Wait Stats Summary" VerticalAlignment="Center"/>
-                                <TextBlock Text="  Time Range:" VerticalAlignment="Center" Margin="12,0,4,0" FontSize="11"/>
+                                <TextBlock Text="Time Range:" VerticalAlignment="Center" Margin="0,0,4,0" Style="{DynamicResource PanelSubtitleText}"/>
                                 <ui:TimeRangePicker x:Name="WaitStatsTimeRangePicker" Compact="True" RangeChanged="WaitStatsTimeRange_RangeChanged"/>
                             </StackPanel>
-                        </Expander.Header>
+                        </ui:ChartPanel.HeaderContent>
                         <StackPanel>
                             <Grid MinHeight="96"><!-- the header, and room for the one sentence the grid shows when it is empty -->
-                            <DataGrid x:Name="WaitCategorySummaryDataGrid"
+                            <DataGrid x:Name="WaitCategorySummaryDataGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}"
                                       AutoGenerateColumns="False"
                                       IsReadOnly="True"
                                       CanUserSortColumns="True"
@@ -2318,7 +2309,6 @@
                                       CanUserResizeColumns="True"
                                       HeadersVisibility="Column"
                                       SelectionMode="Extended"
-                                      MaxHeight="250"
                                       RowStyle="{StaticResource DefaultRowStyle}"
                               LoadingRow="MarkedGrid_LoadingRow">
                                 <DataGrid.Columns>
@@ -2356,23 +2346,20 @@
                                        Visibility="Collapsed"/>
                             </Grid>
                         </StackPanel>
-                    </Expander>
+                    </ui:ChartPanel>
 
                     <!-- Expensive Queries -->
-                    <Expander IsExpanded="True" Margin="0,0,0,8">
-                        <Expander.Header>
+                    <ui:ChartPanel x:Name="ExpensiveQueriesCard" Title="Expensive Queries" Subtitle="The top 20 by CPU over the chosen range" Margin="0,0,0,8">
+                        <ui:ChartPanel.HeaderContent>
                             <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="Expensive Queries (Top 20 by CPU)" VerticalAlignment="Center"/>
-                                <TextBlock Text="  Time Range:" VerticalAlignment="Center" Margin="12,0,4,0" FontSize="11"/>
+                                <TextBlock x:Name="ExpensiveQueriesCountIndicator" Text="" Style="{DynamicResource PanelSubtitleText}" VerticalAlignment="Center" Margin="0,0,12,0"/>
+                                <TextBlock Text="Time Range:" VerticalAlignment="Center" Margin="0,0,4,0" Style="{DynamicResource PanelSubtitleText}"/>
                                 <ui:TimeRangePicker x:Name="ExpensiveQueriesTimeRangePicker" Compact="True" RangeChanged="ExpensiveQueriesTimeRange_RangeChanged"/>
                             </StackPanel>
-                        </Expander.Header>
+                        </ui:ChartPanel.HeaderContent>
                         <StackPanel>
-                            <StackPanel Orientation="Horizontal" Margin="0,4,0,4">
-                                <TextBlock x:Name="ExpensiveQueriesCountIndicator" Text="" Style="{DynamicResource PanelSubtitleText}"/>
-                            </StackPanel>
                             <Grid MinHeight="96"><!-- the header, and room for the one sentence the grid shows when it is empty -->
-                            <DataGrid x:Name="ExpensiveQueriesDataGrid"
+                            <DataGrid x:Name="ExpensiveQueriesDataGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}"
                               LoadingRow="MarkedGrid_LoadingRow"
                                       AutoGenerateColumns="False"
                                       IsReadOnly="True"
@@ -2381,7 +2368,6 @@
                                       CanUserResizeColumns="True"
                                       HeadersVisibility="Column"
                                       SelectionMode="Extended"
-                                      MaxHeight="350"
                                       RowStyle="{StaticResource ExpensiveQueryRowStyle}">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="140">
@@ -2425,13 +2411,13 @@
                                        Visibility="Collapsed"/>
                             </Grid>
                         </StackPanel>
-                    </Expander>
+                    </ui:ChartPanel>
 
                     <!-- Memory Grant Efficiency -->
-                    <Expander Header="Memory Grant Efficiency" IsExpanded="True" Margin="0,0,0,8">
+                    <ui:ChartPanel x:Name="MemoryGrantEfficiencyCard" Title="Memory Grant Efficiency" Subtitle="Granted against used, by day" Margin="0,0,0,8">
                         <StackPanel>
                             <Grid MinHeight="96"><!-- the header, and room for the one sentence the grid shows when it is empty -->
-                            <DataGrid x:Name="MemoryGrantEfficiencyDataGrid"
+                            <DataGrid x:Name="MemoryGrantEfficiencyDataGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}"
                                       AutoGenerateColumns="False"
                                       IsReadOnly="True"
                                       CanUserSortColumns="True"
@@ -2439,7 +2425,6 @@
                                       CanUserResizeColumns="True"
                                       HeadersVisibility="Column"
                                       SelectionMode="Extended"
-                                      MaxHeight="250"
                                       RowStyle="{StaticResource DefaultRowStyle}"
                               LoadingRow="MarkedGrid_LoadingRow">
                                 <DataGrid.Columns>
@@ -2489,7 +2474,7 @@
                                        Visibility="Collapsed"/>
                             </Grid>
                         </StackPanel>
-                    </Expander>
+                    </ui:ChartPanel>
                 </StackPanel>
             </ScrollViewer>
             </Grid>

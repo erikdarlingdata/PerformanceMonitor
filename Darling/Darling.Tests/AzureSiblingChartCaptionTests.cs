@@ -117,8 +117,8 @@ public sealed class AzureSiblingChartCaptionTests
         var chart = xaml.IndexOf("<ItemsControl x:Name=\"FinOpsDbSizeChart\"", StringComparison.Ordinal);
         Assert.True(chart > 0, "the chart is on the page");
 
-        /* The caption sits in the chart's own box, ahead of the chart in a DockPanel, docked to the bottom. */
-        var box = xaml[xaml.LastIndexOf("<GroupBox", chart, StringComparison.Ordinal)..chart];
+        /* The caption sits in the chart's own card, ahead of the chart in a DockPanel, docked to the bottom. */
+        var box = xaml[xaml.LastIndexOf("<ui:ChartPanel", chart, StringComparison.Ordinal)..chart];
         Assert.Contains("<DockPanel>", box, StringComparison.Ordinal);
         Assert.Contains("<TextBlock x:Name=\"FinOpsDbSizeChartCaption\" DockPanel.Dock=\"Bottom\" Visibility=\"Collapsed\"", box, StringComparison.Ordinal);
     }
