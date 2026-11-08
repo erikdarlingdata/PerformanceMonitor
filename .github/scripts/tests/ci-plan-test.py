@@ -363,9 +363,9 @@ lg_files = {**cc_files, LT + "LG1Tests.cs": {"suite": "lite", "classes": ["LG1"]
 r = draft_run([LITE_SRC, LT + "LG1Tests.cs"], cat={**lg_cat, "files": lg_files})
 check("draft lite guard: a changed Lite Guard class is picked once", r.get("lite_classes"), "LG1,LG2")
 # #7744: a Guard class the test host does not list never reaches a plan, in either suite.
-r = cp.plan("pull_request", "dev", "feature/x", [], [LITE_SRC], rules, {**lg_cat, "listed": lambda suite, name: name not in ("LG2", "D1")}, draft=True)
+r = cp.plan("pull_request", "dev", "feature/x", [], [LITE_SRC, LT + "L1Tests.cs"], rules, {**lg_cat, "listed": lambda suite, name: name not in ("LG2", "D1")}, draft=True)
 check("draft lite guard: a Guard class the host does not list is dropped, in either suite",
-      (r.get("darling_scope"), r.get("darling_classes"), r.get("lite_classes")), ("none", "", "LG1"))
+      (r.get("darling_scope"), r.get("darling_classes"), r.get("lite_classes")), ("none", "", "L1,LG1"))
 r = draft_run(["README.md", LT + "L1Tests.cs"], cat=lg_cat)
 check("draft lite guard: a test-only draft has no Guard class", (r.get("areas"), r.get("darling_classes"), r.get("lite_classes")), ("classes", "", "L1"))
 # The Lite Guard classes join a selection that is already narrow and never narrow a draft on their own: a draft that changes only a

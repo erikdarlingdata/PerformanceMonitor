@@ -53,8 +53,10 @@ Rules, in order:
   7. A draft that changes product files (#7727): rule 5 would give the full Darling suite (12 to 15 legs), so a draft
      runs only the test classes in the test files it changed (the rule 6 file table) plus the Stage=Guard classes of
      each suite whose scope is not none (Darling's, and Lite's, #8355), as areas classes. A draft that changed no test
-     file runs the build and the Guard classes only. When a
-     changed test file is not safe in the file table (a helper, a fixture, a base class, a .csproj, a file the map does
+     file runs the build and the Guard classes only. The Lite Guard classes join only a selection that is already narrow
+     (a changed class, a named class or a Darling pick) and never narrow a draft on their own: a draft that changes only
+     a Lite file no test class or Darling class answers for (a manifest, a config file) runs the Lite suite in full. When
+     a changed test file is not safe in the file table (a helper, a fixture, a base class, a .csproj, a file the map does
      not know), the whole pull request runs as rule 5 says, and `why` says so. The full suite runs when the pull
      request is marked ready for review (`ready_for_review` starts a run), so every merge still has a full green run
      behind it. A dev push, a docs-only change and a test-only change are as before.
@@ -230,9 +232,11 @@ def draft_picks(files: "list[str]", catalog: "dict | None", darling_scope: str, 
     names a changed product file by path or file name (ci-select.py classes_naming_files). A named class runs whatever the
     suite's scope is: a pin that reads the file as text is what the rule is for. picks is None when a changed test file is
     not safe in the file table (its suite then runs as today, and so does the whole pull request: areas classes cannot mix a
-    narrowed suite with a full one). A Guard class and a named class pass the same `listed` check as a changed one (#7744:
-    DarlingWorker.cs names the private fixtures FixtureCensus and FixtureOtherClass, which the host does not list). added
-    counts the named classes the plan adds to the rest."""
+    narrowed suite with a full one), and when nothing but the Lite Guard classes would be picked: they join a selection that
+    is already narrow and never narrow a draft on their own, so such a draft runs its areas in full. A Guard class and a
+    named class pass the same `listed` check as a changed one (#7744: DarlingWorker.cs names the private fixtures
+    FixtureCensus and FixtureOtherClass, which the host does not list). added counts the named classes the plan adds to the
+    rest."""
     table = (catalog or {}).get("files") or {}
     classes = (catalog or {}).get("classes") or {}
     if not table or not classes.get("darling"):
@@ -246,11 +250,10 @@ def draft_picks(files: "list[str]", catalog: "dict | None", darling_scope: str, 
             if not row or row["suite"] != suite or not row["safe"]:
                 return None, f"{f} is not a plain test class file, so its suite runs in full", 0
             changed[suite] += [c for c in _real(catalog, suite, row["tests"]) if c not in changed[suite]]
-    scopes = {"darling": darling_scope, "lite": lite_scope}
-    picks: "dict[str, list[str]]" = {}
-    for suite in ("darling", "lite"):
-        guard = _real(catalog, suite, [c for c, t in classes.get(suite, {}).items() if "Stage=Guard" in t and _CS.NO_TESTS_TRAIT not in t])
-        picks[suite] = (changed[suite] + [c for c in guard if c not in changed[suite]]) if scopes[suite] != "none" else []
+    guard = {s: _real(catalog, s, [c for c, t in classes.get(s, {}).items() if "Stage=Guard" in t and _CS.NO_TESTS_TRAIT not in t])
+             for s in ("darling", "lite")}
+    picks = {"darling": (changed["darling"] + [c for c in guard["darling"] if c not in changed["darling"]]) if darling_scope != "none" else [],
+             "lite": changed["lite"] if lite_scope != "none" else []}
     added = 0
     for suite in ("darling", "lite"):
         runs = {c for c, t in classes.get(suite, {}).items() if _CS.NO_TESTS_TRAIT not in t}
@@ -258,7 +261,14 @@ def draft_picks(files: "list[str]", catalog: "dict | None", darling_scope: str, 
                 if c not in picks[suite]]
         picks[suite] += more
         added += len(more)
-    return (picks, "", added) if any(picks.values()) else (None, "no class is selected", 0)
+    if not any(picks.values()):
+        return None, "no class is selected", 0
+    # #8355: the Lite Guard classes join a selection that is already narrow (a changed class, a named class or a Darling pick) and
+    # never narrow a draft on their own: a draft that changes only a Lite file no test class or Darling class answers for (a manifest,
+    # a config file the app reads at run time) runs the Lite suite in full, as it does when it is ready for review.
+    if lite_scope != "none":
+        picks["lite"] += [c for c in guard["lite"] if c not in picks["lite"]]
+    return picks, "", added
 
 
 def scripts_only_picks(catalog: "dict | None") -> "dict[str, list[str]] | None":

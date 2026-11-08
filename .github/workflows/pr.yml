@@ -10,8 +10,9 @@ name: PR CI
 # Every pull request runs, draft or ready for review (#7717; PR 2 of the rollout removed the `ci-next` label gate). Agent
 # pull requests open as drafts and need their first build and test run on CI, not on the laptop. The draft flag does not
 # gate the run, it narrows the scope (#7727): a draft that changes product files runs the build, the test classes of the test
-# files it changed and the Darling Stage=Guard classes, not the full suite. The full suite runs when the pull request is
-# marked ready for review (`ready_for_review` starts a run), so every merge has a full green run behind it.
+# files it changed and the Stage=Guard classes of each suite in its scope (#8355; the Lite Guard classes join only a selection
+# that is already narrow and never narrow a draft on their own), not the full suite. The full suite runs when the pull request
+# is marked ready for review (`ready_for_review` starts a run), so every merge has a full green run behind it.
 # Only a pull request carrying the `merge-train` label does not run; the verdict job fails its `CI result`.
 # No `labeled` trigger: an unrelated label would cancel and restart the run.
 #
