@@ -428,6 +428,14 @@ public sealed class MigrationDataMovingRungCensusPins
             + "writer's clock. The function body names an INSERT ... SELECT into collect.query_store_compose_stamp_built (created V173), which is the "
             + "function text and not a statement the rung runs. The rung is a function replace and two trigger creates: catalog work on the partitioned "
             + "parent, cloned onto each leaf without a scan, and it reads and rewrites no row. It spends none of the lock-wait budget, so the multiple stays 5."),
+        new(
+            254,
+            SetsTheFloor: false,
+            "Two CREATE INDEX statements over tables earlier rungs created (#7659): a partial index on config.investigation_requests (created V184) over "
+            + "chat_thread_of, a column the same rung adds, so every existing row is NULL and the partial index holds no entry; and an index on "
+            + "config.investigation_request_threads (created V252) over its two text columns, a table of one row per request thread that the Slack bot "
+            + "posted, at most the request count (tens of thousands on the largest store) and empty on a store that never posted. Both scans are "
+            + "sub-second, so the rung spends none of the lock-wait budget and the multiple stays 5."),
     ];
 
     /// <summary>

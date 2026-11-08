@@ -39,7 +39,8 @@ public static class ViewerDatabaseProtectionText
 
     /// <summary>
     /// The status line: the summary sentence and when the newest capture was taken. The capture time is stored naive UTC and belongs to
-    /// the picked server, so it reads in the display mode's zone on that server's <paramref name="clock"/> (#7343).
+    /// the picked server, so it reads in the display mode's zone on that server's <paramref name="clock"/> (#7343), stamped to the second
+    /// with the zone's label ("UTC", the server's offset such as "UTC+05:30", or this machine's zone name), as the grids stamp their times.
     /// </summary>
     public static string StatusLine(ViewerDatabaseProtectionRead read, ServerClock clock)
     {
@@ -50,8 +51,10 @@ public static class ViewerDatabaseProtectionText
             return read.Message ?? NoCapture;
         }
 
-        var local = ViewerTimeHelper.FormatForDisplay(captured, ViewerTimeHelper.DisplayZoneFor(ViewerTimeHelper.CurrentDisplayMode, clock), "g");
-        return $"{read.Summary.Text}   Captured: {local}";
+        var mode = ViewerTimeHelper.CurrentDisplayMode;
+        var when = ViewerTimeHelper.FormatForDisplay(captured, ViewerTimeHelper.DisplayZoneFor(mode, clock), "yyyy-MM-dd HH:mm:ss")
+            + " " + ViewerTimeHelper.GetTimezoneLabel(mode, clock, captured);
+        return $"{read.Summary.Text}   Captured: {when}";
     }
 
     /// <summary>The sentence under the list when it has no row: the read's sentence, or the empty-capture sentence.</summary>

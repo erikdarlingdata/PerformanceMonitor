@@ -127,7 +127,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_pg_top_queries` | `collect.pg_statement_stats`<br>`collect.pg_statement_text`<br>`collect.pg_server_config`<br>`collect.collection_log`<br>`collect.v_collection_log` |
 | `get_pg_wait_sampling` | `collect.pg_wait_sampling`<br>`collect.collector_state` |
 | `get_pg_wait_stats` | `collect.pg_wait_stats` |
-| `get_pg_wait_trend` | `collect.pg_wait_sampling` |
+| `get_pg_wait_trend` | `collect.pg_wait_sampling`<br>`collect.pg_wait_stats`<br>`collect.collector_state` |
 | `get_pg_wraparound_risk` | `collect.pg_wraparound_stats` |
 | `get_pg_write_stats` | `collect.pg_write_stats` |
 | `get_pg_xmin_horizon` | `collect.pg_xmin_horizon`<br>`collect.collection_log` |
@@ -139,6 +139,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_procedure_plan_xml` | `collect.procedure_stats`<br>`collect.query_plan_dim` |
 | `get_pvs_stats` | `collect.pvs_stats` (through the view `collect.v_pvs_stats`) |
 | `get_query_duration_trend` | `collect.query_stats`<br>`collect.query_stats` (through the continuous aggregate `collect.query_stats_hourly`)<br>`collect.query_stats` (through the continuous aggregate `collect.query_stats_interval_hourly`)<br>`collect.query_stats` (through the continuous aggregate `collect.query_stats_daily`)<br>`collect.query_stats_interval_daily` (continuous aggregate) |
+| `get_query_fleet_summary` | `collect.servers`<br>`collect.query_stats`<br>`collect.query_stats` (through the continuous aggregate `collect.query_stats_hourly`)<br>`collect.query_stats` (through the continuous aggregate `collect.query_stats_interval_hourly`)<br>`collect.query_stats` (through the continuous aggregate `collect.query_stats_daily`)<br>`collect.query_store_stats`<br>`collect.query_store_stats` (through the continuous aggregate `collect.query_store_stats_corrected_hourly`) |
 | `get_query_heatmap` | `collect.query_stats`<br>`collect.query_text_dim` |
 | `get_query_pileups` | `collect.query_snapshots`<br>`collect.dmv_blocking_snapshots` |
 | `get_query_repro_script` | `collect.query_stats` (through the view `collect.v_query_stats`)<br>`collect.query_store_text`<br>`collect.query_store_stats`<br>`collect.query_snapshots`<br>`collect.query_plan_dim`<br>`collect.server_properties`<br>`collect.server_config`<br>`collect.database_config` |

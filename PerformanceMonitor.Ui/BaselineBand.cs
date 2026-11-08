@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace PerformanceMonitor.Ui;
 
@@ -29,6 +30,9 @@ public static class BaselineBand
 {
     /// <summary>Fill opacity of the band, out of 255. Low enough that the series on top reads through it.</summary>
     public const byte FillAlpha = 40;
+
+    /// <summary>#8224: the lighter fill for a band whose colour reads as a solid block at <see cref="FillAlpha"/> (the Overview's amber Wait lane: brown on Dark, beige on Cool Breeze).</summary>
+    public const byte LightFillAlpha = 22;
 
     /// <summary>Adds the band (Y range <paramref name="lower"/> to <paramref name="upper"/>) in <paramref name="hexColor"/>.</summary>
     public static ScottPlot.Plottables.VerticalSpan Add(ScottPlot.Plot plot, double lower, double upper, string hexColor)
@@ -80,32 +84,71 @@ public static class BaselineBand
         => new(fromX, toX, mean, Math.Max(0, mean - 2 * effectiveStdDev), mean + 2 * effectiveStdDev);
 
     /// <summary>
-    /// #7644: draws the stepped band, one rectangle per hour, then a dashed mean segment per hour. The rectangles are added first
-    /// so they paint behind the lane's series; the mean segments follow them. Returns the rectangles.
+    /// #8162: draws the band as one translucent fill, not a rectangle per hour. Each hour is flat across its own width and the edge
+    /// is vertical at the hour boundary, so what is drawn is the same step every point is judged against: a mark always means
+    /// "outside the band you see". Hours that have no step split the band: each run of neighbouring steps is one fill (no seams,
+    /// no outline), and a gap stays empty. The dashed mean is stepped the same way. The fill is added first so it paints behind
+    /// the lane's series.
     /// </summary>
-    public static List<ScottPlot.Plottables.Rectangle> AddSteps(ScottPlot.Plot plot, IReadOnlyList<HourStep> steps, string hexColor)
+    public static void AddBand(ScottPlot.Plot plot, IReadOnlyList<HourStep> steps, string hexColor, byte fillAlpha = FillAlpha)
     {
-        var rectangles = new List<ScottPlot.Plottables.Rectangle>(steps.Count);
-        foreach (var step in steps)
+        var runs = Runs(steps);
+        foreach (var run in runs)
         {
-            var rect = plot.Add.Rectangle(step.FromX, step.ToX, step.Lower, step.Upper);
-            rect.FillStyle.Color = ScottPlot.Color.FromHex(hexColor).WithAlpha(FillAlpha);
-            rect.LineStyle.Width = 0;
-            /* #7386: a step is a band, not a collected point. The first one starts at the window's left edge, so unmarked it would stand in
+            var upper = Edge(run, step => step.Upper);
+            var lower = Edge(run, step => step.Lower);
+            var outline = new ScottPlot.Coordinates[upper.Count + lower.Count];
+            for (var i = 0; i < upper.Count; i++)
+                outline[i] = upper[i];
+            for (var i = 0; i < lower.Count; i++)
+                outline[upper.Count + i] = lower[lower.Count - 1 - i];
+
+            var fill = plot.Add.Polygon(outline);
+            fill.FillColor = ScottPlot.Color.FromHex(hexColor).WithAlpha(fillAlpha);
+            fill.LineWidth = 0;
+            /* #7386: the band is not a collected point. It starts at the window's left edge, so unmarked it would stand in
                for "the earliest point drawn" and cancel the trimmed axis start the lanes share. */
-            ChartAxisStart.Baseline(rect);
-            rectangles.Add(rect);
+            ChartAxisStart.Baseline(fill);
         }
 
+        foreach (var run in runs)
+        {
+            var mean = Edge(run, step => step.Mean);
+            var line = plot.Add.Scatter(mean.Select(c => c.X).ToArray(), mean.Select(c => c.Y).ToArray());
+            line.Color = ScottPlot.Color.FromHex(hexColor).WithAlpha(60);
+            line.MarkerSize = 0;
+            line.LinePattern = ScottPlot.LinePattern.Dashed;
+            line.LineWidth = 1;
+            ChartAxisStart.Baseline(line);
+        }
+    }
+
+    /// <summary>The steps split where one does not start at the end of the one before (an hour with no step), each run in order.</summary>
+    private static List<List<HourStep>> Runs(IReadOnlyList<HourStep> steps)
+    {
+        const double JoinTolerance = 1.0 / 86400.0; // a second, in days
+        var runs = new List<List<HourStep>>();
         foreach (var step in steps)
         {
-            var mean = plot.Add.Line(step.FromX, step.Mean, step.ToX, step.Mean);
-            mean.Color = ScottPlot.Color.FromHex(hexColor).WithAlpha(60);
-            mean.LinePattern = ScottPlot.LinePattern.Dashed;
-            mean.LineWidth = 1;
-            ChartAxisStart.Baseline(mean);
+            if (runs.Count > 0 && Math.Abs(runs[^1][^1].ToX - step.FromX) <= JoinTolerance)
+                runs[^1].Add(step);
+            else
+                runs.Add([step]);
         }
 
-        return rectangles;
+        return runs;
+    }
+
+    /// <summary>One edge of a run, stepped: for each hour its value at the hour's start and at its end.</summary>
+    private static List<ScottPlot.Coordinates> Edge(List<HourStep> run, Func<HourStep, double> value)
+    {
+        var points = new List<ScottPlot.Coordinates>(run.Count * 2);
+        foreach (var step in run)
+        {
+            points.Add(new(step.FromX, value(step)));
+            points.Add(new(step.ToX, value(step)));
+        }
+
+        return points;
     }
 }

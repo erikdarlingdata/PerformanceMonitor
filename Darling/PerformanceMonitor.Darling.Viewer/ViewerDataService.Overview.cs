@@ -804,11 +804,12 @@ public sealed class ServerSummaryItem
     /* Freshness + per-metric severity thresholds live once in PerformanceMonitor.Common's
        ServerHealthThresholds / ServerHealthClassifier (#1562); this card keeps only the brush mapping. */
 
-    /* Per-severity dot / value brushes, frozen once (the viewer's dark-theme palette). */
-    private static readonly SolidColorBrush s_criticalBrush = MakeBrush("#E57373");
-    private static readonly SolidColorBrush s_warningBrush = MakeBrush("#FFD54F");
-    private static readonly SolidColorBrush s_healthyBrush = MakeBrush("#81C784");
-    private static readonly SolidColorBrush s_unknownBrush = MakeBrush("#888888");
+    /* Per-severity dot / value brushes. Read from the current theme each time (#8221): they were frozen once under whichever theme
+       loaded first. The Overview binds its cards again on a theme change. */
+    private static SolidColorBrush s_criticalBrush => MakeBrush("#E57373");
+    private static SolidColorBrush s_warningBrush => MakeBrush("#FFD54F");
+    private static SolidColorBrush s_healthyBrush => MakeBrush("#81C784");
+    private static SolidColorBrush s_unknownBrush => MakeBrush("#888888");
 
     public string DisplayName { get; set; } = "";
 
@@ -1595,7 +1596,7 @@ public sealed class ServerSummaryItem
     /// <summary>
     /// The card border reflects the worst signal: offline (red) &gt; a Critical metric (red) &gt; a Warning
     /// metric (amber-orange) &gt; a stale collection, a never-collected server, or a card on which NOTHING
-    /// was measured (amber) &gt; calm (dark). Enriches Lite's border (which only knew CPU / blocking /
+    /// was measured (amber) &gt; calm (the theme's neutral card border). Enriches Lite's border (which only knew CPU / blocking /
     /// deadlock) with the added Threads / Memory / Collectors bands via <see cref="OverallMetricSeverity"/>.
     ///
     /// <para>The nothing-measured arm (#3539 A6) paints the Warning brush, because that is the band it is:
@@ -1603,8 +1604,9 @@ public sealed class ServerSummaryItem
     /// <see cref="FleetRollup.ClassifyBand"/> bands that Warning the way it bands a server awaiting its
     /// first collection — and the two amber arms below are the SAME hex (<c>#FFD54F</c>), so the border says
     /// what the band says in the colour the card already uses for "nothing to report yet". A dark border
-    /// here was the card claiming calm about readings it never took. The cached brush rather than
-    /// another <c>MakeBrush</c>: this getter runs per card per refresh.</para>
+    /// here was the card claiming calm about readings it never took. Each read builds a fresh frozen
+    /// brush (#8221: the band takes the current theme's color, so nothing is cached across a theme change), and the Overview binds its cards again
+    /// on a theme change.</para>
     /// </summary>
     public SolidColorBrush CardBorderBrush
     {
@@ -1616,9 +1618,24 @@ public sealed class ServerSummaryItem
                 HealthSeverity.Critical => s_criticalBrush,
                 HealthSeverity.Warning => s_warningBrush,
                 HealthSeverity.Unknown => s_warningBrush,
-                _ => CollectionStale || AwaitingFirstCollection ? MakeBrush("#FFD54F") : MakeBrush("#2a2d35"),
+                _ => CollectionStale || AwaitingFirstCollection ? MakeBrush("#FFD54F") : ThemeNeutralBorderBrush(),
             };
         }
+    }
+
+    /// <summary>#8221: the current theme's card border (the <c>CardBorderBrush</c> resource), as a frozen copy, for a calm card. The old
+    /// fixed <c>#2a2d35</c> was a Dark hex shown in every theme: near-black on Light and Cool Breeze. The Dark value when there is no
+    /// running application to ask, as in a unit test. The Overview binds its cards again on a theme change.</summary>
+    private static SolidColorBrush ThemeNeutralBorderBrush()
+    {
+        if (System.Windows.Application.Current?.TryFindResource("CardBorderBrush") is SolidColorBrush themed)
+        {
+            var copy = new SolidColorBrush(themed.Color);
+            copy.Freeze();
+            return copy;
+        }
+
+        return MakeBrush("#3A3D45");
     }
 
     /// <summary>
@@ -1689,6 +1706,12 @@ public sealed class ServerSummaryItem
 
     private static SolidColorBrush MakeBrush(string hex)
     {
+        /* #8221: on Light and Cool Breeze a band takes the theme's status brush (the Dark pale tones are 1.4:1 to 2.5:1 as card text). */
+        if (ThemedBandBrush.ForLightTheme(hex) is { } themedBrush)
+        {
+            return themedBrush;
+        }
+
         var color = (Color)ColorConverter.ConvertFromString(hex);
         var brush = new SolidColorBrush(color);
         brush.Freeze();

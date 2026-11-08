@@ -97,7 +97,7 @@ public partial class FleetSweepsTab : UserControl
 
             NoRunsMessage.Text = "No sweeps in this span. Widen the span, or check that fleet_sweep.enabled is on — a gap in this timeline is a missed sweep, with its cause on the service log.";
             NoRunsMessage.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            LastRefreshedIndicator.Text = "Last refreshed " + ViewerTimeHelper.FormatFleetWide(DateTime.UtcNow, "HH:mm:ss");
+            LastRefreshedIndicator.Text = "Last refreshed " + ViewerTimeHelper.RefreshedStamp();
         }
         catch (Exception ex)
         {

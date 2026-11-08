@@ -51,14 +51,14 @@ public interface ISlackRequestThreadStore
 public sealed record SlackThreadJournalRow(
     long JournalId, string Event, DateTime EventTimeUtc, string Actor, string? Reason, string? DetailJson, string PostKey,
     Guid RequestId, int RouteId, int ServerId, string ServerName, string Metric, string Severity, string Trigger, Guid? FollowUpOf,
-    string? CalledDetailJson, int ClaimNo, string? Verdict, string? RootCause, DateTime OpenedAtUtc);
+    string? CalledDetailJson, int ClaimNo, string? Verdict, string? RootCause, DateTime OpenedAtUtc, Guid? ChatThreadOf = null);
 
 /// <summary>#7656: where the thread pass reads the rows to post. The store implements it; a test stands its own in.</summary>
 public interface ISlackThreadRowSource
 {
     /// <summary>Up to <paramref name="limit"/> journal rows of the kinds in <paramref name="events"/> from <paramref name="sinceUtc"/> on
-    /// with no post mark yet, on a live request of an enabled route with a bot channel, in journal order, plus each <c>action_called</c>
-    /// row from that window and before <paramref name="unknownBeforeUtc"/> whose result never came.</summary>
+    /// with no post mark yet, on a live request of an enabled route with a bot channel, in time order (event time, then id), plus each
+    /// <c>action_called</c> row from that window and before <paramref name="unknownBeforeUtc"/> whose result never came.</summary>
     Task<IReadOnlyList<SlackThreadJournalRow>> PendingSlackThreadRowsAsync(IReadOnlyList<string> events, DateTime sinceUtc, DateTime unknownBeforeUtc, int limit, CancellationToken cancellationToken);
 
     /// <summary>The agent changes of one request, oldest first, for the report post.</summary>
@@ -139,11 +139,15 @@ WHERE once_key = $1
     /* The rows to post: a mark says what was posted, and the window from $4 bounds what is read. Both arms read the journal through its
        event_time index from $4 on, so a pass costs the window's rows and not the journal's; a row older than the window is neither read
        nor marked. The first arm is every journal row of a post kind; the second is each action_called row older than $2 with no done,
-       failed or undone row naming it, posted once as result unknown under its own key. A request is left out while it is a drill, while
+       failed or undone row naming it, posted once as result unknown under its own key. The third arm (#7658) is each pending note written
+       from a request on a server, as a card with its decision buttons under the key note:<note_id>; a fleet note has no server and is not
+       posted. A request is left out while it is a drill, while
        its route is disabled or has no bot channel, and a row once its mark exists. The called row's detail rides along for a change's
        result row, the claim's number for a claim, the report's verdict and root cause for the reported row, and the request's opened
        time for the pass's gate. The called row is joined by its bigint journal id (the result row's called_id, when it is a number),
-       so the join is a primary key lookup per returned row and not a walk of the journal. */
+       so the join is a primary key lookup per returned row and not a walk of the journal. The batch is in time order, then id: a note's
+       id is from its own sequence and small next to the journal's, so an order by id alone would put a note before the opened row that
+       opens its request's thread, and time order keeps each thread's posts in the order they happened. */
     internal const string PendingSlackThreadRowsSql = @"
 WITH posts AS (
     SELECT j.journal_id, j.event, j.event_time, j.actor, j.reason, j.detail, j.request_id,
@@ -166,6 +170,15 @@ WITH posts AS (
                       WHERE x.request_id = c.request_id
                         AND x.event IN ('action_done', 'action_failed', 'action_undone')
                         AND x.detail ->> 'called_id' = c.journal_id::text)
+    UNION ALL
+    SELECT n.note_id, 'note_pending', n.created_at, n.author, n.note_text, jsonb_build_object('note_id', n.note_id, 'metric', n.metric_name), n.source_request_id,
+           'note:' || n.note_id::text, NULL::bigint
+    FROM config.investigation_notes AS n
+    WHERE n.state = 'pending'
+      AND n.source_request_id IS NOT NULL
+      AND n.server_id IS NOT NULL
+      AND n.created_at >= $4
+      AND n.expires_at > $2
 )
 SELECT p.journal_id, p.event, p.event_time, p.actor, p.reason, p.detail::text, p.post_key,
        r.request_id, r.route_id, r.server_id, COALESCE(sv.display_name, sv.server_name, r.server_name), r.first_metric,
@@ -175,7 +188,7 @@ SELECT p.journal_id, p.event, p.event_time, p.actor, p.reason, p.detail::text, p
             THEN (SELECT count(*) FROM config.investigation_journal AS k
                   WHERE k.request_id = p.request_id AND k.event = 'claimed' AND k.journal_id <= p.journal_id)
             ELSE 0 END,
-       rp.verdict, rp.root_cause, r.opened_at
+       rp.verdict, rp.root_cause, r.opened_at, r.chat_thread_of
 FROM posts AS p
 JOIN config.investigation_requests AS r ON r.request_id = p.request_id
 JOIN config.config_notification_routes AS rt ON rt.route_id = r.route_id
@@ -187,7 +200,7 @@ WHERE r.practice_of IS NULL
   AND rt.slack_bot_channel <> ''
   AND NOT EXISTS (SELECT 1 FROM config.investigation_journal AS m
                   WHERE m.once_key = 'slack_thread:' || r.request_id::text || ':' || p.post_key)
-ORDER BY p.journal_id
+ORDER BY p.event_time, p.journal_id
 LIMIT $3";
 
     /// <inheritdoc />
@@ -212,7 +225,7 @@ LIMIT $3";
                 reader.GetString(12), reader.GetString(13), reader.IsDBNull(14) ? null : reader.GetGuid(14),
                 reader.IsDBNull(15) ? null : reader.GetString(15), (int)reader.GetInt64(16),
                 reader.IsDBNull(17) ? null : reader.GetString(17), reader.IsDBNull(18) ? null : reader.GetString(18),
-                reader.GetFieldValue<DateTime>(19)));
+                reader.GetFieldValue<DateTime>(19), reader.IsDBNull(20) ? null : reader.GetGuid(20)));
         }
 
         return rows;

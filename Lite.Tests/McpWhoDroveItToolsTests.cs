@@ -203,6 +203,50 @@ public sealed class McpWhoDroveItToolsTests : IClassFixture<SharedDuckDbFixture>
         Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
     }
 
+    /// <summary>
+    /// #8090 item 3: the sp_server_diagnostics session is not load, as a WAITFOR shell is not. Its cumulative elapsed is days wide at
+    /// every capture; left in, it takes the whole of <c>total_elapsed_ms</c> and every application caller's <c>elapsed_share</c> reads
+    /// near zero. Darling's twin is in <c>WhoDroveItLiveTests</c>.
+    /// </summary>
+    [Fact]
+    public async Task LoadByCaller_DropsTheServerDiagnosticsSession_SoApplicationSharesAreOfTheirOwnWork()
+    {
+        var t0 = Naive(DateTime.UtcNow.AddMinutes(-50));
+        foreach (var capture in new[] { t0, t0.AddMinutes(20), t0.AddMinutes(40) })
+            await SeedSnapshotAsync(capture, 999, "NODE1", "SQLAgent", "sa", "0xDIAG", 100, 300_000_000, "EXEC sp_server_diagnostics");
+        for (var session = 1; session <= 10; session++)
+            await SeedSnapshotAsync(t0.AddMinutes(20), session, "APP01", "api", "svc", "0xHA", 100, 60_000, "SELECT 1");
+
+        using var doc = JsonDocument.Parse(await McpWhoDroveItTools.GetLoadByCaller(_data, _serverManager, "TestServer", as_of: t0.AddMinutes(50).ToString("o")));
+        var root = doc.RootElement;
+        var app = Assert.Single(root.GetProperty("callers").EnumerateArray());
+        Assert.Equal("APP01", app.GetProperty("host_name").GetString());
+        Assert.Equal(10, root.GetProperty("total_requests").GetInt64());
+        Assert.Equal(600_000.0, root.GetProperty("total_elapsed_ms").GetDouble(), 1);
+        Assert.Equal(1.0, app.GetProperty("elapsed_share").GetDouble(), 4);
+    }
+
+    /// <summary>
+    /// #8090 item 3: a request that started before the window counts only the part of its elapsed that lies inside it, the capture
+    /// time less the window start, as the sampling note says.
+    /// </summary>
+    [Fact]
+    public async Task LoadByCaller_CountsOnlyTheWindowsPart_OfARequestThatStartedBeforeIt()
+    {
+        /* A one-hour window ending ten minutes after the only capture. The batch began two hours before it, fifty minutes of which are inside the window. */
+        var captured = Naive(DateTime.UtcNow.AddMinutes(-20));
+        await SeedSnapshotAsync(captured, 50, "BATCH01", "etl", "etl", "0xHB", 500, 7_200_000, "SELECT 2");
+        await SeedSnapshotAsync(captured, 51, "APP01", "api", "svc", "0xHA", 100, 60_000, "SELECT 1");
+
+        using var doc = JsonDocument.Parse(await McpWhoDroveItTools.GetLoadByCaller(_data, _serverManager, "TestServer", as_of: captured.AddMinutes(10).ToString("o")));
+        var root = doc.RootElement;
+        var callers = root.GetProperty("callers").EnumerateArray().ToList();
+        var batch = Assert.Single(callers, c => c.GetProperty("host_name").GetString() == "BATCH01");
+        Assert.Equal(1, batch.GetProperty("requests").GetInt64());
+        Assert.Equal(3_000_000.0, batch.GetProperty("elapsed_ms").GetDouble(), 1);
+        Assert.Equal(3_060_000.0, root.GetProperty("total_elapsed_ms").GetDouble(), 1);
+    }
+
     /* ───────────────────────── get_query_pileups ───────────────────────── */
 
     [Fact]

@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Common.Tags;
 using PerformanceMonitor.Ui;
 
@@ -156,7 +157,9 @@ public static class OverviewCardView
 
         if (!searching)
         {
-            return attentionOnly ? FleetRollup.AttentionFilterCountText(shown, cards.Count) : null;
+            /* #8115: the filtered grid is FleetRollup.NeedsAttention(cards), so its Healthy cards are exactly the ones with an advisory tile. */
+            var healthyWithAdvisories = cards.Count(c => c.HasAdvisoryTile && FleetRollup.ClassifyBand(c) == FleetHealthBand.Healthy);
+            return attentionOnly ? FleetRollup.AttentionFilterCountText(shown, cards.Count, healthyWithAdvisories) : null;
         }
 
         if (cards.Count == 0)

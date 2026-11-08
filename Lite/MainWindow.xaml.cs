@@ -152,6 +152,8 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         LoadOverviewSortMode();
+        /* #8221: a card's band brushes are read from the theme when it is bound, so a theme change binds the cards again. */
+        ThemeManager.ThemeChanged += _ => ApplyOverviewView();
 
         // Initialize services (with loggers wired to AppLogger)
         _databaseInitializer = new DuckDbInitializer(App.DatabasePath, new AppLoggerAdapter<DuckDbInitializer>());
@@ -2193,8 +2195,8 @@ public partial class MainWindow : Window
         }
 
         /* Prevent double-clicks */
-        ImportDataButton.IsEnabled = false;
-        ImportDataButtonText.Text = "Importing...";
+        Sidebar.ImportDataMenuItem.IsEnabled = false;
+        Sidebar.ImportDataMenuItem.Header = "Importing...";
         StatusText.Text = "Importing data from previous install...";
 
         try
@@ -2267,8 +2269,8 @@ public partial class MainWindow : Window
         }
         finally
         {
-            ImportDataButton.IsEnabled = true;
-            ImportDataButtonText.Text = "Import Data";
+            Sidebar.ImportDataMenuItem.IsEnabled = true;
+            Sidebar.ImportDataMenuItem.Header = "Import Data";
         }
     }
 
@@ -2438,23 +2440,48 @@ public partial class MainWindow : Window
 
     private bool _sidebarCollapsed;
 
+    /* #8219: false until the user collapses or opens the sidebar with its button. From then on the window width no longer
+       switches it. */
+    private bool _sidebarChosenByUser;
+
+    /* The window width (DIPs) below which the sidebar's 280 px leaves too little for the tabs: it shows its rail instead. */
+    private const double SidebarAutoCollapseWidth = 1100;
+
     private void ToggleSidebar_Click(object sender, RoutedEventArgs e)
     {
-        _sidebarCollapsed = !_sidebarCollapsed;
+        _sidebarChosenByUser = true;
+        SetSidebarCollapsed(!_sidebarCollapsed);
+    }
 
-        if (_sidebarCollapsed)
+    private void RootGrid_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (_sidebarChosenByUser || !e.WidthChanged)
+            return;
+
+        var narrow = e.NewSize.Width < SidebarAutoCollapseWidth;
+        if (narrow != _sidebarCollapsed)
+            SetSidebarCollapsed(narrow);
+    }
+
+    private void SetSidebarCollapsed(bool collapsed)
+    {
+        _sidebarCollapsed = collapsed;
+
+        if (collapsed)
         {
             SidebarColumn.Width = new GridLength(40);
             SidebarTitle.Visibility = Visibility.Collapsed;
             SidebarSubtitle.Visibility = Visibility.Collapsed;
-            if (sender is System.Windows.Controls.Button btn) btn.Content = "»";
+            ServerSearchRow.Visibility = Visibility.Collapsed;
+            SidebarToggleButton.Content = "»";
         }
         else
         {
             SidebarColumn.Width = new GridLength(280);
             SidebarTitle.Visibility = Visibility.Visible;
             SidebarSubtitle.Visibility = Visibility.Visible;
-            if (sender is System.Windows.Controls.Button btn) btn.Content = "«";
+            ServerSearchRow.Visibility = Visibility.Visible;
+            SidebarToggleButton.Content = "«";
         }
     }
 

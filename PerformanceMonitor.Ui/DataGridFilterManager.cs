@@ -81,12 +81,20 @@ public class DataGridFilterManager<T> : IDataGridFilterManager
 
         if (!HasActiveFilters())
         {
+            ShowFilteredOutState(false);
             SetItemsSourcePreservingSort(newData);
             return;
         }
 
         ApplyFilters();
     }
+
+    /// <summary>
+    /// #8187: filters that hide every row the grid has say so, with a link that clears them, instead of leaving a bare header row
+    /// whose only hint is the funnel icon. A filter kept from an earlier session (#5565) applies on the first refresh, so this is what
+    /// a server whose rows no longer match it shows.
+    /// </summary>
+    private void ShowFilteredOutState(bool allHidden) => EmptyState.ShowFilteredOut(_dataGrid, allHidden, ClearAllFilters);
 
     /// <summary>
     /// Applies or removes a filter and re-filters the data.
@@ -125,6 +133,7 @@ public class DataGridFilterManager<T> : IDataGridFilterManager
         }
 
         _filters.Clear();
+        ShowFilteredOutState(false);
 
         if (_unfilteredData is not null)
         {
@@ -254,6 +263,7 @@ public class DataGridFilterManager<T> : IDataGridFilterManager
 
         if (!HasActiveFilters())
         {
+            ShowFilteredOutState(false);
             SetItemsSourcePreservingSort(_unfilteredData);
             return;
         }
@@ -268,6 +278,7 @@ public class DataGridFilterManager<T> : IDataGridFilterManager
             return true;
         }).ToList();
 
+        ShowFilteredOutState(_unfilteredData.Count > 0 && filteredData.Count == 0);
         SetItemsSourcePreservingSort(filteredData);
     }
 

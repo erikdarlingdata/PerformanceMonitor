@@ -124,10 +124,10 @@ public sealed class WaitRateRowIntervalLiveTests
 
         /* Back to the store shape before this rung: the interval supply registered (so it exists), the successor absent, V255 unstamped. */
         await ExecuteAsync(connection, TimescaleSupport.CreateWaitStatsIntervalBaselineSql, ct);
-        await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 252, ct);
+        await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 254, ct);
         await ExecuteAsync(connection, "DELETE FROM darling_schema_version WHERE version >= 255", ct);
         Assert.False(await RelationExistsAsync(connection, TimescaleSupport.WaitStatsCadenceBaselineView, ct));
-        Assert.Equal(252, await ScalarAsync<int>(connection, "SELECT max(version) FROM darling_schema_version", ct));
+        Assert.Equal(254, await ScalarAsync<int>(connection, "SELECT max(version) FROM darling_schema_version", ct));
 
         await PgMigrations.MigrateAsync(connection, ct);
         Assert.True(await RelationExistsAsync(connection, TimescaleSupport.WaitStatsCadenceBaselineView, ct), "V255 creates the successor on a store whose wait_stats is a hypertable");
@@ -161,7 +161,7 @@ public sealed class WaitRateRowIntervalLiveTests
 
     /// <summary>The viewer's probe: the successor relation is the V255 sentinel and the top arm.</summary>
     [Fact]
-    public void TheProbe_MapsTheCadenceBaselineToTheSchemaVersion_AndItsAbsenceTo252()
+    public void TheProbe_MapsTheCadenceBaselineToTheSchemaVersion_AndItsAbsenceTo254()
     {
         var map = typeof(ViewerDataService).GetMethod(
             nameof(ViewerDataService.MapProbedSchemaVersion),
@@ -177,7 +177,7 @@ public sealed class WaitRateRowIntervalLiveTests
 
         var withoutRate = (object[])allTrue.Clone();
         withoutRate[rate] = false;
-        Assert.Equal(252, (int)map.Invoke(null, withoutRate)!);
+        Assert.Equal(254, (int)map.Invoke(null, withoutRate)!);
     }
 
     private static async Task<NpgsqlConnection> BuildStoreAsync(ScratchPostgres scratch, CancellationToken ct)

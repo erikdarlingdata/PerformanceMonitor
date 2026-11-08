@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -26,7 +27,7 @@ namespace PerformanceMonitor.Darling.Service.Chat;
 /// post; a blank token means the pass is not ready and posts nothing, so every row waits unmarked for one. The client is rebuilt only
 /// when the token changes.
 /// </summary>
-public sealed class SettingsSlackBotPosts(Func<string> token, string? apiBase = null) : ISlackBotPosts
+public sealed class SettingsSlackBotPosts(Func<string> token, string? apiBase = null, string? responseUrlHost = null) : ISlackBotPosts, ISlackCardApi
 {
     private readonly object _lock = new();
     private string _tokenInUse = "";
@@ -36,34 +37,49 @@ public sealed class SettingsSlackBotPosts(Func<string> token, string? apiBase = 
     public bool HasToken() => !string.IsNullOrWhiteSpace(token());
 
     /// <inheritdoc />
-    public Task<SlackPostResult> PostAsync(string channel, string text, IReadOnlyList<object>? blocks, string? threadTs, CancellationToken cancellationToken)
+    public Task<SlackPostResult> PostAsync(string channel, string text, IReadOnlyList<object>? blocks, string? threadTs, CancellationToken cancellationToken) =>
+        Client() is { } client
+            ? client.PostAsync(channel, text, blocks, threadTs, cancellationToken)
+            : Task.FromResult(new SlackPostResult(false, null, null, "no bot token"));
+
+    /// <inheritdoc />
+    public Task<SlackPostResult> UpdateAsync(string channel, string ts, string text, IReadOnlyList<object>? blocks, CancellationToken cancellationToken) =>
+        Client() is { } client
+            ? client.UpdateAsync(channel, ts, text, blocks, cancellationToken)
+            : Task.FromResult(new SlackPostResult(false, null, null, "no bot token"));
+
+    /// <inheritdoc />
+    public Task<SlackPostResult> RespondAsync(Uri responseUrl, string text, IReadOnlyList<object>? blocks, CancellationToken cancellationToken) =>
+        Client() is { } client
+            ? client.RespondAsync(responseUrl, text, blocks, cancellationToken)
+            : Task.FromResult(new SlackPostResult(false, null, null, "no bot token"));
+
+    /* The client is rebuilt only when the token changes; null while no token is set. */
+    private SlackBotClient? Client()
     {
         var current = (token() ?? "").Trim();
         if (current.Length == 0)
         {
-            return Task.FromResult(new SlackPostResult(false, null, null, "no bot token"));
+            return null;
         }
 
-        SlackBotClient client;
         lock (_lock)
         {
             if (_client is null || !string.Equals(_tokenInUse, current, StringComparison.Ordinal))
             {
-                _client = new SlackBotClient(current, apiBase);
+                _client = new SlackBotClient(current, apiBase, null, responseUrlHost);
                 _tokenInUse = current;
             }
 
-            client = _client;
+            return _client;
         }
-
-        return client.PostAsync(channel, text, blocks, threadTs, cancellationToken);
     }
 }
 
 /// <summary>
 /// #7656: one pass of the Slack thread posts, after the other request-event sends. It reads the journal rows of the kinds in
 /// <see cref="PostedEvents"/> from the last <see cref="ReadWindow"/> that have no post mark (a mark says what was posted; the window
-/// bounds what each pass reads, so a pass costs the window's rows and not the journal's), in journal
+/// bounds what each pass reads, so a pass costs the window's rows and not the journal's), in time
 /// order, so a request's <c>opened</c> row posts first and opens its thread, and every later row replies in it. A follow-up's request
 /// post replies in its <c>follow_up_of</c> parent's thread and inherits it, one level deep: the parent's stored thread is used when it
 /// exists and sits in the route's current bot channel, else the follow-up opens a thread of its own. A change whose result never came
@@ -77,7 +93,9 @@ public sealed class SettingsSlackBotPosts(Func<string> token, string? apiBase = 
 /// way as its parent), and a follow-up of it starts a thread of its own.</para>
 ///
 /// <para>When a parent post fails, the request has no thread, so its later posts are skipped with one log line and marked, never
-/// posted at the top level. A 429 ends the pass: the post's mark is released, the channel waits for Retry-After in the shared
+/// posted at the top level. A pending note's card (#7658) is the exception: read with no thread, it waits unmarked for up to
+/// <see cref="NoteThreadWait"/>, so the pass that opens the thread, or the next one, posts it there; past the wait it is marked with
+/// <see cref="NoThreadForNote"/>. A 429 ends the pass: the post's mark is released, the channel waits for Retry-After in the shared
 /// <see cref="SlackPostThrottle"/>, and no pass posts to it before then. Every other failure keeps its mark.</para>
 /// </summary>
 public sealed class SlackThreadPass
@@ -100,6 +118,15 @@ public sealed class SlackThreadPass
     /// <summary>The reason on the mark of a row that is not posted because its request opened before the route got its bot channel.</summary>
     public const string OpenedBeforeChannel = "opened before the route's bot channel was set";
 
+    /// <summary>How long a pending note's card (#7658) waits, unmarked, for its request's thread. The time order puts the request's
+    /// <c>opened</c> row before the note, so the thread is there by the time the note is read unless the parent post failed for good or the
+    /// request opened before the read window. A note still without a thread this long after it was written is marked with
+    /// <see cref="NoThreadForNote"/> and left to the web page and the Viewer, so it stops taking a batch slot on every pass.</summary>
+    public static readonly TimeSpan NoteThreadWait = TimeSpan.FromHours(1);
+
+    /// <summary>The reason on the mark of a note that is not posted because its request had no thread for <see cref="NoteThreadWait"/>.</summary>
+    public const string NoThreadForNote = "its request had no Slack thread an hour after the note was written";
+
     /// <summary>
     /// The journal kinds that post. The parent from <c>opened</c>; the claim; the report; each change's result (<c>action_done</c>,
     /// <c>action_failed</c>, a person's <c>action_undone</c>); a proposal when made and at each final state; and the end:
@@ -116,6 +143,7 @@ public sealed class SlackThreadPass
         "proposal_refused", "proposal_expired", "proposal_superseded",
         "proposal_voided", "proposal_unknown",
         InvestigationEvents.Resolved, "closed", InvestigationEvents.Expired, InvestigationEvents.ClaimsExhausted,
+        InvestigationRequestStore.AgentMessage,
     ];
 
     private static readonly HashSet<string> s_posted = new(PostedEvents, StringComparer.Ordinal);
@@ -130,11 +158,15 @@ public sealed class SlackThreadPass
     private readonly Func<string> _baseUrl;
     private readonly Func<DateTime> _utcNow;
     private readonly Func<bool> _ready;
+    private readonly Func<bool> _buttons;
 
     /// <param name="ready">Whether the bot can post now (a token is set). False leaves every row unmarked and posts nothing.</param>
+    /// <param name="buttons">Whether this store is listening (its app-level token is set), so its cards may carry buttons (#7658). A store that is
+    /// not listening posts its cards without them, since a press would reach another store's listener and be dropped, and the card points at
+    /// the web page instead. True when null.</param>
     public SlackThreadPass(ISlackThreadRowSource rows, ISlackRequestThreadStore threads, SlackThreadPoster poster, SlackPostThrottle throttle,
         Func<IReadOnlyList<NotificationRoute>> routes, ILogger logger, McpDataDetail dataDetail, Func<string> baseUrl,
-        Func<DateTime>? utcNow = null, Func<bool>? ready = null)
+        Func<DateTime>? utcNow = null, Func<bool>? ready = null, Func<bool>? buttons = null)
     {
         _rows = rows ?? throw new ArgumentNullException(nameof(rows));
         _threads = threads ?? throw new ArgumentNullException(nameof(threads));
@@ -146,6 +178,7 @@ public sealed class SlackThreadPass
         _baseUrl = baseUrl ?? throw new ArgumentNullException(nameof(baseUrl));
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
         _ready = ready ?? (() => true);
+        _buttons = buttons ?? (() => true);
     }
 
     /// <summary>One pass. Answers how many posts Slack took. Throws what the store throws.</summary>
@@ -162,10 +195,11 @@ public sealed class SlackThreadPass
         var posted = 0;
         var skippedRequests = new HashSet<Guid>();
         var gatedRequests = new HashSet<Guid>();
+        var waitingRequests = new HashSet<Guid>();
         var blockedChannels = new HashSet<string>(StringComparer.Ordinal);
         foreach (var row in rows)
         {
-            if (!s_posted.Contains(row.Event) && !string.Equals(row.Event, ActionUnknown, StringComparison.Ordinal))
+            if (!s_posted.Contains(row.Event) && !string.Equals(row.Event, ActionUnknown, StringComparison.Ordinal) && !IsNote(row))
             {
                 continue;
             }
@@ -190,7 +224,8 @@ public sealed class SlackThreadPass
 
             var isParent = string.Equals(row.PostKey, SlackThreadPosts.RequestKey, StringComparison.Ordinal);
             var threadRequest = row.RequestId;
-            if (isParent && row.FollowUpOf is Guid parent)
+            /* A follow-up inherits its parent's thread; a chat request (#7659) the thread of the request it is linked to, the same way. */
+            if (isParent && (row.FollowUpOf ?? row.ChatThreadOf) is Guid parent)
             {
                 var parentThread = await _threads.FindAsync(parent, cancellationToken);
                 if (parentThread is not null && string.Equals(parentThread.ChannelId, channel, StringComparison.Ordinal))
@@ -214,7 +249,7 @@ public sealed class SlackThreadPass
             var changes = string.Equals(row.Event, "reported", StringComparison.Ordinal)
                 ? await _rows.ChangesForRequestAsync(row.RequestId, cancellationToken)
                 : [];
-            var content = Content(row, changes, _dataDetail, _baseUrl() ?? "");
+            var content = Content(row, changes, _dataDetail, _baseUrl() ?? "", _buttons());
             var outcome = await _poster.PostAsync(target, row.PostKey, content, cancellationToken);
             switch (outcome)
             {
@@ -236,6 +271,19 @@ public sealed class SlackThreadPass
                        across requests, so its parent and its later rows often land in different passes): the request has no thread and
                        opened before the channel, so the row is marked with the gate as the reason and never posted at the top level. */
                     await MarkGatedAsync(row, gatedRequests, cancellationToken);
+                    break;
+                case SlackThreadPostOutcome.NoThread when IsNote(row) && now - row.EventTimeUtc < NoteThreadWait:
+                    /* A note's card read before its request's thread exists waits, unmarked, so the pass that opens the thread, or the next
+                       one, posts the card in it. One log line per request per pass. */
+                    if (waitingRequests.Add(row.RequestId))
+                    {
+                        _logger.LogInformation("Slack note card {PostKey} for investigation request {RequestId} waits for the request's thread", row.PostKey, row.RequestId);
+                    }
+
+                    break;
+                case SlackThreadPostOutcome.NoThread when IsNote(row):
+                    /* The thread never came within the wait: the note is marked with the reason, so the read stops returning it, and never posted at the top level. */
+                    await _threads.MarkSkippedAsync(row.RequestId, row.RouteId, row.ServerId, row.PostKey, SlackThreadPosts.OnceKey(row.RequestId, row.PostKey), NoThreadForNote, cancellationToken);
                     break;
                 case SlackThreadPostOutcome.NoThread:
                     /* The parent post failed in this pass or an earlier one: the row is marked so it is not read again, and never posted at the top level. */
@@ -266,8 +314,13 @@ public sealed class SlackThreadPass
         }
     }
 
-    /// <summary>PURE: the post of one journal row, at <paramref name="mode"/>. Every collected value goes through the builders' one escape.</summary>
-    internal static SlackThreadPostContent Content(SlackThreadJournalRow row, IReadOnlyList<RequestChangeRow> changes, McpDataDetail mode, string baseUrl)
+    /// <summary>PURE: the post of one journal row, at <paramref name="mode"/>, with its buttons. Every collected value goes through the builders' one escape.</summary>
+    internal static SlackThreadPostContent Content(SlackThreadJournalRow row, IReadOnlyList<RequestChangeRow> changes, McpDataDetail mode, string baseUrl) =>
+        Content(row, changes, mode, baseUrl, buttons: true);
+
+    /// <summary>PURE: the post of one journal row, at <paramref name="mode"/>. With <paramref name="buttons"/> false (this store is not listening)
+    /// a card that would carry buttons carries none and points at the web page instead.</summary>
+    internal static SlackThreadPostContent Content(SlackThreadJournalRow row, IReadOnlyList<RequestChangeRow> changes, McpDataDetail mode, string baseUrl, bool buttons)
     {
         ArgumentNullException.ThrowIfNull(row);
         var detail = ParseObject(row.DetailJson);
@@ -285,7 +338,14 @@ public sealed class SlackThreadPass
                     new ReportNoticeContent(row.RequestId, row.Verdict ?? row.Reason ?? "", row.ServerName, row.Metric, row.RootCause,
                         changes.Select(c => new ReportNoticeChange(c.Tool, InvestigationEventDelivery.ChangeObject(c.TargetId, c.Database, mode), ResultWord(c.Result))).ToList(),
                         baseUrl),
-                    mode);
+                    mode, verdictButtons: buttons).WebInstead(buttons, "Mark the verdict on the web page, on the request.");
+            case InvestigationRequestStore.AgentMessage:
+                /* The agent's message (#7659): the actor is agent:<id>; the text is in the detail and follows the mode like every free text. */
+                return SlackThreadPosts.AgentMessagePost(
+                    row.Actor.StartsWith("agent:", StringComparison.Ordinal) ? row.Actor["agent:".Length..] : row.Actor, Text(detail?["text"]), mode);
+            case InvestigationRequestStore.NotePending:
+                return SlackThreadPosts.NotePost(row.JournalId, row.Actor, row.Reason ?? "", row.ServerName, Text(detail?["metric"]), mode, buttons)
+                    .WebInstead(buttons, "Decide this note on the web page or in the Viewer.");
             case "action_done":
             case "action_failed":
             case "action_undone":
@@ -303,7 +363,15 @@ public sealed class SlackThreadPass
                         "action_undone" => "undone" + ByWord(row.Actor),
                         _ => "result unknown",
                     };
-                    return SlackThreadPosts.ChangePost(Text(called?["tool"]) ?? "change", objectText, word, mode);
+                    /* A done change carries Undo (#7658) when its kind has an undo path: the called row's id is the record the button acts on. */
+                    long? undoCalledId = string.Equals(row.Event, "action_done", StringComparison.Ordinal)
+                        && long.TryParse(Text(detail?["called_id"]), NumberStyles.None, CultureInfo.InvariantCulture, out var calledId)
+                        ? calledId
+                        : null;
+                    var changeCard = SlackThreadPosts.ChangePost(Text(called?["tool"]) ?? "change", objectText, word, mode, buttons ? undoCalledId : null, Text(called?["kind"]));
+                    return undoCalledId is not null && SlackCards.HasUndo(Text(called?["kind"]))
+                        ? changeCard.WebInstead(buttons, "Undo this change on the web page, in the agent changes.")
+                        : changeCard;
                 }
 
             case InvestigationEvents.Resolved:
@@ -329,10 +397,16 @@ public sealed class SlackThreadPass
                     var expiresUtc = string.Equals(row.Event, "proposal_created", StringComparison.Ordinal)
                         ? row.EventTimeUtc.AddMinutes(ProposalRules.ExpiryMinutes)
                         : (DateTime?)null;
-                    return SlackThreadPosts.ProposalPost(Text(detail?["tool"]) ?? "action", row.ServerName, stateText, null, proposalUrl, mode, expiresUtc);
+                    /* The card made for a new proposal carries the Approve and Refuse buttons (#7658); a decision row carries none. */
+                    var pendingProposal = string.Equals(row.Event, "proposal_created", StringComparison.Ordinal) && proposalId != Guid.Empty ? proposalId : (Guid?)null;
+                    return SlackThreadPosts.ProposalPost(Text(detail?["tool"]) ?? "action", row.ServerName, stateText, null, proposalUrl, mode, expiresUtc, buttons ? pendingProposal : null)
+                        .WebInstead(buttons || pendingProposal is null, "Approve or refuse this on the web page, on the proposal.");
                 }
         }
     }
+
+    /* A pending note's card (#7658): the one row kind whose id is not a journal id and whose post waits for its thread. */
+    private static bool IsNote(SlackThreadJournalRow row) => string.Equals(row.Event, InvestigationRequestStore.NotePending, StringComparison.Ordinal);
 
     private static string ByWord(string actor) =>
         string.IsNullOrWhiteSpace(actor) || string.Equals(actor, "service", StringComparison.Ordinal) ? "" : " by " + actor;

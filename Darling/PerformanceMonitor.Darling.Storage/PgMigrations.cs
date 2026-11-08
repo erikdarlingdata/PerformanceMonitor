@@ -2723,6 +2723,121 @@ BEGIN
 END
 $do$;";
 
+    /* V253 (#7658): the Slack cards. One row per card the bot posted with buttons: the request and post key it was posted under, the channel
+       and ts Slack gave it, the kind of record its buttons act on and that record's id, the request's server, and the card's state. A press
+       names a card by channel and ts, and the service acts only on a card in this table; the row is decided once a press ends it. Owner-written
+       like the thread table: REVOKE ALL ... CASCADE from PUBLIC and each of the four roles that exists, SELECT back to admin alone. Managed
+       provisioning section 10e6 and provision-roles.sql step 3j6 do the same after their blanket grants. */
+    private const string V253Sql = @"
+CREATE TABLE IF NOT EXISTS config.investigation_slack_posts (
+    request_id uuid NOT NULL REFERENCES config.investigation_requests(request_id) ON DELETE CASCADE,
+    post_key text NOT NULL,
+    channel_id text NOT NULL,
+    message_ts text NOT NULL,
+    kind text NOT NULL,
+    record_id text NOT NULL DEFAULT '',
+    server_id integer NOT NULL,
+    state text NOT NULL DEFAULT 'live',
+    decided_by text,
+    decided_at timestamp,
+    posted_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
+    PRIMARY KEY (request_id, post_key),
+    UNIQUE (channel_id, message_ts)
+);
+
+REVOKE ALL ON config.investigation_slack_posts FROM PUBLIC CASCADE;
+
+DO $do$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'admin') THEN
+        REVOKE ALL ON config.investigation_slack_posts FROM admin CASCADE;
+        GRANT SELECT ON config.investigation_slack_posts TO admin;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'viewer') THEN
+        REVOKE ALL ON config.investigation_slack_posts FROM viewer CASCADE;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'web') THEN
+        REVOKE ALL ON config.investigation_slack_posts FROM web CASCADE;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'mcp') THEN
+        REVOKE ALL ON config.investigation_slack_posts FROM mcp CASCADE;
+    END IF;
+END
+$do$;";
+
+    /* V254 (#7659): the chat requests. chat_thread_of links a chat request to the thread's first request (follow_up_of allows one follow-up per
+       request, so a chat needs a column of its own). The asker table holds who asked in a chat request and the request level their grants gave,
+       so the stamp and a follow-up's copy read one table. The message table is the audit row of each person's message: its natural key is the
+       channel and ts, its text is the message with every mention of the bot removed, and its state says whether it waits, joined or opened a
+       chat request. The reverse index on the thread table serves the lookup from a reply's channel and thread ts to the request. Both tables are
+       owner-written: REVOKE ALL ... CASCADE from PUBLIC and each role that exists, SELECT back to admin alone; the mcp login reads neither, since a
+       person's text is not data an agent reads except through the claim answer. Managed provisioning section 10e7 and provision-roles.sql step 3j7
+       do the same after their blanket grants. */
+    private const string V254Sql = @"
+ALTER TABLE config.investigation_requests
+    ADD COLUMN IF NOT EXISTS chat_thread_of uuid REFERENCES config.investigation_requests(request_id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS ix_investigation_requests_chat_thread_of
+    ON config.investigation_requests (chat_thread_of) WHERE chat_thread_of IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS config.investigation_request_askers (
+    request_id uuid NOT NULL REFERENCES config.investigation_requests(request_id) ON DELETE CASCADE,
+    person_id bigint NOT NULL REFERENCES config.person(person_id) ON DELETE CASCADE,
+    identity text NOT NULL,
+    request_level smallint NOT NULL,
+    joined_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
+    PRIMARY KEY (request_id, person_id)
+);
+
+CREATE TABLE IF NOT EXISTS config.investigation_person_messages (
+    channel_id text NOT NULL,
+    ts text NOT NULL,
+    thread_ts text NOT NULL,
+    thread_request_id uuid NOT NULL REFERENCES config.investigation_requests(request_id) ON DELETE CASCADE,
+    request_id uuid REFERENCES config.investigation_requests(request_id) ON DELETE SET NULL,
+    person_id bigint REFERENCES config.person(person_id) ON DELETE SET NULL,
+    identity text NOT NULL,
+    message_text text NOT NULL,
+    state text NOT NULL,
+    received_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
+    PRIMARY KEY (channel_id, ts)
+);
+
+CREATE INDEX IF NOT EXISTS ix_investigation_person_messages_waiting
+    ON config.investigation_person_messages (thread_request_id, received_at) WHERE state = 'waiting';
+
+CREATE INDEX IF NOT EXISTS ix_investigation_person_messages_request
+    ON config.investigation_person_messages (request_id) WHERE request_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS ix_investigation_request_threads_channel_ts
+    ON config.investigation_request_threads (channel_id, thread_ts);
+
+REVOKE ALL ON config.investigation_request_askers FROM PUBLIC CASCADE;
+REVOKE ALL ON config.investigation_person_messages FROM PUBLIC CASCADE;
+
+DO $do$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'admin') THEN
+        REVOKE ALL ON config.investigation_request_askers FROM admin CASCADE;
+        REVOKE ALL ON config.investigation_person_messages FROM admin CASCADE;
+        GRANT SELECT ON config.investigation_request_askers TO admin;
+        GRANT SELECT ON config.investigation_person_messages TO admin;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'viewer') THEN
+        REVOKE ALL ON config.investigation_request_askers FROM viewer CASCADE;
+        REVOKE ALL ON config.investigation_person_messages FROM viewer CASCADE;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'web') THEN
+        REVOKE ALL ON config.investigation_request_askers FROM web CASCADE;
+        REVOKE ALL ON config.investigation_person_messages FROM web CASCADE;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'mcp') THEN
+        REVOKE ALL ON config.investigation_request_askers FROM mcp CASCADE;
+        REVOKE ALL ON config.investigation_person_messages FROM mcp CASCADE;
+    END IF;
+END
+$do$;";
+
     /// <summary>
     /// V255 (#8106): the cadence wait baseline supply, <c>collect.wait_stats_cadence_baseline</c>, created where the store can hold it
     /// at migration time so the upgraded store carries its successor from this rung on. On a store without TimescaleDB it is the plain
@@ -3265,6 +3380,8 @@ $rung$;";
         new Migration(250, "memory-pressure-node", V250Sql),
         new Migration(251, "compose-stamp-late-mark-offset-zero", V251Sql),
         new Migration(252, "slack-bot-threads", V252Sql),
+        new Migration(253, "slack-cards", V253Sql),
+        new Migration(254, "slack-chat-requests", V254Sql),
         new Migration(255, "wait-stats-cadence-baseline", V255Sql),
     };
 

@@ -44,6 +44,12 @@ public class EmailAlertService : IFindingAlertSender
     private readonly Func<Guid, CancellationToken, Task<(InvestigationRequestRow Row, string? Brief)?>>? _readInvestigation;
     private readonly Func<McpDataDetail> _investigationDataDetail;
 
+    /// <summary>Test seam (#8142): the clock that stamps an alert row's time. Null reads <see cref="DateTime.UtcNow"/>. A test
+    /// anchors it inside one hour, because the recurring-skip journal writes one row per alert hour.</summary>
+    internal Func<DateTime>? ClockForTests { get; set; }
+
+    private DateTime UtcNow() => ClockForTests?.Invoke() ?? DateTime.UtcNow;
+
     /// <param name="investigations">
     /// #5820: the shared investigation dispatch core over Lite's investigation store. When set, an alert an agent route
     /// covers opens or joins an investigation request: after its history row is written, or before the channels post when
@@ -148,7 +154,7 @@ public class EmailAlertService : IFindingAlertSender
             /* #5820: the row's time is stamped once, here, so the investigation request names this exact row (Darling's
                DarlingAlertDeliverer does the same). The context is kept as the caller gave it: the route record added
                below belongs to the history row, not to the incident keys the request links. */
-            var alertTimeUtc = AlertHistoryEscalationSeed.TruncateToMicroseconds(DateTime.UtcNow);
+            var alertTimeUtc = AlertHistoryEscalationSeed.TruncateToMicroseconds(UtcNow());
 
             /* #5820 / #5821: the request is opened or joined BEFORE the channels post, for every alert, whether or not the
                generic webhook's template names {{investigation_json}} (Darling's DarlingAlertDeliverer does the same), so a
@@ -181,7 +187,7 @@ public class EmailAlertService : IFindingAlertSender
 
             /* #3598 / #4750: the row records where the posts went and what each channel's send did, exactly as
                the headless service's DarlingAlertDeliverer does. The record lists the channels the firing resolved
-               to, each with the route that supplied it (route_id; source "Exact", "Family" or "Wildcard", or "Default"
+               to, each with the route that supplied it (route_id; source "Exact", "Category", "AnalysisAll", "Family" or "Wildcard", or "Default"
                for the parent settings since #5750) and "delivered", "failed" or "not attempted" — an alert that reached one webhook and failed on another used to read as one
                delivery. Only the outcome word is stored: a webhook error can carry its endpoint's URL, so the
                reason stays in send_error. Null when no channel reached resolution (throttled, folded, muted,
@@ -227,7 +233,9 @@ public class EmailAlertService : IFindingAlertSender
         catch (Exception ex)
         {
             _logger.LogError(ex, $"TrySendAlertEmailAsync outer error: {ex.Message}");
-            return null;
+            /* #8246: nothing is known to have reached anyone, so the deliverer and the engine read this as every channel
+               failed and try the alert again. Whether the row above was written is not known here, so none is written. */
+            return AlertDelivery.DelivererFailed(ex.Message);
         }
     }
 
@@ -247,7 +255,7 @@ public class EmailAlertService : IFindingAlertSender
     /// params — so no separate fallback row is needed.
     /// <para>The row persists <c>DetailText</c>; the channels render it only if the producer says
     /// to. Darling's <c>DarlingFindingAlertSender</c> reads the same declaration.</para>
-    /// <para>#3916: returns the delivery the row recorded; null only when the send path caught.</para>
+    /// <para>#3916: returns the delivery the row recorded; a failed delivery when the send path caught (#8246).</para>
     /// </summary>
     public Task<AlertDelivery?> SendFindingAlertAsync(FindingAlert alert)
     {
@@ -313,7 +321,7 @@ public class EmailAlertService : IFindingAlertSender
             for (var i = 0; i < named.Count; i++)
             {
                 var page = named[i];
-                pageTimes[i] = AlertHistoryEscalationSeed.TruncateToMicroseconds(DateTime.UtcNow);
+                pageTimes[i] = AlertHistoryEscalationSeed.TruncateToMicroseconds(UtcNow());
                 if (_investigations is not null)
                 {
                     await _investigations.OpenForWebhookAsync(
@@ -380,7 +388,7 @@ public class EmailAlertService : IFindingAlertSender
                 delivery,
                 false, detailText, AlertContextSerializer.Serialize(context))
             {
-                AlertTimeUtc = AlertHistoryEscalationSeed.TruncateToMicroseconds(DateTime.UtcNow),
+                AlertTimeUtc = AlertHistoryEscalationSeed.TruncateToMicroseconds(UtcNow()),
             });
             return delivery;
         }

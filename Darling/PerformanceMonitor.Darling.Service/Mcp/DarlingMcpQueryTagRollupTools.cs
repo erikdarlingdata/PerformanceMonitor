@@ -39,7 +39,7 @@ public sealed class DarlingMcpQueryTagRollupTools
     internal const int DefaultLimit = 25;
     private const int MaxLimit = 200;
 
-    [McpServerTool(Name = "get_resource_use_by_tag"), Description("Rolls resource use up by query tag, one section per source: plan_cache, query_store, procedures, blocking_reports, blocking_snapshots, deadlocks. SECTIONS ARE NEVER SUMMED: the plan cache and Query Store count the same executions. Each section has tag rows (own figure and subtree figure), an untagged row and a total. Omit server_name for the fleet. tag limits the answer to that tag's subtree. <<GUIDE>> Rolls resource use up by query tag from the tag map (config.query_tag_map); nothing is evaluated at read time, so a rule change shows after the map's next pass. Sections: plan_cache (cpu_ms, duration_ms, logical_reads, logical_writes, executions), query_store (the same plus peak_memory_pages, a maximum not a sum; read only when hours_back is 24 or more), procedures (as plan_cache), blocking_reports and blocking_snapshots (blocked_ms is wait time on the blocked side's tag, caused_ms the same wait on the blocking side's tag; in blocking_reports each wait counts once at its longest report and the blocked_reports and caused_reports counts are waits, while the snapshot figures repeat a still-open wait once per sample), deadlocks (deadlocks and processes: a deadlock counts once for each tag among its processes, so the rows do not add up to the total). Within a section the tag rows' own figures plus untagged add up to total; a subtree figure is a tag plus its children, a parent's own figure leaves its children out. A key tagged on one server is untagged on another. Fleet answers list each server and give fleet_total per section. With tag set there is no untagged row and total is that tag's subtree. truncated says a section held more tag rows than limit; scan_truncated says the deadlock graphs read hit their ceiling. In the query_store section, effective_start is where its figures start, and window_truncated true means they start later than the window asked for: either the interval table's retention floor cut the start, or hours at the start are still being built into the hourly Query Store table. In the second case backlog_hours_waiting counts the hours still being built (an hour the builder cannot build soon is not one of them: an hour in back-off after a failed build, or one an open writer of the interval table holds back, is read from the interval table as before), hours_left_out counts the whole hours the read leaves out from the window's start (it can be larger, because it also counts every other hour before the start, among them the hours the interval table's floor cut), and backlog_note says the same in one sentence. A section status of empty means no rows in the window; unavailable means the source does not exist in this store yet or, for query_store, one of three things: its table is missing, the window is under the 24-hour minimum its interval table is read for (ask for hours_back 24 or more), or the interval table's gate refused a server (no coverage row, a pending batch, or a failed decision; the section names that server). In a fleet answer a PostgreSQL server that returned no rows in any section reads not_collected in every section, with the engine reason (the six sources are SQL Server collectors, so there is nothing to wait for), and is never named in the top-level message; a server that did return rows keeps them whatever its registry row says; if every server in scope is such a PostgreSQL server the whole answer is not_collected. A server that is a readable secondary Darling does not collect Query Store from (the same gate get_query_store_top answers through) reads not_collected in its query_store section only, with that reason: its other sections keep their rows, and it is never named as a section not served or refused by the interval table, because the exclusion is by design and no coverage row will ever appear for it; a readable secondary that does hold Query Store rows in the window keeps them. The sections answer independently: the top-level status is unavailable only when every section is, empty when every served section is empty, and a top-level message names any section not served.")]
+    [McpServerTool(Name = "get_resource_use_by_tag"), Description("Rolls resource use up by query tag, one section per source: plan_cache, query_store, procedures, blocking_reports, blocking_snapshots, deadlocks. SECTIONS ARE NEVER SUMMED: the plan cache and Query Store count the same executions. Each section has tag rows (own figure and subtree figure), an untagged row and a total. Omit server_name for the fleet. tag limits the answer to that tag's subtree. <<GUIDE>> Rolls resource use up by query tag from the tag map (config.query_tag_map); nothing is evaluated at read time, so a rule change shows after the map's next pass. Sections: plan_cache (cpu_ms, duration_ms, logical_reads, logical_writes, executions), query_store (the same plus peak_memory_pages, a maximum not a sum; read only when hours_back is 24 or more), procedures (as plan_cache), blocking_reports and blocking_snapshots (blocked_ms is wait time on the blocked side's tag, caused_ms the same wait on the blocking side's tag; in blocking_reports each wait counts once at its longest report and the blocked_reports and caused_reports counts are waits, while the snapshot figures repeat a still-open wait once per sample), deadlocks (deadlocks and processes: a deadlock counts once for each tag among its processes, so the rows do not add up to the total). Within a section the tag rows' own figures plus untagged add up to total; a subtree figure is a tag plus its children, a parent's own figure leaves its children out. A key tagged on one server is untagged on another. Fleet answers list each server and give fleet_total per section. With tag set there is no untagged row and total is that tag's subtree. truncated says a section held more tag rows than limit; scan_truncated says the deadlock graphs read hit their ceiling. In the query_store section, effective_start is where its figures start, and window_truncated true means they start later than the window asked for: either the interval table's retention floor cut the start, or hours at the start are still being built into the hourly Query Store table. In the second case backlog_hours_waiting counts the hours still being built (an hour the builder cannot build soon is not one of them: an hour in back-off after a failed build, or one an open writer of the interval table holds back, is read from the interval table as before), hours_left_out counts the whole hours the read leaves out from the window's start (it can be larger, because it also counts every other hour before the start, among them the hours the interval table's floor cut), and backlog_note says the same in one sentence. A section status of empty means no rows in the window; unavailable means the source does not exist in this store yet or, for query_store, one of three things: its table is missing, the window is under the 24-hour minimum its interval table is read for (ask for hours_back 24 or more), or the interval table's gate refused a server (no coverage row, a pending batch, or a failed decision; the section names that server). In a fleet answer a PostgreSQL server that returned no rows in any section reads not_collected in every section, with the engine reason (the six sources are SQL Server collectors, so there is nothing to wait for), and is never named in the top-level message; a server that did return rows keeps them whatever its registry row says; if every server in scope is such a PostgreSQL server the whole answer is not_collected. A server that is a readable secondary Darling does not collect Query Store from (the same gate get_query_store_top answers through) reads not_collected in its query_store section only, with that reason: its other sections keep their rows, and it is never named as a section not served or refused by the interval table, because the exclusion is by design and no coverage row will ever appear for it; a readable secondary that does hold Query Store rows in the window keeps them. The sections answer independently: the top-level status is unavailable only when every section is, empty when every served section is empty, and a top-level message names any section not served. A store that defines no query tag answers empty with that reason and no sections: nothing is read, because every row would be untagged.")]
     public static Task<string> GetResourceUseByTag(
         NpgsqlDataSource postgres,
         [Description("Server name or display name. Omit for the whole fleet.")] string? server_name = null,
@@ -98,6 +98,15 @@ public sealed class DarlingMcpQueryTagRollupTools
             var windowStart = windowEnd.AddHours(-hours_back);
             /* #6860: answers name a server by its display name (#6179), not the connection key. */
             var names = scope.ToDictionary(s => s.ServerId, s => DarlingServerResolver.AnswerNameOf(servers, s));
+
+            /* #8083: with no tag defined, every row of every section would be untagged and every untagged figure would equal its total, so the
+               per-server gates, the routing and the six aggregations are not run: the answer is one empty status over the resolved window, with
+               the window notice every empty answer of this tool carries (#6984). A named tag is refused above first, as on a store with tags, and
+               the engine question is not asked (a fleet of PostgreSQL targets answers not_collected once a tag exists). */
+            if (tags.Count == 0)
+            {
+                return await NoTagsAnswerAsync(postgres, fleet, scope, names, hours_back, windowStart, windowEnd, logger, cancellationToken);
+            }
 
             var serverIds = scope.Select(s => s.ServerId).ToArray();
 
@@ -325,25 +334,7 @@ public sealed class DarlingMcpQueryTagRollupTools
             /* Data, or an empty answer: no served section held figures (nothing collected, or nothing carrying the requested tag), so the status
                is "empty", and the sections ride along (Lite does the same) so each section's own status and any unserved section's reason are
                there to read. */
-            /* #7010: one window-floor notice for the whole answer, the LATEST of the six section floors (a roll-up is only as complete as its
-               least-covered section, and a section's floor is where its own relation's coverage starts). One fleet-form probe per section relation
-               (six a call, run one after the other), scoped to the server when one is named, never one per relation per server. A relation the
-               window holds nothing in answers null and gives way to the others. */
-            var noticeNames = fleet ? null : new[] { scope[0].ServerName };
-            var noticeSources = new[] { "query_stats", "query_store_stats", "procedure_stats", "blocked_process_reports", "dmv_blocking_snapshots", "deadlocks" }
-                .Select(DataWindowFloor.Source.ForCollectorTable).ToArray();
-            var notice = await DarlingMcpWindowNotice.ReadAsync(
-                async () =>
-                {
-                    DateTime? latest = null;
-                    foreach (var source in noticeSources)
-                    {
-                        latest = DarlingMcpWindowNotice.Later(latest, await DarlingMcpWindowNotice.ProbeScoped(postgres, [source], noticeNames, windowStart, windowEnd, cancellationToken));
-                    }
-
-                    return latest;
-                },
-                windowStart, windowEnd, "query tag source tables", emptyAnswer: !anyData, logger: logger, cancellationToken: cancellationToken);
+            var notice = await ReadWindowNoticeAsync(postgres, fleet ? null : scope[0].ServerName, windowStart, windowEnd, emptyAnswer: !anyData, logger, cancellationToken);
 
             var payload = new Dictionary<string, object?>();
             if (!anyData)
@@ -386,6 +377,64 @@ public sealed class DarlingMcpQueryTagRollupTools
         {
             return McpHelpers.FormatError("get_resource_use_by_tag", ex);
         }
+    }
+
+    /// <summary>
+    /// #7010: one window-floor notice for the whole answer, the LATEST of the six section floors (a roll-up is only as complete as its
+    /// least-covered section, and a section's floor is where its own relation's coverage starts). One fleet-form probe per section relation
+    /// (six a call, run one after the other), scoped to the server when one is named, never one per relation per server. A relation the
+    /// window holds nothing in answers null and gives way to the others.
+    /// </summary>
+    private static Task<McpWindowNotice> ReadWindowNoticeAsync(
+        NpgsqlDataSource postgres, string? serverName, DateTime windowStart, DateTime windowEnd, bool emptyAnswer, ILogger? logger, CancellationToken cancellationToken)
+    {
+        var noticeNames = serverName is null ? null : new[] { serverName };
+        var noticeSources = new[] { "query_stats", "query_store_stats", "procedure_stats", "blocked_process_reports", "dmv_blocking_snapshots", "deadlocks" }
+            .Select(DataWindowFloor.Source.ForCollectorTable).ToArray();
+        return DarlingMcpWindowNotice.ReadAsync(
+            async () =>
+            {
+                DateTime? latest = null;
+                foreach (var source in noticeSources)
+                {
+                    latest = DarlingMcpWindowNotice.Later(latest, await DarlingMcpWindowNotice.ProbeScoped(postgres, [source], noticeNames, windowStart, windowEnd, cancellationToken));
+                }
+
+                return latest;
+            },
+            windowStart, windowEnd, "query tag source tables", emptyAnswer: emptyAnswer, logger: logger, cancellationToken: cancellationToken);
+    }
+
+    /// <summary>
+    /// #8083: the answer on a store that defines no query tag: <c>empty</c> with <see cref="QueryTagUsageLabels.NoTagsMessage"/>, the scope and
+    /// the resolved window, and the window notice (<c>effective_start</c>, <c>window_truncated</c>, <c>truncation_note</c>) as the tool's other
+    /// empty answers carry it, so the #6984 window contract holds. No section is read, so there is no <c>sections</c> list.
+    /// </summary>
+    private static async Task<string> NoTagsAnswerAsync(
+        NpgsqlDataSource postgres, bool fleet, List<RegisteredServer> scope, Dictionary<int, string> names, int hoursBack,
+        DateTime windowStart, DateTime windowEnd, ILogger? logger, CancellationToken cancellationToken)
+    {
+        var notice = await ReadWindowNoticeAsync(postgres, fleet ? null : scope[0].ServerName, windowStart, windowEnd, emptyAnswer: true, logger, cancellationToken);
+        var payload = new Dictionary<string, object?>
+        {
+            ["status"] = "empty",
+            ["message"] = QueryTagUsageLabels.NoTagsMessage,
+            ["scope"] = fleet ? "fleet" : "server",
+            ["server"] = fleet ? null : names[scope[0].ServerId],
+            ["hours_back"] = hoursBack,
+            ["window_start"] = windowStart.ToString("o", CultureInfo.InvariantCulture),
+            ["window_end"] = windowEnd.ToString("o", CultureInfo.InvariantCulture),
+        };
+        if (!notice.IsUnavailable)
+        {
+            payload["effective_start"] = notice.EffectiveStart;
+            payload["window_truncated"] = notice.WindowTruncated;
+            payload["truncation_note"] = notice.TruncationNote;
+        }
+
+        payload["tag"] = null;
+        payload["sections_additive"] = false;
+        return JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
     }
 
     /// <summary>Whether the facts hold figures for the request: any fact at all without a tag filter, else a fact on the tag or a tag under it.</summary>

@@ -394,11 +394,20 @@ if (args.Length > 0 && (DarlingCliCommands.IsEnableCollectorVerb(args[0]) || Dar
 }
 
 /* CLI verb: --reset-password-key [--config <path>] (#5366) - mark the service's current password key replaced, so the next
-   start makes a new one, and print how many saved passwords must be entered again. Store only: it never touches a key
+   start makes a new one (without passwordKey; with it, the start waits for a new key in that source, #8006), and print how
+   many saved passwords must be entered again. Store only: it never touches a key
    file. Same platform posture as the verbs around it (Windows only for a MANAGED store credential, which the verb checks). */
 if (args.Length > 0 && DarlingCliCommands.IsResetPasswordKeyVerb(args[0]))
 {
     return await DarlingCliCommands.ResetPasswordKeyAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
+/* CLI verb: --new-password-key <path> (#8006) - write a new password key to a path that holds nothing, for an operator to put in
+   the secret store passwordKey reads, and print only its fingerprint, never the key. It reads no configuration and opens no
+   store, so it runs anywhere the exe does. */
+if (args.Length > 0 && DarlingCliCommands.IsNewPasswordKeyVerb(args[0]))
+{
+    return DarlingCliCommands.NewPasswordKey(args[1..], Console.Out, Console.Error);
 }
 
 /* CLI verb: --self-check-password-key <vector-path> (#5366) - hidden: not in the usage text. Runs the real password key file,

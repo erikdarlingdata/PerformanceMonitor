@@ -153,6 +153,20 @@ public sealed class WebSystemEventsChartsBehaviourTests
         Assert.Equal("No sick spinlock was reported in this window.", r.GetProperty("spinNone").GetProperty("text").GetString());
     }
 
+    /// <summary>#8187: when the window had more sick spinlock types than the read named, the chart says "top 2 of 6 types", as the Viewer's
+    /// Y label does; when it named them all, or an older read carries no count, the chart says nothing more.</summary>
+    [Fact]
+    public void SickSpinlocks_SayHowManyTypesThereWere_OnlyWhenSomeWereLeftOut()
+    {
+        var r = Run();
+
+        var top = r.GetProperty("spinTop");
+        Assert.True(top.GetProperty("hasChart").GetBoolean());
+        Assert.Contains("top 2 of 6 types", top.GetProperty("text").GetString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("types", r.GetProperty("spinAll").GetProperty("text").GetString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("types", r.GetProperty("spinDrawn").GetProperty("text").GetString(), StringComparison.Ordinal);
+    }
+
     /// <summary>#6439: the System Events intro that says the counters are "charted below" is shown only when a chart is drawn.</summary>
     [Fact]
     public void TheChartedBelowSentence_IsShownOnlyWhenAChartIsDrawn()
@@ -191,10 +205,11 @@ public sealed class WebSystemEventsChartsBehaviourTests
         Assert.Null(buckets[0].IntervalDumpRequests);
     }
 
-    /// <summary>The sick spinlock series are the first five types in snapshot order, backoffs peak per bucket (1 when the snapshot names
-    /// the type without a count), and SQL Server's "none" (no spinlock is sick) is no series.</summary>
+    /// <summary>The sick spinlock series are the five types with the most backoffs in the window, busiest first and ties by name (#8187,
+    /// the order the Viewer's chart draws), the read says how many types there were, backoffs peak per bucket (1 when the snapshot
+    /// names the type without a count), and SQL Server's "none" (no spinlock is sick) is no series and no type.</summary>
     [Fact]
-    public void SickSpinlocks_AreTheFirstFiveTypesOldestFirst_PeakPerBucket_AndNoneIsNotASeries()
+    public void SickSpinlocks_AreTheFiveBusiestTypes_BusiestFirst_PeakPerBucket_AndNoneIsNotASeries()
     {
         var t = new DateTime(2026, 1, 2, 0, 0, 0, DateTimeKind.Utc);
         var rows = new[]
@@ -209,7 +224,10 @@ public sealed class WebSystemEventsChartsBehaviourTests
             Snap(t.AddMinutes(13), spin: "F", backoffs: 1),
         };
 
-        Assert.Equal(new[] { "A", "C", "B", "D", "E" }, DarlingMcpHealthParserTools.SickSpinlockTypes(rows));
+        /* A has 40 backoffs and B 5; C, D, E and F have 1 each (C's snapshot carries no count), so the quietest four tie and the name decides. */
+        var (top, total) = DarlingMcpHealthParserTools.SickSpinlockTypes(rows);
+        Assert.Equal(new[] { "A", "B", "C", "D", "E" }, top);
+        Assert.Equal(6, total);
         var first = DarlingMcpHealthParserTools.BucketCpu(rows, 10)[0];
         Assert.Equal(30, first.SickSpinlocks["A"]);
         Assert.Equal(1, first.SickSpinlocks["C"]);
@@ -281,6 +299,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7)",
             var root = doc.RootElement;
 
             Assert.Equal(new[] { "SOS_CACHESTORE" }, root.GetProperty("sick_spinlock_types").EnumerateArray().Select(x => x.GetString()).ToArray());
+            Assert.Equal(1, root.GetProperty("sick_spinlock_type_count").GetInt32());
             var entries = root.GetProperty("entries").EnumerateArray().ToArray();
             Assert.Equal(2, entries.Length);
             // The old fields are still there, unchanged in name.

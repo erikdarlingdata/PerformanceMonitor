@@ -70,6 +70,8 @@ lite_linked_shard:
   - 'Darling/Darling.Tests/CSharpSourceWalker.cs'
   - 'Darling/Darling.Tests/ChartLayoutProbe.cs'
   - 'Darling/Darling.Tests/ClippedTextProbe.cs'
+  - 'Darling/Darling.Tests/GridColumnLayoutProbe.cs'
+  - 'Darling/Darling.Tests/GridPolishProbe.cs'
   - 'Darling/Darling.Tests/InputNamesProbe.cs'
   - 'Darling/Darling.Tests/McpInProcessHost.cs'
   - 'Darling/Darling.Tests/McpArgumentTypeRows.cs'

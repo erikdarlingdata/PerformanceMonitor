@@ -290,8 +290,9 @@ public static partial class DarlingCliCommands
     public static bool IsDisableCollectorVerb(string arg) =>
         string.Equals(arg, "--disable-collector", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>The verb <see cref="ResetPasswordKeyAsync"/> handles: mark the service's current password key replaced, so
-    /// the next start makes a new one (#5366). It changes the store only (as the store owner) and never touches a key file.</summary>
+    /// <summary>The verb <see cref="ResetPasswordKeyAsync"/> handles: mark the service's current password key replaced. Without
+    /// <c>passwordKey</c> the next start makes a new key (#5366); with it set, the next start waits for a new key in that
+    /// source (#8006). It changes the store only (as the store owner) and never touches a key file.</summary>
     public static bool IsResetPasswordKeyVerb(string arg) =>
         string.Equals(arg, "--reset-password-key", StringComparison.OrdinalIgnoreCase);
 
@@ -307,17 +308,200 @@ public static partial class DarlingCliCommands
     public static bool IsSelfCheckLaunchMemoryVerb(string arg) =>
         string.Equals(arg, "--self-check-launch-memory", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Which account <c>--validate-config</c> judges a <c>file:</c> <c>passwordKey</c> as, on Windows: the account the service is
+    /// registered under, the one that reads the key at start, and only when the service is not registered the account running this
+    /// process (a console run, or a check before install). The owner and folder checks trust that account along with SYSTEM and
+    /// Administrators, so judging as the caller let an administrator's own folder pass a check the service then refused. Reuses the
+    /// process-wide setting <c>--harden-files</c> uses (#2371), set only when the service is registered; the verb is a one-shot process.
+    /// Returns the line that names the account, or null when no <c>file:</c> key is configured.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static string? ApplyValidateConfigAccount(DarlingConfig config, Func<string, SecurityIdentifier?> registeredServiceAccount)
+    {
+        if (config.PasswordKey is null || !config.PasswordKey.StartsWith("file:", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var registered = registeredServiceAccount(ServiceName);
+        if (registered is null)
+        {
+            return $"The password key file is judged as the account you are running as ({DarlingFileSecurity.ServiceAccountDisplayName}), because the '{ServiceName}' service is not registered on this machine.";
+        }
+
+        DarlingFileSecurity.HardenForAccount(registered);
+        return $"The password key file is judged as the service account {DarlingFileSecurity.ServiceAccountDisplayName}.";
+    }
+
+    /// <summary>The verb <see cref="NewPasswordKey"/> handles: <c>--new-password-key &lt;path&gt;</c> writes a new password key
+    /// to a path for a <c>passwordKey</c> secret and prints only its fingerprint (#8006).</summary>
+    public static bool IsNewPasswordKeyVerb(string arg) =>
+        string.Equals(arg, "--new-password-key", StringComparison.OrdinalIgnoreCase);
+
+    private const string NewPasswordKeyUsage = "Usage: PerformanceMonitor.Darling.Service.exe --new-password-key <path>";
+
+    /// <summary>
+    /// <c>--new-password-key &lt;path&gt;</c> (#8006): generates a password key and writes it to <paramref name="rest"/>'s one
+    /// path as one line of base64 PKCS#8, the form <c>passwordKey</c> reads, then prints the path and the key's fingerprint,
+    /// never the key. It reads no configuration and opens no store. It never writes over anything: a path that holds
+    /// anything at all is refused, and the file is created with create-new semantics, so one that appears in between makes
+    /// the write fail. On Windows the file is created with the hardened ACL already applied; elsewhere it is mode 0600.
+    /// Returns 0 when written; 1 for a usage error, a path that holds something, or a write that failed.
+    /// </summary>
+    public static int NewPasswordKey(string[] rest, TextWriter output, TextWriter error)
+    {
+        ArgumentNullException.ThrowIfNull(rest);
+        ArgumentNullException.ThrowIfNull(output);
+        ArgumentNullException.ThrowIfNull(error);
+
+        if (rest.Length != 1 || string.IsNullOrWhiteSpace(rest[0]) || rest[0].StartsWith('-'))
+        {
+            error.WriteLine(NewPasswordKeyUsage);
+            return 1;
+        }
+
+        var path = rest[0];
+        try
+        {
+            if (DarlingServiceKeyFile.AnythingAt(path))
+            {
+                error.WriteLine($"Something is already at {path}. --new-password-key never writes over anything: give it a path that does not exist.");
+                return 1;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            error.WriteLine($"Could not check {path}: {ex.Message}");
+            return 1;
+        }
+
+        string keyId;
+        byte[]? pkcs8 = null;
+        char[]? chars = null;
+        byte[]? bytes = null;
+        var created = false;
+        try
+        {
+            using (var key = PasswordPrivateKey.Generate())
+            {
+                keyId = key.PublicKey.KeyId;
+                pkcs8 = key.ExportPkcs8();
+            }
+
+            /* No immutable string of the key ever exists: base64 goes into a char array and then ASCII bytes, all zeroed below. */
+            chars = new char[((pkcs8.Length + 2) / 3) * 4];
+            if (!Convert.TryToBase64Chars(pkcs8, chars, out var charCount))
+            {
+                throw new InvalidOperationException("The key could not be encoded as base64.");
+            }
+
+            bytes = new byte[charCount + 1];
+            for (var i = 0; i < charCount; i++)
+            {
+                bytes[i] = (byte)chars[i];
+            }
+
+            bytes[charCount] = (byte)'\n';
+
+            using (var stream = CreateNewKeyFile(path))
+            {
+                created = true;
+
+                /* Straight to the handle: a write through the stream would copy the key into its internal buffer, which
+                   nothing zeroes. */
+                RandomAccess.Write(stream.SafeFileHandle, bytes, fileOffset: 0);
+                stream.Flush(flushToDisk: true);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException
+            or InvalidOperationException or CryptographicException)
+        {
+            /* A file this call created and could not finish is removed, so no partial key is left behind; one it never
+               created (another process got there first) is not this call's to touch. */
+            var leftover = "";
+            if (created)
+            {
+                try
+                {
+                    File.Delete(path);
+                }
+                catch (Exception deleteEx) when (deleteEx is IOException or UnauthorizedAccessException)
+                {
+                    leftover = $" The partly written file could not be removed ({deleteEx.Message}); delete it.";
+                }
+            }
+
+            error.WriteLine($"Could not write a new password key to {path}: {ex.Message}{leftover}");
+            return 1;
+        }
+        finally
+        {
+            if (pkcs8 is not null)
+            {
+                CryptographicOperations.ZeroMemory(pkcs8);
+            }
+
+            if (chars is not null)
+            {
+                Array.Clear(chars);
+            }
+
+            if (bytes is not null)
+            {
+                CryptographicOperations.ZeroMemory(bytes);
+            }
+        }
+
+        output.WriteLine(
+            $"Wrote a new password key to {path} (fingerprint {PasswordSeal.DisplayKeyId(keyId)}). Put it in your secret store, point {DarlingPasswordKeySource.SettingName} at it, then delete this file.");
+        return 0;
+    }
+
+    /// <summary>Creates the key file, failing if anything is at the path: with the hardened ACL applied at creation on
+    /// Windows (only SYSTEM, Administrators and the account running the verb), and readable and writable by its owner only
+    /// elsewhere.</summary>
+    private static FileStream CreateNewKeyFile(string path)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return DarlingFileSecurity.CreateHardenedFile(path, allowInteractiveRead: false);
+        }
+
+        return new FileStream(path, new FileStreamOptions
+        {
+            Mode = FileMode.CreateNew,
+            Access = FileAccess.Write,
+            Share = FileShare.None,
+            UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite,
+        });
+    }
+
     /// <summary>The text <c>--reset-password-key</c> prints when the key was marked replaced. <paramref name="sealedPasswords"/>
-    /// is how many saved passwords are sealed to the old key and must be entered again.</summary>
-    public static string ResetPasswordKeyRestartSentence(int sealedPasswords) =>
-        sealedPasswords == 1
+    /// is how many saved passwords are sealed to the old key and must be entered again. With <paramref name="fromSetting"/>
+    /// (darling.json sets <c>passwordKey</c>, #8006) the service never makes a key, so the sentence says to put a new one in
+    /// that source instead.</summary>
+    public static string ResetPasswordKeyRestartSentence(int sealedPasswords, bool fromSetting = false)
+    {
+        var count = sealedPasswords.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (fromSetting)
+        {
+            return "Put a new password key in the passwordKey source (make one with --new-password-key), then restart the service. "
+                + (sealedPasswords == 1
+                    ? "This 1 saved password must be entered again."
+                    : $"These {count} saved passwords must be entered again.");
+        }
+
+        return sealedPasswords == 1
             ? "Restart the service. It will make a new password key, and this 1 saved password must be entered again."
-            : $"Restart the service. It will make a new password key, and these {sealedPasswords.ToString(System.Globalization.CultureInfo.InvariantCulture)} saved passwords must be entered again.";
+            : $"Restart the service. It will make a new password key, and these {count} saved passwords must be entered again.";
+    }
 
     /// <summary>
     /// <c>--reset-password-key [--config &lt;path&gt;]</c>: on the owner connection, in one transaction, counts the saved
-    /// passwords sealed to the current key and marks that key <c>replaced</c> with the reason <c>reset</c>. The next service
-    /// start retires the key file and makes a new key. Key files are never touched here.
+    /// passwords sealed to the current key and marks that key <c>replaced</c> with the reason <c>reset</c>. Without
+    /// <c>passwordKey</c>, the next service start retires the key file and makes a new key; with it, the start reports
+    /// <c>reset_pending</c> until a new key is put in that source (#8006). Key files are never touched here.
     /// </summary>
     public static async Task<int> ResetPasswordKeyAsync(
         string[] rest, TextWriter output, TextWriter error, CancellationToken cancellationToken)
@@ -343,6 +527,18 @@ public static partial class DarlingCliCommands
             return CollectorToggleExitCode.UsageOrConfig;
         }
 
+        /* #8006: with passwordKey set the service never makes a key, so the closing sentence says where the new one goes. */
+        bool fromSetting;
+        try
+        {
+            fromSetting = !string.IsNullOrWhiteSpace(DarlingConfig.Load(configPath).PasswordKey);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* The data source above already loaded this config; a second load that fails only costs the setting-aware wording. */
+            fromSetting = false;
+        }
+
         await using var dataSource = created;
         try
         {
@@ -354,7 +550,7 @@ public static partial class DarlingCliCommands
             output.WriteLine();
             output.WriteLine(replaced is null
                 ? "The store publishes no password key, so there is nothing to reset."
-                : ResetPasswordKeyRestartSentence(sealedPasswords));
+                : ResetPasswordKeyRestartSentence(sealedPasswords, fromSetting));
             output.WriteLine();
             return CollectorToggleExitCode.Success;
         }
@@ -440,6 +636,7 @@ public static partial class DarlingCliCommands
         || IsDropXeSessionsVerb(arg)
         || IsGrantScriptVerb(arg)
         || IsResetPasswordKeyVerb(arg)
+        || IsNewPasswordKeyVerb(arg)
         || IsSelfCheckPasswordKeyVerb(arg)
         || IsSelfCheckLaunchMemoryVerb(arg);
 
@@ -507,6 +704,7 @@ public static partial class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --check-settings [--json]   Print the store host profile and a verdict per sizing-relevant setting; exits non-zero if any is stale-after-hardware-change." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --diagnostics-bundle <path> [--hours N] [--server <name>] [--log-dir <dir>] [--config <path>] [--alias-map <path>] [--include-log-text] [--force]   Write one aliased diagnostics file to attach to a bug report (run elevated on the store host; --diag-bundle is the short form)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --encrypt-password  Encrypt a SQL-auth password for darling.json (reads stdin)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --new-password-key <path>   Write a new password key to <path> for a passwordKey secret; prints its fingerprint, never the key." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --print-viewer-connection   Print a remote-viewer connection string (managed store)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --print-mcp-token   Reprint the MCP bearer token from darling.json (run elevated; writes a LIVE token to stdout)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --print-web-token   Reprint the web dashboard access token from darling.json (run elevated; writes a LIVE token to stdout)." + Environment.NewLine +
@@ -554,8 +752,17 @@ public static partial class DarlingCliCommands
     /// When the store itself cannot be reached, this falls back to the file's list and says so plainly, which
     /// is the one case where the file genuinely is the best available answer.</para>
     /// </summary>
-    public static async Task<int> ValidateConfigAsync(
-        string? configPath, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    public static Task<int> ValidateConfigAsync(
+        string? configPath, TextWriter output, TextWriter error, CancellationToken cancellationToken) =>
+        ValidateConfigAsync(
+            configPath, output, error,
+            name => OperatingSystem.IsWindows() ? DarlingFileSecurity.RegisteredServiceAccount(name) : null,
+            cancellationToken);
+
+    /// <summary>The verb's body, with how the service's registered account is found passed in so a test names one without registering a service (#8006).</summary>
+    internal static async Task<int> ValidateConfigAsync(
+        string? configPath, TextWriter output, TextWriter error,
+        Func<string, SecurityIdentifier?> registeredServiceAccount, CancellationToken cancellationToken)
     {
         DarlingConfig config;
         try
@@ -584,6 +791,21 @@ public static partial class DarlingCliCommands
         foreach (var warning in DarlingSecrets.RemediationSecretWarnings(config.Servers))
         {
             output.WriteLine("WARNING: " + warning);
+        }
+
+        /* The service, not this process, reads the key at start, so on Windows the key file is judged as the account the service is registered under. */
+        if (OperatingSystem.IsWindows() && ApplyValidateConfigAccount(config, registeredServiceAccount) is { } judgedAs)
+        {
+            output.WriteLine(judgedAs);
+        }
+
+        /* #8006: a WARNING line for each check a passwordKey file failed that only warns, then the key's fingerprint, or a warning, not a
+           failure: the start refuses such a key without stopping collection.
+           The path is resolved as Load resolved it (DARLING_CONFIG, then beside the binary): configPath is null in the usual run, and
+           with no path the credentials-directory check the start makes would be skipped. */
+        foreach (var line in DarlingPasswordKeySource.DescribeForValidation(config, DarlingConfig.ResolveConfigPath(configPath)))
+        {
+            output.WriteLine(line);
         }
 
         var targets = await ResolveValidationTargetsAsync(config, output, error, cancellationToken);

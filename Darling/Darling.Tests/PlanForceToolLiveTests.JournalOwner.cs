@@ -86,6 +86,7 @@ public sealed partial class PlanForceToolLiveTests
         await RunAsMcpLoginAsync(async (c, webLogin) =>
         {
             var (query, planA, _) = await c.Sql.TwoPlansAsync("pjo6", c.Ct);
+            await SeedCollectedPlanAsync(c, c.Sql.Database, query, planA);
             var forced = Parse(await DarlingMcpPlanForceTools.RunAsync(webLogin, c.Source, c.Log, force: true, "srv-7", c.Sql.Database, query, planA, c.Arg, dry_run: false, c.Ct));
             Assert.Equal("done", (string?)forced["status"]);
             var calledId = (long)forced["journal_id"]!;
@@ -134,6 +135,7 @@ public sealed partial class PlanForceToolLiveTests
         await RunAsMcpLoginAsync(async (c, mcp) =>
         {
             var (query, planA, _) = await c.Sql.TwoPlansAsync("pjo1", c.Ct);
+            await SeedCollectedPlanAsync(c, c.Sql.Database, query, planA);
             var answer = await DarlingMcpPlanForceTools.RunAsync(mcp, c.Source, c.Log, force: true, "srv-7", c.Sql.Database, query, planA, c.Arg, dry_run: false, c.Ct);
             var json = Parse(answer);
             Assert.Equal("done", (string?)json["status"]);

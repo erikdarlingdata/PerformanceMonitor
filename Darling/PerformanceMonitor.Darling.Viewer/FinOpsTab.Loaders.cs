@@ -327,7 +327,7 @@ public partial class FinOpsTab
         /* Physical memory and the buffer pool's share of it come from memory_stats, which on an Azure SQL Database is the
            database's own (its memory limit, from committed_target_kb), not the host's RAM. So both are shown on every
            edition, and only the caption and the verdict's wording change there. */
-        FinOpsMemoryRatioText.Text = $"{bpPct:N0}%";
+        FinOpsMemoryRatioText.Text = $"{bpPct:N1}%";
         SetBar(FinOpsMemoryRatioBar, FinOpsMemRatioFilled, FinOpsMemRatioEmpty, bpPct);
 
         FinOpsPhysicalMemoryCaption.Text = ServerHardwareScope.PhysicalMemoryCaption(data.EngineEdition);
@@ -462,6 +462,8 @@ public partial class FinOpsTab
     /// when there are no points — an ADR-less server gets no dead chart. Series colours rotate the
     /// shared chart palette by series index so a redraw is stable.
     /// </summary>
+    private readonly ChartRenderHelper _chartHelper = new();
+
     private void RenderPvsTrendChart(List<PvsTrendPoint> trend)
     {
         if (trend.Count == 0)
@@ -471,7 +473,9 @@ public partial class FinOpsTab
         }
 
         FinOpsPvsTrendChart.Visibility = Visibility.Visible;
-        FinOpsPvsTrendChart.Plot.Clear();
+        _chartHelper.ClearChart(FinOpsPvsTrendChart); // #8086: a reset also removes the last refresh's legend panel
+        ViewerChartCards.AttachChart(FinOpsPvsTrendChart); // #8151: the reset swapped in a new plot
+        ChartStyle.ApplyThemeToChart(FinOpsPvsTrendChart);
 
         var seriesIndex = 0;
         foreach (var series in trend.GroupBy(t => t.DatabaseName).OrderByDescending(g => g.Max(t => t.PvsSizeMb)))
@@ -489,11 +493,10 @@ public partial class FinOpsTab
                 : series.Key;
         }
 
-        FinOpsPvsTrendChart.Plot.Legend.IsVisible = true;
         FinOpsPvsTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         FinOpsPvsTrendChart.Plot.Axes.AutoScale();
-        FinOpsPvsTrendChart.Plot.YLabel("PVS Off-Row MB");
-        ChartStyle.ApplyThemeToChart(FinOpsPvsTrendChart);
+        FinOpsPvsTrendChart.Plot.YLabel("MB");
+        _chartHelper.ShowChartLegend(FinOpsPvsTrendChart); // #8086: beside or under the plot, never over it
         FinOpsPvsTrendChart.Refresh();
     }
 
@@ -767,7 +770,7 @@ public partial class FinOpsTab
         try
         {
             await loader();
-            StatusChanged?.Invoke($"{_server.DisplayName} — refreshed {DateTime.Now:HH:mm:ss}");
+            StatusChanged?.Invoke($"{_server.DisplayName} — refreshed {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {
