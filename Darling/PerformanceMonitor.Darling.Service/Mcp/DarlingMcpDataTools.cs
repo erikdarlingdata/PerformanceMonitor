@@ -2950,12 +2950,12 @@ ORDER BY server_name";
         return row;
     }
 
-    /// <summary>#5748: adds a partial row's key unless the value is null, false or 0. Three overloads rather than one
-    /// object check, so a number is compared as a number and a bool as a bool. Field-for-field Lite's twin.</summary>
     /// <summary>#7643: a partial row's time, the round-trip form to the whole second (its kind suffix kept). Field-for-field Lite's twin.</summary>
     internal static string? WholeSecond(DateTime? value) =>
         value?.ToString("yyyy-MM-dd'T'HH:mm:ssK", CultureInfo.InvariantCulture);
 
+    /// <summary>#5748: adds a partial row's key unless the value is null, false or 0. Three overloads rather than one
+    /// object check, so a number is compared as a number and a bool as a bool. Field-for-field Lite's twin.</summary>
     private static void AddUnlessDefault(Dictionary<string, object?> row, string key, string? value)
     {
         if (value is not null) row[key] = value;

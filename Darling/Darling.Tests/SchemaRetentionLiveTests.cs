@@ -194,6 +194,38 @@ VALUES ($1, $2, $3, $4, $5)", c);
     }
 
     /// <summary>
+    /// The keep rules through the key-per-kind anti-join: a removed server's SalesDb goes though server 1's SalesDb (the same name) is live
+    /// with versions closed inside the window; an availability group's old history that a pass closed two days ago stays; a group history
+    /// a server still sees stays; a server key and a group key are never taken for each other.
+    /// </summary>
+    [Fact]
+    public async Task Purge_KeepRulesHoldPerHistoryKey_WhenDatabaseNamesAreShared()
+    {
+        await WithStoreAsync(async (c, postgres, ct) =>
+        {
+            await SeedStateAsync(c, 1, "SalesDb", s_now, ct);
+            await SeedVersionAsync(c, "LiveCurrent", s_now.AddDays(-50), null, ct);
+            await SeedVersionAsync(c, "LiveClosedRecently", s_now.AddDays(-50), s_now.AddDays(-3), ct);
+
+            /* Server 2's SalesDb: removed 40 days ago. */
+            await SeedStateAsync(c, 2, "SalesDb", s_now.AddDays(-40), ct);
+            await SeedVersionAsync(c, "RemovedCurrent", s_now.AddDays(-50), null, ct, serverId: 2);
+
+            /* The group's old history of SalesDb, closed by a pass two days ago; no state row points at the group. */
+            await SeedVersionAsync(c, "GroupMovedClosed", s_now.AddDays(-50), s_now.AddDays(-2), ct, serverId: null, group: s_group);
+
+            /* Another group, seen now by server 3, under the database name of server 2's stale key. */
+            var other = Guid.Parse("66666666-6666-6666-6666-666666666666");
+            await SeedStateAsync(c, 3, "SalesDb", s_now, ct, group: other);
+            await SeedVersionAsync(c, "OtherGroupCurrent", s_now.AddDays(-50), null, ct, serverId: null, group: other);
+
+            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, null, ct);
+
+            Assert.Equal("GroupMovedClosed,LiveClosedRecently,LiveCurrent,OtherGroupCurrent", await ObjectNamesAsync(c, ct));
+        });
+    }
+
+    /// <summary>
     /// A database that joined or left an availability group: the pass closed the old key's current versions, and no state row points at
     /// that key any more. The old history stays while a version of it closed inside the window, and its closed rows then age out
     /// through the normal purge, not at the next daily purge.

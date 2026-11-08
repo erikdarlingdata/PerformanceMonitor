@@ -1675,27 +1675,35 @@ public static class DarlingRetention
     /// current versions at the move) ages out over the window through the closed-version purge. The key is written as
     /// <c>SchemaHistoryReader</c> writes it (a server key has no group, a group key no server). Children go by ON DELETE CASCADE.
     /// </summary>
+    /* The histories to keep are listed once, then every version is anti-joined against that list on plain equality, so the planner can
+       hash it: a per-row probe of schema_objects for a stale history scanned every version of that history for each of its versions.
+       The key is one text value per kind ('g' and the group id, or 's' and the server id): the CHECK on schema_objects makes exactly one
+       of the two set, and a state row names the group when it has one. The closed versions inside the window are found through
+       idx_schema_objects_closed (valid_to). */
     internal const string StaleSchemaHistoryDeleteSql = @"
+WITH keep AS
+(
+    SELECT
+        CASE WHEN s.history_ag_group_id IS NOT NULL THEN 'g' || s.history_ag_group_id::text ELSE 's' || s.history_server_id::text END AS history_key,
+        s.database_name
+    FROM collect.schema_capture_state AS s
+    WHERE s.last_seen_in_scope_at >= $1
+    AND   (s.history_ag_group_id IS NOT NULL OR s.history_server_id IS NOT NULL)
+    UNION
+    SELECT
+        CASE WHEN v.ag_group_id IS NOT NULL THEN 'g' || v.ag_group_id::text ELSE 's' || v.server_id::text END,
+        v.database_name
+    FROM collect.schema_objects AS v
+    WHERE v.valid_to >= $1
+)
 DELETE FROM collect.schema_objects AS o
 WHERE NOT EXISTS
 (
     SELECT
         1
-    FROM collect.schema_capture_state AS s
-    WHERE s.database_name = o.database_name
-    AND   s.last_seen_in_scope_at >= $1
-    AND   ((o.ag_group_id IS NULL AND s.history_ag_group_id IS NULL AND s.history_server_id = o.server_id)
-           OR (o.ag_group_id IS NOT NULL AND s.history_ag_group_id = o.ag_group_id))
-)
-AND NOT EXISTS
-(
-    SELECT
-        1
-    FROM collect.schema_objects AS v
-    WHERE v.database_name = o.database_name
-    AND   v.valid_to >= $1
-    AND   ((o.ag_group_id IS NULL AND v.ag_group_id IS NULL AND v.server_id = o.server_id)
-           OR (o.ag_group_id IS NOT NULL AND v.ag_group_id = o.ag_group_id))
+    FROM keep AS k
+    WHERE k.database_name = o.database_name
+    AND   k.history_key = CASE WHEN o.ag_group_id IS NOT NULL THEN 'g' || o.ag_group_id::text ELSE 's' || o.server_id::text END
 )";
 
     /// <summary>
