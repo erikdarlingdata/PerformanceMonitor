@@ -254,7 +254,7 @@ public sealed class DeltaFamilySeedingCensusTests
         Assert.Contains("_collectorService?.DeltaCalculator?.ClearServer(removedServerId);", forget, StringComparison.Ordinal);
 
         var worker = ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs");
-        var reconcile = worker[worker.IndexOf("private void ReconcileServers(", StringComparison.Ordinal)..];
+        var reconcile = worker[worker.IndexOf("internal void ReconcileServers(", StringComparison.Ordinal)..];
         reconcile = reconcile[..reconcile.IndexOf("\n    }", StringComparison.Ordinal)];
         Assert.Contains("_selfAlerts?.Forget(id);", reconcile, StringComparison.Ordinal);
         Assert.Contains("_deltas?.ClearServer(id);", reconcile, StringComparison.Ordinal);
@@ -272,7 +272,7 @@ public sealed class DeltaFamilySeedingCensusTests
     public void DarlingReconcile_ForgetsTheDeltaCacheOnASameIdReconnectToo()
     {
         var worker = ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs");
-        var reconcile = worker[worker.IndexOf("private void ReconcileServers(", StringComparison.Ordinal)..];
+        var reconcile = worker[worker.IndexOf("internal void ReconcileServers(", StringComparison.Ordinal)..];
         reconcile = reconcile[..reconcile.IndexOf("\n    }", StringComparison.Ordinal)];
 
         var forgets = System.Text.RegularExpressions.Regex.Matches(reconcile, System.Text.RegularExpressions.Regex.Escape("_deltas?.ClearServer(id);")).Count;

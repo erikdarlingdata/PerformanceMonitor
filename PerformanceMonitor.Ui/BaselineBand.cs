@@ -31,6 +31,9 @@ public static class BaselineBand
     /// <summary>Fill opacity of the band, out of 255. Low enough that the series on top reads through it.</summary>
     public const byte FillAlpha = 40;
 
+    /// <summary>#8224: the lighter fill for a band whose colour reads as a solid block at <see cref="FillAlpha"/> (the Overview's amber Wait lane: brown on Dark, beige on Cool Breeze).</summary>
+    public const byte LightFillAlpha = 22;
+
     /// <summary>Adds the band (Y range <paramref name="lower"/> to <paramref name="upper"/>) in <paramref name="hexColor"/>.</summary>
     public static ScottPlot.Plottables.VerticalSpan Add(ScottPlot.Plot plot, double lower, double upper, string hexColor)
     {
@@ -87,7 +90,7 @@ public static class BaselineBand
     /// no outline), and a gap stays empty. The dashed mean is stepped the same way. The fill is added first so it paints behind
     /// the lane's series.
     /// </summary>
-    public static void AddBand(ScottPlot.Plot plot, IReadOnlyList<HourStep> steps, string hexColor)
+    public static void AddBand(ScottPlot.Plot plot, IReadOnlyList<HourStep> steps, string hexColor, byte fillAlpha = FillAlpha)
     {
         var runs = Runs(steps);
         foreach (var run in runs)
@@ -101,7 +104,7 @@ public static class BaselineBand
                 outline[upper.Count + i] = lower[lower.Count - 1 - i];
 
             var fill = plot.Add.Polygon(outline);
-            fill.FillColor = ScottPlot.Color.FromHex(hexColor).WithAlpha(FillAlpha);
+            fill.FillColor = ScottPlot.Color.FromHex(hexColor).WithAlpha(fillAlpha);
             fill.LineWidth = 0;
             /* #7386: the band is not a collected point. It starts at the window's left edge, so unmarked it would stand in
                for "the earliest point drawn" and cancel the trimmed axis start the lanes share. */

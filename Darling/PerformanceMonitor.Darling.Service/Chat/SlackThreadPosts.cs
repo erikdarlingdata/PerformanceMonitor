@@ -260,6 +260,20 @@ public static class SlackThreadPosts
         return new SlackThreadPostContent($"Proposed action: {kind} on {server} ({stateText})", blocks, new SlackCardFacts(SlackCardKinds.Proposal, id));
     }
 
+    /// <summary>An agent's message to the thread (#7659, <c>post_investigation_message</c>): the agent and its text at the mode, bounded. The text is
+    /// labelled as the agent's; <c>metadataOnly</c> withholds it and says so.</summary>
+    public static SlackThreadPostContent AgentMessagePost(string agentName, string? text, McpDataDetail mode)
+    {
+        var agent = Bounded(agentName, TextLimit);
+        var body = mode == McpDataDetail.MetadataOnly
+            ? "_The agent's message is withheld at this store's data detail setting._"
+            : Bounded(mode == McpDataDetail.MaskLiterals ? McpDataDetailMasker.MaskLiterals(text ?? "") : text, AgentMessageLimit);
+        return new SlackThreadPostContent($"Message from agent {agent}", [Section($"*Agent {agent} says:*\n{body}")]);
+    }
+
+    /// <summary>The most escaped characters of an agent's message one section carries: under Slack's 3,000-character section limit with the heading.</summary>
+    private const int AgentMessageLimit = 2800;
+
     /// <summary>How a request ended without a resolution: closed by a person, expired, or out of claims. <paramref name="actor"/> is the
     /// person when one acted, and <paramref name="reason"/> what they or the service said.</summary>
     public static SlackThreadPostContent EndPost(string state, string? actor, string? reason)

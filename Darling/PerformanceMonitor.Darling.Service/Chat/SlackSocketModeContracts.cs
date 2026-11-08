@@ -27,7 +27,12 @@ public sealed record SlackInboundEvent(
     string? ThreadTs,
     string? UserId,
     JsonObject Event,
-    JsonObject Payload);
+    JsonObject Payload)
+{
+    /// <summary>#7659: the bot's own user id, learned from <c>auth.test</c> at connect, so a handler can tell a mention of this bot from any other
+    /// <c>&lt;@user&gt;</c> token in the text. Null only on an event made outside the listener.</summary>
+    public string? BotUserId { get; init; }
+}
 
 /// <summary>#7657: one interactive payload (a button press) that passed every listener filter. <see cref="UserTeamId"/> equals
 /// <see cref="TeamId"/>: a press from another workspace in a shared channel is dropped before this record exists. <see cref="Channel"/>
