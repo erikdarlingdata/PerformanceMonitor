@@ -255,10 +255,11 @@ public partial class LiteAlertForwardingTests
     }
 
     [Fact]
-    public async Task Deliverer_ASendThatFailsOnItsOwn_IsUnreported_NotAStop()
+    public async Task Deliverer_ASendThatFailsOnItsOwn_IsReportedAsFailed_NotAStop()
     {
         /* A cancel the caller did not ask for (an HTTP client's own timeout surfacing as a cancellation) and any
-           other exception stay what they were: logged, swallowed, and answered as "unreported". */
+           other exception are logged and swallowed, and answered as every channel failed (#8246): nothing is known to
+           have reached anyone, so the engine tries the alert again instead of reading the throw as delivered. */
         var deliverer = new LiteAlertDeliverer(
             (_, _, _, _, _) => { },
             (_, _, _, _, _, _, _, _, _, _, _, _) => throw new OperationCanceledException("the send's own timeout"),
@@ -268,7 +269,14 @@ public partial class LiteAlertForwardingTests
             (_, _, _, _, _, _, _, _, _, _, _, _) => throw new InvalidOperationException("boom"),
             _ => null);
 
-        Assert.Null(await deliverer.DeliverAndReportAsync(Outcome("High CPU")));
-        Assert.Null(await broken.DeliverAndReportAsync(Outcome("High CPU")));
+        var timedOut = await deliverer.DeliverAndReportAsync(Outcome("High CPU"));
+        Assert.NotNull(timedOut);
+        Assert.True(FailedSendBackoff.EveryChannelFailed(timedOut));
+        Assert.Equal("the send's own timeout", timedOut!.SendError);
+
+        var thrown = await broken.DeliverAndReportAsync(Outcome("High CPU"));
+        Assert.NotNull(thrown);
+        Assert.True(FailedSendBackoff.EveryChannelFailed(thrown));
+        Assert.Equal("boom", thrown!.SendError);
     }
 }

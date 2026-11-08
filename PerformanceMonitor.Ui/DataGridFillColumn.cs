@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections.Specialized;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Windows;
@@ -53,6 +54,12 @@ public static class DataGridFillColumn
     /// <summary>Grids being fitted right now, so the width change a fit makes does not start another fit.</summary>
     private static readonly HashSet<DataGrid> s_fitting = new();
 
+    /// <summary>The handler each grid listens for row changes with, kept so turning the fit off (or applying the style again) detaches the same one.</summary>
+    private static readonly ConditionalWeakTable<DataGrid, NotifyCollectionChangedEventHandler> s_itemsChanged = new();
+
+    /// <summary>Scroll viewers whose content scrolls by pixel because their grid is empty (see <see cref="KeepEmptyGridScrollable"/>).</summary>
+    private static readonly ConditionalWeakTable<ScrollViewer, object> s_emptyScroll = new();
+
     private static void OnEnabledChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
         if (d is not DataGrid grid)
@@ -64,11 +71,21 @@ public static class DataGridFillColumn
         grid.Loaded -= OnLoaded;
         grid.RemoveHandler(ScrollViewer.ScrollChangedEvent, (ScrollChangedEventHandler)OnScrollChanged);
         grid.RemoveHandler(Thumb.DragCompletedEvent, (DragCompletedEventHandler)OnDragCompleted);
+        if (s_itemsChanged.TryGetValue(grid, out var attached))
+        {
+            ((INotifyCollectionChanged)grid.Items).CollectionChanged -= attached;
+            s_itemsChanged.Remove(grid);
+        }
+
         if ((bool)e.NewValue)
         {
             grid.Loaded += OnLoaded;
             grid.AddHandler(ScrollViewer.ScrollChangedEvent, (ScrollChangedEventHandler)OnScrollChanged);
             grid.AddHandler(Thumb.DragCompletedEvent, (DragCompletedEventHandler)OnDragCompleted);
+            /* #8223: rows arriving at or leaving an empty grid change whether its scroll viewer needs the empty-grid width (see KeepEmptyGridScrollable). */
+            NotifyCollectionChangedEventHandler onItemsChanged = (_, _) => Fit(grid);
+            s_itemsChanged.Add(grid, onItemsChanged);
+            ((INotifyCollectionChanged)grid.Items).CollectionChanged += onItemsChanged;
             if (grid.IsLoaded)
             {
                 Fit(grid);
@@ -103,6 +120,8 @@ public static class DataGridFillColumn
         {
             return;
         }
+
+        KeepEmptyGridScrollable(grid, scroll);
 
         var fill = new List<(DataGridColumn Column, double Weight)>();
         var fixedWidth = 0.0;
@@ -150,6 +169,43 @@ public static class DataGridFillColumn
         finally
         {
             s_fitting.Remove(grid);
+        }
+    }
+
+    /// <summary>
+    /// #8223: an empty grid never scrolls sideways. WPF takes the scroll extent from the rows, so with none the extent is 0: columns that do not fit
+    /// (the health grids, all fixed columns, empty most of the time) were cut at the edge, the last one mid-header, with no way to reach the rest. While the
+    /// grid is empty and its columns are wider than the viewport, the scroll viewer scrolls by pixel and its content is held as wide as the columns, so
+    /// the horizontal scroll bar shows and the headers scroll with it. Rows arriving put it back to scrolling by row.
+    /// </summary>
+    private static void KeepEmptyGridScrollable(DataGrid grid, ScrollViewer scroll)
+    {
+        if (scroll.Content is not FrameworkElement presenter)
+        {
+            return;
+        }
+
+        /* The width each column is about to have, as the fit below counts it: a column given an absolute width is laid out that wide even before the pass that says so. */
+        var total = grid.Columns.Where(c => c.Visibility == Visibility.Visible)
+            .Sum(c => c.Width.IsAbsolute ? Math.Max(c.Width.Value, c.MinWidth) : c.ActualWidth);
+        if (grid.Items.Count == 0 && total > scroll.ViewportWidth + 0.5)
+        {
+            if (!s_emptyScroll.TryGetValue(scroll, out _))
+            {
+                s_emptyScroll.Add(scroll, scroll);
+                scroll.CanContentScroll = false;
+            }
+
+            if (Math.Abs(presenter.MinWidth - total) >= 0.5)
+            {
+                presenter.MinWidth = total;
+            }
+        }
+        else if (s_emptyScroll.TryGetValue(scroll, out _))
+        {
+            s_emptyScroll.Remove(scroll);
+            scroll.ClearValue(ScrollViewer.CanContentScrollProperty);
+            presenter.ClearValue(FrameworkElement.MinWidthProperty);
         }
     }
 
