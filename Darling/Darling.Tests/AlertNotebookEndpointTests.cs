@@ -777,4 +777,80 @@ public sealed class AlertNotebookEndpointTests
 
         Assert.Equal("mechanical/tempdb Space", root.GetProperty("template").GetProperty("id").GetString());
     }
+
+    /// <summary>#8323: the High CPU cells for a server whose engine is <paramref name="engineKind"/> (null: the engine-blind shape,
+    /// a fleet-level store with no server). Reached through the template's context, which carries the engine.</summary>
+    private static List<string> CpuCellTitlesFor(string? engineKind)
+    {
+        var build = typeof(AlertNotebookEndpoint).GetMethod("BuildCpuCells", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+        Assert.NotNull(build);
+        var parameters = build!.GetParameters();
+        if (Array.FindIndex(parameters, p => p.ParameterType == typeof(AlertNotebookEndpoint.AuthoredContext)) < 0)
+        {
+            Assert.Fail("BuildCpuCells takes no AuthoredContext, so it cannot learn the server's engine and emits both engines' cells for every server.");
+        }
+
+        var contextType = typeof(AlertNotebookEndpoint.AuthoredContext);
+        var ctor = contextType.GetConstructors().Single();
+        var ctorParameters = ctor.GetParameters();
+        var engineIndex = Array.FindIndex(ctorParameters, p => p.Name == "EngineKind");
+        if (engineIndex < 0)
+        {
+            Assert.Fail("AuthoredContext carries no EngineKind.");
+        }
+
+        var ctorArgs = ctorParameters.Select(p => p.HasDefaultValue
+            ? p.DefaultValue ?? (p.ParameterType.IsValueType ? Activator.CreateInstance(p.ParameterType) : null)
+            : p.ParameterType.IsValueType ? Activator.CreateInstance(p.ParameterType) : null).ToArray();
+        ctorArgs[engineIndex] = engineKind;
+        var context = ctor.Invoke(ctorArgs);
+
+        var windowEnd = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+        var args = new object?[] { "High CPU", "SRV1", "2026-01-01T12:00:00Z", windowEnd.AddHours(-24), windowEnd, null, null, "firing", context };
+        var cells = (System.Text.Json.Nodes.JsonArray)build.Invoke(null, args)!;
+
+        /* Every shape the template emits is a notebook the definition validator accepts: each read cell names a catalog read and
+           binds only arguments that read declares. */
+        var definition = new System.Text.Json.Nodes.JsonObject { ["kind"] = "notebook", ["cells"] = cells.DeepClone() };
+        var validation = DarlingWebEndpoints.ValidateNotebookDefinition(definition);
+        Assert.True(validation.IsValid, validation.Error);
+
+        return cells.Select(c => (string)c!["title"]!).ToList();
+    }
+
+    [Fact]
+    public void HighCpu_ForAPostgresServer_CarriesOnlyThePostgresCells()
+    {
+        var titles = CpuCellTitlesFor(PerformanceMonitor.Collectors.MonitoredEngineKind.Postgres);
+
+        Assert.Equal(new[] { "High CPU", "Status", "PostgreSQL CPU", "Top queries by CPU" }, titles);
+    }
+
+    [Fact]
+    public void HighCpu_ForAnAuroraPostgresServer_CarriesOnlyThePostgresCells()
+    {
+        var titles = CpuCellTitlesFor(PerformanceMonitor.Collectors.MonitoredEngineKind.AuroraPostgres);
+
+        Assert.DoesNotContain("SQL Server CPU", titles);
+        Assert.DoesNotContain("Top procedures by CPU", titles);
+        Assert.DoesNotContain("Scheduler pressure", titles);
+        Assert.Contains("PostgreSQL CPU", titles);
+    }
+
+    [Fact]
+    public void HighCpu_ForASqlServer_KeepsTheSqlServerCells_AndNoPostgresGauge()
+    {
+        var titles = CpuCellTitlesFor(PerformanceMonitor.Collectors.MonitoredEngineKind.SqlServer);
+
+        Assert.Equal(new[] { "High CPU", "Status", "SQL Server CPU", "Top queries by CPU", "Top procedures by CPU", "Scheduler pressure" }, titles);
+    }
+
+    /// <summary>With no server there is no engine (a fleet-level store), and the template keeps both gauges and every drill-down.</summary>
+    [Fact]
+    public void HighCpu_WithNoEngine_KeepsBothEnginesCells()
+    {
+        var titles = CpuCellTitlesFor(null);
+
+        Assert.Equal(new[] { "High CPU", "Status", "SQL Server CPU", "PostgreSQL CPU", "Top queries by CPU", "Top procedures by CPU", "Scheduler pressure" }, titles);
+    }
 }
