@@ -241,14 +241,22 @@ public static partial class PgTargetAdvice
         var knob = KnobFact(facts, PgTargetFactKeys.ConfigSharedBuffers);
         var pressure = KnobFact(facts, PgTargetFactKeys.BufferCachePressure);
 
+        /* #8322: on Aurora the service sizes the knob, so neither the headline nor the story names initdb. */
+        var managedByService = (KnobMeta(knob, "not_applicable_on_aurora") ?? 0) > 0;
         var stated = knob is null
             ? "at the initdb default of 128 MB"
-            : KnobMb(knob.Value) + (knob.Value <= PgTargetScorer.SharedBuffersInitdbDefaultMb ? ": the initdb default" : string.Empty);
+            : KnobMb(knob.Value) + (managedByService
+                ? ": set by the service from the instance's capacity"
+                : (knob.Value <= PgTargetScorer.SharedBuffersInitdbDefaultMb ? ": the initdb default" : string.Empty));
 
         var sb = new StringBuilder(720);
-        sb.Append("`shared_buffers` is PostgreSQL's own page cache. initdb writes 128 MB into every new cluster's postgresql.conf " +
-                  "regardless of the host, so 128 MB means nobody sized it: a 64 GB host caching 128 MB of its data itself and " +
-                  "relying on the operating system's page cache for the rest. ");
+        sb.Append(managedByService
+            ? "`shared_buffers` is PostgreSQL's own page cache. On Aurora the service sets it from the instance's capacity (a " +
+              "parameter-group formula over the instance class's memory, or the current capacity units on Serverless, which " +
+              "moves it as the capacity moves), so the value is not a default nobody sized, and it is not graded here. "
+            : "`shared_buffers` is PostgreSQL's own page cache. initdb writes 128 MB into every new cluster's postgresql.conf " +
+              "regardless of the host, so 128 MB means nobody sized it: a 64 GB host caching 128 MB of its data itself and " +
+              "relying on the operating system's page cache for the rest. ");
 
         if (pressure is not null && pressure.BaseSeverity > 0)
         {
