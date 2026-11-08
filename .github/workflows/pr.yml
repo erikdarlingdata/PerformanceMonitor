@@ -972,7 +972,8 @@ jobs:
           # The body: the failure, the run, and every dev commit from this sha back to the last one whose `context` status is
           # success, each with its short sha, pull request number and title. The script writes the head of the body even
           # when the commit list cannot be read, so the issue is filed either way.
-          python -I .github/scripts/ci-verdict-issues.py dev-red-body --repo "${GITHUB_REPOSITORY}" --red-sha "${GITHUB_SHA}" \n            --run-url "${RUN_URL}" --failed "${FAILED}" --kind "${kind}" --context "${context}" --out body.txt
+          python -I .github/scripts/ci-verdict-issues.py dev-red-body --repo "${GITHUB_REPOSITORY}" --red-sha "${GITHUB_SHA}" \
+            --run-url "${RUN_URL}" --failed "${FAILED}" --kind "${kind}" --context "${context}" --out body.txt
 
           if [ -n "${issue}" ]; then
             gh issue comment "${issue}" --repo "${GITHUB_REPOSITORY}" --body-file body.txt

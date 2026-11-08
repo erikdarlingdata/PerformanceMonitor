@@ -282,6 +282,26 @@ code, stub, text = red_body(history, set())
 check("red body: no green found says so", "(no dev commit with a green CI result among the 5 looked at)" in text, True)
 check("red body: and lists them all", text.count("\n- "), 5)
 
+# #7819: a red full run sweeps back to the last green `CI full suite`, and a green `CI result` above it does not stop the sweep.
+full_pages = page(f"repos/{REPO}/commits?sha={RED}", history)
+for sha, ctx in [("1111111111111111111111111111111111111111", "CI result"), ("3333333333333333333333333333333333333333", "CI full suite")]:
+    full_pages[f"repos/{REPO}/commits/{sha}/statuses?per_page=100&page=1"] = [{"context": ctx, "state": "success"}]
+with tempfile.TemporaryDirectory() as d:
+    out_file = os.path.join(d, "body.txt")
+    with contextlib.redirect_stdout(io.StringIO()):
+        code = vi.run(["dev-red-body", "--repo", REPO, "--red-sha", RED, "--run-url", "u", "--failed", " x",
+                       "--kind", "full suite", "--context", "CI full suite", "--out", out_file], fetcher=Stub(full_pages), write=Recorder())
+    with open(out_file, encoding="utf-8") as fh:
+        full_text = fh.read()
+full_lines = full_text.splitlines()
+check("red full body: exits 0 and names the kind", (code, full_lines[0]), (0, f"The dev full suite CI failed at {RED}."))
+check("red full body: sweeps past a green CI result to the green CI full suite",
+      [l for l in full_lines if l.startswith("- ")],
+      ["- e4eea0a08 #8130 FinOps columns size to their values (#8113)", "- 111111111 #8120 Second swept merge",
+       "- 222222222 #8119 Third, with an (at)mention"])
+check("red full body: the stop line names CI full suite", "(stopped at 333333333, the last dev commit with a green CI full suite)" in full_lines, True)
+check("red full body: the heading names CI full suite", any(l.startswith("Commits since the last dev commit with a green CI full suite") for l in full_lines), True)
+
 code, stub, text = red_body(commits((RED, "A merge with no pull request number")), set())
 check("red body: a subject without a pull request number", "- e4eea0a08 (no PR) A merge with no pull request number" in text, True)
 
