@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using Darling.Tests;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
@@ -626,16 +627,81 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
         Assert.Equal(0, await CountAsync("SELECT COUNT(*) FROM query_tag_sightings"));
     }
 
-    [Fact]
-    public async Task TheShutdownDrain_WritesWhatTheLastRoundBuffered()
+    private RemoteCollectorService ServiceWithOneBufferedSighting()
     {
         var servers = new ServerManager(System.IO.Path.GetTempPath());
         var service = new RemoteCollectorService(_fixture.DuckDb, servers, new ScheduleManager(System.IO.Path.GetTempPath()));
         service.QueryTagSightingBufferForTests = new QueryTagSightingBuffer();
         service.QueryTagSightingBufferForTests.Append(QuerySnapshotsCollector.Instance, [Snapshot(HashA)], serverId: 7);
+        return service;
+    }
 
-        service.FlushQueryTagSightingsAtShutdown(System.Threading.CancellationToken.None);
+    /// <summary>
+    /// Holds the process-wide write lock on another thread until <paramref name="release"/> is set, and signals
+    /// <paramref name="held"/> once it has it. The caller releases in a finally and awaits the task.
+    /// </summary>
+    private Task HoldWriteLock(System.Threading.ManualResetEventSlim held, System.Threading.ManualResetEventSlim release) =>
+        Task.Run(() =>
+        {
+            using var writeLock = _fixture.DuckDb.AcquireWriteLock(timeout: TimeSpan.FromSeconds(30));
+            held.Set();
+            release.Wait(TestContext.Current.CancellationToken);
+        }, TestContext.Current.CancellationToken);
 
+    /* The write lock is one for the whole test process, so a neighbouring class can hold it for longer than the app's
+       ShutdownFlushLimit while this runs. The drain is checked with this host's own budget, which WriteLockBudgetTests
+       proves outlasts every deliberate hold in the suite; the app's limit has its own pin below. */
+    [Fact]
+    public async Task TheShutdownDrain_WritesWhatTheLastRoundBuffered()
+    {
+        var service = ServiceWithOneBufferedSighting();
+
+        service.FlushQueryTagSightingsAtShutdown(LocalDataService.WriteLockBudget, System.Threading.CancellationToken.None);
+
+        Assert.Equal(0, service.QueryTagSightingBufferForTests.Count);
+        Assert.Equal(1, await CountAsync($"SELECT COUNT(*) FROM query_tag_sightings WHERE key = '{HashA}'"));
+    }
+
+    [Fact]
+    public async Task TheShutdownDrain_GivesUpAtTheAppsLimit_WhileAnotherWriterHoldsTheLock_AndWritesNothing()
+    {
+        var service = ServiceWithOneBufferedSighting();
+        var held = new System.Threading.ManualResetEventSlim();
+        var release = new System.Threading.ManualResetEventSlim();
+        var holder = HoldWriteLock(held, release);
+        held.Wait(TestContext.Current.CancellationToken);
+        try
+        {
+            service.FlushQueryTagSightingsAtShutdown(System.Threading.CancellationToken.None);
+        }
+        finally
+        {
+            release.Set();
+            await holder;
+        }
+
+        Assert.Equal(1, service.QueryTagSightingBufferForTests.Count);
+        Assert.Equal(0, await CountAsync($"SELECT COUNT(*) FROM query_tag_sightings WHERE key = '{HashA}'"));
+    }
+
+    [Fact]
+    public async Task TheShutdownDrain_WithThisHostsBudget_WaitsOutAWriterThatHoldsPastTheAppsLimit_AndThenWrites()
+    {
+        var service = ServiceWithOneBufferedSighting();
+        var held = new System.Threading.ManualResetEventSlim();
+        var holder = Task.Run(() =>
+        {
+            using var writeLock = _fixture.DuckDb.AcquireWriteLock(timeout: TimeSpan.FromSeconds(30));
+            held.Set();
+            /* Held for longer than the app's limit: a drain on that limit gives up while this holds. */
+            TestWait.Elapse(RemoteCollectorService.ShutdownFlushLimit + TimeSpan.FromSeconds(1));
+        }, TestContext.Current.CancellationToken);
+        held.Wait(TestContext.Current.CancellationToken);
+
+        service.FlushQueryTagSightingsAtShutdown(LocalDataService.WriteLockBudget, System.Threading.CancellationToken.None);
+        await holder;
+
+        Assert.Equal(0, service.QueryTagSightingBufferForTests.Count);
         Assert.Equal(1, await CountAsync($"SELECT COUNT(*) FROM query_tag_sightings WHERE key = '{HashA}'"));
     }
 
