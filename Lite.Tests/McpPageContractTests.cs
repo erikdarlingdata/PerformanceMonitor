@@ -1085,7 +1085,10 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
     [Fact]
     public async Task DailySummary_StopsPaintingPurgedDaysGreen_AndPublishesTheHorizon()
     {
+        /* One reading of the clock (#5496): every seed and expectation comes from this instant, and the reader's own
+           horizon and default-date clock is pinned to it, since a midnight between the two readings moves both by a day. */
         var now = DateTime.UtcNow;
+        _dataService.ClockForTests = () => now;
         var today = now.Date;
         var horizon = LocalDataService.DailySummaryRetentionHorizon(now);
         var ghostDay = horizon.AddDays(-10);
@@ -1139,6 +1142,18 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
         Assert.Equal(horizon.ToString("yyyy-MM-dd"), todayRow.GetProperty("retention_horizon").GetString());
 
         Assert.StartsWith("Invalid summary_date value '01/02/2026'", McpHelpers.ErrorMessageOf(await McpHealthTools.GetDailySummary(_dataService, _serverManager, ServerName, "01/02/2026")), StringComparison.Ordinal);
+
+        /* The pin steers every reader-side clock read: moved two months on, the range's horizon, the default summary
+           date and the no-rows day's horizon all follow it rather than the wall clock. */
+        var later = now.AddMonths(2);
+        _dataService.ClockForTests = () => later;
+        var laterHorizon = LocalDataService.DailySummaryRetentionHorizon(later).ToString("yyyy-MM-dd");
+        var laterRange = Parse(await McpHealthTools.GetDailySummaryRange(_dataService, _serverManager, ServerName, daysBack));
+        Assert.Equal(laterHorizon, laterRange.GetProperty("retention_horizon").GetString());
+        var laterDefault = await _dataService.GetDailySummaryAsync(_serverId);
+        Assert.NotNull(laterDefault);
+        Assert.Equal(later.Date.ToString("yyyy-MM-dd"), laterDefault!.SummaryDate.ToString("yyyy-MM-dd"));
+        Assert.Equal(laterHorizon, laterDefault.RetentionHorizon?.ToString("yyyy-MM-dd"));
     }
 
     /// <summary>
