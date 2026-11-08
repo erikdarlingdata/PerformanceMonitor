@@ -429,7 +429,7 @@ public partial class TimeRangePicker : UserControl
         var wallNow = DisplayZone.ToDisplay(NowUtc, Zone);
         PickCalendar.SelectedDates.Clear();
         /* The days after today cannot be picked, but they are drawn: a display-date end hides every later day, and with it the
-           week rows after this week, so the month showed two rows and a blank below them early in a month. */
+           week rows after this week. */
         PickCalendar.BlackoutDates.Clear();
         PickCalendar.BlackoutDates.Add(new CalendarDateRange(wallNow.Date.AddDays(1), DateTime.MaxValue));
         PickCalendar.DisplayDate = Resolve() is { } held ? DisplayZone.ToDisplay(held.StartUtc, Zone).Date : wallNow.Date;
@@ -441,9 +441,9 @@ public partial class TimeRangePicker : UserControl
 
     /// <summary>
     /// Places the popup below the button, left-aligned with it, and slides it left when it would pass the right edge of the
-    /// window the picker is in, never past the window's left edge: WPF places a popup against the screen, so under a button on
-    /// the right of a window at the 900 px minimum it hung past the window or was pushed to the screen's edge. The sizes arrive
-    /// in the popup's own units; the button's width in both units gives the scale.
+    /// window the picker is in, never past the window's left edge: WPF places a popup against the screen, not the window, and a
+    /// window at the 900 px minimum is narrower than the screen. The sizes arrive in the popup's own units; the button's width
+    /// in both units gives the scale.
     /// </summary>
     private CustomPopupPlacement[] PlacePopup(Size popupSize, Size targetSize, Point offset)
     {

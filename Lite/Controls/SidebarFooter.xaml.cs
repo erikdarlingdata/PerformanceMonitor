@@ -52,8 +52,8 @@ public partial class SidebarFooter : UserControl
     /// <summary>
     /// Opens the More menu beside its button, where it fits: level with the button's top when the window has room below, else
     /// level with the button's bottom, so it grows upward and stays inside the window. The button sits at the bottom of the
-    /// sidebar, and WPF places a popup against the screen, so a menu that opened downward hung past the window at 900x600. The
-    /// sizes arrive in the popup's own units; the button's height in both units gives the scale.
+    /// sidebar, and WPF places a popup against the screen, not the window, so a window shorter than the screen bounds nothing on
+    /// its own. The sizes arrive in the popup's own units; the button's height in both units gives the scale.
     /// </summary>
     private CustomPopupPlacement[] PlaceMoreMenu(Size popupSize, Size targetSize, Point offset)
     {
