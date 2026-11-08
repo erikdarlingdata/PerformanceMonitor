@@ -39,6 +39,35 @@ public partial class SidebarFooter : UserControl
     /// <summary>The Import Data menu item, which the window disables and relabels while an import runs.</summary>
     internal MenuItem ImportDataMenuItem => ImportDataItem;
 
+    /// <summary>
+    /// #8306: the footer in the sidebar's 40 px rail. Compact stacks the five buttons one per row, each the icon alone, centred, with the
+    /// button's label as its tooltip (a button with a tooltip of its own keeps it). Not compact restores the 2x2 block with More across the
+    /// bottom, icon and label side by side.
+    /// </summary>
+    internal void SetCompact(bool compact)
+    {
+        var buttons = new[] { AddServerButton, ManageServersButton, InvestigationsButton, SettingsButton, MoreButton };
+        for (var i = 0; i < buttons.Length; i++)
+        {
+            var button = buttons[i];
+            var panel = (StackPanel)button.Content;
+            var icon = (TextBlock)panel.Children[0];
+            var label = (TextBlock)panel.Children[1];
+            label.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
+            icon.Margin = compact ? new Thickness(0) : new Thickness(0, 0, 6, 0);
+            button.Padding = compact ? new Thickness(0, 4, 0, 4) : new Thickness(6, 4, 6, 4);
+            button.HorizontalContentAlignment = compact ? HorizontalAlignment.Center : HorizontalAlignment.Left;
+            if (button.ToolTip is null || button.ToolTip is string tip && tip == label.Text)
+            {
+                button.ToolTip = compact ? label.Text : null;
+            }
+
+            Grid.SetRow(button, compact ? i : i / 2);
+            Grid.SetColumn(button, compact ? 0 : i % 2);
+            Grid.SetColumnSpan(button, compact || button == MoreButton ? 2 : 1);
+        }
+    }
+
     private void More_Click(object sender, RoutedEventArgs e)
     {
         MoreMenu.PlacementTarget = MoreButton;
