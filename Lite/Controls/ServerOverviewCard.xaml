@@ -4,9 +4,6 @@
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:controls="clr-namespace:PerformanceMonitorLite.Controls">
-    <UserControl.Resources>
-        <BooleanToVisibilityConverter x:Key="BoolToVisibility"/>
-    </UserControl.Resources>
     <controls:OverviewCardBorder Background="{DynamicResource BackgroundLightBrush}"
             BorderBrush="{Binding CardBorderBrush}"
             BorderThickness="2" CornerRadius="6"
@@ -130,23 +127,18 @@
                          footer it has no dot. Background="Transparent" on both cells is load-bearing,
                          not decoration: a TextBlock with a null Background hit-tests on its rendered
                          glyphs alone, so the tooltip would appear over the letters and nowhere in
-                         the space around them (#2429). -->
+                         the space around them (#2429). The value wraps (#8304): a dated stamp with
+                         its state word, "2026-11-07 14:48:55 (stopped)", is wider than the room left
+                         beside the label, and the state word is what the row is for, so it takes a
+                         second line rather than being cut. -->
                     <TextBlock Grid.Row="4" Grid.Column="1" Text="Last Collect:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"
                                Background="Transparent" ToolTip="{Binding CollectionFreshnessTooltip}"/>
                     <TextBlock Grid.Row="4" Grid.Column="2" Grid.ColumnSpan="2" Text="{Binding LastCollectionDisplay}" FontSize="11" Foreground="{Binding LastCollectionBrush}" FontWeight="SemiBold" Margin="0,2,8,2"
-                               Background="Transparent" ToolTip="{Binding CollectionFreshnessTooltip}"/>
+                               TextWrapping="Wrap" Background="Transparent" ToolTip="{Binding CollectionFreshnessTooltip}"/>
                 </Grid>
             </StackPanel>
-            <!-- Offline overlay -->
-            <Border Background="#80000000" CornerRadius="6"
-                    Visibility="{Binding IsOffline, Converter={StaticResource BoolToVisibility}}">
-                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
-                    <TextBlock Text="&#x2717;" FontSize="28" Foreground="{DynamicResource ErrorBrush}"
-                               HorizontalAlignment="Center"/>
-                    <TextBlock Text="Offline" FontSize="13" Foreground="{DynamicResource ErrorBrush}"
-                               FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,4,0,0"/>
-                </StackPanel>
-            </Border>
+            <!-- An offline card carries no overlay (#8304): the status line under the name already says Offline, the border is red,
+                 and the Blocking and Deadlocks rows read a dash with the unknown dot, so the metric rows stay readable. -->
         </Grid>
     </controls:OverviewCardBorder>
 </UserControl>

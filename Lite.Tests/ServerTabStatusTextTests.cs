@@ -39,7 +39,7 @@ public class ServerTabStatusTextTests
         var end = source.IndexOf("Refresh alerts tab when selected", start, StringComparison.Ordinal);
         var body = source.Substring(start, end - start);
 
-        Assert.Contains("ConnectedStatusText(", body, StringComparison.Ordinal);
+        Assert.Contains("WordSelectedServerTabStatus(", body, StringComparison.Ordinal);
         Assert.DoesNotContain("$\"Connected to", body, StringComparison.Ordinal);
     }
 
