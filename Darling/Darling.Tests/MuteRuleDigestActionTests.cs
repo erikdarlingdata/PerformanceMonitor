@@ -37,11 +37,13 @@ public sealed class MuteRuleDigestActionTests
        fire's own time, never assumed to span the day. */
     private static readonly DateTime LastMinuteUtc = new(2026, 7, 1, 23, 59, 30, DateTimeKind.Utc);
 
-    /// <summary>Gives <paramref name="rule"/> a daily UTC window that spans the day, as 00:00 to 23:59.</summary>
+    /// <summary>Gives <paramref name="rule"/> a daily UTC window that opens an hour before <paramref name="fireAtUtc"/> and closes an
+    /// hour after it, so the fire is inside it whatever its minute. Around the last minute of the day the window crosses midnight.</summary>
     private static MuteRule WindowAround(MuteRule rule, DateTime fireAtUtc)
     {
-        rule.RecurStartTime = new TimeOnly(0, 0);
-        rule.RecurEndTime = new TimeOnly(23, 59);
+        var fire = new TimeOnly(fireAtUtc.Hour, fireAtUtc.Minute);
+        rule.RecurStartTime = fire.AddHours(-1);
+        rule.RecurEndTime = fire.AddHours(1);
         rule.RecurTimeZone = "UTC";
         return rule;
     }
