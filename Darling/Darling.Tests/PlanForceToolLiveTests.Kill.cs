@@ -724,4 +724,102 @@ public sealed partial class PlanForceToolLiveTests
             Assert.Equal(0, await JournalActionRowsAsync(c));
         });
     }
+
+    /// <summary>
+    /// A login that cannot see a database reads its name as NULL (VIEW ANY DATABASE denied, and no user of its own there). When the server's entry excludes
+    /// databases, a session whose database cannot be named is refused on a dry run and on a write alike: the kill cannot show that the database is not an
+    /// excluded one, so it does not run, and the refusal names the grant that is missing. With no exclusions the same session is still killable.
+    /// </summary>
+    [Fact]
+    public async Task AKillOfASessionWhoseDatabaseCannotBeNamed_IsRefusedWhenTheServerExcludesDatabases_AndNamesTheMissingGrant()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var offset = await SeedClockAsync(c);
+            await PgExecAsync(c.Connection, "UPDATE config.config_monitored_servers SET excluded_databases = ARRAY['some_other_db'] WHERE server_id = 7", c.Ct);
+            await using (var admin = await OpenAsync(c.Sql.Admin(), c.Ct))
+            {
+                await ExecAsync(admin, $"DENY VIEW ANY DATABASE TO [{c.Sql.Login}];", c.Ct);
+                await ExecAsync(admin, $"USE [{c.Sql.Database}]; DROP USER [{c.Sql.Login}];", c.Ct);
+            }
+
+            var victim = await OpenVictimAsync(c);
+            await using var _ = victim.Connection;
+
+            foreach (var dryRun in new[] { true, false })
+            {
+                var json = Parse(await KillAsync(c, victim.SessionId, UtcText(victim, offset), dryRun));
+                Assert.True("refused" == (string?)json["status"], json.ToJsonString());
+                Assert.Equal("session_database_unknown", (string?)json["reason"]);
+                Assert.Contains("VIEW ANY DATABASE", (string?)json["message"], StringComparison.Ordinal);
+                Assert.True(await SessionAliveAsync(c, victim));
+            }
+
+            Assert.Equal(0, await JournalActionRowsAsync(c));
+            Assert.Equal("2", await PgScalarAsync(c.Connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = 'session_database_unknown'", c.Ct));
+
+            /* No exclusions: there is nothing the unnamed database could be on, so the session is still killable, with no database name among its facts. */
+            await PgExecAsync(c.Connection, "UPDATE config.config_monitored_servers SET excluded_databases = NULL WHERE server_id = 7", c.Ct);
+            var passes = Parse(await KillAsync(c, victim.SessionId, UtcText(victim, offset), dryRun: true));
+            Assert.True("dry_run" == (string?)passes["status"], passes.ToJsonString());
+            Assert.Null((string?)passes["session"]!["database_name"]);
+            Assert.True(await SessionAliveAsync(c, victim));
+        });
+    }
+
+    /// <summary>
+    /// A running request can move its session to another database after the dry run read it, while last_request_end_time stays as it was. The kill batch
+    /// compares the database the dry run saw, so a session that moved to another database is refused as database_changed and nothing is killed.
+    /// </summary>
+    [Fact]
+    public async Task AKillOfASessionThatMovedToAnotherDatabaseSinceTheDryRun_IsRefusedAsDatabaseChanged_AndNothingIsKilled()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var offset = await SeedClockAsync(c);
+            var victim = await OpenVictimAsync(c);
+            await using var _ = victim.Connection;
+            var store = new InvestigationRequestStore(c.Source, 30, agentActionSource: c.Source);
+            var decision = await ServerActionGate.AuthorizeAsync(store, c.Source, c.Log, DarlingMcpPlanForceTools.KillToolName, ServerActionNames.KillSession, c.Arg,
+                new AgentActionTarget(7, "srv-7", victim.SessionId.ToString(CultureInfo.InvariantCulture), null), c.Ct);
+            var prepared = await DarlingMcpPlanForceTools.PrepareKillSessionAsync(c.Source, c.Source, c.Log, decision.Permit!, 7, "srv-7", azure: false, victim.SessionId,
+                victim.LoginLocal.AddMinutes(-offset), null, c.Ct);
+            Assert.True(prepared.Proceed, prepared.FixedAnswer ?? prepared.NotDone?.Message);
+
+            /* The session's next request moves to master and blocks on a lock another session holds, so the request stays running: its
+               last_request_end_time does not move, and the session is in master, not in the database the dry run read. */
+            await using var holder = await OpenAsync(c.Sql.Admin(), c.Ct);
+            await ExecAsync(holder, "USE master; BEGIN TRAN; EXEC sp_getapplock @Resource = N'pm8235_moved', @LockMode = 'Exclusive', @LockOwner = 'Transaction', @LockTimeout = 0;", c.Ct);
+            using var moved = new SqlCommand("USE master; EXEC sp_getapplock @Resource = N'pm8235_moved', @LockMode = 'Exclusive', @LockOwner = 'Session', @LockTimeout = -1;", victim.Connection) { CommandTimeout = 0 };
+            var running = moved.ExecuteNonQueryAsync(c.Ct);
+            try
+            {
+                await WaitForSessionDatabaseAsync(c, victim, databaseId: 1);
+                var written = await DarlingMcpPlanForceTools.WriteKillSessionAsync(prepared.Executor!, decision.Permit!, azure: false, prepared.Binding!, c.Ct);
+                Assert.True(RemediationOutcome.Refused == written.Outcome, written.Message);
+                Assert.Equal("database_changed", written.Reason);
+                Assert.False(written.Wrote);
+                Assert.True(await SessionAliveAsync(c, victim));
+            }
+            finally
+            {
+                await ExecAsync(holder, "ROLLBACK;", c.Ct);
+                try { await running; } catch (SqlException) { /* a session that was killed ends its request with an error */ }
+            }
+        });
+    }
+
+    /// <summary>Waits until the server's session view shows the session in <paramref name="databaseId"/>, within the test's own deadline.</summary>
+    private static async Task WaitForSessionDatabaseAsync(Ctx c, Victim v, int databaseId)
+    {
+        await using var admin = await OpenAsync(c.Sql.Admin(), c.Ct);
+        for (var attempt = 0; ; attempt++)
+        {
+            var now = await ScalarAsync(admin, $"SELECT database_id FROM sys.dm_exec_sessions WHERE session_id = {v.SessionId};", c.Ct);
+            if (now is not null && now is not DBNull && Convert.ToInt32(now, CultureInfo.InvariantCulture) == databaseId)
+                return;
+            Assert.True(attempt < 600, $"Session {v.SessionId} did not reach database {databaseId}; it is in {now}.");
+            await Task.Delay(50, c.Ct);
+        }
+    }
 }
