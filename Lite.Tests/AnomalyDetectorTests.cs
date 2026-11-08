@@ -1142,7 +1142,10 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
     [Fact]
     public async Task WaitMsPerSecBaseline_RatesEachRowOverItsOwnInterval_SoAReturningWaitTypeDoesNotDeflateTheCollection()
     {
-        var hour = _analysisStart.AddDays(-7);
+        /* The hour is seeded on the hour: the baseline's bucket is the analysis hour's hour of day, truncated, so a start part way
+           through the hour would leave the collections before it outside the bucket. */
+        var seeded = _analysisStart.AddDays(-7);
+        var hour = new DateTime(seeded.Year, seeded.Month, seeded.Day, seeded.Hour, 0, 0, seeded.Kind);
         for (int m = 0; m < 60; m++)
         {
             var at = hour.AddMinutes(m);
