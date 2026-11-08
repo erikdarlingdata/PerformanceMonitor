@@ -158,6 +158,80 @@ public sealed class McpSweepReportsWorklistBudgetLiveTests
         Assert.DoesNotContain("fit", note, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>Two small sweeps in the window: the newest sweep's document ships once. <c>latest</c> carries it in full; the
+    /// newest timeline entry keeps its header facts and a slim <c>report</c> with exactly the fields the sweep rows draw from
+    /// (<c>fleet.bands</c>, <c>watch</c>, and <c>would_have_paged</c> when the sweep ran muted), equal to latest's, and names
+    /// latest with <c>report_under</c>. The older entry keeps its whole document.</summary>
+    [Fact]
+    public async Task GetSweepReports_TheNewestSweepsDocument_ShipsOnce_AndItsEntryKeepsTheRowCounts()
+    {
+        var cs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live sweep-report single-document test.");
+        var ct = Ct;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        await using var postgres = NpgsqlDataSource.Create(WithSearchPath(scratch));
+
+        await SeedSweepsAsync(postgres, sweepCount: 2, serversPerReport: 6, openItems: 0, carriedItems: 0, ct);
+
+        var json = await DarlingMcpFleetSweepTools.GetSweepReports(postgres, NullLogger.Instance, cancellationToken: ct);
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        var latest = root.GetProperty("latest");
+        var latestId = latest.GetProperty("sweep_id").GetString();
+        var entries = root.GetProperty("sweeps").EnumerateArray().ToList();
+        Assert.Equal(2, entries.Count);
+
+        var newest = Assert.Single(entries, entry => entry.GetProperty("sweep_id").GetString() == latestId);
+        Assert.Equal("latest", newest.GetProperty("report_under").GetString());
+        var slim = newest.GetProperty("report");
+        Assert.Equal(new[] { "fleet", "watch" }, slim.EnumerateObject().Select(p => p.Name).OrderBy(k => k, StringComparer.Ordinal));
+        Assert.Equal(new[] { "bands" }, slim.GetProperty("fleet").EnumerateObject().Select(p => p.Name));
+        var full = latest.GetProperty("report");
+        Assert.Equal(full.GetProperty("fleet").GetProperty("bands").GetRawText(), slim.GetProperty("fleet").GetProperty("bands").GetRawText());
+        Assert.Equal(full.GetProperty("watch").GetRawText(), slim.GetProperty("watch").GetRawText());
+        Assert.Equal(6, full.GetProperty("servers").GetArrayLength());
+
+        var older = Assert.Single(entries, entry => entry.GetProperty("sweep_id").GetString() != latestId);
+        Assert.False(older.TryGetProperty("report_under", out _), "an older entry carries its own document and names nothing else");
+        Assert.Equal(6, older.GetProperty("report").GetProperty("servers").GetArrayLength());
+
+        Assert.False(root.GetProperty("truncated").GetBoolean());
+        Assert.False(root.GetProperty("over_budget").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("budget_note").ValueKind);
+    }
+
+    /// <summary>The measured shape: one sweep in the window whose document leaves <c>latest</c> under the budget on its own,
+    /// while latest plus a second copy of that document in the timeline entry is over it. With the document shipped once the
+    /// reply is under the budget, nothing is cut, and the reply says so.</summary>
+    [Fact]
+    public async Task GetSweepReports_ALatestUnderTheBudget_WhoseEntryWouldPushTheReplyOver_Fits()
+    {
+        var cs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live sweep-report measured-shape test.");
+        var ct = Ct;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        await using var postgres = NpgsqlDataSource.Create(WithSearchPath(scratch));
+
+        await SeedSweepsAsync(postgres, sweepCount: 1, serversPerReport: 95, openItems: 2, carriedItems: 0, ct);
+
+        var json = await DarlingMcpFleetSweepTools.GetSweepReports(postgres, NullLogger.Instance, cancellationToken: ct);
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        var latestBytes = Encoding.UTF8.GetByteCount(root.GetProperty("latest").GetRawText());
+        Assert.InRange(latestBytes, McpResponseBudget.DefaultBytes / 2, McpResponseBudget.DefaultBytes);
+        Assert.True(Encoding.UTF8.GetByteCount(json) <= McpResponseBudget.DefaultBytes,
+            $"the reply is {Encoding.UTF8.GetByteCount(json):#,0} bytes with latest at {latestBytes:#,0}, over the {McpResponseBudget.DefaultBytes:#,0}-byte budget");
+        Assert.False(root.GetProperty("truncated").GetBoolean());
+        Assert.False(root.GetProperty("over_budget").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("budget_note").ValueKind);
+        Assert.Equal(1, root.GetProperty("sweeps_returned").GetInt32());
+        Assert.Equal(2, root.GetProperty("watch_items_returned").GetInt32());
+    }
+
     /* ---------------- seeding ---------------- */
 
     /// <summary>Sweeps at a 15-minute cadence ending a minute ago, newest id highest, each with a <paramref name="serversPerReport"/>-card
@@ -189,7 +263,8 @@ public sealed class McpSweepReportsWorklistBudgetLiveTests
                 ServersReported: serversPerReport,
                 InstrumentsAlive: true,
                 InstrumentLivenessJson: """{"alert_pass_counter":{"read":true,"advancing":true}}""",
-                ReportJson: $"{{\"sweep_id\":{id},\"servers\":[{cards}]}}");
+                ReportJson: string.Create(CultureInfo.InvariantCulture,
+                    $"{{\"sweep_id\":{id},\"fleet\":{{\"bands\":{{\"Healthy\":{serversPerReport - 1},\"Warning\":1}}}},\"watch\":{{\"opened\":{(i == 0 ? openItems : 0)},\"carried\":{(i == 0 ? carriedItems : 0)},\"closed\":0}},\"servers\":[{cards}]}}"));
 
             var items = i == 0
                 ? Enumerable.Range(1, openItems)

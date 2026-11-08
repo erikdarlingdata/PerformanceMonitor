@@ -103,13 +103,29 @@ public sealed class ViewerFleetSweepsReadTests
         /* The reference: get_sweep_reports for the same store and the same hour, the default view (open + carried). */
         var web = JsonNode.Parse(await DarlingMcpFleetSweepTools.GetSweepReports(postgres, null, 1, null, null, null, ct))!.AsObject();
 
-        /* The timeline: the two sweeps inside the hour, newest first, each with its report embedded. The 3-hour-old sweep is outside. */
+        /* The timeline: the two sweeps inside the hour, newest first, each with its report embedded. The 3-hour-old sweep is outside.
+           #8318: the web feed ships the newest sweep's document once, under latest; its timeline entry carries the row counts
+           (fleet.bands, watch, would_have_paged) and report_under naming latest. The Viewer reads the store itself, so its entry
+           carries the full document. The comparison is field for field with the newest entry's document taken from latest. */
         var timeline = await viewer.GetFleetSweepTimelineAsync(now.AddHours(-1), now, ct);
         var webSweeps = (JsonArray)web["sweeps"]!;
         var viewerSweeps = (JsonArray)timeline["sweeps"]!;
         Assert.Equal(2, webSweeps.Count);
-        Assert.True(JsonNode.DeepEquals(webSweeps, viewerSweeps), "the Viewer's timeline differs from the web feed's");
+        var webNewest = webSweeps.OfType<JsonObject>().Single(s => s["sweep_id"]!.GetValue<string>() == web["latest"]!["sweep_id"]!.GetValue<string>());
+        Assert.Equal("latest", webNewest["report_under"]!.GetValue<string>());
+        var webSweepsWithLatestDocument = webSweeps.DeepClone().AsArray();
+        var restored = webSweepsWithLatestDocument.OfType<JsonObject>().Single(s => s["sweep_id"]!.GetValue<string>() == webNewest["sweep_id"]!.GetValue<string>());
+        restored["report"] = web["latest"]!["report"]!.DeepClone();
+        restored.Remove("report_under");
+        Assert.True(JsonNode.DeepEquals(webSweepsWithLatestDocument, viewerSweeps), "the Viewer's timeline differs from the web feed's");
         Assert.Equal(newestId.ToString(), viewerSweeps[0]!["sweep_id"]!.GetValue<string>());
+
+        /* The newest row's counts survive the slim entry: the Viewer's row builder over the web feed's timeline and over the Viewer's
+           own read agree on the bands, watch and would-have-paged texts of every row. */
+        var webRows = FleetSweepsRows.Runs(web);
+        var viewerRows = FleetSweepsRows.Runs(timeline);
+        Assert.Equal(viewerRows.Select(r => (r.SweepId, r.BandsText, r.WatchText, r.WouldHavePagedText)),
+            webRows.Select(r => (r.SweepId, r.BandsText, r.WatchText, r.WouldHavePagedText)));
 
         /* The newest sweep in full, and the muted one by id (it carries the would-have-paged ledger). */
         var latest = await viewer.GetFleetSweepDetailAsync(null, ct);
