@@ -200,6 +200,23 @@ public sealed class PlanGuideTests
         Assert.Null(Reason(sql, false, false, null, false, true, false));
     }
 
+    /// <summary>
+    /// OBJECT_DEFINITION is NULL for a login without VIEW DEFINITION (which ALTER implies) and for an encrypted module, so the batch then sees the statement as not
+    /// in the module. When the grant is missing as well, the refusal names the grant, not the statement: the person is told what to grant, not to copy a definition
+    /// the login cannot read.
+    /// </summary>
+    [Fact]
+    public void AnObjectGuideWhoseLoginLacksAlter_IsRefusedForTheGrant_EvenWhenTheDefinitionWasNotReadable()
+    {
+        var obj = new PlanGuideDefinition("g", "OBJECT", Statement, "[dbo].[p]", null, "OPTION (RECOMPILE)");
+        foreach (var type in SqlServerRemediationExecutor.PlanGuideModuleTypes)
+        {
+            var refusal = SqlServerRemediationExecutor.CreatePlanGuideRefusal("create_plan_guide", true, obj, "d", false, true, type, false, true, false, "stmt");
+            Assert.Equal(RemediationResult.Reasons.GuidePermissionDenied, refusal?.Reason);
+            Assert.Contains("ALTER on [dbo].[p]", refusal!.Message, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public void TheMatchWords_SayWhatAGuideAppliesTo()
     {

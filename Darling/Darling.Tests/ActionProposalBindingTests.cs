@@ -100,7 +100,7 @@ public sealed class ActionProposalBindingTests
             new(87, login, login.AddHours(-5), lastEnd, lastEnd?.AddHours(-5), status, open);
         AssertSameAndKeys(T.SqlKillBindingObject(Binding(ended)), T.SqlKillBindingObject(Binding(ended)),
             "session_id", "login_time", "login_time_server_local", "last_request_end_time", "last_request_end_time_server_local", "status",
-            "open_transaction_count");
+            "open_transaction_count", "database_id");
 
         /* Session 87 commits, runs a new batch and sleeps again with a new transaction: only the last end time tells. */
         Assert.Equal(["last_request_end_time", "last_request_end_time_server_local"],

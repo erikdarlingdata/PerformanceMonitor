@@ -79,9 +79,11 @@ public sealed class DailySummaryHeapStoreLiveTests
         Assert.Equal(viewRows, await ReadAsync(connection, current, start, end, ct));
 
         /* The plan: with the heap paths off the table, the direct read scans the cover without touching the heap, and the
-           view read cannot (its payload joins keep the digest columns in the scan's target list). */
-        await Exec(connection, "VACUUM (ANALYZE) collect.query_stats", ct);
-        await Exec(connection, "VACUUM (ANALYZE) collect.wait_stats", ct);
+           view read cannot (its payload joins keep the digest columns in the scan's target list). #8204: the planner prices
+           each index-only scan by the share of pages the visibility map marks, and one vacuum cannot mark them while an
+           older snapshot is open in the database, so vacuum until every page is marked. */
+        await LiveVisibilityMap.VacuumUntilAllVisibleAsync(connection, "collect.query_stats", ct);
+        await LiveVisibilityMap.VacuumUntilAllVisibleAsync(connection, "collect.wait_stats", ct);
         await Exec(connection, "SET enable_seqscan = off; SET enable_bitmapscan = off", ct);
         var directPlan = await PlanAsync(connection, current, start, end, ct);
         var viewPlan = await PlanAsync(connection, viaView, start, end, ct);

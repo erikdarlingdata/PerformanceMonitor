@@ -29,6 +29,7 @@ public sealed class KillSessionTests
     [InlineData("session_gone", "session_gone")]
     [InlineData("session_reused", "session_reused")]
     [InlineData("session_changed", "session_changed")]
+    [InlineData("database_changed", "database_changed")]
     [InlineData("not_user_session", "not_user_session")]
     [InlineData("kill_permission_denied", "kill_permission_denied")]
     public void EveryRefusalOfTheBatch_IsARefusalWithItsOwnReason_AndNeverSaysItWrote(string outcome, string reason)
@@ -91,6 +92,7 @@ public sealed class KillSessionTests
     [InlineData("session_gone", "session_gone")]
     [InlineData("session_reused", "session_reused")]
     [InlineData("session_changed", "session_changed")]
+    [InlineData("database_changed", "database_changed")]
     [InlineData("session_in_other_database", "session_in_other_database")]
     [InlineData("not_user_session", "not_user_session")]
     [InlineData("tool_login_session", "tool_login_session")]
