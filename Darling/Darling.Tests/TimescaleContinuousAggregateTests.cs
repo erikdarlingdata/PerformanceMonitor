@@ -1002,8 +1002,8 @@ public sealed class TimescaleContinuousAggregateTests
     [Fact]
     public void DailyPolicy_UsesOneDayEndOffsetAndSchedule_KeepsThreeDayStart()
     {
-        Assert.Equal("3 days", TimescaleSupport.DailyRefreshStartOffset);
-        Assert.Equal(TimeSpan.FromDays(3), TimescaleSupport.DailyRefreshStartSpan);
+        Assert.Equal("4 days", TimescaleSupport.DailyRefreshStartOffset);
+        Assert.Equal(TimeSpan.FromDays(4), TimescaleSupport.DailyRefreshStartSpan);
 
         foreach (var view in new[]
         {
@@ -1020,7 +1020,7 @@ public sealed class TimescaleContinuousAggregateTests
 
             Assert.Contains($"add_continuous_aggregate_policy('collect.{view}'", sql, StringComparison.Ordinal);
             /* #6070: a daily built on another daily takes the one-bucket-wider window; every other daily keeps 3 days. */
-            var expectedStart = view == TimescaleSupport.QueryStoreStatsDayGrainDailyView ? "4 days" : "3 days";
+            var expectedStart = view == TimescaleSupport.QueryStoreStatsDayGrainDailyView ? "5 days" : "4 days";
             Assert.Contains($"start_offset => INTERVAL '{expectedStart}'", sql, StringComparison.Ordinal);
             Assert.Contains("end_offset => INTERVAL '1 day'", sql, StringComparison.Ordinal);
             Assert.Contains("schedule_interval => INTERVAL '1 day'", sql, StringComparison.Ordinal);

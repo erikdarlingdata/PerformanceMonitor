@@ -1443,13 +1443,13 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
             /* And therefore the converge is a no-op against a FRESH store too, not only a settled one. */
             Assert.Equal(0, await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(connection, null, ct));
 
-            /* ---- (8) SCOPE: the DAILY tier keeps its 3-day window and its finish-to-start schedule. ---- */
+            /* ---- (8) SCOPE: the DAILY tier keeps its 4-day window and its finish-to-start schedule. ---- */
             var daily = await RefreshPolicyStateAsync(connection, Daily, ct);
             Assert.NotNull(daily);
-            Assert.Equal(TimeSpan.FromDays(3).TotalSeconds, daily!.StartOffsetSeconds);
+            Assert.Equal(TimescaleSupport.DailyRefreshStartSpan.TotalSeconds, daily!.StartOffsetSeconds);
             Assert.False(daily.FixedSchedule, "the daily tier is deliberately left on finish-to-start scheduling");
 
-            /* Deliberately AFTER a converge has run and reported 0: "the daily policy is still on 3 days" is
+            /* Deliberately AFTER a converge has run and reported 0: "the daily policy is still on 4 days" is
                trivially true if the converge never looked at anything, so the check has to follow a pass that
                did look at the hourly policies and chose not to touch this one. */
             await ExecAsync(connection,

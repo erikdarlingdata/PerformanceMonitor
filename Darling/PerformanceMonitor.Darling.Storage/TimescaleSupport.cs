@@ -3872,31 +3872,39 @@ WITH NO DATA";
     public static readonly TimeSpan HourlyRefreshScheduleSpan = TimeSpan.FromHours(1);
 
     /// <summary>
-    /// The DAILY refresh window, deliberately still 3 days.
+    /// The DAILY refresh window: 4 days.
     ///
     /// <para>The daily tier is NOT the tier #3012 was about and must not be "made consistent" with the hourly
-    /// one. Its jobs run once a day, so a 3-day window is 3 days of scan against an 86,400-second cadence
-    /// rather than against 3,600 — it was never near its own schedule interval, and it never appeared in the
+    /// one. Its jobs run once a day, so a 4-day window is 4 days of scan against an 86,400-second cadence
+    /// rather than against 3,600 — it is nowhere near its own schedule interval, and it never appeared in the
     /// convoy. What it buys is the buffer <see cref="HourlyRetentionInterval"/> leans on: the hourly rollups
-    /// are dropped at 90 days, and the daily refresh reaching 3 days back is what guarantees a drop can never
+    /// are dropped at 90 days, and the daily refresh reaching 4 days back is what guarantees a drop can never
     /// outrun the aggregate meant to preserve that history. Narrowing this would trade nothing for a
     /// correctness risk.</para>
+    ///
+    /// <para><b>Why 4 and not 3 (#8302).</b> The scheduler refreshes only the WHOLE daily buckets inside
+    /// <c>[now - start_offset, now - 1 day]</c>, and a daily job runs at some minute of the day rather than at
+    /// midnight, so a 3-day window holds exactly ONE whole bucket at a run and each day has a single daily run
+    /// that can fill it. A store that is down across that run (PostgreSQL stopped, a crashed refresh job in its
+    /// backoff, a service outage) loses the day for good: no later run's window reaches it. A 4-day window holds
+    /// two whole buckets at any run time, so every day is inside the window on two consecutive daily runs and a
+    /// store down for up to about a day fills the day it missed on the next run.</para>
     /// </summary>
-    public const string DailyRefreshStartOffset = "3 days";
+    public const string DailyRefreshStartOffset = "4 days";
 
     /// <summary><see cref="TimeSpan"/> twin of <see cref="DailyRefreshStartOffset"/>, pinned equal to the
     /// string and pinned STRICTLY BELOW <see cref="HourlyRetentionSpan"/> by
     /// TimescaleContinuousAggregateTests.</summary>
-    public static readonly TimeSpan DailyRefreshStartSpan = TimeSpan.FromDays(3);
+    public static readonly TimeSpan DailyRefreshStartSpan = TimeSpan.FromDays(4);
 
     /// <summary>
     /// The refresh window of a daily whose PARENT is another daily (#6070): one bucket wider than
-    /// <see cref="DailyRefreshStartOffset"/>, so 4 days. Today that is only
+    /// <see cref="DailyRefreshStartOffset"/>, so 5 days. Today that is only
     /// <see cref="QueryStoreStatsDayGrainDailyView"/> (hourly, then <c>interval_daily</c>, then
     /// <c>daygrain_daily</c>); <see cref="IsDailyParentedDaily"/> derives the set from the parent relation.
     ///
     /// <para><b>Why one bucket wider.</b> A daily policy's window <c>[now - start, now - 1 day]</c> holds
-    /// exactly <c>start - 1</c> whole buckets at any run time, and the daily tier is on finish-to-start
+    /// <c>start - 2</c> whole buckets at any run time off a bucket boundary, and the daily tier is on finish-to-start
     /// scheduling, so two daily jobs have no fixed order. When the child's job runs before its parent's, the
     /// child refreshes a day the parent has not written yet and gets nothing; the parent then writes that day
     /// and logs an invalidation the child's window has moved past by the next run, so the day is never
@@ -3909,10 +3917,10 @@ WITH NO DATA";
     /// <see cref="AddDailyRefreshPolicySql"/>). The window stays below <see cref="HourlyRetentionSpan"/>, and the
     /// view's compress_after follows it (<see cref="AggregateCompressAfterSpanFor"/>).</para>
     /// </summary>
-    public const string DailyChildRefreshStartOffset = "4 days";
+    public const string DailyChildRefreshStartOffset = "5 days";
 
     /// <summary><see cref="TimeSpan"/> twin of <see cref="DailyChildRefreshStartOffset"/>.</summary>
-    public static readonly TimeSpan DailyChildRefreshStartSpan = TimeSpan.FromDays(4);
+    public static readonly TimeSpan DailyChildRefreshStartSpan = TimeSpan.FromDays(5);
 
     /// <summary>Whether <paramref name="view"/> is a daily whose parent (the relation its CREATE selects FROM,
     /// per <see cref="RollupViews"/>) is itself a daily. Derived from the parent relation, never by name.</summary>
@@ -3938,13 +3946,14 @@ WITH NO DATA";
     /// WAL knob only bounded.
     ///
     /// <para><b>What went wrong, and why the window was not the thing to change.</b> A daily policy's window is
-    /// <see cref="DailyRefreshStartOffset"/> wide, so one run re-materializes THREE daily buckets — and by
+    /// <see cref="DailyRefreshStartOffset"/> wide, and one run re-materializes the whole daily buckets inside it:
+    /// two at any run time off midnight, three when a run lands exactly on a bucket boundary — and by
     /// default TimescaleDB does that in ONE transaction. On the largest store in the measured population a
     /// single such run wrote 8.3 million rows, overran the 1 GB <c>max_wal_size</c> into a forced second
-    /// checkpoint, and reads stalled for four minutes behind it. Nothing about the WINDOW was wrong: the 3-day
+    /// checkpoint, and reads stalled for four minutes behind it. Nothing about the WINDOW was wrong: its
     /// reach is what <see cref="HourlyRetentionInterval"/> leans on (a drop must never outrun the aggregate
     /// meant to preserve that history), and the cadence was never near the runtime. What was wrong was that
-    /// three buckets' worth of writes had to commit or roll back together, so the WAL burst — and with it the
+    /// every bucket's worth of writes in the window had to commit or roll back together, so the WAL burst — and with it the
     /// checkpoint pressure and the fsync tail every other backend queues behind — was sized by the WINDOW
     /// rather than by a bucket.</para>
     ///
@@ -3953,7 +3962,7 @@ WITH NO DATA";
     /// it — the burst still scales with the window and with row volume, so the next store that grows three
     /// times finds the same edge one knob further out. Slicing removes the scaling: TimescaleDB's own
     /// documentation states that with <c>buckets_per_batch</c> set "each batch is an individual transaction",
-    /// so a 3-day window becomes three commits whose peak WAL is one bucket's worth no matter how large the
+    /// so a window of several buckets becomes one commit per bucket, whose peak WAL is one bucket's worth no matter how large the
     /// store gets. Measured on a 2.28.1 rig, the sliced policy logs one
     /// <c>continuous aggregate refresh … (batch N of M)</c> line per bucket, which is the observable proof the
     /// setting took.</para>
@@ -7258,11 +7267,12 @@ AND   ca.view_schema = 'collect'";
     public const string SetDailyRefreshWindowSql = "SELECT alter_job(j.job_id, config => jsonb_set(j.config, '{start_offset}', to_jsonb($2::text))) FROM timescaledb_information.jobs AS j WHERE j.job_id = $1::integer";
 
     /// <summary>
-    /// Converges the refresh window of every daily whose parent is a daily (<see cref="IsDailyParentedDaily"/>)
-    /// onto <see cref="DailyChildRefreshStartOffset"/> (#6070). A store made before the fix keeps the 3-day
-    /// window, because <c>add_continuous_aggregate_policy(... if_not_exists)</c> does not reconcile an existing
-    /// policy (and raises 22023 against a different window, so this must run BEFORE the aggregate ensure, like
-    /// <see cref="ConvergeContinuousAggregateRefreshAsync"/>).
+    /// Converges the refresh window of every daily onto <see cref="DailyRefreshStartOffsetFor"/> (#6070, #8302):
+    /// <see cref="DailyRefreshStartOffset"/> for an hourly-parented daily, <see cref="DailyChildRefreshStartOffset"/>
+    /// for a daily whose parent is a daily (<see cref="IsDailyParentedDaily"/>). A store made under an earlier,
+    /// narrower window keeps it otherwise, because <c>add_continuous_aggregate_policy(... if_not_exists)</c> does not
+    /// reconcile an existing policy (and raises 22023 against a different window, so this must run BEFORE the
+    /// aggregate ensure, like <see cref="ConvergeContinuousAggregateRefreshAsync"/>).
     ///
     /// <para>One catalog read per pass (<see cref="ContinuousAggregateRefreshStateSql"/>, the window in seconds);
     /// a converged store issues no <c>alter_job</c>. Failure-isolated per job: one that fails (often a
@@ -7285,7 +7295,7 @@ AND   ca.view_schema = 'collect'";
             while (await reader.ReadAsync(cancellationToken))
             {
                 var view = reader.GetString(1);
-                if (!IsDailyParentedDaily(view) || !DailyAggregates.Any(a => string.Equals(a.View, view, StringComparison.Ordinal)))
+                if (!DailyAggregates.Any(a => string.Equals(a.View, view, StringComparison.Ordinal)))
                 {
                     continue;
                 }
@@ -7317,13 +7327,13 @@ AND   ca.view_schema = 'collect'";
                 converged++;
 
                 logger?.LogInformation(
-                    "TimescaleDB: {View}'s daily refresh policy (job {JobId}) now refreshes a {Window} window (was {WasSeconds}s) - its parent is a daily too, so the job can run before the parent has written a day, and the extra bucket brings it back to that day the next run (#6070).",
+                    "TimescaleDB: {View}'s daily refresh policy (job {JobId}) now refreshes a {Window} window (was {WasSeconds}s) - every day is inside the window on two consecutive daily runs, so a run the store misses loses no day, and a daily-parented daily keeps one bucket more for the day its parent writes after it (#6070, #8302).",
                     view, jobId, DailyRefreshStartOffsetFor(view), wasSeconds);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 logger?.LogWarning(
-                    "Could not widen {View}'s daily refresh policy (job {JobId}) to a {Window} window - it keeps a window that can miss the day its parent daily writes after it (often a permission issue: the store login must own the job): {Message}",
+                    "Could not widen {View}'s daily refresh policy (job {JobId}) to a {Window} window - it keeps a window in which a missed daily run loses a day for good (often a permission issue: the store login must own the job): {Message}",
                     view, jobId, DailyRefreshStartOffsetFor(view), ex.Message);
             }
         }
@@ -7456,7 +7466,7 @@ AND   j.retry_period IS DISTINCT FROM INTERVAL '{PolicyJobRetryPeriod}'";
     public const string RawRetentionInterval = "4 days";
 
     /// <summary>Hourly-CAGG-tier retention horizon: keep the hourly rollups 90 days — well past the daily CAGG's
-    /// 3-day refresh window, so the hourly drop never outruns the daily aggregate. The daily HISTORY CAGGs get
+    /// 4-day refresh window (5 days for a daily-parented daily), so the hourly drop never outruns the daily aggregate. The daily HISTORY CAGGs get
     /// NO retention policy: they are the coarsened, kept-indefinitely tier. (The interval-grain daily is not one
     /// of them — it is dedup plumbing and carries <see cref="IntervalDailyRetentionInterval"/>, which is why the
     /// summary line qualifies this rather than claiming it of every daily, #1958.)
@@ -7505,9 +7515,11 @@ AND   j.retry_period IS DISTINCT FROM INTERVAL '{PolicyJobRetryPeriod}'";
     /// <para>Picked by the same rule that picked <see cref="IntervalRetentionInterval"/>, one tier up, and it
     /// is the OPPOSITE direction from the one instinct suggests. This layer is downstream of L1, so it is L1's
     /// purge that is gated on THIS view covering it — meaning it must OUTLIVE ITS OWN SOURCE with margin, or
-    /// L1's gate can never release and L1 grows without bound. 10 against L1's 7 is the same 3-day margin L1
-    /// takes over raw's 4, and the ordering is pinned as a test invariant so a future tuning pass cannot
-    /// invert it silently.</para>
+    /// L1's gate can never release and L1 grows without bound. 12 against L1's 7 is a 5-day margin, wider than
+    /// the 3-day one L1 takes over raw's 4: this view compresses after its 4-day refresh window plus one chunk
+    /// (<see cref="AggregateCompressAfterSpanFor"/>, 5 days), and the horizon keeps more than half of its life
+    /// compressed. The ordering is pinned as a test invariant so a future tuning pass cannot invert it
+    /// silently.</para>
     ///
     /// <para><b>Capacity (#1581), MEASURED at the same scale #1849 used</b> — a seeded 600-query store at the
     /// default 5-minute <c>query_store</c> cadence, 24 hours of collection (187,200 raw rows). The rig
@@ -7518,14 +7530,14 @@ AND   j.retry_period IS DISTINCT FROM INTERVAL '{PolicyJobRetryPeriod}'";
     /// <item>this view: <b>15,000 rows / 4.7 MB per day</b> — near-raw cardinality like L1, but keyed on
     /// interval identity x DAY where L1 keys on interval identity x HOUR, and an interval spans ~2 hourly
     /// buckets against 1 daily one. So the fourth near-raw-cardinality object is the SMALLEST of them:
-    /// <b>~47 MB at 10 days</b> against L1's 79 MB at 7.</item>
+    /// <b>~56 MB at 12 days</b> against L1's 79 MB at 7.</item>
     /// <item><see cref="QueryStoreStatsDayGrainDailyView"/> above it: ~600 rows/day at composer grain, and
     /// measured byte-for-byte identical to the corrected daily it sits beside (448 kB each over the same
     /// span) — which is why it is kept indefinitely like every other daily rather than needing a horizon of
     /// its own.</item>
     /// </list></para>
     /// </summary>
-    public const string IntervalDailyRetentionInterval = "10 days";
+    public const string IntervalDailyRetentionInterval = "12 days";
 
     /// <summary><see cref="TimeSpan"/> twin of <see cref="RawRetentionInterval"/> for callers doing arithmetic
     /// (the #1665 partial-window notice). RetentionTierRouterTests pins the two equal, as does the all-five
@@ -7543,7 +7555,7 @@ AND   j.retry_period IS DISTINCT FROM INTERVAL '{PolicyJobRetryPeriod}'";
     /// by the walk over <see cref="RetentionPolicies"/> (#1905), like every other pair: a consumer that expired
     /// before its source would hold its source's purge forever, and since #1877 would also STOP one that is
     /// already running, on a healthy store, without self-releasing.</summary>
-    public static readonly TimeSpan IntervalDailyRetentionSpan = TimeSpan.FromDays(10);
+    public static readonly TimeSpan IntervalDailyRetentionSpan = TimeSpan.FromDays(12);
 
     /// <summary><see cref="TimeSpan"/> twin of <see cref="HourlyRetentionInterval"/>; pinned equal by
     /// RetentionTierRouterTests and by the all-five sweep in TimescaleContinuousAggregateTests (#1905).

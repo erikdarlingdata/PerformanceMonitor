@@ -115,9 +115,9 @@ public sealed class DailyChildRefreshOrderLiveTests
         foreach (var (_, view) in TimescaleSupport.DailyAggregates)
         {
             var wide = view == Child;
-            Assert.Equal(wide ? "4 days" : "3 days", TimescaleSupport.DailyRefreshStartOffsetFor(view));
-            Assert.Equal(TimeSpan.FromDays(wide ? 4 : 3), TimescaleSupport.DailyRefreshStartSpanFor(view));
-            Assert.Contains($"start_offset => INTERVAL '{(wide ? 4 : 3)} days'", TimescaleSupport.AddDailyRefreshPolicySql(view), StringComparison.Ordinal);
+            Assert.Equal(wide ? "5 days" : "4 days", TimescaleSupport.DailyRefreshStartOffsetFor(view));
+            Assert.Equal(TimeSpan.FromDays(wide ? 5 : 4), TimescaleSupport.DailyRefreshStartSpanFor(view));
+            Assert.Contains($"start_offset => INTERVAL '{(wide ? 5 : 4)} days'", TimescaleSupport.AddDailyRefreshPolicySql(view), StringComparison.Ordinal);
         }
 
         Assert.True(TimescaleSupport.DailyChildRefreshStartSpan < TimescaleSupport.HourlyRetentionSpan);
@@ -148,7 +148,7 @@ public sealed class DailyChildRefreshOrderLiveTests
 
             // Make the old shape: the child's job on 3 days, and paused, so "never arms" is observable.
             var before = await JobAsync(connection, Child, ct);
-            Assert.Equal(4 * 86400L, before.StartOffsetSeconds);
+            Assert.Equal(5 * 86400L, before.StartOffsetSeconds);
             await using (var old = new NpgsqlCommand(
                 "SELECT alter_job(j.job_id, scheduled => false, config => jsonb_set(j.config, '{start_offset}', to_jsonb('3 days'::text))) " +
                 "FROM timescaledb_information.jobs AS j WHERE j.job_id = $1::integer", connection))
@@ -166,7 +166,7 @@ public sealed class DailyChildRefreshOrderLiveTests
             Assert.Contains("#6070", log.Joined, StringComparison.Ordinal);
 
             var after = await JobAsync(connection, Child, ct);
-            Assert.Equal(4 * 86400L, after.StartOffsetSeconds);
+            Assert.Equal(5 * 86400L, after.StartOffsetSeconds);
             Assert.Equal(oldJob.EndOffsetSeconds, after.EndOffsetSeconds);
             Assert.Equal(oldJob.BucketsPerBatch, after.BucketsPerBatch);
             Assert.Equal(oldJob.FixedSchedule, after.FixedSchedule);
@@ -181,11 +181,11 @@ public sealed class DailyChildRefreshOrderLiveTests
             Assert.Equal(0, await TimescaleSupport.ConvergeDailyChildRefreshWindowAsync(connection, second, ct));
             Assert.DoesNotContain("#6070", second.Joined, StringComparison.Ordinal);
 
-            // And the ensure that follows keeps the 4-day window (no 22023 on a matching policy).
+            // And the ensure that follows keeps the 5-day window (no 22023 on a matching policy).
             var ensureLog = new CapturingTestLogger();
             await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, ensureLog, ct);
             Assert.DoesNotContain("setup failed", ensureLog.Joined, StringComparison.Ordinal);
-            Assert.Equal(4 * 86400L, (await JobAsync(connection, Child, ct)).StartOffsetSeconds);
+            Assert.Equal(5 * 86400L, (await JobAsync(connection, Child, ct)).StartOffsetSeconds);
 
             bodySucceeded = true;
         }

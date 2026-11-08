@@ -124,7 +124,7 @@ public sealed class RetentionConsumerHorizonLiveTests
                 $"no scheduled retention job was found under the view name {IntervalDaily}, so the horizon rule could never apply to it");
             Assert.Equal(IntervalDaily, reader.GetString(0));
             Assert.Equal(TimescaleSupport.IntervalDailyRetentionInterval, reader.GetString(1));
-            Assert.Equal(TimeSpan.FromDays(10).TotalSeconds, reader.GetDouble(2));
+            Assert.Equal(TimescaleSupport.IntervalDailyRetentionSpan.TotalSeconds, reader.GetDouble(2));
             Assert.False(await reader.ReadAsync(ct));
             bodySucceeded = true;
         }
