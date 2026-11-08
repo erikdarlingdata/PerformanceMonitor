@@ -1029,7 +1029,7 @@ public class DarlingTlsKeyFileHardenTests
             Assert.Equal("", error.ToString());
             var closing = output.ToString().TrimEnd().Split(Environment.NewLine).Last();
             Assert.Equal(
-                "All 2 item(s) secured. The service re-asserts the ACLs of the 1 item(s) that are not TLS key files at every start. "
+                "All 2 items secured. The service re-asserts the ACLs of the 1 item that is not a TLS key file at every start. "
                 + "Re-run --harden-files after replacing a TLS key file.",
                 closing);
             Assert.DoesNotContain("re-asserts these ACLs", output.ToString(), StringComparison.Ordinal);

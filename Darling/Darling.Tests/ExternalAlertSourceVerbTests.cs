@@ -300,7 +300,7 @@ public sealed class ExternalAlertSourceVerbTests
         DarlingCliCommands.PrintAlertSourceResult("--rotate-alert-source",
             new ExternalAlertSourceAdmin.Result(ExternalAlertSourceAdmin.Outcome.Done, "darling_src_orders", "Pw0123456789", SessionsEnded: 3),
             "orders", "Host=127.0.0.1", ended, new StringWriter());
-        Assert.Contains("Ended 3 open session(s) of login 'darling_src_orders'", ended.ToString(), StringComparison.Ordinal);
+        Assert.Contains("Ended 3 open sessions of login 'darling_src_orders'", ended.ToString(), StringComparison.Ordinal);
         Assert.Contains("no longer works for a new connection", ended.ToString(), StringComparison.Ordinal);
 
         var refused = new StringWriter();

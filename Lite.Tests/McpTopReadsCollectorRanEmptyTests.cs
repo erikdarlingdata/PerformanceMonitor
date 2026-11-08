@@ -65,7 +65,7 @@ public sealed class McpTopReadsCollectorRanEmptyTests : IClassFixture<SharedDuck
         var root = await TopQueriesAsync(hoursBack: 1);
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
-        Assert.Equal("query_stats ran 6 time(s) in the last 1 hour(s) and found no executed statements to store. This is not a collection gap: collection health showing successful runs that stored no rows is consistent with it.",
+        Assert.Equal("query_stats ran 6 times in the last 1 hour and found no executed statements to store. This is not a collection gap: collection health showing successful runs that stored no rows is consistent with it.",
             root.GetProperty("message").GetString());
         Assert.Equal(6, root.GetProperty("hints").GetProperty("successful_runs_in_window").GetInt64());
     }
@@ -124,7 +124,7 @@ public sealed class McpTopReadsCollectorRanEmptyTests : IClassFixture<SharedDuck
         var empty = JsonDocument.Parse(await McpQueryTools.GetQueryStoreTop(
             new LocalDataService(_duckDb), _serverManager, "TestServer", hours_back: 1)).RootElement;
         Assert.Equal("empty", empty.GetProperty("status").GetString());
-        Assert.StartsWith("query_store ran 2 time(s) in the last 1 hour(s) and found no Query Store intervals to store.", empty.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.StartsWith("query_store ran 2 times in the last 1 hour and found no Query Store intervals to store.", empty.GetProperty("message").GetString(), StringComparison.Ordinal);
         Assert.Equal(2, empty.GetProperty("hints").GetProperty("successful_runs_in_window").GetInt64());
     }
 

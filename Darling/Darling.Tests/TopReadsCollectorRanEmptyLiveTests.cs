@@ -44,7 +44,7 @@ public sealed class TopReadsCollectorRanEmptyLiveTests
             var answer = JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, ServerName, 1, as_of: now.ToString("o"))).RootElement;
 
             Assert.Equal("empty", answer.GetProperty("status").GetString());
-            Assert.Equal("query_stats ran 6 time(s) in the last 1 hour(s) and found no executed statements to store. This is not a collection gap: collection health showing successful runs that stored no rows is consistent with it.",
+            Assert.Equal("query_stats ran 6 times in the last 1 hour and found no executed statements to store. This is not a collection gap: collection health showing successful runs that stored no rows is consistent with it.",
                 answer.GetProperty("message").GetString());
             Assert.Equal(6, answer.GetProperty("hints").GetProperty("successful_runs_in_window").GetInt64());
         });
@@ -133,7 +133,7 @@ public sealed class TopReadsCollectorRanEmptyLiveTests
             await PlantRunAsync(connection, ct, "query_store", now.AddMinutes(-15), "SUCCESS", rows: 0);
             var ran = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, 1, as_of: now.ToString("o"))).RootElement;
             Assert.Equal("empty", ran.GetProperty("status").GetString());
-            Assert.StartsWith("query_store ran 2 time(s) in the last 1 hour(s) and found no Query Store intervals to store.", ran.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.StartsWith("query_store ran 2 times in the last 1 hour and found no Query Store intervals to store.", ran.GetProperty("message").GetString(), StringComparison.Ordinal);
             Assert.Equal(2, ran.GetProperty("hints").GetProperty("successful_runs_in_window").GetInt64());
 
             /* Past the raw tier's retention the collection log outlives the rows, so its runs prove nothing about the window. */
