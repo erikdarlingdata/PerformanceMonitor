@@ -37,11 +37,14 @@ namespace Darling.Tests;
 public sealed class SlackChatStoreLiveTests
 {
     private static readonly Guid s_parent = Guid.Parse("76590000-0000-0000-0000-0000000000b1");
-    private const string Channel = "C07659A1";
-    private const string ThreadTs = "1700000000.000100";
-    private const string Team = "T0TEAM";
-    private const string Admin = "person:admin";
-    private const int ServerId = 7;
+
+    /// <summary>The thread's first request, for the grant class's seed.</summary>
+    internal static Guid Parent => s_parent;
+    internal const string Channel = "C07659A1";
+    internal const string ThreadTs = "1700000000.000100";
+    internal const string Team = "T0TEAM";
+    internal const string Admin = "person:admin";
+    internal const int ServerId = 7;
 
     private static string RequireLivePostgres()
     {
@@ -55,7 +58,7 @@ public sealed class SlackChatStoreLiveTests
     internal static Task<string?> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct) => SlackCardStoreLiveTests.ScalarAsync(connection, sql, ct);
 
     /// <summary>A request on the route and the server, with its alert rows. <paramref name="state"/> and <paramref name="openedAgo"/> shape the one rule.</summary>
-    private static async Task AddRequestAsync(NpgsqlConnection connection, Guid id, int routeId, string state, TimeSpan openedAgo, int level = 3, string kind = "alert",
+    internal static async Task AddRequestAsync(NpgsqlConnection connection, Guid id, int routeId, string state, TimeSpan openedAgo, int level = 3, string kind = "alert",
         Guid? chatThreadOf = null, CancellationToken ct = default)
     {
         var link = chatThreadOf is null ? "NULL" : $"'{chatThreadOf}'";
@@ -108,13 +111,13 @@ public sealed class SlackChatStoreLiveTests
         }
     }
 
-    private static SlackChatThread Thread(int routeId) => new(s_parent, routeId, ServerId, Channel, ThreadTs, DateTime.UtcNow.AddHours(-1));
+    internal static SlackChatThread Thread(int routeId) => new(s_parent, routeId, ServerId, Channel, ThreadTs, DateTime.UtcNow.AddHours(-1));
 
-    private static SlackPersonMessage Message(string ts, long personId, string user, string text) =>
+    internal static SlackPersonMessage Message(string ts, long personId, string user, string text) =>
         new(Channel, ts, ThreadTs, s_parent, personId, "slack:" + Team + ":" + user, text);
 
     /* The live route reader a test controls: every metric resolves to one route at the given level. */
-    private static Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, AlertSeverityLevel?, NotificationRoute?>>> RoutesAt(int? level) =>
+    internal static Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, AlertSeverityLevel?, NotificationRoute?>>> RoutesAt(int? level) =>
         (_, _, _) => Task.FromResult<Func<string, int, AlertSeverityLevel?, NotificationRoute?>>((_, _, _) =>
             level is null ? null : new NotificationRoute(1, "x", "", "", "", "", "", Enabled: true) { AgentLevel = level });
 
@@ -439,7 +442,7 @@ public sealed class SlackChatStoreLiveTests
         });
     }
 
-    private static ServerActionCall Call(Guid request, Guid claim, string action) =>
+    internal static ServerActionCall Call(Guid request, Guid claim, string action) =>
         new(action, action, new AgentAction(request, claim, "agent-a", "the person asked for it",
             "[{\"tool\":\"get_blocking_stats\",\"arguments\":{},\"key_numbers\":\"12\"}]"), new AgentActionTarget(ServerId, "srv-7", null, null));
 
@@ -829,5 +832,97 @@ public sealed class SlackChatGrantLiveTests
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
                 await new LiveCleanupBatch(cleanup).RemoveRolesAsync(s_cleanupRoles, "slackchat7659", cleanupCt));
         }
+    }
+
+    /* A provisioned scratch store (the managed roles as the real logins) with one claimed chat request: Dana, holding request_level_3 for force_plan
+       alone on the server, asked in it. The body gets the owner connection and source, the chat request, its claim, and the mcp login's source. */
+    private static async Task WithProvisionedChatRequestAsync(Func<NpgsqlConnection, NpgsqlDataSource, NpgsqlDataSource, Guid, Guid, CancellationToken, Task> body)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(RequireLivePostgres(), ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var owner = new NpgsqlConnection(scratch.ConnectionString);
+            await owner.OpenAsync(ct);
+            var exist = await SlackChatStoreLiveTests.ScalarAsync(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'web', 'mcp'))", ct) == "True";
+            Assert.SkipWhen(exist, "A cluster-wide admin/viewer/web/mcp role already exists on this cluster; the grants would adopt it.");
+            await PgMigrations.MigrateAsync(owner, ct);
+            await SlackChatStoreLiveTests.ExecAsync(owner, DarlingManagedRoles.BuildProvisioningSql(
+                ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp, 15, PasswordReassert.All,
+                ProvisioningTarget.ComposeStore(new NpgsqlConnectionStringBuilder(owner.ConnectionString).Username ?? "darling", scratch.DatabaseName)), ct);
+
+            await SlackChatStoreLiveTests.ExecAsync(owner, "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
+            await SlackChatStoreLiveTests.ExecAsync(owner, $"INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES ({SlackChatStoreLiveTests.ServerId}, 'srv-7', 'host-7')", ct);
+            var routeId = int.Parse((await SlackChatStoreLiveTests.ScalarAsync(owner,
+                $"INSERT INTO config.config_notification_routes (metric_match, slack_url, slack_bot_channel, enabled, agent_level, agent_max_per_hour) VALUES ('cpu', 'sealed-cpu', '{SlackChatStoreLiveTests.Channel}', true, 3, 3) RETURNING route_id", ct))!,
+                System.Globalization.CultureInfo.InvariantCulture);
+            await SlackChatStoreLiveTests.AddRequestAsync(owner, SlackChatStoreLiveTests.Parent, routeId, "reported", TimeSpan.FromHours(1), ct: ct);
+            await SlackChatStoreLiveTests.ExecAsync(owner, $"INSERT INTO config.investigation_request_threads (request_id, channel_id, thread_ts) VALUES ('{SlackChatStoreLiveTests.Parent}', '{SlackChatStoreLiveTests.Channel}', '{SlackChatStoreLiveTests.ThreadTs}')", ct);
+            await using var ownerSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var dana = (await PersonDirectory.AddPersonAsync(ownerSource, "Dana", SlackChatStoreLiveTests.Admin, ServerActionSurfaces.Viewer, ct)).PersonId!.Value;
+            Assert.True((await PersonDirectory.AddGrantAsync(ownerSource, dana, SlackChatStoreLiveTests.ServerId, null, PersonCapabilities.RequestLevel3, [ServerActionNames.ForcePlan], SlackChatStoreLiveTests.Admin, ServerActionSurfaces.Viewer, ct)).Succeeded);
+            var store = new InvestigationRequestStore(ownerSource, 30);
+            var message = SlackChatStoreLiveTests.Message("1700000000.000701", dana, "U0DANA", "kill the blocking session");
+            Assert.Equal(SlackPersonMessageSaved.Saved, await store.SavePersonMessageAsync(message, ct));
+            var chat = (await store.OpenChatRequestAsync(SlackChatStoreLiveTests.Thread(routeId), SlackChatStoreLiveTests.Parent, [new SlackAsker(dana, message.Identity, 3)], [message], 10, DateTime.UtcNow, SlackChatStoreLiveTests.RoutesAt(3), ct)).RequestId!.Value;
+            var claim = (await store.ClaimAsync(chat, "agent-a", ct)).ClaimId!.Value;
+
+            await using var mcpSource = NpgsqlDataSource.Create(LoginConnectionString(scratch, "mcp", ProvisioningTestSecrets.McpPassword));
+            await body(owner, ownerSource, mcpSource, chat, claim, ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+                await new LiveCleanupBatch(cleanup).RemoveRolesAsync(s_cleanupRoles, "slackchat7659", cleanupCt));
+        }
+    }
+
+    /// <summary>The gate's asker kind check reads the owner-only asker table, so it runs on the owner's source (#7659): a store whose own login is
+    /// mcp with the owner as its agent-action source, as the Level 3 tools build theirs, refuses a kill under a chat request as <c>asker_grant</c>
+    /// and journals the refusal, passes a plan force to the next condition, and the mcp login still cannot read the table.</summary>
+    [Fact]
+    public async Task TheAskerKindCheck_RunsOnTheOwnerSource_SoAnMcpStoreRefusesAsAskerGrantAndJournalsIt_WhileMcpCannotReadTheAskers()
+    {
+        await WithProvisionedChatRequestAsync(async (owner, ownerSource, mcpSource, chat, claim, ct) =>
+        {
+            var mcpStore = new InvestigationRequestStore(mcpSource, 30, agentActionSource: ownerSource);
+            var hooks = new ServerActionHooks
+            {
+                LoadRoutes = SlackChatStoreLiveTests.RoutesAt(3),
+                ReadCredential = (_, _) => throw new InvalidOperationException("the credential is read after the asker check"),
+            };
+
+            var kill = await mcpStore.CheckServerActionAsync(SlackChatStoreLiveTests.Call(chat, claim, ServerActionNames.KillSession), hooks, ct);
+            Assert.Equal(AgentActionCodes.AskerGrant, kill?.Reason);
+            Assert.Equal("1", await SlackChatStoreLiveTests.ScalarAsync(owner, $"SELECT count(*) FROM config.investigation_journal WHERE request_id = '{chat}' AND event = 'refused' AND reason LIKE '%{AgentActionCodes.AskerGrant}%'", ct));
+
+            var force = await mcpStore.CheckServerActionAsync(SlackChatStoreLiveTests.Call(chat, claim, ServerActionNames.ForcePlan), hooks, ct);
+            Assert.NotEqual(AgentActionCodes.AskerGrant, force?.Reason);
+            Assert.NotEqual(AgentActionCodes.NotLevel3, force?.Reason);
+
+            await using var mcp = await mcpSource.OpenConnectionAsync(ct);
+            await AssertDeniedAsync(mcp, "SELECT count(*) FROM config.investigation_request_askers", ct);
+        });
+    }
+
+    /// <summary>The agent's message row is the owner's (#7659): a store whose own login is mcp posts it through the owner's source, as the Level 2
+    /// tools write their rows, and the same store with no owner's source fails closed with no row written.</summary>
+    [Fact]
+    public async Task TheAgentsMessage_IsWrittenOnTheOwnerSource_SoAnMcpStorePostsIt_AndOneWithoutTheOwnerFailsClosed()
+    {
+        await WithProvisionedChatRequestAsync(async (owner, ownerSource, mcpSource, chat, claim, ct) =>
+        {
+            var mcpStore = new InvestigationRequestStore(mcpSource, 30, agentActionSource: ownerSource);
+            var answer = JsonNode.Parse(await DarlingMcpInvestigationTools.PostMessageAsync(mcpStore, chat.ToString(), claim.ToString(), "Looking now.", ct))!;
+            Assert.Equal("posted", answer["status"]?.ToString());
+            Assert.Equal("agent_message|agent:agent-a", await SlackChatStoreLiveTests.ScalarAsync(owner, $"SELECT event || '|' || actor FROM config.investigation_journal WHERE journal_id = {answer["journal_id"]}", ct));
+
+            var bare = new InvestigationRequestStore(mcpSource, 30);
+            var refused = JsonNode.Parse(await DarlingMcpInvestigationTools.PostMessageAsync(bare, chat.ToString(), claim.ToString(), "Again.", ct))!;
+            Assert.NotEqual("posted", refused["status"]?.ToString());
+            Assert.Equal("1", await SlackChatStoreLiveTests.ScalarAsync(owner, $"SELECT count(*) FROM config.investigation_journal WHERE request_id = '{chat}' AND event = '{InvestigationRequestStore.AgentMessage}'", ct));
+        });
     }
 }
