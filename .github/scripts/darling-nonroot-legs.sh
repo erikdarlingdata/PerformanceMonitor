@@ -208,7 +208,8 @@ docker volume create "${secrets_vol}" >/dev/null
 # The web dashboard on, with its token beside the store connection: its host must stay down, not connect as the owner.
 docker run --rm --user 0 --entrypoint sh -e DARLING_STORE_CONNECTION -v "${secrets_vol}:/s" "${image}" -c \
   'printf "%s\n" "${DARLING_STORE_CONNECTION}" > /s/store_connection && chmod 600 /s/store_connection \
-   && head -c 24 /dev/urandom | od -An -tx1 | tr -d " \n" > /s/web_token && chmod 644 /s/web_token' \
+   && head -c 24 /dev/urandom | od -An -tx1 | tr -d " \n" > /s/web_token && chmod 644 /s/web_token \
+   && head -c 24 /dev/urandom | od -An -tx1 | tr -d " \n" > /s/password_key && chown 1654:1654 /s/password_key && chmod 600 /s/password_key' \
   || fail "could not write the secrets volume"
 cat > "${config_file}" <<'JSON'
 {
@@ -223,14 +224,20 @@ wait_log "${prefix}-missed-chmod" "secret file '/run/secrets/store_connection' c
 log="$(log_of "${prefix}-missed-chmod")"
 grep -qF "/run/secrets/store_connection' is denied. The service runs as user 1654, which cannot read it" <<<"${log}" \
   || fail "the secret-read refusal does not name the service's user"
-grep -qF 'chmod 700 secrets && chmod 644 darling.json secrets/*' <<<"${log}" || fail "the secret-read refusal does not give the chmod"
+grep -qF 'chmod 700 secrets && chmod 644 darling.json && find secrets -type f ! -name password_key -exec chmod 644 {} +' <<<"${log}" || fail "the secret-read refusal does not give the chmod"
 grep -qF 'chown darling -R 1654:1654 /var/lib/darling' <<<"${log}" || fail "the secret-read refusal does not give the chown"
 grep -qF 'docker compose restart darling' <<<"${log}" || fail "the secret-read refusal does not say to restart"
 if grep -qF "Generated the compose store's" <<<"${log}"; then fail "the service generated a credential before its config loaded"; fi
 docker rm -f "${prefix}-missed-chmod" >/dev/null
-# The chmod line run, the chown line still skipped.
-docker run --rm --user 0 --entrypoint chmod -v "${secrets_vol}:/s" "${image}" 644 /s/store_connection >/dev/null \
-  || fail "could not make the store connection secret readable"
+# The chmod line run as documented (the volume stands in for secrets/ of the compose folder), the chown line still
+# skipped. A password key kept in secrets/, owned by 1654 with mode 0600, must come out of it untouched. The volume
+# root is opened again afterwards: compose bind-mounts the files one by one, so the service never meets the 0700.
+docker run --rm --user 0 --entrypoint sh -v "${secrets_vol}:/w/secrets" "${image}" -c \
+  'cd /w && : > darling.json && chmod 700 secrets && chmod 644 darling.json && find secrets -type f ! -name password_key -exec chmod 644 {} +' \
+  || fail "the documented chmod line failed"
+key_state="$(docker run --rm --user 0 --entrypoint sh -v "${secrets_vol}:/s" "${image}" -c 'chmod 755 /s && stat -c "%a %u" /s/password_key /s/store_connection' | tr '\n' ';')" \
+  || fail "could not read the secrets volume modes"
+[ "${key_state}" = "600 1654;644 0;" ] || fail "the documented chmod line changed the password key or missed the store connection (got: ${key_state})"
 start_service "${prefix}-missed-new" "${image}" -v "${secrets_vol}:/run/secrets:ro"
 wait_log "${prefix}-missed-new" 'belongs to user 0, but the service runs as user 1654'
 log="$(log_of "${prefix}-missed-new")"
