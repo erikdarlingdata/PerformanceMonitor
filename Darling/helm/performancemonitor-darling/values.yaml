@@ -79,3 +79,27 @@ secrets:
   webTokenKey: web-token
   # Key of the MCP token in the Secret. The chart generates it when the key is not in `values`.
   mcpTokenKey: mcp-token
+
+store:
+  # Where Darling keeps its data. "bundled" runs a single TimescaleDB pod (a StatefulSet) with this release. It suits
+  # evaluation and small installs: one replica, no backups, no failover.
+  mode: bundled
+  bundled:
+    # The store image. Keep it equal to STORE_IMAGE in .github/workflows/darling-linux-store.yml, the image CI tests Darling against.
+    image: timescale/timescaledb:2.31.0-pg17
+    persistence:
+      # Size of the store's data volume.
+      size: 10Gi
+      # Storage class of the data volume. Empty uses the cluster default.
+      storageClass: ""
+    auth:
+      # Name of a Secret you manage that holds the store password under the key `password`. The store pod
+      # (POSTGRES_PASSWORD_FILE) and the Darling pod (PGPASSWORD) both read that key. Empty makes the chart generate
+      # the password into the Secret <release>-store; GitOps installs must set this.
+      existingSecret: ""
+    # Resources of the store container.
+    resources:
+      requests:
+        memory: 2Gi
+      limits:
+        memory: 4Gi

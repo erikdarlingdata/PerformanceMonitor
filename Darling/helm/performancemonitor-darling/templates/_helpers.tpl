@@ -107,6 +107,32 @@ because Darling reads darling.json case-insensitively. Arguments: dict "cfg" <ma
 {{/* darling.json: the operator's config with the chart-owned keys merged over it. */}}
 {{- define "performancemonitor-darling.darlingJson" -}}
 {{- include "performancemonitor-darling.checkOwnedKeys" . -}}
-{{- $owned := dict "postgres" (dict "managed" false) -}}
+{{- $postgres := dict "managed" false -}}
+{{- if eq .Values.store.mode "bundled" -}}
+{{- $_ := set $postgres "connectionString" (printf "Host=%s;Port=5432;Username=darling;Database=darling" (include "performancemonitor-darling.storeName" .)) -}}
+{{- end -}}
+{{- $owned := dict "postgres" $postgres -}}
 {{- mergeOverwrite (deepCopy .Values.config) $owned | toPrettyJson -}}
+{{- end -}}
+
+{{/* Name of the bundled store resources. */}}
+{{- define "performancemonitor-darling.storeName" -}}
+{{- printf "%s-store" (include "performancemonitor-darling.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/* Selector labels of the bundled store pod. The name label differs from the Darling pod's, so the Darling Deployment's selector never matches the store pod. */}}
+{{- define "performancemonitor-darling.storeSelectorLabels" -}}
+app.kubernetes.io/name: {{ include "performancemonitor-darling.name" . }}-store
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: store
+{{- end -}}
+
+{{/* Name of the Secret holding the bundled store's password (key: password): the operator's existingSecret, or the chart-created one. */}}
+{{- define "performancemonitor-darling.storeSecretName" -}}
+{{- default (include "performancemonitor-darling.storeName" .) .Values.store.bundled.auth.existingSecret -}}
+{{- end -}}
+
+{{/* Prints "true" when this install generates the store password: bundled store with no existingSecret. */}}
+{{- define "performancemonitor-darling.storePasswordGenerated" -}}
+{{- if and (eq .Values.store.mode "bundled") (not .Values.store.bundled.auth.existingSecret) -}}true{{- end -}}
 {{- end -}}

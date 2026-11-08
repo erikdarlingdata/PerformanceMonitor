@@ -6,7 +6,7 @@ name: Darling Helm chart
 # render tests in the chart's tests/ directory.
 #
 # Triggers: a manual dispatch, a reusable-workflow call, and a pull request that touches the chart or the files the chart
-# mirrors (the compose file's store flags, the Dockerfile's user and paths, the store image pin in the Linux store workflow).
+# mirrors (the compose file's store flags, the Dockerfile's user and paths, the store image pin in the Linux store workflow, the image name build.yml pushes).
 # Never add `pull_request_target`: the job runs the checked-out chart and scripts and must not get a write token or secrets.
 on:
   workflow_call:
@@ -19,6 +19,7 @@ on:
       - 'Darling/compose/docker-compose.yml'
       - 'Darling/Dockerfile'
       - '.github/workflows/darling-linux-store.yml'
+      - '.github/workflows/build.yml'
 
 permissions:
   contents: read
@@ -99,3 +100,4 @@ jobs:
           set -euo pipefail
           bash "${CHART_DIR}/tests/render-tests.sh"
           sh "${CHART_DIR}/tests/render-config-tests.sh"
+          bash "${CHART_DIR}/tests/parity-tests.sh"

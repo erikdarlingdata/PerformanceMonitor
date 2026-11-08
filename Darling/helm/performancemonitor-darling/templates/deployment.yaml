@@ -89,6 +89,14 @@ spec:
               value: /config/darling.json
             - name: DARLING_STOPPED_MARKER
               value: /tmp/darling-stopped
+            {{- if eq .Values.store.mode "bundled" }}
+            # The store password stays out of the connection string: Npgsql reads it from PGPASSWORD.
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "performancemonitor-darling.storeSecretName" . }}
+                  key: password
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

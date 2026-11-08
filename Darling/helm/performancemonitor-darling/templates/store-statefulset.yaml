@@ -1,0 +1,135 @@
+{{- if eq .Values.store.mode "bundled" }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "performancemonitor-darling.storeName" . }}
+  labels:
+    {{- include "performancemonitor-darling.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  serviceName: {{ include "performancemonitor-darling.storeName" . }}-headless
+  selector:
+    matchLabels:
+      {{- include "performancemonitor-darling.storeSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "performancemonitor-darling.storeSelectorLabels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # 70:70 is the postgres user of the store image (checked with: docker run --rm --entrypoint id timescale/timescaledb:2.31.0-pg17 postgres).
+      # The image would start as root and drop to it; the chart starts it as that user directly, so no container runs as root.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: store
+          image: {{ .Values.store.bundled.image | quote }}
+          imagePullPolicy: IfNotPresent
+          # The six -c pairs of the compose file's store command; a parity test keeps them equal.
+          args:
+            - -c
+            - shared_preload_libraries=timescaledb,pg_stat_statements
+            - -c
+            - pg_stat_statements.track_utility=off
+            - -c
+            - timescaledb.max_background_workers=74
+            - -c
+            - max_worker_processes=85
+            - -c
+            - work_mem=16MB
+            - -c
+            - timescaledb.telemetry_level=off
+          env:
+            - name: POSTGRES_USER
+              value: darling
+            - name: POSTGRES_DB
+              value: darling
+            - name: POSTGRES_PASSWORD_FILE
+              value: /run/secrets/store/password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "darling", "-d", "darling"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            {{- toYaml .Values.store.bundled.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            # What postgres writes outside the data directory: its socket directory, scratch space and POSIX shared memory.
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+            - name: shm
+              mountPath: /dev/shm
+            - name: store-password
+              mountPath: /run/secrets/store
+              readOnly: true
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: run
+          emptyDir:
+            sizeLimit: 1Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+        # A container's default 64Mi /dev/shm is too small for parallel queries.
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 512Mi
+        - name: store-password
+          secret:
+            secretName: {{ include "performancemonitor-darling.storeSecretName" . }}
+            defaultMode: 288
+            items:
+              - key: password
+                path: password
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.store.bundled.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.store.bundled.persistence.size | quote }}
+{{- end }}

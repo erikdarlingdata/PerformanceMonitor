@@ -119,7 +119,7 @@ assert_fails "passwordKey." --set config.passwordKey=x
 
 t secret_existing_vs_created
 render --set secrets.existingSecret=s
-assert_eq "$(yq 'select(.kind == "Secret") | .metadata.name' "${OUT}")" "" "no chart Secret with existingSecret"
+assert_eq "$(yq "select(.kind == \"Secret\" and .metadata.name == \"${DEPLOY}\") | .metadata.name" "${OUT}")" "" "no chart Secret with existingSecret"
 assert_eq "$(dq '.spec.template.spec.volumes[] | select(.name == "secrets") | .secret.secretName')" '"s"' "secret volume uses s"
 render
 assert_eq "$(doc Secret "${DEPLOY}" | yq ".data | has(\"web-token\")")" "true" "generated web-token"
@@ -161,7 +161,7 @@ t notes_warn_generated_secrets
 n="$(notes)"
 grep -qF existingSecret <<<"${n}" || { echo "NOTES lack existingSecret" >&2; exit 1; }
 grep -qF GitOps <<<"${n}" || { echo "NOTES lack GitOps" >&2; exit 1; }
-n="$(notes --set secrets.existingSecret=s)"
+n="$(notes --set secrets.existingSecret=s --set store.bundled.auth.existingSecret=x)"
 if grep -qF existingSecret <<<"${n}" || grep -qF GitOps <<<"${n}"; then echo "NOTES warn with an existing Secret" >&2; exit 1; fi
 
 t notes_warn_latest_tag
@@ -176,3 +176,64 @@ assert_fails "config.postgres.connectionString is owned by the chart" --set conf
 assert_fails "config.web.network.token is owned by the chart" --set config.web.Network.token=x
 assert_fails "config.web.port is owned by the chart" --set config.Web.Port=1
 assert_fails "config.health is owned by the chart" --set config.HEALTH.port=1
+
+# The bundled store.
+SS="${RELEASE}-performancemonitor-darling-store"
+ssq() {
+  doc StatefulSet "${SS}" | yq -o=json -I=0 "$1"
+}
+
+t bundled_default
+render
+assert_eq "$(ssq '.spec.replicas')" "1" "store replicas"
+assert_eq "$(ssq '.spec.serviceName')" "\"${SS}-headless\"" "store serviceName"
+assert_eq "$(ssq '.spec.template.spec.containers[0].image')" '"timescale/timescaledb:2.31.0-pg17"' "store image"
+assert_eq "$(ssq '.spec.template.spec.containers[0].env[] | select(.name == "PGDATA") | .value')" '"/var/lib/postgresql/data/pgdata"' "PGDATA"
+assert_eq "$(ssq '.spec.template.spec.containers[0].volumeMounts[] | select(.name == "data") | .mountPath')" '"/var/lib/postgresql/data"' "data mount"
+assert_eq "$(ssq '.spec.template.spec.containers[0].env[] | select(.name == "POSTGRES_USER") | .value')" '"darling"' "POSTGRES_USER"
+assert_eq "$(ssq '.spec.template.spec.containers[0].env[] | select(.name == "POSTGRES_DB") | .value')" '"darling"' "POSTGRES_DB"
+assert_eq "$(ssq '.spec.template.spec.containers[0].env[] | select(.name == "POSTGRES_PASSWORD_FILE") | .value')" '"/run/secrets/store/password"' "POSTGRES_PASSWORD_FILE"
+assert_eq "$(ssq '.spec.template.spec.volumes[] | select(.name == "store-password") | .secret.secretName')" "\"${SS}\"" "store password volume"
+assert_eq "$(ssq '.spec.template.spec.volumes[] | select(.name == "store-password") | .secret.items[0].key')" '"password"' "store password key"
+assert_eq "$(ssq '.spec.template.spec.containers[0].readinessProbe.exec.command | join(" ")')" '"pg_isready -U darling -d darling"' "store readiness"
+assert_eq "$(ssq '.spec.template.spec.containers[0].resources')" '{"limits":{"memory":"4Gi"},"requests":{"memory":"2Gi"}}' "store resources"
+assert_eq "$(ssq '.spec.volumeClaimTemplates[0].spec.resources.requests.storage')" '"10Gi"' "store pvc size"
+# 70:70 is the postgres user of the store image: docker run --rm --entrypoint id timescale/timescaledb:2.31.0-pg17 postgres
+assert_eq "$(ssq '.spec.template.spec.securityContext')" \
+  '{"runAsNonRoot":true,"runAsUser":70,"runAsGroup":70,"fsGroup":70,"fsGroupChangePolicy":"OnRootMismatch","seccompProfile":{"type":"RuntimeDefault"}}' "store pod securityContext"
+assert_eq "$(ssq '.spec.template.spec.containers[0].securityContext')" \
+  '{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}}' "store container securityContext"
+assert_eq "$(ssq '.spec.template.spec.automountServiceAccountToken')" "false" "store automountServiceAccountToken"
+assert_eq "$(ssq '.spec.template.spec.enableServiceLinks')" "false" "store enableServiceLinks"
+assert_eq "$(doc Secret "${SS}" | yq '.data | has("password")')" "true" "generated store password"
+assert_eq "$(doc Secret "${SS}" | yq '.metadata.annotations["helm.sh/resource-policy"]')" "keep" "store secret keep annotation"
+assert_eq "$(doc Service "${SS}" | yq '.spec.type')" "ClusterIP" "store Service type"
+assert_eq "$(doc Service "${SS}-headless" | yq '.spec.clusterIP')" "None" "headless Service"
+# The store pod is never selected by the Darling Deployment.
+assert_eq "$(ssq '.spec.template.metadata.labels["app.kubernetes.io/name"]')" '"performancemonitor-darling-store"' "store name label"
+# Darling reaches the store through the inline string; the password comes from the store Secret by env.
+assert_eq "$(config_json '.postgres.connectionString')" "\"Host=${SS};Port=5432;Username=darling;Database=darling\"" "postgres.connectionString"
+assert_eq "$(config_json '.postgres.managed')" "false" "postgres.managed"
+assert_eq "$(dq '.spec.template.spec.containers[0].env[] | select(.name == "PGPASSWORD") | .valueFrom.secretKeyRef')" "{\"name\":\"${SS}\",\"key\":\"password\"}" "PGPASSWORD from the store Secret"
+assert_eq "$(doc Secret "${DEPLOY}" | yq '.data | has("store-connection")')" "false" "no store-connection in the chart Secret"
+
+t bundled_existing_secret
+render --set store.bundled.auth.existingSecret=x
+assert_eq "$(yq "select(.kind == \"Secret\" and .metadata.name == \"${SS}\") | .metadata.name" "${OUT}")" "" "no store Secret rendered"
+assert_eq "$(ssq '.spec.template.spec.volumes[] | select(.name == "store-password") | .secret.secretName')" '"x"' "store pod reads x"
+assert_eq "$(dq '.spec.template.spec.containers[0].env[] | select(.name == "PGPASSWORD") | .valueFrom.secretKeyRef.name')" '"x"' "Darling pod reads x"
+
+t store_custom_values
+render --set store.bundled.persistence.size=50Gi,store.bundled.persistence.storageClass=fast,store.bundled.image=example/pg:1
+assert_eq "$(ssq '.spec.volumeClaimTemplates[0].spec.resources.requests.storage')" '"50Gi"' "custom size"
+assert_eq "$(ssq '.spec.volumeClaimTemplates[0].spec.storageClassName')" '"fast"' "custom storage class"
+assert_eq "$(ssq '.spec.template.spec.containers[0].image')" '"example/pg:1"' "custom image"
+
+echo "SKIPPED external_renders_no_statefulset: store.mode=external arrives in Task 4"
+
+t notes_warn_generated_store_password
+n="$(notes --set secrets.existingSecret=s)"
+grep -qF "bundled store's password" <<<"${n}" || { echo "NOTES do not warn about the generated store password" >&2; exit 1; }
+grep -qF 'GitOps' <<<"${n}" || { echo "NOTES lack GitOps for the generated store password" >&2; exit 1; }
+n="$(notes --set secrets.existingSecret=s --set store.bundled.auth.existingSecret=x --set image.tag=1)"
+if grep -qF 'generated' <<<"${n}"; then echo "NOTES warn with both Secrets given" >&2; exit 1; fi
