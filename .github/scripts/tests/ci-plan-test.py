@@ -368,6 +368,21 @@ check("draft lite guard: a Guard class the host does not list is dropped, in eit
       (r.get("darling_scope"), r.get("darling_classes"), r.get("lite_classes")), ("none", "", "LG1"))
 r = draft_run(["README.md", LT + "L1Tests.cs"], cat=lg_cat)
 check("draft lite guard: a test-only draft has no Guard class", (r.get("areas"), r.get("darling_classes"), r.get("lite_classes")), ("classes", "", "L1"))
+# The Lite Guard classes join a selection that is already narrow and never narrow a draft on their own: a draft that changes only a
+# Lite file no test class or Darling class answers for (a manifest, a config file the app reads at run time) runs the Lite suite in
+# full, as it does when it is ready for review.
+for lone in ("Lite/app.manifest", "Lite/config/collection_schedule.json"):
+    r = draft_run([lone], cat=lg_cat)
+    ready = draft_run([lone], draft=False, cat=lg_cat)
+    check(f"draft lite guard: {lone} alone runs the Lite suite in full",
+          (r.get("areas"), r.get("darling_scope"), r.get("lite_scope"), r.get("lite_classes")), ("lite", "none", "full", ""))
+    check(f"draft lite guard: {lone} alone: the areas, scopes and legs of a ready pull request",
+          (r.get("areas"), r.get("darling_scope"), r.get("lite_scope"), r.get("legs")),
+          (ready.get("areas"), ready.get("darling_scope"), ready.get("lite_scope"), ready.get("legs")))
+    check(f"draft lite guard: {lone} alone: the why line says no class is selected", "no class is selected" in r.get("why", ""), True)
+r = draft_run(["Lite/app.manifest", LT + "L1Tests.cs"], cat=lg_cat)
+check("draft lite guard: the same file with a changed Lite test file is narrow, and the Lite Guard classes join",
+      (r.get("areas"), r.get("darling_scope"), r.get("lite_classes")), ("classes", "none", "L1,LG1,LG2"))
 # A changed test file that is not safe: the whole pull request runs as it does today, and the why line says so.
 r = draft_run([SERVICE, DT + "Helpers.cs"])
 check("draft: an unsafe test file: full", (r.get("areas"), r.get("darling_scope")), ("darling", "full"))
