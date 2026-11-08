@@ -67,11 +67,20 @@ public partial class ViewerServerTab
         if (jobs.Count == 0 && !bannerShows && read.LastGoodCollection is DateTime lastGood
             && RunningJobsNoDataMessage.Text == _ownNoDataText[RunningJobsNoDataMessage])
         {
-            RunningJobsNoDataMessage.Text = PerformanceMonitor.Alerting.RunningJobsCurrency.NotCurrentNote(lastGood, utc => ViewerTimeHelper.FormatForDisplay(utc, "yyyy-MM-dd HH:mm:ss"));
-            RunningJobsNoDataMessage.Visibility = Visibility.Visible;
+            ShowRunningJobsNotCurrent(lastGood);
         }
 
         RunningJobsMsdbWarning.Visibility = bannerShows ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// The Running Jobs empty text when the collector has not collected within its freshness bound: the last good collection, worded
+    /// in the Viewer's selected time mode (#8307) like the page's other times, in place of the jobs.
+    /// </summary>
+    internal void ShowRunningJobsNotCurrent(DateTime lastGoodCollectionUtc)
+    {
+        RunningJobsNoDataMessage.Text = PerformanceMonitor.Alerting.RunningJobsCurrency.NotCurrentNote(lastGoodCollectionUtc, utc => ViewerTimeHelper.FormatForDisplay(utc, "yyyy-MM-dd HH:mm:ss"));
+        RunningJobsNoDataMessage.Visibility = Visibility.Visible;
     }
 
     /// <summary>What the tab says in place of "No SQL Agent jobs are running." when the read itself failed.</summary>
