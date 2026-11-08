@@ -69,7 +69,8 @@ public sealed class LiteSidebarAndCardButtonTests
                 var found = new List<string>();
                 try
                 {
-                    var template = ((ItemsControl)main.FindName("ServerListView")!).ItemTemplate;
+                    /* The server row's template is the keyed one the list's selector hands out for a server row. */
+                    var template = (DataTemplate)main.Resources["FleetServerRowTemplate"];
                     var same = Item("same-name", "same-name");
                     var differs = Item("server-a.example", "Display Name");
                     var list = new StackPanel();
