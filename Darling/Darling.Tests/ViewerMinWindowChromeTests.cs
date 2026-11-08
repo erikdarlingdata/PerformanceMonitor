@@ -207,12 +207,12 @@ public sealed class ViewerMinWindowChromeTests
                 var plot = chart.Plot.RenderManager.LastRender.DataRect;
                 var box = chart.TransformToAncestor(viewport).TransformBounds(new Rect(chart.RenderSize));
                 boxes.Add(box);
-                var scale = chart.DisplayScale > 0 ? chart.DisplayScale : 1;
-                var plotBottom = box.Top + plot.Bottom / scale;
+                /* LastRender.DataRect is in the chart's own DIP units at any display scale, the same units as the box. */
+                var plotBottom = box.Top + plot.Bottom;
                 var inside = chart.IsVisible && box.Top >= -0.5 && plotBottom <= viewport.ViewportHeight + 0.5 && box.Left >= -0.5 && box.Right <= viewport.ViewportWidth + 0.5;
-                if (plot.Height / scale < 120 || !inside)
+                if (plot.Height < 120 || !inside)
                 {
-                    found.Add($"{name}: plot {plot.Height / scale:F0} high ending at {plotBottom:F0}, chart {box.Width:F0}x{box.Height:F0} at ({box.Left:F0},{box.Top:F0}), visible area {viewport.ViewportWidth:F0}x{viewport.ViewportHeight:F0}");
+                    found.Add($"{name}: plot {plot.Height:F0} high ending at {plotBottom:F0}, chart {box.Width:F0}x{box.Height:F0} at ({box.Left:F0},{box.Top:F0}), visible area {viewport.ViewportWidth:F0}x{viewport.ViewportHeight:F0}");
                 }
             }
 
