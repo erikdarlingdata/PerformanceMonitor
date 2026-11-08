@@ -18,6 +18,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Interop;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Notifications;
 using System.Windows.Threading;
 using PerformanceMonitorLite.Helpers;
@@ -323,6 +324,9 @@ public partial class App : Application
 
     /* Connection settings */
     public static int ConnectionTimeoutSeconds { get; set; } = 5;
+
+    /// <summary>#8146: the max_events_limit the deadlock, blocked-process and long-query sessions are created with (settings.json xe_ring_buffer_max_events), 1000 to 10000.</summary>
+    public static int XeRingBufferMaxEvents { get; set; } = RingBufferTarget.DefaultMaxEvents;
 
     /* CSV export settings */
     public static string CsvSeparator { get; set; } = GetDefaultCsvSeparator();
@@ -1545,6 +1549,20 @@ public partial class App : Application
                    an out-of-range timeout here has always been ignored in favour of the current value. */
                 var timeout = v.WholeNumber(ConnectionTimeoutSeconds);
                 if (timeout >= 5 && timeout <= 60) ConnectionTimeoutSeconds = timeout;
+            }
+
+            /* #8146: the ring-buffer limit of the deadlock, blocked-process and long-query sessions. Clamped to 1000-10000 and
+               logged, because a value that is not honoured otherwise looks like a ring buffer that loses events for no reason. Read
+               as a long, so a value too large for an int lands on the nearest bound as the guide says; not a number reads as the
+               default. */
+            if (read.TryGetProperty("xe_ring_buffer_max_events", out v))
+            {
+                var givenLimit = v.BigWholeNumber(RingBufferTarget.DefaultMaxEvents, long.MinValue, long.MaxValue);
+                XeRingBufferMaxEvents = RingBufferTarget.Clamp(givenLimit);
+                if (givenLimit != XeRingBufferMaxEvents)
+                {
+                    AppLogger.Warn("Settings", $"settings.json xe_ring_buffer_max_events is {givenLimit}, outside {RingBufferTarget.MinMaxEvents} to {RingBufferTarget.MaxMaxEvents}; using {XeRingBufferMaxEvents}");
+                }
             }
 
             /* CSV export settings */
