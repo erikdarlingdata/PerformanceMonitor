@@ -266,7 +266,7 @@ public sealed class ViewerChartCardsTests
                     new DarlingServer(1, "chart-cards-test", "chart-cards-test", true, null));
                 typeof(ViewerServerTab).GetField("_refreshInFlight", Instance)!.SetValue(tab, true);
                 var window = new Window { Content = tab, Width = 1280, Height = 800, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     var cards = ChartLayoutProbe.Logical<ChartPanel>(tab).ToList();

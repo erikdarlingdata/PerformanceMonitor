@@ -138,7 +138,7 @@ internal static class StaTestThread
     /// </summary>
     internal static void Settle(Window window)
     {
-        Step("Settle: Show() on the window");
+        Step("Settle: showing the window off-screen unless it is showing already");
         if (!window.IsVisible)
         {
             ShowOffScreen(window);

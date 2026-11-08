@@ -46,7 +46,7 @@ public sealed class FinOpsPageWheelTests
             var tab = new FinOpsTab();
             FillGrids(tab);
             var window = new Window { Content = tab, Width = 1000, Height = 600, Left = 0, Top = 0, WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var tabs = ChartLayoutProbe.Logical<TabControl>(tab).First();
