@@ -311,7 +311,9 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
 
     /// <summary>
     /// The only refusals of a plan guide create, in the order the batch gathered their facts: the name is taken, an OBJECT guide's module does not resolve, is not a procedure,
-    /// function or trigger, does not hold the statement, or the login lacks <c>ALTER</c>. Null when none applies. Pure, so a test needs no server.
+    /// function or trigger, the login lacks <c>ALTER</c>, or the statement is not in the module. The grant comes before the statement: <c>OBJECT_DEFINITION</c> is NULL for a
+    /// login without <c>VIEW DEFINITION</c>, which <c>ALTER</c> implies, so a login that lacks the grant also fails the statement check, and it is told the grant it is missing
+    /// rather than to copy a definition it cannot read. Null when none applies. Pure, so a test needs no server.
     /// </summary>
     internal static RemediationResult? CreatePlanGuideRefusal(string name, bool dryRun, PlanGuideDefinition guide, string database, bool taken, bool moduleFound, string? moduleType,
         bool statementInModule, bool grantedDb, bool grantedModule, string statement, string? parentTable = null)
@@ -327,9 +329,6 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
             if (moduleType is null || Array.IndexOf(PlanGuideModuleTypes, moduleType) < 0)
                 return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.NotAModule,
                     $"{guide.ModuleOrBatch} is not a stored procedure, scalar function, multi-statement table-valued function or DML trigger, the objects an OBJECT plan guide can be on. Nothing was run.") with { Statement = statement };
-            if (!statementInModule)
-                return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.StatementNotInModule,
-                    $"The statement does not appear exactly (character for character, case and spacing included) in the definition of {guide.ModuleOrBatch}. Copy it from OBJECT_DEFINITION. Nothing was run.") with { Statement = statement };
         }
 
         if (guide.Type == "OBJECT" ? !grantedModule : !grantedDb)
@@ -339,6 +338,11 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
                         ? $"The remediation login does not hold ALTER on {tableWords}, which sp_create_plan_guide needs for an OBJECT guide on the DML trigger {guide.ModuleOrBatch}."
                         : $"The remediation login does not hold ALTER on {guide.ModuleOrBatch}, which sp_create_plan_guide needs for an OBJECT guide."
                     : $"The remediation login does not hold ALTER on the database {database}, which sp_create_plan_guide needs for a {(guide.Type == "TEMPLATE" ? "TEMPLATE" : "SQL")} guide.") + " Nothing was run.") with { Statement = statement };
+
+        /* With ALTER held the login can read the definition, so a statement the batch did not find there is a statement that is not in the module. */
+        if (guide.Type == "OBJECT" && !statementInModule)
+            return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.StatementNotInModule,
+                $"The statement does not appear exactly (character for character, case and spacing included) in the definition of {guide.ModuleOrBatch}. Copy it from OBJECT_DEFINITION. Nothing was run.") with { Statement = statement };
         return null;
     }
 
