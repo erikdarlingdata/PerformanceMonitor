@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
@@ -40,19 +41,28 @@ internal sealed class DarlingHealthHostService : IHostedService, IAsyncDisposabl
     private readonly IFrontDoorDirectory _frontDoor;
     private readonly ILogger<DarlingHealthHostService> _logger;
     private readonly Func<string> _readConfigText;
+    private readonly bool? _inContainer;
+    private readonly Func<WebApplication, ValueTask> _disposeApp;
     private WebApplication? _app;
 
     public DarlingHealthHostService(
         CollectorRuntimeState collector,
         IFrontDoorDirectory frontDoor,
         ILogger<DarlingHealthHostService> logger,
-        Func<string>? readConfigText = null)
+        Func<string>? readConfigText = null,
+        bool? inContainer = null,
+        Func<WebApplication, ValueTask>? disposeApp = null)
     {
         _collector = collector;
         _frontDoor = frontDoor;
         _logger = logger;
         _readConfigText = readConfigText ?? (() => File.ReadAllText(DarlingConfig.ResolveConfigPath()));
+        _inContainer = inContainer;
+        _disposeApp = disposeApp ?? (app => app.DisposeAsync());
     }
+
+    /// <summary>The running app's services while the port is up, so a test reads back the Kestrel options the built server holds.</summary>
+    internal IServiceProvider? Services => _app?.Services;
 
     /// <summary>True once Kestrel has started; false when health is disabled or refused, or after any start failure.</summary>
     internal bool IsListening { get; private set; }
@@ -80,13 +90,26 @@ internal sealed class DarlingHealthHostService : IHostedService, IAsyncDisposabl
             }
 
             var problems = HealthConfig.Problems(health, file.WebPort, file.McpPort);
-            address = HealthConfig.ResolveListenAddress(health.Listen, DarlingHostBinding.IsRunningInContainer);
+            var inContainer = _inContainer ?? DarlingHostBinding.IsRunningInContainer;
+            address = HealthConfig.ResolveListenAddress(health.Listen, inContainer);
             if (problems.Count > 0 || address is null)
             {
                 _logger.LogCritical(
                     "Health port not started: {Problems} Fix the health block in darling.json and restart; collection keeps running without the port (#8184)",
                     string.Join(" ", problems));
                 return;
+            }
+
+            if (!IPAddress.IsLoopback(address))
+            {
+                /* #8184: no token and no allowFrom, so say why this listener is wide. An empty listen resolves wide only through the
+                   container default, and a host install whose service environment carries the variable gets it too. */
+                _logger.LogWarning(
+                    "Health port binds {Address}, not loopback, because {Reason}; it has no token and no allowFrom, so every host that can reach this address can read it (#8184)",
+                    address,
+                    string.IsNullOrWhiteSpace(health.Listen)
+                        ? "listen is empty and DOTNET_RUNNING_IN_CONTAINER is true"
+                        : "health.listen is " + health.Listen.Trim());
             }
 
             port = health.Port;
@@ -101,7 +124,8 @@ internal sealed class DarlingHealthHostService : IHostedService, IAsyncDisposabl
             builder.WebHost.ConfigureKestrel(options =>
             {
                 options.Configure(new ConfigurationBuilder().Build());
-                options.Listen(listenAddress, port);
+                ApplyLimits(options);
+                options.Listen(listenAddress, port, l => l.Protocols = HttpProtocols.Http1);
             });
             app = builder.Build();
             MapRoutes(app, probe => isFrontDoor
@@ -133,13 +157,27 @@ internal sealed class DarlingHealthHostService : IHostedService, IAsyncDisposabl
         }
     }
 
+    /// <summary>#8184: the limits of a listener that has no token and, in a container, listens on every interface. The probe is a short
+    /// HTTP/1.1 GET with no body, so each limit is tight and none can refuse a real probe.</summary>
+    internal static void ApplyLimits(KestrelServerOptions options)
+    {
+        options.AddServerHeader = false;
+        options.Limits.MaxConcurrentConnections = 64;
+        options.Limits.KeepAliveTimeout = TimeSpan.FromSeconds(15);
+        options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(10);
+        options.Limits.MaxRequestHeadersTotalSize = 8 * 1024;
+        options.Limits.MaxRequestBodySize = 0;
+    }
+
     private async Task DisposeFailedStartAsync(WebApplication? app)
     {
         IsListening = false;
         _app = null;
         if (app is not null)
         {
-            await app.DisposeAsync().ConfigureAwait(false);
+            /* #8184: the web host's guard (DarlingWebHostService.DisposeFailedStartAsync): a second Kestrel failure on teardown must not
+               leave StartAsync, or the service start stops and the worker never runs. */
+            try { await _disposeApp(app).ConfigureAwait(false); } catch { /* best-effort */ }
         }
     }
 
@@ -174,7 +212,7 @@ internal sealed class DarlingHealthHostService : IHostedService, IAsyncDisposabl
         IsListening = false;
         if (app is not null)
         {
-            await app.DisposeAsync().ConfigureAwait(false);
+            try { await _disposeApp(app).ConfigureAwait(false); } catch { /* best-effort */ }
         }
     }
 
