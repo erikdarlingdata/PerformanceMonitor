@@ -207,6 +207,13 @@ Arguments: dict "ctx" <root> "surface" "web"|"mcp" "field" "allowFrom"|"trustedP
 {{- end -}}
 {{- end -}}
 {{- $owned := dict "postgres" $postgres "web" (include "performancemonitor-darling.surfaceJson" (dict "ctx" . "surface" "web") | fromJson) "mcp" (include "performancemonitor-darling.surfaceJson" (dict "ctx" . "surface" "mcp") | fromJson) -}}
+{{- if .Values.passwordKey.existingSecret -}}
+{{- if eq .Values.passwordKey.source "env" -}}
+{{- $_ := set $owned "passwordKey" "env:DARLING_PASSWORD_KEY" -}}
+{{- else -}}
+{{- $_ := set $owned "passwordKey" (printf "file:/run/secrets/darling-password-key/%s" .Values.passwordKey.secretKey) -}}
+{{- end -}}
+{{- end -}}
 {{- mergeOverwrite (deepCopy .Values.config) $owned | toPrettyJson -}}
 {{- end -}}
 

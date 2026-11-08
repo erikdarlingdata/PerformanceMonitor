@@ -70,6 +70,17 @@ config: {}
 # A value may only contain A-Z a-z 0-9 and : / . _ ~ % ? = & + # - ; anything else stops the pod from starting.
 configSubstitutions: []
 
+# Where Darling reads its password key from (the key that seals stored server passwords), instead of generating one
+# into its state volume. Empty leaves Darling to manage the key itself.
+passwordKey:
+  # Name of a Secret you manage that holds the key. Empty means unset.
+  existingSecret: ""
+  # Key of the Secret that holds it.
+  secretKey: password-key
+  # file: mounted read-only at /run/secrets/darling-password-key, mode 0440, group 1654 through fsGroup (the service reads it
+  # as that group, and never needs write access). env: injected as DARLING_PASSWORD_KEY.
+  source: file
+
 secrets:
   # Name of a Secret you manage (GitOps installs must use this). Empty makes the chart create one from `values` plus generated tokens.
   existingSecret: ""

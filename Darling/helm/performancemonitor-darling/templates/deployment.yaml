@@ -98,6 +98,13 @@ spec:
                   name: {{ index $ref 0 | quote }}
                   key: {{ index $ref 1 | quote }}
             {{- end }}
+            {{- if and .Values.passwordKey.existingSecret (eq .Values.passwordKey.source "env") }}
+            - name: DARLING_PASSWORD_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.passwordKey.existingSecret | quote }}
+                  key: {{ .Values.passwordKey.secretKey | quote }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -119,6 +126,11 @@ spec:
             - name: secrets
               mountPath: /run/secrets/darling
               readOnly: true
+            {{- if and .Values.passwordKey.existingSecret (eq .Values.passwordKey.source "file") }}
+            - name: password-key
+              mountPath: /run/secrets/darling-password-key
+              readOnly: true
+            {{- end }}
             {{- if and (eq .Values.store.mode "external") .Values.store.external.connectionStringSecret.name }}
             - name: store-connection
               mountPath: /run/secrets/darling-store
@@ -164,6 +176,15 @@ spec:
           secret:
             secretName: {{ include "performancemonitor-darling.secretName" . }}
             defaultMode: 288
+        {{- if and .Values.passwordKey.existingSecret (eq .Values.passwordKey.source "file") }}
+        - name: password-key
+          secret:
+            secretName: {{ .Values.passwordKey.existingSecret | quote }}
+            defaultMode: 288
+            items:
+              - key: {{ .Values.passwordKey.secretKey | quote }}
+                path: {{ .Values.passwordKey.secretKey | quote }}
+        {{- end }}
         {{- if and (eq .Values.store.mode "external") .Values.store.external.connectionStringSecret.name }}
         - name: store-connection
           secret:

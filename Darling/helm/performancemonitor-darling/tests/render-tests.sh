@@ -340,6 +340,36 @@ assert_fails "web.ingress.hosts" --set web.ingress.enabled=true --set 'network.t
 assert_fails "mcp.enabled" --set mcp.ingress.enabled=true --set 'mcp.ingress.hosts={m.example.com}' --set 'network.allowFrom={10.1.0.0/16}'
 assert_fails "web.port" --set web.port=0
 
+# ---- Task 6: passwordKey ----
+t password_key_unset_by_default
+render
+assert_eq "$(config_json 'has("passwordKey")')" "false" "no passwordKey in the config"
+assert_eq "$(dq '.spec.template.spec.volumes | map(select(.name == "password-key")) | length')" "0" "no password-key volume"
+assert_eq "$(dq '.spec.template.spec.containers[0].env | map(select(.name == "DARLING_PASSWORD_KEY")) | length')" "0" "no password key env"
+
+t password_key_file
+render --set passwordKey.existingSecret=pk
+assert_eq "$(config_json '.passwordKey')" '"file:/run/secrets/darling-password-key/password-key"' "passwordKey file reference"
+assert_eq "$(dq '.spec.template.spec.volumes[] | select(.name == "password-key") | .secret')" '{"secretName":"pk","defaultMode":288,"items":[{"key":"password-key","path":"password-key"}]}' "password-key volume"
+assert_eq "$(dq '.spec.template.spec.containers[0].volumeMounts[] | select(.name == "password-key")')" '{"name":"password-key","mountPath":"/run/secrets/darling-password-key","readOnly":true}' "password-key mount"
+assert_eq "$(dq '.spec.template.spec.containers[0].volumeMounts | map(select(.mountPath | contains("/var/lib/darling/credentials"))) | length')" "0" "nothing mounted inside credentials/"
+render --set passwordKey.existingSecret=pk --set passwordKey.secretKey=k2
+assert_eq "$(config_json '.passwordKey')" '"file:/run/secrets/darling-password-key/k2"' "custom key name"
+assert_eq "$(dq '.spec.template.spec.volumes[] | select(.name == "password-key") | .secret.items')" '[{"key":"k2","path":"k2"}]' "custom key item"
+
+t password_key_env
+render --set passwordKey.existingSecret=pk --set passwordKey.source=env
+assert_eq "$(config_json '.passwordKey')" '"env:DARLING_PASSWORD_KEY"' "passwordKey env reference"
+assert_eq "$(dq '.spec.template.spec.containers[0].env[] | select(.name == "DARLING_PASSWORD_KEY") | .valueFrom.secretKeyRef')" '{"name":"pk","key":"password-key"}' "env from secretKeyRef"
+assert_eq "$(dq '.spec.template.spec.volumes | map(select(.name == "password-key")) | length')" "0" "no password-key volume"
+assert_eq "$(dq '.spec.template.spec.containers[0].volumeMounts | map(select(.name == "password-key")) | length')" "0" "no password-key mount"
+
+t password_key_never_group_writable
+assert_fails "defaultMode" --set passwordKey.existingSecret=pk --set passwordKey.defaultMode=432
+assert_fails "source" --set passwordKey.existingSecret=pk --set passwordKey.source=bogus
+render --set passwordKey.existingSecret=pk
+assert_eq "$(dq '.spec.template.spec.volumes[] | select(.name == "password-key") | .secret.defaultMode')" "288" "mode stays 0440"
+
 t acceptance_values_render
 for f in "${CHART_DIR}"/ci/*.yaml; do
   helm lint "${CHART_DIR}" -f "${f}" > /dev/null

@@ -47,6 +47,15 @@
     "extraVolumes": { "type": "array" },
     "extraVolumeMounts": { "type": "array" },
     "config": { "type": "object" },
+    "passwordKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "existingSecret": { "type": "string" },
+        "secretKey": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "enum": ["file", "env"] }
+      }
+    },
     "configSubstitutions": {
       "type": "array",
       "items": {
