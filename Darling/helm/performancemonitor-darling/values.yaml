@@ -82,7 +82,8 @@ secrets:
 
 store:
   # Where Darling keeps its data. "bundled" runs a single TimescaleDB pod (a StatefulSet) with this release. It suits
-  # evaluation and small installs: one replica, no backups, no failover.
+  # evaluation and small installs: one replica, no backups, no failover. "external" connects to a PostgreSQL/TimescaleDB
+  # server you run (see store.external); the chart then renders no store resources.
   mode: bundled
   bundled:
     # The store image. Keep it equal to STORE_IMAGE in .github/workflows/darling-linux-store.yml, the image CI tests Darling against.
@@ -103,3 +104,30 @@ store:
         memory: 2Gi
       limits:
         memory: 4Gi
+  external:
+    # Host, database and username of the external store. All three are required unless connectionStringSecret is set,
+    # and none of them may contain ";" or "=" (they would inject extra connection string settings).
+    host: ""
+    port: 5432
+    database: ""
+    username: ""
+    # Npgsql SSL Mode: Disable, Allow, Prefer, Require, VerifyCA or VerifyFull.
+    sslMode: Prefer
+    # The password of the user, read from a Secret you manage. It reaches the Darling container as the PGPASSWORD
+    # environment variable, so it never appears in darling.json. Leave name empty when the server needs no password
+    # (trust or certificate authentication); that is allowed. Mutually exclusive with connectionStringSecret.
+    passwordSecret:
+      name: ""
+      key: password
+    # A Secret holding the whole Npgsql connection string (password included). It is mounted read-only at
+    # /run/secrets/darling-store/<key> and postgres.connectionString becomes file:<that path>; host, port, database,
+    # username and sslMode are then ignored. Mutually exclusive with passwordSecret.
+    connectionStringSecret:
+      name: ""
+      key: connection-string
+    # A Secret holding the CA certificate (PEM) that signs the server's certificate. It is mounted read-only at
+    # /etc/darling/store-ca/ca.crt and added to the connection string as Root Certificate (unless connectionStringSecret
+    # is used, whose string you write yourself). Pair it with sslMode VerifyCA or VerifyFull.
+    caSecret:
+      name: ""
+      key: ca.crt

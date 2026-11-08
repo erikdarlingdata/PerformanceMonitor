@@ -229,7 +229,48 @@ assert_eq "$(ssq '.spec.volumeClaimTemplates[0].spec.resources.requests.storage'
 assert_eq "$(ssq '.spec.volumeClaimTemplates[0].spec.storageClassName')" '"fast"' "custom storage class"
 assert_eq "$(ssq '.spec.template.spec.containers[0].image')" '"example/pg:1"' "custom image"
 
-echo "SKIPPED external_renders_no_statefulset: store.mode=external arrives in Task 4"
+EXT=(--set store.mode=external --set store.external.host=db.example --set store.external.database=darling --set store.external.username=app)
+
+t external_renders_no_statefulset
+render "${EXT[@]}"
+assert_eq "$(yq 'select(.kind == "StatefulSet") | .metadata.name' "${OUT}")" "" "no StatefulSet"
+assert_eq "$(yq 'select(.kind == "Service") | .metadata.name' "${OUT}")" "" "no store Services"
+assert_eq "$(yq "select(.kind == \"Secret\" and .metadata.name == \"${SS}\") | .metadata.name" "${OUT}")" "" "no store Secret"
+
+t external_pgpassword
+render "${EXT[@]}" --set store.external.passwordSecret.name=pg --set store.external.passwordSecret.key=pw --set store.external.sslMode=Require
+assert_eq "$(config_json '.postgres.connectionString')" '"Host=db.example;Port=5432;Database=darling;Username=app;SSL Mode=Require"' "connection string"
+assert_eq "$(dq '.spec.template.spec.containers[0].env[] | select(.name == "PGPASSWORD") | .valueFrom.secretKeyRef')" '{"name":"pg","key":"pw"}' "PGPASSWORD from passwordSecret"
+assert_eq "$(config_json '.postgres.connectionString | contains("Password")')" "false" "no Password in the string"
+
+t external_connection_string_secret
+render --set store.mode=external --set store.external.connectionStringSecret.name=cs --set store.external.connectionStringSecret.key=conn
+assert_eq "$(config_json '.postgres.connectionString')" '"file:/run/secrets/darling-store/conn"' "file: connection string"
+assert_eq "$(dq '.spec.template.spec.containers[0].volumeMounts[] | select(.mountPath == "/run/secrets/darling-store")')" '{"name":"store-connection","mountPath":"/run/secrets/darling-store","readOnly":true}' "connection mount"
+assert_eq "$(dq '.spec.template.spec.volumes[] | select(.name == "store-connection") | .secret')" '{"secretName":"cs","defaultMode":288,"items":[{"key":"conn","path":"conn"}]}' "connection volume"
+assert_eq "$(dq '[.spec.template.spec.containers[0].env[] | select(.name == "PGPASSWORD")] | length')" "0" "no PGPASSWORD"
+
+t external_ca
+render "${EXT[@]}" --set store.external.caSecret.name=ca --set store.external.caSecret.key=root.pem
+assert_eq "$(config_json '.postgres.connectionString')" '"Host=db.example;Port=5432;Database=darling;Username=app;SSL Mode=Prefer;Root Certificate=/etc/darling/store-ca/ca.crt"' "connection string with CA"
+assert_eq "$(dq '.spec.template.spec.containers[0].volumeMounts[] | select(.mountPath == "/etc/darling/store-ca")')" '{"name":"store-ca","mountPath":"/etc/darling/store-ca","readOnly":true}' "CA mount"
+assert_eq "$(dq '.spec.template.spec.volumes[] | select(.name == "store-ca") | .secret')" '{"secretName":"ca","defaultMode":288,"items":[{"key":"root.pem","path":"ca.crt"}]}' "CA volume"
+
+t external_no_auth_allowed
+render "${EXT[@]}"
+assert_eq "$(dq '[.spec.template.spec.containers[0].env[] | select(.name == "PGPASSWORD")] | length')" "0" "no PGPASSWORD without a secret"
+
+t external_notes_no_store_warning
+n="$(notes --set secrets.existingSecret=s "${EXT[@]}" --set image.tag=1)"
+if grep -qF 'store' <<<"${n}"; then echo "NOTES mention a store password in external mode" >&2; exit 1; fi
+
+t schema_rejects
+assert_fails "store.mode" --set store.mode=bogus
+assert_fails "host" --set store.mode=external --set store.external.database=d --set store.external.username=u
+assert_fails "store.external" "${EXT[@]}" --set store.external.passwordSecret.name=a --set store.external.connectionStringSecret.name=b
+assert_fails "store.external.host" "${EXT[@]}" --set 'store.external.host=a;Password=x'
+assert_fails "store.external.database" "${EXT[@]}" --set 'store.external.database=a=b'
+assert_fails "store.external.username" "${EXT[@]}" --set 'store.external.username=a;b'
 
 t notes_warn_generated_store_password
 n="$(notes --set secrets.existingSecret=s)"

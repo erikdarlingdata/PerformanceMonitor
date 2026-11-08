@@ -110,6 +110,22 @@ because Darling reads darling.json case-insensitively. Arguments: dict "cfg" <ma
 {{- $postgres := dict "managed" false -}}
 {{- if eq .Values.store.mode "bundled" -}}
 {{- $_ := set $postgres "connectionString" (printf "Host=%s;Port=5432;Username=darling;Database=darling" (include "performancemonitor-darling.storeName" .)) -}}
+{{- else -}}
+{{- $ext := .Values.store.external -}}
+{{- if .Values.store.external.connectionStringSecret.name -}}
+{{- $_ := set $postgres "connectionString" (printf "file:/run/secrets/darling-store/%s" .Values.store.external.connectionStringSecret.key) -}}
+{{- else -}}
+{{- range $field := list "host" "database" "username" "sslMode" -}}
+{{- if regexMatch "[;=]" (toString (get $ext $field)) -}}
+{{- fail (printf "store.external.%s must not contain ';' or '='" $field) -}}
+{{- end -}}
+{{- end -}}
+{{- $cs := printf "Host=%s;Port=%v;Database=%s;Username=%s;SSL Mode=%s" $ext.host $ext.port $ext.database $ext.username $ext.sslMode -}}
+{{- if $ext.caSecret.name -}}
+{{- $cs = printf "%s;Root Certificate=/etc/darling/store-ca/ca.crt" $cs -}}
+{{- end -}}
+{{- $_ := set $postgres "connectionString" $cs -}}
+{{- end -}}
 {{- end -}}
 {{- $owned := dict "postgres" $postgres -}}
 {{- mergeOverwrite (deepCopy .Values.config) $owned | toPrettyJson -}}
@@ -135,4 +151,13 @@ app.kubernetes.io/component: store
 {{/* Prints "true" when this install generates the store password: bundled store with no existingSecret. */}}
 {{- define "performancemonitor-darling.storePasswordGenerated" -}}
 {{- if and (eq .Values.store.mode "bundled") (not .Values.store.bundled.auth.existingSecret) -}}true{{- end -}}
+{{- end -}}
+
+{{/* The secretKeyRef of PGPASSWORD as "name|key", or nothing when the store needs no password from a Secret. */}}
+{{- define "performancemonitor-darling.pgPasswordRef" -}}
+{{- if eq .Values.store.mode "bundled" -}}
+{{- printf "%s|password" (include "performancemonitor-darling.storeSecretName" .) -}}
+{{- else if and .Values.store.external.passwordSecret.name (not .Values.store.external.connectionStringSecret.name) -}}
+{{- printf "%s|%s" .Values.store.external.passwordSecret.name .Values.store.external.passwordSecret.key -}}
+{{- end -}}
 {{- end -}}

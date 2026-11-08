@@ -89,13 +89,14 @@ spec:
               value: /config/darling.json
             - name: DARLING_STOPPED_MARKER
               value: /tmp/darling-stopped
-            {{- if eq .Values.store.mode "bundled" }}
+            {{- with include "performancemonitor-darling.pgPasswordRef" . }}
+            {{- $ref := splitList "|" . }}
             # The store password stays out of the connection string: Npgsql reads it from PGPASSWORD.
             - name: PGPASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "performancemonitor-darling.storeSecretName" . }}
-                  key: password
+                  name: {{ index $ref 0 | quote }}
+                  key: {{ index $ref 1 | quote }}
             {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
@@ -118,6 +119,16 @@ spec:
             - name: secrets
               mountPath: /run/secrets/darling
               readOnly: true
+            {{- if and (eq .Values.store.mode "external") .Values.store.external.connectionStringSecret.name }}
+            - name: store-connection
+              mountPath: /run/secrets/darling-store
+              readOnly: true
+            {{- end }}
+            {{- if and (eq .Values.store.mode "external") .Values.store.external.caSecret.name }}
+            - name: store-ca
+              mountPath: /etc/darling/store-ca
+              readOnly: true
+            {{- end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -153,6 +164,24 @@ spec:
           secret:
             secretName: {{ include "performancemonitor-darling.secretName" . }}
             defaultMode: 288
+        {{- if and (eq .Values.store.mode "external") .Values.store.external.connectionStringSecret.name }}
+        - name: store-connection
+          secret:
+            secretName: {{ .Values.store.external.connectionStringSecret.name | quote }}
+            defaultMode: 288
+            items:
+              - key: {{ .Values.store.external.connectionStringSecret.key | quote }}
+                path: {{ .Values.store.external.connectionStringSecret.key | quote }}
+        {{- end }}
+        {{- if and (eq .Values.store.mode "external") .Values.store.external.caSecret.name }}
+        - name: store-ca
+          secret:
+            secretName: {{ .Values.store.external.caSecret.name | quote }}
+            defaultMode: 288
+            items:
+              - key: {{ .Values.store.external.caSecret.key | quote }}
+                path: ca.crt
+        {{- end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
