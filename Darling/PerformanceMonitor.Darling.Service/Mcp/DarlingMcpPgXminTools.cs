@@ -60,22 +60,47 @@ public sealed class DarlingMcpPgXminTools
     };
 
     /// <summary>
+    /// Whether a session holder's <c>detail</c> says the backend is idle in transaction (aborted or not). The collector
+    /// writes <c>state=… application=… xact_start=… query_start=…</c> for the session source, so the state is read off
+    /// that text; no other source carries a backend state.
+    /// </summary>
+    internal static bool IsIdleInTransaction(string? detail) =>
+        detail is not null && detail.Contains("state=idle in transaction", StringComparison.Ordinal);
+
+    /// <summary>
     /// The remedy for a source whose window peak is material, and the sentence for one that never was (#8322): a holder
     /// whose xmin age peaked under <see cref="DarlingPgSessionStatesReader.MinSustainedHolderHorizonAge"/> transactions,
     /// the floor get_pg_session_states grades a holder against (#8092), held back at most that many transactions' row
     /// versions. An xmin one or two transactions behind is every live transaction on a busy server, so the source's remedy
     /// would send an operator to fix a client that did nothing wrong.
+    /// <para>The floor settles only what VACUUM lost, so the sentence says that and no more. A session idle in transaction
+    /// on a quiet instance can sit for a day in the low thousands of transactions and still hold its locks and its
+    /// connection, so for that one shape the sentence carries the other-axis rider get_pg_session_states puts on the same
+    /// row, pointing at <c>detail</c>'s <c>state</c> and <c>xact_start</c> and at that read for the duration grading.
+    /// The rider itself is not shared with get_pg_session_states' <c>LongIdleOtherAxis</c>, which grades a measured
+    /// duration this table does not carry.</para>
     /// </summary>
-    internal static string RemedyFor(string source, long peakXminAge) =>
-        peakXminAge >= DarlingPgSessionStatesReader.MinSustainedHolderHorizonAge
-            ? RemedyFor(source)
-            : "A holder was seen for this source, but its xmin age peaked at "
-              + CountText.Plural(peakXminAge, "transaction")
-              + " in this window, under the "
-              + DarlingPgSessionStatesReader.MinSustainedHolderHorizonAge.ToString("N0", CultureInfo.InvariantCulture)
-              + " that makes a hold: at most that many transactions' row versions waited behind it, which is the shape of "
-              + "ordinary in-flight work rather than a snapshot VACUUM was stuck behind. Nothing needs fixing unless the age "
-              + "climbs; get_pg_session_states grades the same holder against the same floor.";
+    internal static string RemedyFor(string source, long peakXminAge, string? detail)
+    {
+        if (peakXminAge >= DarlingPgSessionStatesReader.MinSustainedHolderHorizonAge) return RemedyFor(source);
+
+        var underFloor = "A holder was seen for this source, but its xmin age peaked at "
+            + CountText.Plural(peakXminAge, "transaction")
+            + " in this window, under the "
+            + DarlingPgSessionStatesReader.MinSustainedHolderHorizonAge.ToString("N0", CultureInfo.InvariantCulture)
+            + " that makes a hold: at most that many transactions' row versions waited behind it, so VACUUM lost no more "
+            + "than that to this holder. It becomes a horizon finding if the age climbs.";
+
+        if (source == "session" && IsIdleInTransaction(detail))
+        {
+            underFloor += " It is a finding on the OTHER axis though: detail says state=idle in transaction, and its xact_start "
+                + "is when that transaction was opened. An open transaction nobody is using holds its connection and any locks "
+                + "it took whatever its xmin age, so the session is still worth closing; get_pg_session_states grades how long "
+                + "it has sat idle. A forgotten commit is still a forgotten commit.";
+        }
+
+        return underFloor;
+    }
 
     [McpServerTool(Name = "get_pg_xmin_horizon"), Description("What holds back PostgreSQL's xmin horizon, by cause: session, replication slot, logical slot (catalog_xmin), standby feedback, or prepared transaction - identical symptoms, different fixes, for bloat growing while autovacuum looks normal. Reports the oldest holder per source and the current winner. pct_of_window_winning = samples_as_winner / captures_in_window: EVERY capture in the window, not just captures with a holder. Blocks freezing; feeds get_pg_wraparound_risk. empty: captured, found nothing - all-clear. unavailable: no capture in the window. <<GUIDE>> Gets what is holding back the PostgreSQL xmin horizon, attributed by cause. Use this whenever dead tuples or table bloat are growing while autovacuum appears to be running normally - that symptom has four unrelated causes which look identical from the outside, and each needs a completely different fix: a long-running or idle-in-transaction session, an abandoned replication slot, a logical slot holding catalog_xmin, a standby feeding back its xmin, or an orphaned prepared transaction. Reports the oldest holder for each source, which one is currently winning, and how persistent each has been across the window, so a chronic holder can be told apart from a query that merely ran long: pct_of_window_winning is the share of EVERY capture in the window (captures_in_window, from the collector's own log - unheld captures included, the same denominator the vacuum-horizon alert uses), not the share of the captures that happened to record this source. Also relevant to wraparound risk: a pinned horizon blocks freezing, so an unattended holder here is an upstream cause of the risk get_pg_wraparound_risk measures. Works on any PostgreSQL target. Zero holders is reported as empty only when the collector captured in the window; no holders AND no captures is unavailable, not an all-clear.")]
     public static async Task<string> GetPgXminHorizon(
@@ -201,7 +226,7 @@ public sealed class DarlingMcpPgXminTools
                     : (double?)null,
                 /* #8322: the remedy only once the source's window peak clears the age floor; under it, the sentence
                    says the holder was seen and its age never became material. */
-                remedy = RemedyFor(r.Source, r.PeakXminAge),
+                remedy = RemedyFor(r.Source, r.PeakXminAge, r.Detail),
             }).ToList();
 
             var winner = holders.FirstOrDefault(h => h.is_currently_winning) ?? holders[0];
