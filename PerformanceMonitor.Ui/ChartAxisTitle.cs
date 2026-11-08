@@ -251,14 +251,31 @@ namespace PerformanceMonitor.Ui
 
             var baseGridMin = (double)s_baseGridMin.GetValue(grid, g => ((System.Windows.Controls.Grid)g).MinHeight);
             double total = 0;
-            foreach (var d in grid.RowDefinitions)
+            for (var i = 0; i < grid.RowDefinitions.Count; i++)
             {
+                var d = grid.RowDefinitions[i];
                 if (d.Height.IsStar) total += d.MinHeight;
                 else if (d.Height.IsAbsolute) total += d.Height.Value;
-                else total += d.ActualHeight;
+                else total += d.ActualHeight - OpenExpanderContentHeight(grid, i);
             }
             var gridMin = Math.Max(baseGridMin, total);
             if (Math.Abs(grid.MinHeight - gridMin) > 0.5) grid.MinHeight = gridMin;
+        }
+
+        /// <summary>
+        /// The content height, margins included, of every opened <see cref="System.Windows.Controls.Expander"/> in the row. An Auto row counts
+        /// toward the Grid's floor at its closed height, so the floor follows the charts, and a snapshot grid a reader opened does not keep
+        /// the page tall after it closes. A row without an opened expander counts in full.
+        /// </summary>
+        private static double OpenExpanderContentHeight(System.Windows.Controls.Grid grid, int row)
+        {
+            double height = 0;
+            foreach (System.Windows.UIElement child in grid.Children)
+            {
+                if (System.Windows.Controls.Grid.GetRow(child) == row && child is System.Windows.Controls.Expander { IsExpanded: true, Content: System.Windows.FrameworkElement content })
+                    height += content.ActualHeight + content.Margin.Top + content.Margin.Bottom;
+            }
+            return height;
         }
 
         /// <summary>

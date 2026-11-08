@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -121,21 +122,24 @@ public sealed class PgOwnStatementLiveTests
             Assert.True(await DarlingCollectorRunner.ResolvePgExtensionSchemasAsync(
                 context, PgWaitStatsCollector.Instance, connection, null, ct));
 
-            var texts = new List<string>();
+            var entries = new List<(string Text, long QueryId, long DbId)>();
             await using (var read = new NpgsqlCommand(
-                "SELECT query FROM pg_stat_statements WHERE " + OwnDatabase + " AND query LIKE '%pg\\_catalog.pg\\_extension AS e%'", connection))
+                "SELECT query, queryid, dbid::bigint FROM pg_stat_statements WHERE " + OwnDatabase + " AND query LIKE '%pg\\_catalog.pg\\_extension AS e%'", connection))
             await using (var reader = await read.ExecuteReaderAsync(ct))
             {
                 while (await reader.ReadAsync(ct))
                 {
-                    texts.Add(reader.GetString(0));
+                    entries.Add((reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2)));
                 }
             }
 
-            var stored = Assert.Single(texts);
+            var (stored, ownQueryId, ownDbId) = Assert.Single(entries);
             Assert.True(PgOwnStatement.IsOwn(stored), stored);
 
-            /* And the hourly fetch learns it as the service's: a non-NULL own_entries for the shared queryid. */
+            /* And the hourly fetch learns it as the service's: a non-NULL own_entries for the shared queryid. The fetch reads
+               the cluster-wide pg_stat_statements, and other classes run the extension-schema read in their own databases
+               with their own texts, so the row is found by this database's queryid, never as the first row whose text
+               carries the fragment, and its own_entries must name this database. */
             context.PgExtensionSchemas = new Dictionary<string, string>(StringComparer.Ordinal) { ["pg_stat_statements"] = "public" };
             await using var fetch = new NpgsqlCommand(
                 PgOwnStatement.Mark(PgStatementText.FetchSqlFor(false, connection.PostgreSqlVersion.Major, context)), connection);
@@ -145,7 +149,7 @@ public sealed class PgOwnStatementLiveTests
             var found = false;
             while (await fetched.ReadAsync(ct))
             {
-                if (!fetched.IsDBNull(1) && fetched.GetString(1).Contains("pg_catalog.pg_extension AS e", StringComparison.Ordinal))
+                if (!fetched.IsDBNull(0) && fetched.GetInt64(0) == ownQueryId)
                 {
                     found = true;
                     ownEntries = fetched.IsDBNull(2) ? null : fetched.GetString(2);
@@ -155,6 +159,7 @@ public sealed class PgOwnStatementLiveTests
 
             Assert.True(found);
             Assert.NotNull(ownEntries);
+            Assert.Contains(JsonDocument.Parse(ownEntries).RootElement.EnumerateArray(), e => e.GetProperty("d").GetInt64() == ownDbId);
             bodySucceeded = true;
         }
         finally
