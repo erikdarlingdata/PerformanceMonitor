@@ -13,32 +13,31 @@ using System.Linq;
 using System.Reflection;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Media;
 using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 using Xunit;
+using LiteMainWindow = PerformanceMonitorLite.MainWindow;
 
 namespace Lite.Tests;
 
 /// <summary>
 /// #8331: at a maximized 1920x1080 window with the sidebar open, every server sub-tab is on the row and nothing is behind the "»"
-/// button; at a narrower window the button says how many tabs it holds and its tooltip names them. The real ServerTab is built on
-/// the shared STA thread, themed, shown at the width the main window leaves it beside the sidebar, and everything is read from the
-/// rendered controls.
+/// button; at a narrower window the button says how many tabs it holds and its tooltip names them. The real main window is built and
+/// laid out off screen at the size under test, with a server tab hosted in its tab strip the way the app places one, so the strip is
+/// exactly as wide as the window leaves it beside the sidebar. Everything is read from the rendered controls.
 /// </summary>
 [Collection("credential-manager")]
 public sealed class ServerTabStripFitTests
 {
-    private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;
     private const string OverflowButtonName = "PART_TabOverflowButton";
 
-    /* The sidebar's open width and the rail it collapses to below about 1100 DIPs (MainWindow.xaml's SidebarColumn). */
-    private const int OpenWidth = 280;
-    private const int RailWidth = 40;
-
-    private static int TabWidth(int windowWidth, bool sidebarCollapsed) => windowWidth - (sidebarCollapsed || windowWidth < 1100 ? RailWidth : OpenWidth);
+    /* The sidebar's open width (MainWindow.xaml's SidebarColumn); below about 1100 DIPs it shows its 40 px rail by itself. */
+    private const double OpenWidth = 280;
 
     [Theory]
     [InlineData("Dark")]
@@ -46,13 +45,15 @@ public sealed class ServerTabStripFitTests
     [InlineData("CoolBreeze")]
     public void TheServerSubTabs_AllFitTheRow_At1920x1080_WithTheSidebarOpen(string theme)
     {
-        var (hidden, buttonShown, rowWidth) = WithServerTab(theme, TabWidth(1920, sidebarCollapsed: false), 1080, (window, tab) =>
+        var (sidebar, hidden, buttonShown, rowWidth) = RunTab(theme, (w, tab) =>
         {
+            Lay(w, 1920, 1080);
             var main = (TabControl)tab.FindName("MainTabControl");
             var button = (Button)main.Template.FindName(OverflowButtonName, main);
-            return (Names(TabStripOverflow.HiddenTabs(main)), button.Visibility == Visibility.Visible, main.ActualWidth);
+            return (Col(w).ActualWidth, Names(TabStripOverflow.HiddenTabs(main)), button.Visibility == Visibility.Visible, main.ActualWidth);
         });
 
+        Assert.True(sidebar == OpenWidth, $"{theme}: the sidebar is {sidebar:F0} wide at 1920, expected the open {OpenWidth}");
         Assert.True(hidden.Count == 0, $"{theme}: {hidden.Count} server sub-tabs are behind the » button on a {rowWidth:F0} wide strip: {string.Join(", ", hidden)}");
         Assert.False(buttonShown, $"{theme}: every sub-tab fits the {rowWidth:F0} wide strip but the » button is shown");
     }
@@ -62,11 +63,12 @@ public sealed class ServerTabStripFitTests
     [InlineData("QueriesSubTabControl")]
     public void At900x600_TheStripKeepsOneRow_AndTheButtonCarriesTheHiddenCountAndNames(string stripName)
     {
-        var (hidden, caption, tooltip, tops, buttonShown) = WithServerTab("Dark", TabWidth(900, sidebarCollapsed: false), 600, (window, tab) =>
+        var (hidden, caption, tooltip, tops, buttonShown) = RunTab("Dark", (w, tab) =>
         {
+            Lay(w, 900, 600);
             var main = (TabControl)tab.FindName("MainTabControl");
-            main.SelectedItem = main.Items.OfType<TabItem>().First(t => Equals(t.Header, "Queries"));
-            StaTestThread.Settle(window);
+            SelectTab(main, "Queries");
+            Lay(w, 900, 600);
             var tabs = (TabControl)tab.FindName(stripName);
             var button = (Button)tabs.Template.FindName(OverflowButtonName, tabs);
             var menu = TabStripOverflow.HiddenTabs(tabs);
@@ -94,13 +96,19 @@ public sealed class ServerTabStripFitTests
     [InlineData(900, false)]
     public void AtEveryWidth_TheServerStripIsOneRow_AndTheButtonMatchesWhatIsHidden(int windowWidth, bool collapseSidebar)
     {
-        var width = TabWidth(windowWidth, collapseSidebar);
-        var problems = WithServerTab("Dark", width, 1080, (window, tab) =>
+        var problems = RunTab("Dark", (w, tab) =>
         {
+            Lay(w, windowWidth, 1080);
+            if (collapseSidebar)
+            {
+                Toggle(w);
+                Lay(w, windowWidth, 1080);
+            }
+
             var main = (TabControl)tab.FindName("MainTabControl");
             var found = Check(main, "server tabs");
             var hidden = TabStripOverflow.HiddenTabs(main).Count;
-            Report($"lite\t{windowWidth}\tsidebar {(collapseSidebar ? "collapsed" : "open")} ({windowWidth - width})\tstrip {main.ActualWidth:F0}\thidden {hidden}");
+            Report($"lite\t{windowWidth}\tsidebar {(collapseSidebar ? "collapsed" : "open")} ({Col(w).ActualWidth:F0})\tstrip {main.ActualWidth:F0}\thidden {hidden}");
             return found;
         });
 
@@ -153,35 +161,51 @@ public sealed class ServerTabStripFitTests
         File.AppendAllText(Path.Combine(dir, "lite-sub-tab-strip.tsv"), line + Environment.NewLine);
     }
 
-    /// <summary>Builds the real ServerTab against an empty store, shows it themed at the given size, and hands it to <paramref name="body"/>.</summary>
-    private static T WithServerTab<T>(string theme, int width, int height, Func<Window, ServerTab, T> body)
+    private static ColumnDefinition Col(LiteMainWindow w) => (ColumnDefinition)w.FindName("SidebarColumn");
+
+    private static void Toggle(LiteMainWindow w)
+    {
+        var button = (Button)w.FindName("SidebarToggleButton");
+        button.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+        HostOf(w).UpdateLayout();
+    }
+
+    private static void Lay(LiteMainWindow w, double width, double height)
+    {
+        var host = HostOf(w);
+        host.Width = width;
+        host.Height = height;
+        StaTestThread.WaitForIdle(host.Dispatcher, StaTestThread.IdleLimit);
+    }
+
+    /* A window that was never shown has no layout (it reads 0 wide), so the main window's content is moved into a window that is shown. */
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<LiteMainWindow, Window> s_hosts = new();
+
+    private static Window HostOf(LiteMainWindow w) => s_hosts.TryGetValue(w, out var host) ? host : throw new InvalidOperationException("not hosted");
+
+    private static void SelectTab(TabControl tabs, string header)
+    {
+        tabs.SelectedItem = tabs.Items.OfType<TabItem>().First(i => Equals(i.Header, header));
+        tabs.UpdateLayout();
+    }
+
+    private static T RunTab<T>(string theme, Func<LiteMainWindow, ServerTab, T> body)
     {
         var dir = Path.Combine(Path.GetTempPath(), "ServerTabStripFit_" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(dir);
         try
         {
             using var duckDb = new DuckDbInitializer(Path.Combine(dir, "test.duckdb"));
-            return StaTestThread.Run(() => WithAppTheme(theme, () =>
+            return StaTestThread.Run(() => WithTheme(theme, () =>
             {
-                var server = new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "strip-fit-test", DisplayName = "strip-fit-test", IsEnabled = true };
-                var tab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
-                /* Switching to a tab would start that tab's load against a server that is not there. */
-                typeof(ServerTab).GetField("_suppressActiveQueriesAutoRefresh", Instance)!.SetValue(tab, true);
-                /* The host carries the size: a Border with an explicit Width and Height lays its child out at that size whatever the window
-                   is given, so a screen smaller than 1920x1080 (one that clamps any window to itself) leaves the strip's width as asked.
-                   The window itself stays inside such a screen and clips what does not fit, which does not change the layout. */
-                var host = new Border { Width = width, Height = height, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top, Child = tab };
-                var window = new Window { Content = host, Width = Math.Min(width, 1000), Height = Math.Min(height, 700), Left = 0, Top = 0, WindowStyle = WindowStyle.None };
-                window.Resources.MergedDictionaries.Add(LoadTheme(theme));
-                StaTestThread.ShowOffScreen(window);
+                var w = NewWindow(dir);
                 try
                 {
-                    StaTestThread.Settle(window);
-                    return body(window, tab);
+                    return body(w, HostTab(w, duckDb));
                 }
                 finally
                 {
-                    window.Close();
+                    HostOf(w).Close();
                 }
             }));
         }
@@ -191,29 +215,80 @@ public sealed class ServerTabStripFitTests
         }
     }
 
-    private static ResourceDictionary LoadTheme(string theme) =>
-        new() { Source = new Uri($"pack://application:,,,/PerformanceMonitorLite;component/Themes/{theme}Theme.xaml") };
-
-    /// <summary>Runs <paramref name="body"/> with the theme under test as the application's own, so a control resolves its brushes and the app-level text style from it as the running app does.</summary>
-    private static T WithAppTheme<T>(string theme, Func<T> body)
+    private static LiteMainWindow NewWindow(string dir)
     {
-        var app = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
-        ResourceDictionary? added = null;
-        if (!app.Resources.Contains("NumericCell"))
+        /* The window reads these three paths when it is built; point them at a folder of the test's own. */
+        foreach (var (name, value) in new[] { ("DatabasePath", Path.Combine(dir, "monitor.duckdb")), ("ConfigDirectory", dir), ("SharedConfigDirectory", dir) })
         {
-            added = LoadTheme(theme);
-            app.Resources.MergedDictionaries.Add(added);
+            typeof(PerformanceMonitorLite.App).GetProperty(name, BindingFlags.Static | BindingFlags.Public)!.SetValue(null, value);
         }
 
+        var w = new LiteMainWindow();
+        var root = (UIElement)w.Content;
+        w.Content = null;
+        var host = new Window { Content = root, Width = 900, Height = 600, Left = 0, Top = 0, WindowStartupLocation = WindowStartupLocation.Manual, ShowInTaskbar = false };
+        /* The main window sets these on itself, and its content inherits them; the host stands in for the window, so it sets the same. */
+        TextOptions.SetTextFormattingMode(host, TextFormattingMode.Display);
+        host.UseLayoutRounding = true;
+        s_hosts.Add(w, host);
+        StaTestThread.ShowOffScreen(host);
+        /* Windows will not size a window past the screen (plus its borders), so a 1920 wide host is cut on a smaller screen and the
+           sidebar would rightly be the rail. The host lifts that limit, so a test gets the width it asks for on any screen. */
+        ((System.Windows.Interop.HwndSource)PresentationSource.FromVisual(host)).AddHook(AllowAnySize);
+        ClippedTextProbe.Settle(host);
+        return w;
+    }
+
+    private const int WM_GETMINMAXINFO = 0x0024;
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct MinMaxInfo { public int ReservedX, ReservedY, MaxSizeX, MaxSizeY, MaxPositionX, MaxPositionY, MinTrackX, MinTrackY, MaxTrackX, MaxTrackY; }
+
+    private static IntPtr AllowAnySize(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == WM_GETMINMAXINFO)
+        {
+            var info = System.Runtime.InteropServices.Marshal.PtrToStructure<MinMaxInfo>(lParam);
+            info.MaxTrackX = Math.Max(info.MaxTrackX, 4000);
+            info.MaxTrackY = Math.Max(info.MaxTrackY, 4000);
+            System.Runtime.InteropServices.Marshal.StructureToPtr(info, lParam, false);
+        }
+        return IntPtr.Zero;
+    }
+
+    /// <summary>A server tab in the main window's tab strip, the way the app places one, against an empty store.</summary>
+    private static ServerTab HostTab(LiteMainWindow w, DuckDbInitializer duckDb)
+    {
+        var server = new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "strip-fit-test", DisplayName = "strip-fit-test", IsEnabled = true };
+        var tab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
+        /* Switching to a tab would start that tab's load against a server that is not there. */
+        typeof(ServerTab).GetField("_suppressActiveQueriesAutoRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(tab, true);
+        ((UIElement)w.FindName("EmptyStatePanel")).Visibility = Visibility.Collapsed;
+        var tabs = (TabControl)w.FindName("ServerTabControl");
+        tabs.Visibility = Visibility.Visible;
+        var item = new TabItem { Header = "strip-fit-test", Content = tab };
+        tabs.Items.Add(item);
+        tabs.SelectedItem = item;
+        return tab;
+    }
+
+    /// <summary>Runs <paramref name="body"/> with <paramref name="theme"/> as the application's own resources, as the running app has them, then puts the previous set back.</summary>
+    private static T WithTheme<T>(string theme, Func<T> body)
+    {
+        var app = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+        var saved = app.Resources.MergedDictionaries.ToList();
+        app.Resources.MergedDictionaries.Clear();
+        app.Resources.MergedDictionaries.Add(new ResourceDictionary { Source = new Uri($"pack://application:,,,/PerformanceMonitorLite;component/Themes/{theme}Theme.xaml") });
         try
         {
             return body();
         }
         finally
         {
-            if (added is not null)
+            app.Resources.MergedDictionaries.Clear();
+            foreach (var d in saved)
             {
-                app.Resources.MergedDictionaries.Remove(added);
+                app.Resources.MergedDictionaries.Add(d);
             }
         }
     }
