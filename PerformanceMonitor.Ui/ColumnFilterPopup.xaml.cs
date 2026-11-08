@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using PerformanceMonitor.Common;
 
@@ -34,6 +35,77 @@ public partial class ColumnFilterPopup : UserControl
     {
         InitializeComponent();
         PopulateOperatorComboBox();
+        /* The caller fills the popup (Initialize) and then opens it (IsOpen = true). A focus call before the popup is visible lands
+           nowhere, so the entry box takes focus once the popup is visible. Keyboard focus can still stay in the owner window (a
+           popup opened by a mouse click leaves it there), so while the popup is open its owner window closes it on Escape too. */
+        IsVisibleChanged += (_, e) =>
+        {
+            if (e.NewValue is true)
+            {
+                FocusEntry();
+                WatchOwnerForEscape();
+            }
+            else
+            {
+                StopWatchingOwner();
+            }
+        };
+    }
+
+    private Window? _owner;
+
+    /// <summary>Puts keyboard focus in the box a person types in first: the value search when the column has a list, the text
+    /// match otherwise.</summary>
+    private void FocusEntry()
+    {
+        if (_list is not null)
+        {
+            SearchTextBox.Focus();
+        }
+        else
+        {
+            ValueTextBox.Focus();
+            ValueTextBox.SelectAll();
+        }
+    }
+
+    /// <summary>The window the popup opened from: the one that holds the filter button the popup is placed under.</summary>
+    private Window? OwnerWindow()
+    {
+        var target = (Parent as Popup)?.PlacementTarget;
+        return target is null ? null : Window.GetWindow(target);
+    }
+
+    private void WatchOwnerForEscape()
+    {
+        var owner = OwnerWindow();
+        if (owner is null || ReferenceEquals(owner, _owner))
+        {
+            return;
+        }
+
+        StopWatchingOwner();
+        _owner = owner;
+        _owner.PreviewKeyDown += Owner_PreviewKeyDown;
+    }
+
+    private void StopWatchingOwner()
+    {
+        if (_owner is not null)
+        {
+            _owner.PreviewKeyDown -= Owner_PreviewKeyDown;
+            _owner = null;
+        }
+    }
+
+    /// <summary>Escape in the owner window while the popup is open closes the popup, as Escape inside it does.</summary>
+    private void Owner_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape && IsVisible)
+        {
+            FilterCleared?.Invoke(this, EventArgs.Empty);
+            e.Handled = true;
+        }
     }
 
     private void PopulateOperatorComboBox()
@@ -128,14 +200,9 @@ public partial class ColumnFilterPopup : UserControl
         UpdateValueVisibility();
         _suppressEvents = false;
 
-        if (_list is not null)
+        if (IsVisible)
         {
-            SearchTextBox.Focus();
-        }
-        else
-        {
-            ValueTextBox.Focus();
-            ValueTextBox.SelectAll();
+            FocusEntry();
         }
     }
 
