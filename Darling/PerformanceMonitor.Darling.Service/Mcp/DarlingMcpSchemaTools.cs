@@ -418,10 +418,10 @@ public sealed class DarlingMcpSchemaTools
             var fetched = await SchemaHistoryReader.ReadChangesAsync(
                 connection, resolution.Keys, resolution.Database, schema, name, windowStart, windowEnd, include_baseline, limit + 1, offset, cancellationToken);
 
-            /* #6984: where the store's coverage of the window starts, on the schema passes' own log, so a window that reaches back before the
-               first pass says so (window_truncated) instead of reading as a quiet one. */
-            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
-                postgres, "get_schema_changes", resolved.ServerName, windowStart, windowEnd, emptyAnswer: fetched.Count == 0, logger: null, cancellationToken);
+            /* #6984: where the store's coverage of the window starts, on the schema passes' own log (collect.schema_capture_passes), so a
+               window that reaches back before the first pass says so (window_truncated) instead of reading as a quiet one. */
+            var notice = await DarlingMcpWindowNotice.ReadForCollectorTableAsync(
+                postgres, SchemaObjectsCollector.Instance.TargetTable, resolved.ServerName, windowStart, windowEnd, emptyAnswer: fetched.Count == 0, logger: null, cancellationToken);
             if (fetched.Count == 0)
             {
                 return await MissStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, resolution, true, cancellationToken)
