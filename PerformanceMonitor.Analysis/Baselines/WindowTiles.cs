@@ -210,15 +210,19 @@ public static class WindowTiles
     }
 
     /// <summary>
-    /// #8293: the collector's cadence as the window's own tiles measure it — the shortest mean gap between
-    /// consecutive collection instants among the tiles that hold at least <paramref name="minCollections"/>
-    /// instants (never fewer than two). The shortest, because a gap inside a tile can only stretch that tile's
-    /// mean gap, never shrink it, so the tile with the fewest gaps is the one that reports the cadence. <c>null</c>
-    /// when no tile holds enough instants to measure one, which leaves every tile's coverage unknown.
+    /// #8293: the collector's cadence as the window's own tiles measure it — the mean gap between consecutive
+    /// collection instants in the FULLEST tile, the one holding the most distinct instants (at least
+    /// <paramref name="minCollections"/>, never fewer than two), ties to the shorter gap. The fullest, for two
+    /// reasons: a gap inside a tile can only stretch that tile's mean gap, and the fullest tile has the fewest gaps;
+    /// and a sparse tile's instants can sit seconds apart (a collector restart, a run-now) without saying anything
+    /// about the cadence — read from such a tile, a few seconds would price every full hour as uncovered and leave
+    /// the window blind. <c>null</c> when no tile holds enough instants to measure one, which leaves every tile's
+    /// coverage unknown.
     /// </summary>
     public static TimeSpan? CollectionCadence(IReadOnlyList<WindowTile> tiles, int minCollections)
     {
         TimeSpan? cadence = null;
+        long fullest = 0;
         var floor = Math.Max(2, minCollections);
         foreach (var tile in tiles)
         {
@@ -228,9 +232,10 @@ public static class WindowTiles
             }
 
             var gap = TimeSpan.FromTicks(tile.CollectionSpan.Ticks / (tile.Collections - 1));
-            if (cadence is null || gap < cadence.Value)
+            if (cadence is null || tile.Collections > fullest || (tile.Collections == fullest && gap < cadence.Value))
             {
                 cadence = gap;
+                fullest = tile.Collections;
             }
         }
 

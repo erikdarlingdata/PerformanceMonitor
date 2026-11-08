@@ -192,6 +192,38 @@ public class AnomalyGateTileCoverageTests
         Assert.Null(verdict);
     }
 
+    [Fact]
+    public void SparseTileOfInstantsSecondsApart_DoesNotSetTheCadence_FullHoursStillScore()
+    {
+        // Three full hours at a one-minute cadence, a sustained rise in hour 12, and a tile of three instants five
+        // seconds apart (a collector restart). The fullest tile sets the cadence, so the full hours are still scored.
+        var verdict = Evaluate(FourHours,
+            MinuteTile(10, 60, 0.0), MinuteTile(11, 60, 0.0), MinuteTile(12, 60, 5.0),
+            Tile(13, peak: 0.0, mean: 0.0, samples: 3, collections: 3, spanMinutes: 10.0 / 60.0));
+
+        Assert.NotNull(verdict);
+        Assert.True(verdict!.Value.Decision.Fire, "a sustained rise in a full hour fires whatever a sparse tile's instants say about the cadence");
+        Assert.Equal(12, verdict.Value.Tile.LocalHour.Hour);
+        Assert.Equal(3, verdict.Value.TilesScored);
+    }
+
+    [Fact]
+    public void HourMissingFortyOfItsSixtyCollections_IsNotScored_TheFullestTileSetsTheCadence()
+    {
+        // Hours 10 and 12 are full at a one-minute cadence; hour 11 holds twenty instants spread over the hour, a burst
+        // among them. Its own mean gap is three minutes, which would call twenty instants a covered hour; the fullest
+        // tile's one-minute cadence prices them at twenty minutes.
+        var verdict = Evaluate(FourHours,
+            MinuteTile(10, 60, 0.0),
+            Tile(11, peak: 10.0, mean: 10.0, samples: 20, collections: 20, spanMinutes: 57),
+            MinuteTile(12, 60, 0.0));
+
+        Assert.NotNull(verdict);
+        Assert.False(verdict!.Value.Decision.Fire);
+        Assert.Equal(2, verdict.Value.TilesScored);
+        Assert.NotEqual(11, verdict.Value.Tile.LocalHour.Hour);
+    }
+
     /// <summary>One row of a tiled window statement, with the column names the statements use.</summary>
     private sealed class TileRow : IDataRecord
     {
