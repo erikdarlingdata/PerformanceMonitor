@@ -132,8 +132,8 @@ public sealed class FinOpsServerChoiceTests
     [Theory]
     [InlineData(0, false, "")]
     [InlineData(0, true, "")]
-    [InlineData(3, false, "3 server(s)")]
-    [InlineData(3, true, "3 server(s) (removed servers included)")]
+    [InlineData(3, false, "3 servers")]
+    [InlineData(3, true, "3 servers (removed servers included)")]
     public void InventoryCountText_NamesRemovedServers_LikeTheWebPage(int count, bool removed, string expected) =>
         Assert.Equal(expected, FinOpsServerChoice.InventoryCountText(count, removed));
 

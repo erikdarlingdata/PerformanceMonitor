@@ -116,7 +116,7 @@ public sealed class AlertHistoryDismissArchivedTests : IDisposable
         });
 
         var prompt = Assert.Single(prompts);
-        Assert.StartsWith("Dismiss 3 alert(s)?", prompt);
+        Assert.StartsWith("Dismiss 3 alerts?", prompt);
         Assert.DoesNotContain("remain visible", prompt);
         Assert.Equal(1, await SidecarCountAsync());
         var left = await ReadAsync(service);

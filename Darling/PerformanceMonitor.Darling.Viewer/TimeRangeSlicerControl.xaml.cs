@@ -225,11 +225,10 @@ public partial class TimeRangeSlicerControl : UserControl
         {
             Text = _emptyText,
             FontSize = 12,
-            FontStyle = FontStyles.Italic,
             TextAlignment = TextAlignment.Center,
             TextWrapping = TextWrapping.Wrap,
-            MaxWidth = Math.Min(520, Math.Max(40, w - 16)),
-            Foreground = FindBrush("ForegroundDimBrush", "#C7CBD4"),
+            MaxWidth = Math.Max(40, w - 16),
+            Foreground = FindBrush("ForegroundMutedBrush", "#A8AEBA"),
             IsHitTestVisible = false,
         };
         tb.Measure(new Size(tb.MaxWidth, double.PositiveInfinity));

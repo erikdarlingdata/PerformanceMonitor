@@ -19,9 +19,10 @@ namespace PerformanceMonitor.Ui;
 /// The "nothing here" text for a grid or chart that came back empty (Lite click-through F15). Without it a user cannot
 /// tell "nothing happened in this window" from "not collected": the grid is a bare header row, the chart a bare axis.
 ///
-/// <para>The text is a <see cref="TextBlock"/> that sits in the SAME grid cell as the surface, centred, in the style the
-/// System Events sub-tabs' own <c>*NoDataMessage</c> elements use (italic, dim, wrapped). It is made the first time a
-/// surface is empty and only toggled afterwards, so a surface that always has rows never pays for one.</para>
+/// <para>The text is a <see cref="TextBlock"/> that sits in the SAME grid cell as the surface, in the look of the shared
+/// <c>EmptyHint</c> style (muted, upright, centred) and wrapping at the cell's width, never a narrower one, so a wide pane shows
+/// it on one line. It is made the first time a surface is empty and only toggled afterwards, so a surface that always has rows
+/// never pays for one.</para>
 ///
 /// <para>A surface whose cell already holds a <c>*NoDataMessage</c> element (the System Events grids, whose message also
 /// carries the "this collector does not run on this server" wording) or any other <c>*Message</c> element (Alert History's
@@ -31,7 +32,7 @@ namespace PerformanceMonitor.Ui;
 public static class EmptyState
 {
     /// <summary>What a grid says when its caller gave no wording of its own.</summary>
-    public const string DefaultGridText = "No data for the selected time range.";
+    public const string DefaultGridText = "No data in the selected time window.";
 
     /// <summary>The name given to the element this class makes, so it is found again and never doubled.</summary>
     public const string ElementName = "EmptyStateText";
@@ -84,11 +85,9 @@ public static class EmptyState
                 Margin = clearOfBaseline ? new Thickness(0, 36, 0, 0) : new Thickness(0),
                 TextAlignment = TextAlignment.Center,
                 TextWrapping = TextWrapping.Wrap,
-                MaxWidth = 520,
-                FontStyle = FontStyles.Italic,
                 IsHitTestVisible = false,
             };
-            existing.SetResourceReference(TextBlock.ForegroundProperty, "ForegroundDimBrush");
+            existing.SetResourceReference(TextBlock.ForegroundProperty, "ForegroundMutedBrush");
             Grid.SetRow(existing, row);
             Grid.SetColumn(existing, column);
             Grid.SetRowSpan(existing, Grid.GetRowSpan(anchor));
@@ -143,10 +142,8 @@ public static class EmptyState
                 VerticalAlignment = VerticalAlignment.Center,
                 TextAlignment = TextAlignment.Center,
                 TextWrapping = TextWrapping.Wrap,
-                MaxWidth = 520,
-                FontStyle = FontStyles.Italic,
             };
-            existing.SetResourceReference(TextBlock.ForegroundProperty, "ForegroundDimBrush");
+            existing.SetResourceReference(TextBlock.ForegroundProperty, "ForegroundMutedBrush");
             existing.Inlines.Add(new Run(FilteredOutText + " "));
             existing.Inlines.Add(link);
             Grid.SetRow(existing, Grid.GetRow(anchor));

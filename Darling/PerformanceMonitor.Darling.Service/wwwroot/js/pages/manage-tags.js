@@ -26,6 +26,7 @@
  * a double click sends one request. All server text reaches the DOM through el()/textContent.
  */
 
+import { countWord } from "../plain-text.js";
 import { el, mount, apiGetFleet, apiWrite, loadingStrip, errorStrip, emptyStrip } from "../util.js";
 import { getSession } from "../views-api.js";
 
@@ -283,8 +284,8 @@ function rulesNode(rules, heading) {
 function ruleLine(r) {
   const bits = [r.name || "(unnamed rule)"];
   if (r.effect) bits.push(r.effect);
-  if (r.servers_lost_count) bits.push(r.servers_lost_count + " server(s) lost");
-  if (r.servers_gained_count) bits.push(r.servers_gained_count + " server(s) gained");
+  if (r.servers_lost_count) bits.push(countWord(r.servers_lost_count, "server") + " lost");
+  if (r.servers_gained_count) bits.push(countWord(r.servers_gained_count, "server") + " gained");
   if (r.enabled === false) bits.push("rule disabled");
   return bits.join(" — ");
 }
