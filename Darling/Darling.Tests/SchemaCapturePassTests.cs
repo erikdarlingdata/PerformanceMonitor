@@ -777,6 +777,49 @@ public sealed class SchemaCapturePassTests
         });
     }
 
+    /// <summary>
+    /// A database whose read fails every pass does not hold its place at the front: the database the last pass attempted longest ago goes
+    /// first, a never-seen one before any, so the one behind it is read though the pass budget allows only one database.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Pass_ADatabaseThatFailsEveryPass_DoesNotStarveTheOnesAfterIt(bool azure)
+    {
+        await WithRigAsync(async (rig, ct) =>
+        {
+            Seed(rig.Source);
+            rig.Source.Faults[Sales] = new InvalidOperationException("Lock request time out period exceeded.");
+            if (azure)
+            {
+                rig.Source.AzureSessions[Sales] = new SchemaSessionState(true, s_created, null, false);
+                rig.Source.AzureSessions[Reports] = new SchemaSessionState(true, s_created, null, false);
+                rig.Runner.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(new List<string> { "master", Reports, Sales });
+            }
+
+            var server = azure ? rig.Server("schemafail.database.windows.net", azure: true) : rig.Server();
+            rig.Runner.SchemaBudgetsForTests = (TimeSpan.Zero, TimeSpan.FromSeconds(120));
+
+            /* The first pass starts with the first database (SalesDb: the probe order on premises; on Azure the list puts ReportsDb first,
+               so the failing one is made to go first by reading ReportsDb once beforehand). */
+            if (azure)
+            {
+                rig.Source.Faults[Reports] = new InvalidOperationException("Not yet.");
+                await rig.PassAsync(server, ct);
+                rig.Source.Faults.Remove(Reports);
+                rig.Source.Reads.Clear();
+            }
+
+            await rig.PassAsync(server, ct);
+            Assert.Equal(new[] { Sales }, rig.Source.Reads.Select(r => r.Database).ToArray());
+
+            rig.Source.Reads.Clear();
+            await rig.PassAsync(server, ct);
+            Assert.Equal(new[] { Reports }, rig.Source.Reads.Select(r => r.Database).ToArray());
+            Assert.Equal("1", await Versions(rig, "change_kind = 'baseline' AND database_name = 'ReportsDb'", ct));
+        });
+    }
+
     [Fact]
     public async Task Pass_ManyTargetedObjects_AreReadInFull()
     {

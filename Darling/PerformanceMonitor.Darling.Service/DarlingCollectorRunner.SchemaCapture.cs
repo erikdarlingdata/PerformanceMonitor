@@ -49,6 +49,18 @@ public sealed partial class DarlingCollectorRunner
 
     internal void UnsettleSchemaSession(int serverId) => _schemaSessionSettled.TryRemove(serverId, out _);
 
+    /// <summary>
+    /// When the schema pass last started each database's work, by server and database name (#7643). The pass orders its databases by
+    /// this and the stored "seen in scope" stamp, oldest first, so a database whose read fails every pass, which no pass stamps, still
+    /// goes to the back once it was tried. Kept for the process only: after a restart the stored stamps alone order the databases.
+    /// </summary>
+    private readonly ConcurrentDictionary<(int ServerId, string Database), DateTime> _schemaAttempts = new();
+
+    internal DateTime? SchemaAttemptedAt(int serverId, string database) =>
+        _schemaAttempts.TryGetValue((serverId, database), out var at) ? at : null;
+
+    internal void NoteSchemaAttempt(int serverId, string database, DateTime at) => _schemaAttempts[(serverId, database)] = at;
+
     /// <summary>Writes the pass rows of one run with the same writer every collector's rows go through.</summary>
     internal Task<int> WriteSchemaPassRowsAsync(
         NpgsqlConnection pgConnection, List<SchemaObjectsCollector.PassRow> rows, ServerRuntime server, DateTime collectionTime, CancellationToken cancellationToken)

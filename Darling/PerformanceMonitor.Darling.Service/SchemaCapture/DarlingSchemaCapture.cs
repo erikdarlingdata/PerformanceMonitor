@@ -25,6 +25,10 @@ namespace PerformanceMonitor.Darling.Service;
 /// the databases and the session's events, lets <see cref="SchemaWorkPlanner"/> decide what each database needs, reads the catalog of
 /// the ones that need it, writes the versions, and logs one pass row per database read.
 ///
+/// <para><b>Order.</b> The databases that need work go oldest first: the one the last pass reached longest ago (the later of the stored
+/// "seen in scope" stamp and when a pass of this process last started it), a never-seen one before any. Neither a database that fails
+/// every pass nor the pass budget leaves the same databases unread pass after pass.</para>
+///
 /// <para><b>Budgets.</b> A database's read gets 120 seconds and the pass five minutes, checked before a database starts, so one slow
 /// database cannot hold the sweep. A database whose work did not finish (an error, either budget) is not stamped as seen in scope and its
 /// state row is not advanced, so the planner reconciles it on the next pass. The server's event position still advances, because the
@@ -203,7 +207,7 @@ public static class DarlingSchemaCapture
             var plans = SchemaWorkPlanner.Plan(_server.ServerId, _serverRow, _dbStates, session, batch, probes, inScope, _runNow);
             _planned = plans.Count(p => p.Work != SchemaDatabaseWork.Skip);
 
-            foreach (var plan in plans)
+            foreach (var plan in plans.OrderBy(p => p.Work == SchemaDatabaseWork.Skip ? DateTime.MinValue : LastReached(p.DatabaseName)))
             {
                 _ct.ThrowIfCancellationRequested();
                 var probe = probes.First(p => string.Equals(p.Name, plan.DatabaseName, StringComparison.Ordinal));
@@ -220,6 +224,7 @@ public static class DarlingSchemaCapture
                 }
 
                 _started++;
+                _runner.NoteSchemaAttempt(_server.ServerId, plan.DatabaseName, _passTime);
                 using var budget = StartDatabaseBudget();
                 await ExecutePlanAsync(plan, probe, connection, null, budget?.Token ?? _ct);
             }
@@ -234,7 +239,10 @@ public static class DarlingSchemaCapture
                 ? await TimedSql(() => listOverride(_server, _ct))
                 : await TimedSql(() => _runner.GetAzureDatabaseListAsync(_server, _runner.DatabaseScopeFor(SchemaObjectsCollector.Instance.Name, _server.ServerId), _ct));
             var skipped = new HashSet<string>(IdentityCapacityCollector.SkippedDatabaseNames, StringComparer.OrdinalIgnoreCase);
-            var databases = AzureSweepScope.WithoutMaster(listed).Where(d => !skipped.Contains(d)).Order(StringComparer.Ordinal).ToList();
+            /* Each database costs a connect, an ensure, a probe and an event read even when it is quiet, so the order decides which ones a
+               spent budget leaves for the next pass: the one reached longest ago goes first. */
+            var databases = AzureSweepScope.WithoutMaster(listed).Where(d => !skipped.Contains(d))
+                .Order(StringComparer.Ordinal).OrderBy(LastReached).ToList();
 
             foreach (var database in databases)
             {
@@ -246,6 +254,7 @@ public static class DarlingSchemaCapture
                 }
 
                 _started++;
+                _runner.NoteSchemaAttempt(_server.ServerId, database, _passTime);
                 using var budget = StartDatabaseBudget();
                 var token = budget?.Token ?? _ct;
                 try
@@ -329,6 +338,21 @@ public static class DarlingSchemaCapture
 
             await TimedStore(() => SchemaCaptureStateStore.MarkSessionEnsuredAsync(Store, _server.ServerId, _passTime, _ct));
             _sessionMarked = true;
+        }
+
+        /* When a pass last reached the database: the later of its stored "seen in scope" stamp and this process's last start of it. A
+           never-seen database sorts first. */
+        private DateTime LastReached(string database)
+        {
+            var seen = _dbStates.TryGetValue(database, out var row) ? row.LastSeenInScopeAt : null;
+            var attempted = _runner.SchemaAttemptedAt(_server.ServerId, database);
+            return (seen, attempted) switch
+            {
+                ({ } s, { } a) => s > a ? s : a,
+                ({ } s, null) => s,
+                (null, { } a) => a,
+                _ => DateTime.MinValue,
+            };
         }
 
         private async Task LoadStateAsync()
