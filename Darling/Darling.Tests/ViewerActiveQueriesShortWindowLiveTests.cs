@@ -91,6 +91,38 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
         }
     }
 
+    /* The Latest Snapshot button reads the newest capture alone, and feeds the same grid: the head stays and the idle shell is dropped there too. */
+    [Fact]
+    public async Task TheLatestSnapshotRead_KeepsTheWaitforHeadBlocker_AndDropsTheIdleShell()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        var bodySucceeded = false;
+        try
+        {
+            using var connection = await OpenAndResetAsync(cs!, ct);
+            var end = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            var at = end.AddMinutes(-5);
+            await InsertAsync(connection, at, 60, 0, "WAITFOR DELAY '00:10:00'", ct);
+            await InsertAsync(connection, at, 61, 60, "SELECT [v] FROM [dbo].[walk_rows] WHERE [id]=@1", ct);
+            await InsertAsync(connection, at, 62, 0, "WAITFOR DELAY '00:10:00'", ct);
+            await InsertAsync(connection, at, 63, 0, "SELECT 1", ct);
+            await InsertAsync(connection, at.AddMinutes(-1), 60, 0, "WAITFOR DELAY '00:10:00'", ct);
+
+            await using var viewer = new ViewerDataService(cs!);
+            var (batchTime, rows) = await viewer.GetLatestQuerySnapshotBatchAsync(ServerId, cancellationToken: ct);
+
+            Assert.Equal(DarlingMcpTestData.Naive(at), batchTime);
+            Assert.Equal(new[] { 60, 61, 63 }, rows.Select(r => r.SessionId).OrderBy(s => s).ToArray());
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) => await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     [Fact]
     public async Task TheStrip_BucketsAOneHourWindowByTheMinute()
     {
