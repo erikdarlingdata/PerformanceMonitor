@@ -326,7 +326,8 @@ check("draft: product file + changed test file: areas", r.get("areas"), "classes
 check("draft: product file + changed test file: scope", (r.get("darling_scope"), r.get("lite_scope")), ("classes", "none"))
 check("draft: product file + changed test file: the class and the Guard classes", r.get("darling_classes"), "D3,D4,D1")
 check("draft: product file + changed test file: minutes and legs", (r.get("test_minutes"), r.get("legs")), ("3.0", "1"))
-check("draft: the why line names the rule", "a draft runs only its own test classes and the Guard classes" in r.get("why", ""), True)
+check("draft: the why line names the rule",
+      "a draft runs only its own test classes and the Stage=Guard classes of each suite in its scope" in r.get("why", ""), True)
 r = draft_run([SERVICE])
 check("draft: product file only: Guard classes only", (r.get("areas"), r.get("darling_scope"), r.get("darling_classes")), ("classes", "classes", "D1"))
 check("draft: product file only: no Lite", (r.get("lite_scope"), r.get("lite_classes"), r.get("build")), ("none", "", "true"))
@@ -339,6 +340,34 @@ r = draft_run([LITE_SRC])
 check("draft: a Lite-only product file: Darling Guard, no Lite", (r.get("areas"), r.get("darling_classes"), r.get("lite_scope")), ("classes", "D1", "none"))
 r = draft_run([LITE_SRC, LT + "L1Tests.cs"])
 check("draft: a Lite product file + Lite test: both", (r.get("darling_classes"), r.get("lite_classes")), ("D1", "L1"))
+# #8355: a draft runs the Lite Stage=Guard classes that hold a test whenever its Lite scope is not none, as it runs Darling's.
+# LG1 and LG2 are Lite Guard classes with tests; LGHelper carries the trait and holds no test, so it is never named.
+lg_cls = {"darling": d_cls, "lite": {**l_cls, "LG1": {"Stage=Guard"}, "LG2": {"Stage=Guard"}, "LGHelper": {"Stage=Guard", cs.NO_TESTS_TRAIT}}}
+lg_cat = {**cc_cat, "classes": lg_cls, "lite_weights": {**cc_cat["lite_weights"], "LG1": 60, "LG2": 60}}
+r = draft_run([LITE_SRC, LT + "L1Tests.cs"], cat=lg_cat)
+check("draft lite guard: a Lite product file + Lite test: its class, then every Lite Guard class that holds a test", r.get("lite_classes"), "L1,LG1,LG2")
+check("draft lite guard: the Darling side is as before", (r.get("darling_scope"), r.get("darling_classes")), ("classes", "D1"))
+r = draft_run([SERVICE, LITE_SRC, DT + "D3Tests.cs", LT + "L2Tests.cs"], cat=lg_cat)
+check("draft lite guard: both suites", (r.get("darling_classes"), r.get("lite_classes")), ("D3,D4,D1", "L2,LG1,LG2"))
+r = draft_run([LITE_SRC], cat=lg_cat)
+check("draft lite guard: a Lite product file with no changed test file runs the Guard classes of both suites",
+      (r.get("darling_classes"), r.get("lite_scope"), r.get("lite_classes")), ("D1", "classes", "LG1,LG2"))
+r = draft_run([SERVICE], cat=lg_cat)
+check("draft lite guard: a Darling file that Lite classes read (Lite scope reads) runs the Lite Guard classes",
+      (r.get("darling_classes"), r.get("lite_scope"), r.get("lite_classes")), ("D1", "classes", "LG1,LG2"))
+r = draft_run(["Darling/X.cs"], cat=lg_cat)
+check("draft lite guard: a Lite scope of none picks no Lite class", (r.get("darling_classes"), r.get("lite_scope"), r.get("lite_classes")), ("D1", "none", ""))
+check("draft lite guard: the why line names both suites' Guard classes",
+      "a draft runs only its own test classes and the Stage=Guard classes of each suite in its scope" in r.get("why", ""), True)
+lg_files = {**cc_files, LT + "LG1Tests.cs": {"suite": "lite", "classes": ["LG1"], "tests": ["LG1"], "safe": True}}
+r = draft_run([LITE_SRC, LT + "LG1Tests.cs"], cat={**lg_cat, "files": lg_files})
+check("draft lite guard: a changed Lite Guard class is picked once", r.get("lite_classes"), "LG1,LG2")
+# #7744: a Guard class the test host does not list never reaches a plan, in either suite.
+r = cp.plan("pull_request", "dev", "feature/x", [], [LITE_SRC], rules, {**lg_cat, "listed": lambda suite, name: name not in ("LG2", "D1")}, draft=True)
+check("draft lite guard: a Guard class the host does not list is dropped, in either suite",
+      (r.get("darling_scope"), r.get("darling_classes"), r.get("lite_classes")), ("none", "", "LG1"))
+r = draft_run(["README.md", LT + "L1Tests.cs"], cat=lg_cat)
+check("draft lite guard: a test-only draft has no Guard class", (r.get("areas"), r.get("darling_classes"), r.get("lite_classes")), ("classes", "", "L1"))
 # A changed test file that is not safe: the whole pull request runs as it does today, and the why line says so.
 r = draft_run([SERVICE, DT + "Helpers.cs"])
 check("draft: an unsafe test file: full", (r.get("areas"), r.get("darling_scope")), ("darling", "full"))
