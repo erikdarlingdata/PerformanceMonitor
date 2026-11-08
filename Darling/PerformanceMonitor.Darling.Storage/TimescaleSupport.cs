@@ -684,9 +684,10 @@ public static partial class TimescaleSupport
     {
         (LegacyPerfmonBaselineView,   PerfmonIntervalBaselineView),
         (LegacyWaitStatsBaselineView, WaitStatsIntervalBaselineView),
-        /* #8106: the interval-honest wait supply is itself superseded by the per-row rate supply. The chain is walked in this
-           order on every start, so a store that still carries wait_stats_baseline judges it against wait_stats_interval_baseline
-           before that relation is judged against wait_stats_cadence_baseline; a legacy whose successor is gone can never drop. */
+        /* #8106: the interval-honest wait supply is itself superseded by the cadence supply. The chain is walked in this order on
+           every start, so a store that still carries wait_stats_baseline judges it against wait_stats_interval_baseline while that
+           relation stands; once it is gone and no longer registered, the legacy is judged against the cadence supply, the newest
+           registered successor (SuccessorToJudgeAgainstAsync), so it retires on coverage rather than waiting for a relation never made. */
         (WaitStatsIntervalBaselineView, WaitStatsCadenceBaselineView),
     };
 
@@ -1518,6 +1519,40 @@ $do$";
     /// this pass, and if the drop fails its jobs are scheduled again. A plain-PostgreSQL store and a plain view have
     /// no jobs, so this changes nothing for them.
     /// </summary>
+    /// <summary>
+    /// The relation a superseded legacy is judged against: its named successor while that relation stands on the store, and
+    /// otherwise, where the named successor is itself superseded and no longer registered (so the ensure sweep never makes it),
+    /// the chain followed forward to the newest registered successor. A store whose last build predates the interval supply then
+    /// retires <c>wait_stats_baseline</c> once <c>wait_stats_cadence_baseline</c> covers the tier, and a legacy whose successor
+    /// dropped on sight as an empty aggregate (#4289) retires the same way. The chain's order and the interval-to-cadence path are
+    /// unchanged: a successor that stands is judged as named.
+    /// </summary>
+    internal static async Task<string> SuccessorToJudgeAgainstAsync(NpgsqlConnection connection, string successor, CancellationToken cancellationToken)
+    {
+        var registered = BaselineAggregates.Select(a => a.View).ToHashSet(StringComparer.Ordinal);
+        var current = successor;
+        while (!registered.Contains(current))
+        {
+            using (var probe = new NpgsqlCommand(BaselineRelationExistsSql(current), connection) { CommandTimeout = SetupTimeoutSeconds })
+            {
+                if (await probe.ExecuteScalarAsync(cancellationToken) is true)
+                {
+                    return current;
+                }
+            }
+
+            var next = SupersededBaselineRelations.FirstOrDefault(pair => pair.Legacy == current).Successor;
+            if (next is null)
+            {
+                return current;
+            }
+
+            current = next;
+        }
+
+        return current;
+    }
+
     public static async Task<int> DropRetiredBaselineAggregatesAsync(
         NpgsqlConnection connection, ILogger? logger, DateTime utcNow, AggregateJobQuiesceOptions quiesce,
         CancellationToken cancellationToken = default)
@@ -1539,14 +1574,15 @@ $do$";
             var hold = AggregateJobHold.None;
             try
             {
-                var verdict = await JudgeSupersededBaselineRelationAsync(connection, legacy, successor, utcNow, cancellationToken);
+                var judgedAgainst = await SuccessorToJudgeAgainstAsync(connection, successor, cancellationToken);
+                var verdict = await JudgeSupersededBaselineRelationAsync(connection, legacy, judgedAgainst, utcNow, cancellationToken);
                 if (verdict.Decision != SupersededBaselineDecision.Drop)
                 {
                     if (verdict.Decision == SupersededBaselineDecision.SuccessorShort)
                     {
                         logger?.LogInformation(
                             "Superseded baseline relation {Legacy} stays for now (#3653): its successor {Successor} covers from {SuccessorOldest} and the baseline tier's horizon is {Horizon} — the legacy aggregate still holds history the successor has not yet materialized, and this start's read of it is what the provider falls back on for that part of its window. Re-judged on every start; expected to drop about five days after the first start that carried the successor.",
-                            legacy, successor, verdict.SuccessorOldest, verdict.Horizon);
+                            legacy, judgedAgainst, verdict.SuccessorOldest, verdict.Horizon);
                     }
 
                     continue;

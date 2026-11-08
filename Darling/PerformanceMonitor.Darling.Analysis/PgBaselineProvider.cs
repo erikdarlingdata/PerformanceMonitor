@@ -949,7 +949,7 @@ LIMIT 1";
     internal static (string Legacy, string Successor)? SupersededSupplyFor(string metricName) => metricName switch
     {
         MetricNames.BatchRequests => (TimescaleSupport.LegacyPerfmonBaselineView, TimescaleSupport.PerfmonIntervalBaselineView),
-        /* #8106: the wait pair's legacy is now #3653's interval-honest aggregate, superseded by the per-row rate supply. */
+        /* #8106: the wait pair's legacy is now #3653's interval-honest aggregate, superseded by the cadence supply. */
         MetricNames.WaitStats or MetricNames.WaitMsPerSec => (TimescaleSupport.WaitStatsIntervalBaselineView, TimescaleSupport.WaitStatsCadenceBaselineView),
         _ => null,
     };
