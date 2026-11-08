@@ -757,7 +757,7 @@ VALUES ({server.ServerId + 1}, 'SalesDb', '{s_group}', now()) RETURNING 1", ct);
     }
 
     [Fact]
-    public async Task Pass_DatabaseLeavesTheGroupHereWhileAnotherServersRowIsStale_ClosesTheGroupHistory()
+    public async Task Pass_DatabaseLeavesTheGroupHereWhileAnotherServersRowIsFromAFailoverDaysAgo_ClosesTheGroupHistory()
     {
         await WithRigAsync(async (rig, ct) =>
         {
@@ -765,9 +765,9 @@ VALUES ({server.ServerId + 1}, 'SalesDb', '{s_group}', now()) RETURNING 1", ct);
             rig.Source.Catalog[Sales] = [Table(100, "Orders", "Id", "Total"), Table(101, "Customers", "Id")];
             var server = rig.Server();
             await rig.PassAsync(server, ct);
-            /* The other server stopped stamping the group 40 days ago, past the 30 day window the purge uses. */
+            /* The other server stopped stamping the group 25 days ago (a failover): inside the purge window, long past the collector's cadence. */
             await rig.ScalarAsync($@"INSERT INTO collect.schema_capture_state (server_id, database_name, history_ag_group_id, last_seen_in_scope_at)
-VALUES ({server.ServerId + 1}, 'SalesDb', '{s_group}', now() - interval '40 days') RETURNING 1", ct);
+VALUES ({server.ServerId + 1}, 'SalesDb', '{s_group}', now() - interval '25 days') RETURNING 1", ct);
 
             rig.Source.Probes[0] = Probe(Sales, 5);
             await rig.PassAsync(server, ct);

@@ -739,8 +739,8 @@ public sealed partial class DarlingWorker
             queryStoreFetchTopN: () => StoreConfigProvider.ClampQueryStoreFetchTopN(config.QueryStoreFetchTopN),
             /* #8146: clamped and logged once here, because darling.json is read once at start. */
             xeRingBufferMaxEvents: StoreConfigProvider.ClampXeRingBufferMaxEvents(config.XeRingBufferMaxEvents, _logger),
-            /* #7643: the schema pass reads the retention the purge applies, live over the same overrides. */
-            collectorRetentionDays: name => StoreConfigProvider.ResolveFleetRetentionDays(name, _scheduleOverrides));
+            /* #7643: the schema pass reads the cadence the dispatch schedules it at, live over the same overrides. */
+            collectorFrequencyMinutes: (name, serverId) => StoreConfigProvider.ResolveSchedule(name, serverId, _scheduleOverrides).FrequencyMinutes);
         /* #7067: one gate, one clock, for the worker's and the runner's repeated warnings. */
         runner.RepeatLog = RepeatLog;
         _runner = runner;

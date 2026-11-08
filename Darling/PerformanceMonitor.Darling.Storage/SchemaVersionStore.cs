@@ -40,8 +40,9 @@ public sealed record SchemaDatabaseWrite(
 
     /// <summary>
     /// The oldest <c>last_seen_in_scope_at</c> that still makes another server's capture-state row count as writing an availability
-    /// group's history when this read moves a database out of the group: the collector's retention cutoff, the one the purge uses. A
-    /// row last stamped before it no longer keeps the history open.
+    /// group's history when this read moves a database out of the group: the line where get_collection_health reports the collector
+    /// FAILING for this server's cadence (24 hours at the shipped 15 minutes). A server that has not stamped the group since then is
+    /// not writing it (a failover leaves its row behind), so its row no longer keeps the history open.
     /// </summary>
     public required DateTime OtherServerStampedSince { get; init; }
 
@@ -225,8 +226,8 @@ WHERE {keyPredicate} AND database_name = $2 AND valid_to IS NULL", c, tx) { Comm
 
     /* The database's history moved to w.Key: the old key's current versions close at the detection time, their children stop being
        current, and DarlingRetention ages them out over the window. An availability group's history is left open while another server's
-       capture state still writes it (the database left the group on this server only); a row not stamped within the retention window does
-       not count, so a server that stopped stamping the group cannot keep it open until the purge takes it early. */
+       capture state still writes it (the database left the group on this server only); a row not stamped since the collector would read
+       FAILING does not count, so a server that stopped stamping the group (a failover) cannot keep it open until the purge deletes it early. */
     private static async Task CloseMovedHistoryAsync(NpgsqlConnection c, NpgsqlTransaction tx, SchemaDatabaseWrite w, SchemaHistoryKey moved, CancellationToken ct)
     {
         var keyPredicate = moved.AgGroupId is not null

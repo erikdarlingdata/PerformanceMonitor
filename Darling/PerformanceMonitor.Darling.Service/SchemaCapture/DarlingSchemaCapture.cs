@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -491,8 +492,9 @@ public static class DarlingSchemaCapture
                 snapshot.Objects, plan.Attribution, state)
             {
                 TargetedIds = ids,
-                OtherServerStampedSince = _passTime.AddDays(-DarlingRetention.EffectivePurgeRetentionDays(
-                    SchemaObjectsCollector.Instance.Name, _runner.CollectorRetentionDaysFor(SchemaObjectsCollector.Instance.Name))),
+                OtherServerStampedSince = _passTime.AddHours(-CollectorHealthClassifier.FailingThresholdHours(
+                    CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(
+                        _runner.CollectorFrequencyMinutesFor(SchemaObjectsCollector.Instance.Name, _server.ServerId)))),
                 MovedFrom = string.Equals(plan.Reason, "history_key_changed", StringComparison.Ordinal) && existing is not null
                     ? new SchemaHistoryKey(existing.HistoryServerId, existing.HistoryAgGroupId, null)
                     : null,
