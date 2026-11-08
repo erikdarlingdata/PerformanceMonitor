@@ -1244,6 +1244,13 @@
             </Setter.Value>
         </Setter>
     </Style>
+
+    <!-- #8306: a splitter that sets no Background takes the scroll thumb's brush, the theme's grab-handle ink, which reads against the page
+         in every theme. The stock style paints it from the system control grey, which this theme maps to the scroll track's colour. -->
+    <Style TargetType="GridSplitter">
+        <Setter Property="Background" Value="{StaticResource ScrollBarThumbBrush}"/>
+    </Style>
+
     <!-- ============================================ -->
     <!-- Border Style for Panels                      -->
     <!-- ============================================ -->
