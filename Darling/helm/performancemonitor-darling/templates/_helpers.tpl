@@ -206,7 +206,12 @@ Arguments: dict "ctx" <root> "surface" "web"|"mcp" "field" "allowFrom"|"trustedP
 {{- $_ := set $postgres "connectionString" $cs -}}
 {{- end -}}
 {{- end -}}
-{{- $owned := dict "postgres" $postgres "web" (include "performancemonitor-darling.surfaceJson" (dict "ctx" . "surface" "web") | fromJson) "mcp" (include "performancemonitor-darling.surfaceJson" (dict "ctx" . "surface" "mcp") | fromJson) -}}
+{{- range $surface := list "web" "mcp" -}}
+{{- if eq (int (get (get $.Values $surface) "port")) 5154 -}}
+{{- fail (printf "%s.port must not be 5154: that port is fixed for the health endpoint the probes use, and Darling refuses a health port that clashes with the web or MCP port" $surface) -}}
+{{- end -}}
+{{- end -}}
+{{- $owned := dict "health" (dict "enabled" true "port" 5154 "listen" "0.0.0.0") "postgres" $postgres "web" (include "performancemonitor-darling.surfaceJson" (dict "ctx" . "surface" "web") | fromJson) "mcp" (include "performancemonitor-darling.surfaceJson" (dict "ctx" . "surface" "mcp") | fromJson) -}}
 {{- if .Values.passwordKey.existingSecret -}}
 {{- if eq .Values.passwordKey.source "env" -}}
 {{- $_ := set $owned "passwordKey" "env:DARLING_PASSWORD_KEY" -}}

@@ -84,6 +84,47 @@ spec:
             capabilities:
               drop:
                 - ALL
+          # Named ports. The probes use `health` and never the web or MCP port: #8141's ownership stop (a state volume
+          # the non-root user cannot write) keeps those surfaces down on purpose, so a probe on them would restart the
+          # pod into a loop. Port 5154 is fixed and has no Service: the kubelet probes the pod IP.
+          ports:
+            {{- if .Values.web.enabled }}
+            - name: web
+              containerPort: {{ int .Values.web.port }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.mcp.enabled }}
+            - name: mcp
+              containerPort: {{ int .Values.mcp.port }}
+              protocol: TCP
+            {{- end }}
+            - name: health
+              containerPort: 5154
+              protocol: TCP
+          # Readiness follows the collector (a degraded or stopped collector is not Ready, by design). /livez answers
+          # in every phase including stopped, so liveness only catches a hung process. There is no /startupz: a startup
+          # probe that waited on a verdict would kill a long schema migration.
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: health
+            periodSeconds: 10
+            failureThreshold: 30
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: health
+            periodSeconds: 20
+            failureThreshold: 3
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 5
           env:
             - name: DARLING_CONFIG
               value: /config/darling.json

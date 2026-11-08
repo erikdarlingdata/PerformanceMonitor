@@ -19,6 +19,7 @@ on:
       - 'Darling/compose/docker-compose.yml'
       - 'Darling/Dockerfile'
       - '.github/workflows/darling-linux-store.yml'
+      - 'Darling/PerformanceMonitor.Darling.Service/Hosting/DarlingHealth*.cs'
       - '.github/workflows/build.yml'
 
 permissions:

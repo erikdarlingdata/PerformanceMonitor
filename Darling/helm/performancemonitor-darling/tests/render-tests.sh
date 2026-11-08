@@ -370,6 +370,22 @@ assert_fails "source" --set passwordKey.existingSecret=pk --set passwordKey.sour
 render --set passwordKey.existingSecret=pk
 assert_eq "$(dq '.spec.template.spec.volumes[] | select(.name == "password-key") | .secret.defaultMode')" "288" "mode stays 0440"
 
+t probes_health_port
+render
+assert_eq "$(config_json '.health')" '{"enabled":true,"listen":"0.0.0.0","port":5154}' "rendered health block"
+assert_eq "$(dq '.spec.template.spec.containers[0].startupProbe')" '{"httpGet":{"path":"/livez","port":"health"},"periodSeconds":10,"failureThreshold":30,"timeoutSeconds":5}' "startupProbe"
+assert_eq "$(dq '.spec.template.spec.containers[0].livenessProbe')" '{"httpGet":{"path":"/livez","port":"health"},"periodSeconds":20,"failureThreshold":3,"timeoutSeconds":5}' "livenessProbe"
+assert_eq "$(dq '.spec.template.spec.containers[0].readinessProbe')" '{"httpGet":{"path":"/readyz","port":"health"},"periodSeconds":10,"failureThreshold":3,"timeoutSeconds":5}' "readinessProbe"
+assert_eq "$(dq '.spec.template.spec.containers[0].ports')" '[{"name":"web","containerPort":5153,"protocol":"TCP"},{"name":"health","containerPort":5154,"protocol":"TCP"}]' "ports, mcp off"
+assert_eq "$(dq '[.spec.template.spec.containers[0] | (.startupProbe, .livenessProbe, .readinessProbe) | .httpGet.port] | unique')" '["health"]' "no probe targets web, mcp or a number"
+render --set mcp.enabled=true --set web.enabled=false
+assert_eq "$(dq '.spec.template.spec.containers[0].ports | map(.name)')" '["mcp","health"]' "ports, web off, mcp on"
+assert_fails "config.health is owned by the chart" --set config.health.port=9999
+
+t fail_port_clashes_with_health
+assert_fails "5154" --set web.port=5154
+assert_fails "5154" --set mcp.enabled=true --set mcp.port=5154
+
 t acceptance_values_render
 for f in "${CHART_DIR}"/ci/*.yaml; do
   helm lint "${CHART_DIR}" -f "${f}" > /dev/null
