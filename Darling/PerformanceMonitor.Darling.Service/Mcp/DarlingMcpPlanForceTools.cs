@@ -57,7 +57,7 @@ public sealed partial class DarlingMcpPlanForceTools
     [McpServerTool(Name = "force_query_store_plan"), Description(
         "Agent arm, SQL Server only: forces one Query Store plan for a query on the monitored server (replaces another plan of the query that is forced now). Dry run by default: returns the exact statement and the before state, writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's force_plan switch and remediation login; ships off. " +
         "<<GUIDE>>" +
-        "Call get_plan_force_precheck first and weigh its warnings; it only warns. This tool blocks only a call that cannot do anything: plan_not_found (the plan is not among that query's Query Store rows) or plan_already_forced. " +
+        "Call get_plan_force_precheck first and weigh its warnings; it only warns. This tool blocks only a call that cannot do anything: plan_not_collected (no Query Store row Darling collected for that server holds that database_name, query_id and plan_id together: take all three from one get_query_store_top row; the store keeps them for about ten days after the plan was last collected, and the message names the database it does hold the pair for), plan_not_found (the plan is not among that query's Query Store rows) or plan_already_forced. " +
         "mcp.allowWrites never bypasses the gate, and a dry run needs it too (it signs in with the remediation login). The change is journaled in Agent changes (kind plan_force) with the plan that was forced before and how (forcing_type MANUAL or AUTO on SQL Server 2022 and later, else unknown), so the way back is known. " +
         "After a write, check with get_forced_plans. Nothing in Darling unforces on its own: unforce_query_store_plan is the way back, and a person can undo a force from the Agent changes list. Answers status dry_run, done, refused (reason) or failed, with before, after, statement and journal_id. A done answer also carries undo: the tool and arguments that put the change back (undoing a force that replaced an AUTO force says that forcing it again makes it manual).")]
     public static Task<string> ForceQueryStorePlan(
@@ -77,7 +77,7 @@ public sealed partial class DarlingMcpPlanForceTools
     [McpServerTool(Name = "unforce_query_store_plan"), Description(
         "Agent arm, SQL Server only: removes the forced plan of one Query Store plan on the monitored server. Dry run by default: returns the exact statement and the before state, writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's force_plan switch and remediation login; ships off. " +
         "<<GUIDE>>" +
-        "Call get_plan_force_precheck first. This tool blocks only a call that cannot do anything: plan_not_found or plan_not_forced. An agent may unforce any force, including one automatic plan correction or a person placed; the change is journaled in Agent changes (kind plan_unforce) with how that plan was forced, so it can be forced again, and a person can undo it from the Agent changes list. " +
+        "Call get_plan_force_precheck first. This tool blocks only a call that cannot do anything: plan_not_collected (that database_name, query_id and plan_id are not together in any Query Store row Darling collected for that server: take all three from one get_query_store_top row), plan_not_found or plan_not_forced. An agent may unforce any force, including one automatic plan correction or a person placed; the change is journaled in Agent changes (kind plan_unforce) with how that plan was forced, so it can be forced again, and a person can undo it from the Agent changes list. " +
         "mcp.allowWrites never bypasses the gate, and a dry run needs it too. After a write, check with get_forced_plans. Nothing in Darling unforces on its own. Answers status dry_run, done, refused (reason) or failed, with before, after, statement and journal_id. A done answer also carries undo: force_query_store_plan with the same plan (a plan that automatic plan correction forced says that forcing it again makes it manual).")]
     public static Task<string> UnforceQueryStorePlan(
         NpgsqlDataSource postgres,
@@ -120,8 +120,8 @@ public sealed partial class DarlingMcpPlanForceTools
         "Azure SQL Database: also pass database_name, the database_name of the get_blocking row you read. A session is reached only from inside its own database, so the kill connects there (never master), read-write, and checks that the session's database is that one. The database must be the server's registered database or one Darling collected a blocking row from in the last day, and not excluded. Hyperscale: the kill reaches only the primary; a session on a named replica or a read-only secondary answers session_gone. " +
         "PostgreSQL: pass backend_id exactly as get_pg_blocking (root_backend_id) or get_pg_session_states (backend_id) returns it, a string of digits, and session_id as the pid the same read returned (root_pid or pid); leave login_time out. backend_id is the session's start time in epoch seconds followed by its pid in seven digits, and session_id must agree with it. The pid and the start second are checked in the SAME statement that calls pg_terminate_backend, so a pid given to a session that started in another second is never ended. On Windows a pid can come back within about a second, so there a new session can share the pid and the start second. A login that cannot signal the session (no pg_signal_backend, a superuser's session, or no pg_read_all_stats to see its start time) is refused before any kill is tried. Only client sessions are ended. " +
         "The tool sets no limit of its own. Whether to kill a running session, an idle one, one with an open transaction, or a login on a protected list is the agent's instruction file's call, not this tool's. " +
-        "On SQL Server the answer lists the session's login_name, host_name, program_name, status, open_transaction_count, last_request_end_time and log_bytes_used (no statement text). If log_bytes_used is above 0 the kill rolls the work back: the session keeps its locks until the rollback ends, so do not kill it again, and read get_blocking to see it clear. After a write, rollback says whether a rollback is running and its percent_complete, read once. On PostgreSQL it lists the backend_id, login_name, application_name, client_addr, database, state, wait_event, backend_type, backend_start, xact_start and state_change (no statement text); ending a session rolls its open transaction back, except a session waiting for a synchronous standby, which has already committed. After a write, still_there says whether the backend was still there when read right after the signal. There is no undo. " +
-        "Refusals: Azure SQL Database only: database_required, database_excluded, database_not_monitored, wrong_database, not_primary, view_state_permission_denied, session_in_other_database, database_unavailable (paused or resuming serverless, nothing sent) fails. Every engine: tool_login_session (a session of Darling itself: its program or application name starts with PerformanceMonitorDarling AND its login is the monitoring or remediation login, or any session of the remediation login), own_session, session_gone, session_reused (the id now belongs to another session; nothing about that session is returned), session_changed (the session ran something new since the dry run: its last request ended at another time on SQL Server, or its transaction or state changed on PostgreSQL; nothing was killed, dry run it again), backend_id_has_no_session_start (PostgreSQL: the id holds the server's start time because the monitoring login lacks pg_read_all_stats), not_user_session, kill_permission_denied (SQL Server: the login lacks ALTER ANY CONNECTION), not_permitted (PostgreSQL: the login cannot signal that session; the message names the missing grant), bad_session_id, bad_login_time, bad_backend_id, server_clock_unknown (no clock collected for the server yet), sign_in_not_strong_enough (PostgreSQL: the server does not offer SCRAM-SHA-256 sign-in over TLS, which only a person can change on the server) and search_path_not_pinned (PostgreSQL: the connection did not get the pinned search_path, as when a connection pooler drops the startup options; point the server entry at the server directly). " +
+        "On SQL Server the answer lists the session's login_name, host_name, program_name, database_name (the database it is in now), status, open_transaction_count, last_request_end_time and log_bytes_used (no statement text). If log_bytes_used is above 0 the kill rolls the work back: the session keeps its locks until the rollback ends, so do not kill it again, and read get_blocking to see it clear. After a write, rollback says whether a rollback is running and its percent_complete, read once. On PostgreSQL it lists the backend_id, login_name, application_name, client_addr, database, state, wait_event, backend_type, backend_start, xact_start and state_change (no statement text); ending a session rolls its open transaction back, except a session waiting for a synchronous standby, which has already committed. After a write, still_there says whether the backend was still there when read right after the signal. There is no undo. " +
+        "Refusals: Azure SQL Database only: database_required, database_not_monitored, wrong_database, not_primary, view_state_permission_denied, session_in_other_database, database_unavailable (paused or resuming serverless, nothing sent) fails. SQL Server and Azure SQL Database: database_excluded (the database is excluded in the server's entry: on SQL Server the database the session is in now, read in the same batch as its login_time; on Azure SQL Database the database_name passed), database_changed (the session's running request moved it to another database since the dry run; nothing was killed, dry run it again). SQL Server only: session_database_unknown (the server's entry excludes databases and the remediation login cannot name the session's database, as when VIEW ANY DATABASE is denied; a person grants it, or gives the login a user in that database). Every engine: tool_login_session (a session of Darling itself: its program or application name starts with PerformanceMonitorDarling AND its login is the monitoring or remediation login, or any session of the remediation login), own_session, session_gone, session_reused (the id now belongs to another session; nothing about that session is returned), session_changed (the session ran something new since the dry run: its last request ended at another time on SQL Server, or its transaction or state changed on PostgreSQL; nothing was killed, dry run it again), backend_id_has_no_session_start (PostgreSQL: the id holds the server's start time because the monitoring login lacks pg_read_all_stats), not_user_session, kill_permission_denied (SQL Server: the login lacks ALTER ANY CONNECTION), not_permitted (PostgreSQL: the login cannot signal that session; the message names the missing grant), bad_session_id, bad_login_time, bad_backend_id, server_clock_unknown (no clock collected for the server yet), sign_in_not_strong_enough (PostgreSQL: the server does not offer SCRAM-SHA-256 sign-in over TLS, which only a person can change on the server) and search_path_not_pinned (PostgreSQL: the connection did not get the pinned search_path, as when a connection pooler drops the startup options; point the server entry at the server directly). " +
         "mcp.allowWrites never bypasses the gate, and a dry run needs it too (it signs in with the remediation login). The change is journaled in Agent changes (kind session_kill). Answers status dry_run, done, refused (reason), failed, or outcome_unknown (the kill was sent and its reply was lost, so the session may have ended; read get_blocking or get_pg_session_states before trying again), with session, warnings, rollback and journal_id.")]
     public static Task<string> KillSession(
         NpgsqlDataSource postgres,
@@ -278,8 +278,8 @@ public sealed partial class DarlingMcpPlanForceTools
                with the binding facts and writes nothing to the server. */
             var proposing = decision.NeedsApproval && !dry_run;
 
-            /* 3: the prepare step: the server row, the excluded database, the before state, the block reason and, on a dry run, the executor's own checks. */
-            var prepared = await PrepareForcePlanAsync(owner, logger, permit, resolved.ServerId, resolved.DisplayName, force, database_name.Trim(), query_id, plan_id, dry_run || proposing,
+            /* 3: the prepare step: the server row, the excluded database, the store's collected rows for the database, query and plan, the before state, the block reason and, on a dry run, the executor's own checks. */
+            var prepared = await PrepareForcePlanAsync(postgres, owner, logger, permit, resolved.ServerId, resolved.DisplayName, force, database_name.Trim(), query_id, plan_id, dry_run || proposing,
                 (reason, token) => store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, reason, agentTokenName, token), ct);
             if (proposing && prepared.Facts is { } proposed)
                 return await ProposeAsync(owner, utcNow, decision, action!, tool, ServerActionNames.ForcePlan, resolved.ServerId, resolved.DisplayName,
@@ -292,6 +292,11 @@ public sealed partial class DarlingMcpPlanForceTools
             var executor = prepared.Executor!;
             var beforeState = facts.Before;
             var statement = facts.Statement;
+
+            /* The write, the read after it and the journal name the database as the store spells it, which is where the prepare step read the before state:
+               the agent's spelling, when it differs by case alone, is replaced by the permit and the target the prepare step settled on. */
+            var writePermit = prepared.Permit ?? permit;
+            var writeTarget = string.Equals(target.Database, facts.Database, StringComparison.Ordinal) ? target : target with { Database = facts.Database };
 
             /* 6: the write, journaled. */
             PlanForceState? after = null;
@@ -307,7 +312,7 @@ public sealed partial class DarlingMcpPlanForceTools
                     ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(beforeState)),
                     Write = async (_, _, token) =>
                     {
-                        var written = await WriteForcePlanAsync(executor, permit, facts, token);
+                        var written = await WriteForcePlanAsync(executor, writePermit, facts, token);
                         /* The executor says the server accepted the write: from here the store's journal never says failed (#5632, step 13). */
                         if (written.Wrote)
                             changed.MarkServerChanged();
@@ -325,7 +330,7 @@ public sealed partial class DarlingMcpPlanForceTools
                         /* The read after the write is a warning when it fails, not an error for a change that was made (#5632, step 13). */
                         try
                         {
-                            var read = await executor.ReadPlanStateAsync(permit, query_id, plan_id, token);
+                            var read = await executor.ReadPlanStateAsync(writePermit, query_id, plan_id, token);
                             after = read.State;
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -337,7 +342,7 @@ public sealed partial class DarlingMcpPlanForceTools
                         return JsonSerializer.Serialize(new { statement, state = after, message = written.Message });
                     },
                 };
-                var result = await store.RunAgentActionAsync(new AgentActionCall(tool, kind, action!, target, agentTokenName), hooks, ct);
+                var result = await store.RunAgentActionAsync(new AgentActionCall(tool, kind, action!, writeTarget, agentTokenName), hooks, ct);
                 if (result.Refusal is { } refused)
                     return DarlingAgentActionGate.RefusalAnswer(refused);
                 if (result.OutcomeUnknown && unknown is not null)
@@ -345,7 +350,7 @@ public sealed partial class DarlingMcpPlanForceTools
                     /* A force whose reply was lost may still have taken effect: read the plan again, and when it is forced, journal action_done late so the
                        post-force checks run. A read that fails or shows it not forced leaves the call as it is, with no result row. */
                     if (force && result.CalledId is long unknownCalled)
-                        await RecordUnknownForceTookEffectAsync(store, executor, permit, logger, action!, resolved.ServerId, unknownCalled, statement, query_id, plan_id);
+                        await RecordUnknownForceTookEffectAsync(store, executor, writePermit, logger, action!, resolved.ServerId, unknownCalled, statement, query_id, plan_id);
                     return Answer("outcome_unknown", null, unknown.Message, new { dry_run = false, statement, before = beforeState, journal_id = result.CalledId });
                 }
 
@@ -881,6 +886,7 @@ public sealed partial class DarlingMcpPlanForceTools
         login_name = facts.LoginName,
         host_name = facts.HostName,
         program_name = facts.ProgramName,
+        database_name = facts.DatabaseName,
         status = facts.Status,
         open_transaction_count = facts.OpenTransactionCount,
         last_request_end_time = UtcText(clock, facts.LastRequestEndTime),
@@ -1143,6 +1149,9 @@ WHERE server_id = $1";
 
     internal const string AzureDatabaseRequired = RemediationResult.Reasons.DatabaseRequired;
     internal const string AzureDatabaseExcluded = "database_excluded";
+
+    /// <summary>SQL Server: the server's entry excludes databases and the remediation login cannot name the session's database, so the kill does not run.</summary>
+    internal const string SessionDatabaseUnknown = "session_database_unknown";
     internal const string AzureDatabaseUnknown = "database_not_monitored";
 
     /// <summary>

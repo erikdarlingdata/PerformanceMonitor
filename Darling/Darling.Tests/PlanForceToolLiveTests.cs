@@ -185,8 +185,12 @@ public sealed partial class PlanForceToolLiveTests
 
     private sealed record Ctx(NpgsqlDataSource Source, NpgsqlConnection Connection, SqlScratch Sql, string Arg, Lines Log, CancellationToken Ct)
     {
-        public Task<string> Tool(bool force, long queryId, long planId, bool dryRun, string server = "srv-7") =>
-            DarlingMcpPlanForceTools.RunAsync(Source, Source, Log, force, server, Sql.Database, queryId, planId, Arg, dryRun, Ct);
+        /// <summary>The tool, called as an agent that copied the database, query and plan from one get_query_store_top row: the store holds the three together for this server.</summary>
+        public async Task<string> Tool(bool force, long queryId, long planId, bool dryRun, string server = "srv-7")
+        {
+            await SeedCollectedPlanAsync(this, Sql.Database, queryId, planId);
+            return await DarlingMcpPlanForceTools.RunAsync(Source, Source, Log, force, server, Sql.Database, queryId, planId, Arg, dryRun, Ct);
+        }
     }
 
     /// <param name="approval">The routes' <c>action_approval</c>: off by default, so an action runs; a test of the approval path passes <c>required</c> (#7109).</param>
@@ -430,6 +434,7 @@ public sealed partial class PlanForceToolLiveTests
         await RunAsync(without, async c =>
         {
             var (query, planA, _) = await c.Sql.TwoPlansAsync("pfd", c.Ct);
+            await SeedCollectedPlanAsync(c, c.Sql.Database, query, planA);
             var answer = await DarlingMcpPlanForceTools.RunAsync(c.Source, c.Source, c.Log, true, "srv-7", c.Sql.Database, query, planA, null, true, c.Ct);
             var json = Parse(answer);
             Assert.Equal("refused", (string?)json["status"]);
