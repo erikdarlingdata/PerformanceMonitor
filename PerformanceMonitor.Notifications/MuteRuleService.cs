@@ -30,18 +30,22 @@ public class MuteRuleService
     private readonly ILogger<MuteRuleService> _logger;
     private readonly object _lock = new object();
     private List<MuteRule> _rules = new();
+    private readonly Func<DateTime> _utcNow;
 
-    public MuteRuleService(IMuteRuleStore store, ILogger<MuteRuleService> logger)
+    /// <param name="utcNow">The clock the match, schedule and in-effect checks read; the system clock when null.</param>
+    public MuteRuleService(IMuteRuleStore store, ILogger<MuteRuleService> logger, Func<DateTime>? utcNow = null)
     {
         _store = store;
         _logger = logger;
+        _utcNow = utcNow ?? (() => DateTime.UtcNow);
     }
 
     public bool IsAlertMuted(AlertMuteContext context)
     {
+        var now = _utcNow();
         lock (_lock)
         {
-            return _rules.Any(r => r.Matches(context));
+            return _rules.Any(r => r.MatchesAt(context, now));
         }
     }
 
@@ -53,7 +57,7 @@ public class MuteRuleService
     /// or null when none is. The engines pass this as their digest-window delegate.</summary>
     public string? DigestWindowReason(AlertMuteContext context)
     {
-        var now = DateTime.UtcNow;
+        var now = _utcNow();
         lock (_lock)
         {
             return _rules.FirstOrDefault(r => r.MatchesDigestAt(context, now))?.DigestHoldReason();
@@ -70,9 +74,10 @@ public class MuteRuleService
 
     public List<MuteRule> GetActiveRules()
     {
+        var now = _utcNow();
         lock (_lock)
         {
-            return _rules.Where(r => r.IsInEffectAt(DateTime.UtcNow)).ToList();
+            return _rules.Where(r => r.IsInEffectAt(now)).ToList();
         }
     }
 

@@ -32,22 +32,41 @@ public sealed class MuteRuleDigestActionTests
 
     private static readonly AlertMuteContext Blocking = new() { ServerName = "sql-a", ServerId = 7, MetricName = "Blocking Detected" };
 
-    private static MuteRule DigestRule(bool allDay = true) => new()
-    {
-        Action = MuteRuleActions.Digest,
-        MetricName = "Blocking Detected",
-        ServerId = 7,
-        Reason = "nightly delete",
-        RecurStartTime = allDay ? new TimeOnly(0, 0) : new TimeOnly(3, 0),
-        RecurEndTime = allDay ? new TimeOnly(23, 59) : new TimeOnly(3, 1),
-        RecurTimeZone = "UTC",
-    };
+    /* The one clock the service and the engines read, set to the last minute of a UTC day. A window's end time is exclusive, so a
+       window written as 00:00 to 23:59 closes at 23:59 and does not cover this minute: an "inside" window has to be built around the
+       fire's own time, never assumed to span the day. */
+    private static readonly DateTime LastMinuteUtc = new(2026, 7, 1, 23, 59, 30, DateTimeKind.Utc);
 
-    private static MuteRuleService ServiceWith(params MuteRule[] rules)
+    /// <summary>Gives <paramref name="rule"/> a daily UTC window that spans the day, as 00:00 to 23:59.</summary>
+    private static MuteRule WindowAround(MuteRule rule, DateTime fireAtUtc)
+    {
+        rule.RecurStartTime = new TimeOnly(0, 0);
+        rule.RecurEndTime = new TimeOnly(23, 59);
+        rule.RecurTimeZone = "UTC";
+        return rule;
+    }
+
+    /// <summary>Gives <paramref name="rule"/> a one-minute UTC window that closed hours before <paramref name="fireAtUtc"/>.</summary>
+    private static MuteRule WindowClosedBefore(MuteRule rule, DateTime fireAtUtc)
+    {
+        var start = new TimeOnly(fireAtUtc.Hour, fireAtUtc.Minute).AddHours(-5);
+        rule.RecurStartTime = start;
+        rule.RecurEndTime = start.AddMinutes(1);
+        rule.RecurTimeZone = "UTC";
+        return rule;
+    }
+
+    private static MuteRule DigestRule(bool insideWindow = true)
+    {
+        var rule = new MuteRule { Action = MuteRuleActions.Digest, MetricName = "Blocking Detected", ServerId = 7, Reason = "nightly delete" };
+        return insideWindow ? WindowAround(rule, LastMinuteUtc) : WindowClosedBefore(rule, LastMinuteUtc);
+    }
+
+    private static MuteRuleService ServiceWith(Func<DateTime> utcNow, params MuteRule[] rules)
     {
         var store = new MemoryStore();
         store.Rules.AddRange(rules);
-        var service = new MuteRuleService(store, NullLogger<MuteRuleService>.Instance);
+        var service = new MuteRuleService(store, NullLogger<MuteRuleService>.Instance, utcNow);
         service.LoadAsync().GetAwaiter().GetResult();
         return service;
     }
@@ -82,7 +101,7 @@ public sealed class MuteRuleDigestActionTests
     [Fact]
     public void ADigestRule_DoesNotMute_ButHoldsTheFireInsideItsWindow()
     {
-        var service = ServiceWith(DigestRule());
+        var service = ServiceWith(() => LastMinuteUtc, DigestRule());
 
         Assert.False(service.IsAlertMuted(Blocking));
         Assert.True(service.IsInDigestWindow(Blocking));
@@ -96,7 +115,7 @@ public sealed class MuteRuleDigestActionTests
     [Fact]
     public void ADigestRule_ForAnotherMetric_HoldsNothing()
     {
-        var service = ServiceWith(DigestRule());
+        var service = ServiceWith(() => LastMinuteUtc, DigestRule());
         var other = new AlertMuteContext { ServerName = "sql-a", ServerId = 7, MetricName = "High CPU" };
 
         var judgment = MuteJudgment.Judge(service.IsAlertMuted, service.DigestWindowReason, other);
@@ -107,13 +126,7 @@ public sealed class MuteRuleDigestActionTests
     [Fact]
     public void ADigestRule_OutsideItsWindow_LetsTheFirePage()
     {
-        var now = DateTime.UtcNow;
-        var rule = DigestRule(allDay: false);
-        /* A one-minute window that opened a few hours ago and closed: the clock is outside it. */
-        var start = now.AddHours(-5);
-        rule.RecurStartTime = TimeOnly.FromDateTime(start);
-        rule.RecurEndTime = TimeOnly.FromDateTime(start.AddMinutes(1));
-        var service = ServiceWith(rule);
+        var service = ServiceWith(() => LastMinuteUtc, DigestRule(insideWindow: false));
 
         var judgment = MuteJudgment.Judge(service.IsAlertMuted, service.DigestWindowReason, Blocking);
 
@@ -124,7 +137,7 @@ public sealed class MuteRuleDigestActionTests
     public void AMuteRuleAndADigestRuleBothMatching_TheFireIsMuted_NotHeld()
     {
         var mute = new MuteRule { MetricName = "Blocking Detected", ServerId = 7 };
-        var service = ServiceWith(DigestRule(), mute);
+        var service = ServiceWith(() => LastMinuteUtc, DigestRule(), mute);
 
         var judgment = MuteJudgment.Judge(service.IsAlertMuted, service.DigestWindowReason, Blocking);
 
@@ -157,21 +170,8 @@ public sealed class MuteRuleDigestActionTests
 
     private static MuteRule CpuDigestRule(bool insideWindow)
     {
-        var rule = new MuteRule { Action = MuteRuleActions.Digest, MetricName = "High CPU", Reason = "batch window", RecurTimeZone = "UTC" };
-        if (insideWindow)
-        {
-            rule.RecurStartTime = new TimeOnly(0, 0);
-            rule.RecurEndTime = new TimeOnly(23, 59);
-        }
-        else
-        {
-            /* A one-minute window that closed hours ago. */
-            var start = DateTime.UtcNow.AddHours(-5);
-            rule.RecurStartTime = TimeOnly.FromDateTime(start);
-            rule.RecurEndTime = TimeOnly.FromDateTime(start.AddMinutes(1));
-        }
-
-        return rule;
+        var rule = new MuteRule { Action = MuteRuleActions.Digest, MetricName = "High CPU", Reason = "batch window" };
+        return insideWindow ? WindowAround(rule, LastMinuteUtc) : WindowClosedBefore(rule, LastMinuteUtc);
     }
 
     private static (DarlingAlertDeliverer Deliverer, CapturingHistoryStore History) RealDeliverer(
@@ -207,8 +207,8 @@ public sealed class MuteRuleDigestActionTests
         using var endpoint = new CapturingWebhookEndpoint();
         using var smtp = new CapturingSmtpEndpoint();
         var (deliverer, history) = RealDeliverer(endpoint, smtp);
-        var service = ServiceWith(CpuDigestRule(insideWindow: true));
-        var h = new AlertEngineTests.Harness();
+        var h = new AlertEngineTests.Harness { Now = LastMinuteUtc };
+        var service = ServiceWith(() => h.Now, CpuDigestRule(insideWindow: true));
         h.Settings.CpuEnabled = true;
         var engine = new AlertEngine(
             h.Settings, h.Adapter, h.StateStore, deliverer, service.IsAlertMuted,
@@ -234,8 +234,8 @@ public sealed class MuteRuleDigestActionTests
         using var endpoint = new CapturingWebhookEndpoint();
         using var smtp = new CapturingSmtpEndpoint();
         var (deliverer, history) = RealDeliverer(endpoint, smtp);
-        var service = ServiceWith(CpuDigestRule(insideWindow: false));
-        var h = new AlertEngineTests.Harness();
+        var h = new AlertEngineTests.Harness { Now = LastMinuteUtc };
+        var service = ServiceWith(() => h.Now, CpuDigestRule(insideWindow: false));
         h.Settings.CpuEnabled = true;
         var engine = new AlertEngine(
             h.Settings, h.Adapter, h.StateStore, deliverer, service.IsAlertMuted,
@@ -253,8 +253,8 @@ public sealed class MuteRuleDigestActionTests
     [Fact]
     public async Task AHeldFire_StampsTheCooldown_SoTheNextSampleAfterTheWindowClosesStaysQuiet()
     {
-        var service = ServiceWith(CpuDigestRule(insideWindow: true));
-        var h = new AlertEngineTests.Harness();
+        var h = new AlertEngineTests.Harness { Now = LastMinuteUtc };
+        var service = ServiceWith(() => h.Now, CpuDigestRule(insideWindow: true));
         h.Settings.CpuEnabled = true;
         var windowOpen = true;
         var engine = new AlertEngine(
@@ -277,13 +277,10 @@ public sealed class MuteRuleDigestActionTests
     [Fact]
     public async Task ASelfAlert_InsideADigestWindow_IsHeld_AndAMuteRuleStillWinsOverIt()
     {
-        var digest = new MuteRule
-        {
-            Action = MuteRuleActions.Digest, MetricName = "Collection Stopped", Reason = "maintenance", RecurTimeZone = "UTC",
-            RecurStartTime = new TimeOnly(0, 0), RecurEndTime = new TimeOnly(23, 59),
-        };
-        var service = ServiceWith(digest);
-        var h = new DarlingSelfAlertTests.Harness();
+        var digest = WindowAround(
+            new MuteRule { Action = MuteRuleActions.Digest, MetricName = "Collection Stopped", Reason = "maintenance" }, LastMinuteUtc);
+        var h = new DarlingSelfAlertTests.Harness { Now = LastMinuteUtc };
+        var service = ServiceWith(() => h.Now, digest);
         var evaluator = new DarlingSelfAlertEvaluator(
             h.Settings, h.Deliverer, h.History, service.IsAlertMuted, utcNow: () => h.Now, digestWindowReason: service.DigestWindowReason);
 
@@ -295,8 +292,8 @@ public sealed class MuteRuleDigestActionTests
         Assert.Contains("maintenance", held.Hold!.Reason);
         Assert.Contains("Held for the daily digest by a digest rule (maintenance)", held.Hold.Reason, StringComparison.Ordinal);
 
-        var withMute = ServiceWith(digest, new MuteRule { MetricName = "Collection Stopped" });
-        var h2 = new DarlingSelfAlertTests.Harness();
+        var h2 = new DarlingSelfAlertTests.Harness { Now = LastMinuteUtc };
+        var withMute = ServiceWith(() => h2.Now, digest, new MuteRule { MetricName = "Collection Stopped" });
         var muted = new DarlingSelfAlertEvaluator(
             h2.Settings, h2.Deliverer, h2.History, withMute.IsAlertMuted, utcNow: () => h2.Now, digestWindowReason: withMute.DigestWindowReason);
 
