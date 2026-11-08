@@ -84,7 +84,7 @@ public sealed class ViewerOverviewLanesFillTests
                 var control = new CorrelatedTimelineLanesControl();
                 control.Initialize(null!, 1);
                 var window = new Window { Content = control, Width = width, Height = height, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     var to = DateTime.UtcNow;

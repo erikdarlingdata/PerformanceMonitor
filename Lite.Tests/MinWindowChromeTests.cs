@@ -348,7 +348,7 @@ public sealed class MinWindowChromeTests
                 var tab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
                 typeof(ServerTab).GetField("_suppressActiveQueriesAutoRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(tab, true);
                 var window = new Window { Content = tab, Width = tabWidth, Height = 600, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     var found = new List<string>();
@@ -395,7 +395,7 @@ public sealed class MinWindowChromeTests
                 var tab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
                 typeof(ServerTab).GetField("_suppressActiveQueriesAutoRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(tab, true);
                 var window = new Window { Content = tab, Width = tabWidth, Height = 600, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     ClippedTextProbe.Settle(window);
@@ -470,7 +470,7 @@ public sealed class MinWindowChromeTests
     private static List<string> PairsShareARow(FrameworkElement tab, double width, params string[] captions)
     {
         var window = new Window { Content = tab, Width = width, Height = 600, Left = 0, Top = 0 };
-        window.Show();
+        StaTestThread.ShowOffScreen(window);
         try
         {
             ClippedTextProbe.Settle(window);
@@ -591,7 +591,7 @@ public sealed class MinWindowChromeTests
         w.Content = null;
         var host = new Window { Content = root, Width = 900, Height = 600, Left = 0, Top = 0, WindowStartupLocation = WindowStartupLocation.Manual, ShowInTaskbar = false };
         s_hosts.Add(w, host);
-        host.Show();
+        StaTestThread.ShowOffScreen(host);
         /* Windows will not size a window past the screen (plus its borders), so a 1280 wide host is cut to 1044 on a 1024 wide screen
            and the sidebar would rightly be the rail. The host lifts that limit, so a test gets the width it asks for on any screen. */
         ((System.Windows.Interop.HwndSource)PresentationSource.FromVisual(host)).AddHook(AllowAnySize);

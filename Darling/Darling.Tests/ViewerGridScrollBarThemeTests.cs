@@ -48,7 +48,7 @@ public sealed class ViewerGridScrollBarThemeTests
                 Source = new Uri($"pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/{theme}.xaml"),
             });
             grid.Style = (Style)window.FindResource(typeof(DataGrid));
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ClippedTextProbe.Settle(window);

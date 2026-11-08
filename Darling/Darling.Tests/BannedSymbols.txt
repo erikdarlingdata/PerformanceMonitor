@@ -4,3 +4,6 @@
 # (a fake slow call), use TestWait.Elapse. A loop that paces itself waits on its CancellationToken's WaitHandle.
 M:System.Threading.Thread.Sleep(System.Int32);Use TestWait.WaitUntil (waiting for a condition) or TestWait.Elapse (time passing is the stimulus); see TestTimeHelpers.cs
 M:System.Threading.Thread.Sleep(System.TimeSpan);Use TestWait.WaitUntil (waiting for a condition) or TestWait.Elapse (time passing is the stimulus); see TestTimeHelpers.cs
+# #8289: a test window is shown through StaTestThread.ShowOffScreen (or Settle), which keeps it off the developer's screen and away from
+# keyboard focus. A bare Show() put 143 windows on screen and took the foreground 144 times in one run of Darling's WPF classes.
+M:System.Windows.Window.Show;Use StaTestThread.ShowOffScreen(window) or StaTestThread.Settle(window): a bare Show() puts the window on the developer's screen and takes keyboard focus (#8289)
