@@ -982,14 +982,15 @@ public sealed class McpHealthTools
         AddUnlessDefault(row, "session_missing", r.SessionMissingCount);
         AddUnlessDefault(row, "abandoned", r.AbandonedCount);
         AddUnlessDefault(row, "rows_stored", r.RowsStored);
-        AddUnlessDefault(row, "last_success", r.LastSuccessTime?.ToString("o"));
+        /* #7643: the times to the whole second, Darling's twin: the fraction digits cost the worst case about 800 B of the budget. */
+        AddUnlessDefault(row, "last_success", WholeSecond(r.LastSuccessTime));
         AddUnlessDefault(row, "last_error", McpHelpers.Truncate(r.LastError, ErrorMessagePreviewLength));
         /* The two truncated flags are written as plain indexer assignments, the form McpPayloadContractCensusTests reads
            a payload key from, so the census still sees these cut keys. */
         if (r.LastError is not null && r.LastError.Length > ErrorMessagePreviewLength)
             row["last_error_truncated"] = true;
-        AddUnlessDefault(row, "last_error_at", r.LastErrorTime?.ToString("o"));
-        AddUnlessDefault(row, "last_denied_at", r.LastDeniedTime?.ToString("o"));
+        AddUnlessDefault(row, "last_error_at", WholeSecond(r.LastErrorTime));
+        AddUnlessDefault(row, "last_denied_at", WholeSecond(r.LastDeniedTime));
         AddUnlessDefault(row, "denied_since_last_success", r.DeniedSinceLastSuccess);
         AddUnlessDefault(row, "regressed_from_productive", r.AnyRegression);
         /* #4620: the flag used to ride here without the sentence that explains it, so a WARNING row whose only issue
@@ -1018,6 +1019,10 @@ public sealed class McpHealthTools
 
     /// <summary>#5748: adds a partial row's key unless the value is null, false or 0. Three overloads rather than one
     /// object check, so a number is compared as a number and a bool as a bool. Field-for-field Darling's twin.</summary>
+    /// <summary>#7643: a partial row's time, the round-trip form to the whole second (its kind suffix kept). Field-for-field Darling's twin.</summary>
+    private static string? WholeSecond(DateTime? value) =>
+        value?.ToString("yyyy-MM-dd'T'HH:mm:ssK", System.Globalization.CultureInfo.InvariantCulture);
+
     private static void AddUnlessDefault(Dictionary<string, object?> row, string key, string? value)
     {
         if (value is not null) row[key] = value;
