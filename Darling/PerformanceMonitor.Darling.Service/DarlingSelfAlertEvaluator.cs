@@ -9408,6 +9408,7 @@ WHERE c.is_enabled";
         }
 
         await ResolveCaughtUpDailyRollupsAsync(staleRollups, cancellationToken);
+        await CloseEndedStaleRollupEpisodesAsync(reading, staleRollups, cancellationToken);
         await CloseEndedPolicyJobEpisodesAsync(reading, stillStuck, cancellationToken);
 
         /* Recovery: any job we were tracking that is no longer stuck has recovered — drop its state and write
@@ -10767,6 +10768,14 @@ ORDER BY ag_name, database_name, replica_server_name";
     /// </summary>
     private async Task<bool> ApplyStaleDailyRollupAsync(StuckPolicyJob job, string key, DateTime now, CancellationToken cancellationToken)
     {
+        /* #7068 shape: on the first pass of this process, an open fire row for this rollup in the history means it was
+           already announced before the restart. Seeding the state from it keeps the restart from writing a second
+           first-sight row, and lets the pass where the rollup catches up resolve the row it finds open. */
+        if (!_policyJobFirstPassDone && !_staleRollupState.ContainsKey(key))
+        {
+            await SeedStandingStaleRollupAsync(key, cancellationToken);
+        }
+
         var view = string.IsNullOrEmpty(job.HypertableName) ? "daily rollup" : job.HypertableName;
         var detail = $"TimescaleDB daily rollup {view} (refresh job {key}) is behind its source: {job.Reason}. The refresh policy " +
             "refreshes only the whole buckets inside its window, so a day the window has moved past is never refreshed by the " +
@@ -10807,6 +10816,90 @@ ORDER BY ag_name, database_name, replica_server_name";
             cancellationToken);
         NoteStateSend(DailyRollupStaleMetric, key, repeat);
         return true;
+    }
+
+    /// <summary>#8302, the #7068 seed for a stale rollup: the open <see cref="DailyRollupStaleMetric"/> row for this key written
+    /// before this process started, if any, becomes the standing state, with its fire time as the last announcement.</summary>
+    private async Task SeedStandingStaleRollupAsync(string key, CancellationToken cancellationToken)
+    {
+        var historyKey = StoreKey(RollupStaleKeyPrefix + key);
+        var seedClock = Stopwatch.StartNew();
+        try
+        {
+            var rows = await _historyStore.GetKeyedStandingAsync(
+                historyKey, DailyRollupStaleMetric, new[] { DailyRollupRecoveredMetric }, null, _serviceStartUtc);
+            if (rows.OpenFor(_ => true, null) is { } standing)
+            {
+                _staleRollupState[key] = true;
+                _lastStaleRollupAlert[key] = standing.FireAtUtc;
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning("Could not read the open {Metric} incident for {Key} from alert history after {ElapsedMs} ms; a rollup still behind its source may be announced again after this restart: {Message}",
+                DailyRollupStaleMetric, historyKey, seedClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(null, "stale rollup standing seed self-alert", seedClock.ElapsedMilliseconds);
+        }
+    }
+
+    /// <summary>#8302: the daily refresh jobs whose stale-rollup row has been checked for an episode that ended while no process was watching.</summary>
+    private readonly ConcurrentDictionary<string, bool> _staleRollupEndedChecked = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// #8302, the #7076 close for a stale rollup: a daily refresh job that is not behind now, that no process tracks, and whose
+    /// last <see cref="DailyRollupStaleMetric"/> row is still open in the history (the rollup was refreshed by hand while the
+    /// service was down) gets its <see cref="DailyRollupRecoveredMetric"/> row here, once per job per process. A failed read is
+    /// logged and counted, and the jobs not yet checked are tried again on the next pass.
+    /// </summary>
+    private async Task CloseEndedStaleRollupEpisodesAsync(StorePolicyJobHealth reading, HashSet<string> staleNow, CancellationToken cancellationToken)
+    {
+        foreach (var job in reading.Jobs)
+        {
+            var key = job.JobId.ToString(CultureInfo.InvariantCulture);
+            if (job.Family != TimescaleSupport.StorePolicyJobFamily.Refresh || staleNow.Contains(key) || _staleRollupEndedChecked.ContainsKey(key))
+            {
+                continue;
+            }
+
+            if (_staleRollupState.ContainsKey(key))
+            {
+                _staleRollupEndedChecked[key] = true;
+                continue;
+            }
+
+            var historyKey = StoreKey(RollupStaleKeyPrefix + key);
+            bool episodeStillOpen;
+            var readClock = Stopwatch.StartNew();
+            try
+            {
+                var rows = await _historyStore.GetKeyedStandingAsync(
+                    historyKey, DailyRollupStaleMetric, new[] { DailyRollupRecoveredMetric }, null, _serviceStartUtc);
+                _staleRollupEndedChecked[key] = true;
+                episodeStillOpen = rows.OpenFor(_ => true, null) is not null;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Could not read the open {Metric} incident for {Key} from alert history after {ElapsedMs} ms; an ended incident may stay open until the next pass: {Message}",
+                    DailyRollupStaleMetric, historyKey, readClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(null, "stale rollup ended-episode close self-alert", readClock.ElapsedMilliseconds);
+                return;
+            }
+
+            if (episodeStillOpen)
+            {
+                await RecordResolutionAsync(new AlertResolution(
+                    StoreKey(RollupStaleKeyPrefix + key), _storeLabel, DailyRollupStaleMetric, DailyRollupRecoveredMetric,
+                    $"TimescaleDB daily rollup (refresh job {key}) is level with its source again"), cancellationToken);
+            }
+        }
     }
 
     /// <summary>#8302: every daily rollup reported behind its source on an earlier pass and not on this one has caught

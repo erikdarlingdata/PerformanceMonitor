@@ -132,6 +132,8 @@ internal static class AlertSeverity
                is wrong — so WARNING, with Store Disk Pressure owning the page if it ever reaches the volume. */
             "Refresh Job Stuck" => ("#DC2626", "CRITICAL", "\U0001F534"),
             "Retention Job Stuck" => ("#D97706", "WARNING", "\U0001F7E0"),
+            /* #8302: a daily rollup behind its source fires at Warning and replays as one. */
+            "Daily Rollup Stale" => ("#D97706", "WARNING", "\U0001F7E0"),
             /* #3816: the total_failures arm is the fourth deliberate INFO arm, on the digest's reasoning —
                a policy job that fails and retries is alive, and the useful response is to read the
                PostgreSQL log rather than to wake anybody. Fired with no severity override so this arm

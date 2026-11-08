@@ -185,6 +185,8 @@ public static class AlertFamily
            history row, mute rule and route is keyed on, so renaming it would orphan all three. */
         ["Refresh Job Stuck"] = SelfMonitor,
         ["Retention Job Stuck"] = SelfMonitor,
+        /* #8302: a daily rollup behind its source, the store's own condition like the policy-job names above. */
+        ["Daily Rollup Stale"] = SelfMonitor,
         ["Store Job Failing"] = SelfMonitor,
 
         /* ---- reports: the three daily documents ---- */

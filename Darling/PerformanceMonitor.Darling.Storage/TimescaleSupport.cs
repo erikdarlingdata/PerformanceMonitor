@@ -15374,10 +15374,12 @@ WHERE j.proc_name LIKE '%compression%'
             cancellationToken,
             ct => ReadTimescaleVersionAsync(connection, logger, ct));
 
-        /* #8302: the stale daily rollups ride the same pass and the same list, under each rollup's refresh job, so the
-           evaluator's one machine (first sight, escalation, recovery) and the alert family's surfaces serve them. A job
-           already flagged by a stat-row arm keeps that arm: a crashed job's rollup is stale BECAUSE it crashed. A pass
-           whose stat read failed (no census) is left as it is, so "could not read" keeps its shape. */
+        /* #8302: the stale daily rollups ride the same pass and the same list, under each rollup's refresh job, as their
+           own arm: the evaluator keeps them out of the stuck-job machine and gives them their own Warning and resolution.
+           A job flagged by a stat-row arm as well keeps BOTH rows, because the two are different conditions with
+           different lives: the crash clears when a run finishes, the staleness when the rollup catches up, and dropping
+           the stale row while the job is crashed would read as the rollup having caught up. A pass whose stat read
+           failed (no census) is left as it is, so "could not read" keeps its shape. */
         if (health.Jobs.Count == 0)
         {
             return health;
@@ -15389,8 +15391,7 @@ WHERE j.proc_name LIKE '%compression%'
             return health;
         }
 
-        var flagged = new HashSet<long>(health.Stuck.Select(s => s.JobId));
-        return new StorePolicyJobHealth(health.Stuck.Concat(stale.Where(s => flagged.Add(s.JobId))).ToList(), health.Jobs);
+        return new StorePolicyJobHealth(health.Stuck.Concat(stale).ToList(), health.Jobs);
     }
 
     /// <summary>
