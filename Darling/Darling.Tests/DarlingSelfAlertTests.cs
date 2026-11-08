@@ -8036,4 +8036,28 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
         Assert.Contains("storeName: config.Peers?.StoreName", worker, StringComparison.Ordinal);
     }
+
+    /* ---------------- #8302: the crash-backoff escalation states the backoff as the scheduler computes it ---------------- */
+
+    [Fact]
+    public async Task PolicyJobs_CrashBackoffEscalation_StatesTheLinearBackoff_AndTheRetryPeriodRemedy()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(CrashBackoff(1002), rearm.Delegate, Ct);
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(CrashBackoff(1002), rearm.Delegate, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(rearm.Calls);
+
+        /* The scheduler's wait after a crash is retry_period x consecutive_crashes, at least five minutes, restarted on
+           every reload of its job list. It is not a doubling, and it does not clear by itself while anything reloads
+           the list every hour; the remedy is the short retry period every job this product schedules carries. */
+        Assert.DoesNotContain("doubles", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("retry_period", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("consecutive_crashes", fired.DetailText, StringComparison.Ordinal);
+    }
 }
