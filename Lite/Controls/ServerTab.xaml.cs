@@ -196,7 +196,7 @@ public partial class ServerTab : UserControl
             CurrentWaitsDurationChart, CurrentWaitsBlockedChart, LatchStatsChart, SpinlockStatsChart,
             BadPagesChart, DumpRequestsChart, AccessViolationsChart, WriteAccessViolationsChart,
             NonYieldingTasksChart, LatchWarningsChart, SickSpinlocksChart, CpuComparisonChart,
-            MemoryChart, CpuSchedulerChart);
+            MemoryChart, CpuSchedulerChart, CpuChart);
         QueryTagFilterCombo.ItemsSource = new[] { PerformanceMonitorLite.Helpers.QueryTagGrid.AllChoice };
         QueryTagFilterCombo.SelectedIndex = 0;
         SetupBarCellMaxes();

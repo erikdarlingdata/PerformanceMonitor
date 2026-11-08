@@ -148,7 +148,7 @@ public partial class ViewerServerTab : UserControl
             BlockingDurationChart, BlockingTotalDurationChart, DeadlockWaitChart, DeadlockTotalWaitChart,
             CurrentWaitsDurationChart, CurrentWaitsBlockedChart, LatchStatsChart, SpinlockStatsChart,
             BadPagesChart, DumpRequestsChart, AccessViolationsChart, WriteAccessViolationsChart,
-            NonYieldingTasksChart, LatchWarningsChart, SickSpinlocksChart, CpuComparisonChart);
+            NonYieldingTasksChart, LatchWarningsChart, SickSpinlocksChart, CpuComparisonChart, CpuChart);
         /* #5565: every filtered grid below this tab keeps its column filters across a restart under this server. */
         ColumnFilterScope.SetServer(this, _server.ServerName);
 
