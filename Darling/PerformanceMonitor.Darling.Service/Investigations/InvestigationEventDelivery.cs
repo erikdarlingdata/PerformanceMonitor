@@ -114,6 +114,7 @@ public sealed class InvestigationEventDelivery
     private readonly McpDataDetail _dataDetail;
     private readonly Func<string> _baseUrl;
     private readonly Chat.SlackThreadPass? _slackThreads;
+    private readonly Chat.SlackChatSweep? _slackChat;
 
     /// <param name="reportNotices">#6979: sends a report notice to one Slack or Teams destination; null sends none.</param>
     /// <param name="defaults">#6979: the settings' channels, the parent default a route with no channel of its own falls to.</param>
@@ -123,9 +124,11 @@ public sealed class InvestigationEventDelivery
     public InvestigationEventDelivery(InvestigationRequestStore store, Func<IReadOnlyList<NotificationRoute>> routes,
         IInvestigationEventSends sends, InvestigationOpenSignal? signal, ILogger logger, Func<DateTime>? utcNow = null,
         IReportNoticeSends? reportNotices = null, IAlertSettings? defaults = null,
-        McpDataDetail dataDetail = McpDataDetail.MetadataOnly, Func<string>? baseUrl = null, Chat.SlackThreadPass? slackThreads = null)
+        McpDataDetail dataDetail = McpDataDetail.MetadataOnly, Func<string>? baseUrl = null, Chat.SlackThreadPass? slackThreads = null,
+        Chat.SlackChatSweep? slackChat = null)
     {
         _slackThreads = slackThreads;
+        _slackChat = slackChat;
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _routes = routes ?? throw new ArgumentNullException(nameof(routes));
         _sends = sends ?? throw new ArgumentNullException(nameof(sends));
@@ -172,7 +175,31 @@ public sealed class InvestigationEventDelivery
         var notices = await NoticePassAsync(routes, cancellationToken);
         var proposals = await ProposalNoticePassAsync(routes, cancellationToken);
         await SlackThreadPassAsync(cancellationToken);
+        await SlackChatSweepAsync(cancellationToken);
         return (fallbacks, posted, notices + proposals);
+    }
+
+    /// <summary>#7659: the chat sweep, after the thread pass: a chat request for waiting messages whose request has ended, and the offline answer.
+    /// Its store or Slack failure is logged and tried again next pass.</summary>
+    private async Task SlackChatSweepAsync(CancellationToken cancellationToken)
+    {
+        if (_slackChat is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _slackChat.RunOnceAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Slack chat sweep failed; it is tried again next pass");
+        }
     }
 
     /// <summary>#7656: the Slack thread pass, after every other send. Its store or Slack failure is logged and tried again next pass.</summary>

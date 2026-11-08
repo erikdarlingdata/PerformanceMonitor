@@ -158,6 +158,9 @@ public partial class ViewerServerTab
         }
     }
 
+    /// <summary>#8224: how far below the data the heatmap's colour range starts, as a share of the data's span, so the smallest count is not drawn at the colormap's dark end.</summary>
+    private const double HeatmapLowCountLift = 0.5;
+
     private void UpdateQueryHeatmapChart(HeatmapResult result)
     {
         ClearChart(QueryHeatmapChart);
@@ -191,6 +194,14 @@ public partial class ViewerServerTab
         heatmap.FlipVertically = true; // row 0 ("0-1ms") at bottom, row 6 (">100s") at top
         heatmap.Colormap = new ScottPlot.Colormaps.Viridis();
         heatmap.NaNCellColor = QueryHeatmapChart.Plot.DataBackground.Color;
+        /* #8224: an empty cell is the background, so no cell is at 0, and a count of one at the colormap's dark end was all but
+           invisible on the Dark data background. The colour range starts below the data by half its span, so the smallest
+           count is drawn a third of the way up the ramp (a visible blue in every theme) and the largest keeps the top. */
+        double maxScaled = 0;
+        for (int r = 0; r < numRows; r++)
+            for (int c = 0; c < numCols; c++)
+                if (!double.IsNaN(scaled[r, c]) && scaled[r, c] > maxScaled) maxScaled = scaled[r, c];
+        heatmap.ManualRange = new ScottPlot.Range(-maxScaled * HeatmapLowCountLift, maxScaled > 0 ? maxScaled : 1);
 
         // Let ScottPlot use default extent (0..numCols, 0..numRows).
         // Use manual tick labels for both axes instead.
@@ -218,28 +229,23 @@ public partial class ViewerServerTab
         var colorBar = new ScottPlot.Panels.ColorBar(heatmap, ScottPlot.Edge.Right);
         colorBar.Label = "Query Count";
         colorBar.LabelStyle.ForeColor = QueryHeatmapChart.Plot.Axes.Bottom.TickLabelStyle.ForeColor;
+        colorBar.LabelStyle.Bold = false; // #8224: the same style as every axis unit (ChartStyle.ApplyAxisTitleStyle)
+        colorBar.LabelStyle.FontSize = (float)PerformanceMonitor.Ui.ChartAxisTitle.BaseFontSize;
         colorBar.Axis.TickLabelStyle.ForeColor = QueryHeatmapChart.Plot.Axes.Bottom.TickLabelStyle.ForeColor;
+        colorBar.Axis.TickLabelStyle.FontSize = 13;
         double maxRaw = 0;
         for (int r = 0; r < numRows; r++)
             for (int c = 0; c < numCols; c++)
                 if (result.Intensities[r, c] > maxRaw) maxRaw = result.Intensities[r, c];
-        var cbTicks = new ScottPlot.TickGenerators.NumericManual();
-        cbTicks.AddMajor(0, "0");
+        /* No "0": an empty cell is the background, not the ramp's floor. #8224: the round values present and the maximum, with a round
+           value left out when its label would touch the maximum's or its neighbour's at the bar's length at each render. */
         int[] niceValues = { 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000 };
-        foreach (var n in niceValues)
-        {
-            if (n > maxRaw) break;
-            cbTicks.AddMajor(Math.Log(1 + n), n.ToString("N0"));
-        }
-        cbTicks.AddMajor(Math.Log(1 + maxRaw), ((int)maxRaw).ToString("N0"));
-        colorBar.Axis.TickGenerator = cbTicks;
+        var roundTicks = niceValues.Where(n => n <= maxRaw).Select(n => (Math.Log(1 + n), n.ToString("N0"))).ToList();
+        colorBar.Axis.TickGenerator = new PerformanceMonitor.Ui.ColorBarCountTicks(roundTicks, (Math.Log(1 + maxRaw), ((int)maxRaw).ToString("N0")));
         QueryHeatmapChart.Plot.Axes.AddPanel(colorBar);
         _chartHelper.SetLegendPanel(QueryHeatmapChart, colorBar);
 
-        var metricName = ((ComboBoxItem)HeatmapMetricCombo.SelectedItem).Content?.ToString() ?? "Duration (ms)";
-        QueryHeatmapChart.Plot.Title($"Query Distribution by {metricName}");
-        QueryHeatmapChart.Plot.Axes.Title.Label.ForeColor = QueryHeatmapChart.Plot.Axes.Bottom.TickLabelStyle.ForeColor;
-
+        /* #8224: the card names the chart and the metric picker names the metric, so the plot draws no title of its own. */
         QueryHeatmapChart.Refresh();
     }
 

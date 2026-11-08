@@ -176,7 +176,7 @@ public sealed class DarlingMcpInvestigationToolsTests
         Assert.Contains("list_investigation_requests", DarlingMcpToolClassification.ReadOnlyTools);
         Assert.Contains("get_investigation_reports", DarlingMcpToolClassification.ReadOnlyTools);
         Assert.Equal(
-            new[] { "claim_investigation_request", "submit_investigation_report" },
+            new[] { "claim_investigation_request", "post_investigation_message", "submit_investigation_report" },
             DarlingMcpWritePolicy.InvestigationTools.OrderBy(n => n, StringComparer.Ordinal));
         Assert.Empty(DarlingMcpWritePolicy.InvestigationTools.Intersect(DarlingMcpWritePolicy.WriteTools));
         Assert.Empty(DarlingMcpWritePolicy.InvestigationTools.Intersect(DarlingMcpToolClassification.ReadOnlyTools));
