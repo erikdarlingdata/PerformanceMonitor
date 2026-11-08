@@ -241,11 +241,12 @@ public static class SameStatementPileupDetector
     public const int StaleSnapshotCutoffMinutes = 10;
 
     /// <summary>
-    /// The row cap of one window read, 50,000, bound as the read's LIMIT by both SKUs' readers: about 900 qualifying
-    /// sessions a snapshot across the 55-minute window the sweep reads at a one-minute cadence, past what a busy server
-    /// sustains and well short of what a runaway snapshot would cost in statement text (2,000 blocked sessions a minute over
-    /// that window is 110,000 rows). A tripwire, not a working bound: a reader whose read returns this many rows asks
-    /// <see cref="ReachesBaselineFloor"/> whether they still cover the baseline the finding would state (#8157).
+    /// The row cap of one window read, 50,000: about 900 qualifying sessions a snapshot across the 55-minute window the
+    /// sweep reads at a one-minute cadence, past what a busy server sustains and well short of what a runaway snapshot
+    /// would cost in statement text (2,000 blocked sessions a minute over that window is 110,000 rows). A tripwire, not a
+    /// working bound. Both SKUs' readers bind one row more than this as the read's LIMIT, so a read that returns more than
+    /// the cap was cut by it, and one of exactly the cap is a whole window; a cut read asks <see cref="ReachesBaselineFloor"/>
+    /// whether its rows still cover the baseline the finding would state, and drops the extra row when they do (#8157).
     /// </summary>
     public const int WindowRowCap = 50_000;
 

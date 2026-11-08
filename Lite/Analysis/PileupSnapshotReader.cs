@@ -61,11 +61,13 @@ public class PileupSnapshotReader
     /// The evaluation window's rows, newest first, or an empty list on a read fault — the pileup
     /// sweep is a per-collection best-effort evaluation; a failed read costs one log line and this
     /// cycle, never the collection loop. The row cap (<see cref="SameStatementPileupDetector.WindowRowCap"/>,
-    /// the one Darling's reader binds) is a tripwire against a runaway session count, not a working bound: a
-    /// read that fills it short of the baseline floor the finding would state returns the empty list too, with
-    /// one log line, rather than hand the detector a baseline shorter than the one its finding describes
-    /// (#8157). The trip is read off the rows the read returned, the same way Darling's reader reads it: the
-    /// read delegate below can run twice (#7256), so it keeps no state outside its return value.
+    /// the one Darling's reader binds) is a tripwire against a runaway session count, not a working bound. The
+    /// read binds one row more than the cap, so more than cap rows means the cap cut the window, and exactly
+    /// cap rows is a whole window that stands. A cut short of the baseline floor the finding would state
+    /// returns the empty list too, with one log line, rather than hand the detector a baseline shorter than the
+    /// one its finding describes; a cut past the floor drops the extra row (#8157). The trip is read off the
+    /// rows the read returned, the same way Darling's reader reads it: the read delegate below can run twice
+    /// (#7256), so it keeps no state outside its return value.
     /// </summary>
     public async Task<List<SameStatementPileupDetector.SnapshotRow>> ReadWindowAsync(
         int serverId, DateTime windowFloorUtc, CancellationToken cancellationToken)
@@ -78,14 +80,25 @@ public class PileupSnapshotReader
             rows.AddRange(await new LocalDataService(_duckDb).ReadWindowSkippingEmptyArchiveAsync(
                 "query_snapshots", "collection_time", windowFloorUtc, ReadAsync, cancellationToken));
 
-            if (rows.Count >= _rowCap && !SameStatementPileupDetector.ReachesBaselineFloor(rows))
+            if (rows.Count > _rowCap)
             {
-                /* #8157: the cap tripped short of the baseline floor the finding would state. The detector would describe
-                   a baseline it never read, so this sweep evaluates nothing; the next sweep re-reads. */
-                _logger?.LogWarning(
-                    "[PileupSnapshotReader] pileup window read for server {ServerId} filled its {RowCap}-row cap and reached back only to {OldestUtc:u}, short of the {Minutes}-minute baseline the finding would state — this sweep's evaluation is skipped",
-                    serverId, _rowCap, rows.Min(r => r.CollectionTime), SameStatementPileupDetector.BaselineLookbackMinutes);
-                rows.Clear();
+                /* #8157: the read binds one row more than the cap, so more than cap rows means the cap cut the window; exactly
+                   cap rows is a whole window and stands. */
+                if (!SameStatementPileupDetector.ReachesBaselineFloor(rows))
+                {
+                    /* The cut landed short of the baseline floor the finding would state. The detector would describe a
+                       baseline it never read, so this sweep evaluates nothing; the next sweep re-reads. */
+                    _logger?.LogWarning(
+                        "[PileupSnapshotReader] pileup window read for server {ServerId} filled its {RowCap}-row cap and reached back only to {OldestUtc:u}, short of the {Minutes}-minute baseline the finding would state — this sweep's evaluation is skipped",
+                        serverId, _rowCap, rows.Min(r => r.CollectionTime), SameStatementPileupDetector.BaselineLookbackMinutes);
+                    rows.Clear();
+                }
+                else
+                {
+                    /* The extra row, the oldest, sits past the floor, and every baseline instant sorts before it, so the first
+                       cap rows hold the whole baseline. The detector gets at most the cap. */
+                    rows.RemoveRange(_rowCap, rows.Count - _rowCap);
+                }
             }
 
             async Task<List<SameStatementPileupDetector.SnapshotRow>> ReadAsync(string relation)
@@ -120,7 +133,7 @@ LIMIT $3";
             cmd.CommandText = cmd.CommandText.Replace("v_query_snapshots", relation, StringComparison.Ordinal);
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             cmd.Parameters.Add(new DuckDBParameter { Value = windowFloorUtc });
-            cmd.Parameters.Add(new DuckDBParameter { Value = _rowCap });
+            cmd.Parameters.Add(new DuckDBParameter { Value = _rowCap + 1 });
 
             using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
