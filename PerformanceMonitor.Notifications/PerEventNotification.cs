@@ -57,9 +57,11 @@ public static class PerEventNotification
 
     /// <summary>One per-event notification to send: the single-incident (or overflow) context plus the
     /// "current value" string the caller passes to its alert sender. <see cref="NumericValue"/> carries
-    /// the same value as a number for the history stores (#1830): the overflow message's text
-    /// ("+N more incidents this cycle", "+1 more incident this cycle" for one) is not parseable, and a store falling back to text-parsing
-    /// it silently recorded 0.</summary>
+    /// the same value as a number: the history row's numeric for an alert with no measurement of its own (#1830: the
+    /// overflow message's text, "+N more incidents this cycle", or "+1 more incident this cycle" for one, is not parseable,
+    /// and a store falling back to text-parsing it silently recorded 0). An alert that measures something (a free
+    /// percent, a duration) keeps that measurement on every per-event row (#8246), because the engine reads the newest
+    /// open row's value back as the level it last announced.</summary>
     public sealed record Message(AlertContext Context, string CurrentValue, bool IsOverflow, double? NumericValue = null);
 
     /// <summary>

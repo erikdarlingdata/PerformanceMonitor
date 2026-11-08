@@ -163,15 +163,17 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
                 var deliveries = new List<AlertDelivery?>();
                 foreach (var message in PerEventNotification.Split(outcome.Context, _settings.PerEventMax))
                 {
-                    /* Per-incident card: msg.CurrentValue is the incident's occurrence count, and
-                       msg.NumericValue carries it as a number for the history row (#1830 — the
-                       overflow message's "+N more" text is unparseable, so the store's text fallback
-                       silently recorded 0). Threshold is the outcome's, unchanged. Matches Lite's
-                       per-event sends; detail text rebuilt from the split context. */
+                    /* Per-incident card: message.CurrentValue is the incident's occurrence count. The row's numeric is the
+                       alert's measurement (#8246): the engine reads the newest open row's value back as the level it last
+                       announced (Volume Free Space's free percent, PVS's percent), and the history shows the value the
+                       threshold was judged against. message.NumericValue, the incident's count, is the row's numeric only
+                       for an alert with no measurement of its own (#1830: the overflow message's "+N more" text is
+                       unparseable, so the store's text fallback silently recorded 0). Threshold is the outcome's,
+                       unchanged. Matches Lite's per-event sends; detail text rebuilt from the split context. */
                     deliveries.Add(await SendAndRecordAsync(
                         outcome, message.CurrentValue, message.Context,
                         AlertContextBuilders.ContextToDetailText(message.Context),
-                        numericCurrentValue: message.NumericValue, numericThresholdValue: outcome.NumericThresholdValue,
+                        numericCurrentValue: outcome.NumericCurrentValue ?? message.NumericValue, numericThresholdValue: outcome.NumericThresholdValue,
                         deliveryMode: mode, cancellationToken: cancellationToken));
                 }
 

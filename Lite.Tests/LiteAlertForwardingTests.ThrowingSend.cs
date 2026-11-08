@@ -110,4 +110,31 @@ public partial class LiteAlertForwardingTests
         Assert.Equal(2, send.Context!.Incidents!.Count);
         Assert.Equal(2, send.NumericCurrentValue);
     }
+
+    [Fact]
+    public async Task LowDisk_PerEventMode_SendsOncePerVolume_AndEveryRowKeepsTheFreePercent()
+    {
+        /* Through the real engine's Volume Free Space arm: two volumes under the 10% threshold. In Per-event mode each
+           volume is its own send, and every send carries the alert's measurement, the worst volume's free percent, as its
+           numeric: the engine reads the newest open row's value back after a restart as the level it last announced, and
+           an incident's occurrence count (1 here) in its place would read as 1% free. */
+        DisableAllChecks();
+        App.AlertLowDiskEnabled = true;
+        var h = new Harness();
+        var (deliverer, toasts, sends) = BuildReportingDeliverer(DeliveredByWebhook, serverOverride: AlertNotificationMode.PerEvent);
+        var engine = h.Build(deliverer);
+        h.Adapter.Volumes.Add(new VolumeFreeSpaceInfo { MountPoint = "D:\\", TotalMb = 819200, FreeMb = 65536 }); /* 8% free */
+        h.Adapter.Volumes.Add(new VolumeFreeSpaceInfo { MountPoint = "E:\\", TotalMb = 819200, FreeMb = 49152 }); /* 6% free */
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Single(toasts);
+        Assert.Equal(2, sends.Count);
+        Assert.All(sends, s => Assert.Equal("Volume Free Space", s.MetricName));
+        Assert.All(sends, s => Assert.Equal(AlertNotificationMode.PerEvent, s.DeliveryMode));
+        Assert.All(sends, s => Assert.Single(s.Context!.Incidents!));
+        Assert.Equal(2, sends.Select(s => s.Context!.Incidents![0].DedupKey).Distinct(StringComparer.Ordinal).Count());
+        Assert.All(sends, s => Assert.Equal(6d, s.NumericCurrentValue));
+        Assert.All(sends, s => Assert.Equal(10d, s.NumericThresholdValue));
+    }
 }

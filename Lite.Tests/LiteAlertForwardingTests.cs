@@ -1298,10 +1298,10 @@ public partial class LiteAlertForwardingTests : IDisposable
         Assert.Equal("3", sends[0].CurrentValue);   /* DescribeIncident = occurrence count */
         Assert.Equal("1", sends[1].CurrentValue);
         Assert.Equal("+1 more incident this cycle", sends[2].CurrentValue);
-        /* #1830: per-event sends carry per-incident numerics — occurrence counts, then the overflow
-           COUNT for the "+N more" trailer whose text is unparseable (it stored 0 before). The
-           threshold stays the outcome's on every send. */
-        Assert.Equal(new double?[] { 3, 1, 1 }, sends.Select(s => s.NumericCurrentValue).ToArray());
+        /* #8246: every per-event send carries the alert's measurement as its numeric (the engine reads the newest open row's
+           value back as the level it last announced), the overflow send included, so the "+N more" trailer whose text is
+           unparseable never stores 0 (#1830). The threshold stays the outcome's on every send. */
+        Assert.Equal(new double?[] { 6, 6, 6 }, sends.Select(s => s.NumericCurrentValue).ToArray());
         Assert.All(sends, s => Assert.Equal(1d, s.NumericThresholdValue));
         var overflowIncident = Assert.Single(sends[2].Context!.Incidents!);
         Assert.Equal("c", overflowIncident.DedupKey);

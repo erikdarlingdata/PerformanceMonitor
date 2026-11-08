@@ -226,7 +226,8 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
             {
                 return await SendPerEventAsync(
                     outcome.MetricName, outcome.ServerName, outcome.ThresholdValue,
-                    serverId, outcome.Context, outcome.NumericThresholdValue, outcome.Muted, deliveryMode, cancellationToken);
+                    serverId, outcome.Context, outcome.NumericCurrentValue, outcome.NumericThresholdValue, outcome.Muted,
+                    deliveryMode, cancellationToken);
             }
 
             return await _sendAlert(
@@ -262,18 +263,21 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
        (PerEventNotification.Splits), so the context carries incidents. */
     private async Task<AlertDelivery?> SendPerEventAsync(
         string metricName, string serverName, string thresholdValue,
-        int serverId, AlertContext context, double? numericThresholdValue,
+        int serverId, AlertContext context, double? numericCurrentValue, double? numericThresholdValue,
         bool isMuted, AlertNotificationMode deliveryMode, CancellationToken cancellationToken)
     {
         var deliveries = new List<AlertDelivery?>();
         foreach (var msg in PerEventNotification.Split(context, App.AlertPerEventMaxPerCycle))
         {
-            /* Each per-event row stores its OWN numeric (#1830): the overflow message's
-               "+N more incident(s)" text is unparseable, and the history store's text fallback
-               silently recorded 0 for it. The threshold is the outcome's, unchanged. */
+            /* Each per-event row keeps the alert's measurement (#8246): the engine reads the newest open row's value back
+               as the level it last announced (Volume Free Space's free percent, PVS's percent), and the history shows the
+               value the threshold was judged against. The incident's count is the card's current-value text, and the row's
+               numeric only for an alert that has no measurement of its own (#1830: the overflow message's "+N more
+               incident(s)" text is unparseable, and the store's text fallback silently recorded 0 for it). The threshold is
+               the outcome's, unchanged. */
             deliveries.Add(await _sendAlert(
                 metricName, serverName, msg.CurrentValue, thresholdValue, serverId,
-                msg.Context, msg.NumericValue, numericThresholdValue, isMuted,
+                msg.Context, numericCurrentValue ?? msg.NumericValue, numericThresholdValue, isMuted,
                 AlertDetailText.WithSampleAge(AlertContextBuilders.ContextToDetailText(msg.Context), msg.Context),
                 deliveryMode, cancellationToken));
         }
