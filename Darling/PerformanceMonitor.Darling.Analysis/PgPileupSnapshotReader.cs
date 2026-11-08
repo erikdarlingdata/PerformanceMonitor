@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -43,15 +44,20 @@ public sealed class PgPileupSnapshotReader
 
     private readonly NpgsqlDataSource _postgres;
     private readonly ILogger? _logger;
+    private readonly int _rowCap;
 
     /// <summary>
     /// $1 server_id, $2 window floor (naive UTC — <c>collection_time</c> is stamped host-UTC by the
     /// collector runner and stored naive). The text comes back WHOLE (#5320): <see cref="ReadWindowAsync"/> cuts it to
     /// <see cref="StatementTextCharacters"/> code points, the bound identity fallback and the drill-down preview
-    /// need, and judges the whole statement with the sensitive-statement filter before the cut that is printed. Bounded output: the window is
-    /// <see cref="SameStatementPileupDetector.BaselineLookbackMinutes"/> of a one-minute-cadence
-    /// collector, ~50–150 rows on a busy server; the LIMIT is a tripwire against a misbehaving
-    /// snapshot (a runaway session count), not a working cap.
+    /// need, and judges the whole statement with the sensitive-statement filter before the cut that is printed. The time
+    /// floor bounds the read: the caller passes <see cref="SameStatementPileupDetector.BaselineLookbackMinutes"/> plus the
+    /// staleness margin of a one-minute-cadence collector, so the rows are the window's sessions over that span. <c>$3</c>
+    /// is one row more than the row cap, <see cref="SameStatementPileupDetector.WindowRowCap"/> unless a test lowers it: a
+    /// tripwire against a runaway session count. The extra row tells a window of exactly cap rows, which is whole, from one
+    /// the cap cut. A cut that lands before the floor is passed is caught by <see cref="ReadWindowAsync"/>, which skips the
+    /// sweep rather than hand the detector a baseline shorter than the one its finding states; a cut past the floor drops
+    /// the extra row (#8157).
     /// </summary>
     public const string PileupWindowSql = $@"
 SELECT collection_time,
@@ -73,16 +79,18 @@ AND   session_id > 50
 AND   COALESCE(is_cdc_capture, FALSE) = FALSE
 AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
 ORDER BY collection_time DESC
-LIMIT 5000";
+LIMIT $3";
 
-    public PgPileupSnapshotReader(NpgsqlDataSource postgres, ILogger? logger = null)
+    public PgPileupSnapshotReader(NpgsqlDataSource postgres, ILogger? logger = null, int rowCap = SameStatementPileupDetector.WindowRowCap)
     {
         _postgres = postgres;
         _logger = logger;
+        _rowCap = rowCap;
     }
 
     /// <summary>
-    /// The evaluation window's rows, newest first, or an empty list on a read fault — the pileup
+    /// The evaluation window's rows, newest first, or an empty list on a read fault, or when the row cap
+    /// filled short of the baseline floor the finding would state (#8157) — the pileup
     /// sweep is a per-collection best-effort evaluation, and a failed read must cost one log line and
     /// this cycle's evaluation, never the sweep (the fact-collector degrade discipline). The next
     /// sweep re-reads a fresher window anyway. Shutdown residue is not a fault: it propagates past
@@ -102,6 +110,7 @@ LIMIT 5000";
             };
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(DateTime.SpecifyKind(windowFloorUtc, DateTimeKind.Unspecified));
+            command.Parameters.AddWithValue(_rowCap + 1);
 
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
@@ -123,6 +132,27 @@ LIMIT 5000";
                     LogicalReads: reader.IsDBNull(10) ? 0L : Convert.ToInt64(reader.GetValue(10)),
                     PhysicalReads: reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11)),
                     PreviewText: AnalysisStatementText.Preview(rawText, StatementTextCharacters)));
+            }
+
+            if (rows.Count > _rowCap)
+            {
+                /* #8157: the read binds one row more than the cap, so more than cap rows means the cap cut the window; exactly
+                   cap rows is a whole window and stands. */
+                if (!SameStatementPileupDetector.ReachesBaselineFloor(rows))
+                {
+                    /* The cut landed short of the baseline floor the finding would state. The detector would describe a
+                       baseline it never read, so this sweep evaluates nothing; the next sweep re-reads. */
+                    _logger?.LogWarning(
+                        "[PgPileupSnapshotReader] pileup window read for server {ServerId} filled its {RowCap}-row cap and reached back only to {OldestUtc:u}, short of the {Minutes}-minute baseline the finding would state — this sweep's evaluation is skipped",
+                        serverId, _rowCap, rows.Min(r => r.CollectionTime), SameStatementPileupDetector.BaselineLookbackMinutes);
+                    rows.Clear();
+                }
+                else
+                {
+                    /* The extra row, the oldest, sits past the floor, and every baseline instant sorts before it, so the first
+                       cap rows hold the whole baseline. The detector gets at most the cap. */
+                    rows.RemoveRange(_rowCap, rows.Count - _rowCap);
+                }
             }
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))

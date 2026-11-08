@@ -152,6 +152,8 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         LoadOverviewSortMode();
+        /* #8221: a card's band brushes are read from the theme when it is bound, so a theme change binds the cards again. */
+        ThemeManager.ThemeChanged += _ => ApplyOverviewView();
 
         // Initialize services (with loggers wired to AppLogger)
         _databaseInitializer = new DuckDbInitializer(App.DatabasePath, new AppLoggerAdapter<DuckDbInitializer>());
