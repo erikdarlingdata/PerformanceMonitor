@@ -138,6 +138,9 @@ public sealed class ExternalAlertStoreLiveTests
             Assert.Equal(0, await store.ReapAsync(TimeSpan.FromMinutes(5), ct));
             Assert.Equal("claimed", await ScalarAsync(seed, $"SELECT status FROM config.external_alert_pending WHERE pending_id = {pendingId}", ct));
 
+            /* The store's clock runs one second ahead of this run's: the claim it stamped sits in this run's future. */
+            await ExecAsync(seed, $"UPDATE config.external_alert_pending SET claimed_at = claimed_at + interval '1 second' WHERE pending_id = {pendingId}", ct);
+
             /* Past the grace it is interrupted, finished, and never claimed again. */
             Assert.Equal(1, await store.ReapAsync(TimeSpan.Zero, ct));
             Assert.Equal("interrupted", await ScalarAsync(seed, $"SELECT status FROM config.external_alert_pending WHERE pending_id = {pendingId}", ct));
