@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Mcp;
@@ -89,13 +90,15 @@ public sealed class McpLongQueryTools
                    is not told to switch itself on. Null (no schedules, or the collector is not in them) leaves the rule above alone. */
                 var collectorMayBeOff = runTimes?.IsCollectorEnabled(resolved.ServerId, "long_query_completions") != true
                     && ((database == null && !tagScope.Active) || emptyNotice.EffectiveStart is null);
-                return await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.StatusForDatabase("empty",
+                /* #8146: the long-query session's ring-buffer loss over the window rides the empty answer's hints. */
+                return RingBufferLossAnswer.AttachToHints(await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.StatusForDatabase("empty",
                     "No long-running query completions found in the specified time range" + McpBlockingTools.ForChosenDatabase(database)
                         + (tagScope.Active ? $" for query tag '{tagScope.Requested}'" : "")
                         + (collectorMayBeOff ? ". The long_query_completions collector is opt-in (default OFF): enable it in the collector schedule to capture data." : ".")
                         + (include_monitor ? "" : " The monitor's own statements are left out. Pass include_monitor=true to include them."),
                     database, /* #5244 review L2: the echo rides on an empty answer too */
-                    emptyNotice.AsHints()), windowEnd.AddHours(-hours_back));
+                    emptyNotice.AsHints()), windowEnd.AddHours(-hours_back)),
+                    await dataService.GetLossRunsInWindowAsync(resolved.ServerId, LongQueryCompletionsCollector.Instance.Name, windowEnd.AddHours(-hours_back), windowEnd), database != null);
             }
 
             var truncated = rows.Count > limit;
@@ -137,7 +140,8 @@ public sealed class McpLongQueryTools
                     tag = tagScope.TagOfHash(r.QueryHash)
                 });
 
-            return McpQueryTools.WithTagFilter(new
+            /* #8146: the window's ring-buffer loss is a top-level key when there was any. */
+            return RingBufferLossAnswer.Attach(McpQueryTools.WithTagFilter(new
             {
                 server = resolved.DisplayName,
                 hours_back,
@@ -158,7 +162,7 @@ public sealed class McpLongQueryTools
                 newest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Max(r => r.EventTime)),
                 order = "duration_ms_desc",
                 completions = result
-            }, tagScope.Named);
+            }, tagScope.Named), await dataService.GetLossRunsInWindowAsync(resolved.ServerId, LongQueryCompletionsCollector.Instance.Name, requestedStart, windowEnd), database != null);
         }
         catch (Exception ex)
         {

@@ -2839,6 +2839,40 @@ END
 $do$;";
 
     /// <summary>
+    /// V255 (#8106): the cadence wait baseline supply, <c>collect.wait_stats_cadence_baseline</c>, created where the store can hold it
+    /// at migration time so the upgraded store carries its successor from this rung on. On a store without TimescaleDB it is the plain
+    /// fallback view over <c>collect.wait_stats</c>, the same view the ensure sweep derives. On a TimescaleDB store whose
+    /// <c>wait_stats</c> is already a hypertable (every upgrading store) it is the continuous aggregate, <c>WITH NO DATA</c>, which is
+    /// catalog-only and transaction-safe; the ensure sweep that follows on the same start finds it, gives it the refresh, retention and
+    /// compression policies of the position it took over from <c>wait_stats_interval_baseline</c>, and backfills it from raw. On a
+    /// fresh TimescaleDB store the table is not yet a hypertable here (the conversion runs after the ladder), so this rung creates
+    /// the plain view, which the sweep drops for the aggregate once the table is a hypertable, as on a store that gained the extension. <c>wait_stats_interval_baseline</c> is not touched: it
+    /// keeps serving the baseline tier until the successor covers it, then retires through
+    /// <c>TimescaleSupport.SupersededBaselineRelations</c>. Idempotent. <b>No Lite twin:</b> Lite has no rollup tier.
+    /// </summary>
+    private static readonly string V255Sql = @"
+DO $$
+DECLARE
+    v_hypertable boolean := false;
+BEGIN
+    /* timescaledb_information only exists once the extension has been created; to_regclass probes it without raising, and
+       the hypertable read goes through EXECUTE so the reference is parsed only when it runs. */
+    IF to_regclass('timescaledb_information.continuous_aggregates') IS NOT NULL THEN
+        EXECUTE 'SELECT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_schema = ''collect'' AND hypertable_name = ''wait_stats'')'
+        INTO v_hypertable;
+    END IF;
+
+    /* The continuous aggregate where wait_stats is a hypertable; everywhere else the plain view over the same body, which the
+       ensure sweep drops for the aggregate once the table is a hypertable, as it does on a store that gained the extension. The
+       relation exists from this rung on, whatever shape the store is in, so the viewer's probe reads the rung. */
+    IF v_hypertable THEN
+        EXECUTE '" + TimescaleSupport.CreateWaitStatsCadenceBaselineSql.Replace("'", "''") + @"';
+    ELSE
+        EXECUTE '" + TimescaleSupport.CreateBaselineFallbackViewSql(TimescaleSupport.WaitStatsCadenceBaselineView, TimescaleSupport.CreateWaitStatsCadenceBaselineSql).Replace("'", "''") + @"';
+    END IF;
+END $$;";
+
+    /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
     /// <c>DatabaseProtectionCollector</c> every 60 minutes (Darling only). One row per database per pass: the raw times (UTC), the
     /// recovery model, the database state and replica role, a per-row platform label (native, platform_managed, native_only) and a state
@@ -3350,6 +3384,7 @@ $rung$;";
         new Migration(252, "slack-bot-threads", V252Sql),
         new Migration(253, "slack-cards", V253Sql),
         new Migration(254, "slack-chat-requests", V254Sql),
+        new Migration(255, "wait-stats-cadence-baseline", V255Sql),
     };
 
     /// <summary>

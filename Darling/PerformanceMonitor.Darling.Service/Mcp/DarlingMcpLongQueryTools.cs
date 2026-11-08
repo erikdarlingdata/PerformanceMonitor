@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -132,7 +133,9 @@ public sealed class DarlingMcpLongQueryTools
                         + (collectorMayBeOff ? ". The long_query_completions collector is opt-in (default OFF): enable it in the collector schedule to capture data." : ".")
                         + (include_monitor ? "" : " The monitor's own statements are left out. Pass include_monitor=true to include them."),
                     databaseFilter.Describe(), /* #5244 review L2: the echo rides on an empty answer too */
-                    emptyNotice.AsHints()), cancellationToken, windowStart);
+                    /* #8146: the long-query session's ring-buffer loss rides beside the window keys. */
+                    RingBufferLossAnswer.WithLoss(emptyNotice.AsHints(),
+                        await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, LongQueryCompletionsCollector.Instance.Name, windowStart, now, cancellationToken), !databaseFilter.IsAll)), cancellationToken, windowStart);
             }
 
             var truncated = rows.Count > limit;
@@ -209,8 +212,10 @@ public sealed class DarlingMcpLongQueryTools
 
             var json = payloadNode.ToJsonString(McpHelpers.JsonOptions);
 
-            /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). */
-            return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
+            /* A failed probe costs the notice, never the rows (see DarlingMcpWindowNotice.ReadAsync). #8146: the window's ring-buffer loss is a top-level key when there was any. */
+            return RingBufferLossAnswer.Attach(
+                notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json,
+                await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, LongQueryCompletionsCollector.Instance.Name, windowStart, now, cancellationToken), !databaseFilter.IsAll);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

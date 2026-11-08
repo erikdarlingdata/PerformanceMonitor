@@ -183,9 +183,9 @@ WITH clean AS (
 
         /* The Aurora all-types wait rate, ms per second, CPU excluded — PgAnomalyDetector.WaitRateWindowSql's
            per_collection over pg_wait_stats with the wait partial's three-state interval
-           (PgTargetFactCollector.Waits.cs): the STORED sample_interval_seconds (MAX over the collection's rows;
-           0 only when every row was unknowable — a restart) through NULLIF so a restart collection is NOT a
-           sample, a pre-V128 NULL falling back to LAG(collection_time). Never ELSE 0. `CPU` is a wait TYPE on
+           (PgTargetFactCollector.Waits.cs): the collection's positive-interval deltas over its CADENCE, the shortest
+           stored sample_interval_seconds any row measured (#8106), so a restart collection (every row 0) is NOT a
+           sample and a returning event's longer interval never divides its siblings; a pre-V128 NULL falls back to LAG(collection_time). Never ELSE 0. `CPU` is a wait TYPE on
            Aurora (on-CPU time under the same function) and is excluded here exactly as the wait facts' share
            denominator excludes it, so the window's rate and its baseline agree on what "waiting" is. Only
            pg_wait_stats: stock's pg_wait_sampling estimate has no arm in v1 (class summary). */
@@ -193,18 +193,25 @@ WITH clean AS (
 WITH per_collection AS (
     SELECT collection_time,
            CAST(SUM(GREATEST(delta_wait_time_us, 0)) FILTER (WHERE lower(wait_type) IS DISTINCT FROM 'cpu') AS DOUBLE PRECISION) / 1000.0 AS total_wait_ms,
+           /* #8106: each (wait_type, wait_event) row carries its own sample_interval_seconds, the seconds since that
+              event's previous sighting, so the collection credits every row measured over a positive interval whole
+              and rates the sum over its cadence, the shortest interval any of its rows measured (the total then equals
+              the sum of its parts). A row whose interval is 0 adds nothing; a collection whose every row is 0 (a
+              restart) has no cadence and is not a sample; a pre-V128 collection (no stored interval) rates its total
+              over the LAG. */
            CASE WHEN MAX(sample_interval_seconds) IS NULL
-                THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-                ELSE NULLIF(MAX(sample_interval_seconds), 0)
-           END AS interval_sec
+                THEN coalesce(CAST(SUM(GREATEST(delta_wait_time_us, 0)) FILTER (WHERE lower(wait_type) IS DISTINCT FROM 'cpu') AS DOUBLE PRECISION), 0) / 1000.0 / NULLIF(extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))), 0)
+                ELSE coalesce(CAST(SUM(GREATEST(delta_wait_time_us, 0)) FILTER (WHERE lower(wait_type) IS DISTINCT FROM 'cpu' AND sample_interval_seconds > 0) AS DOUBLE PRECISION), 0) / 1000.0
+                     / MIN(NULLIF(sample_interval_seconds, 0))
+           END AS ms_per_sec
     FROM pg_wait_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     GROUP BY collection_time
 ),
 clean AS (
-    SELECT collection_time, coalesce(total_wait_ms, 0) / interval_sec AS v
+    SELECT collection_time, ms_per_sec AS v
     FROM per_collection
-    WHERE interval_sec > 0
+    WHERE ms_per_sec IS NOT NULL
 )," + RobustTierScaffold,
 
         /* Percent of the CONFIGURED capacity ceiling — acu_utilization_percent, never cpu_percent (#3281: on the

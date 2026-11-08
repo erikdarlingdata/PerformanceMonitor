@@ -110,6 +110,12 @@ SET @shred_needed =
         ELSE 0
     END;
 
+/* #8146: the position fragments. The session row (created, dropped, limit) is read on EVERY run, gated or not, so a
+   run that skips the shred still measures what the session dropped; the header comes from the shredded target below. */
+{RingBufferXml.PositionDeclareSql}
+
+SET @ring_position_session = N'{XeSessionName}';
+
 IF @shred_needed = 1
 BEGIN
     {RingBufferXml.DeclareSql}
@@ -128,6 +134,8 @@ BEGIN
 
     {RingBufferXml.TruncationSql}
 
+    {RingBufferXml.HeaderSql}
+
     INSERT
         @PerformanceMonitor_Deadlock
     (
@@ -136,6 +144,15 @@ BEGIN
     SELECT
         ring_xml = @ring_xml
     WHERE @ring_xml IS NOT NULL;
+END;
+
+/* #8146: not in master. The master item belongs to a logical-server registration, which keeps no loss accounting (its
+   telemetry-blob arm below already holds every deadlock a ring can evict), so this read's output would go unused there,
+   and the sys.database_event_session* catalog views it joins have never been run in a logical master: a failure there
+   must not cost the telemetry arm. The position columns then read NULL, which the accounting takes as no session. */
+IF DB_NAME() <> N'master'
+BEGIN
+    {RingBufferXml.SessionPositionDatabaseSql}
 END;
 
 SELECT
@@ -191,7 +208,9 @@ SELECT
     execution_count = @execution_count,
     gated = CASE WHEN @shred_needed = 1 THEN CONVERT(bit, 0) ELSE CONVERT(bit, 1) END,
     /* #6441: whether SQL Server truncated the ring buffer's XML (all NULL when the gate skipped the read). */
-    {RingBufferXml.TruncationColumnsSql};";
+    {RingBufferXml.TruncationColumnsSql},
+    /* #8146: the target header, the session row and the limit, for ReadAsync's loss accounting. */
+    {RingBufferXml.PositionColumnsSql};";
 
     /* On-prem / Azure MI / AWS RDS: read from ring_buffer (server-scoped session)
        Use .query() to get XML with structure intact, then CONVERT to nvarchar(max) */
@@ -227,6 +246,12 @@ SET @shred_needed =
         ELSE 0
     END;
 
+/* #8146: the position fragments. The session row (created, dropped, limit) is read on EVERY run, gated or not, so a
+   run that skips the shred still measures what the session dropped; the header comes from the shredded target below. */
+{RingBufferXml.PositionDeclareSql}
+
+SET @ring_position_session = N'{XeSessionName}';
+
 IF @shred_needed = 1
 BEGIN
     {RingBufferXml.DeclareSql}
@@ -245,6 +270,8 @@ BEGIN
 
     {RingBufferXml.TruncationSql}
 
+    {RingBufferXml.HeaderSql}
+
     INSERT
         @PerformanceMonitor_Deadlock
     (
@@ -254,6 +281,8 @@ BEGIN
         ring_xml = @ring_xml
     WHERE @ring_xml IS NOT NULL;
 END;
+
+{RingBufferXml.SessionPositionServerSql}
 
 SELECT
     deadlock_time = evt.value('(@timestamp)[1]', 'datetime2'),
@@ -279,7 +308,9 @@ SELECT
     execution_count = @execution_count,
     gated = CASE WHEN @shred_needed = 1 THEN CONVERT(bit, 0) ELSE CONVERT(bit, 1) END,
     /* #6441: whether SQL Server truncated the ring buffer's XML (all NULL when the gate skipped the read). */
-    {RingBufferXml.TruncationColumnsSql};";
+    {RingBufferXml.TruncationColumnsSql},
+    /* #8146: the target header, the session row and the limit, for ReadAsync's loss accounting. */
+    {RingBufferXml.PositionColumnsSql};";
 
     /* Best-effort victim plan capture (CapturePlanXml only — Darling). Resolve the victim's deadlocked
        statement plan from the live plan cache by its executionStack frame's sql_handle + statement
@@ -382,7 +413,7 @@ OUTER APPLY
     /// <see cref="AzureQueryText"/>: that branch reads a durable file-backed store with no execution_count
     /// of its own, and runs unconditionally exactly as before.
     /// </summary>
-    public override IReadOnlyList<string> StateKeys { get; } = new[] { XeShredGate.StateKey, TelemetryCursorStateKey, RingCursorStateKey };
+    public override IReadOnlyList<string> StateKeys { get; } = new[] { XeShredGate.StateKey, TelemetryCursorStateKey, RingCursorStateKey, RingBufferLossAccounting.StateKey };
 
     /// <summary>
     /// The Azure telemetry arm's own cursor: the newest <c>deadlock_time</c> that arm itself returned.
@@ -727,6 +758,16 @@ OUTER APPLY
 
             /* #6441: SQL Server cuts a ring buffer's XML at about 4 MB and keeps the OLDEST events. */
             RingBufferXml.MeasureTruncation(reader, 2, context);
+
+            /* #8146: what the ring buffer evicted and the session dropped since the last run. Runs on a gated run too
+               (the header columns are NULL then, the session's dropped count is not). An Azure SQL Database logical-server
+               registration reads the file-backed telemetry blob on its master item, which holds every deadlock a ring buffer
+               can evict (#2641), so an eviction there loses no deadlock: no accounting there. */
+            if (!(context.Target.IsAzureSqlDb && context.AzureRegistrationIsLogicalServer))
+            {
+                var truncated = reader.FieldCount > 2 && !reader.IsDBNull(2) && reader.GetBoolean(2);
+                RingBufferLossAccounting.Apply(context, RingBufferObservation.Read(reader, 5), truncated);
+            }
         }
 
         return rows;

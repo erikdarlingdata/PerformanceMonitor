@@ -245,8 +245,19 @@ public partial class RemoteCollectorService
             }
         }
 
+        /* #8146: only the deadlocks collector reads this flag (it skips ring-buffer loss accounting for a logical-server
+           registration). The catalog is the one the connection string gets (ServerConnection.BuildConnectionString: DatabaseName, else
+           master), read off the server itself: the credential resolver throws for an unconfirmed host, and that must not fail every
+           collector's run. */
+        var registeredAsLogicalServer = target.IsAzureSqlDb
+            && string.Equals(definition.Name, DeadlocksCollector.Instance.Name, StringComparison.Ordinal)
+            && AzureSweepScope.IsLogicalServerRegistration(
+                target, string.IsNullOrWhiteSpace(server.DatabaseName) ? "master" : server.DatabaseName);
+
         var context = new CollectorContext
         {
+            AzureRegistrationIsLogicalServer = registeredAsLogicalServer,
+            RingBufferMaxEvents = App.XeRingBufferMaxEvents,
             ServerId = serverId,
             ServerName = GetServerNameForStorage(server),
             CollectionTime = collectionTime,
@@ -1456,6 +1467,13 @@ public partial class RemoteCollectorService
             {
                 await SaveCollectorStateAsync(serverId, definition.Name, context.PendingState, cancellationToken);
             }
+        }
+
+        /* #8146: the long-query read found this install's own session below the setting in an item it landed. Its rows and
+           position are stored above, so the session can be recreated with the setting now. Never fails the run. */
+        if (context.SessionRecreates.Count > 0)
+        {
+            await RecreateLongQuerySessionsBelowSettingAsync(server, context.Target.IsAzureSqlDb, context.SessionRecreates, cancellationToken);
         }
 
         telemetry.SqlMs = sqlMs;

@@ -3717,7 +3717,7 @@ LIMIT 1", connection))
             (TimescaleSupport.QueryStatsIoHourlyView, 11),
             (TimescaleSupport.ProcedureStatsIoHourlyView, 2),
             (TimescaleSupport.PerfmonIntervalBaselineView, 4),
-            (TimescaleSupport.WaitStatsIntervalBaselineView, 5),
+            (TimescaleSupport.WaitStatsCadenceBaselineView, 5),
             (TimescaleSupport.SessionStatsBaselineView, 6),
             (TimescaleSupport.QueryStatsBaselineView, 8),
             (TimescaleSupport.BlockedProcessBaselineView, 9),

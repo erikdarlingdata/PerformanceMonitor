@@ -47,13 +47,16 @@ public sealed class DarlingMcpCollectorScheduleBehaviourLiveTests
     private const string ShipsOff = "long_query_completions";
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+    /* Npgsql leaves the password out of the ConnectionString read back from a data source or an opened connection, so what the body opens by connection string comes from the scratch store's own string. */
+    private string _storeConnectionString = "";
 
-    private static async Task WithStoreAsync(Func<NpgsqlDataSource, NpgsqlConnection, CancellationToken, Task> body)
+    private async Task WithStoreAsync(Func<NpgsqlDataSource, NpgsqlConnection, CancellationToken, Task> body)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the collector schedule behaviour pins.");
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath }.ConnectionString;
+        _storeConnectionString = connectionString;
         await using var owner = new NpgsqlConnection(connectionString);
         await owner.OpenAsync(ct);
         await PgMigrations.MigrateAsync(owner, ct);
@@ -386,8 +389,7 @@ public sealed class DarlingMcpCollectorScheduleBehaviourLiveTests
             await DarlingMcpCollectorScheduleTools.SetCollectorFrequency(source, Delta, 10, false, "beh-alpha", cancellationToken: ct);
             Assert.Null(await ScalarAsync(owner, $"SELECT enabled FROM config.config_collector_schedules WHERE server_id = {ServerA} AND collector_name = '{Delta}'", ct));
 
-            var connectionString = new NpgsqlConnectionStringBuilder(owner.ConnectionString).ConnectionString;
-            await using var viewer = new ViewerDataService(connectionString);
+            await using var viewer = new ViewerDataService(_storeConnectionString);
 
             var rows = await viewer.GetCollectorSchedulesAsync(ct);
             var stored = rows.Single(r => r.ServerId == ServerA && r.CollectorName == Delta);

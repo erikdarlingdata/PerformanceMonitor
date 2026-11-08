@@ -743,6 +743,10 @@ ALTER TABLE IF EXISTS config.config_notification DROP COLUMN IF EXISTS slack_app
 DROP TABLE IF EXISTS config.investigation_request_askers;
 DROP INDEX IF EXISTS config.ix_investigation_request_threads_channel_ts;
 ALTER TABLE IF EXISTS config.investigation_requests DROP COLUMN IF EXISTS chat_thread_of;"),
+        // V255 (#8106): the cadence wait baseline supply. The probe's sentinel is the relation itself, a continuous aggregate or the plain
+        // fallback view, so the rewind drops whichever shape stands (the product's own discriminating drop), and a re-run of V255 or the
+        // ensure sweep creates it again. Safe on a store that never had it.
+        new(255, "hasWaitStatsCadenceBaseline", PerformanceMonitor.Darling.Storage.TimescaleSupport.DropRetiredBaselineRelationSql(PerformanceMonitor.Darling.Storage.TimescaleSupport.WaitStatsCadenceBaselineView)),
     ];
 
     /// <summary>
