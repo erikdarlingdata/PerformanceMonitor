@@ -33,7 +33,7 @@ public sealed class ChartPanel : ContentControl
         nameof(Subtitle), typeof(string), typeof(ChartPanel), new PropertyMetadata(string.Empty));
 
     public static readonly DependencyProperty HeaderContentProperty = DependencyProperty.Register(
-        nameof(HeaderContent), typeof(object), typeof(ChartPanel), new PropertyMetadata(null));
+        nameof(HeaderContent), typeof(object), typeof(ChartPanel), new PropertyMetadata(null, OnHeaderContentChanged));
 
     public static readonly DependencyProperty IsEmptyProperty = DependencyProperty.Register(
         nameof(IsEmpty), typeof(bool), typeof(ChartPanel), new PropertyMetadata(false));
@@ -49,8 +49,45 @@ public sealed class ChartPanel : ContentControl
     /// <summary>The line under the title. Takes no room while empty.</summary>
     public string Subtitle { get => (string)GetValue(SubtitleProperty); set => SetValue(SubtitleProperty, value); }
 
-    /// <summary>What sits on the right of the header: a legend note, a "0 throughout" mark, a button.</summary>
+    /// <summary>What sits on the right of the header: a legend note, a "0 throughout" mark, a button, a count.</summary>
     public object? HeaderContent { get => GetValue(HeaderContentProperty); set => SetValue(HeaderContentProperty, value); }
+
+    /// <summary>
+    /// The header's content is a logical child of the card, as the plot is, so a walk of the logical tree (the one that finds the
+    /// tab an element sits in, or every element of a kind on a tab) reaches a count or a button in the header.
+    /// </summary>
+    protected override System.Collections.IEnumerator LogicalChildren
+    {
+        get
+        {
+            var children = new System.Collections.Generic.List<object>(2);
+            if (Content is not null)
+            {
+                children.Add(Content);
+            }
+
+            if (HeaderContent is not null)
+            {
+                children.Add(HeaderContent);
+            }
+
+            return children.GetEnumerator();
+        }
+    }
+
+    private static void OnHeaderContentChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        var card = (ChartPanel)d;
+        if (e.OldValue is DependencyObject old && LogicalTreeHelper.GetParent(old) == card)
+        {
+            card.RemoveLogicalChild(old);
+        }
+
+        if (e.NewValue is DependencyObject added && LogicalTreeHelper.GetParent(added) is null)
+        {
+            card.AddLogicalChild(added);
+        }
+    }
 
     /// <summary>True when there is nothing to draw: the plot is hidden and <see cref="EmptyText"/> is shown in its place.</summary>
     public bool IsEmpty { get => (bool)GetValue(IsEmptyProperty); set => SetValue(IsEmptyProperty, value); }
