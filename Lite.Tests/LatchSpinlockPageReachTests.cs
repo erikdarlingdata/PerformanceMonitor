@@ -34,6 +34,7 @@ namespace PerformanceMonitorLite.Tests;
 /// the layout of its sibling sub-tabs: a title row with Refresh over a full-width grid whose Broker column fits its names and whose
 /// every column header is named.
 /// </summary>
+[Collection("credential-manager")]
 public sealed class LatchSpinlockPageReachTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;
