@@ -72,7 +72,7 @@ public sealed record BaselineBucketMap(
 /// the tile is not scored (design §1's minimum-samples edge rule).</param>
 /// <param name="PeakTimeUtc">The UTC instant the peak was observed at, for families that track it
 /// (<c>peak_time</c> in the design). <c>null</c> for families with no per-tile peak time.</param>
-/// <param name="Collections">#8293: distinct collection instants observed in this tile — the
+/// <param name="Collections">#8293: distinct collector instants in this tile, idle ones included — the
 /// <c>tile_collections</c> column <see cref="WindowTiles.CoverageColumnsSql"/> appends to every tiled statement.
 /// Instants, not rows: the I/O families carry several file rows per collection. With <see cref="CollectionSpan"/>
 /// and the window's cadence it says how much of its hour the tile's collection covers

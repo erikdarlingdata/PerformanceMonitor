@@ -134,14 +134,22 @@ rated AS (
     SELECT collection_time, xacts / interval_sec AS tps
     FROM per_collection
     WHERE interval_sec > 0
+),
+collected AS (
+    /* #8293: every collection the collector wrote, so the coverage columns count collector instants; a collection
+       without a rate (the window's first, with no previous sample) joins as NULL and is not a sample. */
+    SELECT DISTINCT collection_time
+    FROM pg_database_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
 )
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(tps)                                                             AS peak_tps,
        AVG(tps)                                                             AS avg_tps,
-       COUNT(*)                                                             AS tps_samples,
-       (array_agg(collection_time ORDER BY tps DESC NULLS LAST, collection_time DESC))[1]                    AS peak_time,
+       COUNT(tps)                                                             AS tps_samples,
+       (array_agg(collection_time ORDER BY tps DESC NULLS LAST, collection_time DESC) FILTER (WHERE tps IS NOT NULL))[1]                    AS peak_time,
        " + WindowTiles.CoverageColumnsSql + @"
-FROM rated
+FROM collected
+LEFT JOIN rated USING (collection_time)
 GROUP BY " + WindowTiles.LocalHourSql + @"
 ORDER BY " + WindowTiles.LocalHourSql;
 
@@ -224,14 +232,13 @@ WITH per_collection AS (
     SELECT collection_time, MAX(total_sessions)::DOUBLE PRECISION AS total_sessions
     FROM pg_session_states
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
-    AND   total_sessions IS NOT NULL
     GROUP BY collection_time
 )
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(total_sessions)                                  AS peak_sessions,
        AVG(total_sessions)                                  AS avg_sessions,
-       COUNT(*)                                              AS sample_count,
-       (array_agg(collection_time ORDER BY total_sessions DESC NULLS LAST, collection_time DESC))[1] AS peak_time,
+       COUNT(total_sessions)                                              AS sample_count,
+       (array_agg(collection_time ORDER BY total_sessions DESC NULLS LAST, collection_time DESC) FILTER (WHERE total_sessions IS NOT NULL))[1] AS peak_time,
        " + WindowTiles.CoverageColumnsSql + @"
 FROM per_collection
 GROUP BY " + WindowTiles.LocalHourSql + @"

@@ -30,13 +30,12 @@ WITH per_collection AS (
     SELECT collection_time, MAX(replay_bytes_behind)::DOUBLE PRECISION AS replay_bytes
     FROM pg_replication_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
-    AND   replay_bytes_behind IS NOT NULL
     GROUP BY collection_time
 )
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(replay_bytes) AS peak_replay_bytes,
        AVG(replay_bytes) AS avg_replay_bytes,
-       COUNT(*)          AS sample_count,
+       COUNT(replay_bytes)          AS sample_count,
        " + WindowTiles.CoverageColumnsSql + @"
 FROM per_collection
 GROUP BY " + WindowTiles.LocalHourSql + @"

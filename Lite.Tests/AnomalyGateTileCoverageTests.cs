@@ -224,6 +224,20 @@ public class AnomalyGateTileCoverageTests
         Assert.NotEqual(11, verdict.Value.Tile.LocalHour.Hour);
     }
 
+    [Fact]
+    public void FullyCollectedHour_WhoseQueriesRanTwentyFiveMinutes_IsScoredOnItsCollectorInstants()
+    {
+        // Sixty collector instants, twenty-five of them carrying work: coverage is the collector's, the samples are the work's.
+        var verdict = Evaluate(FourHours,
+            MinuteTile(10, 60, 0.0), MinuteTile(11, 60, 0.0), MinuteTile(12, 60, 0.0),
+            Tile(13, peak: 10.0, mean: 10.0, samples: 25, collections: 60, spanMinutes: 59));
+
+        Assert.NotNull(verdict);
+        Assert.True(verdict!.Value.Decision.Fire, "an idle hour the collector wrote every minute is a covered hour");
+        Assert.Equal(13, verdict.Value.Tile.LocalHour.Hour);
+        Assert.Equal(4, verdict.Value.TilesScored);
+    }
+
     /// <summary>One row of a tiled window statement, with the column names the statements use.</summary>
     private sealed class TileRow : IDataRecord
     {

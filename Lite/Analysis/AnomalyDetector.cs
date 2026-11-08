@@ -564,6 +564,13 @@ WITH per_collection AS (
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   delta_wait_time_ms >= 0
     GROUP BY collection_time
+),
+collected AS (
+    /* #8293: every collection the collector wrote in the window, whatever its rows measured, so the coverage
+       columns count collector instants; a collection with no rated row joins as NULL and is not a sample. */
+    SELECT DISTINCT collection_time
+    FROM v_wait_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 )
 SELECT {WindowTiles.LocalHourSql} AS local_hour,
        MAX(ms_per_sec) AS peak_ms_per_sec,
@@ -571,7 +578,8 @@ SELECT {WindowTiles.LocalHourSql} AS local_hour,
        SUM(total_wait_ms) AS total_wait_ms,
        COUNT(*) FILTER (WHERE ms_per_sec IS NOT NULL) AS sample_count,
        {WindowTiles.CoverageColumnsSql}
-FROM per_collection
+FROM collected
+LEFT JOIN per_collection USING (collection_time)
 GROUP BY local_hour
 ORDER BY local_hour";
                 rateCmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
@@ -962,6 +970,20 @@ FROM (SELECT (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("
                slice this read AVG ALONE for read/write; MAX was added THEN so a single file's stall burst
                fires the way CPU or batch requests would — this slice keeps that PEAK/MEAN pair, per tile. */
             cmd.CommandText = @"
+WITH active AS (
+    /* The read-or-write-bearing file rows: the statistic's row set. */
+    SELECT collection_time, file_type, database_name, delta_reads, delta_writes, delta_stall_read_ms, delta_stall_write_ms
+    FROM v_file_io_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   (delta_reads > 0 OR delta_writes > 0)
+),
+collected AS (
+    /* #8293: every collection the collector wrote, so the coverage columns count collector instants; a collection
+       with no active file row joins as NULL and is not a sample on either side. */
+    SELECT DISTINCT collection_time
+    FROM v_file_io_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+)
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS peak_read_lat,
        AVG(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS avg_read_lat,
@@ -973,9 +995,8 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        CAST(COALESCE(SUM(delta_reads), 0) AS BIGINT) AS read_ops,
        CAST(COALESCE(SUM(delta_writes) FILTER (WHERE file_type = 'LOG' OR lower(database_name) = 'tempdb'), 0) AS BIGINT) AS write_ops,
        " + WindowTiles.CoverageColumnsSql + @"
-FROM v_file_io_stats
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-AND   (delta_reads > 0 OR delta_writes > 0)
+FROM collected
+LEFT JOIN active USING (collection_time)
 GROUP BY local_hour
 ORDER BY local_hour";
 
@@ -1181,15 +1202,13 @@ ORDER BY local_hour";
                metadata key reads one). $4..$6 bind map.WindowClock, never the cached baseline clock. */
             cmd.CommandText = @"
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
-       MAX(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0)) AS peak_batch,
-       AVG(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0)) AS avg_batch,
-       COUNT(*) AS sample_count,
+       MAX(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0)) FILTER (WHERE delta_cntr_value >= 0 AND sample_interval_seconds > 0) AS peak_batch,
+       AVG(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0)) FILTER (WHERE delta_cntr_value >= 0 AND sample_interval_seconds > 0) AS avg_batch,
+       COUNT(*) FILTER (WHERE delta_cntr_value >= 0 AND sample_interval_seconds > 0) AS sample_count,
        " + WindowTiles.CoverageColumnsSql + @"
 FROM v_perfmon_stats
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 AND   counter_name = 'Batch Requests/sec'
-AND   delta_cntr_value >= 0
-AND   sample_interval_seconds > 0
 GROUP BY local_hour
 ORDER BY local_hour";
 
@@ -1448,17 +1467,17 @@ ORDER BY local_hour";
             cmd.CommandText = @"
 WITH per_collection AS (
     SELECT collection_time,
-           SUM(delta_elapsed_time)::DOUBLE PRECISION AS total_elapsed
+           /* #8293: the activity filter rides on the aggregate, so an idle collection (rows without executions)
+              still yields a row, with a NULL total, and the coverage columns count it; it is not a sample. */
+           SUM(delta_elapsed_time) FILTER (WHERE delta_execution_count > 0 AND delta_elapsed_time >= 0)::DOUBLE PRECISION AS total_elapsed
     FROM v_query_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-    AND   delta_execution_count > 0
-    AND   delta_elapsed_time >= 0
     GROUP BY collection_time
 )
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(total_elapsed) AS peak_elapsed,
        AVG(total_elapsed) AS avg_elapsed,
-       COUNT(*) AS sample_count,
+       COUNT(total_elapsed) AS sample_count,
        " + WindowTiles.CoverageColumnsSql + @"
 FROM per_collection
 GROUP BY local_hour
@@ -1583,13 +1602,12 @@ ORDER BY local_hour";
                metadata key reads one). $4..$6 bind map.WindowClock, never the cached baseline clock. */
             cmd.CommandText = @"
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
-       MAX(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) AS peak_pressure,
-       AVG(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) AS avg_pressure,
-       COUNT(*) AS sample_count,
+       MAX(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) FILTER (WHERE target_server_memory_mb > 0) AS peak_pressure,
+       AVG(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) FILTER (WHERE target_server_memory_mb > 0) AS avg_pressure,
+       COUNT(*) FILTER (WHERE target_server_memory_mb > 0) AS sample_count,
        " + WindowTiles.CoverageColumnsSql + @"
 FROM v_memory_stats
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-AND   target_server_memory_mb > 0
 GROUP BY local_hour
 ORDER BY local_hour";
 

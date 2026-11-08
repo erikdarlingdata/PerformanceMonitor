@@ -48,7 +48,10 @@ public static class WindowTiles
     /// <see cref="WindowTile.CollectionSpan"/> for every family without moving any family's ordinal contract.
     /// Counts instants, not rows, because the I/O families carry several file rows per collection. Runs on
     /// PostgreSQL and DuckDB alike. Every tiled statement's FROM exposes <c>collection_time</c>, since the tile
-    /// key <see cref="LocalHourSql"/> is built over it.
+    /// key <see cref="LocalHourSql"/> is built over it, and sees every collection the collector wrote: a statement
+    /// that filters rows on activity keeps that filter on its value aggregates, or joins the collections it would
+    /// drop back in, so an idle hour the collector wrote every minute is still a covered hour and only the active
+    /// rows are samples.
     /// </summary>
     public const string CoverageColumnsSql =
         "COUNT(DISTINCT collection_time) AS " + CollectionsColumn + @",
