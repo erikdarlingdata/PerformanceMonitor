@@ -5526,7 +5526,7 @@ public static partial class DarlingCliCommands
             ? $"All {CountText.Plural(touched, "item")} secured. The service re-asserts these ACLs at every start."
             : touched == tlsExamined
                 ? $"All {CountText.Plural(touched, "item")} secured. Re-run --harden-files after replacing a TLS key file."
-                : $"All {CountText.Plural(touched, "item")} secured. The service re-asserts the ACLs of the {CountText.Plural(touched - tlsExamined, "item")} that are not TLS key files at every start. Re-run --harden-files after replacing a TLS key file.");
+                : $"All {CountText.Plural(touched, "item")} secured. The service re-asserts the ACLs of the {CountText.Plural(touched - tlsExamined, "item")} that {(touched - tlsExamined == 1 ? "is not a TLS key file" : "are not TLS key files")} at every start. Re-run --harden-files after replacing a TLS key file.");
         return 0;
     }
 

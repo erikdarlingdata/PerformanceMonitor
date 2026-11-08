@@ -84,7 +84,7 @@ public sealed class DarlingMcpPgTrendTools
                               + "cumulative wait counters, so there is nothing to follow: nothing waited, or the window holds only "
                               + "each event's first collection (the collector measures an interval from the second one on). "
                               + "get_pg_wait_stats lists the events this server does record."
-                            : $"No wait event gained samples on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} "
+                            : $"No wait event gained samples on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}"
                               + ", so there is nothing to follow: none was sampled, or the window holds a "
                               + "single collection (a trend needs at least two to difference)."
                               + DarlingMcpPgWaitSamplingTools.DescribeInstrumentForEmpty(

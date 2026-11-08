@@ -768,7 +768,7 @@ public sealed partial class DarlingWorker
         server.LastConnectFailureLineUtc = default;
         return downSince is null
             ? string.Empty
-            : $", after {CountText.Plural(attempts, "failed attempt")} over {RepeatLogGate.FormatSpan(RepeatLog.Clock() - downSince.Value)} down";
+            : $", after {attempts} failed attempt(s) over {RepeatLogGate.FormatSpan(RepeatLog.Clock() - downSince.Value)} down";
     }
 
     /// <summary>1 once the native-library load failure (#6183) has been logged. It is one cause for every server.</summary>

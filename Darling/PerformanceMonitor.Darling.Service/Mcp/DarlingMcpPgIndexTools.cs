@@ -147,7 +147,7 @@ public sealed class DarlingMcpPgIndexTools
 
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status(
                     "empty",
-                    $"No index bloat rows for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} "
+                    $"No index bloat rows for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}"
                     + ". This collector runs DAILY, so a window shorter than a day can be empty "
                     + "on a perfectly healthy server: widen it before concluding anything. "
                     + coverage.Message), cancellationToken, windowEnd.AddHours(-hours_back));

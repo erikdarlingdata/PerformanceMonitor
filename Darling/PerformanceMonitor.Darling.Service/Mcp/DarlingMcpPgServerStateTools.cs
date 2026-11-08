@@ -205,7 +205,7 @@ public sealed class DarlingMcpPgServerStateTools
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd,
                     DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status(
                         "empty",
-                        $"No extension inventory for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} "
+                        $"No extension inventory for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}"
                         + ". This collector runs DAILY, so a short window can be empty on a healthy "
                         + "server: widen it before concluding anything."
                         + (scope is null
@@ -496,7 +496,7 @@ public sealed class DarlingMcpPgServerStateTools
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                            factual: $"No lock activity sampled on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} "
+                            factual: $"No lock activity sampled on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}"
                                 + ". This is a SAMPLE of pg_locks rather than an event log",
                             coveredClaim: ", so this is the "
                                 + "healthy state on a server without sustained contention, and it is not proof "

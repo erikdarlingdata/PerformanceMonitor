@@ -85,7 +85,7 @@ public sealed class DarlingMcpPgReplicationStatsTools
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                            factual: $"No replica was connected to {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} "
+                            factual: $"No replica was connected to {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}"
                                 + "",
                             coveredClaim: ". On a server with no replicas that is the expected answer.",
                             tail: " If a "

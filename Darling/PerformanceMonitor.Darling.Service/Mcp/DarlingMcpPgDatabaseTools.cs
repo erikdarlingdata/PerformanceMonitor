@@ -418,7 +418,7 @@ public sealed class DarlingMcpPgDatabaseTools
         return await DarlingServerOfflineNote.UnavailableAsync(
             postgres, serverId, displayName,
             everCollected
-                ? $"No pg_stat_database snapshots were collected for {displayName} in the last {CountText.Plural(hoursBack, "hour")} "
+                ? $"No pg_stat_database snapshots were collected for {displayName} in the last {CountText.Plural(hoursBack, "hour")}"
                 + ", so this is NOT an all-clear - the window says nothing either way. Collection HAS "
                 + "run for this server outside the window, so this is a gap rather than a dead collector: "
                 + "widen hours_back, or use get_collection_health to find where it stopped."

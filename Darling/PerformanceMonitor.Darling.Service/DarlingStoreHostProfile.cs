@@ -1308,7 +1308,7 @@ WHERE NOT is_compressed";
     private static void AppendHostLines(StringBuilder sb, HostProfile profile)
     {
         sb.Append("Host: ").Append(profile.Platform).Append(profile.IsContainerized ? " (containerized)" : "")
-          .Append(", ").Append(CountText.Plural(profile.ProcessorCount, "CPU")).Append('\n');
+          .Append(", ").Append(profile.ProcessorCount).Append(" CPU(s)").Append('\n');
         sb.Append("RAM: ").Append(FormatBytes(profile.Memory.EffectiveBytes))
           .Append(profile.Memory.IsAuthoritative ? "" : " (unauthoritative reading)")
           .Append(" [").Append(profile.Memory.SourceDescription).Append(']').Append('\n');
@@ -1361,7 +1361,7 @@ WHERE NOT is_compressed";
                 ? 100.0 * uncompressedBytes / profile.Memory.EffectiveBytes
                 : 0.0;
             sb.Append("  uncompressed chunks: ").Append(FormatBytes(uncompressedBytes)).Append(" in ")
-              .Append(CountText.Plural(uncompressedCount, "chunk")).Append(", ")
+              .Append(uncompressedCount).Append(" chunk(s), ")
               .Append(ramPercent.ToString("0.0", CultureInfo.InvariantCulture)).Append("% of RAM").Append('\n');
         }
         else
