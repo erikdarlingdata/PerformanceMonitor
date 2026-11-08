@@ -552,6 +552,8 @@ public sealed class NotificationRoutingTests
                cannot see a variable, so the census's forcing function is this line. */
             DarlingSelfAlertEvaluator.RefreshJobStuckMetric, DarlingSelfAlertEvaluator.RetentionJobStuckMetric,
             DarlingSelfAlertEvaluator.PolicyJobFailingMetric,
+            /* #8302: a daily rollup behind its source, fired through the constant on its own path. */
+            DarlingSelfAlertEvaluator.DailyRollupStaleMetric,
             /* #3783: the store's TOAST slack and checkpointer pressure, both fired through the constant. */
             DarlingSelfAlertEvaluator.ToastSlackMetric, DarlingSelfAlertEvaluator.CheckpointerPressureMetric,
             /* #5654: the external-alert delivery health check's alert. */
@@ -660,5 +662,15 @@ public sealed class NotificationRoutingTests
         public int AnalysisNotifyCooldownMinutes => 360;
         public int AnalysisPageCap => 5;
         public string TriageBaseUrl => "";
+    }
+    /// <summary>#8302: the stale daily rollup's own name routes with the store's other self-monitor names, pairs with its
+    /// recovered name, and replays at the Warning it fires at rather than falling through to the performance family.</summary>
+    [Fact]
+    public void DailyRollupStale_IsASelfMonitorName_WithItsRecoveredPair_AndReplaysAsWarning()
+    {
+        Assert.Equal(AlertFamily.SelfMonitor, AlertFamily.Of(DarlingSelfAlertEvaluator.DailyRollupStaleMetric));
+        Assert.Equal(AlertSeverityLevel.Warning, AlertSeverity.RouteLevelOf(DarlingSelfAlertEvaluator.DailyRollupStaleMetric, null));
+        Assert.Equal("WARNING", AlertSeverity.ForMetric(DarlingSelfAlertEvaluator.DailyRollupStaleMetric).BadgeText);
+        Assert.True(AlertMetricClassifier.IsResolution(DarlingSelfAlertEvaluator.DailyRollupRecoveredMetric));
     }
 }

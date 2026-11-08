@@ -8112,4 +8112,83 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         var summary = Assert.Single(h.Log.Entries, x => x.Message.StartsWith("Store job health:", StringComparison.Ordinal));
         Assert.Contains("1 stale", summary.Message, StringComparison.Ordinal);
     }
+
+    /// <summary>A restart while a rollup is still behind: the open fire row in the history seeds the state, so the first pass
+    /// announces nothing new, and the pass where it catches up still resolves the row.</summary>
+    [Fact]
+    public async Task StaleDailyRollup_StillBehindAcrossARestart_IsNotAnnouncedAgain_AndStillResolves()
+    {
+        var h = new Harness();
+        h.History.OpenFireFor = (serverKey, metric) =>
+            serverKey == "rollupstale:7005" && metric == "Daily Rollup Stale" ? new AlertHistoryFire(h.Now.AddHours(-3), 0, null) : null;
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(StaleRollup(7005), rearm.Delegate, Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(rearm.Calls);
+
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(), rearm.Delegate, Ct);
+        var resolved = Assert.Single(h.History.Records);
+        Assert.Equal("Daily Rollup Recovered", resolved.MetricName);
+        Assert.Equal("rollupstale:7005", resolved.ServerId);
+    }
+
+    /// <summary>A rollup refreshed by hand while the service was down: its fire row is still open in the history, no process
+    /// tracked it, and the first pass that reads its job healthy closes the row, once.</summary>
+    [Fact]
+    public async Task StaleDailyRollup_CaughtUpWhileTheServiceWasDown_HasItsOpenRowClosedOnce()
+    {
+        var h = new Harness();
+        h.History.OpenFireFor = (serverKey, metric) =>
+            serverKey == "rollupstale:7006" && metric == "Daily Rollup Stale" ? new AlertHistoryFire(h.Now.AddDays(-1), 0, null) : null;
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+        var healthy = Reading(StuckJobs(), new PolicyJobRunReading(
+            7006, TimescaleSupport.StorePolicyJobFamily.Refresh, "query_store_stats_interval_daily", Held: false, LastRunStatus: "Success", TotalFailures: 0));
+
+        await e.ApplyPolicyJobsStuckAsync(healthy, rearm.Delegate, Ct);
+        var resolved = Assert.Single(h.History.Records);
+        Assert.Equal("Daily Rollup Recovered", resolved.MetricName);
+        Assert.Equal("rollupstale:7006", resolved.ServerId);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(healthy, rearm.Delegate, Ct);
+        Assert.Single(h.History.Records);
+    }
+
+    /// <summary>A rollup that is behind and whose job then crashes: the stale condition stands through the crash and is resolved
+    /// once, when the rollup catches up, never while the lag is unchanged.</summary>
+    [Fact]
+    public async Task StaleDailyRollup_WhoseJobCrashesWhileBehind_IsNotResolvedUntilItCatchesUp()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(StaleRollup(7007), rearm.Delegate, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The job crashes while the rollup is still behind: both arms arrive for the same job. */
+        h.Now = h.Now.AddHours(1);
+        var both = Reading(StaleRollup(7007).Stuck.Concat(CrashBackoffJobs(7007)).ToList());
+        await e.ApplyPolicyJobsStuckAsync(both, rearm.Delegate, Ct);
+        Assert.Empty(h.History.Records);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The crash clears, the rollup is still behind: nothing new is announced and nothing is resolved. */
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(StaleRollup(7007), rearm.Delegate, Ct);
+        Assert.Empty(h.History.Records);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* It catches up: one resolution. */
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(), rearm.Delegate, Ct);
+        Assert.Empty(rearm.Calls);
+        var resolved = Assert.Single(h.History.Records);
+        Assert.Equal("Daily Rollup Recovered", resolved.MetricName);
+    }
 }

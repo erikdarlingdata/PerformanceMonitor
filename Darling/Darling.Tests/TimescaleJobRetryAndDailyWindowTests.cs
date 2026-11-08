@@ -394,6 +394,58 @@ VALUES ($1, now() - INTERVAL '2 hours', '-infinity', now() + INTERVAL '1 day', n
         Assert.Equal(TimeSpan.FromHours(12), TimescaleSupport.DailyRefreshStartSpan - StaleDailyThreshold);
     }
 
+    /// <summary>
+    /// A daily behind its source whose refresh job has also crashed is reported on BOTH arms, under the same job: the crash
+    /// clears when a run finishes, the staleness when the rollup catches up, and dropping either row would misreport the other.
+    /// </summary>
+    [Fact]
+    public async Task AStaleDailyWhoseJobCrashed_IsReportedOnBothArms()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #8302 two-arm test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        Assert.SkipWhen(!await PrepareAsync(connection, scratch.ConnectionString, ct), "The live #8302 tests need TimescaleDB.");
+
+        await InsertDayAsync(connection, D0, ct);
+        await InsertDayAsync(connection, D0.AddDays(1), ct);
+        await RefreshAsync(connection, Hourly, D0, D0.AddDays(2), ct);
+        await RefreshAsync(connection, Daily, D0, D0.AddDays(2), ct);
+        for (var day = D0.AddDays(2); day < D0.AddDays(6); day = day.AddDays(1))
+        {
+            await InsertDayAsync(connection, day, ct);
+        }
+
+        await RefreshAsync(connection, Hourly, D0, D0.AddDays(6), ct);
+        var jobId = await RefreshJobIdAsync(connection, Daily, ct);
+
+        try
+        {
+            await using var crash = new NpgsqlCommand(@"
+INSERT INTO _timescaledb_internal.bgw_job_stat
+    (job_id, last_start, last_finish, next_start, last_successful_finish, last_run_success, total_runs, total_duration,
+     total_duration_failures, total_successes, total_failures, total_crashes, consecutive_failures, consecutive_crashes, flags)
+VALUES ($1, now() - INTERVAL '2 hours', '-infinity', now() + INTERVAL '1 day', now() - INTERVAL '1 day', true, 3, INTERVAL '1 minute',
+     INTERVAL '0', 2, 0, 1, 0, 1, 0)", connection);
+            crash.Parameters.AddWithValue(jobId);
+            await crash.ExecuteNonQueryAsync(ct);
+        }
+        catch (PostgresException ex)
+        {
+            Assert.Skip($"This cluster does not let the test mark a job crashed ({ex.SqlState}: {ex.MessageText}).");
+        }
+
+        var both = await TimescaleSupport.ReadStuckPolicyJobsAsync(connection, D0.AddDays(6), null, ct);
+        var rows = both.Stuck.Where(j => j.JobId == jobId).ToList();
+        Assert.Equal(2, rows.Count);
+        Assert.Contains(rows, j => j.Arm == StuckPolicyJobArm.NextStartNegativeInfinity);
+        Assert.Contains(rows, j => j.Arm == StuckPolicyJobArm.DailyRollupStale);
+    }
+
     /* ---------------- helpers ---------------- */
 
     private static async Task<bool> PrepareAsync(NpgsqlConnection connection, string connectionString, CancellationToken ct)
