@@ -263,8 +263,8 @@ public partial class QueryStoreHistoryWindow : Window
 
         if (string.IsNullOrEmpty(planXml))
         {
-            MessageBox.Show(this, "No Query Store plan was captured in the collected data for this plan ID.",
-                "No Plan Available", MessageBoxButton.OK, MessageBoxImage.Information);
+            InAppMessage.Show(this, "No Plan Available",
+                "No Query Store plan was captured in the collected data for this plan ID.");
             return;
         }
 

@@ -282,9 +282,8 @@ public static class ViewerActualPlanFlow
     {
         if (prepared.Lookup == QueryStatsActualPlanLookup.NothingStored)
         {
-            MessageBox.Show(owner,
-                "No stored query text was found for this query, so there is nothing to run. Nothing was run.",
-                "No Plan Available", MessageBoxButton.OK, MessageBoxImage.Information);
+            InAppMessage.Show(owner, "No Plan Available",
+                "No stored query text was found for this query, so there is nothing to run. Nothing was run.");
             return;
         }
 

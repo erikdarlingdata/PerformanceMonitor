@@ -244,8 +244,8 @@ public partial class QueryStatsHistoryWindow : Window
 
         if (string.IsNullOrEmpty(planXml))
         {
-            MessageBox.Show(this, "No query plan was captured in the collected data for this query hash.",
-                "No Plan Available", MessageBoxButton.OK, MessageBoxImage.Information);
+            InAppMessage.Show(this, "No Plan Available",
+                "No query plan was captured in the collected data for this query hash.");
             return;
         }
 
