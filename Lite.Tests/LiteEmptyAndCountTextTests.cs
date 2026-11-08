@@ -330,6 +330,55 @@ public sealed class LiteEmptyAndCountTextTests
     }
 
     [Theory]
+    [MemberData(nameof(Themes))]
+    public void TheSlicersEmptyText_IsMutedAndUpright_CentredInTheSlicer(string theme)
+    {
+        var problems = StaTestThread.Run(() => WithTheme(theme, muted =>
+        {
+            var found = new List<string>();
+            foreach (var (width, height) in Sizes)
+            {
+                var at = $"{theme} {width}x{height}: the slicer's empty text";
+                /* A slicer with no message host draws the sentence itself, on its own canvas. */
+                var slicer = new TimeRangeSlicerControl { VerticalAlignment = VerticalAlignment.Top };
+                var host = new Grid();
+                host.Children.Add(slicer);
+                var window = Open(host, PaneWidth(width), height);
+                try
+                {
+                    slicer.ShowEmpty("No active queries in the selected time window.");
+                    Settle(window);
+                    var text = Find<Canvas>(slicer, "SlicerCanvas").Children.OfType<TextBlock>().FirstOrDefault(t => t.Text == slicer.EmptyText);
+                    if (text is null)
+                    {
+                        found.Add($"{at} is not drawn");
+                    }
+                    else
+                    {
+                        found.AddRange(Muted(text, slicer, muted, at, weight: false));
+                        var band = Bounds(Find<FrameworkElement>(slicer, "SlicerBorder"), slicer);
+                        var bounds = Bounds(text, slicer);
+                        if (Math.Abs((bounds.Left + bounds.Right) / 2 - (band.Left + band.Right) / 2) > 1)
+                        {
+                            found.Add($"{at} is centred at {(bounds.Left + bounds.Right) / 2:0}, the slicer at {(band.Left + band.Right) / 2:0}");
+                        }
+                    }
+
+                    Shoot(window, $"Slicer-{theme}-{width}x{height}.png");
+                }
+                finally
+                {
+                    window.Close();
+                }
+            }
+
+            return found;
+        }));
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    [Theory]
     [InlineData(1, "1 index")]
     [InlineData(3, "3 indexes")]
     public void ACountWithAnIrregularPlural_ReadsAsAPersonSaysIt(int count, string expected) =>
