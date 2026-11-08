@@ -215,13 +215,25 @@ public class SchemaWorkPlannerTests
     }
 
     [Fact]
-    public void Planner_NoStoredServerState_IsNotAGap()
+    public void Planner_NoStoredEventPosition_IsNotAGap()
     {
-        var plan = For(
-            Plan([Probe("SalesDb")], States(Db("SalesDb")), Batch(40, Event(30, "SalesDb")), server: new SchemaCaptureStateRow()),
-            "SalesDb");
+        var server = Server() with { LastEventSequence = null, LastEventTime = null, TotalEventsProcessed = null };
+        var plan = For(Plan([Probe("SalesDb")], States(Db("SalesDb")), Batch(40, Event(30, "SalesDb")), server: server), "SalesDb");
 
         Assert.Equal(SchemaDatabaseWork.Targeted, plan.Work);
+    }
+
+    /// <summary>A server row with no session position and no pass stamp is the mark a pass leaves when it finds the session running: that pass
+    /// wrote database rows and failed before it stored the position, so what changed meanwhile was recorded by nothing.</summary>
+    [Fact]
+    public void Planner_OnlyTheSessionMark_ReadsTheDatabaseInFull()
+    {
+        var plan = For(
+            Plan([Probe("SalesDb")], States(Db("SalesDb")), Batch(40, Event(30, "SalesDb")), server: new SchemaCaptureStateRow { ServerId = ServerId }),
+            "SalesDb");
+
+        Assert.Equal(SchemaDatabaseWork.Reconcile, plan.Work);
+        Assert.Equal("session_started", plan.Reason);
     }
 
     [Fact]

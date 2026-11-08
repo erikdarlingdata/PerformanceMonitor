@@ -172,6 +172,7 @@ public static class DarlingSchemaCapture
         private Dictionary<string, SchemaCaptureStateRow> _dbStates = new(StringComparer.Ordinal);
         private SchemaCaptureStateRow? _newServerRow;
         private bool _budgetStopped;
+        private bool _sessionMarked;
 
         public Pass(DarlingCollectorRunner runner, ServerRuntime server, string sessionName, bool runNow, CancellationToken ct)
         {
@@ -193,6 +194,7 @@ public static class DarlingSchemaCapture
             await using var connection = await TimedSql(() => _runner.SchemaSource.OpenAsync(_server, null, _ct));
             var session = await TimedSql(() => connection.EnsureSessionAsync(_sessionName, _ct));
             NoteSessionFault(session, null);
+            await MarkSessionEnsuredAsync(session);
 
             await LoadStateAsync();
             var probes = await TimedSql(() => connection.ReadProbesAsync(_ct));
@@ -269,6 +271,7 @@ public static class DarlingSchemaCapture
             await using var connection = await TimedSql(() => _runner.SchemaSource.OpenAsync(_server, database, token));
             var session = await TimedSql(() => connection.EnsureSessionAsync(_sessionName, token));
             NoteSessionFault(session, database);
+            await MarkSessionEnsuredAsync(session);
 
             var probe = (await TimedSql(() => connection.ReadProbesAsync(token)))
                 .FirstOrDefault(p => string.Equals(p.Name, database, StringComparison.OrdinalIgnoreCase));
@@ -313,6 +316,19 @@ public static class DarlingSchemaCapture
             }
 
             await ExecutePlanAsync(plan, probe, connection, withSession, token);
+        }
+
+        /* The store learns that a session runs before anything else of the pass can fail, so the disabled sweep and a server's removal find it
+           even when the pass never stores the session's position. Once a pass is enough: on Azure the server row covers every database. */
+        private async Task MarkSessionEnsuredAsync(SchemaSessionState session)
+        {
+            if (!session.Running || _sessionMarked)
+            {
+                return;
+            }
+
+            await TimedStore(() => SchemaCaptureStateStore.MarkSessionEnsuredAsync(Store, _server.ServerId, _passTime, _ct));
+            _sessionMarked = true;
         }
 
         private async Task LoadStateAsync()

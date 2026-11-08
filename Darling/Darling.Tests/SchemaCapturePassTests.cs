@@ -48,6 +48,8 @@ public sealed class SchemaCapturePassTests
         public List<SchemaEvent> Ring { get; } = new();
         public List<(string Database, IReadOnlyCollection<int>? Ids)> Reads { get; } = new();
         public List<DateTime> Cutoffs { get; } = new();
+        public Exception? EventsFault { get; set; }
+        public CancellationTokenSource? StopOnCatalogRead { get; set; }
 
         public void AddEvent(string name, string database, int? objectId, int? type = 8277, int? related = null)
         {
@@ -84,6 +86,11 @@ public sealed class SchemaCapturePassTests
             public Task<SchemaEventBatch> ReadEventsAsync(string sessionName, DateTime cutoffUtc, CancellationToken cancellationToken)
             {
                 _source.Cutoffs.Add(cutoffUtc);
+                if (_source.EventsFault is { } eventsFault)
+                {
+                    throw eventsFault;
+                }
+
                 var events = _source.Ring
                     .Where(e => e.TimeUtc > cutoffUtc && (_azure is null || string.Equals(e.DatabaseName, _azure, StringComparison.OrdinalIgnoreCase)))
                     .ToList();
@@ -94,6 +101,12 @@ public sealed class SchemaCapturePassTests
             public Task<SchemaCatalogSnapshot> ReadCatalogAsync(string database, IReadOnlyCollection<int>? objectIds, CancellationToken cancellationToken)
             {
                 _source.Reads.Add((database, objectIds));
+                if (_source.StopOnCatalogRead is { } stop)
+                {
+                    stop.Cancel();
+                    stop.Token.ThrowIfCancellationRequested();
+                }
+
                 if (_source.Faults.TryGetValue(database, out var fault))
                 {
                     throw fault;
@@ -434,6 +447,47 @@ public sealed class SchemaCapturePassTests
             rig.Source.Reads.Clear();
             await rig.PassAsync(server, ct);
             Assert.Empty(rig.Source.Reads);
+        });
+    }
+
+    /// <summary>
+    /// The pass makes the session and then fails before it stores the session's position: the event read fails, or the service stops
+    /// during the baseline. The collector is then disabled, and the sweep still drops the session.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Pass_SessionMadeThenThePassFails_TheDisabledSweepStillDropsIt(bool eventReadFails)
+    {
+        await WithRigAsync(async (rig, ct) =>
+        {
+            Seed(rig.Source);
+            var server = rig.Server();
+            var drops = 0;
+            rig.Runner.SchemaSessionDropForTests = (_, _, _, _) =>
+            {
+                drops++;
+                return Task.CompletedTask;
+            };
+            Task<LongQueryTraceInstanceGuard> NoGuard(CancellationToken _) => Task.FromResult(LongQueryTraceInstanceGuard.NoKeepers);
+
+            if (eventReadFails)
+            {
+                rig.Source.EventsFault = new InvalidOperationException("The ring buffer could not be read.");
+                await rig.PassAsync(server, ct);
+            }
+            else
+            {
+                using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                rig.Source.StopOnCatalogRead = stop;
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => rig.PassAsync(server, stop.Token));
+            }
+
+            Assert.Equal("0", await rig.ScalarAsync("SELECT count(*) FROM collect.schema_capture_state WHERE session_create_time IS NOT NULL", ct));
+            await DarlingSchemaCapture.DropWhenDisabledAsync(rig.Runner, server, Array.Empty<MonitoredServer>(), _ => false, NoGuard, NullLogger.Instance, ct);
+
+            Assert.Equal(1, drops);
+            Assert.False(await SchemaCaptureStateStore.HasSessionAsync(rig.Connection, server.ServerId, ct));
         });
     }
 

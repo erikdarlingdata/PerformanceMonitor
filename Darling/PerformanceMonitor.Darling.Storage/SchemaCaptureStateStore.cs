@@ -93,14 +93,56 @@ WHERE server_id = $1", c) { CommandTimeout = SchemaVersionStore.WriteCommandTime
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    /// <summary>True when the store shows the collector once held an event session for <paramref name="serverId"/> that was not dropped since.</summary>
+    /// <summary>
+    /// Records on the server row that the pass found the event session running at <paramref name="at"/>, before anything else of the pass
+    /// can fail: an event read, a probe or a store write that fails after the session was made, or a service that stops during a long
+    /// baseline, still leaves the store knowing there is a session to drop. Only this column is written; the full server row is stored at
+    /// the end of the pass by <see cref="SaveAsync"/>, which leaves it alone.
+    /// </summary>
+    public static async Task MarkSessionEnsuredAsync(NpgsqlConnection c, int serverId, DateTime at, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(c);
+        await using var cmd = new NpgsqlCommand(@"
+INSERT INTO collect.schema_capture_state (server_id, database_name, session_ensured_at)
+VALUES ($1, '', $2)
+ON CONFLICT (server_id, database_name) DO UPDATE SET session_ensured_at = EXCLUDED.session_ensured_at", c) { CommandTimeout = SchemaVersionStore.WriteCommandTimeoutSeconds };
+        Param(cmd, NpgsqlDbType.Integer, serverId);
+        Param(cmd, NpgsqlDbType.Timestamp, Naive(at));
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// True when the store shows the collector made or found an event session for <paramref name="serverId"/> that was not dropped since:
+    /// a stored session position, or the mark <see cref="MarkSessionEnsuredAsync"/> leaves as soon as the session runs.
+    /// </summary>
     public static async Task<bool> HasSessionAsync(NpgsqlConnection c, int serverId, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(c);
-        await using var cmd = new NpgsqlCommand(
-            "SELECT EXISTS (SELECT 1 FROM collect.schema_capture_state WHERE server_id = $1 AND session_create_time IS NOT NULL)", c) { CommandTimeout = SchemaVersionStore.WriteCommandTimeoutSeconds };
-        Param(cmd, NpgsqlDbType.Integer, serverId);
-        return (bool)(await cmd.ExecuteScalarAsync(ct))!;
+        return (await WithSessionAsync(c, [serverId], ct)).Count > 0;
+    }
+
+    /// <summary>The ones of <paramref name="serverIds"/> that <see cref="HasSessionAsync"/> answers true for, in one statement.</summary>
+    public static async Task<IReadOnlySet<int>> WithSessionAsync(NpgsqlConnection c, IReadOnlyCollection<int> serverIds, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(c);
+        ArgumentNullException.ThrowIfNull(serverIds);
+        var result = new HashSet<int>();
+        if (serverIds.Count == 0)
+        {
+            return result;
+        }
+
+        await using var cmd = new NpgsqlCommand(@"
+SELECT DISTINCT server_id FROM collect.schema_capture_state
+WHERE server_id = ANY($1) AND (session_create_time IS NOT NULL OR session_ensured_at IS NOT NULL)", c) { CommandTimeout = SchemaVersionStore.WriteCommandTimeoutSeconds };
+        cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = new List<int>(serverIds) });
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            result.Add(reader.GetInt32(0));
+        }
+
+        return result;
     }
 
     /// <summary>
@@ -113,7 +155,7 @@ WHERE server_id = $1", c) { CommandTimeout = SchemaVersionStore.WriteCommandTime
         ArgumentNullException.ThrowIfNull(c);
         await using (var clear = new NpgsqlCommand(@"
 UPDATE collect.schema_capture_state
-SET session_create_time = NULL, last_event_sequence = NULL, last_event_time = NULL, total_events_processed = NULL, dropped_event_count = NULL
+SET session_create_time = NULL, session_ensured_at = NULL, last_event_sequence = NULL, last_event_time = NULL, total_events_processed = NULL, dropped_event_count = NULL
 WHERE server_id = $1", c) { CommandTimeout = SchemaVersionStore.WriteCommandTimeoutSeconds })
         {
             Param(clear, NpgsqlDbType.Integer, serverId);

@@ -3537,6 +3537,7 @@ CREATE TABLE IF NOT EXISTS collect.schema_capture_state (
     server_id integer NOT NULL,
     database_name text NOT NULL,
     session_create_time timestamp,
+    session_ensured_at timestamp,
     last_event_sequence bigint,
     last_event_time timestamp,
     total_events_processed bigint,

@@ -167,10 +167,10 @@ public static class SchemaWorkPlanner
         }
 
         /* A session that runs now where an earlier pass left no create time (the server row has a pass stamp) never ran for this server
-           (the grant was missing at the baseline), or was dropped and its position cleared. With no server row at all, a first pass
-           wrote database rows and failed before it stored its position. Either way what changed before it started was recorded by
-           nothing, so every database is read in full, once. */
-        if ((serverState is null || serverState is { SessionCreateTime: null, LastSeenInScopeAt: not null }) && session.CreateTimeUtc is not null)
+           (the grant was missing at the baseline), or was dropped and its position cleared. With no server row, or only the mark a pass
+           leaves when it finds the session running, a first pass wrote database rows and failed before it stored its position. Either
+           way what changed before it started was recorded by nothing, so every database is read in full, once. */
+        if (serverState?.SessionCreateTime is null && session.CreateTimeUtc is not null)
         {
             return Reconcile(probe, "session_started", key, events);
         }
