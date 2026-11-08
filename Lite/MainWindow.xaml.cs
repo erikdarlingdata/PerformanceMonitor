@@ -266,8 +266,6 @@ public partial class MainWindow : Window
             UpdateStatusBar();
             await RefreshOverviewAsync();
             CheckConnectionsAndNotify();
-            /* #8304: the selected server tab's status bar follows the check: Offline when its server went down, Connected when it came back. */
-            WordSelectedServerTabStatus();
             CheckWebhookChannelsAndNotify();
 
             /* Auto-refresh alert history if the tab is active */
@@ -2750,6 +2748,10 @@ public partial class MainWindow : Window
         {
             AppLogger.Error("ConnectionAlerts", $"Connection check notify failed: {ex.Message}", ex);
         }
+
+        /* #8304: the selected server tab's status bar follows this check, from the cache it just refreshed: Offline when its
+           server went down, Connected when it came back. */
+        WordSelectedServerTabStatus();
     }
 
     }
