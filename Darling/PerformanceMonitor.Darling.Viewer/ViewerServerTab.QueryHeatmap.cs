@@ -237,15 +237,11 @@ public partial class ViewerServerTab
         for (int r = 0; r < numRows; r++)
             for (int c = 0; c < numCols; c++)
                 if (result.Intensities[r, c] > maxRaw) maxRaw = result.Intensities[r, c];
-        var cbTicks = new ScottPlot.TickGenerators.NumericManual(); // no "0": an empty cell is the background, not the ramp's floor
+        /* No "0": an empty cell is the background, not the ramp's floor. #8224: the round values present and the maximum, with a round
+           value left out when its label would touch the maximum's or its neighbour's at the bar's length at each render. */
         int[] niceValues = { 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000 };
-        foreach (var n in niceValues)
-        {
-            if (n > maxRaw) break;
-            cbTicks.AddMajor(Math.Log(1 + n), n.ToString("N0"));
-        }
-        cbTicks.AddMajor(Math.Log(1 + maxRaw), ((int)maxRaw).ToString("N0"));
-        colorBar.Axis.TickGenerator = cbTicks;
+        var roundTicks = niceValues.Where(n => n <= maxRaw).Select(n => (Math.Log(1 + n), n.ToString("N0"))).ToList();
+        colorBar.Axis.TickGenerator = new PerformanceMonitor.Ui.ColorBarCountTicks(roundTicks, (Math.Log(1 + maxRaw), ((int)maxRaw).ToString("N0")));
         QueryHeatmapChart.Plot.Axes.AddPanel(colorBar);
         _chartHelper.SetLegendPanel(QueryHeatmapChart, colorBar);
 
