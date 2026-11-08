@@ -6,6 +6,10 @@
              xmlns:controls="clr-namespace:PerformanceMonitorLite.Controls">
     <UserControl.Resources>
         <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <!-- #8266: the shared text styles and the server toolbar style (ServerToolbarStyle), resolved here so the tab reads them wherever it is built. -->
+                <ResourceDictionary Source="pack://application:,,,/PerformanceMonitor.Ui;component/Themes/SharedStyles.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
             <BooleanToVisibilityConverter x:Key="BoolToVis"/>
             <ui:OneLineTextConverter x:Key="OneLine"/>
 
@@ -163,56 +167,6 @@
             <!-- Row style for deadlock grid - View Plan context menu -->
             <Style x:Key="DeadlockRowStyle" TargetType="DataGridRow">
                 <Setter Property="ContextMenu" Value="{StaticResource DeadlockContextMenu}"/>
-            </Style>
-            <!-- #8219: a ToolBar with the app's colors: no gradient, no grip, and an overflow button that opens the controls that did not fit. A ToolBar gives its own flat face to every Button in it, so the Buttons below name the theme's Button style (Style="{DynamicResource {x:Type Button}}") to keep the face. -->
-            <Style x:Key="ServerToolbarStyle" TargetType="ToolBar">
-                <Setter Property="Background" Value="Transparent"/>
-                <Setter Property="Foreground" Value="{DynamicResource ForegroundBrush}"/>
-                <Setter Property="Padding" Value="0,2"/>
-                <Setter Property="Template">
-                    <Setter.Value>
-                        <ControlTemplate TargetType="ToolBar">
-                            <DockPanel Background="{TemplateBinding Background}" LastChildFill="True">
-                                <ToggleButton x:Name="OverflowButton" DockPanel.Dock="Right" Visibility="Collapsed" VerticalAlignment="Center"
-                                              ToolTip="More controls" AutomationProperties.Name="More controls" ClickMode="Press" Margin="8,0,0,0"
-                                              IsChecked="{Binding Path=IsOverflowOpen, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}"
-                                              IsEnabled="{TemplateBinding HasOverflowItems}">
-                                    <ToggleButton.Template>
-                                        <ControlTemplate TargetType="ToggleButton">
-                                            <Border x:Name="face" Background="{DynamicResource BackgroundLightBrush}" BorderBrush="{DynamicResource BorderBrush}"
-                                                    BorderThickness="1" CornerRadius="3" Padding="8,2">
-                                                <TextBlock Text="&#x22EF;" FontSize="14" Foreground="{DynamicResource ForegroundBrush}" HorizontalAlignment="Center"/>
-                                            </Border>
-                                            <ControlTemplate.Triggers>
-                                                <Trigger Property="IsMouseOver" Value="True">
-                                                    <Setter TargetName="face" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
-                                                </Trigger>
-                                                <Trigger Property="IsChecked" Value="True">
-                                                    <Setter TargetName="face" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
-                                                    <Setter TargetName="face" Property="Background" Value="{DynamicResource BackgroundDarkBrush}"/>
-                                                </Trigger>
-                                            </ControlTemplate.Triggers>
-                                        </ControlTemplate>
-                                    </ToggleButton.Template>
-                                </ToggleButton>
-                                <Popup x:Name="OverflowPopup" AllowsTransparency="False" Placement="Bottom" Focusable="False" StaysOpen="False"
-                                       IsOpen="{Binding Path=IsOverflowOpen, RelativeSource={RelativeSource TemplatedParent}}"
-                                       PlacementTarget="{Binding ElementName=OverflowButton}">
-                                    <Border Background="{DynamicResource BackgroundDarkBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="6">
-                                        <ToolBarOverflowPanel x:Name="PART_ToolBarOverflowPanel" WrapWidth="300" Focusable="True"
-                                                              KeyboardNavigation.TabNavigation="Cycle" KeyboardNavigation.DirectionalNavigation="Cycle"/>
-                                    </Border>
-                                </Popup>
-                                <ToolBarPanel x:Name="PART_ToolBarPanel" IsItemsHost="True"/>
-                            </DockPanel>
-                            <ControlTemplate.Triggers>
-                                <Trigger Property="HasOverflowItems" Value="True">
-                                    <Setter TargetName="OverflowButton" Property="Visibility" Value="Visible"/>
-                                </Trigger>
-                            </ControlTemplate.Triggers>
-                        </ControlTemplate>
-                    </Setter.Value>
-                </Setter>
             </Style>
         </ResourceDictionary>
     </UserControl.Resources>
@@ -1503,9 +1457,9 @@
                         </TabItem>
                         <TabItem Header="Query Heatmap">
                             <!-- #8220: the tab scrolls when the chart card cannot keep a plot of 120 DIPs: the grid is as tall as the viewport but never under
-                                 MinHeight (the metric row, the banner and a 280 DIP card). -->
+                                 MinHeight (the metric row, the banner and a 260 DIP card, whose plot keeps about 200; #8266: 340 lets the card fit the Viewer at its 900x600 minimum). -->
                             <ScrollViewer x:Name="HeatmapScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                                <Grid Height="{Binding ViewportHeight, ElementName=HeatmapScroll}" MinHeight="360">
+                                <Grid Height="{Binding ViewportHeight, ElementName=HeatmapScroll}" MinHeight="340">
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
