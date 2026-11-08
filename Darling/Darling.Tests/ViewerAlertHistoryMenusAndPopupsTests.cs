@@ -23,13 +23,48 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// The Viewer's Alert History clock and toolbar, with the real tab rendered: a list that has shown several servers keeps one clock in its header and its range label when a later read
+/// The Viewer's Alert History popups, clock and toolbar, with the real tab rendered: a filter popup opened by a click closes on
+/// Escape in its window; a list that has shown several servers keeps one clock in its header and its range label when a later read
 /// is empty; and Refresh wraps together with the Dismiss buttons.
 /// </summary>
 public sealed class ViewerAlertHistoryMenusAndPopupsTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;
     private const string ThemeUri = "pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/DarkTheme.xaml";
+
+    [Fact]
+    public void AFilterPopupOpenedByAClick_ClosesOnEscapeInItsWindow()
+    {
+        var openAfterEscape = StaTestThread.Run(() => WithTheme(() =>
+        {
+            var tab = new AlertsHistoryTab();
+            var window = new Window { Content = tab, Width = 1000, Height = 600 };
+            StaTestThread.ShowOffScreen(window);
+            ClippedTextProbe.Settle(window);
+            try
+            {
+                var button = ClippedTextProbe.Descendants(tab).OfType<Button>().Single(b => b.Tag is string tag && tag == "ServerName");
+                button.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+                StaTestThread.WaitForIdle(window.Dispatcher, TimeSpan.FromSeconds(10));
+                var popup = (Popup)typeof(AlertsHistoryTab).GetField("_filterPopup", Instance)!.GetValue(tab)!;
+                Assert.True(popup.IsOpen, "the click did not open the filter popup");
+
+                /* A test window is shown unactivated, so keyboard focus stays where a mouse click leaves it in the app: in the window. */
+                var source = PresentationSource.FromVisual(window)!;
+                window.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, Key.Escape) { RoutedEvent = Keyboard.PreviewKeyDownEvent });
+                StaTestThread.WaitForIdle(window.Dispatcher, TimeSpan.FromSeconds(10));
+                var open = popup.IsOpen;
+                popup.IsOpen = false;
+                return open;
+            }
+            finally
+            {
+                window.Close();
+            }
+        }));
+
+        Assert.False(openAfterEscape, "Escape in the window left the filter popup open");
+    }
 
     [Fact]
     public void AListThatHasShownSeveralServers_KeepsOneClockInItsHeaderAndRangeLabel_WhenAReadIsEmpty()
