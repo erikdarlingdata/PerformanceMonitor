@@ -293,6 +293,11 @@ public sealed partial class DarlingMcpPlanForceTools
             var beforeState = facts.Before;
             var statement = facts.Statement;
 
+            /* The write, the read after it and the journal name the database as the store spells it, which is where the prepare step read the before state:
+               the agent's spelling, when it differs by case alone, is replaced by the permit and the target the prepare step settled on. */
+            var writePermit = prepared.Permit ?? permit;
+            var writeTarget = string.Equals(target.Database, facts.Database, StringComparison.Ordinal) ? target : target with { Database = facts.Database };
+
             /* 6: the write, journaled. */
             PlanForceState? after = null;
             var afterNotRead = false;
@@ -307,7 +312,7 @@ public sealed partial class DarlingMcpPlanForceTools
                     ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(beforeState)),
                     Write = async (_, _, token) =>
                     {
-                        var written = await WriteForcePlanAsync(executor, permit, facts, token);
+                        var written = await WriteForcePlanAsync(executor, writePermit, facts, token);
                         /* The executor says the server accepted the write: from here the store's journal never says failed (#5632, step 13). */
                         if (written.Wrote)
                             changed.MarkServerChanged();
@@ -325,7 +330,7 @@ public sealed partial class DarlingMcpPlanForceTools
                         /* The read after the write is a warning when it fails, not an error for a change that was made (#5632, step 13). */
                         try
                         {
-                            var read = await executor.ReadPlanStateAsync(permit, query_id, plan_id, token);
+                            var read = await executor.ReadPlanStateAsync(writePermit, query_id, plan_id, token);
                             after = read.State;
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -337,7 +342,7 @@ public sealed partial class DarlingMcpPlanForceTools
                         return JsonSerializer.Serialize(new { statement, state = after, message = written.Message });
                     },
                 };
-                var result = await store.RunAgentActionAsync(new AgentActionCall(tool, kind, action!, target, agentTokenName), hooks, ct);
+                var result = await store.RunAgentActionAsync(new AgentActionCall(tool, kind, action!, writeTarget, agentTokenName), hooks, ct);
                 if (result.Refusal is { } refused)
                     return DarlingAgentActionGate.RefusalAnswer(refused);
                 if (result.OutcomeUnknown && unknown is not null)
@@ -345,7 +350,7 @@ public sealed partial class DarlingMcpPlanForceTools
                     /* A force whose reply was lost may still have taken effect: read the plan again, and when it is forced, journal action_done late so the
                        post-force checks run. A read that fails or shows it not forced leaves the call as it is, with no result row. */
                     if (force && result.CalledId is long unknownCalled)
-                        await RecordUnknownForceTookEffectAsync(store, executor, permit, logger, action!, resolved.ServerId, unknownCalled, statement, query_id, plan_id);
+                        await RecordUnknownForceTookEffectAsync(store, executor, writePermit, logger, action!, resolved.ServerId, unknownCalled, statement, query_id, plan_id);
                     return Answer("outcome_unknown", null, unknown.Message, new { dry_run = false, statement, before = beforeState, journal_id = result.CalledId });
                 }
 
