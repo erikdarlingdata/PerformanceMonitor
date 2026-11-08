@@ -158,6 +158,43 @@ public sealed class FinOpsServerInventoryLastKnownTests : IDisposable
     }
 
     [Fact]
+    public async Task WhenTheCollectedReadFails_TheEmptySentenceSaysTheyCouldNotBeRead()
+    {
+        var first = Unreachable("inv-offline-unreadable-first", 1);
+        var second = Unreachable("inv-offline-unreadable-second", 2);
+
+        using var initializer = await StoreAsync();
+        /* A store whose server_properties table is gone: every collected read throws, as on a store that cannot be read. */
+        using (var conn = new DuckDBConnection($"Data Source={Path.Combine(_tempDir, "inventory.duckdb")}"))
+        {
+            await conn.OpenAsync();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "DROP TABLE server_properties CASCADE";
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        var problems = OnTheInventory(new LocalDataService(initializer), new[] { first, second }, (grid, message, count) =>
+        {
+            var found = new List<string>();
+            if (grid.Items.Count != 0)
+            {
+                found.Add($"the inventory lists {grid.Items.Count} servers with nothing reachable and the store unreadable");
+            }
+            if (message.Visibility != Visibility.Visible)
+            {
+                found.Add("the empty sentence is not shown over an empty grid");
+            }
+            if (message.Text != "2 servers could not be reached and their collected properties could not be read")
+            {
+                found.Add($"the empty sentence reads \"{message.Text}\"");
+            }
+            return found;
+        });
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    [Fact]
     public async Task WithNoServerListed_TheEmptySentenceSaysNothingWasCollected()
     {
         using var initializer = await StoreAsync();

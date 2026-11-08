@@ -256,6 +256,21 @@ public sealed class FinOpsServerInventoryTests : IDisposable
         Assert.Equal("", row.AgReplicaRoleDisplay);
     }
 
+    /// <summary>A collected row stored with no CPU count and no memory is one the collector wrote when the monitoring login was
+    /// denied the hardware read, so the last-known row carries the Hardware Note a live row gets for that denial rather than
+    /// reading as a server with 0 CPUs and 0 MB. A row with hardware figures carries no note.</summary>
+    [Fact]
+    public void ACollectedRowStoredWithoutHardware_CarriesTheDeniedHardwareNote()
+    {
+        var denied = FinOpsServerInventory.FromCollected(new ServerPropertiesRow
+        {
+            Edition = "Standard Edition (64-bit)", ProductVersion = "16.0.4150.1", ProductLevel = "RTM", EngineEdition = 3, CpuCount = 0, PhysicalMemoryMb = 0, CollectionTime = CollectedAtUtc,
+        });
+        Assert.Equal("Hardware inventory (CPU, memory, sockets) unavailable - the monitoring login likely lacks VIEW DATABASE STATE on this database.", denied.HardwareUnavailableReason);
+
+        Assert.Null(FinOpsServerInventory.FromCollected(Collected()).HardwareUnavailableReason);
+    }
+
     /// <summary>A collected read that throws leaves that server out and is logged, and costs no other server its row.</summary>
     [Fact]
     public async Task AFailingCollectedRead_LeavesThatServerOut_AndLogsIt()
